@@ -1,36 +1,112 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PF -- Personal Finance App
 
-## Getting Started
+A local-first personal finance app with an MCP server for AI assistant integration. Track income, expenses, budgets, investments, loans, and goals -- then query your financial data from Claude, ChatGPT, or any MCP-compatible AI.
 
-First, run the development server:
+## Quick Start
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run db:push     # Create database tables
+npm run dev          # Start at http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Import Your Data
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. Go to `/import` in the app
+2. Upload CSV files in order: Accounts -> Categories -> Portfolio -> Transactions
+3. CSV format matches the files in `/Data/`
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### MCP Server
 
-## Learn More
+Build and configure the MCP server for AI assistant access:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run build:mcp
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Add to your Claude Desktop config (`~/.claude/claude_desktop_config.json`):
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```json
+{
+  "mcpServers": {
+    "pf-finance": {
+      "command": "node",
+      "args": ["<path-to>/pf-app/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
 
-## Deploy on Vercel
+The MCP server provides 15 tools (11 read, 4 write) for querying and managing your financial data through AI.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Tech Stack
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+| Layer | Technology |
+|-------|-----------|
+| Framework | Next.js 15 (App Router) + TypeScript |
+| Database | SQLite (better-sqlite3) + Drizzle ORM |
+| UI | Tailwind CSS + shadcn/ui v4 |
+| Charts | Recharts |
+| MCP | @modelcontextprotocol/sdk |
+| Prices | Yahoo Finance API (free, no key) |
+
+## Pages
+
+| Page | Path | Description |
+|------|------|-------------|
+| Dashboard | `/dashboard` | Net worth, income vs expenses, spending breakdown, insights |
+| Accounts | `/accounts` | All accounts grouped by type with balances |
+| Transactions | `/transactions` | Full transaction list with filters and CRUD |
+| Budgets | `/budgets` | Monthly budget management with progress bars |
+| Portfolio | `/portfolio` | Investment holdings, allocation charts |
+| Loans | `/loans` | Loan tracker, amortization schedules, what-if scenarios |
+| Goals | `/goals` | Financial goals with progress tracking |
+| Reports | `/reports` | Income statement, balance sheet, CSV export |
+| Tax | `/tax` | TFSA/RRSP/RESP room, RRSP vs TFSA calculator |
+| Import | `/import` | CSV import wizard |
+| Settings | `/settings` | Data export, MCP config |
+
+## API Routes
+
+19 API routes under `/api/`: accounts, transactions, categories, budgets, portfolio, dashboard, import, loans, goals, snapshots, prices, fx, recurring, forecast, insights, tax, reports, notifications, rebalancing.
+
+## Database
+
+SQLite with 15 tables. Database file (`pf.db`) is gitignored and stays on your machine.
+
+```bash
+npm run db:push      # Apply schema to database
+npm run db:generate  # Generate migration files
+```
+
+## Scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Start dev server |
+| `npm run build` | Production build |
+| `npm run build:mcp` | Build MCP server |
+| `npm run db:push` | Push schema to database |
+| `npm run db:generate` | Generate Drizzle migrations |
+
+## Project Structure
+
+```
+src/
+  app/           # Pages and API routes
+  components/    # UI components (nav, shadcn/ui)
+  db/            # Schema (15 tables) and connection
+  lib/           # Business logic
+    csv-parser.ts        # CSV import
+    currency.ts          # Formatting helpers
+    queries.ts           # DB queries
+    loan-calculator.ts   # Amortization, debt payoff
+    investment-returns.ts # XIRR, TWR
+    price-service.ts     # Yahoo Finance, ETF decomposition
+    fx-service.ts        # FX rates, currency conversion
+    recurring-detector.ts # Recurring detection, cash flow forecast
+    spending-insights.ts # Anomalies, trends, merchants
+    tax-optimizer.ts     # Canadian tax optimization
+mcp-server/
+  index.ts       # MCP server (15 tools)
+```
