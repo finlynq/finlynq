@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -18,9 +18,26 @@ interface Props {
 
 export default function UnlockScreen({ isLoading: initialLoading }: Props) {
   const theme = useTheme();
-  const { unlock, error, needsSetup, isLoading } = useAuth();
+  const {
+    unlock,
+    biometricUnlock,
+    error,
+    needsSetup,
+    isLoading,
+    biometricAvailable,
+    biometricEnabled,
+  } = useAuth();
   const [passphrase, setPassphrase] = useState("");
   const [showPass, setShowPass] = useState(false);
+
+  const canBiometric = biometricAvailable && biometricEnabled && !needsSetup;
+
+  // Auto-trigger biometric on mount
+  useEffect(() => {
+    if (canBiometric) {
+      biometricUnlock();
+    }
+  }, [canBiometric]);
 
   const handleUnlock = () => {
     if (passphrase.trim()) {
@@ -50,6 +67,27 @@ export default function UnlockScreen({ isLoading: initialLoading }: Props) {
             : "Enter your passphrase to unlock"}
         </Text>
 
+        {/* Biometric button */}
+        {canBiometric && (
+          <TouchableOpacity
+            style={[styles.biometricBtn, { borderColor: colors.border }]}
+            onPress={biometricUnlock}
+          >
+            <Text style={[styles.biometricIcon, { color: colors.primary }]}>⊕</Text>
+            <Text style={[styles.biometricText, { color: colors.primary }]}>
+              Unlock with Biometrics
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {canBiometric && (
+          <View style={styles.dividerRow}>
+            <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+            <Text style={[styles.dividerText, { color: colors.mutedForeground }]}>or</Text>
+            <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+          </View>
+        )}
+
         {/* Passphrase input */}
         <View style={styles.inputRow}>
           <TextInput
@@ -67,7 +105,7 @@ export default function UnlockScreen({ isLoading: initialLoading }: Props) {
             value={passphrase}
             onChangeText={setPassphrase}
             onSubmitEditing={handleUnlock}
-            autoFocus
+            autoFocus={!canBiometric}
             returnKeyType="go"
           />
           <TouchableOpacity
@@ -81,9 +119,7 @@ export default function UnlockScreen({ isLoading: initialLoading }: Props) {
         </View>
 
         {error && (
-          <Text style={[styles.error, { color: colors.destructive }]}>
-            {error}
-          </Text>
+          <Text style={[styles.error, { color: colors.destructive }]}>{error}</Text>
         )}
 
         <TouchableOpacity
@@ -137,9 +173,30 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     fontSize: 15,
-    marginBottom: 32,
+    marginBottom: 24,
     textAlign: "center",
   },
+  biometricBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "100%",
+    height: 48,
+    borderRadius: 10,
+    borderWidth: 1,
+    marginBottom: 8,
+    gap: 8,
+  },
+  biometricIcon: { fontSize: 22 },
+  biometricText: { fontSize: 15, fontWeight: "600" },
+  dividerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    marginVertical: 12,
+  },
+  dividerLine: { flex: 1, height: StyleSheet.hairlineWidth },
+  dividerText: { fontSize: 13, marginHorizontal: 12 },
   inputRow: {
     width: "100%",
     position: "relative",

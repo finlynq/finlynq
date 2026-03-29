@@ -16,6 +16,7 @@
     "expo": "~54.0.33",
     "expo-constants": "^55.0.9",
     "expo-document-picker": "~14.0.8",
+    "expo-local-authentication": "~17.0.8",
     "expo-secure-store": "^55.0.9",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
