@@ -3,7 +3,7 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { View, Text, StyleSheet } from "react-native";
 import { useTheme } from "../theme";
 import DashboardScreen from "../screens/DashboardScreen";
-import TransactionsScreen from "../screens/TransactionsScreen";
+import TransactionsStack from "./TransactionsStack";
 import ImportScreen from "../screens/ImportScreen";
 import BudgetsScreen from "../screens/BudgetsScreen";
 import SettingsScreen from "../screens/SettingsScreen";
@@ -60,7 +60,7 @@ export default function TabNavigator() {
       })}
     >
       <Tab.Screen name="Dashboard" component={DashboardScreen} />
-      <Tab.Screen name="Transactions" component={TransactionsScreen} />
+      <Tab.Screen name="Transactions" component={TransactionsStack} />
       <Tab.Screen name="Import" component={ImportScreen} />
       <Tab.Screen name="Budgets" component={BudgetsScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />

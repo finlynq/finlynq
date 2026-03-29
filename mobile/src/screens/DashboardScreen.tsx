@@ -10,7 +10,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
-import type { DashboardData } from "../../../shared/types";
+import type { DashboardData, HealthScoreData, BudgetWithSpending } from "../../../shared/types";
 
 function formatCurrency(amount: number, currency = "CAD"): string {
   return new Intl.NumberFormat("en-CA", {
@@ -21,24 +21,132 @@ function formatCurrency(amount: number, currency = "CAD"): string {
   }).format(amount);
 }
 
+function getCurrentMonth(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function getHealthColor(score: number): string {
+  if (score >= 70) return "#10b981";
+  if (score >= 40) return "#f59e0b";
+  return "#ef4444";
+}
+
+function HealthScoreRing({ score, grade, color }: { score: number; grade: string; color: string }) {
+  // Simple ring visualization using nested Views
+  const size = 100;
+  const strokeWidth = 8;
+  const pct = Math.min(score, 100);
+
+  return (
+    <View style={healthStyles.container}>
+      {/* Background ring */}
+      <View
+        style={[
+          healthStyles.ring,
+          {
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+            borderWidth: strokeWidth,
+            borderColor: color + "22",
+          },
+        ]}
+      >
+        {/* Filled overlay — we approximate a progress arc with a half-circle technique */}
+        <View
+          style={[
+            healthStyles.ring,
+            {
+              width: size,
+              height: size,
+              borderRadius: size / 2,
+              borderWidth: strokeWidth,
+              borderColor: color,
+              borderTopColor: pct > 75 ? color : "transparent",
+              borderRightColor: pct > 50 ? color : "transparent",
+              borderBottomColor: pct > 25 ? color : "transparent",
+              borderLeftColor: color,
+              position: "absolute",
+            },
+          ]}
+        />
+        <View style={healthStyles.inner}>
+          <Text style={[healthStyles.score, { color }]}>{score}</Text>
+          <Text style={[healthStyles.grade, { color }]}>{grade}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function BudgetProgressBar({
+  label,
+  spent,
+  budget,
+  colors,
+}: {
+  label: string;
+  spent: number;
+  budget: number;
+  colors: ReturnType<typeof useTheme>["colors"];
+}) {
+  const pct = budget > 0 ? Math.min((spent / budget) * 100, 100) : 0;
+  const isOver = spent > budget;
+
+  return (
+    <View style={budgetStyles.item}>
+      <View style={budgetStyles.labelRow}>
+        <Text style={[budgetStyles.name, { color: colors.foreground }]} numberOfLines={1}>
+          {label}
+        </Text>
+        <Text style={[budgetStyles.amounts, { color: colors.mutedForeground }]}>
+          {formatCurrency(spent)} / {formatCurrency(budget)}
+        </Text>
+      </View>
+      <View style={[budgetStyles.bar, { backgroundColor: colors.secondary }]}>
+        <View
+          style={[
+            budgetStyles.fill,
+            {
+              backgroundColor: isOver ? colors.destructive : colors.primary,
+              width: `${pct}%`,
+            },
+          ]}
+        />
+      </View>
+    </View>
+  );
+}
+
 export default function DashboardScreen() {
   const theme = useTheme();
   const [data, setData] = useState<DashboardData | null>(null);
+  const [health, setHealth] = useState<HealthScoreData | null>(null);
+  const [budgets, setBudgets] = useState<BudgetWithSpending[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchDashboard = async (isRefresh = false) => {
+  const fetchAll = async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     try {
-      const res = await endpoints.getDashboard();
-      if (res.success) {
-        setData(res.data);
+      const [dashRes, healthRes, budgetRes] = await Promise.all([
+        endpoints.getDashboard(),
+        endpoints.getHealthScore(),
+        endpoints.getBudgets(getCurrentMonth()),
+      ]);
+
+      if (dashRes.success) {
+        setData(dashRes.data);
         setError(null);
       } else {
-        setError(res.error);
+        setError(dashRes.error);
       }
+
+      if (healthRes.success) setHealth(healthRes.data);
+      if (budgetRes.success) setBudgets(budgetRes.data);
     } catch {
       setError("Cannot connect to server");
     } finally {
@@ -48,7 +156,7 @@ export default function DashboardScreen() {
   };
 
   useEffect(() => {
-    fetchDashboard();
+    fetchAll();
   }, []);
 
   const colors = theme.colors;
@@ -69,36 +177,65 @@ export default function DashboardScreen() {
     );
   }
 
+  const healthColor = health ? getHealthColor(health.score) : colors.primary;
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
       <ScrollView
         contentContainerStyle={styles.scroll}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={() => fetchDashboard(true)} />
+          <RefreshControl refreshing={refreshing} onRefresh={() => fetchAll(true)} />
         }
       >
         <Text style={[styles.header, { color: colors.foreground }]}>Dashboard</Text>
 
-        {/* Net Worth Card */}
-        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>Net Worth</Text>
-          <Text style={[styles.cardValue, { color: colors.foreground }]}>
-            {data ? formatCurrency(data.netWorth) : "--"}
-          </Text>
-          <View style={styles.row}>
-            <View style={styles.halfCol}>
-              <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Assets</Text>
-              <Text style={[styles.smallValue, { color: colors.chart3 }]}>
-                {data ? formatCurrency(data.totalAssets) : "--"}
-              </Text>
-            </View>
-            <View style={styles.halfCol}>
-              <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Liabilities</Text>
-              <Text style={[styles.smallValue, { color: colors.destructive }]}>
-                {data ? formatCurrency(data.totalLiabilities) : "--"}
-              </Text>
+        {/* Net Worth + Health Score Row */}
+        <View style={styles.heroRow}>
+          {/* Net Worth Card */}
+          <View
+            style={[
+              styles.card,
+              styles.heroCard,
+              { backgroundColor: colors.card, borderColor: colors.border },
+            ]}
+          >
+            <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>Net Worth</Text>
+            <Text style={[styles.cardValue, { color: colors.foreground }]}>
+              {data ? formatCurrency(data.netWorth) : "--"}
+            </Text>
+            <View style={styles.row}>
+              <View style={styles.halfCol}>
+                <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Assets</Text>
+                <Text style={[styles.smallValue, { color: colors.chart3 }]}>
+                  {data ? formatCurrency(data.totalAssets) : "--"}
+                </Text>
+              </View>
+              <View style={styles.halfCol}>
+                <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>
+                  Liabilities
+                </Text>
+                <Text style={[styles.smallValue, { color: colors.destructive }]}>
+                  {data ? formatCurrency(data.totalLiabilities) : "--"}
+                </Text>
+              </View>
             </View>
           </View>
+
+          {/* Health Score Card */}
+          {health && (
+            <View
+              style={[
+                styles.card,
+                styles.healthCard,
+                { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
+                Health Score
+              </Text>
+              <HealthScoreRing score={health.score} grade={health.grade} color={healthColor} />
+            </View>
+          )}
         </View>
 
         {/* Monthly Summary */}
@@ -135,6 +272,31 @@ export default function DashboardScreen() {
             </View>
           )}
         </View>
+
+        {/* Budget Progress Summary */}
+        {budgets.length > 0 && (
+          <View
+            style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
+          >
+            <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
+              Budget Progress
+            </Text>
+            {budgets.slice(0, 5).map((b) => (
+              <BudgetProgressBar
+                key={b.id}
+                label={b.categoryName || `Category ${b.categoryId}`}
+                spent={b.convertedSpent ?? 0}
+                budget={b.convertedAmount ?? b.amount}
+                colors={colors}
+              />
+            ))}
+            {budgets.length > 5 && (
+              <Text style={[styles.moreText, { color: colors.mutedForeground }]}>
+                +{budgets.length - 5} more budgets
+              </Text>
+            )}
+          </View>
+        )}
 
         {/* Recent Transactions */}
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -175,6 +337,9 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   scroll: { padding: 16, paddingBottom: 32 },
   header: { fontSize: 28, fontWeight: "800", marginBottom: 16 },
+  heroRow: { flexDirection: "row", gap: 12, marginBottom: 12 },
+  heroCard: { flex: 1, marginBottom: 0 },
+  healthCard: { width: 140, marginBottom: 0, alignItems: "center" },
   card: {
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -182,7 +347,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   cardLabel: { fontSize: 13, fontWeight: "600", marginBottom: 4 },
-  cardValue: { fontSize: 32, fontWeight: "800", marginBottom: 12 },
+  cardValue: { fontSize: 28, fontWeight: "800", marginBottom: 12 },
   row: { flexDirection: "row", gap: 12 },
   halfCol: { flex: 1 },
   smallLabel: { fontSize: 12, marginBottom: 2 },
@@ -208,4 +373,27 @@ const styles = StyleSheet.create({
   txDate: { fontSize: 12, marginTop: 2 },
   txAmount: { fontSize: 15, fontWeight: "600" },
   emptyText: { fontSize: 14, textAlign: "center", paddingVertical: 16 },
+  moreText: { fontSize: 12, textAlign: "center", marginTop: 8 },
+});
+
+const healthStyles = StyleSheet.create({
+  container: { alignItems: "center", marginTop: 4 },
+  ring: { alignItems: "center", justifyContent: "center" },
+  inner: { alignItems: "center" },
+  score: { fontSize: 28, fontWeight: "800" },
+  grade: { fontSize: 11, fontWeight: "600" },
+});
+
+const budgetStyles = StyleSheet.create({
+  item: { marginTop: 10 },
+  labelRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  name: { fontSize: 13, fontWeight: "500", flex: 1, marginRight: 8 },
+  amounts: { fontSize: 11 },
+  bar: { height: 6, borderRadius: 3, overflow: "hidden" },
+  fill: { height: 6, borderRadius: 3 },
 });

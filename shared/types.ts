@@ -149,3 +149,44 @@ export interface DashboardData {
   recentTransactions: Transaction[];
   accountBalances: Array<{ name: string; balance: number; type: string; currency: string }>;
 }
+
+// --- Health Score ---
+export interface HealthScoreComponent {
+  name: string;
+  score: number;
+  weight: number;
+  weighted: number;
+  detail: string;
+}
+
+export interface HealthScoreData {
+  score: number;
+  grade: "Excellent" | "Good" | "Fair" | "Needs Work";
+  components: HealthScoreComponent[];
+}
+
+// --- Budget with spending ---
+export interface BudgetWithSpending extends Budget {
+  categoryName?: string;
+  categoryGroup?: string;
+  convertedAmount?: number;
+  convertedSpent?: number;
+  rolloverAmount?: number;
+}
+
+// --- Transaction form ---
+export interface TransactionFormData {
+  date: string;
+  amount: number;
+  accountId: number;
+  categoryId: number;
+  currency?: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  isBusiness?: number;
+  splitPerson?: string;
+  splitRatio?: number;
+  quantity?: number;
+  portfolioHolding?: string;
+}

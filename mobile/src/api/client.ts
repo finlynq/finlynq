@@ -61,9 +61,12 @@ export const api = {
 import type {
   Account,
   Transaction,
+  TransactionFormData,
   Budget,
+  BudgetWithSpending,
   Category,
   DashboardData,
+  HealthScoreData,
   UnlockStatus,
 } from "../../../shared/types";
 
@@ -81,17 +84,28 @@ export const endpoints = {
   // Dashboard
   getDashboard: () => api.get<DashboardData>("/api/dashboard"),
 
+  // Health Score
+  getHealthScore: () => api.get<HealthScoreData>("/api/health-score"),
+
   // Accounts
   getAccounts: () => api.get<Account[]>("/api/accounts"),
 
   // Transactions
   getTransactions: (params?: string) =>
     api.get<Transaction[]>(`/api/transactions${params ? `?${params}` : ""}`),
+  createTransaction: (data: TransactionFormData) =>
+    api.post<Transaction>("/api/transactions", data),
+  updateTransaction: (data: Partial<TransactionFormData> & { id: number }) =>
+    api.put<Transaction>("/api/transactions", data),
+  deleteTransaction: (id: number) =>
+    api.delete<void>(`/api/transactions?id=${id}`),
 
   // Categories
   getCategories: () => api.get<Category[]>("/api/categories"),
 
   // Budgets
-  getBudgets: (month?: string) =>
-    api.get<Budget[]>(`/api/budgets${month ? `?month=${month}` : ""}`),
+  getBudgets: (month?: string, spending = true) =>
+    api.get<BudgetWithSpending[]>(
+      `/api/budgets?spending=1${month ? `&month=${month}` : ""}`
+    ),
 };
