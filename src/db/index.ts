@@ -1,13 +1,43 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema";
 import { getConnection } from "./connection";
+import type { DatabaseAdapter, DbDialect, DrizzleDb } from "./adapter";
+import { SqliteAdapter } from "./adapters/sqlite";
+import { PostgresAdapter } from "./adapters/postgres";
 
-type DrizzleDb = ReturnType<typeof drizzle<typeof schema>>;
+type DrizzleSqliteDb = ReturnType<typeof drizzle<typeof schema>>;
 
-// Persist Drizzle instance across HMR in development
-const g = globalThis as typeof globalThis & { __pfDrizzle?: DrizzleDb | null };
+// ─── Adapter registry ────────────────────────────────────────────────────────
 
-function getDb(): DrizzleDb {
+const g = globalThis as typeof globalThis & {
+  __pfDrizzle?: DrizzleSqliteDb | null;
+  __pfAdapter?: DatabaseAdapter | null;
+  __pfDialect?: DbDialect;
+};
+
+/** Get or create the active database adapter */
+export function getAdapter(): DatabaseAdapter | null {
+  return g.__pfAdapter ?? null;
+}
+
+/** Set the active database adapter (called during initialization) */
+export function setAdapter(adapter: DatabaseAdapter): void {
+  g.__pfAdapter = adapter;
+}
+
+/** Get the current dialect (defaults to "sqlite" for backward compat) */
+export function getDialect(): DbDialect {
+  return g.__pfDialect ?? "sqlite";
+}
+
+/** Set the active dialect */
+export function setDialect(dialect: DbDialect): void {
+  g.__pfDialect = dialect;
+}
+
+// ─── Backward-compatible SQLite Drizzle instance ─────────────────────────────
+
+function getDb(): DrizzleSqliteDb {
   if (!g.__pfDrizzle) {
     const sqlite = getConnection(); // throws DatabaseLockedError if not unlocked
     g.__pfDrizzle = drizzle(sqlite, { schema });
@@ -22,10 +52,24 @@ export function resetDb(): void {
 
 /**
  * Lazy Proxy — all existing `import { db } from "@/db"` calls continue to work.
- * The real Drizzle instance is created on first property access after unlock.
+ *
+ * When the adapter is set to PostgreSQL, the proxy delegates to the PG adapter.
+ * Otherwise it falls through to the existing SQLite behavior.
  */
-export const db = new Proxy({} as DrizzleDb, {
+export const db = new Proxy({} as DrizzleSqliteDb, {
   get(_target, prop, receiver) {
+    // If a non-SQLite adapter is active, delegate to it
+    const adapter = g.__pfAdapter;
+    if (adapter && adapter.dialect !== "sqlite") {
+      const adapterDb = adapter.getDb();
+      const value = Reflect.get(adapterDb, prop, receiver);
+      if (typeof value === "function") {
+        return value.bind(adapterDb);
+      }
+      return value;
+    }
+
+    // Default: existing SQLite path
     const real = getDb();
     const value = Reflect.get(real, prop, receiver);
     if (typeof value === "function") {
@@ -36,6 +80,9 @@ export const db = new Proxy({} as DrizzleDb, {
 });
 
 export { schema };
+export type { DatabaseAdapter, DbDialect, DrizzleDb };
+export { DEFAULT_USER_ID } from "./adapter";
+export { SqliteAdapter, PostgresAdapter };
 export {
   initializeConnection,
   isUnlocked,

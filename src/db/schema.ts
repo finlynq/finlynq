@@ -1,7 +1,9 @@
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { DEFAULT_USER_ID } from "./adapter";
 
 export const accounts = sqliteTable("accounts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   type: text("type").notNull(), // 'A' (asset) or 'L' (liability)
   group: text("group").notNull().default(""),
   name: text("name").notNull().unique(),
@@ -11,6 +13,7 @@ export const accounts = sqliteTable("accounts", {
 
 export const categories = sqliteTable("categories", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   type: text("type").notNull(), // 'E' (expense), 'I' (income), 'R' (reconciliation)
   group: text("group").notNull().default(""),
   name: text("name").notNull().unique(),
@@ -19,6 +22,7 @@ export const categories = sqliteTable("categories", {
 
 export const transactions = sqliteTable("transactions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   date: text("date").notNull(),
   accountId: integer("account_id").references(() => accounts.id),
   categoryId: integer("category_id").references(() => categories.id),
@@ -38,6 +42,7 @@ export const transactions = sqliteTable("transactions", {
 
 export const portfolioHoldings = sqliteTable("portfolio_holdings", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   accountId: integer("account_id").references(() => accounts.id),
   name: text("name").notNull(),
   symbol: text("symbol"),
@@ -48,6 +53,7 @@ export const portfolioHoldings = sqliteTable("portfolio_holdings", {
 
 export const budgets = sqliteTable("budgets", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   categoryId: integer("category_id")
     .references(() => categories.id)
     .notNull(),
@@ -59,6 +65,7 @@ export const budgets = sqliteTable("budgets", {
 // Feature 1: Loans & Amortization
 export const loans = sqliteTable("loans", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   name: text("name").notNull(),
   type: text("type").notNull(), // 'mortgage', 'lease', 'loan', 'student_loan', 'credit_card'
   accountId: integer("account_id").references(() => accounts.id),
@@ -75,6 +82,7 @@ export const loans = sqliteTable("loans", {
 // Feature 9: Net Worth Snapshots
 export const snapshots = sqliteTable("snapshots", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   accountId: integer("account_id").references(() => accounts.id),
   date: text("date").notNull(),
   value: real("value").notNull(),
@@ -84,6 +92,7 @@ export const snapshots = sqliteTable("snapshots", {
 // Feature 11: Financial Goals
 export const goals = sqliteTable("goals", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   name: text("name").notNull(),
   type: text("type").notNull(), // 'savings', 'debt_payoff', 'investment', 'emergency_fund'
   targetAmount: real("target_amount").notNull(),
@@ -97,6 +106,7 @@ export const goals = sqliteTable("goals", {
 // Feature 15: Rebalancing Target Allocations
 export const targetAllocations = sqliteTable("target_allocations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   name: text("name").notNull(),
   targetPct: real("target_pct").notNull(),
   category: text("category").notNull(),
@@ -105,6 +115,7 @@ export const targetAllocations = sqliteTable("target_allocations", {
 // Feature 6: Recurring Transactions
 export const recurringTransactions = sqliteTable("recurring_transactions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   payee: text("payee").notNull(),
   amount: real("amount").notNull(),
   frequency: text("frequency").notNull(),
@@ -118,6 +129,7 @@ export const recurringTransactions = sqliteTable("recurring_transactions", {
 // Feature 2: Price Cache
 export const priceCache = sqliteTable("price_cache", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   symbol: text("symbol").notNull(),
   date: text("date").notNull(),
   price: real("price").notNull(),
@@ -127,6 +139,7 @@ export const priceCache = sqliteTable("price_cache", {
 // Feature 5: FX Rates
 export const fxRates = sqliteTable("fx_rates", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   date: text("date").notNull(),
   fromCurrency: text("from_currency").notNull(),
   toCurrency: text("to_currency").notNull(),
@@ -136,6 +149,7 @@ export const fxRates = sqliteTable("fx_rates", {
 // Feature 19: Notifications
 export const notifications = sqliteTable("notifications", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   type: text("type").notNull(),
   title: text("title").notNull(),
   message: text("message").notNull(),
@@ -147,6 +161,7 @@ export const notifications = sqliteTable("notifications", {
 // Feature: Subscription Tracker
 export const subscriptions = sqliteTable("subscriptions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   name: text("name").notNull(),
   amount: real("amount").notNull(),
   currency: text("currency").notNull().default("CAD"),
@@ -162,12 +177,14 @@ export const subscriptions = sqliteTable("subscriptions", {
 // Feature: App Settings (email import config, etc.)
 export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   value: text("value").notNull(),
 });
 
 // Feature: Transaction Rules Engine
 export const transactionRules = sqliteTable("transaction_rules", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   name: text("name").notNull(),
   matchField: text("match_field").notNull(), // 'payee', 'amount', 'tags'
   matchType: text("match_type").notNull(), // 'contains', 'exact', 'regex', 'greater_than', 'less_than'
@@ -183,6 +200,7 @@ export const transactionRules = sqliteTable("transaction_rules", {
 // Budget Templates
 export const budgetTemplates = sqliteTable("budget_templates", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   name: text("name").notNull(),
   categoryId: integer("category_id")
     .references(() => categories.id)
@@ -194,6 +212,7 @@ export const budgetTemplates = sqliteTable("budget_templates", {
 // Feature 8: Tax - Contribution Room
 export const contributionRoom = sqliteTable("contribution_room", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
   type: text("type").notNull(), // 'TFSA', 'RRSP', 'RESP'
   year: integer("year").notNull(),
   room: real("room").notNull(),
