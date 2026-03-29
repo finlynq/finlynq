@@ -6,6 +6,7 @@
  */
 
 export { requireAuth } from "./require-auth";
+export { requireAdmin } from "./require-admin";
 export type { AuthContext, AuthResult, AuthStrategy } from "./strategy";
 export { PassphraseStrategy } from "./strategies/passphrase";
 export { AccountStrategy, AUTH_COOKIE } from "./strategies/account";

@@ -9,6 +9,7 @@ import { hashPassword, createSessionToken, AUTH_COOKIE } from "@/lib/auth";
 import { createUser, getUserByEmail } from "@/lib/auth/queries";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { sendEmail, emailVerificationEmail, welcomeEmail } from "@/lib/email";
 
 const registerSchema = z.object({
   email: z.string().email("Invalid email address"),
@@ -55,6 +56,10 @@ export async function POST(request: NextRequest) {
     // Create user
     const passwordHash = await hashPassword(password);
     const user = createUser({ email, passwordHash, displayName });
+
+    // Send verification and welcome emails (fire-and-forget)
+    sendEmail(emailVerificationEmail(email, user.emailVerifyToken)).catch(() => {});
+    sendEmail(welcomeEmail(email, displayName)).catch(() => {});
 
     // Issue session token
     const token = await createSessionToken(user.id, email, false);

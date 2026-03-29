@@ -28,6 +28,7 @@ import {
   Menu,
   X,
   MoreHorizontal,
+  ShieldCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -77,6 +78,7 @@ const navGroups: { label: string; items: NavItem[] }[] = [
 
 const toolLinks: NavItem[] = [
   { href: "/import", label: "Import", icon: Upload, color: "text-blue-400" },
+  { href: "/admin", label: "Admin", icon: ShieldCheck, color: "text-amber-400" },
   { href: "/settings", label: "Settings", icon: Settings, color: "text-slate-400" },
 ];
 

@@ -12,6 +12,7 @@ import { generateResetToken } from "@/lib/auth";
 import { getUserByEmail, createPasswordResetToken } from "@/lib/auth/queries";
 import { validateBody } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { sendEmail, passwordResetEmail } from "@/lib/email";
 
 const requestSchema = z.object({
   email: z.string().email("Invalid email address"),
@@ -47,13 +48,8 @@ export async function POST(request: NextRequest) {
       const { token, tokenHash, expiresAt } = generateResetToken();
       createPasswordResetToken(user.id, tokenHash, expiresAt);
 
-      // TODO: Send email with reset link containing `token`
-      // For now, log it in development
-      if (process.env.NODE_ENV !== "production") {
-        console.log(
-          `[DEV] Password reset token for ${user.email}: ${token}`
-        );
-      }
+      // Send password reset email (fire-and-forget)
+      sendEmail(passwordResetEmail(user.email, token)).catch(() => {});
     }
 
     // Always return success to prevent user enumeration

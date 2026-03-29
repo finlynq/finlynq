@@ -217,8 +217,15 @@ export const users = sqliteTable("users", {
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   displayName: text("display_name"),
+  role: text("role").notNull().default("user"), // 'user' | 'admin'
+  emailVerified: integer("email_verified").notNull().default(0),
+  emailVerifyToken: text("email_verify_token"),
   mfaEnabled: integer("mfa_enabled").notNull().default(0),
   mfaSecret: text("mfa_secret"), // encrypted TOTP secret
+  onboardingComplete: integer("onboarding_complete").notNull().default(0),
+  plan: text("plan").notNull().default("free"), // 'free' | 'pro' | 'premium'
+  planExpiresAt: text("plan_expires_at"),
+  stripeCustomerId: text("stripe_customer_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
