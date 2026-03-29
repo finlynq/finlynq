@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET() {
+  const locked = requireUnlock(); if (locked) return locked;
   // Fetch last 12 months of transactions with payees
   const cutoff = new Date();
   cutoff.setFullYear(cutoff.getFullYear() - 1);

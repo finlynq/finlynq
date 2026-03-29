@@ -43,15 +43,28 @@ export default function GoalsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState({ name: "", type: "savings", targetAmount: "", deadline: "", accountId: "", priority: "1", note: "" });
+  const [errors, setErrors] = useState<{ name?: string; targetAmount?: string }>({});
+
+  function validateForm() {
+    const e: { name?: string; targetAmount?: string } = {};
+    if (!form.name.trim()) e.name = "Name is required";
+    if (!form.targetAmount || parseFloat(form.targetAmount) <= 0) e.targetAmount = "Target amount must be greater than 0";
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  }
+
+  const isFormValid = form.name.trim() !== "" && form.targetAmount !== "" && parseFloat(form.targetAmount) > 0;
 
   const load = useCallback(() => { fetch("/api/goals").then((r) => r.json()).then(setGoals); }, []);
   useEffect(() => { load(); fetch("/api/accounts").then((r) => r.json()).then(setAccounts); }, [load]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!validateForm()) return;
     await fetch("/api/goals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: form.name, type: form.type, targetAmount: parseFloat(form.targetAmount), deadline: form.deadline || null, accountId: form.accountId ? parseInt(form.accountId) : null, priority: parseInt(form.priority), note: form.note }) });
     setDialogOpen(false);
     setForm({ name: "", type: "savings", targetAmount: "", deadline: "", accountId: "", priority: "1", note: "" });
+    setErrors({});
     load();
   }
 
@@ -82,7 +95,11 @@ export default function GoalsPage() {
           <DialogContent>
             <DialogHeader><DialogTitle>New Financial Goal</DialogTitle></DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-3">
-              <div><Label>Goal Name</Label><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Emergency Fund" required /></div>
+              <div>
+                <Label>Goal Name</Label>
+                <Input value={form.name} onChange={(e) => { setForm({ ...form, name: e.target.value }); setErrors({ ...errors, name: "" }); }} placeholder="e.g. Emergency Fund" />
+                {errors.name && <p className="text-xs text-destructive mt-1">{errors.name}</p>}
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div><Label>Type</Label>
                   <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v ?? "savings" })}>
@@ -95,7 +112,11 @@ export default function GoalsPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div><Label>Target Amount</Label><Input type="number" step="0.01" value={form.targetAmount} onChange={(e) => setForm({ ...form, targetAmount: e.target.value })} required /></div>
+                <div>
+                  <Label>Target Amount</Label>
+                  <Input type="number" step="0.01" value={form.targetAmount} onChange={(e) => { setForm({ ...form, targetAmount: e.target.value }); setErrors({ ...errors, targetAmount: "" }); }} />
+                  {errors.targetAmount && <p className="text-xs text-destructive mt-1">{errors.targetAmount}</p>}
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div><Label>Deadline</Label><Input type="date" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} /></div>
@@ -117,7 +138,7 @@ export default function GoalsPage() {
                 </Select>
               </div>
               <div><Label>Note</Label><Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></div>
-              <Button type="submit" className="w-full">Create Goal</Button>
+              <Button type="submit" className="w-full" disabled={!isFormValid}>Create Goal</Button>
             </form>
           </DialogContent>
         </Dialog>

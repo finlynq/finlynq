@@ -29,11 +29,17 @@ type Account = {
   currency: string;
 };
 
+type AccountBalance = {
+  accountId: number;
+  balance: number;
+};
+
 export default function AccountDetailPage() {
   const { id } = useParams();
   const [account, setAccount] = useState<Account | null>(null);
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [total, setTotal] = useState(0);
+  const [balance, setBalance] = useState<number | null>(null);
 
   useEffect(() => {
     fetch("/api/accounts")
@@ -41,6 +47,14 @@ export default function AccountDetailPage() {
       .then((accts) => {
         const found = accts.find((a: Account) => a.id === Number(id));
         setAccount(found ?? null);
+      });
+
+    // Fetch the computed balance from the dashboard API (sums all transactions for the account)
+    fetch("/api/dashboard")
+      .then((r) => r.json())
+      .then((d) => {
+        const acctBalance = d.balances?.find((b: AccountBalance) => b.accountId === Number(id));
+        setBalance(acctBalance?.balance ?? 0);
       });
 
     fetch(`/api/transactions?accountId=${id}&limit=200`)
@@ -61,7 +75,7 @@ export default function AccountDetailPage() {
     </div>
   );
 
-  const balance = txns.reduce((s, t) => s + t.amount, 0);
+  const displayBalance = balance ?? 0;
 
   return (
     <div className="space-y-6">
@@ -90,11 +104,11 @@ export default function AccountDetailPage() {
             <div className="flex items-start justify-between">
               <div>
                 <p className="text-xs font-medium text-muted-foreground">Balance</p>
-                <p className={`text-2xl font-bold tracking-tight mt-1 ${balance >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
-                  {formatCurrency(balance, account.currency)}
+                <p className={`text-2xl font-bold tracking-tight mt-1 ${displayBalance >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                  {formatCurrency(displayBalance, account.currency)}
                 </p>
               </div>
-              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${balance >= 0 ? "bg-emerald-100 text-emerald-600" : "bg-rose-100 text-rose-600"}`}>
+              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${displayBalance >= 0 ? "bg-emerald-100 text-emerald-600" : "bg-rose-100 text-rose-600"}`}>
                 <Wallet className="h-5 w-5" />
               </div>
             </div>

@@ -1,0 +1,49 @@
+{
+  "name": "pf-finance",
+  "version": "2.3.0",
+  "description": "Personal Finance MCP Server — query and manage financial data (accounts, transactions, budgets, investments, goals, subscriptions) via AI assistants.",
+  "transport": {
+    "type": "streamable-http",
+    "url": "/api/mcp"
+  },
+  "tools": 27,
+  "capabilities": {
+    "read": [
+      "get_account_balances",
+      "get_transactions",
+      "get_budget_summary",
+      "get_spending_trends",
+      "get_portfolio_summary",
+      "get_net_worth",
+      "get_categories",
+      "get_loans",
+      "get_goals",
+      "get_recurring_transactions",
+      "get_income_statement",
+      "get_transaction_rules",
+      "apply_rules_to_uncategorized",
+      "get_spotlight_items",
+      "get_weekly_recap",
+      "get_financial_health_score",
+      "get_spending_anomalies",
+      "get_subscription_summary",
+      "get_cash_flow_forecast",
+      "search_transactions",
+      "get_net_worth_trend"
+    ],
+    "write": [
+      "add_transaction",
+      "set_budget",
+      "add_goal",
+      "add_snapshot",
+      "categorize_transaction",
+      "add_account"
+    ]
+  },
+  "security": {
+    "model": "local-only",
+    "description": "Runs on localhost only. No bank integrations. Data stays on the user's machine. Requires app to be unlocked."
+  },
+  "homepage": "http://localhost:3000",
+  "apiDocs": "http://localhost:3000/api-docs"
+}

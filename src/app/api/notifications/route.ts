@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, desc, sql } from "drizzle-orm";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET() {
+  const locked = requireUnlock(); if (locked) return locked;
   const notifications = db
     .select()
     .from(schema.notifications)
@@ -23,6 +25,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
 

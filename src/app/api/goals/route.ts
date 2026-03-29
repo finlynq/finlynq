@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, sql } from "drizzle-orm";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET() {
+  const locked = requireUnlock(); if (locked) return locked;
   const goals = db
     .select({
       id: schema.goals.id,
@@ -60,6 +62,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
     const goal = db.insert(schema.goals).values({
@@ -80,6 +83,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
     const { id, ...data } = body;
@@ -92,6 +96,7 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
   db.delete(schema.goals).where(eq(schema.goals.id, id)).run();

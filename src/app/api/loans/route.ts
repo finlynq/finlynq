@@ -6,8 +6,10 @@ import {
   calculateExtraPaymentImpact,
   calculateDebtPayoff,
 } from "@/lib/loan-calculator";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET() {
+  const locked = requireUnlock(); if (locked) return locked;
   const loans = db
     .select({
       id: schema.loans.id,
@@ -59,6 +61,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
 
@@ -107,6 +110,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
   db.delete(schema.loans).where(eq(schema.loans.id, id)).run();

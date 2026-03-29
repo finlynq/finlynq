@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, eq, and, gte, lte } from "drizzle-orm";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   const params = request.nextUrl.searchParams;
   const type = params.get("type") ?? "income-statement";
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;

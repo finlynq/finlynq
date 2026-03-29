@@ -9,8 +9,10 @@ import {
   getMarginalRate,
   rrspVsTfsa,
 } from "@/lib/tax-optimizer";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET() {
+  const locked = requireUnlock(); if (locked) return locked;
   // Get contribution room records
   const contributions = db.select().from(schema.contributionRoom).all();
 
@@ -71,6 +73,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
 

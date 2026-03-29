@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { importAccounts, importCategories, importPortfolio, importTransactions } from "@/lib/csv-parser";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function POST(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const formData = await request.formData();
     const fileType = formData.get("type") as string;

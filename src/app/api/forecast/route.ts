@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, eq } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   const days = parseInt(request.nextUrl.searchParams.get("days") ?? "90");
 
   // Detect recurring transactions

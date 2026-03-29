@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET() {
+  const locked = requireUnlock(); if (locked) return locked;
   const targets = db.select().from(schema.targetAllocations).all();
 
   // Get portfolio holdings with cached prices
@@ -79,6 +81,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
 

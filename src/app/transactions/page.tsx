@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown } from "lucide-react";
 
 type Transaction = {
   id: number;
@@ -27,6 +27,9 @@ type Transaction = {
   note: string;
   payee: string;
   tags: string;
+  isBusiness: number | null;
+  splitPerson: string | null;
+  splitRatio: number | null;
 };
 
 type Account = { id: number; name: string; currency: string };
@@ -78,6 +81,7 @@ export default function TransactionsPage() {
   });
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [form, setForm] = useState({
     date: new Date().toISOString().split("T")[0],
     accountId: "",
@@ -87,6 +91,11 @@ export default function TransactionsPage() {
     payee: "",
     note: "",
     tags: "",
+    splitPerson: "",
+    splitRatio: "",
+    isBusiness: false,
+    quantity: "",
+    portfolioHoldingId: "",
   });
 
   const limit = 50;
@@ -105,8 +114,8 @@ export default function TransactionsPage() {
     fetch(`/api/transactions?${params}`)
       .then((r) => r.json())
       .then((d) => {
-        setTxns(d.data);
-        setTotal(d.total);
+        setTxns(d.data ?? []);
+        setTotal(d.total ?? 0);
       })
       .finally(() => setLoading(false));
   }, [filters, page]);
@@ -116,13 +125,13 @@ export default function TransactionsPage() {
   }, [loadTxns]);
 
   useEffect(() => {
-    fetch("/api/accounts").then((r) => r.json()).then(setAccounts);
-    fetch("/api/categories").then((r) => r.json()).then(setCategories);
+    fetch("/api/accounts").then((r) => r.ok ? r.json() : []).then(setAccounts);
+    fetch("/api/categories").then((r) => r.ok ? r.json() : []).then(setCategories);
   }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const body = {
+    const body: Record<string, unknown> = {
       ...(editId ? { id: editId } : {}),
       date: form.date,
       accountId: Number(form.accountId),
@@ -132,7 +141,12 @@ export default function TransactionsPage() {
       payee: form.payee,
       note: form.note,
       tags: form.tags,
+      isBusiness: form.isBusiness ? 1 : 0,
     };
+    if (form.splitPerson) body.splitPerson = form.splitPerson;
+    if (form.splitRatio) body.splitRatio = parseFloat(form.splitRatio);
+    if (form.quantity) body.quantity = parseFloat(form.quantity);
+    if (form.portfolioHoldingId) body.portfolioHolding = form.portfolioHoldingId;
 
     await fetch("/api/transactions", {
       method: editId ? "PUT" : "POST",
@@ -147,7 +161,8 @@ export default function TransactionsPage() {
   }
 
   function resetForm() {
-    setForm({ date: new Date().toISOString().split("T")[0], accountId: "", categoryId: "", currency: "CAD", amount: "", payee: "", note: "", tags: "" });
+    setForm({ date: new Date().toISOString().split("T")[0], accountId: "", categoryId: "", currency: "CAD", amount: "", payee: "", note: "", tags: "", splitPerson: "", splitRatio: "", isBusiness: false, quantity: "", portfolioHoldingId: "" });
+    setShowAdvanced(false);
   }
 
   function startEdit(t: Transaction) {
@@ -161,7 +176,16 @@ export default function TransactionsPage() {
       payee: t.payee || "",
       note: t.note || "",
       tags: t.tags || "",
+      splitPerson: t.splitPerson || "",
+      splitRatio: t.splitRatio != null ? String(t.splitRatio) : "",
+      isBusiness: t.isBusiness === 1,
+      quantity: t.quantity != null ? String(t.quantity) : "",
+      portfolioHoldingId: t.portfolioHolding || "",
     });
+    // Show advanced section if any advanced fields have values
+    if (t.splitPerson || t.splitRatio != null || t.isBusiness === 1 || t.quantity != null || t.portfolioHolding) {
+      setShowAdvanced(true);
+    }
     setDialogOpen(true);
   }
 
@@ -265,6 +289,52 @@ export default function TransactionsPage() {
                 <Label>Tags (comma-separated)</Label>
                 <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
               </div>
+
+              {/* Advanced fields toggle */}
+              <button
+                type="button"
+                className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors w-full"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+              >
+                <ChevronDown className={`h-4 w-4 transition-transform ${showAdvanced ? "rotate-180" : ""}`} />
+                Advanced Options
+              </button>
+
+              {showAdvanced && (
+                <div className="space-y-4 border rounded-lg p-4 bg-muted/20">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label>Split Person</Label>
+                      <Input value={form.splitPerson} onChange={(e) => setForm({ ...form, splitPerson: e.target.value })} placeholder="e.g. John" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Split Ratio</Label>
+                      <Input type="number" step="0.01" min="0" max="1" value={form.splitRatio} onChange={(e) => setForm({ ...form, splitRatio: e.target.value })} placeholder="0.5 = 50%" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label>Quantity</Label>
+                      <Input type="number" step="0.0001" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="e.g. 10" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Portfolio Holding</Label>
+                      <Input value={form.portfolioHoldingId} onChange={(e) => setForm({ ...form, portfolioHoldingId: e.target.value })} placeholder="Holding name/ID" />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="isBusiness"
+                      checked={form.isBusiness}
+                      onChange={(e) => setForm({ ...form, isBusiness: e.target.checked })}
+                      className="h-4 w-4 rounded border-input"
+                    />
+                    <Label htmlFor="isBusiness" className="cursor-pointer">Business expense</Label>
+                  </div>
+                </div>
+              )}
+
               <Button type="submit" className="w-full">{editId ? "Update" : "Create"} Transaction</Button>
             </form>
           </DialogContent>

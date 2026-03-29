@@ -1,7 +1,9 @@
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
+import { generateImportHash, checkDuplicates } from "./import-hash";
+import type { RawTransaction } from "./import-pipeline";
 
-function parseCSV(text: string): Record<string, string>[] {
+export function parseCSV(text: string): Record<string, string>[] {
   const lines = text.trim().split("\n");
   const headers = lines[0].split(",").map((h) => h.trim());
   return lines.slice(1).filter(Boolean).map((line) => {
@@ -12,6 +14,22 @@ function parseCSV(text: string): Record<string, string>[] {
     });
     return row;
   });
+}
+
+export function csvToRawTransactions(csvText: string): RawTransaction[] {
+  const rows = parseCSV(csvText);
+  return rows.map((row) => ({
+    date: row["Date"] ?? "",
+    account: row["Account"] ?? "",
+    amount: parseFloat(row["Amount"]) || 0,
+    payee: row["Payee"] ?? "",
+    category: row["Categorization"] ?? "",
+    currency: row["Currency"] ?? "CAD",
+    note: row["Note"] ?? "",
+    tags: row["Tags"] ?? "",
+    quantity: row["Quantity"] ? parseFloat(row["Quantity"]) : undefined,
+    portfolioHolding: row["Portfolio holding"] || undefined,
+  }));
 }
 
 export async function importAccounts(csvText: string) {
@@ -98,16 +116,14 @@ export async function importPortfolio(csvText: string) {
 export async function importTransactions(csvText: string) {
   const rows = parseCSV(csvText);
   let imported = 0;
+  let skippedDuplicates = 0;
   const batchSize = 500;
 
-  // Pre-load account and category lookups
   const allAccounts = db.select().from(schema.accounts).all();
   const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
 
   const allCategories = db.select().from(schema.categories).all();
   const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
-
-  const insertStmt = db.insert(schema.transactions);
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
@@ -118,25 +134,37 @@ export async function importTransactions(csvText: string) {
       const categoryId = categoryMap.get(row["Categorization"]);
       if (!accountId) continue;
 
+      const amount = parseFloat(row["Amount"]) || 0;
+      const hash = generateImportHash(row["Date"], accountId, amount, row["Payee"] ?? "");
+
       values.push({
         date: row["Date"],
         accountId,
         categoryId: categoryId ?? null,
         currency: row["Currency"] ?? "CAD",
-        amount: parseFloat(row["Amount"]) || 0,
+        amount,
         quantity: row["Quantity"] ? parseFloat(row["Quantity"]) : null,
         portfolioHolding: row["Portfolio holding"] || null,
         note: row["Note"] ?? "",
         payee: row["Payee"] ?? "",
         tags: row["Tags"] ?? "",
+        importHash: hash,
       });
     }
 
     if (values.length > 0) {
-      db.insert(schema.transactions).values(values).run();
-      imported += values.length;
+      // Check for duplicates in this batch
+      const hashes = values.map((v) => v.importHash);
+      const existingHashes = checkDuplicates(hashes);
+      const newValues = values.filter((v) => !existingHashes.has(v.importHash));
+      skippedDuplicates += values.length - newValues.length;
+
+      if (newValues.length > 0) {
+        db.insert(schema.transactions).values(newValues).run();
+        imported += newValues.length;
+      }
     }
   }
 
-  return { total: rows.length, imported };
+  return { total: rows.length, imported, skippedDuplicates };
 }

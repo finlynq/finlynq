@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getLatestFxRate } from "@/lib/fx-service";
 import { getAccountBalances } from "@/lib/queries";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   const target = request.nextUrl.searchParams.get("target") ?? "CAD";
 
   const rate = await getLatestFxRate("USD", "CAD");

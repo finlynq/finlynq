@@ -5,8 +5,10 @@ import {
   getSpendingByCategory,
   getNetWorthOverTime,
 } from "@/lib/queries";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   const params = request.nextUrl.searchParams;
 
   const now = new Date();

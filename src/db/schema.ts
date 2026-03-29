@@ -32,6 +32,8 @@ export const transactions = sqliteTable("transactions", {
   isBusiness: integer("is_business").default(0),
   splitPerson: text("split_person"),
   splitRatio: real("split_ratio"),
+  importHash: text("import_hash"),
+  fitId: text("fit_id"),
 });
 
 export const portfolioHoldings = sqliteTable("portfolio_holdings", {
@@ -40,6 +42,7 @@ export const portfolioHoldings = sqliteTable("portfolio_holdings", {
   name: text("name").notNull(),
   symbol: text("symbol"),
   currency: text("currency").notNull().default("CAD"),
+  isCrypto: integer("is_crypto").default(0),
   note: text("note").default(""),
 });
 
@@ -138,6 +141,53 @@ export const notifications = sqliteTable("notifications", {
   read: integer("read").notNull().default(0),
   createdAt: text("created_at").notNull(),
   metadata: text("metadata").default(""),
+});
+
+// Feature: Subscription Tracker
+export const subscriptions = sqliteTable("subscriptions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  amount: real("amount").notNull(),
+  currency: text("currency").notNull().default("CAD"),
+  frequency: text("frequency").notNull().default("monthly"), // weekly, monthly, quarterly, annual
+  categoryId: integer("category_id").references(() => categories.id),
+  accountId: integer("account_id").references(() => accounts.id),
+  nextDate: text("next_date"),
+  status: text("status").notNull().default("active"), // active, paused, cancelled
+  cancelReminderDate: text("cancel_reminder_date"),
+  notes: text("notes"),
+});
+
+// Feature: App Settings (email import config, etc.)
+export const settings = sqliteTable("settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
+
+// Feature: Transaction Rules Engine
+export const transactionRules = sqliteTable("transaction_rules", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  matchField: text("match_field").notNull(), // 'payee', 'amount', 'tags'
+  matchType: text("match_type").notNull(), // 'contains', 'exact', 'regex', 'greater_than', 'less_than'
+  matchValue: text("match_value").notNull(),
+  assignCategoryId: integer("assign_category_id").references(() => categories.id),
+  assignTags: text("assign_tags"),
+  renameTo: text("rename_to"),
+  isActive: integer("is_active").notNull().default(1),
+  priority: integer("priority").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+});
+
+// Budget Templates
+export const budgetTemplates = sqliteTable("budget_templates", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  categoryId: integer("category_id")
+    .references(() => categories.id)
+    .notNull(),
+  amount: real("amount").notNull(),
+  createdAt: text("created_at").notNull(),
 });
 
 // Feature 8: Tax - Contribution Room

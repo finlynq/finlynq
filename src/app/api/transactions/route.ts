@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction } from "@/lib/queries";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   const params = request.nextUrl.searchParams;
   const filters = {
     startDate: params.get("startDate") ?? undefined,
@@ -20,6 +22,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
     const tx = createTransaction(body);
@@ -31,6 +34,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
     const { id, ...data } = body;
@@ -43,6 +47,7 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const locked = requireUnlock(); if (locked) return locked;
   const params = request.nextUrl.searchParams;
   const id = parseInt(params.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });

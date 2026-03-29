@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { getMonthlySpending, getTransactions } from "@/lib/queries";
 import { detectAnomalies, analyzeTrends, analyzeMerchants, spendingByDayOfWeek } from "@/lib/spending-insights";
 import { getCurrentMonth } from "@/lib/currency";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET() {
+  const locked = requireUnlock(); if (locked) return locked;
   const now = new Date();
   const startDate = `${now.getFullYear() - 1}-01-01`;
   const endDate = `${now.getFullYear()}-12-31`;

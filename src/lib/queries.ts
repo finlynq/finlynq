@@ -1,7 +1,7 @@
 import { db, schema } from "@/db";
 import { eq, and, gte, lte, desc, sql, like, asc } from "drizzle-orm";
 
-const { accounts, categories, transactions, portfolioHoldings, budgets } = schema;
+const { accounts, categories, transactions, portfolioHoldings, budgets, budgetTemplates } = schema;
 
 // Accounts
 export function getAccounts() {
@@ -43,6 +43,11 @@ export function updateCategory(id: number, data: Partial<{ type: string; group: 
 
 export function deleteCategory(id: number) {
   return db.delete(categories).where(eq(categories.id, id)).run();
+}
+
+export function getTransactionCountByCategory(categoryId: number): number {
+  const result = db.select({ count: sql<number>`count(*)` }).from(transactions).where(eq(transactions.categoryId, categoryId)).get();
+  return result?.count ?? 0;
 }
 
 // Transactions
@@ -132,6 +137,9 @@ export function createTransaction(data: {
   note?: string;
   payee?: string;
   tags?: string;
+  isBusiness?: number;
+  splitPerson?: string;
+  splitRatio?: number;
 }) {
   return db.insert(transactions).values(data).returning().get();
 }
@@ -147,6 +155,9 @@ export function updateTransaction(id: number, data: Partial<{
   note: string;
   payee: string;
   tags: string;
+  isBusiness: number;
+  splitPerson: string;
+  splitRatio: number;
 }>) {
   return db.update(transactions).set(data).where(eq(transactions.id, id)).returning().get();
 }
@@ -209,6 +220,71 @@ export function upsertBudget(data: { categoryId: number; month: string; amount: 
 
 export function deleteBudget(id: number) {
   return db.delete(budgets).where(eq(budgets.id, id)).run();
+}
+
+// Budget Templates
+export function getBudgetTemplates() {
+  return db
+    .select({
+      id: budgetTemplates.id,
+      name: budgetTemplates.name,
+      categoryId: budgetTemplates.categoryId,
+      categoryName: categories.name,
+      categoryGroup: categories.group,
+      amount: budgetTemplates.amount,
+      createdAt: budgetTemplates.createdAt,
+    })
+    .from(budgetTemplates)
+    .leftJoin(categories, eq(budgetTemplates.categoryId, categories.id))
+    .orderBy(budgetTemplates.name)
+    .all();
+}
+
+export function createBudgetTemplate(data: { name: string; categoryId: number; amount: number }) {
+  return db
+    .insert(budgetTemplates)
+    .values({ ...data, createdAt: new Date().toISOString() })
+    .returning()
+    .get();
+}
+
+export function deleteBudgetTemplate(id: number) {
+  return db.delete(budgetTemplates).where(eq(budgetTemplates.id, id)).run();
+}
+
+// Budget Rollover: get previous month overspend per category
+export function getBudgetRollover(currentMonth: string) {
+  const [y, m] = currentMonth.split("-").map(Number);
+  const prevDate = new Date(y, m - 2, 1);
+  const prevMonth = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, "0")}`;
+
+  const prevBudgets = getBudgets(prevMonth);
+  if (prevBudgets.length === 0) return [];
+
+  const prevStartDate = `${prevMonth}-01`;
+  const prevEndDate = `${prevMonth}-${new Date(prevDate.getFullYear(), prevDate.getMonth() + 1, 0).getDate()}`;
+  const prevSpending = getSpendingByCategory(prevStartDate, prevEndDate);
+
+  const spendMap = new Map<number, number>();
+  prevSpending.forEach((s) => {
+    if (s.categoryId != null) {
+      spendMap.set(s.categoryId, Math.abs(s.total));
+    }
+  });
+
+  return prevBudgets
+    .map((b) => {
+      const spent = spendMap.get(b.categoryId) ?? 0;
+      const overspend = spent - b.amount;
+      return {
+        categoryId: b.categoryId,
+        categoryName: b.categoryName,
+        budgetAmount: b.amount,
+        spent,
+        rolloverAmount: overspend > 0 ? overspend : 0,
+      };
+    })
+    .filter((r) => r.rolloverAmount > 0);
 }
 
 // Dashboard aggregations

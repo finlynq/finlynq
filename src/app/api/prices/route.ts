@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { fetchMultipleQuotes, cachePrice, aggregatePortfolioExposure } from "@/lib/price-service";
+import { requireUnlock } from "@/lib/require-unlock";
 
 export async function GET() {
+  const locked = requireUnlock(); if (locked) return locked;
   // Get all holdings with symbols
   const holdings = db
     .select({

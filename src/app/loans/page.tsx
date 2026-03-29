@@ -111,6 +111,21 @@ export default function LoansPage() {
   const [amort, setAmort] = useState<AmortResult | null>(null);
   const [whatIf, setWhatIf] = useState<WhatIf[]>([]);
   const [form, setForm] = useState({ name: "", type: "mortgage", principal: "", annualRate: "", termMonths: "", startDate: "", paymentFrequency: "monthly", extraPayment: "0", accountId: "" });
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  function validateForm() {
+    const e: Record<string, string> = {};
+    if (!form.name.trim()) e.name = "Name is required";
+    if (!form.principal || parseFloat(form.principal) <= 0) e.principal = "Principal must be greater than 0";
+    if (!form.annualRate || parseFloat(form.annualRate) <= 0) e.annualRate = "Rate must be greater than 0";
+    if (form.annualRate && parseFloat(form.annualRate) > 100) e.annualRate = "Rate must be 100 or less";
+    if (!form.termMonths || parseInt(form.termMonths) <= 0) e.termMonths = "Term must be greater than 0";
+    if (!form.startDate) e.startDate = "Start date is required";
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  }
+
+  const isFormValid = form.name.trim() !== "" && form.principal !== "" && parseFloat(form.principal) > 0 && form.annualRate !== "" && parseFloat(form.annualRate) > 0 && parseFloat(form.annualRate) <= 100 && form.termMonths !== "" && parseInt(form.termMonths) > 0 && form.startDate !== "";
 
   const load = useCallback(() => {
     fetch("/api/loans").then((r) => r.json()).then((data) => { setLoans(data); setLoading(false); });
@@ -129,9 +144,11 @@ export default function LoansPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!validateForm()) return;
     await fetch("/api/loans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: form.name, type: form.type, principal: parseFloat(form.principal), annualRate: parseFloat(form.annualRate), termMonths: parseInt(form.termMonths), startDate: form.startDate, paymentFrequency: form.paymentFrequency, extraPayment: parseFloat(form.extraPayment) || 0, accountId: form.accountId ? parseInt(form.accountId) : null }) });
     setDialogOpen(false);
     setForm({ name: "", type: "mortgage", principal: "", annualRate: "", termMonths: "", startDate: "", paymentFrequency: "monthly", extraPayment: "0", accountId: "" });
+    setErrors({});
     load();
   }
 
@@ -158,7 +175,11 @@ export default function LoansPage() {
             <DialogHeader><DialogTitle>Add Loan</DialogTitle></DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
-                <div><Label>Name</Label><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></div>
+                <div>
+                  <Label>Name</Label>
+                  <Input value={form.name} onChange={(e) => { setForm({ ...form, name: e.target.value }); setErrors({ ...errors, name: "" }); }} />
+                  {errors.name && <p className="text-xs text-destructive mt-1">{errors.name}</p>}
+                </div>
                 <div><Label>Type</Label>
                   <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v ?? "mortgage" })}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -173,12 +194,28 @@ export default function LoansPage() {
                 </div>
               </div>
               <div className="grid grid-cols-3 gap-3">
-                <div><Label>Principal ($)</Label><Input type="number" step="0.01" value={form.principal} onChange={(e) => setForm({ ...form, principal: e.target.value })} required /></div>
-                <div><Label>Annual Rate (%)</Label><Input type="number" step="0.01" value={form.annualRate} onChange={(e) => setForm({ ...form, annualRate: e.target.value })} required /></div>
-                <div><Label>Term (months)</Label><Input type="number" value={form.termMonths} onChange={(e) => setForm({ ...form, termMonths: e.target.value })} required /></div>
+                <div>
+                  <Label>Principal ($)</Label>
+                  <Input type="number" step="0.01" value={form.principal} onChange={(e) => { setForm({ ...form, principal: e.target.value }); setErrors({ ...errors, principal: "" }); }} />
+                  {errors.principal && <p className="text-xs text-destructive mt-1">{errors.principal}</p>}
+                </div>
+                <div>
+                  <Label>Annual Rate (%)</Label>
+                  <Input type="number" step="0.01" value={form.annualRate} onChange={(e) => { setForm({ ...form, annualRate: e.target.value }); setErrors({ ...errors, annualRate: "" }); }} />
+                  {errors.annualRate && <p className="text-xs text-destructive mt-1">{errors.annualRate}</p>}
+                </div>
+                <div>
+                  <Label>Term (months)</Label>
+                  <Input type="number" value={form.termMonths} onChange={(e) => { setForm({ ...form, termMonths: e.target.value }); setErrors({ ...errors, termMonths: "" }); }} />
+                  {errors.termMonths && <p className="text-xs text-destructive mt-1">{errors.termMonths}</p>}
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <div><Label>Start Date</Label><Input type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} required /></div>
+                <div>
+                  <Label>Start Date</Label>
+                  <Input type="date" value={form.startDate} onChange={(e) => { setForm({ ...form, startDate: e.target.value }); setErrors({ ...errors, startDate: "" }); }} />
+                  {errors.startDate && <p className="text-xs text-destructive mt-1">{errors.startDate}</p>}
+                </div>
                 <div><Label>Extra Payment/mo</Label><Input type="number" step="0.01" value={form.extraPayment} onChange={(e) => setForm({ ...form, extraPayment: e.target.value })} /></div>
               </div>
               <div><Label>Linked Account</Label>
@@ -187,7 +224,7 @@ export default function LoansPage() {
                   <SelectContent>{accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
-              <Button type="submit" className="w-full">Add Loan</Button>
+              <Button type="submit" className="w-full" disabled={!isFormValid}>Add Loan</Button>
             </form>
           </DialogContent>
         </Dialog>
