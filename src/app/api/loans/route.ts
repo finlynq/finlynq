@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import {
   generateAmortizationSchedule,
   calculateExtraPaymentImpact,
   calculateDebtPayoff,
 } from "@/lib/loan-calculator";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -24,8 +24,9 @@ const createLoanSchema = z.object({
   note: z.string().optional(),
 });
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const loans = db
     .select({
       id: schema.loans.id,
@@ -44,6 +45,7 @@ export async function GET() {
     })
     .from(schema.loans)
     .leftJoin(schema.accounts, eq(schema.loans.accountId, schema.accounts.id))
+    .where(eq(schema.loans.userId, userId))
     .all();
 
   // Add amortization summary for each loan
@@ -77,7 +79,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
 
@@ -108,6 +110,7 @@ export async function POST(request: NextRequest) {
     if (parsed.error) return parsed.error;
     const d = parsed.data;
     const loan = db.insert(schema.loans).values({
+      userId: auth.context.userId,
       name: d.name,
       type: d.type,
       accountId: d.accountId || null,
@@ -128,9 +131,9 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  db.delete(schema.loans).where(eq(schema.loans.id, id)).run();
+  db.delete(schema.loans).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).run();
   return NextResponse.json({ success: true });
 }

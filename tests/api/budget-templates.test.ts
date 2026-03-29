@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 const mockGetBudgetTemplates = vi.fn();
@@ -27,7 +27,8 @@ describe("API /api/budget-templates", () => {
         { id: 1, name: "Basic", categoryId: 1, amount: 500, createdAt: "2024-01-01" },
       ];
       mockGetBudgetTemplates.mockReturnValue(templates);
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/budget-templates");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(data).toEqual(templates);

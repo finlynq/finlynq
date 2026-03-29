@@ -2,12 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { processMessage } from "@/lib/chat-engine";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 const postSchema = z.object({
   message: z.string().min(1),
 });
 
 export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);

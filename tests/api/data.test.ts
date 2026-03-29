@@ -20,11 +20,13 @@ vi.mock("@/db", () => ({
   },
 }));
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 
 import { DELETE } from "@/app/api/data/route";
-import { requireUnlock } from "@/lib/require-unlock";
-import { parseResponse } from "../helpers/api-test-utils";
+import { requireAuth } from "@/lib/auth/require-auth";
+import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 import { NextResponse } from "next/server";
 
 describe("API /api/data", () => {
@@ -34,7 +36,8 @@ describe("API /api/data", () => {
   });
 
   it("clears all data", async () => {
-    const res = await DELETE();
+    const req = createMockRequest("http://localhost:3000/api/data", { method: "DELETE" });
+    const res = await DELETE(req);
     const { status, data } = await parseResponse(res);
     expect(status).toBe(200);
     expect(data).toEqual({ success: true });
@@ -42,17 +45,20 @@ describe("API /api/data", () => {
     expect(mockDbChain.run).toHaveBeenCalled();
   });
 
-  it("returns 423 when locked", async () => {
-    vi.mocked(requireUnlock).mockReturnValueOnce(
-      NextResponse.json({ error: "Locked" }, { status: 423 })
-    );
-    const res = await DELETE();
-    expect(res.status).toBe(423);
+  it("returns 401 when not authenticated", async () => {
+    vi.mocked(requireAuth).mockResolvedValueOnce({
+      authenticated: false,
+      response: NextResponse.json({ error: "Unauthorized" }, { status: 401 }),
+    });
+    const req = createMockRequest("http://localhost:3000/api/data", { method: "DELETE" });
+    const res = await DELETE(req);
+    expect(res.status).toBe(401);
   });
 
   it("returns 500 on error", async () => {
     mockDbChain.run!.mockImplementation(() => { throw new Error("FK violation"); });
-    const res = await DELETE();
+    const req = createMockRequest("http://localhost:3000/api/data", { method: "DELETE" });
+    const res = await DELETE(req);
     expect(res.status).toBe(500);
   });
 });

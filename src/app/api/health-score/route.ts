@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import {
   getAccountBalances,
   getIncomeVsExpenses,
@@ -7,7 +7,7 @@ import {
   getSpendingByCategory,
 } from "@/lib/queries";
 import { calculateAgeOfMoney } from "@/lib/age-of-money";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 type ComponentScore = {
   name: string;
@@ -17,33 +17,30 @@ type ComponentScore = {
   detail: string;
 };
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
   // Date ranges
-  const threeMonthsAgo = new Date(now);
-  threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-  const sixMonthsAgo = new Date(now);
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
   const twelveMonthsAgo = new Date(now);
   twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
 
   const fmt = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 
-  const incomeExpenses = getIncomeVsExpenses(fmt(twelveMonthsAgo), `${currentMonth}-31`);
-  const balances = getAccountBalances();
-  const netWorthData = getNetWorthOverTime();
-  const budgetsData = getBudgets(currentMonth);
+  const incomeExpenses = getIncomeVsExpenses(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`);
+  const balances = getAccountBalances(userId);
+  const netWorthData = getNetWorthOverTime(userId);
+  const budgetsData = getBudgets(userId, currentMonth);
   const spending = getSpendingByCategory(
+    userId,
     `${currentMonth}-01`,
     `${currentMonth}-31`
   );
 
   // --- 1. Savings Rate (30%) ---
-  // Use last 3 months average
   const recentMonths = new Set<string>();
   const monthIncome = new Map<string, number>();
   const monthExpenses = new Map<string, number>();
@@ -73,8 +70,7 @@ export async function GET() {
   let savingsRateDetail = "No income data";
   if (totalIncome > 0) {
     const savingsRate = (totalIncome - totalExpenses) / totalIncome;
-    // 20%+ savings rate = 100, 0% = 0, negative = 0
-    savingsRateScore = Math.min(100, Math.max(0, savingsRate * 500)); // 20% => 100
+    savingsRateScore = Math.min(100, Math.max(0, savingsRate * 500));
     savingsRateDetail = `${Math.round(savingsRate * 100)}% savings rate`;
   }
 
@@ -89,7 +85,6 @@ export async function GET() {
   let dtiDetail = "No income data";
   if (annualIncome > 0) {
     const dtiRatio = totalLiabilities / annualIncome;
-    // DTI < 0.36 = 100, > 1.0 = 0
     dtiScore = Math.min(100, Math.max(0, (1 - dtiRatio) * 100));
     dtiDetail = `${Math.round(dtiRatio * 100)}% debt-to-income`;
   } else if (totalLiabilities === 0) {
@@ -101,7 +96,6 @@ export async function GET() {
   const avgMonthlyExpenses =
     sortedMonths.length > 0 ? totalExpenses / sortedMonths.length : 0;
 
-  // Liquid assets: checking, savings type accounts (assets not investment)
   const liquidAssets = balances
     .filter(
       (b) =>
@@ -116,7 +110,6 @@ export async function GET() {
   let emergencyDetail = "No expense data";
   if (avgMonthlyExpenses > 0) {
     const monthsCovered = liquidAssets / avgMonthlyExpenses;
-    // 6+ months = 100, 3 months = 75, 0 = 0
     emergencyScore = Math.min(100, Math.max(0, (monthsCovered / 6) * 100));
     emergencyDetail = `${monthsCovered.toFixed(1)} months covered`;
   } else if (liquidAssets > 0) {
@@ -125,7 +118,6 @@ export async function GET() {
   }
 
   // --- 4. Net Worth Trend (15%) ---
-  // Compare last 3 months net worth growth
   const nwByMonth = new Map<string, number>();
   let runningNW = 0;
   netWorthData
@@ -138,7 +130,7 @@ export async function GET() {
   const nwMonths = Array.from(nwByMonth.entries())
     .sort(([a], [b]) => a.localeCompare(b));
 
-  let nwTrendScore = 50; // neutral default
+  let nwTrendScore = 50;
   let nwTrendDetail = "Insufficient data";
   if (nwMonths.length >= 3) {
     const recent = nwMonths.slice(-3);
@@ -151,7 +143,6 @@ export async function GET() {
 
     if (olderAvg !== 0) {
       const growthPct = ((recentAvg - olderAvg) / Math.abs(olderAvg)) * 100;
-      // Growing > 5% = 100, flat = 50, declining > 5% = 0
       nwTrendScore = Math.min(100, Math.max(0, 50 + growthPct * 10));
       nwTrendDetail =
         growthPct >= 0
@@ -161,7 +152,7 @@ export async function GET() {
   }
 
   // --- 5. Budget Adherence (15%) ---
-  let budgetScore = 50; // neutral if no budgets
+  let budgetScore = 50;
   let budgetDetail = "No budgets set";
   if (budgetsData.length > 0) {
     const spendingByCat = new Map<number, number>();
@@ -183,12 +174,11 @@ export async function GET() {
   }
 
   // --- 6. Age of Money (10%) ---
-  let aomScore = 50; // neutral default
+  let aomScore = 50;
   let aomDetail = "Insufficient data";
   try {
-    const aom = calculateAgeOfMoney();
+    const aom = calculateAgeOfMoney(userId);
     if (aom.ageInDays > 0) {
-      // 30+ days = 100, 14 days = 50, 0 days = 0
       aomScore = Math.min(100, Math.max(0, (aom.ageInDays / 30) * 100));
       aomDetail = `${aom.ageInDays} days`;
       if (aom.trend > 0) aomDetail += ` (+${aom.trend}d trend)`;

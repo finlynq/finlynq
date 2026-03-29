@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import {
   getEtfTopHoldings,
   getEtfRegionBreakdown,
@@ -8,10 +8,11 @@ import {
   getAvailableEtfSymbols,
   type EtfConstituent,
 } from "@/lib/price-service";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
 
   const symbol = request.nextUrl.searchParams.get("symbol");
 
@@ -26,6 +27,7 @@ export async function GET(request: NextRequest) {
       })
       .from(schema.portfolioHoldings)
       .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+      .where(eq(schema.portfolioHoldings.userId, userId))
       .all();
 
     const availableSymbols = new Set(getAvailableEtfSymbols());

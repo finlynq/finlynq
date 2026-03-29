@@ -1,11 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { calculateAgeOfMoney } from "@/lib/age-of-money";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
-    const result = calculateAgeOfMoney();
+    const result = calculateAgeOfMoney(auth.context.userId);
     return NextResponse.json(result);
   } catch (error: unknown) {
     const message =

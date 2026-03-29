@@ -21,7 +21,9 @@ vi.mock("@/db", () => ({
   },
 }));
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 vi.mock("drizzle-orm", () => ({ eq: vi.fn() }));
 
 import { GET, POST } from "@/app/api/rebalancing/route";
@@ -37,7 +39,8 @@ describe("API /api/rebalancing", () => {
 
   describe("GET", () => {
     it("returns rebalancing data", async () => {
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/rebalancing");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       const d = data as Record<string, unknown>;
@@ -48,7 +51,8 @@ describe("API /api/rebalancing", () => {
     });
 
     it("returns empty comparison when no targets", async () => {
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/rebalancing");
+      const res = await GET(req);
       const { data } = await parseResponse(res);
       const d = data as { comparison: unknown[]; targets: unknown[] };
       expect(d.targets).toEqual([]);

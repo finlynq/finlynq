@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 
 const mockCalculateAgeOfMoney = vi.fn();
 vi.mock("@/lib/age-of-money", () => ({
@@ -8,7 +10,7 @@ vi.mock("@/lib/age-of-money", () => ({
 }));
 
 import { GET } from "@/app/api/age-of-money/route";
-import { parseResponse } from "../helpers/api-test-utils";
+import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 
 describe("API /api/age-of-money", () => {
   beforeEach(() => {
@@ -21,7 +23,8 @@ describe("API /api/age-of-money", () => {
       trend: 3,
       history: [{ date: "2024-01-15", ageInDays: 25 }],
     });
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/age-of-money");
+    const res = await GET(req);
     const { status, data } = await parseResponse(res);
     expect(status).toBe(200);
     const d = data as { ageInDays: number; trend: number };
@@ -35,7 +38,8 @@ describe("API /api/age-of-money", () => {
       trend: 0,
       history: [],
     });
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/age-of-money");
+    const res = await GET(req);
     const { status, data } = await parseResponse(res);
     expect(status).toBe(200);
     expect((data as { ageInDays: number }).ageInDays).toBe(0);

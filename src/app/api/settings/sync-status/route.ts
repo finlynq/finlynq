@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { getMode, getDbPath, isCloudReadOnly } from "@/db";
 import { checkLock, forceReleaseLock, acquireLock } from "@/db/sync";
 import { findConflictFiles } from "@/db/sync-checks";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
 
   const mode = getMode();
   if (mode !== "cloud") {
@@ -25,7 +25,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
 
   const body = await request.json();
   const { action } = body;

@@ -35,7 +35,7 @@ function daysFromNow(dateStr: string): number {
 }
 
 // 1. Overspent budgets
-function getOverspentBudgets(): SpotlightItem[] {
+function getOverspentBudgets(userId: string): SpotlightItem[] {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
@@ -51,7 +51,7 @@ function getOverspentBudgets(): SpotlightItem[] {
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
-    .where(eq(budgets.month, month))
+    .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
     .groupBy(budgets.id)
     .all();
 
@@ -74,18 +74,18 @@ function getOverspentBudgets(): SpotlightItem[] {
 }
 
 // 2. Upcoming large bills (>$100 in next 7 days)
-function getUpcomingLargeBills(): SpotlightItem[] {
+function getUpcomingLargeBills(userId: string): SpotlightItem[] {
   const todayStr = today();
   const weekAhead = new Date(new Date(todayStr + "T00:00:00").getTime() + 7 * 86400000)
     .toISOString()
     .split("T")[0];
 
-  // Check subscriptions with next_date in the window
   const subs = db
     .select()
     .from(subscriptions)
     .where(
       and(
+        eq(subscriptions.userId, userId),
         eq(subscriptions.status, "active"),
         gte(subscriptions.nextDate, todayStr),
         lte(subscriptions.nextDate, weekAhead)
@@ -112,7 +112,7 @@ function getUpcomingLargeBills(): SpotlightItem[] {
 }
 
 // 3. Goal deadlines approaching (<30 days, <80% funded)
-function getGoalDeadlines(): SpotlightItem[] {
+function getGoalDeadlines(userId: string): SpotlightItem[] {
   const goalRows = db
     .select({
       id: goals.id,
@@ -122,7 +122,7 @@ function getGoalDeadlines(): SpotlightItem[] {
       accountId: goals.accountId,
     })
     .from(goals)
-    .where(eq(goals.status, "active"))
+    .where(and(eq(goals.userId, userId), eq(goals.status, "active")))
     .all();
 
   const items: SpotlightItem[] = [];
@@ -131,13 +131,12 @@ function getGoalDeadlines(): SpotlightItem[] {
     const days = daysFromNow(goal.deadline);
     if (days < 0 || days > 30) continue;
 
-    // Estimate progress: sum of account balance
     let current = 0;
     if (goal.accountId) {
       const bal = db
         .select({ total: sql<number>`COALESCE(SUM(${transactions.amount}), 0)` })
         .from(transactions)
-        .where(eq(transactions.accountId, goal.accountId))
+        .where(and(eq(transactions.accountId, goal.accountId), eq(transactions.userId, userId)))
         .get();
       current = Math.abs(bal?.total ?? 0);
     }
@@ -159,19 +158,17 @@ function getGoalDeadlines(): SpotlightItem[] {
 }
 
 // 4. Spending anomalies (>30% vs 3-month avg)
-function getSpendingAnomalies(): SpotlightItem[] {
+function getSpendingAnomalies(userId: string): SpotlightItem[] {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
   const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
 
-  // 3 months back
   const threeMonthsAgo = new Date(y, m - 4, 1);
   const prevStart = threeMonthsAgo.toISOString().split("T")[0];
   const prevEndMonth = new Date(y, m - 1, 0);
   const prevEnd = prevEndMonth.toISOString().split("T")[0];
 
-  // Current month spending by category
   const currentSpend = db
     .select({
       categoryId: categories.id,
@@ -182,6 +179,7 @@ function getSpendingAnomalies(): SpotlightItem[] {
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(
       and(
+        eq(transactions.userId, userId),
         gte(transactions.date, startDate),
         lte(transactions.date, endDate),
         eq(categories.type, "E")
@@ -190,7 +188,6 @@ function getSpendingAnomalies(): SpotlightItem[] {
     .groupBy(categories.id)
     .all();
 
-  // Avg over previous 3 months
   const prevSpend = db
     .select({
       categoryId: categories.id,
@@ -200,6 +197,7 @@ function getSpendingAnomalies(): SpotlightItem[] {
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(
       and(
+        eq(transactions.userId, userId),
         gte(transactions.date, prevStart),
         lte(transactions.date, prevEnd),
         eq(categories.type, "E")
@@ -231,7 +229,7 @@ function getSpendingAnomalies(): SpotlightItem[] {
 }
 
 // 5. Uncategorized transactions
-function getUncategorizedTransactions(): SpotlightItem[] {
+function getUncategorizedTransactions(userId: string): SpotlightItem[] {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
@@ -242,6 +240,7 @@ function getUncategorizedTransactions(): SpotlightItem[] {
     .from(transactions)
     .where(
       and(
+        eq(transactions.userId, userId),
         gte(transactions.date, startDate),
         lte(transactions.date, endDate),
         sql`${transactions.categoryId} IS NULL`
@@ -266,7 +265,7 @@ function getUncategorizedTransactions(): SpotlightItem[] {
 }
 
 // 6. Low account balances (<$500)
-function getLowBalances(): SpotlightItem[] {
+function getLowBalances(userId: string): SpotlightItem[] {
   const rows = db
     .select({
       accountId: accounts.id,
@@ -276,13 +275,12 @@ function getLowBalances(): SpotlightItem[] {
     })
     .from(accounts)
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
-    .where(eq(accounts.type, "A"))
+    .where(and(eq(accounts.userId, userId), eq(accounts.type, "A")))
     .groupBy(accounts.id)
     .all();
 
   const items: SpotlightItem[] = [];
   for (const row of rows) {
-    // Skip investment-type account groups
     const group = row.accountName?.toLowerCase() ?? "";
     if (group.includes("rrsp") || group.includes("tfsa") || group.includes("invest")) continue;
 
@@ -302,7 +300,7 @@ function getLowBalances(): SpotlightItem[] {
 }
 
 // 7. Subscription renewals (next 7 days)
-function getUpcomingSubscriptions(): SpotlightItem[] {
+function getUpcomingSubscriptions(userId: string): SpotlightItem[] {
   const todayStr = today();
   const weekAhead = new Date(new Date(todayStr + "T00:00:00").getTime() + 7 * 86400000)
     .toISOString()
@@ -313,6 +311,7 @@ function getUpcomingSubscriptions(): SpotlightItem[] {
     .from(subscriptions)
     .where(
       and(
+        eq(subscriptions.userId, userId),
         eq(subscriptions.status, "active"),
         gte(subscriptions.nextDate, todayStr),
         lte(subscriptions.nextDate, weekAhead)
@@ -320,7 +319,6 @@ function getUpcomingSubscriptions(): SpotlightItem[] {
     )
     .all();
 
-  // Filter out ones already captured by large bills (>$100)
   return subs
     .filter((s) => Math.abs(s.amount) < 100)
     .map((s) => {
@@ -337,17 +335,16 @@ function getUpcomingSubscriptions(): SpotlightItem[] {
     });
 }
 
-export function getSpotlightItems(): SpotlightItem[] {
+export function getSpotlightItems(userId: string): SpotlightItem[] {
   const items: SpotlightItem[] = [
-    ...getOverspentBudgets(),
-    ...getUpcomingLargeBills(),
-    ...getGoalDeadlines(),
-    ...getSpendingAnomalies(),
-    ...getUncategorizedTransactions(),
-    ...getLowBalances(),
-    ...getUpcomingSubscriptions(),
+    ...getOverspentBudgets(userId),
+    ...getUpcomingLargeBills(userId),
+    ...getGoalDeadlines(userId),
+    ...getSpendingAnomalies(userId),
+    ...getUncategorizedTransactions(userId),
+    ...getLowBalances(userId),
+    ...getUpcomingSubscriptions(userId),
   ];
 
-  // Sort by severity
   return items.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 }

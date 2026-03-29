@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { csvToRawTransactions } from "@/lib/csv-parser";
 import { parsePdfToTransactions } from "@/lib/pdf-parser";
 import { extractExcelRows, parseExcelSheets } from "@/lib/excel-parser";
 import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
-import { requireUnlock } from "@/lib/require-unlock";
 import { safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
   try {
     // Verify webhook secret
     const secret = request.headers.get("x-webhook-secret");
@@ -23,6 +21,9 @@ export async function POST(request: NextRequest) {
     if (!storedSecret || secret !== storedSecret.value) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    // Resolve the userId that owns this webhook secret
+    const userId = storedSecret.userId;
 
     const formData = await request.formData();
     const allRows: RawTransaction[] = [];
@@ -71,9 +72,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "No importable data found in attachments" });
     }
 
-    const result = executeImport(allRows);
+    const result = executeImport(allRows, [], userId);
 
-    // Create notification
+    // Create notification scoped to user
     db.insert(schema.notifications)
       .values({
         type: "import",
@@ -81,6 +82,7 @@ export async function POST(request: NextRequest) {
         message: `Imported ${result.imported} transactions (${result.skippedDuplicates} duplicates skipped)`,
         read: 0,
         createdAt: new Date().toISOString(),
+        userId,
       })
       .run();
 

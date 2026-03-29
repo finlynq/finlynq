@@ -2,12 +2,12 @@ import { describe, it, expect } from "vitest";
 import { applyRules, suggestCategory, applyRulesToBatch, type TransactionInput, type RuleMatch } from "@/lib/auto-categorize";
 
 function makeRule(overrides: Partial<{
-  id: number; name: string; matchField: string; matchType: string;
+  id: number; userId: string; name: string; matchField: string; matchType: string;
   matchValue: string; assignCategoryId: number | null; assignTags: string | null;
   renameTo: string | null; isActive: number; priority: number; createdAt: string;
 }>) {
   return {
-    id: 1, name: "Rule", matchField: "payee", matchType: "contains",
+    id: 1, userId: "default", name: "Rule", matchField: "payee", matchType: "contains",
     matchValue: "", assignCategoryId: null, assignTags: null,
     renameTo: null, isActive: 1, priority: 0, createdAt: "2024-01-01",
     ...overrides,

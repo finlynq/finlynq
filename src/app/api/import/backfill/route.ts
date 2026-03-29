@@ -1,16 +1,17 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, isNull } from "drizzle-orm";
+import { eq, and, isNull } from "drizzle-orm";
 import { generateImportHash } from "@/lib/import-hash";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
-export async function POST() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const transactions = db
       .select()
       .from(schema.transactions)
-      .where(isNull(schema.transactions.importHash))
+      .where(and(isNull(schema.transactions.importHash), eq(schema.transactions.userId, userId)))
       .all();
 
     let updated = 0;
@@ -27,7 +28,7 @@ export async function POST() {
         );
         db.update(schema.transactions)
           .set({ importHash: hash })
-          .where(eq(schema.transactions.id, tx.id))
+          .where(and(eq(schema.transactions.id, tx.id), eq(schema.transactions.userId, userId)))
           .run();
         updated++;
       }

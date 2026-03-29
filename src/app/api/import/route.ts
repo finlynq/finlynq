@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { importAccounts, importCategories, importPortfolio, importTransactions } from "@/lib/csv-parser";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const formData = await request.formData();
     const fileType = formData.get("type") as string;
@@ -19,16 +20,16 @@ export async function POST(request: NextRequest) {
 
     switch (fileType) {
       case "accounts":
-        result = await importAccounts(text);
+        result = await importAccounts(text, userId);
         break;
       case "categories":
-        result = await importCategories(text);
+        result = await importCategories(text, userId);
         break;
       case "portfolio":
-        result = await importPortfolio(text);
+        result = await importPortfolio(text, userId);
         break;
       case "transactions":
-        result = await importTransactions(text);
+        result = await importTransactions(text, userId);
         break;
       default:
         return NextResponse.json({ error: "Invalid type" }, { status: 400 });

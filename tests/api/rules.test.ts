@@ -14,13 +14,15 @@ vi.mock("@/db", () => ({
     get: (_t, prop) => mockDbChain[prop as string] ?? vi.fn().mockReturnValue(mockDbChain),
   }),
   schema: {
-    transactionRules: { id: "id", name: "name", matchField: "matchField", matchType: "matchType", matchValue: "matchValue", assignCategoryId: "assignCategoryId", assignTags: "assignTags", renameTo: "renameTo", isActive: "isActive", priority: "priority", createdAt: "createdAt" },
+    transactionRules: { id: "id", name: "name", matchField: "matchField", matchType: "matchType", matchValue: "matchValue", assignCategoryId: "assignCategoryId", assignTags: "assignTags", renameTo: "renameTo", isActive: "isActive", priority: "priority", createdAt: "createdAt", userId: "userId" },
     categories: { id: "id", name: "name" },
   },
 }));
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
-vi.mock("drizzle-orm", () => ({ eq: vi.fn(), asc: vi.fn() }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
+vi.mock("drizzle-orm", () => ({ eq: vi.fn(), asc: vi.fn(), and: vi.fn() }));
 
 import { GET, POST, PUT, DELETE } from "@/app/api/rules/route";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
@@ -37,7 +39,8 @@ describe("API /api/rules", () => {
     it("returns all rules", async () => {
       const rules = [{ id: 1, name: "Coffee", matchField: "payee", matchType: "contains", matchValue: "Starbucks", isActive: 1 }];
       mockDbChain.all!.mockReturnValueOnce(rules);
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/rules");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(data).toEqual(rules);

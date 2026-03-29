@@ -1,10 +1,10 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, sql, and, isNotNull } from "drizzle-orm";
 import { fetchMultipleQuotes, aggregatePortfolioExposure, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, getAvailableEtfSymbols, autoSeedEtfIfMissing } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, convertCurrency } from "@/lib/fx-service";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 const CRYPTO_SYMBOLS = new Set([
   "BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AAVE", "ATOM", "AVAX",
@@ -18,8 +18,9 @@ function isCryptoSymbol(symbol: string): boolean {
   return CRYPTO_SYMBOLS.has(base);
 }
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
 
   // 1. Get all holdings with account info
   const holdings = db
@@ -35,6 +36,7 @@ export async function GET() {
     })
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+    .where(eq(schema.portfolioHoldings.userId, userId))
     .orderBy(schema.accounts.name, schema.portfolioHoldings.name)
     .all();
 
@@ -84,7 +86,7 @@ export async function GET() {
       totalAmount: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
     })
     .from(schema.transactions)
-    .where(isNotNull(schema.transactions.portfolioHolding))
+    .where(and(isNotNull(schema.transactions.portfolioHolding), eq(schema.transactions.userId, userId)))
     .groupBy(schema.transactions.portfolioHolding)
     .all();
 

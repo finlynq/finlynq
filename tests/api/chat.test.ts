@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
+
 const mockProcessMessage = vi.fn();
 vi.mock("@/lib/chat-engine", () => ({
   processMessage: (...a: unknown[]) => mockProcessMessage(...a),

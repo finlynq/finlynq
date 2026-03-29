@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 const mockGetAccountBalances = vi.fn();
@@ -93,7 +93,7 @@ describe("API /api/dashboard", () => {
   it("accepts custom date range", async () => {
     const req = createMockRequest("http://localhost:3000/api/dashboard?startDate=2023-01-01&endDate=2023-12-31");
     await GET(req);
-    expect(mockGetIncomeVsExpenses).toHaveBeenCalledWith("2023-01-01", "2023-12-31");
-    expect(mockGetSpendingByCategory).toHaveBeenCalledWith("2023-01-01", "2023-12-31");
+    expect(mockGetIncomeVsExpenses).toHaveBeenCalledWith("default", "2023-01-01", "2023-12-31");
+    expect(mockGetSpendingByCategory).toHaveBeenCalledWith("default", "2023-01-01", "2023-12-31");
   });
 });

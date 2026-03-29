@@ -1,9 +1,9 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSpotlightItems } from "@/lib/spotlight";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
-  const items = getSpotlightItems();
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const items = getSpotlightItems(auth.context.userId);
   return NextResponse.json({ items });
 }

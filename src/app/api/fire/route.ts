@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -15,7 +15,7 @@ const postSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
@@ -36,8 +36,6 @@ export async function POST(request: NextRequest) {
     const fireNumber = annualExpenses / (withdrawalRate / 100);
 
     // Calculate years to FIRE
-    // FV = PV*(1+r)^n + PMT*((1+r)^n - 1)/r = fireNumber
-    // Solve for n
     let yearsToFire = 0;
     let balance = currentInvestments;
     const projections: { age: number; year: number; netWorth: number; fireNumber: number }[] = [];
@@ -54,7 +52,6 @@ export async function POST(request: NextRequest) {
     const maxYears = Math.max(targetRetirementAge - currentAge + 10, 50);
 
     for (let y = 1; y <= maxYears; y++) {
-      // Compound monthly within each year
       for (let m = 0; m < 12; m++) {
         balance = balance * (1 + monthlyReturn) + monthlySavings;
       }
@@ -78,17 +75,12 @@ export async function POST(request: NextRequest) {
       fireAge = currentAge + maxYears;
     }
 
-    // Calculate projected FIRE date
     const now = new Date();
     const fireDate = new Date(now.getFullYear() + yearsToFire, now.getMonth(), now.getDate());
 
-    // Coast FIRE: amount needed now such that it grows to fireNumber by retirement age
-    // coastFire = fireNumber / (1 + realReturn)^yearsToRetirement
     const yearsToRetirement = targetRetirementAge - currentAge;
     const coastFireNumber = fireNumber / Math.pow(1 + realReturn, yearsToRetirement);
 
-    // Coast FIRE age: when can you stop saving entirely?
-    // Find year when balance (without further contributions) will grow to fireNumber by retirement
     let coastFireAge = currentAge;
     let coastBalance = currentInvestments;
     for (let y = 0; y <= yearsToRetirement; y++) {
@@ -98,14 +90,12 @@ export async function POST(request: NextRequest) {
         coastFireAge = currentAge + y;
         break;
       }
-      // Add one year of savings + growth
       for (let m = 0; m < 12; m++) {
         coastBalance = coastBalance * (1 + monthlyReturn) + monthlySavings;
       }
       coastFireAge = currentAge + y + 1;
     }
 
-    // Sensitivity table: return rates x savings adjustments
     const returnRates = [5, 6, 7, 8, 9];
     const savingsAdjustments = [-1000, -500, 0, 500, 1000];
     const sensitivityTable: { returnRate: number; savings: number; yearsToFire: number }[] = [];

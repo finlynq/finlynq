@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { extractExcelRows } from "@/lib/excel-parser";
 import { previewImport } from "@/lib/import-pipeline";
 import type { ColumnMapping } from "@/lib/excel-parser";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const formData = await request.formData();
     const file = formData.get("file") as File;

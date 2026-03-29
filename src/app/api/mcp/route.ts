@@ -1,6 +1,8 @@
+import { NextRequest } from "next/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { isUnlocked, getConnection } from "@/db";
+import { getConnection } from "@/db";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { registerCoreTools } from "../../../../mcp-server/register-core-tools";
 import { registerV2Tools } from "../../../../mcp-server/tools-v2";
 
@@ -43,20 +45,9 @@ function getSessionByRequest(request: Request): { server: McpServer; transport: 
   return undefined;
 }
 
-function guardLocked(): Response | null {
-  if (!isUnlocked()) {
-    return Response.json(
-      { error: "Database is locked. Unlock via the app first." },
-      { status: 423 }
-    );
-  }
-  return null;
-}
-
 // POST — MCP messages (initialization + tool calls)
-export async function POST(request: Request) {
-  const locked = guardLocked();
-  if (locked) return locked;
+export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
 
   // Existing session or new one (initialization)
   const existing = getSessionByRequest(request);
@@ -65,9 +56,8 @@ export async function POST(request: Request) {
 }
 
 // GET — SSE stream for server-initiated messages
-export async function GET(request: Request) {
-  const locked = guardLocked();
-  if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
 
   const existing = getSessionByRequest(request);
   if (!existing) {
@@ -80,9 +70,8 @@ export async function GET(request: Request) {
 }
 
 // DELETE — close MCP session
-export async function DELETE(request: Request) {
-  const locked = guardLocked();
-  if (locked) return locked;
+export async function DELETE(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
 
   const existing = getSessionByRequest(request);
   if (!existing) {

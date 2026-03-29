@@ -4,11 +4,11 @@ import { parsePdfToTransactions } from "@/lib/pdf-parser";
 import { parseExcelSheets } from "@/lib/excel-parser";
 import { parseOfx } from "@/lib/ofx-parser";
 import { previewImport } from "@/lib/import-pipeline";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const formData = await request.formData();
     const file = formData.get("file") as File;

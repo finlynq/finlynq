@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 
 const mockGetMonthlySpending = vi.fn();
 const mockGetTransactions = vi.fn();
@@ -21,7 +23,7 @@ vi.mock("@/lib/currency", () => ({
 }));
 
 import { GET } from "@/app/api/insights/route";
-import { parseResponse } from "../helpers/api-test-utils";
+import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 
 describe("API /api/insights", () => {
   beforeEach(() => {
@@ -31,7 +33,8 @@ describe("API /api/insights", () => {
   });
 
   it("returns insights structure", async () => {
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/insights");
+    const res = await GET(req);
     const { status, data } = await parseResponse(res);
     expect(status).toBe(200);
     const d = data as Record<string, unknown>;
@@ -44,7 +47,8 @@ describe("API /api/insights", () => {
   it("limits trends to 15 items", async () => {
     const { analyzeTrends } = await import("@/lib/spending-insights");
     vi.mocked(analyzeTrends).mockReturnValue(Array(20).fill({ category: "Test", direction: "up" }));
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/insights");
+    const res = await GET(req);
     const { data } = await parseResponse(res);
     const d = data as { trends: unknown[] };
     expect(d.trends.length).toBeLessThanOrEqual(15);
@@ -53,7 +57,8 @@ describe("API /api/insights", () => {
   it("limits merchants to 20 items", async () => {
     const { analyzeMerchants } = await import("@/lib/spending-insights");
     vi.mocked(analyzeMerchants).mockReturnValue(Array(25).fill({ payee: "Test", total: -100 }));
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/insights");
+    const res = await GET(req);
     const { data } = await parseResponse(res);
     const d = data as { topMerchants: unknown[] };
     expect(d.topMerchants.length).toBeLessThanOrEqual(20);

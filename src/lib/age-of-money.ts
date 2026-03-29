@@ -11,7 +11,7 @@ type AgeEntry = { date: string; ageInDays: number };
  * For the last 10 expenses, trace each dollar back to when it was received as income.
  * The "age" is the average number of days between income receipt and spending.
  */
-export function calculateAgeOfMoney(): {
+export function calculateAgeOfMoney(userId: string): {
   ageInDays: number;
   trend: number;
   history: AgeEntry[];
@@ -24,7 +24,7 @@ export function calculateAgeOfMoney(): {
     })
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
-    .where(eq(categories.type, "I"))
+    .where(and(eq(transactions.userId, userId), eq(categories.type, "I")))
     .orderBy(asc(transactions.date))
     .all();
 
@@ -36,7 +36,7 @@ export function calculateAgeOfMoney(): {
     })
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
-    .where(eq(categories.type, "E"))
+    .where(and(eq(transactions.userId, userId), eq(categories.type, "E")))
     .orderBy(desc(transactions.date))
     .limit(10)
     .all();
@@ -108,7 +108,6 @@ export function calculateAgeOfMoney(): {
   );
 
   // Calculate 30-day trend: compare current age to what it was ~30 days ago
-  // Use older expenses for comparison
   const olderExpenseRows = db
     .select({
       date: transactions.date,
@@ -116,7 +115,7 @@ export function calculateAgeOfMoney(): {
     })
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
-    .where(eq(categories.type, "E"))
+    .where(and(eq(transactions.userId, userId), eq(categories.type, "E")))
     .orderBy(desc(transactions.date))
     .limit(10)
     .offset(10)

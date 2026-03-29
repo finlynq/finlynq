@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runMonteCarloSimulation } from "@/lib/monte-carlo";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -16,7 +16,7 @@ const postSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);

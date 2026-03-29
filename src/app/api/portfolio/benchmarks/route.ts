@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAllBenchmarkReturns } from "@/lib/benchmarks";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const { searchParams } = new URL(request.url);
     const period = searchParams.get("period") ?? "1y";

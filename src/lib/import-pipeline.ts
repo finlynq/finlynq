@@ -140,6 +140,7 @@ export function previewImport(rows: RawTransaction[]): PreviewResult {
 export function executeImport(
   rows: RawTransaction[],
   forceImportIndices: number[] = [],
+  userId?: string,
 ): ImportResult {
   if (rows.length === 0) {
     return { total: 0, imported: 0, skippedDuplicates: 0 };
@@ -275,7 +276,7 @@ export function executeImport(
   // Batch insert
   for (let i = 0; i < toInsert.length; i += batchSize) {
     const batch = toInsert.slice(i, i + batchSize);
-    const values = batch.map(({ rowIndex: _, ...rest }) => rest);
+    const values = batch.map(({ rowIndex: _, ...rest }) => ({ ...rest, ...(userId ? { userId } : {}) }));
     if (values.length > 0) {
       try {
         db.insert(schema.transactions).values(values).run();

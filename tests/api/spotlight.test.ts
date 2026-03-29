@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 
 const mockGetSpotlightItems = vi.fn();
 vi.mock("@/lib/spotlight", () => ({
@@ -8,7 +10,7 @@ vi.mock("@/lib/spotlight", () => ({
 }));
 
 import { GET } from "@/app/api/spotlight/route";
-import { parseResponse } from "../helpers/api-test-utils";
+import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 
 describe("API /api/spotlight", () => {
   beforeEach(() => {
@@ -19,7 +21,8 @@ describe("API /api/spotlight", () => {
   });
 
   it("returns spotlight items", async () => {
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/spotlight");
+    const res = await GET(req);
     const { status, data } = await parseResponse(res);
     expect(status).toBe(200);
     const d = data as { items: unknown[] };
@@ -29,7 +32,8 @@ describe("API /api/spotlight", () => {
 
   it("returns empty items when none available", async () => {
     mockGetSpotlightItems.mockReturnValue([]);
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/spotlight");
+    const res = await GET(req);
     const { data } = await parseResponse(res);
     const d = data as { items: unknown[] };
     expect(d.items).toEqual([]);

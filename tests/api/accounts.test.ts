@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 const mockGetAccounts = vi.fn();
@@ -12,7 +12,7 @@ vi.mock("@/lib/queries", () => ({
 }));
 
 import { GET, POST } from "@/app/api/accounts/route";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 import { NextResponse } from "next/server";
 
@@ -22,13 +22,15 @@ describe("API /api/accounts", () => {
   });
 
   describe("GET", () => {
-    it("returns 423 when database is locked", async () => {
-      vi.mocked(requireUnlock).mockReturnValueOnce(
-        NextResponse.json({ error: "Database is locked." }, { status: 423 })
-      );
-      const res = await GET();
+    it("returns 401 when not authenticated", async () => {
+      vi.mocked(requireAuth).mockResolvedValueOnce({
+        authenticated: false,
+        response: NextResponse.json({ error: "Unauthorized" }, { status: 401 }),
+      });
+      const req = createMockRequest("http://localhost:3000/api/accounts");
+      const res = await GET(req);
       const { status } = await parseResponse(res);
-      expect(status).toBe(423);
+      expect(status).toBe(401);
     });
 
     it("returns list of accounts", async () => {
@@ -37,7 +39,8 @@ describe("API /api/accounts", () => {
         { id: 2, type: "L", group: "Credit", name: "Visa", currency: "CAD", note: "" },
       ];
       mockGetAccounts.mockReturnValue(accounts);
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/accounts");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(data).toEqual(accounts);
@@ -45,7 +48,8 @@ describe("API /api/accounts", () => {
 
     it("returns empty array when no accounts exist", async () => {
       mockGetAccounts.mockReturnValue([]);
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/accounts");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(data).toEqual([]);
@@ -64,7 +68,7 @@ describe("API /api/accounts", () => {
       const { status, data } = await parseResponse(res);
       expect(status).toBe(201);
       expect(data).toEqual(newAccount);
-      expect(mockCreateAccount).toHaveBeenCalledWith({
+      expect(mockCreateAccount).toHaveBeenCalledWith("default", {
         name: "Savings", type: "A", group: "Banking", currency: "CAD",
       });
     });
@@ -79,16 +83,17 @@ describe("API /api/accounts", () => {
       expect(status).toBe(400);
     });
 
-    it("returns 423 when locked", async () => {
-      vi.mocked(requireUnlock).mockReturnValueOnce(
-        NextResponse.json({ error: "Database is locked." }, { status: 423 })
-      );
+    it("returns 401 when not authenticated", async () => {
+      vi.mocked(requireAuth).mockResolvedValueOnce({
+        authenticated: false,
+        response: NextResponse.json({ error: "Unauthorized" }, { status: 401 }),
+      });
       const req = createMockRequest("http://localhost:3000/api/accounts", {
         method: "POST",
         body: { name: "Test", type: "A", group: "G", currency: "CAD" },
       });
       const res = await POST(req);
-      expect(res.status).toBe(423);
+      expect(res.status).toBe(401);
     });
 
     it("returns 500 on unexpected error", async () => {

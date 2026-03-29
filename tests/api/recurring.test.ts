@@ -12,11 +12,13 @@ vi.mock("@/db", () => ({
     get: (_t, prop) => mockDbChain[prop as string] ?? vi.fn().mockReturnValue(mockDbChain),
   }),
   schema: {
-    transactions: { id: "id", date: "date", payee: "payee", amount: "amount", accountId: "accountId", categoryId: "categoryId" },
+    transactions: { id: "id", date: "date", payee: "payee", amount: "amount", accountId: "accountId", categoryId: "categoryId", userId: "userId" },
   },
 }));
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 
 vi.mock("@/lib/recurring-detector", () => ({
   detectRecurringTransactions: vi.fn(() => [
@@ -26,10 +28,10 @@ vi.mock("@/lib/recurring-detector", () => ({
   forecastCashFlow: vi.fn(() => []),
 }));
 
-vi.mock("drizzle-orm", () => ({ sql: vi.fn() }));
+vi.mock("drizzle-orm", () => ({ sql: vi.fn(), and: vi.fn(), eq: vi.fn() }));
 
 import { GET } from "@/app/api/recurring/route";
-import { parseResponse } from "../helpers/api-test-utils";
+import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 
 describe("API /api/recurring", () => {
   beforeEach(() => {
@@ -39,7 +41,8 @@ describe("API /api/recurring", () => {
   });
 
   it("returns recurring transactions", async () => {
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/recurring");
+    const res = await GET(req);
     const { status, data } = await parseResponse(res);
     expect(status).toBe(200);
     const d = data as { recurring: unknown[]; monthlyRecurringTotal: number; count: number };
@@ -50,7 +53,8 @@ describe("API /api/recurring", () => {
   });
 
   it("calculates monthly recurring total from expenses only", async () => {
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/recurring");
+    const res = await GET(req);
     const { data } = await parseResponse(res);
     const d = data as { monthlyRecurringTotal: number };
     // Only Netflix (-15.99 monthly) should count

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, sql } from "drizzle-orm";
-import { requireUnlock } from "@/lib/require-unlock";
+import { eq, and, sql } from "drizzle-orm";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -28,8 +28,9 @@ const putSchema = z.object({
   note: z.string().optional(),
 });
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const goals = db
     .select({
       id: schema.goals.id,
@@ -45,6 +46,7 @@ export async function GET() {
     })
     .from(schema.goals)
     .leftJoin(schema.accounts, eq(schema.goals.accountId, schema.accounts.id))
+    .where(eq(schema.goals.userId, userId))
     .orderBy(schema.goals.priority, schema.goals.name)
     .all();
 
@@ -55,7 +57,7 @@ export async function GET() {
       const result = db
         .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
         .from(schema.transactions)
-        .where(eq(schema.transactions.accountId, g.accountId))
+        .where(and(eq(schema.transactions.accountId, g.accountId), eq(schema.transactions.userId, userId)))
         .get();
       currentAmount = result?.total ?? 0;
     }
@@ -87,13 +89,14 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
     const goal = db.insert(schema.goals).values({
+      userId: auth.context.userId,
       name: d.name,
       type: d.type,
       targetAmount: d.targetAmount,
@@ -110,13 +113,13 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
-    const goal = db.update(schema.goals).set(data).where(eq(schema.goals.id, id)).returning().get();
+    const goal = db.update(schema.goals).set(data).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).returning().get();
     return NextResponse.json(goal);
   } catch (error: unknown) {
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
@@ -124,9 +127,9 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  db.delete(schema.goals).where(eq(schema.goals.id, id)).run();
+  db.delete(schema.goals).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).run();
   return NextResponse.json({ success: true });
 }

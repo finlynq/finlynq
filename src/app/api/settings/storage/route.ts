@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { readConfig, writeConfig, resolveDbPath } from "@shared/config";
 import { getMode, getDbPath } from "@/db";
 import fs from "fs";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
 
   const config = readConfig();
   const dbPath = resolveDbPath(config);
@@ -28,7 +28,7 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
 
   try {
   const body = await request.json();

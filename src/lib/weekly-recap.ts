@@ -48,7 +48,7 @@ function getWeekBounds(endDate?: string): { weekStart: string; weekEnd: string; 
   };
 }
 
-function getSpendingForPeriod(start: string, end: string) {
+function getSpendingForPeriod(userId: string, start: string, end: string) {
   const rows = db
     .select({
       categoryName: categories.name,
@@ -58,6 +58,7 @@ function getSpendingForPeriod(start: string, end: string) {
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(
       and(
+        eq(transactions.userId, userId),
         gte(transactions.date, start),
         lte(transactions.date, end),
         eq(categories.type, "E")
@@ -75,13 +76,14 @@ function getSpendingForPeriod(start: string, end: string) {
   return { total: Math.round(total * 100) / 100, topCategories };
 }
 
-function getIncomeForPeriod(start: string, end: string): number {
+function getIncomeForPeriod(userId: string, start: string, end: string): number {
   const result = db
     .select({ total: sql<number>`COALESCE(SUM(${transactions.amount}), 0)` })
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(
       and(
+        eq(transactions.userId, userId),
         gte(transactions.date, start),
         lte(transactions.date, end),
         eq(categories.type, "I")
@@ -91,19 +93,19 @@ function getIncomeForPeriod(start: string, end: string): number {
   return Math.round((result?.total ?? 0) * 100) / 100;
 }
 
-export function generateWeeklyRecap(endDate?: string): WeeklyRecap {
+export function generateWeeklyRecap(userId: string, endDate?: string): WeeklyRecap {
   const { weekStart, weekEnd, prevWeekStart, prevWeekEnd } = getWeekBounds(endDate);
 
   // Spending
-  const currentSpending = getSpendingForPeriod(weekStart, weekEnd);
-  const prevSpending = getSpendingForPeriod(prevWeekStart, prevWeekEnd);
+  const currentSpending = getSpendingForPeriod(userId, weekStart, weekEnd);
+  const prevSpending = getSpendingForPeriod(userId, prevWeekStart, prevWeekEnd);
   const spendingChange = prevSpending.total > 0
     ? Math.round(((currentSpending.total - prevSpending.total) / prevSpending.total) * 100)
     : 0;
 
   // Income
-  const currentIncome = getIncomeForPeriod(weekStart, weekEnd);
-  const prevIncome = getIncomeForPeriod(prevWeekStart, prevWeekEnd);
+  const currentIncome = getIncomeForPeriod(userId, weekStart, weekEnd);
+  const prevIncome = getIncomeForPeriod(userId, prevWeekStart, prevWeekEnd);
 
   // Net cash flow
   const netCashFlow = Math.round((currentIncome - currentSpending.total) * 100) / 100;
@@ -124,7 +126,7 @@ export function generateWeeklyRecap(endDate?: string): WeeklyRecap {
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
-    .where(eq(budgets.month, month))
+    .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
     .groupBy(budgets.id)
     .all();
 
@@ -149,6 +151,7 @@ export function generateWeeklyRecap(endDate?: string): WeeklyRecap {
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(
       and(
+        eq(transactions.userId, userId),
         gte(transactions.date, weekStart),
         lte(transactions.date, weekEnd),
         eq(categories.type, "E")
@@ -175,6 +178,7 @@ export function generateWeeklyRecap(endDate?: string): WeeklyRecap {
     .from(schema.subscriptions)
     .where(
       and(
+        eq(schema.subscriptions.userId, userId),
         eq(schema.subscriptions.status, "active"),
         gte(schema.subscriptions.nextDate, weekEnd),
         lte(schema.subscriptions.nextDate, weekAhead)
@@ -192,7 +196,7 @@ export function generateWeeklyRecap(endDate?: string): WeeklyRecap {
   const nwThisWeek = db
     .select({ total: sql<number>`COALESCE(SUM(${transactions.amount}), 0)` })
     .from(transactions)
-    .where(and(gte(transactions.date, weekStart), lte(transactions.date, weekEnd)))
+    .where(and(eq(transactions.userId, userId), gte(transactions.date, weekStart), lte(transactions.date, weekEnd)))
     .get();
 
   const netWorthChange = Math.round((nwThisWeek?.total ?? 0) * 100) / 100;

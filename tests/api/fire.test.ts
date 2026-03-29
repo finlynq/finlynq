@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 import { POST } from "@/app/api/fire/route";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 import { NextResponse } from "next/server";
 
@@ -25,15 +25,16 @@ describe("API /api/fire", () => {
     withdrawalRate: 4,
   };
 
-  it("returns 423 when locked", async () => {
-    vi.mocked(requireUnlock).mockReturnValueOnce(
-      NextResponse.json({ error: "Locked" }, { status: 423 })
-    );
+  it("returns 401 when not authenticated", async () => {
+    vi.mocked(requireAuth).mockResolvedValueOnce({
+      authenticated: false,
+      response: NextResponse.json({ error: "Unauthorized" }, { status: 401 }),
+    });
     const req = createMockRequest("http://localhost:3000/api/fire", {
       method: "POST", body: validBody,
     });
     const res = await POST(req);
-    expect(res.status).toBe(423);
+    expect(res.status).toBe(401);
   });
 
   it("calculates FIRE number correctly", async () => {

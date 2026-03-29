@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
-import { requireUnlock } from "@/lib/require-unlock";
+import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { createCategory, createAccount, getAccounts, getCategories } from "@/lib/queries";
 import { db, schema } from "@/db";
 
@@ -28,13 +28,14 @@ function dateString(daysAgo: number) {
   return d.toISOString().slice(0, 10);
 }
 
-export async function POST() {
-  const locked = requireUnlock();
-  if (locked) return locked;
+export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
 
   try {
     // Ensure categories exist
-    const existingCategories = getCategories();
+    const existingCategories = getCategories(userId);
     const catMap = new Map<string, number>();
 
     for (const cat of existingCategories) {
@@ -43,13 +44,13 @@ export async function POST() {
 
     for (const cat of SAMPLE_CATEGORIES) {
       if (!catMap.has(cat.name)) {
-        const created = createCategory(cat);
+        const created = createCategory(userId, cat);
         catMap.set(cat.name, created.id);
       }
     }
 
     // Ensure at least one account exists
-    const existingAccounts = getAccounts();
+    const existingAccounts = getAccounts(userId);
     let checkingId: number;
     let creditCardId: number | null = null;
 
@@ -57,7 +58,7 @@ export async function POST() {
     if (checking) {
       checkingId = checking.id;
     } else {
-      const created = createAccount({ type: "A", group: "Checking", name: "Checking Account", currency: "CAD" });
+      const created = createAccount(userId, { type: "A", group: "Checking", name: "Checking Account", currency: "CAD" });
       checkingId = created.id;
     }
 
@@ -75,6 +76,7 @@ export async function POST() {
       payee: string;
       note: string;
       currency: string;
+      userId: string;
     }> = [];
 
     for (let month = 0; month < 3; month++) {
@@ -89,6 +91,7 @@ export async function POST() {
         payee: "Employer Inc.",
         note: "Monthly salary",
         currency: "CAD",
+        userId,
       });
 
       // Rent
@@ -100,6 +103,7 @@ export async function POST() {
         payee: "Landlord",
         note: "Monthly rent",
         currency: "CAD",
+        userId,
       });
 
       // Utilities
@@ -111,6 +115,7 @@ export async function POST() {
         payee: "City Utilities",
         note: "",
         currency: "CAD",
+        userId,
       });
 
       // Groceries (weekly)
@@ -123,6 +128,7 @@ export async function POST() {
           payee: ["FreshMart", "Whole Foods", "Metro", "Costco"][w % 4],
           note: "",
           currency: "CAD",
+          userId,
         });
       }
 
@@ -136,6 +142,7 @@ export async function POST() {
           payee: ["Sushi Place", "Italian Bistro"][r],
           note: "",
           currency: "CAD",
+          userId,
         });
       }
 
@@ -148,6 +155,7 @@ export async function POST() {
         payee: "Shell",
         note: "",
         currency: "CAD",
+        userId,
       });
 
       // Streaming
@@ -159,6 +167,7 @@ export async function POST() {
         payee: "Netflix",
         note: "Monthly subscription",
         currency: "CAD",
+        userId,
       });
 
       // Interest
@@ -170,6 +179,7 @@ export async function POST() {
         payee: "Bank Interest",
         note: "",
         currency: "CAD",
+        userId,
       });
     }
 

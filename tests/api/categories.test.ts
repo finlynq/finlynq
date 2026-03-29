@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 const mockGetCategories = vi.fn();
@@ -18,7 +18,7 @@ vi.mock("@/lib/queries", () => ({
 }));
 
 import { GET, POST, PUT, DELETE } from "@/app/api/categories/route";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 import { NextResponse } from "next/server";
 
@@ -28,12 +28,14 @@ describe("API /api/categories", () => {
   });
 
   describe("GET", () => {
-    it("returns 423 when locked", async () => {
-      vi.mocked(requireUnlock).mockReturnValueOnce(
-        NextResponse.json({ error: "Locked" }, { status: 423 })
-      );
-      const res = await GET();
-      expect(res.status).toBe(423);
+    it("returns 401 when not authenticated", async () => {
+      vi.mocked(requireAuth).mockResolvedValueOnce({
+        authenticated: false,
+        response: NextResponse.json({ error: "Unauthorized" }, { status: 401 }),
+      });
+      const req = createMockRequest("http://localhost:3000/api/categories");
+      const res = await GET(req);
+      expect(res.status).toBe(401);
     });
 
     it("returns all categories", async () => {
@@ -42,7 +44,8 @@ describe("API /api/categories", () => {
         { id: 2, type: "I", group: "Income", name: "Salary" },
       ];
       mockGetCategories.mockReturnValue(cats);
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/categories");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(data).toEqual(cats);

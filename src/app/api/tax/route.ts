@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import {
   getTotalTFSARoom,
   getRRSPRoom,
@@ -9,13 +9,14 @@ import {
   getMarginalRate,
   rrspVsTfsa,
 } from "@/lib/tax-optimizer";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   // Get contribution room records
-  const contributions = db.select().from(schema.contributionRoom).all();
+  const contributions = db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)).all();
 
   // Get holdings for asset location advice
   const holdings = db
@@ -27,6 +28,7 @@ export async function GET() {
     })
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+    .where(eq(schema.portfolioHoldings.userId, userId))
     .all();
 
   const advice = getAssetLocationAdvice(
@@ -41,7 +43,6 @@ export async function GET() {
   const currentYear = new Date().getFullYear();
   const tfsaTotalRoom = getTotalTFSARoom(2009, currentYear);
 
-  // Calculate used TFSA room from contributions records
   const tfsaUsed = contributions
     .filter((c) => c.type === "TFSA")
     .reduce((s, c) => s + (c.used ?? 0), 0);
@@ -74,7 +75,8 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const body = await request.json();
 
@@ -85,6 +87,7 @@ export async function POST(request: NextRequest) {
 
     // Save contribution room
     const record = db.insert(schema.contributionRoom).values({
+      userId,
       type: body.type,
       year: body.year,
       room: body.room,

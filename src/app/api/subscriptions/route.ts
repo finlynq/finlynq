@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, sql } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions } from "@/lib/recurring-detector";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -23,8 +23,9 @@ const putSchema = z.object({
   id: z.number(),
 }).passthrough();
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const subs = db
     .select({
       id: schema.subscriptions.id,
@@ -44,6 +45,7 @@ export async function GET() {
     .from(schema.subscriptions)
     .leftJoin(schema.categories, eq(schema.subscriptions.categoryId, schema.categories.id))
     .leftJoin(schema.accounts, eq(schema.subscriptions.accountId, schema.accounts.id))
+    .where(eq(schema.subscriptions.userId, userId))
     .orderBy(schema.subscriptions.status, schema.subscriptions.name)
     .all();
 
@@ -51,7 +53,8 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const body = await request.json();
 
@@ -71,7 +74,10 @@ export async function POST(request: NextRequest) {
           categoryId: schema.transactions.categoryId,
         })
         .from(schema.transactions)
-        .where(sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`)
+        .where(and(
+          eq(schema.transactions.userId, userId),
+          sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
+        ))
         .all();
 
       const detected = detectRecurringTransactions(
@@ -113,6 +119,7 @@ export async function POST(request: NextRequest) {
     const sub = db
       .insert(schema.subscriptions)
       .values({
+        userId,
         name: d.name,
         amount: d.amount,
         currency: d.currency ?? "CAD",
@@ -134,7 +141,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
@@ -143,7 +150,7 @@ export async function PUT(request: NextRequest) {
     const sub = db
       .update(schema.subscriptions)
       .set(data)
-      .where(eq(schema.subscriptions.id, id))
+      .where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, auth.context.userId)))
       .returning()
       .get();
     return NextResponse.json(sub);
@@ -153,9 +160,9 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  db.delete(schema.subscriptions).where(eq(schema.subscriptions.id, id)).run();
+  db.delete(schema.subscriptions).where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, auth.context.userId))).run();
   return NextResponse.json({ success: true });
 }

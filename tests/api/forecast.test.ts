@@ -18,7 +18,9 @@ vi.mock("@/db", () => ({
   },
 }));
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 
 vi.mock("@/lib/recurring-detector", () => ({
   detectRecurringTransactions: vi.fn(() => []),

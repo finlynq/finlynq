@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { sql } from "drizzle-orm";
+import { sql, and, eq } from "drizzle-orm";
 import { suggestCategory } from "@/lib/auto-categorize";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -10,7 +10,8 @@ const { transactions, categories } = schema;
 
 // POST { payee } → suggested category
 export async function POST(req: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(req); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const body = await req.json();
 
@@ -30,7 +31,10 @@ export async function POST(req: NextRequest) {
       })
       .from(transactions)
       .where(
-        sql`${transactions.payee} IS NOT NULL AND ${transactions.payee} != '' AND ${transactions.categoryId} IS NOT NULL`
+        and(
+          eq(transactions.userId, userId),
+          sql`${transactions.payee} IS NOT NULL AND ${transactions.payee} != '' AND ${transactions.categoryId} IS NOT NULL`
+        )
       )
       .all();
 
@@ -49,7 +53,7 @@ export async function POST(req: NextRequest) {
         group: categories.group,
       })
       .from(categories)
-      .where(sql`${categories.id} = ${suggestedCategoryId}`)
+      .where(and(eq(categories.id, suggestedCategoryId), eq(categories.userId, userId)))
       .get();
 
     return NextResponse.json({ suggestion: category ?? null });

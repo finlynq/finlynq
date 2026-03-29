@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { requireAuth } from "@/lib/auth/require-auth";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     // Get all crypto holdings (isCrypto = 1 or detected by symbol pattern)
     const allHoldings = db
@@ -21,6 +24,7 @@ export async function GET() {
       })
       .from(schema.portfolioHoldings)
       .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+      .where(eq(schema.portfolioHoldings.userId, userId))
       .all();
 
     // Filter to crypto holdings
@@ -76,6 +80,8 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const body = await request.json();
 
@@ -100,6 +106,7 @@ export async function POST(request: NextRequest) {
         currency: currency ?? "CAD",
         isCrypto: 1,
         note: note ?? "",
+        userId,
       })
       .returning()
       .get();

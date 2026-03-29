@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 const mockGetBudgets = vi.fn();
@@ -45,7 +45,7 @@ describe("API /api/budgets", () => {
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(Array.isArray(data)).toBe(true);
-      expect(mockGetBudgets).toHaveBeenCalledWith("2024-01");
+      expect(mockGetBudgets).toHaveBeenCalledWith("default", "2024-01");
     });
 
     it("includes spending data when requested", async () => {
@@ -73,7 +73,7 @@ describe("API /api/budgets", () => {
       const res = await GET(req);
       const { status } = await parseResponse(res);
       expect(status).toBe(200);
-      expect(mockGetBudgetRollover).toHaveBeenCalledWith("2024-02");
+      expect(mockGetBudgetRollover).toHaveBeenCalledWith("default", "2024-02");
     });
 
     it("returns budgets with display currency conversion", async () => {

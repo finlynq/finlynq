@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, gte, lte, eq } from "drizzle-orm";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const params = request.nextUrl.searchParams;
   const currentYear = new Date().getFullYear();
   const year1 = parseInt(params.get("year1") ?? String(currentYear - 1), 10);
@@ -23,6 +24,7 @@ export async function GET(request: NextRequest) {
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
       .where(
         and(
+          eq(schema.transactions.userId, userId),
           gte(schema.transactions.date, `${year}-01-01`),
           lte(schema.transactions.date, `${year}-12-31`)
         )
@@ -43,6 +45,7 @@ export async function GET(request: NextRequest) {
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
       .where(
         and(
+          eq(schema.transactions.userId, userId),
           gte(schema.transactions.date, `${year}-01-01`),
           lte(schema.transactions.date, `${year}-12-31`),
           sql`${schema.categories.type} IN ('I', 'E')`

@@ -1,11 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { fetchMultipleQuotes, cachePrice, aggregatePortfolioExposure } from "@/lib/price-service";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   // Get all holdings with symbols
   const holdings = db
     .select({
@@ -17,6 +18,7 @@ export async function GET() {
     })
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+    .where(eq(schema.portfolioHoldings.userId, userId))
     .all();
 
   const symbols = holdings.map((h) => h.symbol).filter(Boolean) as string[];

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, asc } from "drizzle-orm";
-import { requireUnlock } from "@/lib/require-unlock";
+import { eq, and, asc } from "drizzle-orm";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -32,8 +32,9 @@ const putSchema = z.object({
 const { transactionRules, categories } = schema;
 
 // GET — list all rules
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const rules = db
     .select({
       id: transactionRules.id,
@@ -51,6 +52,7 @@ export async function GET() {
     })
     .from(transactionRules)
     .leftJoin(categories, eq(transactionRules.assignCategoryId, categories.id))
+    .where(eq(transactionRules.userId, userId))
     .orderBy(asc(transactionRules.priority))
     .all();
 
@@ -59,7 +61,7 @@ export async function GET() {
 
 // POST — create a new rule
 export async function POST(req: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(req); if (!auth.authenticated) return auth.response;
   try {
     const body = await req.json();
     const parsed = validateBody(body, postSchema);
@@ -69,6 +71,7 @@ export async function POST(req: NextRequest) {
     const rule = db
       .insert(transactionRules)
       .values({
+        userId: auth.context.userId,
         name: name.trim(),
         matchField,
         matchType,
@@ -91,7 +94,7 @@ export async function POST(req: NextRequest) {
 
 // PUT — update an existing rule
 export async function PUT(req: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(req); if (!auth.authenticated) return auth.response;
   try {
     const body = await req.json();
     const parsed = validateBody(body, putSchema);
@@ -113,7 +116,7 @@ export async function PUT(req: NextRequest) {
     const rule = db
       .update(transactionRules)
       .set(data)
-      .where(eq(transactionRules.id, id))
+      .where(and(eq(transactionRules.id, id), eq(transactionRules.userId, auth.context.userId)))
       .returning()
       .get();
 
@@ -126,11 +129,11 @@ export async function PUT(req: NextRequest) {
 
 // DELETE — delete a rule
 export async function DELETE(req: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(req); if (!auth.authenticated) return auth.response;
   const { searchParams } = new URL(req.url);
   const id = searchParams.get("id");
   if (!id) return NextResponse.json({ error: "ID is required" }, { status: 400 });
 
-  db.delete(transactionRules).where(eq(transactionRules.id, parseInt(id))).run();
+  db.delete(transactionRules).where(and(eq(transactionRules.id, parseInt(id)), eq(transactionRules.userId, auth.context.userId))).run();
   return NextResponse.json({ success: true });
 }

@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const body = await request.json();
 
@@ -22,7 +23,7 @@ export async function POST(request: NextRequest) {
       forceImportIndices: number[];
     };
 
-    const result = executeImport(rows, forceImportIndices);
+    const result = executeImport(rows, forceImportIndices, userId);
     return NextResponse.json(result);
   } catch (error: unknown) {
     const message = safeErrorMessage(error, "Import failed");

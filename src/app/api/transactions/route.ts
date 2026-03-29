@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction } from "@/lib/queries";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -38,7 +38,8 @@ const putSchema = z.object({
 });
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const params = request.nextUrl.searchParams;
   const filters = {
     startDate: params.get("startDate") ?? undefined,
@@ -50,19 +51,19 @@ export async function GET(request: NextRequest) {
     offset: params.get("offset") ? parseInt(params.get("offset")!) : 0,
   };
 
-  const data = getTransactions(filters);
-  const total = getTransactionCount(filters);
+  const data = getTransactions(userId, filters);
+  const total = getTransactionCount(userId, filters);
 
   return NextResponse.json({ data, total });
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
-    const tx = createTransaction(parsed.data);
+    const tx = createTransaction(auth.context.userId, parsed.data);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create transaction") }, { status: 500 });
@@ -70,13 +71,13 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
-    const tx = updateTransaction(id, data);
+    const tx = updateTransaction(id, auth.context.userId, data);
     return NextResponse.json(tx);
   } catch (error: unknown) {
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update transaction") }, { status: 500 });
@@ -84,10 +85,10 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const params = request.nextUrl.searchParams;
   const id = parseInt(params.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  deleteTransaction(id);
+  deleteTransaction(id, auth.context.userId);
   return NextResponse.json({ success: true });
 }

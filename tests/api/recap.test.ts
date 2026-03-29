@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 
 const mockGenerateWeeklyRecap = vi.fn();
 vi.mock("@/lib/weekly-recap", () => ({
@@ -33,12 +35,12 @@ describe("API /api/recap", () => {
   it("passes date parameter", async () => {
     const req = createMockRequest("http://localhost:3000/api/recap?date=2024-01-15");
     await GET(req);
-    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("2024-01-15");
+    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", "2024-01-15");
   });
 
   it("uses undefined for missing date", async () => {
     const req = createMockRequest("http://localhost:3000/api/recap");
     await GET(req);
-    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith(undefined);
+    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", undefined);
   });
 });

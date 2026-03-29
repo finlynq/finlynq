@@ -1,14 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, desc, sql } from "drizzle-orm";
-import { requireUnlock } from "@/lib/require-unlock";
+import { eq, and, desc, sql } from "drizzle-orm";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const notifications = db
     .select()
     .from(schema.notifications)
+    .where(eq(schema.notifications.userId, userId))
     .orderBy(desc(schema.notifications.createdAt))
     .limit(50)
     .all();
@@ -16,7 +18,7 @@ export async function GET() {
   const unreadCount = db
     .select({ count: sql<number>`COUNT(*)` })
     .from(schema.notifications)
-    .where(eq(schema.notifications.read, 0))
+    .where(and(eq(schema.notifications.userId, userId), eq(schema.notifications.read, 0)))
     .get();
 
   return NextResponse.json({
@@ -26,15 +28,16 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const body = await request.json();
 
     if (body.action === "mark-read") {
       if (body.id) {
-        db.update(schema.notifications).set({ read: 1 }).where(eq(schema.notifications.id, body.id)).run();
+        db.update(schema.notifications).set({ read: 1 }).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
       } else {
-        db.update(schema.notifications).set({ read: 1 }).run();
+        db.update(schema.notifications).set({ read: 1 }).where(eq(schema.notifications.userId, userId)).run();
       }
       return NextResponse.json({ success: true });
     }
@@ -58,7 +61,7 @@ export async function POST(request: NextRequest) {
         .from(schema.budgets)
         .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
         .leftJoin(schema.transactions, eq(schema.transactions.categoryId, schema.categories.id))
-        .where(eq(schema.budgets.month, month))
+        .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId)))
         .groupBy(schema.budgets.id)
         .all();
 
@@ -67,6 +70,7 @@ export async function POST(request: NextRequest) {
           const pct = (b.spent / b.budgetAmount) * 100;
           if (pct >= 100) {
             generated.push({
+              userId,
               type: "budget_exceeded",
               title: `Budget Exceeded: ${b.categoryName}`,
               message: `You've spent $${b.spent.toFixed(2)} of your $${b.budgetAmount.toFixed(2)} ${b.categoryName} budget (${Math.round(pct)}%)`,
@@ -75,6 +79,7 @@ export async function POST(request: NextRequest) {
             });
           } else if (pct >= 80) {
             generated.push({
+              userId,
               type: "budget_warning",
               title: `Budget Warning: ${b.categoryName}`,
               message: `You've used ${Math.round(pct)}% of your ${b.categoryName} budget ($${b.spent.toFixed(2)} / $${b.budgetAmount.toFixed(2)})`,
@@ -94,6 +99,7 @@ export async function POST(request: NextRequest) {
 
     // Create custom notification
     const notif = db.insert(schema.notifications).values({
+      userId,
       type: body.type ?? "info",
       title: body.title,
       message: body.message,

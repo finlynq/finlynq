@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 const mockGetTransactions = vi.fn();
@@ -18,7 +18,7 @@ vi.mock("@/lib/queries", () => ({
 }));
 
 import { GET, POST, PUT, DELETE } from "@/app/api/transactions/route";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 import { NextResponse } from "next/server";
 
@@ -28,13 +28,14 @@ describe("API /api/transactions", () => {
   });
 
   describe("GET", () => {
-    it("returns 423 when locked", async () => {
-      vi.mocked(requireUnlock).mockReturnValueOnce(
-        NextResponse.json({ error: "Locked" }, { status: 423 })
-      );
+    it("returns 401 when not authenticated", async () => {
+      vi.mocked(requireAuth).mockResolvedValueOnce({
+        authenticated: false,
+        response: NextResponse.json({ error: "Unauthorized" }, { status: 401 }),
+      });
       const req = createMockRequest("http://localhost:3000/api/transactions");
       const res = await GET(req);
-      expect(res.status).toBe(423);
+      expect(res.status).toBe(401);
     });
 
     it("returns transactions with total count", async () => {
@@ -55,7 +56,7 @@ describe("API /api/transactions", () => {
         "http://localhost:3000/api/transactions?startDate=2024-01-01&endDate=2024-12-31&accountId=1&categoryId=2&search=coffee&limit=50&offset=10"
       );
       await GET(req);
-      expect(mockGetTransactions).toHaveBeenCalledWith({
+      expect(mockGetTransactions).toHaveBeenCalledWith("default", {
         startDate: "2024-01-01",
         endDate: "2024-12-31",
         accountId: 1,
@@ -72,6 +73,7 @@ describe("API /api/transactions", () => {
       const req = createMockRequest("http://localhost:3000/api/transactions");
       await GET(req);
       expect(mockGetTransactions).toHaveBeenCalledWith(
+        "default",
         expect.objectContaining({ limit: 100, offset: 0 })
       );
     });
@@ -127,7 +129,7 @@ describe("API /api/transactions", () => {
       const res = await PUT(req);
       const { status } = await parseResponse(res);
       expect(status).toBe(200);
-      expect(mockUpdateTransaction).toHaveBeenCalledWith(1, { amount: -75 });
+      expect(mockUpdateTransaction).toHaveBeenCalledWith(1, "default", { amount: -75 });
     });
 
     it("returns 400 when id is missing", async () => {
@@ -147,7 +149,7 @@ describe("API /api/transactions", () => {
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(data).toEqual({ success: true });
-      expect(mockDeleteTransaction).toHaveBeenCalledWith(5);
+      expect(mockDeleteTransaction).toHaveBeenCalledWith(5, "default");
     });
 
     it("returns 400 when id is missing", async () => {

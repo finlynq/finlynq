@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, eq, and, gte, lte } from "drizzle-orm";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { getRateMap, convertWithRateMap } from "@/lib/fx-service";
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const params = request.nextUrl.searchParams;
   const type = params.get("type") ?? "income-statement";
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;
@@ -17,6 +18,7 @@ export async function GET(request: NextRequest) {
 
   if (type === "income-statement") {
     const conditions = [
+      eq(schema.transactions.userId, userId),
       gte(schema.transactions.date, startDate),
       lte(schema.transactions.date, endDate),
     ];
@@ -91,6 +93,7 @@ export async function GET(request: NextRequest) {
       })
       .from(schema.accounts)
       .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
+      .where(eq(schema.accounts.userId, userId))
       .groupBy(schema.accounts.id)
       .orderBy(schema.accounts.type, schema.accounts.group)
       .all();
@@ -138,6 +141,7 @@ export async function GET(request: NextRequest) {
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
       .where(
         and(
+          eq(schema.transactions.userId, userId),
           gte(schema.transactions.date, startDate),
           lte(schema.transactions.date, endDate),
           sql`${schema.categories.type} IN ('I', 'E')`

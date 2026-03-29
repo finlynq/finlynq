@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
-import { requireUnlock } from "@/lib/require-unlock";
+import { eq, and } from "drizzle-orm";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
-  const targets = db.select().from(schema.targetAllocations).all();
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
+  const targets = db.select().from(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).all();
 
   // Get portfolio holdings with cached prices
   const holdings = db
@@ -19,10 +20,11 @@ export async function GET() {
     })
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+    .where(eq(schema.portfolioHoldings.userId, userId))
     .all();
 
   // Get latest cached prices
-  const prices = db.select().from(schema.priceCache).all();
+  const prices = db.select().from(schema.priceCache).where(eq(schema.priceCache.userId, userId)).all();
   const priceMap = new Map<string, number>();
   for (const p of prices) {
     const existing = priceMap.get(p.symbol);
@@ -43,7 +45,6 @@ export async function GET() {
   const comparison = targets.map((t) => {
     const matchingHoldings = holdingsWithValue.filter((h) => {
       const sym = h.symbol ?? "";
-      // Simple matching based on category name
       if (t.category === "US" && (sym.includes("VUN") || sym === "VTI" || sym.includes("VUAA") || sym.includes("VUSD") || sym.includes("VNRA") || sym.includes("TPU"))) return true;
       if (t.category === "Canada" && sym.includes("VCN")) return true;
       if (t.category === "International" && (sym.includes("VIU") || sym.includes("VWRA") || sym.includes("VWRD") || sym.includes("VHVE") || sym.includes("TPE"))) return true;
@@ -82,15 +83,17 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const body = await request.json();
 
     if (body.action === "set-targets") {
-      // Replace all targets
-      db.delete(schema.targetAllocations).run();
+      // Replace all targets for this user
+      db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).run();
       for (const t of body.targets) {
         db.insert(schema.targetAllocations).values({
+          userId,
           name: t.name,
           targetPct: t.targetPct,
           category: t.category,
@@ -100,6 +103,7 @@ export async function POST(request: NextRequest) {
     }
 
     const target = db.insert(schema.targetAllocations).values({
+      userId,
       name: body.name,
       targetPct: body.targetPct,
       category: body.category,

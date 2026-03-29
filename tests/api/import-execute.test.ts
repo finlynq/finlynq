@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
 
 const mockExecuteImport = vi.fn();
 vi.mock("@/lib/import-pipeline", () => ({
@@ -38,7 +40,8 @@ describe("API /api/import/execute", () => {
     await POST(req);
     expect(mockExecuteImport).toHaveBeenCalledWith(
       expect.any(Array),
-      [0]
+      [0],
+      "default"
     );
   });
 

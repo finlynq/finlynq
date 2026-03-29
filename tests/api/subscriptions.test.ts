@@ -21,8 +21,8 @@ vi.mock("@/db", () => ({
   },
 }));
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 vi.mock("@/lib/recurring-detector", () => ({
@@ -52,7 +52,8 @@ describe("API /api/subscriptions", () => {
     it("returns subscriptions list", async () => {
       const subs = [{ id: 1, name: "Netflix", amount: 15.99, frequency: "monthly", status: "active" }];
       mockDbChain.all!.mockReturnValueOnce(subs);
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/subscriptions");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(data).toEqual(subs);

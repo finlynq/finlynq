@@ -1,11 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { sql } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   // Fetch last 12 months of transactions with payees
   const cutoff = new Date();
   cutoff.setFullYear(cutoff.getFullYear() - 1);
@@ -21,7 +22,10 @@ export async function GET() {
       categoryId: schema.transactions.categoryId,
     })
     .from(schema.transactions)
-    .where(sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`)
+    .where(and(
+      eq(schema.transactions.userId, userId),
+      sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
+    ))
     .all();
 
   const detected = detectRecurringTransactions(

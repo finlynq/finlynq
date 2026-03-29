@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 const mockGetAccountBalances = vi.fn();
@@ -22,7 +22,7 @@ vi.mock("@/lib/age-of-money", () => ({
 }));
 
 import { GET } from "@/app/api/health-score/route";
-import { parseResponse } from "../helpers/api-test-utils";
+import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 
 describe("API /api/health-score", () => {
   beforeEach(() => {
@@ -35,7 +35,8 @@ describe("API /api/health-score", () => {
   });
 
   it("returns health score structure", async () => {
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/health-score");
+    const res = await GET(req);
     const { status, data } = await parseResponse(res);
     expect(status).toBe(200);
     const d = data as { score: number; components: unknown[]; grade: string };
@@ -46,7 +47,8 @@ describe("API /api/health-score", () => {
   });
 
   it("returns score between 0 and 100", async () => {
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/health-score");
+    const res = await GET(req);
     const { data } = await parseResponse(res);
     const d = data as { score: number };
     expect(d.score).toBeGreaterThanOrEqual(0);
@@ -60,7 +62,8 @@ describe("API /api/health-score", () => {
       { month, type: "I", total: 5000 },
       { month, type: "E", total: -3000 },
     ]);
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/health-score");
+    const res = await GET(req);
     const { data } = await parseResponse(res);
     const d = data as { components: { name: string; score: number; detail: string }[] };
     const savingsRate = d.components.find((c) => c.name === "Savings Rate");
@@ -70,7 +73,8 @@ describe("API /api/health-score", () => {
 
   it("assigns correct grades", async () => {
     // With no data, most scores are neutral (50)
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/health-score");
+    const res = await GET(req);
     const { data } = await parseResponse(res);
     const d = data as { grade: string; score: number };
     expect(["Excellent", "Good", "Fair", "Needs Work"]).toContain(d.grade);
@@ -80,7 +84,8 @@ describe("API /api/health-score", () => {
     mockGetAccountBalances.mockReturnValue([
       { accountType: "A", accountGroup: "Banking", balance: 10000, currency: "CAD" },
     ]);
-    const res = await GET();
+    const req = createMockRequest("http://localhost:3000/api/health-score");
+    const res = await GET(req);
     const { data } = await parseResponse(res);
     const d = data as { components: { name: string; score: number; detail: string }[] };
     const dti = d.components.find((c) => c.name === "Debt-to-Income");

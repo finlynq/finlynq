@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getLatestFxRate, getActiveCurrencies, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { getAccountBalances } from "@/lib/queries";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const target = request.nextUrl.searchParams.get("target") ?? "CAD";
 
-  const balances = getAccountBalances();
+  const balances = getAccountBalances(userId);
   const activeCurrencies = getActiveCurrencies();
 
   // Build rate map: every active currency → target

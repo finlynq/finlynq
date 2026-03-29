@@ -20,8 +20,8 @@ vi.mock("@/db", () => ({
   },
 }));
 
-vi.mock("@/lib/require-unlock", () => ({
-  requireUnlock: vi.fn(() => null),
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
 vi.mock("drizzle-orm", () => ({
@@ -48,7 +48,8 @@ describe("API /api/goals", () => {
       ]);
       mockDbChain.get!.mockReturnValueOnce({ total: 5000 });
 
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/goals");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       const goals = data as { currentAmount: number; progress: number; remaining: number }[];
@@ -62,7 +63,8 @@ describe("API /api/goals", () => {
         { id: 1, name: "Vacation", type: "savings", targetAmount: 5000, deadline: null, accountId: null, accountName: null, priority: 1, status: "active", note: "" },
       ]);
 
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/goals");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       const goals = data as { currentAmount: number; progress: number }[];
@@ -76,7 +78,8 @@ describe("API /api/goals", () => {
       ]);
       mockDbChain.get!.mockReturnValueOnce({ total: 2000 });
 
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/goals");
+      const res = await GET(req);
       const { data } = await parseResponse(res);
       const goals = data as { progress: number; remaining: number }[];
       expect(goals[0].progress).toBe(100);

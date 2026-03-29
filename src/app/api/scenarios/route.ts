@@ -5,12 +5,12 @@ import {
   calculateDebtPayoff,
   type Debt,
 } from "@/lib/loan-calculator";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
 
@@ -34,7 +34,6 @@ export async function POST(request: NextRequest) {
       const monthlyMaintenance = maintenanceYear / 12;
       const monthlyCashFlow = monthlyPayment + monthlyPropertyTax + monthlyMaintenance;
 
-      // Generate balance over time (yearly snapshots)
       const schedule = generateAmortizationSchedule(principal, interestRate, termMonths, new Date().toISOString().split("T")[0]);
       const balanceOverTime = schedule.schedule
         .filter((_, i) => i % 12 === 0 || i === schedule.schedule.length - 1)
@@ -96,7 +95,6 @@ export async function POST(request: NextRequest) {
       const avalanche = calculateDebtPayoff(debts, extraBudget ?? 0, "avalanche");
       const snowball = calculateDebtPayoff(debts, extraBudget ?? 0, "snowball");
 
-      // Generate monthly total debt for chart
       function simulateDebt(debtsIn: Debt[], extra: number, strategy: "avalanche" | "snowball") {
         const sorted = [...debtsIn].sort((a, b) =>
           strategy === "avalanche" ? b.rate - a.rate : a.balance - b.balance
@@ -154,7 +152,6 @@ export async function POST(request: NextRequest) {
     if (type === "income-change") {
       const { currentIncome, newIncome, currentSavingsRate } = body;
 
-      // Simple Canadian tax estimate (federal + average provincial)
       function estimateTax(annual: number) {
         let tax = 0;
         const brackets = [
@@ -164,7 +161,6 @@ export async function POST(request: NextRequest) {
           { limit: 220000, rate: 0.29 },
           { limit: Infinity, rate: 0.33 },
         ];
-        // Add ~5% average provincial
         let remaining = annual;
         let prevLimit = 0;
         for (const b of brackets) {
@@ -174,7 +170,7 @@ export async function POST(request: NextRequest) {
           remaining -= taxable;
           prevLimit = b.limit;
         }
-        tax += annual * 0.05; // rough provincial estimate
+        tax += annual * 0.05;
         return Math.round(tax * 100) / 100;
       }
 

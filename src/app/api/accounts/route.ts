@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAccounts, createAccount } from "@/lib/queries";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -12,19 +12,19 @@ const postSchema = z.object({
   note: z.string().optional(),
 });
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
-  const data = getAccounts();
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const data = getAccounts(auth.context.userId);
   return NextResponse.json(data);
 }
 
 export async function POST(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
-    const account = createAccount(parsed.data);
+    const account = createAccount(auth.context.userId, parsed.data);
     return NextResponse.json(account, { status: 201 });
   } catch (error: unknown) {
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create account") }, { status: 500 });

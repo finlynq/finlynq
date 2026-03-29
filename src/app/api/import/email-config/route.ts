@@ -1,16 +1,17 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { randomUUID, randomBytes } from "crypto";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
-export async function GET() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const emailSetting = db
       .select()
       .from(schema.settings)
-      .where(eq(schema.settings.key, "import_email"))
+      .where(and(eq(schema.settings.key, "import_email"), eq(schema.settings.userId, userId)))
       .get();
 
     return NextResponse.json({
@@ -22,8 +23,9 @@ export async function GET() {
   }
 }
 
-export async function POST() {
-  const locked = requireUnlock(); if (locked) return locked;
+export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   try {
     const uuid = randomUUID().slice(0, 8);
     const email = `import-${uuid}@pf.app`;
@@ -31,13 +33,13 @@ export async function POST() {
 
     // Upsert email address
     db.insert(schema.settings)
-      .values({ key: "import_email", value: email })
+      .values({ key: "import_email", value: email, userId })
       .onConflictDoUpdate({ target: schema.settings.key, set: { value: email } })
       .run();
 
     // Upsert webhook secret
     db.insert(schema.settings)
-      .values({ key: "email_webhook_secret", value: webhookSecret })
+      .values({ key: "email_webhook_secret", value: webhookSecret, userId })
       .onConflictDoUpdate({ target: schema.settings.key, set: { value: webhookSecret } })
       .run();
 

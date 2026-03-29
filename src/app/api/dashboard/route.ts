@@ -6,10 +6,11 @@ import {
   getNetWorthOverTime,
 } from "@/lib/queries";
 import { getRateMap, convertWithRateMap } from "@/lib/fx-service";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const params = request.nextUrl.searchParams;
   const displayCurrency = params.get("currency") ?? "CAD";
 
@@ -23,16 +24,16 @@ export async function GET(request: NextRequest) {
 
   const rateMap = await getRateMap(displayCurrency);
 
-  const balances = getAccountBalances();
+  const balances = getAccountBalances(userId);
   const convertedBalances = balances.map((b) => ({
     ...b,
     convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
     displayCurrency,
   }));
 
-  const incomeVsExpenses = getIncomeVsExpenses(startDate, endDate);
-  const spendingByCategory = getSpendingByCategory(startDate, endDate);
-  const netWorthRaw = getNetWorthOverTime();
+  const incomeVsExpenses = getIncomeVsExpenses(userId, startDate, endDate);
+  const spendingByCategory = getSpendingByCategory(userId, startDate, endDate);
+  const netWorthRaw = getNetWorthOverTime(userId);
 
   // Consolidate net worth across currencies into display currency
   const netWorthByMonth = new Map<string, number>();

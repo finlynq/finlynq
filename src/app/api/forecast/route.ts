@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, and } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock(); if (locked) return locked;
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
   const days = parseInt(request.nextUrl.searchParams.get("days") ?? "90");
 
   // Detect recurring transactions
@@ -23,7 +24,10 @@ export async function GET(request: NextRequest) {
       categoryId: schema.transactions.categoryId,
     })
     .from(schema.transactions)
-    .where(sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`)
+    .where(and(
+      eq(schema.transactions.userId, userId),
+      sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
+    ))
     .all();
 
   const detected = detectRecurringTransactions(
@@ -39,7 +43,10 @@ export async function GET(request: NextRequest) {
   const bankAccounts = db
     .select({ id: schema.accounts.id })
     .from(schema.accounts)
-    .where(sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`)
+    .where(and(
+      eq(schema.accounts.userId, userId),
+      sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`
+    ))
     .all();
 
   let currentBalance = 0;
@@ -47,7 +54,7 @@ export async function GET(request: NextRequest) {
     const result = db
       .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
       .from(schema.transactions)
-      .where(eq(schema.transactions.accountId, ba.id))
+      .where(and(eq(schema.transactions.accountId, ba.id), eq(schema.transactions.userId, userId)))
       .get();
     currentBalance += result?.total ?? 0;
   }

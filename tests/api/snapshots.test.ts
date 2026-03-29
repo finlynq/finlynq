@@ -14,13 +14,15 @@ vi.mock("@/db", () => ({
     get: (_t, prop) => mockDbChain[prop as string] ?? vi.fn().mockReturnValue(mockDbChain),
   }),
   schema: {
-    snapshots: { id: "id", accountId: "accountId", date: "date", value: "value", note: "note" },
+    snapshots: { id: "id", accountId: "accountId", date: "date", value: "value", note: "note", userId: "userId" },
     accounts: { id: "id", name: "name" },
   },
 }));
 
-vi.mock("@/lib/require-unlock", () => ({ requireUnlock: vi.fn(() => null) }));
-vi.mock("drizzle-orm", () => ({ eq: vi.fn(), desc: vi.fn() }));
+vi.mock("@/lib/auth/require-auth", () => ({
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+}));
+vi.mock("drizzle-orm", () => ({ eq: vi.fn(), desc: vi.fn(), and: vi.fn() }));
 
 import { GET, POST, DELETE } from "@/app/api/snapshots/route";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
@@ -37,7 +39,8 @@ describe("API /api/snapshots", () => {
     it("returns snapshots", async () => {
       const snaps = [{ id: 1, accountId: 1, accountName: "Savings", date: "2024-01-01", value: 10000, note: "" }];
       mockDbChain.all!.mockReturnValueOnce(snaps);
-      const res = await GET();
+      const req = createMockRequest("http://localhost:3000/api/snapshots");
+      const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
       expect(data).toEqual(snaps);

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, gte, lte, eq } from "drizzle-orm";
-import { requireUnlock } from "@/lib/require-unlock";
+import { requireAuth } from "@/lib/auth/require-auth";
 
 type Period = "daily" | "weekly" | "monthly" | "quarterly";
 type GroupBy = "category" | "group";
@@ -36,8 +36,9 @@ function formatPeriodLabel(key: string, period: Period): string {
 }
 
 export async function GET(request: NextRequest) {
-  const locked = requireUnlock();
-  if (locked) return locked;
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
 
   const params = request.nextUrl.searchParams;
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;
@@ -50,6 +51,7 @@ export async function GET(request: NextRequest) {
 
   // Time-series: income vs expenses per period
   const conditions = [
+    eq(schema.transactions.userId, userId),
     gte(schema.transactions.date, startDate),
     lte(schema.transactions.date, endDate),
     sql`${schema.categories.type} IN ('I', 'E')`,

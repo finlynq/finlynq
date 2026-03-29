@@ -1,7 +1,14 @@
 /**
- * Simple in-memory rate limiter for API routes.
- * Not suitable for multi-process deployments — use Redis for that.
+ * Per-user rate limiting for API routes.
+ *
+ * - Managed (PostgreSQL): Sliding window rate limiter keyed by userId.
+ *   For multi-process deployments, replace with Redis.
+ * - Self-hosted (SQLite): No-op — single user, no rate limiting needed.
+ *
+ * Also supports generic key-based limiting (e.g., IP-based for auth routes).
  */
+
+import { getDialect } from "@/db";
 
 interface RateLimitEntry {
   count: number;
@@ -28,7 +35,7 @@ export interface RateLimitResult {
 
 /**
  * Check rate limit for a given key.
- * @param key - Unique identifier (e.g., IP address)
+ * @param key - Unique identifier (e.g., userId or IP address)
  * @param maxAttempts - Maximum attempts per window
  * @param windowMs - Time window in milliseconds
  */
@@ -52,4 +59,20 @@ export function checkRateLimit(
   }
 
   return { allowed: true, remaining: maxAttempts - entry.count, resetAt: entry.resetAt };
+}
+
+/**
+ * Check per-user API rate limit for managed mode.
+ * Returns null if allowed, or a RateLimitResult if rate limited.
+ *
+ * In self-hosted (SQLite) mode, always returns null (no-op).
+ */
+export function checkUserRateLimit(userId: string): RateLimitResult | null {
+  // No rate limiting for self-hosted single-user mode
+  if (getDialect() !== "postgres") {
+    return null;
+  }
+
+  const result = checkRateLimit(`user:${userId}`, 120, 60_000);
+  return result.allowed ? null : result;
 }
