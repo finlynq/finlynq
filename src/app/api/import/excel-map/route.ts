@@ -24,14 +24,20 @@ export async function POST(request: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const rows = extractExcelRows(buffer, sheetName, mapping, hasHeaders);
+    const result = extractExcelRows(buffer, sheetName, mapping, hasHeaders);
 
-    if (rows.length === 0) {
-      return NextResponse.json({ error: "No valid rows found with the given mapping" }, { status: 400 });
+    if (result.rows.length === 0) {
+      const msg = result.errors.length > 0
+        ? result.errors.map((e) => `Row ${e.row}: ${e.message}`).join("; ")
+        : "No valid rows found with the given mapping";
+      return NextResponse.json({ error: msg }, { status: 400 });
     }
 
-    const preview = previewImport(rows);
-    return NextResponse.json({ type: "excel-mapped", ...preview });
+    const preview = previewImport(result.rows);
+    if (result.errors.length > 0) {
+      preview.errors.push(...result.errors.map((e) => ({ rowIndex: e.row - 2, message: e.message })));
+    }
+    return NextResponse.json({ type: "excel-mapped", totalRows: result.totalRows, ...preview });
   } catch (error: unknown) {
     const message = safeErrorMessage(error, "Excel mapping failed");
     return NextResponse.json({ error: message }, { status: 500 });

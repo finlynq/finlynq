@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
 
       if (ext === "csv") {
         const text = await value.text();
-        rows = csvToRawTransactions(text);
+        rows = csvToRawTransactions(text).rows;
       } else if (ext === "pdf") {
         const buffer = Buffer.from(await value.arrayBuffer());
         const result = await parsePdfToTransactions(buffer);
@@ -51,7 +51,7 @@ export async function POST(request: NextRequest) {
           const sheet = sheets[0];
           const mapping = autoDetectMapping(sheet.headers);
           if (mapping) {
-            rows = extractExcelRows(buffer, sheet.name, mapping);
+            rows = extractExcelRows(buffer, sheet.name, mapping).rows;
           }
         }
       }

@@ -21,8 +21,11 @@ export async function POST(request: NextRequest) {
 
     if (ext === "csv") {
       const text = await file.text();
-      const rows = csvToRawTransactions(text);
+      const { rows, errors: parseErrors } = csvToRawTransactions(text);
       const preview = previewImport(rows);
+      if (parseErrors.length > 0) {
+        preview.errors.push(...parseErrors.map((e) => ({ rowIndex: e.row - 2, message: e.message })));
+      }
       return NextResponse.json({ type: "csv", ...preview });
     }
 
@@ -52,9 +55,18 @@ export async function POST(request: NextRequest) {
 
     if (ext === "pdf") {
       const buffer = Buffer.from(await file.arrayBuffer());
-      const { rows, confidence, rawText } = await parsePdfToTransactions(buffer);
-      const preview = previewImport(rows);
-      return NextResponse.json({ type: "pdf", confidence, rawText, ...preview });
+      const result = await parsePdfToTransactions(buffer);
+      if (result.errors.length > 0 && result.rows.length === 0) {
+        return NextResponse.json({ error: result.errors.join(". ") }, { status: 400 });
+      }
+      const preview = previewImport(result.rows);
+      return NextResponse.json({
+        type: "pdf",
+        confidence: result.confidence,
+        rawText: result.rawText,
+        warnings: result.errors.length > 0 ? result.errors : undefined,
+        ...preview,
+      });
     }
 
     if (ext === "xlsx" || ext === "xls") {
