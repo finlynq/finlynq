@@ -5,12 +5,16 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    include: ["**/*.test.ts"],
+    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     coverage: {
       provider: "v8",
       include: ["src/lib/**", "shared/**"],
       reporter: ["text", "text-summary"],
     },
+    // Component tests use jsdom via inline config
+    environmentMatchGlobs: [
+      ["tests/components/**", "jsdom"],
+    ],
   },
   resolve: {
     alias: {

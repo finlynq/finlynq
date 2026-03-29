@@ -13,7 +13,9 @@
     "db:push:encrypted": "npx tsx scripts/db-push.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "npx playwright test",
+    "test:components": "vitest run tests/components/"
   },
   "dependencies": {
     "@base-ui/react": "^1.2.0",
@@ -38,7 +40,11 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/pdf-parse": "^1.1.5",
@@ -49,6 +55,7 @@
     "drizzle-kit": "^0.31.9",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
+    "jsdom": "^29.0.1",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.2"
