@@ -7,7 +7,7 @@ export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
   try {
-    const formData = await request.formData();
+    const formData = await request.formData() as unknown as globalThis.FormData;
     const fileType = formData.get("type") as string;
     const file = formData.get("file") as File;
 

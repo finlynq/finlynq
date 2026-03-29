@@ -10,7 +10,7 @@ import { safeErrorMessage } from "@/lib/validate";
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
-    const formData = await request.formData();
+    const formData = await request.formData() as unknown as globalThis.FormData;
     const file = formData.get("file") as File;
 
     if (!file) {

@@ -38,7 +38,7 @@ export async function GET() {
         const pgAdapter = adapter as import("@/db").DatabaseAdapter & {
           getDb: () => import("drizzle-orm/node-postgres").NodePgDatabase;
         };
-        await pgAdapter.getDb().execute(
+        await (pgAdapter.getDb() as any).execute(
           { sql: "SELECT 1", params: [], typings: [] }
         );
       }

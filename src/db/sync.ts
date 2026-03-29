@@ -155,7 +155,7 @@ function startHeartbeat(dbPath: string): void {
 
   // Don't block process exit
   if (heartbeatTimer && typeof heartbeatTimer === "object" && "unref" in heartbeatTimer) {
-    heartbeatTimer.unref();
+    (heartbeatTimer as NodeJS.Timeout).unref();
   }
 }
 

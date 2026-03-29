@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     // Resolve the userId that owns this webhook secret
     const userId = storedSecret.userId;
 
-    const formData = await request.formData();
+    const formData = await request.formData() as unknown as globalThis.FormData;
     const allRows: RawTransaction[] = [];
     const defaultAccount = formData.get("defaultAccount") as string | null;
 
