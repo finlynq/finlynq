@@ -56,6 +56,18 @@ jest.mock("../screens/UnlockScreen", () => {
   return (props: any) => React.createElement(Text, null, "UnlockScreen");
 });
 
+jest.mock("../screens/ModeSelectScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return (props: any) => React.createElement(Text, null, "ModeSelectScreen");
+});
+
+jest.mock("../screens/LoginScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return (props: any) => React.createElement(Text, null, "LoginScreen");
+});
+
 jest.mock("../api/client", () => ({
   endpoints: {
     getUnlockStatus: jest.fn(),
@@ -77,10 +89,16 @@ let mockAuthReturn = {
   biometricAvailable: false,
   biometricEnabled: false,
   autoLockMinutes: 5,
+  serverMode: "self-hosted" as string | null,
   unlock: jest.fn(),
   biometricUnlock: jest.fn(),
   lock: jest.fn(),
+  login: jest.fn(),
+  register: jest.fn(),
   checkStatus: jest.fn(),
+  selectMode: jest.fn(),
+  resetMode: jest.fn(),
+  clearError: jest.fn(),
   setBiometricEnabled: jest.fn(),
   setAutoLockMinutes: jest.fn(),
 };
@@ -145,10 +163,16 @@ describe("RootNavigator", () => {
       biometricAvailable: false,
       biometricEnabled: false,
       autoLockMinutes: 5,
+      serverMode: "self-hosted" as string | null,
       unlock: jest.fn(),
       biometricUnlock: jest.fn(),
       lock: jest.fn(),
+      login: jest.fn(),
+      register: jest.fn(),
       checkStatus: jest.fn(),
+      selectMode: jest.fn(),
+      resetMode: jest.fn(),
+      clearError: jest.fn(),
       setBiometricEnabled: jest.fn(),
       setAutoLockMinutes: jest.fn(),
     };
@@ -162,9 +186,32 @@ describe("RootNavigator", () => {
     expect(tree).toContain("Dashboard");
   });
 
-  it("shows UnlockScreen when locked", () => {
+  it("shows UnlockScreen when locked in self-hosted mode", () => {
     mockAuthReturn.isUnlocked = false;
+    mockAuthReturn.serverMode = "self-hosted";
     const { getByText } = renderWithTheme(<RootNavigator />);
     expect(getByText("UnlockScreen")).toBeTruthy();
+  });
+
+  it("shows ModeSelectScreen when no mode selected", () => {
+    mockAuthReturn.serverMode = null;
+    mockAuthReturn.isUnlocked = false;
+    const { getByText } = renderWithTheme(<RootNavigator />);
+    expect(getByText("ModeSelectScreen")).toBeTruthy();
+  });
+
+  it("shows LoginScreen when cloud mode and not authenticated", () => {
+    mockAuthReturn.serverMode = "cloud";
+    mockAuthReturn.isUnlocked = false;
+    const { getByText } = renderWithTheme(<RootNavigator />);
+    expect(getByText("LoginScreen")).toBeTruthy();
+  });
+
+  it("shows TabNavigator when cloud mode and authenticated", () => {
+    mockAuthReturn.serverMode = "cloud";
+    mockAuthReturn.isUnlocked = true;
+    const { toJSON } = renderWithTheme(<RootNavigator />);
+    const tree = JSON.stringify(toJSON());
+    expect(tree).toContain("Dashboard");
   });
 });

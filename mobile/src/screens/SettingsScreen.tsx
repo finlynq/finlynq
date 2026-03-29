@@ -26,12 +26,15 @@ export default function SettingsScreen() {
   const theme = useTheme();
   const {
     lock,
+    serverMode,
+    resetMode,
     biometricAvailable,
     biometricEnabled,
     setBiometricEnabled,
     autoLockMinutes,
     setAutoLockMinutes,
   } = useAuth();
+  const isCloud = serverMode === "cloud";
   const [url, setUrl] = useState(getServerUrl());
   const [saved, setSaved] = useState(false);
 
@@ -44,10 +47,26 @@ export default function SettingsScreen() {
   };
 
   const handleLock = () => {
-    Alert.alert("Lock App", "Are you sure you want to lock the app?", [
+    const title = isCloud ? "Sign Out" : "Lock App";
+    const message = isCloud
+      ? "Are you sure you want to sign out?"
+      : "Are you sure you want to lock the app?";
+    const action = isCloud ? "Sign Out" : "Lock";
+    Alert.alert(title, message, [
       { text: "Cancel", style: "cancel" },
-      { text: "Lock", style: "destructive", onPress: lock },
+      { text: action, style: "destructive", onPress: lock },
     ]);
+  };
+
+  const handleSwitchMode = () => {
+    Alert.alert(
+      "Switch Mode",
+      "This will sign you out and return to the mode selection screen.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Switch", style: "destructive", onPress: resetMode },
+      ]
+    );
   };
 
   return (
@@ -149,13 +168,13 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          {/* Lock button */}
+          {/* Lock / Sign Out button */}
           <TouchableOpacity
             style={[styles.button, { backgroundColor: colors.destructive, marginTop: 12 }]}
             onPress={handleLock}
           >
             <Text style={[styles.buttonText, { color: colors.destructiveForeground }]}>
-              Lock App Now
+              {isCloud ? "Sign Out" : "Lock App Now"}
             </Text>
           </TouchableOpacity>
         </View>
@@ -172,6 +191,12 @@ export default function SettingsScreen() {
             <Text style={[styles.aboutValue, { color: colors.foreground }]}>1.0.0</Text>
           </View>
           <View style={[styles.aboutRow, { borderBottomColor: colors.border }]}>
+            <Text style={[styles.aboutLabel, { color: colors.mutedForeground }]}>Mode</Text>
+            <Text style={[styles.aboutValue, { color: colors.foreground }]}>
+              {isCloud ? "Cloud" : "Self-Hosted"}
+            </Text>
+          </View>
+          <View style={[styles.aboutRow, { borderBottomColor: colors.border }]}>
             <Text style={[styles.aboutLabel, { color: colors.mutedForeground }]}>Platform</Text>
             <Text style={[styles.aboutValue, { color: colors.foreground }]}>
               React Native + Expo
@@ -184,6 +209,14 @@ export default function SettingsScreen() {
             </Text>
           </View>
         </View>
+
+        {/* Switch mode */}
+        <TouchableOpacity
+          style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border, alignItems: "center" }]}
+          onPress={handleSwitchMode}
+        >
+          <Text style={[styles.switchModeText, { color: colors.primary }]}>Switch Mode</Text>
+        </TouchableOpacity>
 
         <View style={styles.footer}>
           <Text style={[styles.footerText, { color: colors.mutedForeground }]}>
@@ -256,6 +289,7 @@ const styles = StyleSheet.create({
   },
   aboutLabel: { fontSize: 14 },
   aboutValue: { fontSize: 14, fontWeight: "500" },
+  switchModeText: { fontSize: 15, fontWeight: "600" },
   footer: { alignItems: "center", paddingVertical: 24 },
   footerText: { fontSize: 13 },
 });

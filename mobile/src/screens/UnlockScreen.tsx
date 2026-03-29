@@ -14,9 +14,10 @@ import { useAuth } from "../hooks/useAuth";
 
 interface Props {
   isLoading: boolean;
+  onBack?: () => void;
 }
 
-export default function UnlockScreen({ isLoading: initialLoading }: Props) {
+export default function UnlockScreen({ isLoading: initialLoading, onBack }: Props) {
   const theme = useTheme();
   const {
     unlock,
@@ -53,6 +54,13 @@ export default function UnlockScreen({ isLoading: initialLoading }: Props) {
       behavior={Platform.OS === "ios" ? "padding" : "height"}
     >
       <View style={styles.content}>
+        {/* Back to mode selection */}
+        {onBack && (
+          <TouchableOpacity style={styles.backBtn} onPress={onBack}>
+            <Text style={[styles.backText, { color: colors.primary }]}>← Back</Text>
+          </TouchableOpacity>
+        )}
+
         {/* Logo */}
         <View style={[styles.logoBadge, { backgroundColor: colors.primary }]}>
           <Text style={styles.logoText}>PF</Text>
@@ -151,6 +159,14 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: 32,
     alignItems: "center",
+  },
+  backBtn: {
+    alignSelf: "flex-start",
+    marginBottom: 24,
+  },
+  backText: {
+    fontSize: 15,
+    fontWeight: "600",
   },
   logoBadge: {
     width: 64,
