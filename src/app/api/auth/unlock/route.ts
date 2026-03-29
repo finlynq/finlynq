@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import {
   initializeConnection,
   isUnlocked,
@@ -17,6 +18,41 @@ import { detectDbState, migrateToEncrypted } from "@/db/migration";
 import Database from "better-sqlite3-multiple-ciphers";
 import type BetterSqlite3 from "better-sqlite3";
 import fs from "fs";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const unlockSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("setup"),
+    passphrase: z.string().min(8, "Passphrase must be at least 8 characters"),
+    dbPath: z.string().optional(),
+    mode: z.enum(["local", "cloud"]).optional(),
+  }),
+  z.object({
+    action: z.literal("unlock"),
+    passphrase: z.string().min(1, "Passphrase is required"),
+  }),
+  z.object({
+    action: z.literal("lock"),
+  }),
+  z.object({
+    action: z.literal("rekey"),
+    passphrase: z.string().min(1, "Current passphrase is required"),
+    newPassphrase: z.string().min(8, "New passphrase must be at least 8 characters"),
+  }),
+]);
+
+// Default action for backwards compatibility (no action = unlock)
+const bodyPreprocess = z.object({
+  action: z.string().optional(),
+  passphrase: z.string().optional(),
+  newPassphrase: z.string().optional(),
+  dbPath: z.string().optional(),
+  mode: z.enum(["local", "cloud"]).optional(),
+}).transform((val) => ({
+  ...val,
+  action: val.action || "unlock",
+}));
 
 export async function GET() {
   const hasConfig = configExists();
@@ -26,10 +62,8 @@ export async function GET() {
 
   let needsSetup = false;
   if (!hasConfig) {
-    // No config file — first launch or legacy unencrypted DB
     needsSetup = true;
   } else if (!config.salt) {
-    // Config exists but no salt — needs encryption setup
     needsSetup = true;
   }
 
@@ -42,35 +76,57 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { action, passphrase, newPassphrase, dbPath, mode } = body;
+  // Rate limit: 5 attempts per 60 seconds per IP
+  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const rateLimit = checkRateLimit(`auth:${ip}`, 5, 60_000);
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { error: "Too many attempts. Please try again later." },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(Math.ceil((rateLimit.resetAt - Date.now()) / 1000)),
+        },
+      }
+    );
+  }
+
+  let rawBody: unknown;
+  try {
+    rawBody = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  // Preprocess to add default action
+  const preprocessed = bodyPreprocess.safeParse(rawBody);
+  if (!preprocessed.success) {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+
+  const validated = validateBody(preprocessed.data, unlockSchema);
+  if (validated.error) return validated.error;
+
+  const body = validated.data;
 
   try {
-    switch (action) {
+    switch (body.action) {
       case "setup":
-        return handleSetup(passphrase, dbPath, mode);
+        return handleSetup(body.passphrase, body.dbPath, body.mode);
       case "lock":
         return handleLock();
       case "rekey":
-        return handleRekey(passphrase, newPassphrase);
+        return handleRekey(body.passphrase, body.newPassphrase);
       default:
-        return handleUnlock(passphrase);
+        return handleUnlock(body.passphrase);
     }
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unknown error occurred";
+    const message = safeErrorMessage(error, "Authentication operation failed");
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }
 
 function handleUnlock(passphrase: string) {
-  if (!passphrase) {
-    return NextResponse.json(
-      { error: "Passphrase is required" },
-      { status: 400 }
-    );
-  }
-
   resetDb();
   initializeConnection(passphrase);
   return NextResponse.json({ success: true });
@@ -87,23 +143,14 @@ function handleSetup(
   dbPath?: string,
   mode?: "local" | "cloud"
 ) {
-  if (!passphrase || passphrase.length < 8) {
-    return NextResponse.json(
-      { error: "Passphrase must be at least 8 characters" },
-      { status: 400 }
-    );
-  }
-
   const config = readConfig();
   const resolvedPath = dbPath || resolveDbPath(config);
   const salt = generateSalt();
   const dbState = detectDbState(resolvedPath);
 
   if (dbState === "unencrypted") {
-    // Migrate existing unencrypted DB to encrypted
     migrateToEncrypted(resolvedPath, passphrase, salt);
   } else if (dbState === "missing") {
-    // Create new encrypted DB
     const hexKey = deriveKey(passphrase, salt);
     const sqlite = new (Database as unknown as typeof BetterSqlite3)(
       resolvedPath
@@ -111,21 +158,18 @@ function handleSetup(
     sqlite.pragma(`key = "x'${hexKey}'"`);
     sqlite.pragma("journal_mode = WAL");
     sqlite.pragma("foreign_keys = ON");
-    // Create a marker table to verify encryption works
     sqlite.exec(
       "CREATE TABLE IF NOT EXISTS _encryption_check (id INTEGER PRIMARY KEY)"
     );
     sqlite.close();
   }
 
-  // Save config
   writeConfig({
     dbPath: dbPath || config.dbPath,
     mode: mode || config.mode,
     salt: salt.toString("hex"),
   });
 
-  // Now unlock with the new passphrase
   resetDb();
   initializeConnection(passphrase, resolvedPath, mode || config.mode);
 
@@ -133,20 +177,6 @@ function handleSetup(
 }
 
 function handleRekey(currentPassphrase: string, newPassphrase: string) {
-  if (!currentPassphrase || !newPassphrase) {
-    return NextResponse.json(
-      { error: "Both current and new passphrases are required" },
-      { status: 400 }
-    );
-  }
-  if (newPassphrase.length < 8) {
-    return NextResponse.json(
-      { error: "New passphrase must be at least 8 characters" },
-      { status: 400 }
-    );
-  }
-
-  // Ensure DB is unlocked with current passphrase
   if (!isUnlocked()) {
     resetDb();
     initializeConnection(currentPassphrase);
@@ -156,17 +186,14 @@ function handleRekey(currentPassphrase: string, newPassphrase: string) {
   const newSalt = generateSalt();
   const newHexKey = deriveKey(newPassphrase, newSalt);
 
-  // Re-encrypt database with new key
   const sqlite = getConnection();
   sqlite.pragma(`rekey = "x'${newHexKey}'"`);
 
-  // Update config with new salt
   writeConfig({
     ...config,
     salt: newSalt.toString("hex"),
   });
 
-  // Reconnect with new passphrase
   resetDb();
   closeConnection();
   initializeConnection(newPassphrase);

@@ -3,6 +3,25 @@ import { db, schema } from "@/db";
 import { eq, sql } from "drizzle-orm";
 import { detectRecurringTransactions } from "@/lib/recurring-detector";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const createSchema = z.object({
+  name: z.string(),
+  amount: z.number(),
+  currency: z.string().optional(),
+  frequency: z.string().optional(),
+  categoryId: z.number().optional(),
+  accountId: z.number().optional(),
+  nextDate: z.string().optional(),
+  status: z.string().optional(),
+  cancelReminderDate: z.string().optional(),
+  notes: z.string().optional(),
+});
+
+const putSchema = z.object({
+  id: z.number(),
+}).passthrough();
 
 export async function GET() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -88,27 +107,29 @@ export async function POST(request: NextRequest) {
     }
 
     // Normal create
+    const parsed = validateBody(body, createSchema);
+    if (parsed.error) return parsed.error;
+    const d = parsed.data;
     const sub = db
       .insert(schema.subscriptions)
       .values({
-        name: body.name,
-        amount: body.amount,
-        currency: body.currency ?? "CAD",
-        frequency: body.frequency ?? "monthly",
-        categoryId: body.categoryId || null,
-        accountId: body.accountId || null,
-        nextDate: body.nextDate || null,
-        status: body.status ?? "active",
-        cancelReminderDate: body.cancelReminderDate || null,
-        notes: body.notes || null,
+        name: d.name,
+        amount: d.amount,
+        currency: d.currency ?? "CAD",
+        frequency: d.frequency ?? "monthly",
+        categoryId: d.categoryId || null,
+        accountId: d.accountId || null,
+        nextDate: d.nextDate || null,
+        status: d.status ?? "active",
+        cancelReminderDate: d.cancelReminderDate || null,
+        notes: d.notes || null,
       })
       .returning()
       .get();
 
     return NextResponse.json(sub, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
 
@@ -116,7 +137,9 @@ export async function PUT(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const { id, ...data } = body;
+    const parsed = validateBody(body, putSchema);
+    if (parsed.error) return parsed.error;
+    const { id, ...data } = parsed.data;
     const sub = db
       .update(schema.subscriptions)
       .set(data)
@@ -125,8 +148,7 @@ export async function PUT(request: NextRequest) {
       .get();
     return NextResponse.json(sub);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { importAccounts, importCategories, importPortfolio, importTransactions } from "@/lib/csv-parser";
 import { requireUnlock } from "@/lib/require-unlock";
+import { safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
@@ -35,7 +36,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(result);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Import failed";
+    const message = safeErrorMessage(error, "Import failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

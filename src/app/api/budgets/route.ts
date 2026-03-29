@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBudgets, upsertBudget, deleteBudget, getBudgetRollover } from "@/lib/queries";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const postSchema = z.object({
+  categoryId: z.number(),
+  month: z.string(),
+  amount: z.number(),
+});
 
 export async function GET(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
@@ -27,11 +35,12 @@ export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const budget = upsertBudget(body);
+    const parsed = validateBody(body, postSchema);
+    if (parsed.error) return parsed.error;
+    const budget = upsertBudget(parsed.data);
     return NextResponse.json(budget, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to save budget";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to save budget") }, { status: 500 });
   }
 }
 

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
 
 export async function GET() {
   try {
@@ -68,7 +70,7 @@ export async function GET() {
 
     return NextResponse.json(enriched);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to fetch crypto holdings";
+    const message = safeErrorMessage(error, "Failed to fetch crypto holdings");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
@@ -76,11 +78,18 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { name, symbol, accountId, currency, note } = body;
 
-    if (!name || !symbol) {
-      return NextResponse.json({ error: "Name and symbol are required" }, { status: 400 });
-    }
+    const cryptoSchema = z.object({
+      name: z.string(),
+      symbol: z.string(),
+      accountId: z.number().optional(),
+      currency: z.string().optional(),
+      note: z.string().optional(),
+    });
+    const parsed = validateBody(body, cryptoSchema);
+    if (parsed.error) return parsed.error;
+
+    const { name, symbol, accountId, currency, note } = parsed.data;
 
     const holding = db
       .insert(schema.portfolioHoldings)
@@ -97,7 +106,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(holding);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to create crypto holding";
+    const message = safeErrorMessage(error, "Failed to create crypto holding");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

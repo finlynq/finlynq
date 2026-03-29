@@ -2,6 +2,31 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, sql } from "drizzle-orm";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const postSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+  targetAmount: z.number(),
+  deadline: z.string().optional(),
+  accountId: z.number().optional(),
+  priority: z.number().optional(),
+  status: z.string().optional(),
+  note: z.string().optional(),
+});
+
+const putSchema = z.object({
+  id: z.number(),
+  name: z.string().optional(),
+  type: z.string().optional(),
+  targetAmount: z.number().optional(),
+  deadline: z.string().optional(),
+  accountId: z.number().optional(),
+  priority: z.number().optional(),
+  status: z.string().optional(),
+  note: z.string().optional(),
+});
 
 export async function GET() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -65,20 +90,22 @@ export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
+    const parsed = validateBody(body, postSchema);
+    if (parsed.error) return parsed.error;
+    const d = parsed.data;
     const goal = db.insert(schema.goals).values({
-      name: body.name,
-      type: body.type,
-      targetAmount: body.targetAmount,
-      deadline: body.deadline || null,
-      accountId: body.accountId || null,
-      priority: body.priority ?? 1,
-      status: body.status ?? "active",
-      note: body.note ?? "",
+      name: d.name,
+      type: d.type,
+      targetAmount: d.targetAmount,
+      deadline: d.deadline || null,
+      accountId: d.accountId || null,
+      priority: d.priority ?? 1,
+      status: d.status ?? "active",
+      note: d.note ?? "",
     }).returning().get();
     return NextResponse.json(goal, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
 
@@ -86,12 +113,13 @@ export async function PUT(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const { id, ...data } = body;
+    const parsed = validateBody(body, putSchema);
+    if (parsed.error) return parsed.error;
+    const { id, ...data } = parsed.data;
     const goal = db.update(schema.goals).set(data).where(eq(schema.goals.id, id)).returning().get();
     return NextResponse.json(goal);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
 

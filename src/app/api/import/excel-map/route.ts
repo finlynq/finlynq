@@ -3,6 +3,7 @@ import { extractExcelRows } from "@/lib/excel-parser";
 import { previewImport } from "@/lib/import-pipeline";
 import type { ColumnMapping } from "@/lib/excel-parser";
 import { requireUnlock } from "@/lib/require-unlock";
+import { safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
@@ -32,7 +33,7 @@ export async function POST(request: NextRequest) {
     const preview = previewImport(rows);
     return NextResponse.json({ type: "excel-mapped", ...preview });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Excel mapping failed";
+    const message = safeErrorMessage(error, "Excel mapping failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, desc, sql } from "drizzle-orm";
 import { requireUnlock } from "@/lib/require-unlock";
+import { safeErrorMessage } from "@/lib/validate";
 
 export async function GET() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -102,7 +103,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(notif, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
+    const message = safeErrorMessage(error, "Notification operation failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

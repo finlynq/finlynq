@@ -1,10 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const postSchema = z.object({
+  currentAge: z.number(),
+  targetRetirementAge: z.number(),
+  currentInvestments: z.number(),
+  monthlySavings: z.number(),
+  annualReturn: z.number(),
+  inflation: z.number(),
+  annualExpenses: z.number(),
+  withdrawalRate: z.number(),
+});
 
 export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
+    const parsed = validateBody(body, postSchema);
+    if (parsed.error) return parsed.error;
     const {
       currentAge,
       targetRetirementAge,
@@ -14,7 +29,7 @@ export async function POST(request: NextRequest) {
       inflation,
       annualExpenses,
       withdrawalRate,
-    } = body;
+    } = parsed.data;
 
     const realReturn = (annualReturn - inflation) / 100;
     const monthlyReturn = realReturn / 12;
@@ -137,7 +152,6 @@ export async function POST(request: NextRequest) {
       sensitivityTable,
     });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }

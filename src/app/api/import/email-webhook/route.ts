@@ -7,6 +7,7 @@ import { extractExcelRows, parseExcelSheets } from "@/lib/excel-parser";
 import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { requireUnlock } from "@/lib/require-unlock";
+import { safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
@@ -85,7 +86,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(result);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Email import failed";
+    const message = safeErrorMessage(error, "Email import failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

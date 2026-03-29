@@ -7,6 +7,22 @@ import {
   calculateDebtPayoff,
 } from "@/lib/loan-calculator";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const createLoanSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+  principal: z.number(),
+  annualRate: z.number(),
+  termMonths: z.number(),
+  startDate: z.string(),
+  accountId: z.number().optional(),
+  paymentAmount: z.number().optional(),
+  paymentFrequency: z.string().optional(),
+  extraPayment: z.number().optional(),
+  note: z.string().optional(),
+});
 
 export async function GET() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -88,24 +104,26 @@ export async function POST(request: NextRequest) {
     }
 
     // Create new loan
+    const parsed = validateBody(body, createLoanSchema);
+    if (parsed.error) return parsed.error;
+    const d = parsed.data;
     const loan = db.insert(schema.loans).values({
-      name: body.name,
-      type: body.type,
-      accountId: body.accountId || null,
-      principal: body.principal,
-      annualRate: body.annualRate,
-      termMonths: body.termMonths,
-      startDate: body.startDate,
-      paymentAmount: body.paymentAmount,
-      paymentFrequency: body.paymentFrequency ?? "monthly",
-      extraPayment: body.extraPayment ?? 0,
-      note: body.note ?? "",
+      name: d.name,
+      type: d.type,
+      accountId: d.accountId || null,
+      principal: d.principal,
+      annualRate: d.annualRate,
+      termMonths: d.termMonths,
+      startDate: d.startDate,
+      paymentAmount: d.paymentAmount,
+      paymentFrequency: d.paymentFrequency ?? "monthly",
+      extraPayment: d.extraPayment ?? 0,
+      note: d.note ?? "",
     }).returning().get();
 
     return NextResponse.json(loan, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
 

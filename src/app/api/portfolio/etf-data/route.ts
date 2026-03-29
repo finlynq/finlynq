@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
 import {
   getEtfInfoAll,
   getEtfInfoBySymbol,
@@ -29,6 +31,12 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
+    const etfActionSchema = z.object({
+      action: z.string(),
+    }).passthrough();
+    const parsed = validateBody(body, etfActionSchema);
+    if (parsed.error) return parsed.error;
+
     if (body.action === "seed") {
       return seedAllFromHardcoded();
     }
@@ -43,7 +51,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
+    const message = safeErrorMessage(error, "ETF data operation failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

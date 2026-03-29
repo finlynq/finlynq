@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { requireUnlock } from "@/lib/require-unlock";
+import { safeErrorMessage } from "@/lib/validate";
 
 export async function DELETE() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -24,7 +25,7 @@ export async function DELETE() {
 
     return NextResponse.json({ success: true });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to clear data";
+    const message = safeErrorMessage(error, "Failed to clear data");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

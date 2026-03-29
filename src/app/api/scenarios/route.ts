@@ -6,12 +6,21 @@ import {
   type Debt,
 } from "@/lib/loan-calculator";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const { type } = body;
+
+    const scenarioSchema = z.object({
+      type: z.enum(["home-purchase", "extra-savings", "debt-payoff", "income-change"]),
+    }).passthrough();
+    const parsed = validateBody(body, scenarioSchema);
+    if (parsed.error) return parsed.error;
+
+    const { type } = parsed.data;
 
     if (type === "home-purchase") {
       const { purchasePrice, downPaymentPct, interestRate, amortizationYears, propertyTaxYear, maintenanceYear } = body;
@@ -204,7 +213,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ error: "Unknown scenario type" }, { status: 400 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
+    const message = safeErrorMessage(error, "Scenario calculation failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

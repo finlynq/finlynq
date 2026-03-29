@@ -1,6 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCategories, createCategory, updateCategory, deleteCategory, getTransactionCountByCategory } from "@/lib/queries";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const postSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+  group: z.string(),
+  note: z.string().optional(),
+});
+
+const putSchema = z.object({
+  id: z.number(),
+  name: z.string().optional(),
+  type: z.string().optional(),
+  group: z.string().optional(),
+  note: z.string().optional(),
+});
 
 export async function GET() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -12,11 +29,12 @@ export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const category = createCategory(body);
+    const parsed = validateBody(body, postSchema);
+    if (parsed.error) return parsed.error;
+    const category = createCategory(parsed.data);
     return NextResponse.json(category, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to create category";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to create category") }, { status: 500 });
   }
 }
 
@@ -24,12 +42,13 @@ export async function PUT(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const { id, ...data } = body;
+    const parsed = validateBody(body, putSchema);
+    if (parsed.error) return parsed.error;
+    const { id, ...data } = parsed.data;
     const category = updateCategory(id, data);
     return NextResponse.json(category);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to update category";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to update category") }, { status: 500 });
   }
 }
 

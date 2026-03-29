@@ -1,11 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runMonteCarloSimulation } from "@/lib/monte-carlo";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const postSchema = z.object({
+  currentInvestments: z.number(),
+  monthlySavings: z.number(),
+  annualReturn: z.number(),
+  annualExpenses: z.number(),
+  annualVolatility: z.number().optional(),
+  inflation: z.number().optional(),
+  yearsToSimulate: z.number().optional(),
+  withdrawalRate: z.number().optional(),
+});
 
 export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
+    const parsed = validateBody(body, postSchema);
+    if (parsed.error) return parsed.error;
     const {
       currentInvestments,
       monthlySavings,
@@ -15,28 +30,22 @@ export async function POST(request: NextRequest) {
       yearsToSimulate,
       withdrawalRate,
       annualExpenses,
-    } = body;
-
-    // Validate required fields
-    if (currentInvestments == null || monthlySavings == null || annualReturn == null || annualExpenses == null) {
-      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
-    }
+    } = parsed.data;
 
     const result = runMonteCarloSimulation({
-      currentInvestments: Number(currentInvestments),
-      monthlySavings: Number(monthlySavings),
-      annualReturn: Number(annualReturn),
-      annualVolatility: Number(annualVolatility ?? 15),
-      inflation: Number(inflation ?? 2),
-      yearsToSimulate: Number(yearsToSimulate ?? 30),
+      currentInvestments,
+      monthlySavings,
+      annualReturn,
+      annualVolatility: annualVolatility ?? 15,
+      inflation: inflation ?? 2,
+      yearsToSimulate: yearsToSimulate ?? 30,
       numSimulations: 1000,
-      withdrawalRate: Number(withdrawalRate ?? 4),
-      annualExpenses: Number(annualExpenses),
+      withdrawalRate: withdrawalRate ?? 4,
+      annualExpenses,
     });
 
     return NextResponse.json(result);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Simulation failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Simulation failed") }, { status: 500 });
   }
 }

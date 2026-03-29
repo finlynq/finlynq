@@ -5,6 +5,14 @@ import {
   deleteBudgetTemplate,
 } from "@/lib/queries";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const postSchema = z.object({
+  name: z.string(),
+  categoryId: z.number(),
+  amount: z.number(),
+});
 
 export async function GET() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -16,25 +24,18 @@ export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const { name, categoryId, amount } = body;
-
-    if (!name || !categoryId || !amount) {
-      return NextResponse.json(
-        { error: "name, categoryId, and amount are required" },
-        { status: 400 }
-      );
-    }
+    const parsed = validateBody(body, postSchema);
+    if (parsed.error) return parsed.error;
+    const { name, categoryId, amount } = parsed.data;
 
     const template = createBudgetTemplate({
       name,
-      categoryId: Number(categoryId),
-      amount: Number(amount),
+      categoryId,
+      amount,
     });
     return NextResponse.json(template, { status: 201 });
   } catch (error: unknown) {
-    const message =
-      error instanceof Error ? error.message : "Failed to save template";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to save template") }, { status: 500 });
   }
 }
 

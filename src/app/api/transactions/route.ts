@@ -1,6 +1,41 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction } from "@/lib/queries";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const postSchema = z.object({
+  date: z.string(),
+  amount: z.number(),
+  accountId: z.number(),
+  categoryId: z.number(),
+  currency: z.string(),
+  payee: z.string().optional(),
+  quantity: z.number().optional(),
+  portfolioHolding: z.string().optional(),
+  note: z.string().optional(),
+  tags: z.string().optional(),
+  isBusiness: z.number().optional(),
+  splitPerson: z.string().optional(),
+  splitRatio: z.number().optional(),
+});
+
+const putSchema = z.object({
+  id: z.number(),
+  date: z.string().optional(),
+  amount: z.number().optional(),
+  accountId: z.number().optional(),
+  categoryId: z.number().optional(),
+  currency: z.string().optional(),
+  payee: z.string().optional(),
+  quantity: z.number().optional(),
+  portfolioHolding: z.string().optional(),
+  note: z.string().optional(),
+  tags: z.string().optional(),
+  isBusiness: z.number().optional(),
+  splitPerson: z.string().optional(),
+  splitRatio: z.number().optional(),
+});
 
 export async function GET(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
@@ -25,11 +60,12 @@ export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const tx = createTransaction(body);
+    const parsed = validateBody(body, postSchema);
+    if (parsed.error) return parsed.error;
+    const tx = createTransaction(parsed.data);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to create transaction";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to create transaction") }, { status: 500 });
   }
 }
 
@@ -37,12 +73,13 @@ export async function PUT(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
-    const { id, ...data } = body;
+    const parsed = validateBody(body, putSchema);
+    if (parsed.error) return parsed.error;
+    const { id, ...data } = parsed.data;
     const tx = updateTransaction(id, data);
     return NextResponse.json(tx);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to update transaction";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to update transaction") }, { status: 500 });
   }
 }
 

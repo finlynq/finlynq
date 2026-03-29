@@ -10,6 +10,7 @@ import {
   rrspVsTfsa,
 } from "@/lib/tax-optimizer";
 import { requireUnlock } from "@/lib/require-unlock";
+import { safeErrorMessage } from "@/lib/validate";
 
 export async function GET() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -93,7 +94,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(record, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
+    const message = safeErrorMessage(error, "Tax operation failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

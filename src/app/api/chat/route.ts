@@ -1,19 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { processMessage } from "@/lib/chat-engine";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const postSchema = z.object({
+  message: z.string().min(1),
+});
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const message = body.message;
+    const parsed = validateBody(body, postSchema);
+    if (parsed.error) return parsed.error;
 
-    if (!message || typeof message !== "string") {
-      return NextResponse.json({ error: "Message is required" }, { status: 400 });
-    }
-
-    const response = processMessage(message.trim());
+    const response = processMessage(parsed.data.message.trim());
     return NextResponse.json(response);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to process message";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to process message") }, { status: 500 });
   }
 }

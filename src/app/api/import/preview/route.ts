@@ -5,6 +5,7 @@ import { parseExcelSheets } from "@/lib/excel-parser";
 import { parseOfx } from "@/lib/ofx-parser";
 import { previewImport } from "@/lib/import-pipeline";
 import { requireUnlock } from "@/lib/require-unlock";
+import { safeErrorMessage } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
@@ -64,7 +65,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ error: "Unsupported file type. Use CSV, Excel, PDF, OFX, or QFX." }, { status: 400 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Preview failed";
+    const message = safeErrorMessage(error, "Preview failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

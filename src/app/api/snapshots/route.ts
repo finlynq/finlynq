@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, desc } from "drizzle-orm";
 import { requireUnlock } from "@/lib/require-unlock";
+import { z } from "zod";
+import { validateBody, safeErrorMessage } from "@/lib/validate";
 
 export async function GET() {
   const locked = requireUnlock(); if (locked) return locked;
@@ -25,15 +27,25 @@ export async function POST(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   try {
     const body = await request.json();
+
+    const snapshotSchema = z.object({
+      accountId: z.number(),
+      date: z.string(),
+      value: z.number(),
+      note: z.string().optional(),
+    });
+    const parsed = validateBody(body, snapshotSchema);
+    if (parsed.error) return parsed.error;
+
     const snap = db.insert(schema.snapshots).values({
-      accountId: body.accountId,
-      date: body.date,
-      value: body.value,
-      note: body.note ?? "",
+      accountId: parsed.data.accountId,
+      date: parsed.data.date,
+      value: parsed.data.value,
+      note: parsed.data.note ?? "",
     }).returning().get();
     return NextResponse.json(snap, { status: 201 });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed";
+    const message = safeErrorMessage(error, "Failed to create snapshot");
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
