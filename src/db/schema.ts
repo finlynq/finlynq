@@ -53,6 +53,7 @@ export const budgets = sqliteTable("budgets", {
     .notNull(),
   month: text("month").notNull(),
   amount: real("amount").notNull().default(0),
+  currency: text("currency").notNull().default("CAD"),
 });
 
 // Feature 1: Loans & Amortization

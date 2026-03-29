@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getLatestFxRate } from "@/lib/fx-service";
+import { getLatestFxRate, getActiveCurrencies, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { getAccountBalances } from "@/lib/queries";
 import { requireUnlock } from "@/lib/require-unlock";
 
@@ -7,37 +7,41 @@ export async function GET(request: NextRequest) {
   const locked = requireUnlock(); if (locked) return locked;
   const target = request.nextUrl.searchParams.get("target") ?? "CAD";
 
-  const rate = await getLatestFxRate("USD", "CAD");
-  const reverseRate = await getLatestFxRate("CAD", "USD");
-
-  // Consolidated balances
   const balances = getAccountBalances();
-  let totalCAD = 0;
-  let totalUSD = 0;
+  const activeCurrencies = getActiveCurrencies();
 
-  for (const b of balances) {
-    if (target === "CAD") {
-      totalCAD += b.currency === "CAD" ? b.balance : b.balance * rate;
-    } else {
-      totalUSD += b.currency === "USD" ? b.balance : b.balance * reverseRate;
+  // Build rate map: every active currency → target
+  const rateMap = await getRateMap(target);
+
+  // Build rates object for response
+  const rates: Record<string, number> = {};
+  for (const currency of activeCurrencies) {
+    if (currency !== target) {
+      const rate = rateMap.get(currency) ?? 1;
+      rates[`${currency}${target}`] = rate;
     }
   }
 
+  // Consolidated total
+  let total = 0;
+  const byAccount = balances.map((b) => {
+    const converted = convertWithRateMap(b.balance, b.currency, rateMap);
+    total += converted;
+    return {
+      ...b,
+      convertedBalance: converted,
+      targetCurrency: target,
+    };
+  });
+
   return NextResponse.json({
-    rates: { USDCAD: rate, CADUSD: reverseRate },
+    rates,
+    activeCurrencies,
+    displayCurrency: target,
     consolidated: {
       currency: target,
-      total: Math.round((target === "CAD" ? totalCAD : totalUSD) * 100) / 100,
+      total: Math.round(total * 100) / 100,
     },
-    byAccount: balances.map((b) => ({
-      ...b,
-      convertedBalance: Math.round(
-        (target === "CAD"
-          ? b.currency === "CAD" ? b.balance : b.balance * rate
-          : b.currency === "USD" ? b.balance : b.balance * reverseRate
-        ) * 100
-      ) / 100,
-      targetCurrency: target,
-    })),
+    byAccount,
   });
 }

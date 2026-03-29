@@ -32,9 +32,10 @@ export interface ImportResult {
 function buildLookups() {
   const allAccounts = db.select().from(schema.accounts).all();
   const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
+  const accountCurrencyMap = new Map(allAccounts.map((a) => [a.name, a.currency]));
   const allCategories = db.select().from(schema.categories).all();
   const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
-  return { accountMap, categoryMap };
+  return { accountMap, accountCurrencyMap, categoryMap };
 }
 
 export function previewImport(rows: RawTransaction[]): PreviewResult {
@@ -95,7 +96,7 @@ export function executeImport(
   rows: RawTransaction[],
   forceImportIndices: number[] = [],
 ): ImportResult {
-  const { accountMap, categoryMap } = buildLookups();
+  const { accountMap, accountCurrencyMap, categoryMap } = buildLookups();
   const forceSet = new Set(forceImportIndices);
   const batchSize = 500;
   let imported = 0;
@@ -126,11 +127,14 @@ export function executeImport(
     const categoryId = row.category ? (categoryMap.get(row.category) ?? null) : null;
     const hash = generateImportHash(row.date, accountId, row.amount, row.payee);
 
+    // Inherit currency from account when not specified in import data
+    const currency = row.currency || accountCurrencyMap.get(row.account) || "CAD";
+
     insertable.push({
       date: row.date,
       accountId,
       categoryId,
-      currency: row.currency ?? "CAD",
+      currency,
       amount: row.amount,
       quantity: row.quantity ?? null,
       portfolioHolding: row.portfolioHolding ?? null,

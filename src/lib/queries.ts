@@ -197,6 +197,7 @@ export function getBudgets(month?: string) {
       categoryGroup: categories.group,
       month: budgets.month,
       amount: budgets.amount,
+      currency: budgets.currency,
     })
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
@@ -205,7 +206,7 @@ export function getBudgets(month?: string) {
     .all();
 }
 
-export function upsertBudget(data: { categoryId: number; month: string; amount: number }) {
+export function upsertBudget(data: { categoryId: number; month: string; amount: number; currency?: string }) {
   const existing = db
     .select()
     .from(budgets)
@@ -213,9 +214,11 @@ export function upsertBudget(data: { categoryId: number; month: string; amount: 
     .get();
 
   if (existing) {
-    return db.update(budgets).set({ amount: data.amount }).where(eq(budgets.id, existing.id)).returning().get();
+    const update: { amount: number; currency?: string } = { amount: data.amount };
+    if (data.currency) update.currency = data.currency;
+    return db.update(budgets).set(update).where(eq(budgets.id, existing.id)).returning().get();
   }
-  return db.insert(budgets).values(data).returning().get();
+  return db.insert(budgets).values({ ...data, currency: data.currency ?? "CAD" }).returning().get();
 }
 
 export function deleteBudget(id: number) {
@@ -341,6 +344,30 @@ export function getSpendingByCategory(startDate: string, endDate: string) {
       )
     )
     .groupBy(categories.id)
+    .orderBy(sql`SUM(${transactions.amount})`)
+    .all();
+}
+
+export function getSpendingByCategoryAndCurrency(startDate: string, endDate: string) {
+  return db
+    .select({
+      categoryId: categories.id,
+      categoryName: categories.name,
+      categoryGroup: categories.group,
+      categoryType: categories.type,
+      currency: transactions.currency,
+      total: sql<number>`SUM(${transactions.amount})`,
+    })
+    .from(transactions)
+    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .where(
+      and(
+        gte(transactions.date, startDate),
+        lte(transactions.date, endDate),
+        eq(categories.type, "E")
+      )
+    )
+    .groupBy(categories.id, transactions.currency)
     .orderBy(sql`SUM(${transactions.amount})`)
     .all();
 }
