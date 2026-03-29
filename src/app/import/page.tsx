@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { OnboardingTips } from "@/components/onboarding-tips";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Upload,
@@ -312,6 +313,7 @@ export default function ImportPage() {
 
   return (
     <div className="max-w-3xl space-y-6">
+      <OnboardingTips page="import" />
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Import Data</h1>
         <p className="text-sm text-muted-foreground mt-0.5">

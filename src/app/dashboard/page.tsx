@@ -17,6 +17,7 @@ import { SpendingCategoryChart } from "./_components/spending-category-chart";
 import { NetWorthChart } from "./_components/net-worth-chart";
 import { AvailableToSpend } from "./_components/available-to-spend";
 import { InsightsSection } from "./_components/insights-section";
+import { OnboardingTips } from "@/components/onboarding-tips";
 import type { DashboardData } from "./_components/types";
 
 // --- Animation variants ---
@@ -193,6 +194,11 @@ export default function DashboardPage() {
         >
           <User className="h-4 w-4 text-muted-foreground" />
         </Link>
+      </motion.div>
+
+      {/* Onboarding tips for first-time users */}
+      <motion.div variants={itemVariants}>
+        <OnboardingTips page="dashboard" />
       </motion.div>
 
       {/* ============================================

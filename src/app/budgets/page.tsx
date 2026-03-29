@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { OnboardingTips } from "@/components/onboarding-tips";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import {
   Plus, ChevronLeft, ChevronRight, Trash2, PiggyBank, TrendingDown,
@@ -274,6 +275,7 @@ export default function BudgetsPage() {
 
   return (
     <div className="space-y-6">
+      <OnboardingTips page="budgets" />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

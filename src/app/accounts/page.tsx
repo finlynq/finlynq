@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
+import { OnboardingTips } from "@/components/onboarding-tips";
 import {
   TrendingUp,
   TrendingDown,
@@ -155,6 +156,7 @@ export default function AccountsPage() {
 
   return (
     <div className="space-y-6">
+      <OnboardingTips page="accounts" />
       <div>
         <h1 className="text-2xl font-bold">Accounts</h1>
         <p className="text-sm text-muted-foreground mt-1">
