@@ -82,10 +82,10 @@ const toolLinks: NavItem[] = [
 
 // Bottom bar items for mobile
 const mobileBarItems: NavItem[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, color: "text-blue-400" },
+  { href: "/dashboard", label: "Home", icon: LayoutDashboard, color: "text-blue-400" },
   { href: "/transactions", label: "Txns", icon: ArrowLeftRight, color: "text-amber-400" },
+  { href: "/import", label: "Import", icon: Upload, color: "text-indigo-400" },
   { href: "/budgets", label: "Budgets", icon: PiggyBank, color: "text-emerald-400" },
-  { href: "/portfolio", label: "Portfolio", icon: TrendingUp, color: "text-cyan-400" },
 ];
 
 const allFlatItems = navGroups.flatMap((g) => g.items).concat(toolLinks);
@@ -123,6 +123,7 @@ export function Nav() {
         key={item.href}
         href={item.href}
         title={!showLabel ? item.label : undefined}
+        aria-current={isActive ? "page" : undefined}
         onClick={() => setMobileOpen(false)}
         className={cn(
           "group/link relative flex items-center gap-3 rounded-lg text-[13px] font-medium transition-all duration-200",
@@ -148,6 +149,7 @@ export function Nav() {
   // Desktop sidebar
   const sidebar = (
     <nav
+      aria-label="Main navigation"
       className={cn(
         "hidden md:flex flex-col bg-sidebar h-screen sticky top-0 border-r border-sidebar-border/50 transition-[width] duration-200 ease-in-out overflow-hidden",
         collapsed ? "w-14" : "w-60"
@@ -202,6 +204,7 @@ export function Nav() {
           <button
             onClick={toggleCollapsed}
             className="p-1.5 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-all duration-200 hover:scale-110"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
             {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
@@ -213,7 +216,7 @@ export function Nav() {
 
   // Mobile bottom bar
   const mobileBar = (
-    <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-sidebar border-t border-sidebar-border">
+    <nav aria-label="Mobile navigation" className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-sidebar border-t border-sidebar-border">
       <div className="flex items-center justify-around h-14">
         {mobileBarItems.map((item) => {
           const isActive = pathname.startsWith(item.href);
@@ -233,6 +236,8 @@ export function Nav() {
         })}
         <button
           onClick={() => setMobileOpen(!mobileOpen)}
+          aria-expanded={mobileOpen}
+          aria-label="Show all pages"
           className={cn(
             "flex flex-col items-center gap-0.5 py-1 px-3 text-[10px] font-medium transition-colors",
             mobileOpen ? "text-sidebar-primary" : "text-sidebar-foreground/50"
@@ -242,13 +247,13 @@ export function Nav() {
           More
         </button>
       </div>
-    </div>
+    </nav>
   );
 
   // Mobile slide-up panel
   const mobilePanel = mobileOpen && (
     <div className="md:hidden fixed inset-0 z-40">
-      <div className="absolute inset-0 bg-black/50" onClick={() => setMobileOpen(false)} />
+      <div className="absolute inset-0 bg-black/50" onClick={() => setMobileOpen(false)} aria-hidden="true" />
       <div className="absolute bottom-14 left-0 right-0 bg-sidebar border-t border-sidebar-border rounded-t-xl max-h-[70vh] overflow-y-auto p-4 space-y-1 animate-in slide-in-from-bottom duration-200">
         <div className="flex items-center justify-between mb-3">
           <span className="text-sm font-semibold text-sidebar-foreground">All Pages</span>

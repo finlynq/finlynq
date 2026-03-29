@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { OnboardingTips } from "@/components/onboarding-tips";
+import { EmptyState } from "@/components/empty-state";
+import { ErrorState } from "@/components/error-state";
 import {
   TrendingUp,
   TrendingDown,
@@ -76,15 +78,22 @@ function SummarySkeleton() {
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<AccountBalance[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
-  useEffect(() => {
+  function loadAccounts() {
+    setLoading(true);
+    setError(false);
     fetch("/api/dashboard")
-      .then((r) => r.json())
+      .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
       .then((d) => {
-        setAccounts(d.balances);
+        setAccounts(d.balances ?? []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => { setError(true); setLoading(false); });
+  }
+
+  useEffect(() => {
+    loadAccounts();
   }, []);
 
   const assets = accounts.filter((a) => a.accountType === "A");
@@ -152,6 +161,24 @@ export default function AccountsPage() {
 
   if (loading) {
     return <SummarySkeleton />;
+  }
+
+  if (error) {
+    return <ErrorState title="Couldn't load accounts" message="We had trouble loading your account data." onRetry={loadAccounts} />;
+  }
+
+  if (accounts.length === 0) {
+    return (
+      <div className="space-y-6">
+        <OnboardingTips page="accounts" />
+        <EmptyState
+          icon={Wallet}
+          title="No accounts yet"
+          description="Add your bank accounts, credit cards, and investments to start tracking your net worth."
+          action={{ label: "Import data", href: "/import" }}
+        />
+      </div>
+    );
   }
 
   return (

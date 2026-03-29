@@ -9,9 +9,10 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
+import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt } from "lucide-react";
 
 type Transaction = {
   id: number;
@@ -381,6 +382,13 @@ export default function TransactionsPage() {
         <CardContent className="p-0">
           {loading ? (
             <TableSkeleton />
+          ) : txns.length === 0 ? (
+            <EmptyState
+              icon={Receipt}
+              title="No transactions yet"
+              description="Add your first transaction or import bank statements to get started."
+              action={{ label: "Import data", href: "/import" }}
+            />
           ) : (
             <Table>
               <TableHeader>
