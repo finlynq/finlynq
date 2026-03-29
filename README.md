@@ -136,6 +136,26 @@ Zero infrastructure cost -- the sync is handled entirely by your cloud drive pro
 - **Monte Carlo simulation** — retirement projections with randomized market scenarios
 - And more — see [FEATURES.md](/FEATURES.md)
 
+## Mobile App
+
+PF includes a React Native (Expo) mobile app in the `mobile/` directory. It connects to the PF web server and provides Dashboard, Transactions, Import, Budgets, and Settings screens on iOS and Android.
+
+```bash
+cd mobile
+npm install
+npx expo start
+```
+
+See the [Mobile Setup Guide](docs/mobile-setup.md) for full instructions on connecting to your server.
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Getting Started](docs/getting-started.md) | Installation, first-time setup, importing data, creating budgets |
+| [FAQ](docs/faq.md) | Common questions about security, privacy, syncing, and troubleshooting |
+| [Mobile Setup](docs/mobile-setup.md) | How to connect the React Native mobile app to your PF server |
+
 ## Database
 
 SQLite with 18 tables. Database file (`pf.db`) is encrypted with AES-256 (SQLCipher) and gitignored.
