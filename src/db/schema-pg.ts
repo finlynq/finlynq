@@ -219,6 +219,32 @@ export const budgetTemplates = pgTable("budget_templates", {
   createdAt: text("created_at").notNull(),
 });
 
+// ─── Authentication Tables (Phase 2: NS-32) ────────────────────────────────
+
+/** Users table for account-based auth (managed edition) */
+export const users = pgTable("users", {
+  id: text("id").primaryKey(), // UUID
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  displayName: text("display_name"),
+  mfaEnabled: integer("mfa_enabled").notNull().default(0),
+  mfaSecret: text("mfa_secret"), // encrypted TOTP secret
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+/** Password reset tokens */
+export const passwordResetTokens = pgTable("password_reset_tokens", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  tokenHash: text("token_hash").notNull(), // SHA-256 of the token
+  expiresAt: text("expires_at").notNull(),
+  usedAt: text("used_at"),
+  createdAt: text("created_at").notNull(),
+});
+
 export const contributionRoom = pgTable("contribution_room", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),

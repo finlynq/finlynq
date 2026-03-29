@@ -5,6 +5,7 @@ import {
   isUnlocked,
   closeConnection,
   getConnection,
+  getDialect,
 } from "@/db";
 import { resetDb } from "@/db";
 import { generateSalt, deriveKey } from "@shared/crypto";
@@ -55,6 +56,19 @@ const bodyPreprocess = z.object({
 }));
 
 export async function GET() {
+  const dialect = getDialect();
+
+  // In managed mode, passphrase unlock is not applicable
+  if (dialect === "postgres") {
+    return NextResponse.json({
+      unlocked: true,
+      needsSetup: false,
+      mode: "managed",
+      authMethod: "account",
+      hasExistingData: false,
+    });
+  }
+
   const hasConfig = configExists();
   const config = readConfig();
   const dbPath = resolveDbPath(config);
@@ -71,6 +85,7 @@ export async function GET() {
     unlocked: isUnlocked(),
     needsSetup,
     mode: config.mode,
+    authMethod: "passphrase",
     hasExistingData: dbExists && !hasConfig,
   });
 }
@@ -88,6 +103,14 @@ export async function POST(request: NextRequest) {
           "Retry-After": String(Math.ceil((rateLimit.resetAt - Date.now()) / 1000)),
         },
       }
+    );
+  }
+
+  // Passphrase operations are only for self-hosted mode
+  if (getDialect() === "postgres") {
+    return NextResponse.json(
+      { error: "Passphrase unlock is not available in managed mode. Use /api/auth/login instead." },
+      { status: 403 }
     );
   }
 

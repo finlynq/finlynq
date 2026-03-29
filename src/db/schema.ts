@@ -209,6 +209,32 @@ export const budgetTemplates = sqliteTable("budget_templates", {
   createdAt: text("created_at").notNull(),
 });
 
+// ─── Authentication Tables (Phase 2: NS-32) ────────────────────────────────
+
+/** Users table for account-based auth (managed edition) */
+export const users = sqliteTable("users", {
+  id: text("id").primaryKey(), // UUID
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  displayName: text("display_name"),
+  mfaEnabled: integer("mfa_enabled").notNull().default(0),
+  mfaSecret: text("mfa_secret"), // encrypted TOTP secret
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+/** Password reset tokens */
+export const passwordResetTokens = sqliteTable("password_reset_tokens", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  tokenHash: text("token_hash").notNull(), // SHA-256 of the token
+  expiresAt: text("expires_at").notNull(),
+  usedAt: text("used_at"),
+  createdAt: text("created_at").notNull(),
+});
+
 // Feature 8: Tax - Contribution Room
 export const contributionRoom = sqliteTable("contribution_room", {
   id: integer("id").primaryKey({ autoIncrement: true }),

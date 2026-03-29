@@ -6,6 +6,7 @@ vi.mock("@/db", () => ({
   closeConnection: vi.fn(),
   getConnection: vi.fn(() => ({ pragma: vi.fn() })),
   resetDb: vi.fn(),
+  getDialect: vi.fn(() => "sqlite"),
 }));
 
 vi.mock("@shared/crypto", () => ({
