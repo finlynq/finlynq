@@ -51,7 +51,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Get the user and verify MFA
-    const user = getUserById(payload.sub);
+    const user = await getUserById(payload.sub);
     if (!user || !user.mfaEnabled || !user.mfaSecret) {
       return NextResponse.json(
         { error: "MFA is not configured for this account." },

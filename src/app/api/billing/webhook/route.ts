@@ -69,12 +69,12 @@ export async function POST(request: NextRequest) {
         const userId = metadata?.userId;
         if (!userId) break;
 
-        const user = getUserById(userId);
+        const user = await getUserById(userId);
         if (!user) break;
 
         // Store Stripe customer ID
         const now = new Date().toISOString();
-        db.update(schema.users)
+        await db.update(schema.users)
           .set({
             stripeCustomerId: customer ?? null,
             updatedAt: now,
@@ -83,7 +83,7 @@ export async function POST(request: NextRequest) {
           .run();
 
         // Activate plan (default to pro for checkout)
-        updateUserPlan(userId, "pro");
+        await updateUserPlan(userId, "pro");
         break;
       }
 
@@ -93,7 +93,7 @@ export async function POST(request: NextRequest) {
         if (!customerId) break;
 
         // Find user by Stripe customer ID
-        const user = db
+        const user = await db
           .select()
           .from(schema.users)
           .where(eq(schema.users.stripeCustomerId, customerId))
@@ -107,9 +107,9 @@ export async function POST(request: NextRequest) {
           : undefined;
 
         if (obj.status === "active" || obj.status === "trialing") {
-          updateUserPlan(user.id, plan, expiresAt);
+          await updateUserPlan(user.id, plan, expiresAt);
         } else if (obj.status === "canceled" || obj.status === "unpaid") {
-          updateUserPlan(user.id, "free");
+          await updateUserPlan(user.id, "free");
         }
         break;
       }
@@ -118,14 +118,14 @@ export async function POST(request: NextRequest) {
         const customerId = event.data.object.customer;
         if (!customerId) break;
 
-        const user = db
+        const user = await db
           .select()
           .from(schema.users)
           .where(eq(schema.users.stripeCustomerId, customerId))
           .get();
         if (!user) break;
 
-        updateUserPlan(user.id, "free");
+        await updateUserPlan(user.id, "free");
         break;
       }
 
@@ -133,7 +133,7 @@ export async function POST(request: NextRequest) {
         const customerId = event.data.object.customer;
         if (!customerId) break;
 
-        const user = db
+        const user = await db
           .select()
           .from(schema.users)
           .where(eq(schema.users.stripeCustomerId, customerId))
@@ -141,7 +141,7 @@ export async function POST(request: NextRequest) {
         if (!user) break;
 
         // Create in-app notification about payment failure
-        db.insert(schema.notifications)
+        await db.insert(schema.notifications)
           .values({
             userId: user.id,
             type: "billing",

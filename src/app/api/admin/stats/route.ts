@@ -20,10 +20,10 @@ export async function GET(request: NextRequest) {
   const auth = await requireAdmin(request);
   if (!auth.authenticated) return auth.response;
 
-  const stats = getUsageStats();
+  const stats = await getUsageStats();
 
   // Compute registrations in last 7 and 30 days
-  const allUsers = listUsers({ limit: 10000 });
+  const allUsers = await listUsers({ limit: 10000 });
   const now = Date.now();
   const d7 = now - 7 * 86_400_000;
   const d30 = now - 30 * 86_400_000;

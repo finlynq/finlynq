@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const user = verifyUserEmail(token);
+  const user = await verifyUserEmail(token);
   if (!user) {
     return NextResponse.json(
       { error: "Invalid or expired verification token." },

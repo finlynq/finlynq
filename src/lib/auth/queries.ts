@@ -3,11 +3,21 @@
  *
  * These queries operate on the users and password_reset_tokens tables
  * added in Phase 2 (NS-32).
+ *
+ * All functions are async to support both SQLite (synchronous) and
+ * PostgreSQL (async) Drizzle adapters via the db proxy.
  */
 
-import { db, schema } from "@/db";
-import { eq, sql, count } from "drizzle-orm";
+import { db, getDialect } from "@/db";
+import * as sqliteSchema from "@/db/schema";
+import * as pgSchema from "@/db/schema-pg";
+import { eq, count } from "drizzle-orm";
 import crypto from "crypto";
+
+/** Returns the correct schema tables for the active dialect */
+function getSchema() {
+  return getDialect() === "postgres" ? pgSchema : sqliteSchema;
+}
 
 // ─── User queries ────────────────────────────────────────────────────────────
 
@@ -17,12 +27,12 @@ export interface CreateUserInput {
   displayName?: string;
 }
 
-export function createUser(input: CreateUserInput) {
+export async function createUser(input: CreateUserInput) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const emailVerifyToken = crypto.randomUUID();
 
-  db.insert(schema.users)
+  await db.insert(getSchema().users)
     .values({
       id,
       email: input.email,
@@ -37,160 +47,149 @@ export function createUser(input: CreateUserInput) {
       plan: "free",
       createdAt: now,
       updatedAt: now,
-    })
-    .run();
+    });
 
   return { id, email: input.email, emailVerifyToken };
 }
 
-export function getUserByEmail(email: string) {
-  return db
+export async function getUserByEmail(email: string) {
+  const rows = await db
     .select()
-    .from(schema.users)
-    .where(eq(schema.users.email, email))
-    .get();
+    .from(getSchema().users)
+    .where(eq(getSchema().users.email, email));
+  return rows[0] ?? null;
 }
 
-export function getUserById(id: string) {
-  return db
+export async function getUserById(id: string) {
+  const rows = await db
     .select()
-    .from(schema.users)
-    .where(eq(schema.users.id, id))
-    .get();
+    .from(getSchema().users)
+    .where(eq(getSchema().users.id, id));
+  return rows[0] ?? null;
 }
 
-export function updateUserPassword(userId: string, passwordHash: string) {
+export async function updateUserPassword(userId: string, passwordHash: string) {
   const now = new Date().toISOString();
-  db.update(schema.users)
+  await db.update(getSchema().users)
     .set({ passwordHash, updatedAt: now })
-    .where(eq(schema.users.id, userId))
-    .run();
+    .where(eq(getSchema().users.id, userId));
 }
 
-export function enableUserMfa(userId: string, mfaSecret: string) {
+export async function enableUserMfa(userId: string, mfaSecret: string) {
   const now = new Date().toISOString();
-  db.update(schema.users)
+  await db.update(getSchema().users)
     .set({ mfaEnabled: 1, mfaSecret, updatedAt: now })
-    .where(eq(schema.users.id, userId))
-    .run();
+    .where(eq(getSchema().users.id, userId));
 }
 
-export function disableUserMfa(userId: string) {
+export async function disableUserMfa(userId: string) {
   const now = new Date().toISOString();
-  db.update(schema.users)
+  await db.update(getSchema().users)
     .set({ mfaEnabled: 0, mfaSecret: null, updatedAt: now })
-    .where(eq(schema.users.id, userId))
-    .run();
+    .where(eq(getSchema().users.id, userId));
 }
 
 // ─── Password reset token queries ───────────────────────────────────────────
 
-export function createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string) {
+export async function createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string) {
   const now = new Date().toISOString();
-  db.insert(schema.passwordResetTokens)
-    .values({ userId, tokenHash, expiresAt, createdAt: now })
-    .run();
+  await db.insert(getSchema().passwordResetTokens)
+    .values({ userId, tokenHash, expiresAt, createdAt: now });
 }
 
-export function getPasswordResetToken(tokenHash: string) {
-  return db
+export async function getPasswordResetToken(tokenHash: string) {
+  const rows = await db
     .select()
-    .from(schema.passwordResetTokens)
-    .where(eq(schema.passwordResetTokens.tokenHash, tokenHash))
-    .get();
+    .from(getSchema().passwordResetTokens)
+    .where(eq(getSchema().passwordResetTokens.tokenHash, tokenHash));
+  return rows[0] ?? null;
 }
 
-export function markResetTokenUsed(tokenHash: string) {
+export async function markResetTokenUsed(tokenHash: string) {
   const now = new Date().toISOString();
-  db.update(schema.passwordResetTokens)
+  await db.update(getSchema().passwordResetTokens)
     .set({ usedAt: now })
-    .where(eq(schema.passwordResetTokens.tokenHash, tokenHash))
-    .run();
+    .where(eq(getSchema().passwordResetTokens.tokenHash, tokenHash));
 }
 
 // ─── Email verification queries ─────────────────────────────────────────────
 
-export function verifyUserEmail(token: string) {
+export async function verifyUserEmail(token: string) {
   const now = new Date().toISOString();
-  const user = db
+  const rows = await db
     .select()
-    .from(schema.users)
-    .where(eq(schema.users.emailVerifyToken, token))
-    .get();
+    .from(getSchema().users)
+    .where(eq(getSchema().users.emailVerifyToken, token));
 
+  const user = rows[0] ?? null;
   if (!user) return null;
 
-  db.update(schema.users)
+  await db.update(getSchema().users)
     .set({ emailVerified: 1, emailVerifyToken: null, updatedAt: now })
-    .where(eq(schema.users.id, user.id))
-    .run();
+    .where(eq(getSchema().users.id, user.id));
 
   return user;
 }
 
 // ─── Onboarding queries ─────────────────────────────────────────────────────
 
-export function completeOnboarding(userId: string) {
+export async function completeOnboarding(userId: string) {
   const now = new Date().toISOString();
-  db.update(schema.users)
+  await db.update(getSchema().users)
     .set({ onboardingComplete: 1, updatedAt: now })
-    .where(eq(schema.users.id, userId))
-    .run();
+    .where(eq(getSchema().users.id, userId));
 }
 
 // ─── Admin queries (managed edition) ────────────────────────────────────────
 
-export function listUsers(options: { limit?: number; offset?: number } = {}) {
+export async function listUsers(options: { limit?: number; offset?: number } = {}) {
   const { limit = 50, offset = 0 } = options;
   return db
     .select({
-      id: schema.users.id,
-      email: schema.users.email,
-      displayName: schema.users.displayName,
-      role: schema.users.role,
-      emailVerified: schema.users.emailVerified,
-      mfaEnabled: schema.users.mfaEnabled,
-      onboardingComplete: schema.users.onboardingComplete,
-      plan: schema.users.plan,
-      planExpiresAt: schema.users.planExpiresAt,
-      createdAt: schema.users.createdAt,
-      updatedAt: schema.users.updatedAt,
+      id: getSchema().users.id,
+      email: getSchema().users.email,
+      displayName: getSchema().users.displayName,
+      role: getSchema().users.role,
+      emailVerified: getSchema().users.emailVerified,
+      mfaEnabled: getSchema().users.mfaEnabled,
+      onboardingComplete: getSchema().users.onboardingComplete,
+      plan: getSchema().users.plan,
+      planExpiresAt: getSchema().users.planExpiresAt,
+      createdAt: getSchema().users.createdAt,
+      updatedAt: getSchema().users.updatedAt,
     })
-    .from(schema.users)
+    .from(getSchema().users)
     .limit(limit)
-    .offset(offset)
-    .all();
+    .offset(offset);
 }
 
-export function getUserCount() {
-  const result = db.select({ total: count() }).from(schema.users).get();
-  return result?.total ?? 0;
+export async function getUserCount() {
+  const rows = await db.select({ total: count() }).from(getSchema().users);
+  return rows[0]?.total ?? 0;
 }
 
-export function updateUserRole(userId: string, role: string) {
+export async function updateUserRole(userId: string, role: string) {
   const now = new Date().toISOString();
-  db.update(schema.users)
+  await db.update(getSchema().users)
     .set({ role, updatedAt: now })
-    .where(eq(schema.users.id, userId))
-    .run();
+    .where(eq(getSchema().users.id, userId));
 }
 
-export function updateUserPlan(userId: string, plan: string, planExpiresAt?: string) {
+export async function updateUserPlan(userId: string, plan: string, planExpiresAt?: string) {
   const now = new Date().toISOString();
-  db.update(schema.users)
+  await db.update(getSchema().users)
     .set({ plan, planExpiresAt: planExpiresAt ?? null, updatedAt: now })
-    .where(eq(schema.users.id, userId))
-    .run();
+    .where(eq(getSchema().users.id, userId));
 }
 
-export function getUsageStats() {
-  const userTotal = db.select({ total: count() }).from(schema.users).get();
-  const txTotal = db.select({ total: count() }).from(schema.transactions).get();
-  const acctTotal = db.select({ total: count() }).from(schema.accounts).get();
+export async function getUsageStats() {
+  const userRows = await db.select({ total: count() }).from(getSchema().users);
+  const txRows = await db.select({ total: count() }).from(getSchema().transactions);
+  const acctRows = await db.select({ total: count() }).from(getSchema().accounts);
 
   return {
-    totalUsers: userTotal?.total ?? 0,
-    totalTransactions: txTotal?.total ?? 0,
-    totalAccounts: acctTotal?.total ?? 0,
+    totalUsers: userRows[0]?.total ?? 0,
+    totalTransactions: txRows[0]?.total ?? 0,
+    totalAccounts: acctRows[0]?.total ?? 0,
   };
 }

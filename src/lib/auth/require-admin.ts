@@ -16,7 +16,7 @@ export async function requireAdmin(request: NextRequest) {
     return authResult;
   }
 
-  const user = getUserById(authResult.context.userId);
+  const user = await getUserById(authResult.context.userId);
   if (!user || user.role !== "admin") {
     return {
       authenticated: false as const,

@@ -1,11 +1,12 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import * as schema from "./schema";
+import * as sqliteSchema from "./schema";
+import * as pgSchema from "./schema-pg";
 import { getConnection } from "./connection";
 import type { DatabaseAdapter, DbDialect, DrizzleDb } from "./adapter";
 import { SqliteAdapter } from "./adapters/sqlite";
 import { PostgresAdapter } from "./adapters/postgres";
 
-type DrizzleSqliteDb = ReturnType<typeof drizzle<typeof schema>>;
+type DrizzleSqliteDb = ReturnType<typeof drizzle<typeof sqliteSchema>>;
 
 // ─── Adapter registry ────────────────────────────────────────────────────────
 
@@ -40,7 +41,7 @@ export function setDialect(dialect: DbDialect): void {
 function getDb(): DrizzleSqliteDb {
   if (!g.__pfDrizzle) {
     const sqlite = getConnection(); // throws DatabaseLockedError if not unlocked
-    g.__pfDrizzle = drizzle(sqlite, { schema });
+    g.__pfDrizzle = drizzle(sqlite, { schema: sqliteSchema });
   }
   return g.__pfDrizzle;
 }
@@ -79,7 +80,17 @@ export const db = new Proxy({} as DrizzleSqliteDb, {
   },
 });
 
-export { schema };
+/**
+ * Schema export — returns the correct schema for the active dialect.
+ * PG schema when PostgreSQL adapter is active, SQLite schema otherwise.
+ */
+export const schema = new Proxy(sqliteSchema as typeof sqliteSchema & typeof pgSchema, {
+  get(_target, prop, receiver) {
+    const dialect = g.__pfDialect ?? "sqlite";
+    const activeSchema = dialect === "postgres" ? pgSchema : sqliteSchema;
+    return Reflect.get(activeSchema, prop, receiver);
+  },
+});
 export type { DatabaseAdapter, DbDialect, DrizzleDb };
 export { DEFAULT_USER_ID } from "./adapter";
 export { SqliteAdapter, PostgresAdapter };

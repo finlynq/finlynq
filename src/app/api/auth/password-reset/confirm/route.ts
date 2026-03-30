@@ -50,7 +50,7 @@ export async function POST(request: NextRequest) {
 
     // Look up the token by its hash
     const tokenHash = hashResetToken(token);
-    const resetToken = getPasswordResetToken(tokenHash);
+    const resetToken = await getPasswordResetToken(tokenHash);
 
     if (!resetToken) {
       return NextResponse.json(
@@ -75,8 +75,8 @@ export async function POST(request: NextRequest) {
 
     // Update the password and mark token used
     const passwordHash = await hashPassword(newPassword);
-    updateUserPassword(resetToken.userId, passwordHash);
-    markResetTokenUsed(tokenHash);
+    await updateUserPassword(resetToken.userId, passwordHash);
+    await markResetTokenUsed(tokenHash);
 
     return NextResponse.json({
       success: true,

@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
     if (parsed.error) return parsed.error;
 
     const { userId } = auth.context;
-    const user = getUserById(userId);
+    const user = await getUserById(userId);
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
             { status: 400 }
           );
         }
-        enableUserMfa(userId, secret);
+        await enableUserMfa(userId, secret);
         return NextResponse.json({ success: true, mfaEnabled: true });
       }
 
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
             { status: 400 }
           );
         }
-        disableUserMfa(userId);
+        await disableUserMfa(userId);
         return NextResponse.json({ success: true, mfaEnabled: false });
       }
     }

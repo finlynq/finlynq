@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
     const { email, password, displayName } = parsed.data;
 
     // Check for existing user
-    const existing = getUserByEmail(email);
+    const existing = await getUserByEmail(email);
     if (existing) {
       return NextResponse.json(
         { error: "An account with this email already exists." },
@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
 
     // Create user
     const passwordHash = await hashPassword(password);
-    const user = createUser({ email, passwordHash, displayName });
+    const user = await createUser({ email, passwordHash, displayName });
 
     // Send verification and welcome emails (fire-and-forget)
     sendEmail(emailVerificationEmail(email, user.emailVerifyToken)).catch(() => {});

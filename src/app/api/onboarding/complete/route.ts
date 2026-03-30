@@ -17,7 +17,7 @@ export async function POST(request: NextRequest) {
   const { userId } = auth.context;
 
   if (getDialect() === "postgres") {
-    completeOnboarding(userId);
+    await completeOnboarding(userId);
   }
 
   return NextResponse.json({ success: true });

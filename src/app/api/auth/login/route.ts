@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
       { status: 401 }
     );
 
-    const user = getUserByEmail(email);
+    const user = await getUserByEmail(email);
     if (!user) return invalidCredentials;
 
     const valid = await verifyPassword(password, user.passwordHash);

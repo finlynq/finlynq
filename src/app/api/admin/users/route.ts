@@ -33,8 +33,8 @@ export async function GET(request: NextRequest) {
   const limit = Math.min(Number(url.searchParams.get("limit")) || 50, 100);
   const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
 
-  const users = listUsers({ limit, offset });
-  const total = getUserCount();
+  const users = await listUsers({ limit, offset });
+  const total = await getUserCount();
 
   return NextResponse.json({ users, total, limit, offset });
 }
@@ -64,13 +64,13 @@ export async function PATCH(request: NextRequest) {
 
     const { userId, role, plan, planExpiresAt } = parsed.data;
 
-    const target = getUserById(userId);
+    const target = await getUserById(userId);
     if (!target) {
       return NextResponse.json({ error: "User not found." }, { status: 404 });
     }
 
-    if (role) updateUserRole(userId, role);
-    if (plan) updateUserPlan(userId, plan, planExpiresAt);
+    if (role) await updateUserRole(userId, role);
+    if (plan) await updateUserPlan(userId, plan, planExpiresAt);
 
     return NextResponse.json({ success: true });
   } catch {

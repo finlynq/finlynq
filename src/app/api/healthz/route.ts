@@ -38,9 +38,8 @@ export async function GET() {
         const pgAdapter = adapter as import("@/db").DatabaseAdapter & {
           getDb: () => import("drizzle-orm/node-postgres").NodePgDatabase;
         };
-        await (pgAdapter.getDb() as any).execute(
-          { sql: "SELECT 1", params: [], typings: [] }
-        );
+        const { sql } = await import("drizzle-orm");
+        await pgAdapter.getDb().execute(sql`SELECT 1`);
       }
     } else {
       // SQLite: just check if the connection is open

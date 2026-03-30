@@ -42,11 +42,11 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, requestSchema);
     if (parsed.error) return parsed.error;
 
-    const user = getUserByEmail(parsed.data.email);
+    const user = await getUserByEmail(parsed.data.email);
 
     if (user) {
       const { token, tokenHash, expiresAt } = generateResetToken();
-      createPasswordResetToken(user.id, tokenHash, expiresAt);
+      await createPasswordResetToken(user.id, tokenHash, expiresAt);
 
       // Send password reset email (fire-and-forget)
       sendEmail(passwordResetEmail(user.email, token)).catch(() => {});

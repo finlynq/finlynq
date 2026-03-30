@@ -18,7 +18,7 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
 
-  const user = getUserById(auth.context.userId);
+  const user = await getUserById(auth.context.userId);
   if (!user) {
     return NextResponse.json({ error: "User not found." }, { status: 404 });
   }
