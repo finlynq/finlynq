@@ -17,6 +17,9 @@ RUN npm ci
 COPY . .
 
 # Build the Next.js app (standalone output for minimal image)
+# Set NEXT_BASE_PATH=/app for managed deployment behind Nginx
+ARG NEXT_BASE_PATH=""
+ENV NEXT_BASE_PATH=$NEXT_BASE_PATH
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
@@ -25,8 +28,10 @@ FROM node:22-alpine AS runner
 RUN apk add --no-cache curl
 WORKDIR /app
 
+ARG NEXT_BASE_PATH=""
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_BASE_PATH=$NEXT_BASE_PATH
 
 # Create non-root user
 RUN addgroup --system --gid 1001 nodejs
@@ -51,7 +56,7 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD curl -f http://localhost:3000/api/healthz || exit 1
+  CMD curl -f http://localhost:3000${NEXT_BASE_PATH:-}/api/healthz || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "server.js"]
