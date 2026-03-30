@@ -40,7 +40,7 @@ export default function LandingPage() {
 
           {/* Cloud / Managed Card */}
           <Link
-            href="/dashboard"
+            href="/app"
             className="group flex items-center gap-4 rounded-xl border border-border bg-card p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent"
           >
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-secondary text-2xl">
