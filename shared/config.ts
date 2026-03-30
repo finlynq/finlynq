@@ -13,9 +13,15 @@ const DEFAULT_CONFIG: PfConfig = {
   salt: "",
 };
 
+function getDataDir(): string {
+  // PF_DATA_DIR overrides cwd — needed because Next.js standalone mode
+  // calls process.chdir() to .next/standalone/, moving cwd away from the
+  // project root where user data files live.
+  return process.env.PF_DATA_DIR || process.cwd();
+}
+
 function getConfigPath(): string {
-  // Config lives next to the app root
-  return path.join(process.cwd(), "pf-config.json");
+  return path.join(getDataDir(), "pf-config.json");
 }
 
 export function configExists(): boolean {
@@ -40,5 +46,5 @@ export function resolveDbPath(config: PfConfig): string {
   if (path.isAbsolute(config.dbPath)) {
     return config.dbPath;
   }
-  return path.join(process.cwd(), config.dbPath);
+  return path.join(getDataDir(), config.dbPath);
 }

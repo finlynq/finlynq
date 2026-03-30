@@ -25,7 +25,7 @@ RUN npm run build
 
 # ── Stage 3: Production image ─────────────────────────────────────────────────
 FROM node:22-alpine AS runner
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl netcat-openbsd
 WORKDIR /app
 
 ARG NEXT_BASE_PATH=""
