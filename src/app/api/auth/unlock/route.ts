@@ -6,6 +6,7 @@ import {
   closeConnection,
   getConnection,
   getDialect,
+  DEFAULT_USER_ID,
 } from "@/db";
 import { resetDb, SqliteAdapter } from "@/db";
 import { generateSalt, deriveKey } from "@shared/crypto";
@@ -21,6 +22,7 @@ import type BetterSqlite3 from "better-sqlite3";
 import fs from "fs";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { createSessionToken, verifySessionToken, AUTH_COOKIE } from "@/lib/auth";
 
 const unlockSchema = z.discriminatedUnion("action", [
   z.object({
@@ -55,7 +57,20 @@ const bodyPreprocess = z.object({
   action: val.action || "unlock",
 }));
 
-export async function GET() {
+/** Set the pf_session cookie on a response for self-hosted mode. */
+async function setSessionCookie(response: NextResponse): Promise<NextResponse> {
+  const token = await createSessionToken(DEFAULT_USER_ID, "self-hosted", false);
+  response.cookies.set(AUTH_COOKIE, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 60 * 60 * 24, // 24 hours
+    path: "/",
+  });
+  return response;
+}
+
+export async function GET(request: NextRequest) {
   const dialect = getDialect();
 
   // In managed mode, passphrase unlock is not applicable
@@ -81,8 +96,19 @@ export async function GET() {
     needsSetup = true;
   }
 
+  // DB may be globally unlocked, but this client is only "unlocked"
+  // if they have a valid session cookie.
+  let clientUnlocked = false;
+  if (isUnlocked()) {
+    const token = request.cookies.get(AUTH_COOKIE)?.value;
+    if (token) {
+      const payload = await verifySessionToken(token);
+      clientUnlocked = payload !== null && payload.sub === DEFAULT_USER_ID;
+    }
+  }
+
   return NextResponse.json({
-    unlocked: isUnlocked(),
+    unlocked: clientUnlocked,
     needsSetup,
     mode: config.mode,
     authMethod: "passphrase",
@@ -149,19 +175,29 @@ export async function POST(request: NextRequest) {
   }
 }
 
-function handleUnlock(passphrase: string) {
+async function handleUnlock(passphrase: string) {
   resetDb();
   initializeConnection(passphrase);
-  return NextResponse.json({ success: true });
+  const response = NextResponse.json({ success: true });
+  return setSessionCookie(response);
 }
 
 function handleLock() {
   resetDb();
   closeConnection();
-  return NextResponse.json({ success: true });
+  const response = NextResponse.json({ success: true });
+  // Clear session cookie on lock
+  response.cookies.set(AUTH_COOKIE, "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 0,
+    path: "/",
+  });
+  return response;
 }
 
-function handleSetup(
+async function handleSetup(
   passphrase: string,
   dbPath?: string,
   mode?: "local" | "cloud"
@@ -210,10 +246,11 @@ function handleSetup(
   const adapter = new SqliteAdapter();
   adapter.migrate();
 
-  return NextResponse.json({ success: true });
+  const response = NextResponse.json({ success: true });
+  return setSessionCookie(response);
 }
 
-function handleRekey(currentPassphrase: string, newPassphrase: string) {
+async function handleRekey(currentPassphrase: string, newPassphrase: string) {
   if (!isUnlocked()) {
     resetDb();
     initializeConnection(currentPassphrase);
@@ -235,5 +272,6 @@ function handleRekey(currentPassphrase: string, newPassphrase: string) {
   closeConnection();
   initializeConnection(newPassphrase);
 
-  return NextResponse.json({ success: true });
+  const response = NextResponse.json({ success: true });
+  return setSessionCookie(response);
 }

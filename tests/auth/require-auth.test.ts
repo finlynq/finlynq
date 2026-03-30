@@ -15,7 +15,7 @@ vi.mock("@/lib/api-auth", () => ({
   validateApiKey: vi.fn(() => null), // valid by default
 }));
 
-// Mock JWT verification for account strategy
+// Mock JWT verification for account strategy and passphrase session cookie
 vi.mock("@/lib/auth/jwt", () => ({
   verifySessionToken: vi.fn(async () => null),
   createSessionToken: vi.fn(async () => "mock-token"),
@@ -30,12 +30,16 @@ function makeRequest(
   cookies: Record<string, string> = {}
 ): NextRequest {
   const url = "http://localhost:3000/api/test";
-  const request = new NextRequest(url, {
-    headers: new Headers(headers),
-  });
-  // NextRequest cookies can't easily be set after construction in test,
-  // but headers cover our main test scenarios
-  return request;
+  const allHeaders = new Headers(headers);
+  if (Object.keys(cookies).length > 0) {
+    allHeaders.set(
+      "cookie",
+      Object.entries(cookies)
+        .map(([k, v]) => `${k}=${v}`)
+        .join("; ")
+    );
+  }
+  return new NextRequest(url, { headers: allHeaders });
 }
 
 describe("requireAuth", () => {
@@ -46,8 +50,15 @@ describe("requireAuth", () => {
   });
 
   describe("SQLite (self-hosted) mode", () => {
-    it("uses passphrase strategy and succeeds when unlocked", async () => {
-      const result = await requireAuth(makeRequest());
+    it("uses passphrase strategy and succeeds when unlocked with valid session", async () => {
+      vi.mocked(verifySessionToken).mockResolvedValue({
+        sub: "default",
+        email: "self-hosted",
+        mfa: false,
+        iss: "pf-auth",
+        aud: "pf-app",
+      });
+      const result = await requireAuth(makeRequest({}, { pf_session: "valid-token" }));
       expect(result.authenticated).toBe(true);
       if (result.authenticated) {
         expect(result.context.method).toBe("passphrase");
@@ -61,6 +72,14 @@ describe("requireAuth", () => {
       expect(result.authenticated).toBe(false);
       if (!result.authenticated) {
         expect(result.response.status).toBe(423);
+      }
+    });
+
+    it("returns 401 when unlocked but no session cookie", async () => {
+      const result = await requireAuth(makeRequest());
+      expect(result.authenticated).toBe(false);
+      if (!result.authenticated) {
+        expect(result.response.status).toBe(401);
       }
     });
   });
