@@ -30,6 +30,7 @@ import {
   MoreHorizontal,
   ShieldCheck,
   LogOut,
+  Home,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -209,6 +210,18 @@ export function Nav() {
       {/* Bottom section */}
       <div className="px-2 pb-3 pt-2 border-t border-sidebar-border/50 space-y-0.5">
         {toolLinks.map((item) => renderLink(item, !collapsed))}
+        <a
+          href="/"
+          title={collapsed ? "Back to Home" : undefined}
+          className={cn(
+            "group/link relative flex items-center gap-3 rounded-lg text-[13px] font-medium transition-all duration-200 w-full",
+            collapsed ? "px-0 py-2 justify-center" : "px-3 py-2",
+            "text-sidebar-foreground/50 hover:bg-white/[0.05] hover:text-sidebar-foreground"
+          )}
+        >
+          <Home className="h-[18px] w-[18px] shrink-0 text-sidebar-foreground/40 group-hover/link:text-sidebar-foreground/70 group-hover/link:scale-110 transition-all duration-200" />
+          {!collapsed && <span className="truncate">Back to Home</span>}
+        </a>
         <button
           onClick={handleSignOut}
           title={collapsed ? "Sign Out" : undefined}
@@ -284,6 +297,14 @@ export function Nav() {
         {allFlatItems
           .filter((item) => !mobileBarItems.some((m) => m.href === item.href))
           .map((item) => renderLink(item, true))}
+        <a
+          href="/"
+          onClick={() => setMobileOpen(false)}
+          className="group/link relative flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-all duration-200 w-full text-sidebar-foreground/50 hover:bg-white/[0.05] hover:text-sidebar-foreground"
+        >
+          <Home className="h-[18px] w-[18px] shrink-0 text-sidebar-foreground/40 group-hover/link:text-sidebar-foreground/70 transition-all duration-200" />
+          <span className="truncate">Back to Home</span>
+        </a>
         <button
           onClick={() => { setMobileOpen(false); handleSignOut(); }}
           className="group/link relative flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-all duration-200 w-full text-sidebar-foreground/50 hover:bg-white/[0.05] hover:text-sidebar-foreground"

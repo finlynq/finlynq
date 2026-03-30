@@ -21,7 +21,7 @@ export default function LandingPage() {
         <div className="grid gap-4">
           {/* Self-Hosted Card */}
           <Link
-            href="/dashboard"
+            href="/self-hosted"
             className="group flex items-center gap-4 rounded-xl border border-border bg-card p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent"
           >
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-secondary text-2xl">
@@ -39,8 +39,8 @@ export default function LandingPage() {
           </Link>
 
           {/* Cloud / Managed Card */}
-          <a
-            href="https://app.finance.nextsoftwareconsulting.com"
+          <Link
+            href="/app"
             className="group flex items-center gap-4 rounded-xl border border-border bg-card p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent"
           >
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-secondary text-2xl">
@@ -55,7 +55,7 @@ export default function LandingPage() {
                 Synced and backed up.
               </p>
             </div>
-          </a>
+          </Link>
         </div>
 
         <p className="mt-8 text-xs text-muted-foreground/60">
