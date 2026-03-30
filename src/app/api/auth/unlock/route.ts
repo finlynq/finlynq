@@ -7,7 +7,7 @@ import {
   getConnection,
   getDialect,
 } from "@/db";
-import { resetDb } from "@/db";
+import { resetDb, SqliteAdapter } from "@/db";
 import { generateSalt, deriveKey } from "@shared/crypto";
 import {
   readConfig,
@@ -171,6 +171,16 @@ function handleSetup(
   const salt = generateSalt();
   const dbState = detectDbState(resolvedPath);
 
+  if (dbState === "encrypted") {
+    return NextResponse.json(
+      {
+        error:
+          "An encrypted database already exists at this path. Use the 'unlock' action with your original passphrase, or delete the database file to start fresh.",
+      },
+      { status: 409 }
+    );
+  }
+
   if (dbState === "unencrypted") {
     migrateToEncrypted(resolvedPath, passphrase, salt);
   } else if (dbState === "missing") {
@@ -195,6 +205,10 @@ function handleSetup(
 
   resetDb();
   initializeConnection(passphrase, resolvedPath, mode || config.mode);
+
+  // Run schema migrations so all tables are available immediately after setup
+  const adapter = new SqliteAdapter();
+  adapter.migrate();
 
   return NextResponse.json({ success: true });
 }

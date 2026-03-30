@@ -14,8 +14,12 @@ const postSchema = z.object({
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const data = getAccounts(auth.context.userId);
-  return NextResponse.json(data);
+  try {
+    const data = getAccounts(auth.context.userId);
+    return NextResponse.json(data);
+  } catch (error: unknown) {
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to load accounts") }, { status: 500 });
+  }
 }
 
 export async function POST(request: NextRequest) {

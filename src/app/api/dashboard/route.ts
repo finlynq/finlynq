@@ -14,42 +14,47 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const displayCurrency = params.get("currency") ?? "CAD";
 
-  const now = new Date();
-  const startDate =
-    params.get("startDate") ??
-    `${now.getFullYear() - 1}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-  const endDate =
-    params.get("endDate") ??
-    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-31`;
+  try {
+    const now = new Date();
+    const startDate =
+      params.get("startDate") ??
+      `${now.getFullYear() - 1}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+    const endDate =
+      params.get("endDate") ??
+      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-31`;
 
-  const rateMap = await getRateMap(displayCurrency);
+    const rateMap = await getRateMap(displayCurrency);
 
-  const balances = getAccountBalances(userId);
-  const convertedBalances = balances.map((b) => ({
-    ...b,
-    convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
-    displayCurrency,
-  }));
+    const balances = getAccountBalances(userId);
+    const convertedBalances = balances.map((b) => ({
+      ...b,
+      convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
+      displayCurrency,
+    }));
 
-  const incomeVsExpenses = getIncomeVsExpenses(userId, startDate, endDate);
-  const spendingByCategory = getSpendingByCategory(userId, startDate, endDate);
-  const netWorthRaw = getNetWorthOverTime(userId);
+    const incomeVsExpenses = getIncomeVsExpenses(userId, startDate, endDate);
+    const spendingByCategory = getSpendingByCategory(userId, startDate, endDate);
+    const netWorthRaw = getNetWorthOverTime(userId);
 
-  // Consolidate net worth across currencies into display currency
-  const netWorthByMonth = new Map<string, number>();
-  for (const row of netWorthRaw) {
-    const converted = convertWithRateMap(row.cumulative, row.currency ?? displayCurrency, rateMap);
-    netWorthByMonth.set(row.month, (netWorthByMonth.get(row.month) ?? 0) + converted);
+    // Consolidate net worth across currencies into display currency
+    const netWorthByMonth = new Map<string, number>();
+    for (const row of netWorthRaw) {
+      const converted = convertWithRateMap(row.cumulative, row.currency ?? displayCurrency, rateMap);
+      netWorthByMonth.set(row.month, (netWorthByMonth.get(row.month) ?? 0) + converted);
+    }
+    const netWorthOverTime = Array.from(netWorthByMonth.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, cumulative]) => ({ month, cumulative: Math.round(cumulative * 100) / 100, currency: displayCurrency }));
+
+    return NextResponse.json({
+      displayCurrency,
+      balances: convertedBalances,
+      incomeVsExpenses,
+      spendingByCategory,
+      netWorthOverTime,
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Failed to load dashboard data";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-  const netWorthOverTime = Array.from(netWorthByMonth.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([month, cumulative]) => ({ month, cumulative: Math.round(cumulative * 100) / 100, currency: displayCurrency }));
-
-  return NextResponse.json({
-    displayCurrency,
-    balances: convertedBalances,
-    incomeVsExpenses,
-    spendingByCategory,
-    netWorthOverTime,
-  });
 }
