@@ -73,10 +73,16 @@ async function setSessionCookie(response: NextResponse): Promise<NextResponse> {
 export async function GET(request: NextRequest) {
   const dialect = getDialect();
 
-  // In managed mode, passphrase unlock is not applicable
+  // In managed mode, check for a valid account session
   if (dialect === "postgres") {
+    let clientUnlocked = false;
+    const token = request.cookies.get(AUTH_COOKIE)?.value;
+    if (token) {
+      const payload = await verifySessionToken(token);
+      clientUnlocked = payload !== null;
+    }
     return NextResponse.json({
-      unlocked: true,
+      unlocked: clientUnlocked,
       needsSetup: false,
       mode: "managed",
       authMethod: "account",
