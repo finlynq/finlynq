@@ -7,10 +7,10 @@ import { safeErrorMessage } from "@/lib/validate";
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const targets = db.select().from(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).all();
+  const targets = await db.select().from(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).all();
 
   // Get portfolio holdings with cached prices
-  const holdings = db
+  const holdings = await db
     .select({
       id: schema.portfolioHoldings.id,
       name: schema.portfolioHoldings.name,
@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
     .all();
 
   // Get latest cached prices
-  const prices = db.select().from(schema.priceCache).where(eq(schema.priceCache.userId, userId)).all();
+  const prices = await db.select().from(schema.priceCache).where(eq(schema.priceCache.userId, userId)).all();
   const priceMap = new Map<string, number>();
   for (const p of prices) {
     const existing = priceMap.get(p.symbol);
@@ -90,9 +90,9 @@ export async function POST(request: NextRequest) {
 
     if (body.action === "set-targets") {
       // Replace all targets for this user
-      db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).run();
+      await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).run();
       for (const t of body.targets) {
-        db.insert(schema.targetAllocations).values({
+        await db.insert(schema.targetAllocations).values({
           userId,
           name: t.name,
           targetPct: t.targetPct,
@@ -102,7 +102,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true });
     }
 
-    const target = db.insert(schema.targetAllocations).values({
+    const target = await db.insert(schema.targetAllocations).values({
       userId,
       name: body.name,
       targetPct: body.targetPct,

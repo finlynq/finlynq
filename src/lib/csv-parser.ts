@@ -268,13 +268,13 @@ export async function importAccounts(csvText: string, userId?: string) {
       continue;
     }
     try {
-      const existing = db
+      const existing = await db
         .select()
         .from(schema.accounts)
         .where(eq(schema.accounts.name, row["Account"]))
         .get();
       if (!existing) {
-        db.insert(schema.accounts)
+        await db.insert(schema.accounts)
           .values({
             type: row["Type"] || "A",
             group: row["Group"] ?? "",
@@ -306,13 +306,13 @@ export async function importCategories(csvText: string, userId?: string) {
       continue;
     }
     try {
-      const existing = db
+      const existing = await db
         .select()
         .from(schema.categories)
         .where(eq(schema.categories.name, row["Category"]))
         .get();
       if (!existing) {
-        db.insert(schema.categories)
+        await db.insert(schema.categories)
           .values({
             type: row["Type"] || "E",
             group: row["Group"] ?? "",
@@ -339,7 +339,7 @@ export async function importPortfolio(csvText: string, userId?: string) {
 
   for (const row of rows) {
     try {
-      const account = db
+      const account = await db
         .select()
         .from(schema.accounts)
         .where(eq(schema.accounts.name, row["Portfolio account name"]))
@@ -349,13 +349,13 @@ export async function importPortfolio(csvText: string, userId?: string) {
         continue;
       }
 
-      const existing = db
+      const existing = await db
         .select()
         .from(schema.portfolioHoldings)
         .where(eq(schema.portfolioHoldings.name, row["Portfolio holding name"]))
         .get();
       if (!existing) {
-        db.insert(schema.portfolioHoldings)
+        await db.insert(schema.portfolioHoldings)
           .values({
             accountId: account.id,
             name: row["Portfolio holding name"],
@@ -392,10 +392,10 @@ export async function importTransactions(csvText: string, userId?: string) {
   let skippedDuplicates = 0;
   const batchSize = 500;
 
-  const allAccounts = db.select().from(schema.accounts).all();
+  const allAccounts = await db.select().from(schema.accounts).all();
   const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
 
-  const allCategories = db.select().from(schema.categories).all();
+  const allCategories = await db.select().from(schema.categories).all();
   const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
 
   for (let i = 0; i < rows.length; i += batchSize) {
@@ -427,12 +427,12 @@ export async function importTransactions(csvText: string, userId?: string) {
 
     if (values.length > 0) {
       const hashes = values.map((v) => v.importHash);
-      const existingHashes = checkDuplicates(hashes);
+      const existingHashes = await checkDuplicates(hashes);
       const newValues = values.filter((v) => !existingHashes.has(v.importHash));
       skippedDuplicates += values.length - newValues.length;
 
       if (newValues.length > 0) {
-        db.insert(schema.transactions).values(newValues).run();
+        await db.insert(schema.transactions).values(newValues).run();
         imported += newValues.length;
       }
     }

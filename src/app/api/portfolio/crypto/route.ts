@@ -11,7 +11,7 @@ export async function GET(request: NextRequest) {
   const { userId } = auth.context;
   try {
     // Get all crypto holdings (isCrypto = 1 or detected by symbol pattern)
-    const allHoldings = db
+    const allHoldings = await db
       .select({
         id: schema.portfolioHoldings.id,
         accountId: schema.portfolioHoldings.accountId,
@@ -97,7 +97,7 @@ export async function POST(request: NextRequest) {
 
     const { name, symbol, accountId, currency, note } = parsed.data;
 
-    const holding = db
+    const holding = await db
       .insert(schema.portfolioHoldings)
       .values({
         name,

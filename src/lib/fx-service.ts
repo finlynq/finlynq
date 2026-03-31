@@ -23,7 +23,7 @@ export async function fetchFxRate(from: string, to: string): Promise<number | nu
 export async function getLatestFxRate(from: string, to: string): Promise<number> {
   if (from === to) return 1;
 
-  const cached = db
+  const cached = await db
     .select()
     .from(schema.fxRates)
     .where(
@@ -38,7 +38,7 @@ export async function getLatestFxRate(from: string, to: string): Promise<number>
 
   const rate = await fetchFxRate(from, to);
   if (rate !== null) {
-    db.insert(schema.fxRates)
+    await db.insert(schema.fxRates)
       .values({ date: today, fromCurrency: from, toCurrency: to, rate })
       .run();
     return rate;
@@ -87,20 +87,20 @@ export async function getConsolidatedBalances(
 /**
  * Discover all distinct currencies used across accounts and transactions.
  */
-export function getActiveCurrencies(): string[] {
-  const accountCurrencies = db
+export async function getActiveCurrencies(): Promise<string[]> {
+  const accountCurrencyRows = await db
     .select({ currency: schema.accounts.currency })
     .from(schema.accounts)
     .groupBy(schema.accounts.currency)
-    .all()
-    .map((r) => r.currency);
+    .all();
+  const accountCurrencies = accountCurrencyRows.map((r) => r.currency);
 
-  const txnCurrencies = db
+  const txnCurrencyRows = await db
     .select({ currency: schema.transactions.currency })
     .from(schema.transactions)
     .groupBy(schema.transactions.currency)
-    .all()
-    .map((r) => r.currency);
+    .all();
+  const txnCurrencies = txnCurrencyRows.map((r) => r.currency);
 
   return [...new Set([...accountCurrencies, ...txnCurrencies])];
 }
@@ -108,8 +108,8 @@ export function getActiveCurrencies(): string[] {
 /**
  * Build all needed currency pairs from active currencies to a target display currency.
  */
-export function getActiveCurrencyPairs(displayCurrency: string): Array<{ from: string; to: string }> {
-  const currencies = getActiveCurrencies();
+export async function getActiveCurrencyPairs(displayCurrency: string): Promise<Array<{ from: string; to: string }>> {
+  const currencies = await getActiveCurrencies();
   const pairs: Array<{ from: string; to: string }> = [];
   for (const c of currencies) {
     if (c !== displayCurrency) {
@@ -125,7 +125,7 @@ export function getActiveCurrencyPairs(displayCurrency: string): Array<{ from: s
 export async function refreshAllRates(
   displayCurrency: string
 ): Promise<Map<string, number>> {
-  const pairs = getActiveCurrencyPairs(displayCurrency);
+  const pairs = await getActiveCurrencyPairs(displayCurrency);
   const rateMap = new Map<string, number>();
   rateMap.set(displayCurrency, 1);
 

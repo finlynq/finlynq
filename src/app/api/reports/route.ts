@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
     ];
     if (isBusiness) conditions.push(eq(schema.transactions.isBusiness, 1));
 
-    const rows = db
+    const rows = await db
       .select({
         categoryType: schema.categories.type,
         categoryGroup: schema.categories.group,
@@ -83,7 +83,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (type === "balance-sheet") {
-    const balances = db
+    const balances = await db
       .select({
         accountType: schema.accounts.type,
         accountGroup: schema.accounts.group,
@@ -130,7 +130,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (type === "tax-summary") {
-    const rows = db
+    const rows = await db
       .select({
         categoryGroup: schema.categories.group,
         categoryName: schema.categories.name,

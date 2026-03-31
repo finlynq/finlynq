@@ -25,16 +25,16 @@ export async function GET(request: NextRequest) {
 
     const rateMap = await getRateMap(displayCurrency);
 
-    const balances = getAccountBalances(userId);
+    const balances = await getAccountBalances(userId);
     const convertedBalances = balances.map((b) => ({
       ...b,
       convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
       displayCurrency,
     }));
 
-    const incomeVsExpenses = getIncomeVsExpenses(userId, startDate, endDate);
-    const spendingByCategory = getSpendingByCategory(userId, startDate, endDate);
-    const netWorthRaw = getNetWorthOverTime(userId);
+    const incomeVsExpenses = await getIncomeVsExpenses(userId, startDate, endDate);
+    const spendingByCategory = await getSpendingByCategory(userId, startDate, endDate);
+    const netWorthRaw = await getNetWorthOverTime(userId);
 
     // Consolidate net worth across currencies into display currency
     const netWorthByMonth = new Map<string, number>();

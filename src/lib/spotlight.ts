@@ -35,13 +35,13 @@ function daysFromNow(dateStr: string): number {
 }
 
 // 1. Overspent budgets
-function getOverspentBudgets(userId: string): SpotlightItem[] {
+async function getOverspentBudgets(userId: string): Promise<SpotlightItem[]> {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
   const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
 
-  const rows = db
+  const rows = await db
     .select({
       budgetId: budgets.id,
       categoryName: categories.name,
@@ -74,13 +74,13 @@ function getOverspentBudgets(userId: string): SpotlightItem[] {
 }
 
 // 2. Upcoming large bills (>$100 in next 7 days)
-function getUpcomingLargeBills(userId: string): SpotlightItem[] {
+async function getUpcomingLargeBills(userId: string): Promise<SpotlightItem[]> {
   const todayStr = today();
   const weekAhead = new Date(new Date(todayStr + "T00:00:00").getTime() + 7 * 86400000)
     .toISOString()
     .split("T")[0];
 
-  const subs = db
+  const subs = await db
     .select()
     .from(subscriptions)
     .where(
@@ -112,8 +112,8 @@ function getUpcomingLargeBills(userId: string): SpotlightItem[] {
 }
 
 // 3. Goal deadlines approaching (<30 days, <80% funded)
-function getGoalDeadlines(userId: string): SpotlightItem[] {
-  const goalRows = db
+async function getGoalDeadlines(userId: string): Promise<SpotlightItem[]> {
+  const goalRows = await db
     .select({
       id: goals.id,
       name: goals.name,
@@ -133,7 +133,7 @@ function getGoalDeadlines(userId: string): SpotlightItem[] {
 
     let current = 0;
     if (goal.accountId) {
-      const bal = db
+      const bal = await db
         .select({ total: sql<number>`COALESCE(SUM(${transactions.amount}), 0)` })
         .from(transactions)
         .where(and(eq(transactions.accountId, goal.accountId), eq(transactions.userId, userId)))
@@ -158,7 +158,7 @@ function getGoalDeadlines(userId: string): SpotlightItem[] {
 }
 
 // 4. Spending anomalies (>30% vs 3-month avg)
-function getSpendingAnomalies(userId: string): SpotlightItem[] {
+async function getSpendingAnomalies(userId: string): Promise<SpotlightItem[]> {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
@@ -169,7 +169,7 @@ function getSpendingAnomalies(userId: string): SpotlightItem[] {
   const prevEndMonth = new Date(y, m - 1, 0);
   const prevEnd = prevEndMonth.toISOString().split("T")[0];
 
-  const currentSpend = db
+  const currentSpend = await db
     .select({
       categoryId: categories.id,
       categoryName: categories.name,
@@ -188,7 +188,7 @@ function getSpendingAnomalies(userId: string): SpotlightItem[] {
     .groupBy(categories.id)
     .all();
 
-  const prevSpend = db
+  const prevSpend = await db
     .select({
       categoryId: categories.id,
       avgTotal: sql<number>`ABS(SUM(${transactions.amount})) / 3.0`,
@@ -229,13 +229,13 @@ function getSpendingAnomalies(userId: string): SpotlightItem[] {
 }
 
 // 5. Uncategorized transactions
-function getUncategorizedTransactions(userId: string): SpotlightItem[] {
+async function getUncategorizedTransactions(userId: string): Promise<SpotlightItem[]> {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
   const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
 
-  const result = db
+  const result = await db
     .select({ count: sql<number>`COUNT(*)` })
     .from(transactions)
     .where(
@@ -265,8 +265,8 @@ function getUncategorizedTransactions(userId: string): SpotlightItem[] {
 }
 
 // 6. Low account balances (<$500)
-function getLowBalances(userId: string): SpotlightItem[] {
-  const rows = db
+async function getLowBalances(userId: string): Promise<SpotlightItem[]> {
+  const rows = await db
     .select({
       accountId: accounts.id,
       accountName: accounts.name,
@@ -300,13 +300,13 @@ function getLowBalances(userId: string): SpotlightItem[] {
 }
 
 // 7. Subscription renewals (next 7 days)
-function getUpcomingSubscriptions(userId: string): SpotlightItem[] {
+async function getUpcomingSubscriptions(userId: string): Promise<SpotlightItem[]> {
   const todayStr = today();
   const weekAhead = new Date(new Date(todayStr + "T00:00:00").getTime() + 7 * 86400000)
     .toISOString()
     .split("T")[0];
 
-  const subs = db
+  const subs = await db
     .select()
     .from(subscriptions)
     .where(
@@ -335,15 +335,33 @@ function getUpcomingSubscriptions(userId: string): SpotlightItem[] {
     });
 }
 
-export function getSpotlightItems(userId: string): SpotlightItem[] {
+export async function getSpotlightItems(userId: string): Promise<SpotlightItem[]> {
+  const [
+    overspent,
+    largeBills,
+    goalDeadlines,
+    anomalies,
+    uncategorized,
+    lowBalances,
+    upcomingSubs,
+  ] = await Promise.all([
+    getOverspentBudgets(userId),
+    getUpcomingLargeBills(userId),
+    getGoalDeadlines(userId),
+    getSpendingAnomalies(userId),
+    getUncategorizedTransactions(userId),
+    getLowBalances(userId),
+    getUpcomingSubscriptions(userId),
+  ]);
+
   const items: SpotlightItem[] = [
-    ...getOverspentBudgets(userId),
-    ...getUpcomingLargeBills(userId),
-    ...getGoalDeadlines(userId),
-    ...getSpendingAnomalies(userId),
-    ...getUncategorizedTransactions(userId),
-    ...getLowBalances(userId),
-    ...getUpcomingSubscriptions(userId),
+    ...overspent,
+    ...largeBills,
+    ...goalDeadlines,
+    ...anomalies,
+    ...uncategorized,
+    ...lowBalances,
+    ...upcomingSubs,
   ];
 
   return items.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);

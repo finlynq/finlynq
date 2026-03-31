@@ -8,7 +8,7 @@ export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
   try {
-    const transactions = db
+    const transactions = await db
       .select()
       .from(schema.transactions)
       .where(and(isNull(schema.transactions.importHash), eq(schema.transactions.userId, userId)))
@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
           tx.amount,
           tx.payee ?? "",
         );
-        db.update(schema.transactions)
+        await db.update(schema.transactions)
           .set({ importHash: hash })
           .where(and(eq(schema.transactions.id, tx.id), eq(schema.transactions.userId, userId)))
           .run();

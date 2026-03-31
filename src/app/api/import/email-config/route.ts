@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
   try {
-    const emailSetting = db
+    const emailSetting = await db
       .select()
       .from(schema.settings)
       .where(and(eq(schema.settings.key, "import_email"), eq(schema.settings.userId, userId)))
@@ -32,13 +32,13 @@ export async function POST(request: NextRequest) {
     const webhookSecret = randomBytes(32).toString("hex");
 
     // Upsert email address
-    db.insert(schema.settings)
+    await db.insert(schema.settings)
       .values({ key: "import_email", value: email, userId })
       .onConflictDoUpdate({ target: schema.settings.key, set: { value: email } })
       .run();
 
     // Upsert webhook secret
-    db.insert(schema.settings)
+    await db.insert(schema.settings)
       .values({ key: "email_webhook_secret", value: webhookSecret, userId })
       .onConflictDoUpdate({ target: schema.settings.key, set: { value: webhookSecret } })
       .run();

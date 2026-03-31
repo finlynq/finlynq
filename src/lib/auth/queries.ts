@@ -15,8 +15,8 @@ import { eq, count } from "drizzle-orm";
 import crypto from "crypto";
 
 /** Returns the correct schema tables for the active dialect */
-function getSchema() {
-  return getDialect() === "postgres" ? pgSchema : sqliteSchema;
+function getSchema(): typeof sqliteSchema {
+  return (getDialect() === "postgres" ? pgSchema : sqliteSchema) as typeof sqliteSchema;
 }
 
 // ─── User queries ────────────────────────────────────────────────────────────

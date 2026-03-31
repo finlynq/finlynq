@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
     const { payee } = parsed.data;
 
     // Get existing transactions with their payee and categoryId
-    const existing = db
+    const existing = await db
       .select({
         payee: transactions.payee,
         categoryId: transactions.categoryId,
@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Get category details
-    const category = db
+    const category = await db
       .select({
         id: categories.id,
         name: categories.name,

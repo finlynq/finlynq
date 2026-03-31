@@ -27,7 +27,7 @@ const createLoanSchema = z.object({
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const loans = db
+  const loans = await db
     .select({
       id: schema.loans.id,
       name: schema.loans.name,
@@ -109,7 +109,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, createLoanSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
-    const loan = db.insert(schema.loans).values({
+    const loan = await db.insert(schema.loans).values({
       userId: auth.context.userId,
       name: d.name,
       type: d.type,
@@ -134,6 +134,6 @@ export async function DELETE(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  db.delete(schema.loans).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).run();
+  await db.delete(schema.loans).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).run();
   return NextResponse.json({ success: true });
 }

@@ -8,7 +8,7 @@ import { validateBody, safeErrorMessage } from "@/lib/validate";
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const data = db
+  const data = await db
     .select({
       id: schema.snapshots.id,
       accountId: schema.snapshots.accountId,
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, snapshotSchema);
     if (parsed.error) return parsed.error;
 
-    const snap = db.insert(schema.snapshots).values({
+    const snap = await db.insert(schema.snapshots).values({
       userId: auth.context.userId,
       accountId: parsed.data.accountId,
       date: parsed.data.date,
@@ -57,6 +57,6 @@ export async function DELETE(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  db.delete(schema.snapshots).where(and(eq(schema.snapshots.id, id), eq(schema.snapshots.userId, auth.context.userId))).run();
+  await db.delete(schema.snapshots).where(and(eq(schema.snapshots.id, id), eq(schema.snapshots.userId, auth.context.userId))).run();
   return NextResponse.json({ success: true });
 }

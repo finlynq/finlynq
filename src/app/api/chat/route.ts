@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
 
-    const response = processMessage(parsed.data.message.trim());
+    const response = await processMessage(parsed.data.message.trim());
     return NextResponse.json(response);
   } catch (error: unknown) {
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to process message") }, { status: 500 });

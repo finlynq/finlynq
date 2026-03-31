@@ -23,7 +23,7 @@ export async function GET(request: NextRequest) {
   const { userId } = auth.context;
 
   // 1. Get all holdings with account info
-  const holdings = db
+  const holdings = await db
     .select({
       id: schema.portfolioHoldings.id,
       accountId: schema.portfolioHoldings.accountId,
@@ -79,7 +79,7 @@ export async function GET(request: NextRequest) {
   }
 
   // 6. Get transaction-based quantities for each holding
-  const txQuantities = db
+  const txQuantities = await db
     .select({
       portfolioHolding: schema.transactions.portfolioHolding,
       totalQty: sql<number>`COALESCE(SUM(${schema.transactions.quantity}), 0)`,

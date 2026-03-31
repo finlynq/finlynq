@@ -48,8 +48,8 @@ function getWeekBounds(endDate?: string): { weekStart: string; weekEnd: string; 
   };
 }
 
-function getSpendingForPeriod(userId: string, start: string, end: string) {
-  const rows = db
+async function getSpendingForPeriod(userId: string, start: string, end: string) {
+  const rows = await db
     .select({
       categoryName: categories.name,
       total: sql<number>`ABS(SUM(${transactions.amount}))`,
@@ -76,8 +76,8 @@ function getSpendingForPeriod(userId: string, start: string, end: string) {
   return { total: Math.round(total * 100) / 100, topCategories };
 }
 
-function getIncomeForPeriod(userId: string, start: string, end: string): number {
-  const result = db
+async function getIncomeForPeriod(userId: string, start: string, end: string): Promise<number> {
+  const result = await db
     .select({ total: sql<number>`COALESCE(SUM(${transactions.amount}), 0)` })
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
@@ -93,19 +93,19 @@ function getIncomeForPeriod(userId: string, start: string, end: string): number 
   return Math.round((result?.total ?? 0) * 100) / 100;
 }
 
-export function generateWeeklyRecap(userId: string, endDate?: string): WeeklyRecap {
+export async function generateWeeklyRecap(userId: string, endDate?: string): Promise<WeeklyRecap> {
   const { weekStart, weekEnd, prevWeekStart, prevWeekEnd } = getWeekBounds(endDate);
 
   // Spending
-  const currentSpending = getSpendingForPeriod(userId, weekStart, weekEnd);
-  const prevSpending = getSpendingForPeriod(userId, prevWeekStart, prevWeekEnd);
+  const currentSpending = await getSpendingForPeriod(userId, weekStart, weekEnd);
+  const prevSpending = await getSpendingForPeriod(userId, prevWeekStart, prevWeekEnd);
   const spendingChange = prevSpending.total > 0
     ? Math.round(((currentSpending.total - prevSpending.total) / prevSpending.total) * 100)
     : 0;
 
   // Income
-  const currentIncome = getIncomeForPeriod(userId, weekStart, weekEnd);
-  const prevIncome = getIncomeForPeriod(userId, prevWeekStart, prevWeekEnd);
+  const currentIncome = await getIncomeForPeriod(userId, weekStart, weekEnd);
+  const prevIncome = await getIncomeForPeriod(userId, prevWeekStart, prevWeekEnd);
 
   // Net cash flow
   const netCashFlow = Math.round((currentIncome - currentSpending.total) * 100) / 100;
@@ -117,7 +117,7 @@ export function generateWeeklyRecap(userId: string, endDate?: string): WeeklyRec
   const monthStart = `${month}-01`;
   const monthEnd = `${month}-${new Date(y, m, 0).getDate()}`;
 
-  const budgetRows = db
+  const budgetRows = await db
     .select({
       category: categories.name,
       budget: budgets.amount,
@@ -140,7 +140,7 @@ export function generateWeeklyRecap(userId: string, endDate?: string): WeeklyRec
     .sort((a, b) => b.pctUsed - a.pctUsed);
 
   // Notable transactions (largest expenses this week)
-  const notable = db
+  const notable = await db
     .select({
       date: transactions.date,
       payee: transactions.payee,
@@ -173,7 +173,7 @@ export function generateWeeklyRecap(userId: string, endDate?: string): WeeklyRec
     .toISOString()
     .split("T")[0];
 
-  const subs = db
+  const subs = await db
     .select()
     .from(schema.subscriptions)
     .where(
@@ -193,7 +193,7 @@ export function generateWeeklyRecap(userId: string, endDate?: string): WeeklyRec
   }));
 
   // Net worth change over the week
-  const nwThisWeek = db
+  const nwThisWeek = await db
     .select({ total: sql<number>`COALESCE(SUM(${transactions.amount}), 0)` })
     .from(transactions)
     .where(and(eq(transactions.userId, userId), gte(transactions.date, weekStart), lte(transactions.date, weekEnd)))

@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
   // Get all holdings with symbols
-  const holdings = db
+  const holdings = await db
     .select({
       id: schema.portfolioHoldings.id,
       name: schema.portfolioHoldings.name,

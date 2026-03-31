@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
   const includeRollover = request.nextUrl.searchParams.get("rollover") === "1";
   const includeSpending = request.nextUrl.searchParams.get("spending") === "1";
 
-  const data = getBudgets(userId, month);
+  const data = await getBudgets(userId, month);
   const rateMap = await getRateMap(displayCurrency);
 
   // Convert budget amounts to display currency
@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
     const [y, m] = month.split("-").map(Number);
     const lastDay = new Date(y, m, 0).getDate();
     const endDate = `${month}-${String(lastDay).padStart(2, "0")}`;
-    const spending = getSpendingByCategoryAndCurrency(userId, startDate, endDate);
+    const spending = await getSpendingByCategoryAndCurrency(userId, startDate, endDate);
 
     // Aggregate spending per category in display currency
     const spentMap = new Map<number, number>();
@@ -57,7 +57,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (includeRollover && month) {
-    const rollovers = getBudgetRollover(userId, month);
+    const rollovers = await getBudgetRollover(userId, month);
     const rolloverMap = new Map(rollovers.map((r) => [r.categoryId, r.rolloverAmount]));
 
     enriched = enriched.map((b) => ({
@@ -75,7 +75,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
-    const budget = upsertBudget(auth.context.userId, parsed.data);
+    const budget = await upsertBudget(auth.context.userId, parsed.data);
     return NextResponse.json(budget, { status: 201 });
   } catch (error: unknown) {
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to save budget") }, { status: 500 });
@@ -86,6 +86,6 @@ export async function DELETE(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  deleteBudget(id, auth.context.userId);
+  await deleteBudget(id, auth.context.userId);
   return NextResponse.json({ success: true });
 }

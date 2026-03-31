@@ -71,24 +71,24 @@ export async function fetchMultipleQuotes(symbols: string[]): Promise<Map<string
 // Cache prices in DB
 export async function cachePrice(symbol: string, price: number, currency: string) {
   const today = new Date().toISOString().split("T")[0];
-  const existing = db
+  const existing = await db
     .select()
     .from(schema.priceCache)
     .where(and(eq(schema.priceCache.symbol, symbol), eq(schema.priceCache.date, today)))
     .get();
 
   if (existing) {
-    db.update(schema.priceCache)
+    await db.update(schema.priceCache)
       .set({ price, currency })
       .where(eq(schema.priceCache.id, existing.id))
       .run();
   } else {
-    db.insert(schema.priceCache).values({ symbol, date: today, price, currency }).run();
+    await db.insert(schema.priceCache).values({ symbol, date: today, price, currency }).run();
   }
 }
 
-export function getCachedPrice(symbol: string): { price: number; currency: string; date: string } | null {
-  const row = db
+export async function getCachedPrice(symbol: string): Promise<{ price: number; currency: string; date: string } | null> {
+  const row = await db
     .select()
     .from(schema.priceCache)
     .where(eq(schema.priceCache.symbol, symbol))

@@ -34,17 +34,17 @@ export interface ImportResult {
 /** Max rows per import to prevent memory issues */
 const MAX_IMPORT_ROWS = 50_000;
 
-function buildLookups() {
-  const allAccounts = db.select().from(schema.accounts).all();
+async function buildLookups() {
+  const allAccounts = await db.select().from(schema.accounts).all();
   const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
   const accountCurrencyMap = new Map(allAccounts.map((a) => [a.name, a.currency]));
-  const allCategories = db.select().from(schema.categories).all();
+  const allCategories = await db.select().from(schema.categories).all();
   const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
   return { accountMap, accountCurrencyMap, categoryMap };
 }
 
-export function previewImport(rows: RawTransaction[]): PreviewResult {
-  const { accountMap } = buildLookups();
+export async function previewImport(rows: RawTransaction[]): Promise<PreviewResult> {
+  const { accountMap } = await buildLookups();
   const valid: PreviewResult["valid"] = [];
   const errors: PreviewResult["errors"] = [];
 
@@ -112,9 +112,9 @@ export function previewImport(rows: RawTransaction[]): PreviewResult {
   const hashOnlyRows = valid.filter((v) => !v.fitId);
 
   // fitId-based dedup
-  const existingFitIds = checkFitIdDuplicates(fitIdRows.map((v) => v.fitId!));
+  const existingFitIds = await checkFitIdDuplicates(fitIdRows.map((v) => v.fitId!));
   // hash-based dedup
-  const existingHashes = checkDuplicates(hashOnlyRows.map((v) => v.hash));
+  const existingHashes = await checkDuplicates(hashOnlyRows.map((v) => v.hash));
 
   const duplicates: PreviewResult["valid"] = [];
   const nonDuplicates: PreviewResult["valid"] = [];
@@ -137,11 +137,11 @@ export function previewImport(rows: RawTransaction[]): PreviewResult {
   return { valid: nonDuplicates, duplicates, errors };
 }
 
-export function executeImport(
+export async function executeImport(
   rows: RawTransaction[],
   forceImportIndices: number[] = [],
   userId?: string,
-): ImportResult {
+): Promise<ImportResult> {
   if (rows.length === 0) {
     return { total: 0, imported: 0, skippedDuplicates: 0 };
   }
@@ -155,7 +155,7 @@ export function executeImport(
     };
   }
 
-  const { accountMap, accountCurrencyMap, categoryMap } = buildLookups();
+  const { accountMap, accountCurrencyMap, categoryMap } = await buildLookups();
   const forceSet = new Set(forceImportIndices);
   const batchSize = 500;
   let imported = 0;
@@ -227,8 +227,8 @@ export function executeImport(
   const fitIdRows = insertable.filter((r) => r.fitId);
   const hashOnlyRows = insertable.filter((r) => !r.fitId);
 
-  const existingFitIds = checkFitIdDuplicates(fitIdRows.map((r) => r.fitId!));
-  const existingHashes = checkDuplicates(hashOnlyRows.map((r) => r.importHash));
+  const existingFitIds = await checkFitIdDuplicates(fitIdRows.map((r) => r.fitId!));
+  const existingHashes = await checkDuplicates(hashOnlyRows.map((r) => r.importHash));
 
   // Filter: keep non-duplicates + force-imported duplicates
   const toInsert = insertable.filter((r) => {
@@ -246,7 +246,7 @@ export function executeImport(
 
   // Auto-categorize uncategorized transactions using rules
   try {
-    const activeRules = db
+    const activeRules = await db
       .select()
       .from(schema.transactionRules)
       .where(eq(schema.transactionRules.isActive, 1))
@@ -279,7 +279,7 @@ export function executeImport(
     const values = batch.map(({ rowIndex: _, ...rest }) => ({ ...rest, ...(userId ? { userId } : {}) }));
     if (values.length > 0) {
       try {
-        db.insert(schema.transactions).values(values).run();
+        await db.insert(schema.transactions).values(values).run();
         imported += values.length;
       } catch (e) {
         importErrors.push(`Batch insert failed at row ${i + 1}: ${e instanceof Error ? e.message : "Unknown error"}`);

@@ -16,7 +16,7 @@ const postSchema = z.object({
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const data = getBudgetTemplates(auth.context.userId);
+  const data = await getBudgetTemplates(auth.context.userId);
   return NextResponse.json(data);
 }
 
@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
     if (parsed.error) return parsed.error;
     const { name, categoryId, amount } = parsed.data;
 
-    const template = createBudgetTemplate(auth.context.userId, {
+    const template = await createBudgetTemplate(auth.context.userId, {
       name,
       categoryId,
       amount,
@@ -43,6 +43,6 @@ export async function DELETE(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  deleteBudgetTemplate(id, auth.context.userId);
+  await deleteBudgetTemplate(id, auth.context.userId);
   return NextResponse.json({ success: true });
 }

@@ -11,13 +11,13 @@ type AgeEntry = { date: string; ageInDays: number };
  * For the last 10 expenses, trace each dollar back to when it was received as income.
  * The "age" is the average number of days between income receipt and spending.
  */
-export function calculateAgeOfMoney(userId: string): {
+export async function calculateAgeOfMoney(userId: string): Promise<{
   ageInDays: number;
   trend: number;
   history: AgeEntry[];
-} {
+}> {
   // Get all income transactions ordered by date ascending (FIFO pool)
-  const incomeRows = db
+  const incomeRows = await db
     .select({
       date: transactions.date,
       amount: transactions.amount,
@@ -29,7 +29,7 @@ export function calculateAgeOfMoney(userId: string): {
     .all();
 
   // Get the last 10 expense transactions ordered by date descending
-  const expenseRows = db
+  const expenseRows = await db
     .select({
       date: transactions.date,
       amount: transactions.amount,
@@ -108,7 +108,7 @@ export function calculateAgeOfMoney(userId: string): {
   );
 
   // Calculate 30-day trend: compare current age to what it was ~30 days ago
-  const olderExpenseRows = db
+  const olderExpenseRows = await db
     .select({
       date: transactions.date,
       amount: transactions.amount,

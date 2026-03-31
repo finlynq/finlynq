@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
 
   try {
     // Ensure categories exist
-    const existingCategories = getCategories(userId);
+    const existingCategories = await getCategories(userId);
     const catMap = new Map<string, number>();
 
     for (const cat of existingCategories) {
@@ -44,13 +44,13 @@ export async function POST(request: NextRequest) {
 
     for (const cat of SAMPLE_CATEGORIES) {
       if (!catMap.has(cat.name)) {
-        const created = createCategory(userId, cat);
+        const created = await createCategory(userId, cat);
         catMap.set(cat.name, created.id);
       }
     }
 
     // Ensure at least one account exists
-    const existingAccounts = getAccounts(userId);
+    const existingAccounts = await getAccounts(userId);
     let checkingId: number;
     let creditCardId: number | null = null;
 
@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
     if (checking) {
       checkingId = checking.id;
     } else {
-      const created = createAccount(userId, { type: "A", group: "Checking", name: "Checking Account", currency: "CAD" });
+      const created = await createAccount(userId, { type: "A", group: "Checking", name: "Checking Account", currency: "CAD" });
       checkingId = created.id;
     }
 
@@ -185,7 +185,7 @@ export async function POST(request: NextRequest) {
 
     // Bulk insert transactions
     if (sampleTransactions.length > 0) {
-      db.insert(schema.transactions).values(sampleTransactions).run();
+      await db.insert(schema.transactions).values(sampleTransactions).run();
     }
 
     return NextResponse.json({ success: true, transactionsCreated: sampleTransactions.length });

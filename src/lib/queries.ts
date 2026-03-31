@@ -1,57 +1,65 @@
-import { db, schema } from "@/db";
+import { db, schema, getDialect } from "@/db";
 import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 
 const { accounts, categories, transactions, portfolioHoldings, budgets, budgetTemplates } = schema;
 
+/** Dialect-safe month extraction: strftime for SQLite, to_char for PG */
+function monthExpr(dateCol: typeof transactions.date | typeof transactions.date): SQL<string> {
+  return getDialect() === "postgres"
+    ? sql<string>`to_char(${dateCol}::date, 'YYYY-MM')`
+    : sql<string>`strftime('%Y-%m', ${dateCol})`;
+}
+
 // Accounts
-export function getAccounts(userId: string) {
+export async function getAccounts(userId: string) {
   return db.select().from(accounts).where(eq(accounts.userId, userId)).orderBy(accounts.type, accounts.group, accounts.name).all();
 }
 
-export function getAccountById(id: number, userId: string) {
+export async function getAccountById(id: number, userId: string) {
   return db.select().from(accounts).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).get();
 }
 
-export function createAccount(userId: string, data: { type: string; group: string; name: string; currency: string; note?: string }) {
+export async function createAccount(userId: string, data: { type: string; group: string; name: string; currency: string; note?: string }) {
   return db.insert(accounts).values({ ...data, userId }).returning().get();
 }
 
-export function updateAccount(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; currency: string; note: string }>) {
+export async function updateAccount(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; currency: string; note: string }>) {
   return db.update(accounts).set(data).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).returning().get();
 }
 
-export function deleteAccount(id: number, userId: string) {
+export async function deleteAccount(id: number, userId: string) {
   return db.delete(accounts).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).run();
 }
 
 // Categories
-export function getCategories(userId: string) {
+export async function getCategories(userId: string) {
   return db.select().from(categories).where(eq(categories.userId, userId)).orderBy(categories.type, categories.group, categories.name).all();
 }
 
-export function getCategoryById(id: number, userId: string) {
+export async function getCategoryById(id: number, userId: string) {
   return db.select().from(categories).where(and(eq(categories.id, id), eq(categories.userId, userId))).get();
 }
 
-export function createCategory(userId: string, data: { type: string; group: string; name: string; note?: string }) {
+export async function createCategory(userId: string, data: { type: string; group: string; name: string; note?: string }) {
   return db.insert(categories).values({ ...data, userId }).returning().get();
 }
 
-export function updateCategory(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; note: string }>) {
+export async function updateCategory(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; note: string }>) {
   return db.update(categories).set(data).where(and(eq(categories.id, id), eq(categories.userId, userId))).returning().get();
 }
 
-export function deleteCategory(id: number, userId: string) {
+export async function deleteCategory(id: number, userId: string) {
   return db.delete(categories).where(and(eq(categories.id, id), eq(categories.userId, userId))).run();
 }
 
-export function getTransactionCountByCategory(categoryId: number, userId: string): number {
-  const result = db.select({ count: sql<number>`count(*)` }).from(transactions).where(and(eq(transactions.categoryId, categoryId), eq(transactions.userId, userId))).get();
+export async function getTransactionCountByCategory(categoryId: number, userId: string): Promise<number> {
+  const result = await db.select({ count: sql<number>`count(*)` }).from(transactions).where(and(eq(transactions.categoryId, categoryId), eq(transactions.userId, userId))).get();
   return result?.count ?? 0;
 }
 
 // Transactions
-export function getTransactions(userId: string, filters?: {
+export async function getTransactions(userId: string, filters?: {
   startDate?: string;
   endDate?: string;
   accountId?: number;
@@ -99,13 +107,13 @@ export function getTransactions(userId: string, filters?: {
   return query.all();
 }
 
-export function getTransactionCount(userId: string, filters?: {
+export async function getTransactionCount(userId: string, filters?: {
   startDate?: string;
   endDate?: string;
   accountId?: number;
   categoryId?: number;
   search?: string;
-}) {
+}): Promise<number> {
   const conditions = [eq(transactions.userId, userId)];
   if (filters?.startDate) conditions.push(gte(transactions.date, filters.startDate));
   if (filters?.endDate) conditions.push(lte(transactions.date, filters.endDate));
@@ -117,7 +125,7 @@ export function getTransactionCount(userId: string, filters?: {
     );
   }
 
-  const result = db
+  const result = await db
     .select({ count: sql<number>`count(*)` })
     .from(transactions)
     .where(and(...conditions))
@@ -126,7 +134,7 @@ export function getTransactionCount(userId: string, filters?: {
   return result?.count ?? 0;
 }
 
-export function createTransaction(userId: string, data: {
+export async function createTransaction(userId: string, data: {
   date: string;
   accountId: number;
   categoryId: number;
@@ -144,7 +152,7 @@ export function createTransaction(userId: string, data: {
   return db.insert(transactions).values({ ...data, userId }).returning().get();
 }
 
-export function updateTransaction(id: number, userId: string, data: Partial<{
+export async function updateTransaction(id: number, userId: string, data: Partial<{
   date: string;
   accountId: number;
   categoryId: number;
@@ -162,12 +170,12 @@ export function updateTransaction(id: number, userId: string, data: Partial<{
   return db.update(transactions).set(data).where(and(eq(transactions.id, id), eq(transactions.userId, userId))).returning().get();
 }
 
-export function deleteTransaction(id: number, userId: string) {
+export async function deleteTransaction(id: number, userId: string) {
   return db.delete(transactions).where(and(eq(transactions.id, id), eq(transactions.userId, userId))).run();
 }
 
 // Portfolio
-export function getPortfolioHoldings(userId: string) {
+export async function getPortfolioHoldings(userId: string) {
   return db
     .select({
       id: portfolioHoldings.id,
@@ -186,7 +194,7 @@ export function getPortfolioHoldings(userId: string) {
 }
 
 // Budgets
-export function getBudgets(userId: string, month?: string) {
+export async function getBudgets(userId: string, month?: string) {
   const conditions = [eq(budgets.userId, userId)];
   if (month) conditions.push(eq(budgets.month, month));
 
@@ -207,8 +215,8 @@ export function getBudgets(userId: string, month?: string) {
     .all();
 }
 
-export function upsertBudget(userId: string, data: { categoryId: number; month: string; amount: number; currency?: string }) {
-  const existing = db
+export async function upsertBudget(userId: string, data: { categoryId: number; month: string; amount: number; currency?: string }) {
+  const existing = await db
     .select()
     .from(budgets)
     .where(and(eq(budgets.categoryId, data.categoryId), eq(budgets.month, data.month), eq(budgets.userId, userId)))
@@ -222,12 +230,12 @@ export function upsertBudget(userId: string, data: { categoryId: number; month: 
   return db.insert(budgets).values({ ...data, userId, currency: data.currency ?? "CAD" }).returning().get();
 }
 
-export function deleteBudget(id: number, userId: string) {
+export async function deleteBudget(id: number, userId: string) {
   return db.delete(budgets).where(and(eq(budgets.id, id), eq(budgets.userId, userId))).run();
 }
 
 // Budget Templates
-export function getBudgetTemplates(userId: string) {
+export async function getBudgetTemplates(userId: string) {
   return db
     .select({
       id: budgetTemplates.id,
@@ -245,7 +253,7 @@ export function getBudgetTemplates(userId: string) {
     .all();
 }
 
-export function createBudgetTemplate(userId: string, data: { name: string; categoryId: number; amount: number }) {
+export async function createBudgetTemplate(userId: string, data: { name: string; categoryId: number; amount: number }) {
   return db
     .insert(budgetTemplates)
     .values({ ...data, userId, createdAt: new Date().toISOString() })
@@ -253,22 +261,22 @@ export function createBudgetTemplate(userId: string, data: { name: string; categ
     .get();
 }
 
-export function deleteBudgetTemplate(id: number, userId: string) {
+export async function deleteBudgetTemplate(id: number, userId: string) {
   return db.delete(budgetTemplates).where(and(eq(budgetTemplates.id, id), eq(budgetTemplates.userId, userId))).run();
 }
 
 // Budget Rollover: get previous month overspend per category
-export function getBudgetRollover(userId: string, currentMonth: string) {
+export async function getBudgetRollover(userId: string, currentMonth: string) {
   const [y, m] = currentMonth.split("-").map(Number);
   const prevDate = new Date(y, m - 2, 1);
   const prevMonth = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, "0")}`;
 
-  const prevBudgets = getBudgets(userId, prevMonth);
+  const prevBudgets = await getBudgets(userId, prevMonth);
   if (prevBudgets.length === 0) return [];
 
   const prevStartDate = `${prevMonth}-01`;
   const prevEndDate = `${prevMonth}-${new Date(prevDate.getFullYear(), prevDate.getMonth() + 1, 0).getDate()}`;
-  const prevSpending = getSpendingByCategory(userId, prevStartDate, prevEndDate);
+  const prevSpending = await getSpendingByCategory(userId, prevStartDate, prevEndDate);
 
   const spendMap = new Map<number, number>();
   prevSpending.forEach((s) => {
@@ -293,7 +301,7 @@ export function getBudgetRollover(userId: string, currentMonth: string) {
 }
 
 // Dashboard aggregations
-export function getAccountBalances(userId: string) {
+export async function getAccountBalances(userId: string) {
   return db
     .select({
       accountId: accounts.id,
@@ -311,10 +319,10 @@ export function getAccountBalances(userId: string) {
     .all();
 }
 
-export function getMonthlySpending(userId: string, startDate: string, endDate: string) {
+export async function getMonthlySpending(userId: string, startDate: string, endDate: string) {
   return db
     .select({
-      month: sql<string>`strftime('%Y-%m', ${transactions.date})`,
+      month: monthExpr(transactions.date),
       categoryGroup: categories.group,
       categoryName: categories.name,
       categoryType: categories.type,
@@ -323,12 +331,12 @@ export function getMonthlySpending(userId: string, startDate: string, endDate: s
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(and(eq(transactions.userId, userId), gte(transactions.date, startDate), lte(transactions.date, endDate)))
-    .groupBy(sql`strftime('%Y-%m', ${transactions.date})`, categories.name)
-    .orderBy(sql`strftime('%Y-%m', ${transactions.date})`)
+    .groupBy(monthExpr(transactions.date), categories.name)
+    .orderBy(monthExpr(transactions.date))
     .all();
 }
 
-export function getSpendingByCategory(userId: string, startDate: string, endDate: string) {
+export async function getSpendingByCategory(userId: string, startDate: string, endDate: string) {
   return db
     .select({
       categoryId: categories.id,
@@ -352,7 +360,7 @@ export function getSpendingByCategory(userId: string, startDate: string, endDate
     .all();
 }
 
-export function getSpendingByCategoryAndCurrency(userId: string, startDate: string, endDate: string) {
+export async function getSpendingByCategoryAndCurrency(userId: string, startDate: string, endDate: string) {
   return db
     .select({
       categoryId: categories.id,
@@ -377,10 +385,10 @@ export function getSpendingByCategoryAndCurrency(userId: string, startDate: stri
     .all();
 }
 
-export function getIncomeVsExpenses(userId: string, startDate: string, endDate: string) {
+export async function getIncomeVsExpenses(userId: string, startDate: string, endDate: string) {
   return db
     .select({
-      month: sql<string>`strftime('%Y-%m', ${transactions.date})`,
+      month: monthExpr(transactions.date),
       type: categories.type,
       total: sql<number>`SUM(${transactions.amount})`,
     })
@@ -394,22 +402,22 @@ export function getIncomeVsExpenses(userId: string, startDate: string, endDate: 
         sql`${categories.type} IN ('E', 'I')`
       )
     )
-    .groupBy(sql`strftime('%Y-%m', ${transactions.date})`, categories.type)
-    .orderBy(sql`strftime('%Y-%m', ${transactions.date})`)
+    .groupBy(monthExpr(transactions.date), categories.type)
+    .orderBy(monthExpr(transactions.date))
     .all();
 }
 
-export function getNetWorthOverTime(userId: string) {
+export async function getNetWorthOverTime(userId: string) {
   return db
     .select({
-      month: sql<string>`strftime('%Y-%m', ${transactions.date})`,
+      month: monthExpr(transactions.date),
       currency: accounts.currency,
       cumulative: sql<number>`SUM(${transactions.amount})`,
     })
     .from(transactions)
     .leftJoin(accounts, eq(transactions.accountId, accounts.id))
     .where(eq(transactions.userId, userId))
-    .groupBy(sql`strftime('%Y-%m', ${transactions.date})`, accounts.currency)
-    .orderBy(sql`strftime('%Y-%m', ${transactions.date})`)
+    .groupBy(monthExpr(transactions.date), accounts.currency)
+    .orderBy(monthExpr(transactions.date))
     .all();
 }

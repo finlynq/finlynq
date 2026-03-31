@@ -30,11 +30,11 @@ export async function GET(request: NextRequest) {
   const fmt = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 
-  const incomeExpenses = getIncomeVsExpenses(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`);
-  const balances = getAccountBalances(userId);
-  const netWorthData = getNetWorthOverTime(userId);
-  const budgetsData = getBudgets(userId, currentMonth);
-  const spending = getSpendingByCategory(
+  const incomeExpenses = await getIncomeVsExpenses(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`);
+  const balances = await getAccountBalances(userId);
+  const netWorthData = await getNetWorthOverTime(userId);
+  const budgetsData = await getBudgets(userId, currentMonth);
+  const spending = await getSpendingByCategory(
     userId,
     `${currentMonth}-01`,
     `${currentMonth}-31`
@@ -177,7 +177,7 @@ export async function GET(request: NextRequest) {
   let aomScore = 50;
   let aomDetail = "Insufficient data";
   try {
-    const aom = calculateAgeOfMoney(userId);
+    const aom = await calculateAgeOfMoney(userId);
     if (aom.ageInDays > 0) {
       aomScore = Math.min(100, Math.max(0, (aom.ageInDays / 30) * 100));
       aomDetail = `${aom.ageInDays} days`;

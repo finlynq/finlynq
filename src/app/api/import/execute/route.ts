@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
       forceImportIndices: number[];
     };
 
-    const result = executeImport(rows, forceImportIndices, userId);
+    const result = await executeImport(rows, forceImportIndices, userId);
     return NextResponse.json(result);
   } catch (error: unknown) {
     const message = safeErrorMessage(error, "Import failed");
