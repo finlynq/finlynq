@@ -4,7 +4,7 @@ import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions } from "@/lib/recurring-detector";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
 const createSchema = z.object({
   name: z.string(),
@@ -136,6 +136,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(sub, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/subscriptions", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
@@ -155,6 +156,7 @@ export async function PUT(request: NextRequest) {
       .get();
     return NextResponse.json(sub);
   } catch (error: unknown) {
+    await logApiError("PUT", "/api/subscriptions", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }

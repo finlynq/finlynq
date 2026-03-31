@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { safeErrorMessage } from "@/lib/validate";
+import { safeErrorMessage, logApiError } from "@/lib/validate";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -62,7 +62,7 @@ export async function POST(request: NextRequest) {
         .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
         .leftJoin(schema.transactions, eq(schema.transactions.categoryId, schema.categories.id))
         .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId)))
-        .groupBy(schema.budgets.id)
+        .groupBy(schema.budgets.id, schema.categories.name, schema.budgets.amount)
         .all();
 
       for (const b of budgets) {
@@ -109,6 +109,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(notif, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/notifications", error, userId);
     const message = safeErrorMessage(error, "Notification operation failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }

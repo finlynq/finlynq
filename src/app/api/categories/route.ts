@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCategories, createCategory, updateCategory, deleteCategory, getTransactionCountByCategory } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
 const postSchema = z.object({
   name: z.string(),
@@ -34,6 +34,7 @@ export async function POST(request: NextRequest) {
     const category = await createCategory(auth.context.userId, parsed.data);
     return NextResponse.json(category, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/categories", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create category") }, { status: 500 });
   }
 }
@@ -48,6 +49,7 @@ export async function PUT(request: NextRequest) {
     const category = await updateCategory(id, auth.context.userId, data);
     return NextResponse.json(category);
   } catch (error: unknown) {
+    await logApiError("PUT", "/api/categories", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update category") }, { status: 500 });
   }
 }

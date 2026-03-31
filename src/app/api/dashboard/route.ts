@@ -7,6 +7,7 @@ import {
 } from "@/lib/queries";
 import { getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { logApiError } from "@/lib/validate";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -54,6 +55,7 @@ export async function GET(request: NextRequest) {
       netWorthOverTime,
     });
   } catch (error: unknown) {
+    await logApiError("GET", "/api/dashboard", error, userId);
     const message = error instanceof Error ? error.message : "Failed to load dashboard data";
     return NextResponse.json({ error: message }, { status: 500 });
   }

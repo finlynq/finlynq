@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
       .from(schema.transactions)
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
       .where(and(...conditions))
-      .groupBy(schema.categories.id, schema.transactions.currency)
+      .groupBy(schema.categories.id, schema.categories.type, schema.categories.group, schema.categories.name, schema.transactions.currency)
       .orderBy(schema.categories.type, schema.categories.group)
       .all();
 
@@ -94,7 +94,7 @@ export async function GET(request: NextRequest) {
       .from(schema.accounts)
       .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
       .where(eq(schema.accounts.userId, userId))
-      .groupBy(schema.accounts.id)
+      .groupBy(schema.accounts.id, schema.accounts.type, schema.accounts.group, schema.accounts.name, schema.accounts.currency)
       .orderBy(schema.accounts.type, schema.accounts.group)
       .all();
 
@@ -147,7 +147,7 @@ export async function GET(request: NextRequest) {
           sql`${schema.categories.type} IN ('I', 'E')`
         )
       )
-      .groupBy(schema.categories.id, schema.transactions.currency)
+      .groupBy(schema.categories.id, schema.categories.group, schema.categories.name, schema.transactions.currency)
       .all();
 
     // Aggregate across currencies per category

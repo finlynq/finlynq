@@ -61,6 +61,25 @@ export function safeErrorMessage(error: unknown, fallback: string): string {
 }
 
 /**
+ * Log an API error to the server log file for monitoring.
+ * Call this in catch blocks to ensure errors are tracked.
+ */
+export async function logApiError(
+  method: string,
+  path: string,
+  error: unknown,
+  userId?: string,
+): Promise<void> {
+  try {
+    const { logServerError } = await import("@/lib/server-logger");
+    await logServerError(method, path, 500, error, userId);
+  } catch {
+    // Fallback: at least print to console
+    console.error(`[API Error] ${method} ${path}:`, error);
+  }
+}
+
+/**
  * Wrap a route handler with safe error handling.
  */
 export function safeRoute(fallbackMessage: string, handler: () => NextResponse | Promise<NextResponse>): Promise<NextResponse> {

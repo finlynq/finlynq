@@ -3,7 +3,7 @@ import { db, schema } from "@/db";
 import { eq, and, sql } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
 const postSchema = z.object({
   name: z.string(),
@@ -108,6 +108,7 @@ export async function POST(request: NextRequest) {
     }).returning().get();
     return NextResponse.json(goal, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/goals", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
@@ -122,6 +123,7 @@ export async function PUT(request: NextRequest) {
     const goal = await db.update(schema.goals).set(data).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).returning().get();
     return NextResponse.json(goal);
   } catch (error: unknown) {
+    await logApiError("PUT", "/api/goals", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }

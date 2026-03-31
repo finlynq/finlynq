@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getBudgets, upsertBudget, deleteBudget, getBudgetRollover, getSpendingByCategoryAndCurrency } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { getRateMap, convertWithRateMap } from "@/lib/fx-service";
 
 const postSchema = z.object({
@@ -78,6 +78,7 @@ export async function POST(request: NextRequest) {
     const budget = await upsertBudget(auth.context.userId, parsed.data);
     return NextResponse.json(budget, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/budgets", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to save budget") }, { status: 500 });
   }
 }

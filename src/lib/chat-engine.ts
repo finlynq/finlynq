@@ -95,7 +95,7 @@ const handleNetWorth: IntentHandler = async () => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .groupBy(schema.accounts.id)
+    .groupBy(schema.accounts.id, schema.accounts.name, schema.accounts.type, schema.accounts.group, schema.accounts.currency)
     .orderBy(schema.accounts.type, schema.accounts.group)
     .all();
 
@@ -164,7 +164,7 @@ const handleSpending: IntentHandler = async (msg) => {
         lte(schema.transactions.date, range.end)
       )
     )
-    .groupBy(schema.categories.id)
+    .groupBy(schema.categories.id, schema.categories.name)
     .orderBy(sql`SUM(${schema.transactions.amount}) ASC`)
     .all();
 
@@ -213,7 +213,7 @@ const handleBalance: IntentHandler = async (msg) => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .groupBy(schema.accounts.id)
+    .groupBy(schema.accounts.id, schema.accounts.name, schema.accounts.type, schema.accounts.currency)
     .orderBy(schema.accounts.type, schema.accounts.name)
     .all();
 
@@ -619,7 +619,7 @@ const handleSummary: IntentHandler = async () => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .groupBy(schema.accounts.id)
+    .groupBy(schema.accounts.id, schema.accounts.type)
     .all();
 
   let assets = 0, liabilities = 0;

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
 const postSchema = z.object({
   date: z.string(),
@@ -66,6 +66,7 @@ export async function POST(request: NextRequest) {
     const tx = await createTransaction(auth.context.userId, parsed.data);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/transactions", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create transaction") }, { status: 500 });
   }
 }
@@ -80,6 +81,7 @@ export async function PUT(request: NextRequest) {
     const tx = await updateTransaction(id, auth.context.userId, data);
     return NextResponse.json(tx);
   } catch (error: unknown) {
+    await logApiError("PUT", "/api/transactions", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update transaction") }, { status: 500 });
   }
 }

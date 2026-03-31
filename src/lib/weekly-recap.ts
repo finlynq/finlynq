@@ -64,7 +64,7 @@ async function getSpendingForPeriod(userId: string, start: string, end: string) 
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id)
+    .groupBy(categories.id, categories.name)
     .all();
 
   const total = rows.reduce((s, r) => s + (r.total ?? 0), 0);
@@ -127,7 +127,7 @@ export async function generateWeeklyRecap(userId: string, endDate?: string): Pro
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
     .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
-    .groupBy(budgets.id)
+    .groupBy(budgets.id, categories.name, budgets.amount)
     .all();
 
   const budgetStatus = budgetRows

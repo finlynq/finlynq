@@ -7,7 +7,7 @@ import { z } from "zod";
 import { getDialect } from "@/db";
 import { hashPassword, createSessionToken, AUTH_COOKIE } from "@/lib/auth";
 import { createUser, getUserByEmail } from "@/lib/auth/queries";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sendEmail, emailVerificationEmail, welcomeEmail } from "@/lib/email";
 
@@ -79,6 +79,7 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
+    await logApiError("POST", "/api/auth/register", error);
     return NextResponse.json(
       { error: safeErrorMessage(error, "Registration failed") },
       { status: 500 }

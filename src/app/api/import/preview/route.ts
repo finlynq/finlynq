@@ -5,7 +5,7 @@ import { parseExcelSheets } from "@/lib/excel-parser";
 import { parseOfx } from "@/lib/ofx-parser";
 import { previewImport } from "@/lib/import-pipeline";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { safeErrorMessage } from "@/lib/validate";
+import { safeErrorMessage, logApiError } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -77,6 +77,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ error: "Unsupported file type. Use CSV, Excel, PDF, OFX, or QFX." }, { status: 400 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/import/preview", error, auth.context.userId);
     const message = safeErrorMessage(error, "Preview failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }

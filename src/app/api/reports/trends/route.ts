@@ -106,7 +106,7 @@ export async function GET(request: NextRequest) {
     .from(schema.transactions)
     .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
     .where(and(...conditions))
-    .groupBy(periodCol, groupCol, schema.categories.type)
+    .groupBy(periodCol, groupCol, schema.categories.type, schema.categories.group)
     .orderBy(periodCol, schema.categories.type, groupCol)
     .all();
 

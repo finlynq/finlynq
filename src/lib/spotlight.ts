@@ -52,7 +52,7 @@ async function getOverspentBudgets(userId: string): Promise<SpotlightItem[]> {
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
     .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
-    .groupBy(budgets.id)
+    .groupBy(budgets.id, categories.name, budgets.amount)
     .all();
 
   const items: SpotlightItem[] = [];
@@ -185,7 +185,7 @@ async function getSpendingAnomalies(userId: string): Promise<SpotlightItem[]> {
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id)
+    .groupBy(categories.id, categories.name)
     .all();
 
   const prevSpend = await db
@@ -276,7 +276,7 @@ async function getLowBalances(userId: string): Promise<SpotlightItem[]> {
     .from(accounts)
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
     .where(and(eq(accounts.userId, userId), eq(accounts.type, "A")))
-    .groupBy(accounts.id)
+    .groupBy(accounts.id, accounts.name, accounts.type)
     .all();
 
   const items: SpotlightItem[] = [];

@@ -8,7 +8,7 @@ import {
 } from "@/lib/loan-calculator";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
 const createLoanSchema = z.object({
   name: z.string(),
@@ -126,6 +126,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(loan, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/loans", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }

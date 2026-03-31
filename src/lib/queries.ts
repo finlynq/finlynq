@@ -314,7 +314,7 @@ export async function getAccountBalances(userId: string) {
     .from(accounts)
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
     .where(eq(accounts.userId, userId))
-    .groupBy(accounts.id)
+    .groupBy(accounts.id, accounts.name, accounts.type, accounts.group, accounts.currency)
     .orderBy(accounts.type, accounts.group, accounts.name)
     .all();
 }
@@ -331,7 +331,7 @@ export async function getMonthlySpending(userId: string, startDate: string, endD
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(and(eq(transactions.userId, userId), gte(transactions.date, startDate), lte(transactions.date, endDate)))
-    .groupBy(monthExpr(transactions.date), categories.name)
+    .groupBy(monthExpr(transactions.date), categories.name, categories.group, categories.type)
     .orderBy(monthExpr(transactions.date))
     .all();
 }
@@ -355,7 +355,7 @@ export async function getSpendingByCategory(userId: string, startDate: string, e
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id)
+    .groupBy(categories.id, categories.name, categories.group, categories.type)
     .orderBy(sql`SUM(${transactions.amount})`)
     .all();
 }
@@ -380,7 +380,7 @@ export async function getSpendingByCategoryAndCurrency(userId: string, startDate
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, transactions.currency)
+    .groupBy(categories.id, categories.name, categories.group, categories.type, transactions.currency)
     .orderBy(sql`SUM(${transactions.amount})`)
     .all();
 }

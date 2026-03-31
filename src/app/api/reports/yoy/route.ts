@@ -29,7 +29,7 @@ export async function GET(request: NextRequest) {
           lte(schema.transactions.date, `${year}-12-31`)
         )
       )
-      .groupBy(schema.categories.id)
+      .groupBy(schema.categories.id, schema.categories.name, schema.categories.type, schema.categories.group)
       .all();
   }
 
