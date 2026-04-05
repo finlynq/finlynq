@@ -76,7 +76,8 @@ export async function POST(request: NextRequest) {
         const now = new Date().toISOString();
         await db.update(schema.users)
           .set({
-            stripeCustomerId: customer ?? null,
+            // @ts-expect-error — customer is string|null from Stripe; Drizzle SQLite types are overly strict here
+            stripeCustomerId: customer ?? undefined,
             updatedAt: now,
           })
           .where(eq(schema.users.id, userId))
