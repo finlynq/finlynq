@@ -144,54 +144,83 @@ export default function GoalsPage() {
         </Dialog>
       </div>
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card>
-          <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100">
-              <Target className="h-5 w-5 text-indigo-600" />
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Total Target</p>
-              <p className="text-2xl font-bold">{formatCurrency(totalTarget, "CAD")}</p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100">
-              <TrendingUp className="h-5 w-5 text-emerald-600" />
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Current Progress</p>
-              <p className="text-2xl font-bold text-emerald-600">{formatCurrency(totalCurrent, "CAD")}</p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100">
-              <CheckCircle2 className="h-5 w-5 text-violet-600" />
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Completed</p>
-              <p className="text-2xl font-bold">{completed.length} <span className="text-base font-normal text-muted-foreground">/ {goals.length}</span></p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      {/* Summary cards — only show when there are goals */}
+      {goals.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Card>
+            <CardContent className="flex items-center gap-4 pt-6">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100">
+                <Target className="h-5 w-5 text-indigo-600" />
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Total Target</p>
+                <p className="text-2xl font-bold">{formatCurrency(totalTarget, "CAD")}</p>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="flex items-center gap-4 pt-6">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100">
+                <TrendingUp className="h-5 w-5 text-emerald-600" />
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Current Progress</p>
+                <p className="text-2xl font-bold text-emerald-600">{formatCurrency(totalCurrent, "CAD")}</p>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="flex items-center gap-4 pt-6">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100">
+                <CheckCircle2 className="h-5 w-5 text-violet-600" />
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Completed</p>
+                <p className="text-2xl font-bold">{completed.length} <span className="text-base font-normal text-muted-foreground">/ {goals.length}</span></p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
-      {/* Empty state */}
-      {active.length === 0 && (
-        <Card>
-          <CardContent className="py-12 flex flex-col items-center text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted mb-4">
-              <Target className="h-7 w-7 text-muted-foreground" />
+      {/* Empty state — no goals at all */}
+      {goals.length === 0 && (
+        <Card className="border-dashed">
+          <CardContent className="py-16 flex flex-col items-center text-center">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-100 dark:bg-indigo-950/60 mb-4">
+              <Target className="h-8 w-8 text-indigo-600 dark:text-indigo-400" />
             </div>
-            <h3 className="text-lg font-semibold mb-1">No active goals yet</h3>
-            <p className="text-sm text-muted-foreground max-w-sm">
-              Set a financial goal to start tracking your progress. Whether it&apos;s saving for an emergency fund, paying off debt, or building investments, every journey starts with a goal.
+            <h3 className="text-lg font-semibold mb-2">Set your first financial goal</h3>
+            <p className="text-sm text-muted-foreground max-w-sm mb-6">
+              Goals help you stay focused and measure real progress. Start with an emergency fund, debt payoff target, or a savings milestone.
             </p>
+            <div className="flex flex-wrap gap-2 justify-center">
+              {[
+                { label: "Emergency Fund", type: "emergency_fund" },
+                { label: "Pay off debt", type: "debt_payoff" },
+                { label: "Save for vacation", type: "savings" },
+                { label: "Build investments", type: "investment" },
+              ].map(({ label, type }) => (
+                <button
+                  key={label}
+                  onClick={() => { setForm({ ...form, name: label, type }); setDialogOpen(true); }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-border/60 bg-muted/40 hover:bg-muted transition-colors"
+                >
+                  <Plus className="h-3 w-3" />{label}
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Empty state — has completed goals but no active */}
+      {goals.length > 0 && active.length === 0 && (
+        <Card>
+          <CardContent className="py-10 flex flex-col items-center text-center">
+            <CheckCircle2 className="h-10 w-10 text-emerald-500 mb-3" />
+            <h3 className="text-base font-semibold mb-1">All goals completed!</h3>
+            <p className="text-sm text-muted-foreground">Add a new goal to keep building momentum.</p>
           </CardContent>
         </Card>
       )}

@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { formatCurrency } from "@/lib/currency";
 import { CHART_COLORS } from "@/lib/chart-colors";
+import { useDevMode } from "@/hooks/use-dev-mode";
 import { SankeyChart } from "@/components/sankey-chart";
 import {
   Download,
@@ -169,6 +170,7 @@ export default function ReportsPage() {
 
   // Active tab
   const [activeTab, setActiveTab] = useState("income");
+  const devMode = useDevMode();
 
   // Preset handler
   const handlePreset = useCallback((preset: string) => {
@@ -517,12 +519,16 @@ export default function ReportsPage() {
           <TabsTrigger value="balance">
             <FileText className="h-3.5 w-3.5 mr-1.5" /> Balance Sheet
           </TabsTrigger>
-          <TabsTrigger value="cashflow">
-            <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
-          </TabsTrigger>
-          <TabsTrigger value="yoy">
-            <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
-          </TabsTrigger>
+          {devMode && (
+            <TabsTrigger value="cashflow">
+              <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
+            </TabsTrigger>
+          )}
+          {devMode && (
+            <TabsTrigger value="yoy">
+              <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* ============ Income Statement ============ */}
@@ -804,30 +810,32 @@ export default function ReportsPage() {
           )}
         </TabsContent>
 
-        {/* ============ Cash Flow (Sankey) ============ */}
-        <TabsContent value="cashflow">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600 dark:bg-cyan-950 dark:text-cyan-400">
-                  <Workflow className="h-5 w-5" />
+        {/* ============ Cash Flow (Sankey) — dev only ============ */}
+        {devMode && (
+          <TabsContent value="cashflow">
+            <Card>
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600 dark:bg-cyan-950 dark:text-cyan-400">
+                    <Workflow className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <CardTitle className="text-base">Cash Flow Diagram</CardTitle>
+                    <CardDescription>
+                      How income flows into expense categories ({startDate} to {endDate})
+                    </CardDescription>
+                  </div>
                 </div>
-                <div>
-                  <CardTitle className="text-base">Cash Flow Diagram</CardTitle>
-                  <CardDescription>
-                    How income flows into expense categories ({startDate} to {endDate})
-                  </CardDescription>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <SankeyChart incomeData={sankeyIncome} expenseData={sankeyExpenses} />
-            </CardContent>
-          </Card>
-        </TabsContent>
+              </CardHeader>
+              <CardContent>
+                <SankeyChart incomeData={sankeyIncome} expenseData={sankeyExpenses} />
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
 
-        {/* ============ Year over Year ============ */}
-        <TabsContent value="yoy">
+        {/* ============ Year over Year — dev only ============ */}
+        {devMode && <TabsContent value="yoy">
           <div className="space-y-6">
             <Card className="bg-muted/30 border-dashed">
               <CardContent className="pt-4">
@@ -998,7 +1006,7 @@ export default function ReportsPage() {
               </>
             )}
           </div>
-        </TabsContent>
+        </TabsContent>}
       </Tabs>
     </div>
   );

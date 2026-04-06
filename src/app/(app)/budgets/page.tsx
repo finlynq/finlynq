@@ -277,31 +277,39 @@ export default function BudgetsPage() {
     <div className="space-y-6">
       <OnboardingTips page="budgets" />
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Budgets</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Set spending limits and track how you&apos;re doing each month.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Mode toggle */}
-          <div className="inline-flex items-center rounded-lg bg-muted/50 p-0.5">
+          <div className="inline-flex items-center rounded-lg border bg-background p-0.5 shadow-sm">
             <button
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                mode === "traditional" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-150 flex items-center gap-1.5 ${
+                mode === "traditional"
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
               }`}
               onClick={() => setMode("traditional")}
+              title="Monthly budget limits per category"
             >
-              Traditional
+              <LayoutGrid className="h-3 w-3" />
+              <span className="hidden sm:inline">Traditional</span>
             </button>
             <button
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                mode === "envelope" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-150 flex items-center gap-1.5 ${
+                mode === "envelope"
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
               }`}
               onClick={() => setMode("envelope")}
+              title="Zero-based envelope budgeting"
             >
-              Envelope
+              <Wallet className="h-3 w-3" />
+              <span className="hidden sm:inline">Envelope</span>
             </button>
           </div>
 
@@ -645,10 +653,13 @@ export default function BudgetsPage() {
                         }`}>
                           {Math.round(rawPct)}%
                         </span>
-                        {rollover > 0 && mode === "traditional" && (
-                          <span className="text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-0.5">
-                            <ArrowDownRight className="h-3 w-3" />
-                            -{formatCurrency(rollover, "CAD")}
+                        {rollover > 0 && (
+                          <span
+                            className="text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400 flex items-center gap-0.5"
+                            title={`${formatCurrency(rollover, "CAD")} rolled over from last month`}
+                          >
+                            <Clock className="h-3 w-3" />
+                            {formatCurrency(rollover, "CAD")}
                           </span>
                         )}
                       </div>
