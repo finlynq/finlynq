@@ -189,9 +189,16 @@ export default function GoalsPage() {
               <Target className="h-7 w-7 text-muted-foreground" />
             </div>
             <h3 className="text-lg font-semibold mb-1">No active goals yet</h3>
-            <p className="text-sm text-muted-foreground max-w-sm">
+            <p className="text-sm text-muted-foreground max-w-sm mb-4">
               Set a financial goal to start tracking your progress. Whether it&apos;s saving for an emergency fund, paying off debt, or building investments, every journey starts with a goal.
             </p>
+            <button
+              onClick={() => setDialogOpen(true)}
+              className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+            >
+              <Plus className="h-4 w-4" />
+              Set your first goal
+            </button>
           </CardContent>
         </Card>
       )}

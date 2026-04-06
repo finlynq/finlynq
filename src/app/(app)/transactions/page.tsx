@@ -12,7 +12,7 @@ import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X } from "lucide-react";
 
 type Transaction = {
   id: number;
@@ -347,9 +347,19 @@ export default function TransactionsPage() {
       {/* Filters */}
       <Card className="bg-muted/30 border-dashed">
         <CardContent className="pt-4">
-          <div className="flex items-center gap-2 mb-3">
-            <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-medium text-muted-foreground">Filters</span>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-medium text-muted-foreground">Filters</span>
+            </div>
+            {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search) && (
+              <button
+                onClick={() => { setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "" }); setPage(0); }}
+                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <X className="h-3.5 w-3.5" /> Clear all
+              </button>
+            )}
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <Input type="date" placeholder="Start date" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
@@ -372,7 +382,23 @@ export default function TransactionsPage() {
                 ))}
               </SelectContent>
             </Select>
-            <Input placeholder="Search payee, note, tags..." value={filters.search} onChange={(e) => { setFilters({ ...filters, search: e.target.value }); setPage(0); }} />
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+              <Input
+                placeholder="Search payee, note, tags..."
+                value={filters.search}
+                onChange={(e) => { setFilters({ ...filters, search: e.target.value }); setPage(0); }}
+                className="pl-8"
+              />
+              {filters.search && (
+                <button
+                  onClick={() => { setFilters({ ...filters, search: "" }); setPage(0); }}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 flex items-center justify-center rounded-full hover:bg-muted/60"
+                >
+                  <X className="h-3 w-3 text-muted-foreground" />
+                </button>
+              )}
+            </div>
           </div>
         </CardContent>
       </Card>

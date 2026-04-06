@@ -169,6 +169,7 @@ export default function ReportsPage() {
 
   // Active tab
   const [activeTab, setActiveTab] = useState("income");
+  const [devMode, setDevMode] = useState(false);
 
   // Preset handler
   const handlePreset = useCallback((preset: string) => {
@@ -193,12 +194,23 @@ export default function ReportsPage() {
       .then(setBalanceSheet);
   }, [endDate]);
 
-  // Fetch YoY
+  // Fetch dev mode
   useEffect(() => {
+    fetch("/api/settings/dev-mode").then(r => r.ok ? r.json() : { devMode: false }).then(d => {
+      const dm = d.devMode ?? false;
+      setDevMode(dm);
+      if (!dm && (activeTab === "cashflow" || activeTab === "yoy")) setActiveTab("income");
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fetch YoY (dev mode only)
+  useEffect(() => {
+    if (!devMode) return;
     fetch(`/api/reports/yoy?year1=${yoyYear1}&year2=${yoyYear2}`)
       .then((r) => r.json())
       .then(setYoyData);
-  }, [yoyYear1, yoyYear2]);
+  }, [yoyYear1, yoyYear2, devMode]);
 
   // Sankey data
   const sankeyIncome = useMemo(() => {
@@ -517,12 +529,16 @@ export default function ReportsPage() {
           <TabsTrigger value="balance">
             <FileText className="h-3.5 w-3.5 mr-1.5" /> Balance Sheet
           </TabsTrigger>
-          <TabsTrigger value="cashflow">
-            <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
-          </TabsTrigger>
-          <TabsTrigger value="yoy">
-            <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
-          </TabsTrigger>
+          {devMode && (
+            <TabsTrigger value="cashflow">
+              <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
+            </TabsTrigger>
+          )}
+          {devMode && (
+            <TabsTrigger value="yoy">
+              <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* ============ Income Statement ============ */}

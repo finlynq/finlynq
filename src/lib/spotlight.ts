@@ -103,7 +103,7 @@ function getUpcomingLargeBills(userId: string): SpotlightItem[] {
         severity: "warning",
         title: `${sub.name} due${days <= 1 ? " tomorrow" : ` in ${days} days`}`,
         description: `$${Math.abs(sub.amount).toFixed(2)} ${sub.frequency} payment`,
-        actionUrl: "/subscriptions",
+        actionUrl: "/transactions",
         amount: Math.abs(sub.amount),
       });
     }
@@ -329,7 +329,7 @@ function getUpcomingSubscriptions(userId: string): SpotlightItem[] {
         severity: "info" as SpotlightSeverity,
         title: `${s.name} renewing${days <= 1 ? " tomorrow" : ` in ${days} days`}`,
         description: `$${Math.abs(s.amount).toFixed(2)} ${s.frequency}`,
-        actionUrl: "/subscriptions",
+        actionUrl: "/transactions",
         amount: Math.abs(s.amount),
       };
     });

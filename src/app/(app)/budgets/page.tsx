@@ -277,14 +277,14 @@ export default function BudgetsPage() {
     <div className="space-y-6">
       <OnboardingTips page="budgets" />
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-start gap-3 sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Budgets</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Set spending limits and track how you&apos;re doing each month.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Mode toggle */}
           <div className="inline-flex items-center rounded-lg bg-muted/50 p-0.5">
             <button
@@ -633,10 +633,10 @@ export default function BudgetsPage() {
                     key={b.id}
                     className="rounded-lg px-3 py-3 -mx-3 transition-colors hover:bg-muted/50"
                   >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{b.categoryName}</span>
-                        <span className={`text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full ${
+                    <div className="flex flex-wrap items-center justify-between gap-y-1 mb-1.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-sm font-medium truncate">{b.categoryName}</span>
+                        <span className={`shrink-0 text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full ${
                           over
                             ? "bg-rose-100 text-rose-700"
                             : rawPct >= 75
@@ -646,7 +646,7 @@ export default function BudgetsPage() {
                           {Math.round(rawPct)}%
                         </span>
                         {rollover > 0 && mode === "traditional" && (
-                          <span className="text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-0.5">
+                          <span className="shrink-0 text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-0.5">
                             <ArrowDownRight className="h-3 w-3" />
                             -{formatCurrency(rollover, "CAD")}
                           </span>
@@ -654,17 +654,12 @@ export default function BudgetsPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         {mode === "envelope" ? (
-                          <span className={`text-sm font-mono ${envelopeAvailable < 0 ? "text-rose-600" : ""}`}>
-                            {formatCurrency(envelopeAvailable, "CAD")} available
+                          <span className={`text-sm font-mono tabular-nums ${envelopeAvailable < 0 ? "text-rose-600" : ""}`}>
+                            {formatCurrency(envelopeAvailable, "CAD")} left
                           </span>
                         ) : (
-                          <span className={`text-sm font-mono ${over ? "text-rose-600" : ""}`}>
+                          <span className={`text-sm font-mono tabular-nums ${over ? "text-rose-600" : ""}`}>
                             {formatCurrency(spent, "CAD")} / {formatCurrency(effectiveBudget, "CAD")}
-                            {rollover > 0 && (
-                              <span className="text-xs text-muted-foreground ml-1">
-                                (was {formatCurrency(b.amount, "CAD")})
-                              </span>
-                            )}
                           </span>
                         )}
                         <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => handleDelete(b.id)}>

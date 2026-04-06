@@ -273,6 +273,7 @@ function PortfolioSkeleton() {
 export default function PortfolioPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [devMode, setDevMode] = useState(false);
   const [filter, setFilter] = useState<FilterType>("all");
   const [benchmarks, setBenchmarks] = useState<BenchmarkData[]>([]);
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");
@@ -292,14 +293,20 @@ export default function PortfolioPage() {
       .catch(() => setLoading(false));
   }, []);
 
-  // Fetch benchmarks
+  // Fetch dev mode
   useEffect(() => {
+    fetch("/api/settings/dev-mode").then(r => r.ok ? r.json() : { devMode: false }).then(d => setDevMode(d.devMode ?? false));
+  }, []);
+
+  // Fetch benchmarks (dev mode only)
+  useEffect(() => {
+    if (!devMode) return;
     setBenchmarkLoading(true);
     fetch(`/api/portfolio/benchmarks?period=${benchmarkPeriod}`)
       .then(r => r.json())
       .then(d => { setBenchmarks(d.benchmarks ?? []); setBenchmarkLoading(false); })
       .catch(() => setBenchmarkLoading(false));
-  }, [benchmarkPeriod]);
+  }, [benchmarkPeriod, devMode]);
 
   // Filtered & sorted holdings
   const filteredHoldings = useMemo(() => {
@@ -636,8 +643,8 @@ export default function PortfolioPage() {
         </CardContent>
       </Card>
 
-      {/* ── ETF X-Ray (Combined) ──────────────────────────────── */}
-      {hasEtfData && (
+      {/* ── ETF X-Ray (dev mode only) ─────────────────────────── */}
+      {devMode && hasEtfData && (
         <Card>
           <CardHeader className="pb-2">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1037,8 +1044,8 @@ export default function PortfolioPage() {
         </Card>
       </div>
 
-      {/* ── Performance vs Benchmarks ─────────────────────────── */}
-      <Card>
+      {/* ── Performance vs Benchmarks (dev mode only) ─────────── */}
+      {devMode && <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <div>
@@ -1129,7 +1136,7 @@ export default function PortfolioPage() {
             </div>
           )}
         </CardContent>
-      </Card>
+      </Card>}
 
       {/* ── Holdings by Account (Collapsible) ─────────────────── */}
       <Card>

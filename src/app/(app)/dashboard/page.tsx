@@ -1,22 +1,17 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/currency";
 import { Sparkline } from "@/components/sparkline";
-import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User } from "lucide-react";
+import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User, Upload, FileText, CheckCircle2, AlertCircle, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { AnimatedNumber } from "./_components/animated-number";
 import { StatCard } from "./_components/stat-card";
 import { HealthScoreCard } from "./_components/health-score-card";
 import { ActionCenter } from "./_components/action-center";
 import { WeeklyRecap } from "./_components/weekly-recap";
-import { IncomeExpenseChart } from "./_components/income-expense-chart";
-import { SpendingCategoryChart } from "./_components/spending-category-chart";
-import { NetWorthChart } from "./_components/net-worth-chart";
-import { AvailableToSpend } from "./_components/available-to-spend";
-import { InsightsSection } from "./_components/insights-section";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import type { DashboardData } from "./_components/types";
 
@@ -51,6 +46,164 @@ function DashboardSkeleton() {
         {[1, 2].map((i) => <div key={i} className="h-72 animate-shimmer rounded-2xl" />)}
       </div>
     </div>
+  );
+}
+
+// --- Quick Import widget ---
+type ImportStatus = "idle" | "ready" | "importing" | "success" | "error";
+
+function QuickImport() {
+  const [isDragging, setIsDragging] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [importType, setImportType] = useState("transactions");
+  const [status, setStatus] = useState<ImportStatus>("idle");
+  const [message, setMessage] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const reset = () => {
+    setFile(null);
+    setStatus("idle");
+    setMessage("");
+  };
+
+  const handleFile = (f: File) => {
+    setFile(f);
+    setStatus("ready");
+    setMessage("");
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const f = e.dataTransfer.files[0];
+    if (f) handleFile(f);
+  };
+
+  const handleImport = async () => {
+    if (!file) return;
+    setStatus("importing");
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("type", importType);
+      const res = await fetch("/api/import", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Import failed");
+      const count = data.imported ?? data.count ?? "?";
+      setStatus("success");
+      setMessage(`${count} records imported`);
+    } catch (err) {
+      setStatus("error");
+      setMessage(err instanceof Error ? err.message : "Import failed");
+    }
+  };
+
+  if (status === "success") {
+    return (
+      <Card className="card-hover">
+        <CardContent className="flex flex-col items-center justify-center py-8 text-center gap-3">
+          <div className="h-12 w-12 rounded-full bg-emerald-100 dark:bg-emerald-950/50 flex items-center justify-center">
+            <CheckCircle2 className="h-6 w-6 text-emerald-600" />
+          </div>
+          <div>
+            <p className="font-semibold text-sm">Import complete</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{message}</p>
+          </div>
+          <button onClick={reset} className="text-xs text-indigo-600 hover:underline">Import another file</button>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="card-hover">
+      <CardContent className="pt-4 pb-4 px-5">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Upload className="h-4 w-4 text-indigo-500" />
+            <span className="text-sm font-semibold">Quick Import</span>
+          </div>
+          <Link href="/import" className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+            Full import →
+          </Link>
+        </div>
+
+        {/* Drop zone */}
+        <div
+          className={`relative rounded-xl border-2 border-dashed transition-all duration-200 cursor-pointer
+            ${isDragging
+              ? "border-indigo-400 bg-indigo-50/60 dark:bg-indigo-950/30"
+              : file
+                ? "border-indigo-300 bg-indigo-50/30 dark:bg-indigo-950/10"
+                : "border-border/50 hover:border-indigo-300 hover:bg-muted/30"
+            }`}
+          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+          onClick={() => !file && fileInputRef.current?.click()}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.ofx,.qfx"
+            className="hidden"
+            onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+          />
+
+          {file ? (
+            <div className="flex items-center gap-3 px-4 py-3">
+              <FileText className="h-5 w-5 text-indigo-500 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate">{file.name}</p>
+                <p className="text-xs text-muted-foreground">{(file.size / 1024).toFixed(1)} KB</p>
+              </div>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); reset(); }}
+                className="h-6 w-6 flex items-center justify-center rounded-full hover:bg-muted/60 transition-colors"
+              >
+                <X className="h-3.5 w-3.5 text-muted-foreground" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center py-6 gap-1.5">
+              <Upload className="h-7 w-7 text-muted-foreground/60" />
+              <p className="text-sm text-muted-foreground">Drop CSV or OFX file here</p>
+              <p className="text-xs text-muted-foreground/70">or click to browse</p>
+            </div>
+          )}
+        </div>
+
+        {/* Type selector + import button */}
+        {file && (
+          <div className="flex items-center gap-2 mt-3">
+            <select
+              value={importType}
+              onChange={(e) => setImportType(e.target.value)}
+              className="flex-1 text-xs h-8 rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-ring"
+            >
+              <option value="transactions">Transactions</option>
+              <option value="accounts">Accounts</option>
+              <option value="portfolio">Portfolio</option>
+            </select>
+            <button
+              onClick={handleImport}
+              disabled={status === "importing"}
+              className="h-8 px-3 rounded-md bg-indigo-600 text-white text-xs font-medium hover:bg-indigo-700 disabled:opacity-60 transition-colors"
+            >
+              {status === "importing" ? "Importing…" : "Import"}
+            </button>
+          </div>
+        )}
+
+        {status === "error" && (
+          <div className="flex items-center gap-1.5 mt-2 text-xs text-rose-600">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+            {message}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -120,11 +273,6 @@ export default function DashboardPage() {
   const lastMonthIncome = incExpData.length > 0 ? incExpData[incExpData.length - 1].income : 0;
   const lastMonthExpenses = incExpData.length > 0 ? incExpData[incExpData.length - 1].expenses : 0;
   const availableToSpend = lastMonthIncome - lastMonthExpenses;
-
-  // Spending by category
-  const spendingData = (data.spendingByCategory ?? [])
-    .map((c) => ({ name: c.categoryName ?? "Uncategorized", value: Math.abs(c.total) }))
-    .slice(0, 8);
 
   const budgetSparkline = incExpLast6.map((d) => d.income - d.expenses);
 
@@ -280,25 +428,11 @@ export default function DashboardPage() {
       </div>
 
       {/* ============================================
-          ROW 4 — Charts (Income/Expense + Spending)
+          ROW 4 — Quick Import
           ============================================ */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <IncomeExpenseChart data={incExpData} />
-        <SpendingCategoryChart data={spendingData} />
-      </div>
-
-      {/* ============================================
-          ROW 5 — Available to Spend + Net Worth Trend
-          ============================================ */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <AvailableToSpend income={lastMonthIncome} expenses={lastMonthExpenses} />
-        <NetWorthChart data={netWorthData} />
-      </div>
-
-      {/* ============================================
-          ROW 6 — Insights (Alerts, Recurring, Merchants, Trends)
-          ============================================ */}
-      <InsightsSection />
+      <motion.div variants={itemVariants}>
+        <QuickImport />
+      </motion.div>
     </motion.div>
   );
 }
