@@ -167,6 +167,9 @@ export default function ReportsPage() {
   const [expandedIncomeGroups, setExpandedIncomeGroups] = useState<Set<string>>(new Set());
   const [expandedExpenseGroups, setExpandedExpenseGroups] = useState<Set<string>>(new Set());
 
+  // Dev mode
+  const [devMode, setDevMode] = useState(true); // default true to avoid flash
+
   // Active tab
   const [activeTab, setActiveTab] = useState("income");
 
@@ -176,6 +179,21 @@ export default function ReportsPage() {
     const { start, end } = getPresetRange(preset);
     setStartDate(start);
     setEndDate(end);
+  }, []);
+
+  // Fetch dev mode
+  useEffect(() => {
+    fetch("/api/settings/dev-mode")
+      .then((r) => r.json())
+      .then((d) => {
+        const dm = Boolean(d.devMode);
+        setDevMode(dm);
+        if (!dm && (activeTab === "cashflow" || activeTab === "yoy")) {
+          setActiveTab("income");
+        }
+      })
+      .catch(() => setDevMode(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fetch trends data
@@ -517,12 +535,16 @@ export default function ReportsPage() {
           <TabsTrigger value="balance">
             <FileText className="h-3.5 w-3.5 mr-1.5" /> Balance Sheet
           </TabsTrigger>
-          <TabsTrigger value="cashflow">
-            <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
-          </TabsTrigger>
-          <TabsTrigger value="yoy">
-            <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
-          </TabsTrigger>
+          {devMode && (
+            <TabsTrigger value="cashflow">
+              <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
+            </TabsTrigger>
+          )}
+          {devMode && (
+            <TabsTrigger value="yoy">
+              <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* ============ Income Statement ============ */}

@@ -283,6 +283,7 @@ export default function PortfolioPage() {
   const [etfXrayTab, setEtfXrayTab] = useState<EtfXrayTab>("stocks");
   const [stocksPage, setStocksPage] = useState(1);
   const STOCKS_PER_PAGE = 25;
+  const [devMode, setDevMode] = useState(true); // default true to avoid flash
 
   // Fetch portfolio overview
   useEffect(() => {
@@ -290,6 +291,14 @@ export default function PortfolioPage() {
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
+  }, []);
+
+  // Fetch dev mode
+  useEffect(() => {
+    fetch("/api/settings/dev-mode")
+      .then((r) => r.json())
+      .then((d) => setDevMode(Boolean(d.devMode)))
+      .catch(() => setDevMode(false));
   }, []);
 
   // Fetch benchmarks
@@ -636,8 +645,8 @@ export default function PortfolioPage() {
         </CardContent>
       </Card>
 
-      {/* ── ETF X-Ray (Combined) ──────────────────────────────── */}
-      {hasEtfData && (
+      {/* ── ETF X-Ray (Combined) — dev mode only ─────────────── */}
+      {hasEtfData && devMode && (
         <Card>
           <CardHeader className="pb-2">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1037,8 +1046,8 @@ export default function PortfolioPage() {
         </Card>
       </div>
 
-      {/* ── Performance vs Benchmarks ─────────────────────────── */}
-      <Card>
+      {/* ── Performance vs Benchmarks — dev mode only ─────────── */}
+      {devMode && (<Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <div>
@@ -1129,7 +1138,7 @@ export default function PortfolioPage() {
             </div>
           )}
         </CardContent>
-      </Card>
+      </Card>)}
 
       {/* ── Holdings by Account (Collapsible) ─────────────────── */}
       <Card>

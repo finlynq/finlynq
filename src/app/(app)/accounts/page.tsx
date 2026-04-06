@@ -11,7 +11,6 @@ import { ErrorState } from "@/components/error-state";
 import {
   TrendingUp,
   TrendingDown,
-  DollarSign,
   Wallet,
   ArrowUpRight,
   ArrowDownRight,
@@ -132,18 +131,18 @@ export default function AccountsPage() {
               <Link
                 key={a.accountId}
                 href={`/accounts/${a.accountId}`}
-                className="flex items-center justify-between hover:bg-muted/50 transition-colors rounded-lg py-2.5 px-3"
+                className="flex items-center justify-between hover:bg-muted/50 transition-colors rounded-lg py-2.5 px-3 gap-2"
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
                   <div
-                    className={`h-8 w-8 rounded-lg flex items-center justify-center text-xs font-bold ${avatarClasses}`}
+                    className={`h-8 w-8 shrink-0 rounded-lg flex items-center justify-center text-xs font-bold ${avatarClasses}`}
                   >
                     {a.accountName.charAt(0).toUpperCase()}
                   </div>
-                  <span className="font-medium text-sm">{a.accountName}</span>
-                  <Badge variant="outline" className="text-xs">{a.currency}</Badge>
+                  <span className="font-medium text-sm truncate">{a.accountName}</span>
+                  <Badge variant="outline" className="text-xs shrink-0 hidden sm:inline-flex">{a.currency}</Badge>
                 </div>
-                <span className={`font-mono text-sm font-semibold ${a.balance >= 0 ? color : "text-rose-600"}`}>
+                <span className={`font-mono text-sm font-semibold shrink-0 ${a.balance >= 0 ? color : "text-rose-600"}`}>
                   {formatCurrency(a.balance, a.currency)}
                 </span>
               </Link>
@@ -191,59 +190,25 @@ export default function AccountsPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center">
-                <TrendingUp className="h-5 w-5" />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {[
+          { label: "Assets (CAD)", value: totalAssets("CAD"), currency: "CAD", Icon: TrendingUp, color: "emerald" },
+          { label: "Assets (USD)", value: totalAssets("USD"), currency: "USD", Icon: TrendingUp, color: "emerald" },
+          { label: "Liabilities (CAD)", value: totalLiabilities("CAD"), currency: "CAD", Icon: TrendingDown, color: "rose" },
+          { label: "Liabilities (USD)", value: totalLiabilities("USD"), currency: "USD", Icon: TrendingDown, color: "rose" },
+        ].map(({ label, value, currency, Icon, color }) => (
+          <Card key={label}>
+            <CardContent className="pt-4 pb-3">
+              <div className={`flex h-8 w-8 items-center justify-center rounded-lg mb-2 ${color === "emerald" ? "bg-emerald-100 text-emerald-600" : "bg-rose-100 text-rose-600"}`}>
+                <Icon className="h-4 w-4" />
               </div>
-              <CardTitle className="text-sm text-muted-foreground">Assets (CAD)</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xl font-bold text-emerald-600">{formatCurrency(totalAssets("CAD"), "CAD")}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center">
-                <TrendingUp className="h-5 w-5" />
-              </div>
-              <CardTitle className="text-sm text-muted-foreground">Assets (USD)</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xl font-bold text-emerald-600">{formatCurrency(totalAssets("USD"), "USD")}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center">
-                <TrendingDown className="h-5 w-5" />
-              </div>
-              <CardTitle className="text-sm text-muted-foreground">Liabilities (CAD)</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xl font-bold text-rose-600">{formatCurrency(totalLiabilities("CAD"), "CAD")}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center">
-                <TrendingDown className="h-5 w-5" />
-              </div>
-              <CardTitle className="text-sm text-muted-foreground">Liabilities (USD)</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xl font-bold text-rose-600">{formatCurrency(totalLiabilities("USD"), "USD")}</p>
-          </CardContent>
-        </Card>
+              <p className="text-xs text-muted-foreground truncate">{label}</p>
+              <p className={`text-lg font-bold mt-0.5 ${color === "emerald" ? "text-emerald-600" : "text-rose-600"}`}>
+                {formatCurrency(value, currency)}
+              </p>
+            </CardContent>
+          </Card>
+        ))}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">

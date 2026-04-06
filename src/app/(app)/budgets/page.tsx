@@ -277,14 +277,14 @@ export default function BudgetsPage() {
     <div className="space-y-6">
       <OnboardingTips page="budgets" />
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Budgets</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Set spending limits and track how you&apos;re doing each month.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Mode toggle */}
           <div className="inline-flex items-center rounded-lg bg-muted/50 p-0.5">
             <button
@@ -488,7 +488,7 @@ export default function BudgetsPage() {
       </div>
 
       {/* Summary Cards */}
-      <div className={`grid grid-cols-1 gap-4 ${mode === "envelope" ? "md:grid-cols-4" : ageOfMoney ? "md:grid-cols-4" : "md:grid-cols-3"}`}>
+      <div className={`grid grid-cols-2 gap-3 ${mode === "envelope" ? "md:grid-cols-4" : ageOfMoney ? "md:grid-cols-4" : "md:grid-cols-3"}`}>
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">

@@ -12,7 +12,7 @@ import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X } from "lucide-react";
 
 type Transaction = {
   id: number;
@@ -344,6 +344,25 @@ export default function TransactionsPage() {
         </Dialog>
       </div>
 
+      {/* Search bar */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+        <Input
+          className="pl-9 pr-9 h-10"
+          placeholder="Search payee, note, tags..."
+          value={filters.search}
+          onChange={(e) => { setFilters({ ...filters, search: e.target.value }); setPage(0); }}
+        />
+        {filters.search && (
+          <button
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+            onClick={() => { setFilters({ ...filters, search: "" }); setPage(0); }}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+
       {/* Filters */}
       <Card className="bg-muted/30 border-dashed">
         <CardContent className="pt-4">
@@ -351,7 +370,7 @@ export default function TransactionsPage() {
             <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
             <span className="text-sm font-medium text-muted-foreground">Filters</span>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <Input type="date" placeholder="Start date" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
             <Input type="date" placeholder="End date" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
             <Select value={filters.accountId} onValueChange={(v) => { setFilters({ ...filters, accountId: !v || v === "all" ? "" : v }); setPage(0); }}>
@@ -372,7 +391,6 @@ export default function TransactionsPage() {
                 ))}
               </SelectContent>
             </Select>
-            <Input placeholder="Search payee, note, tags..." value={filters.search} onChange={(e) => { setFilters({ ...filters, search: e.target.value }); setPage(0); }} />
           </div>
         </CardContent>
       </Card>
