@@ -22,6 +22,7 @@ import {
   FlameKindling,
   GitBranch,
   MessageSquare,
+  Bot,
   ChevronLeft,
   ChevronDown,
   ChevronRight,
@@ -43,7 +44,8 @@ const navGroups: { label: string; items: NavItem[] }[] = [
     label: "",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, color: "text-blue-400", mode: "prod" },
-      { href: "/chat", label: "AI Chat", icon: MessageSquare, color: "text-indigo-400", mode: "dev" },
+      { href: "/mcp-guide", label: "MCP Guide", icon: Bot, color: "text-indigo-400", mode: "prod" },
+      { href: "/chat", label: "AI Chat", icon: MessageSquare, color: "text-violet-400", mode: "dev" },
     ],
   },
   {

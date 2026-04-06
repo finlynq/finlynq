@@ -1,4 +1,4 @@
-import { PDFParse } from "pdf-parse";
+// pdf-parse is loaded dynamically to avoid canvas/DOMMatrix errors at build time
 import type { RawTransaction } from "./import-pipeline";
 import { normalizeDate, parseAmount } from "./csv-parser";
 
@@ -50,6 +50,8 @@ export async function parsePdfToTransactions(buffer: Buffer): Promise<PdfParseRe
 
   let rawText = "";
   try {
+    // Dynamic import to prevent canvas/DOMMatrix errors during Next.js build
+    const { PDFParse } = await import("pdf-parse");
     const parser: PdfParser = new PDFParse({ verbosity: 0 });
     await parser.load(buffer);
     const info = await parser.getInfo();

@@ -1,48 +1,81 @@
 {
   "name": "pf-finance",
   "version": "2.3.0",
-  "description": "Personal Finance MCP Server — query and manage financial data (accounts, transactions, budgets, investments, goals, subscriptions) via AI assistants.",
+  "description": "Personal Finance MCP Server — query and manage financial data via your AI assistant. Ask about spending, budgets, net worth, goals, and investments using natural language.",
   "transport": {
     "type": "streamable-http",
     "url": "/api/mcp"
   },
   "tools": 27,
-  "capabilities": {
-    "read": [
-      "get_account_balances",
-      "get_transactions",
-      "get_budget_summary",
-      "get_spending_trends",
-      "get_portfolio_summary",
-      "get_net_worth",
-      "get_categories",
-      "get_loans",
-      "get_goals",
-      "get_recurring_transactions",
-      "get_income_statement",
-      "get_transaction_rules",
-      "apply_rules_to_uncategorized",
-      "get_spotlight_items",
-      "get_weekly_recap",
-      "get_financial_health_score",
-      "get_spending_anomalies",
-      "get_subscription_summary",
-      "get_cash_flow_forecast",
-      "search_transactions",
-      "get_net_worth_trend"
-    ],
-    "write": [
-      "add_transaction",
-      "set_budget",
-      "add_goal",
-      "add_snapshot",
-      "categorize_transaction",
-      "add_account"
-    ]
+  "categories": {
+    "accounts": {
+      "description": "Read account balances, account list, and net worth snapshots",
+      "tools": ["get_account_balances", "get_net_worth", "get_net_worth_trend", "add_account", "add_snapshot"]
+    },
+    "transactions": {
+      "description": "Search, list, and categorize transactions",
+      "tools": ["get_transactions", "search_transactions", "add_transaction", "categorize_transaction"]
+    },
+    "budgets": {
+      "description": "View budget usage and set budget limits by category",
+      "tools": ["get_budget_summary", "set_budget"]
+    },
+    "spending": {
+      "description": "Analyze spending trends, anomalies, and category breakdowns",
+      "tools": ["get_spending_trends", "get_spending_anomalies", "get_income_statement", "get_cash_flow_forecast"]
+    },
+    "goals": {
+      "description": "Track savings goals and their progress toward target amounts",
+      "tools": ["get_goals", "add_goal"]
+    },
+    "investments": {
+      "description": "View portfolio holdings, performance, and net worth over time",
+      "tools": ["get_portfolio_summary"]
+    },
+    "categories": {
+      "description": "List transaction categories and manage auto-categorization rules",
+      "tools": ["get_categories", "get_transaction_rules", "apply_rules_to_uncategorized"]
+    },
+    "subscriptions": {
+      "description": "View detected recurring subscriptions and their costs",
+      "tools": ["get_subscription_summary", "get_recurring_transactions"]
+    },
+    "loans": {
+      "description": "View outstanding loans, balances, and payoff schedules",
+      "tools": ["get_loans"]
+    },
+    "insights": {
+      "description": "Dashboard spotlight items, weekly recap, and financial health score",
+      "tools": ["get_spotlight_items", "get_weekly_recap", "get_financial_health_score"]
+    }
   },
+  "example_prompts": [
+    "How much did I spend last month by category?",
+    "Am I on track with my budgets this month?",
+    "What's my current net worth?",
+    "Show me my top 5 spending categories this year.",
+    "Are there any unusual transactions I should review?",
+    "How long until I reach my emergency fund goal?",
+    "What subscriptions am I paying for each month?",
+    "Add a $50 grocery transaction for today."
+  ],
   "security": {
-    "model": "local-only",
-    "description": "Runs on localhost only. No bank integrations. Data stays on the user's machine. Requires app to be unlocked."
+    "model": "local-first",
+    "description": "MCP server runs on the user's machine. All data stays local. No bank credentials. No third-party data sharing. Requires the app to be unlocked before tools are accessible.",
+    "authentication": "App unlock (passphrase for self-hosted, session cookie for cloud)",
+    "scope": "Read all financial data; write new transactions, budgets, goals, accounts, and snapshots"
+  },
+  "setup": {
+    "guide": "/mcp-guide",
+    "claude_desktop": {
+      "transport": "streamable-http",
+      "url": "http://localhost:3000/api/mcp"
+    },
+    "stdio": {
+      "command": "node",
+      "args": ["mcp-server/dist/index.js"],
+      "env": ["PF_PASSPHRASE"]
+    }
   },
   "homepage": "http://localhost:3000",
   "apiDocs": "http://localhost:3000/api-docs"

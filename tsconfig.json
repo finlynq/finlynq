@@ -35,13 +35,16 @@
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
-    "**/*.mts"
+    "**/*.mts",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
     "vitest.config.ts",
     "playwright.config.ts",
     "drizzle.config.ts",
-    "drizzle-pg.config.ts"
+    "drizzle-pg.config.ts",
+    "mobile"
   ]
 }
