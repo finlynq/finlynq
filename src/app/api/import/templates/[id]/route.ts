@@ -29,7 +29,7 @@ export async function PUT(
       isDefault?: boolean;
     };
 
-    const existing = db
+    const existing = await db
       .select()
       .from(schema.importTemplates)
       .where(and(eq(schema.importTemplates.id, templateId), eq(schema.importTemplates.userId, userId)))
@@ -41,13 +41,13 @@ export async function PUT(
 
     // If setting as default, clear others
     if (body.isDefault) {
-      db.update(schema.importTemplates)
+      await db.update(schema.importTemplates)
         .set({ isDefault: 0 })
         .where(eq(schema.importTemplates.userId, userId))
         .run();
     }
 
-    const updated = db
+    const updated = await db
       .update(schema.importTemplates)
       .set({
         ...(body.name !== undefined ? { name: body.name.trim() } : {}),
@@ -82,7 +82,7 @@ export async function DELETE(
   }
 
   try {
-    const existing = db
+    const existing = await db
       .select()
       .from(schema.importTemplates)
       .where(and(eq(schema.importTemplates.id, templateId), eq(schema.importTemplates.userId, userId)))
@@ -92,7 +92,7 @@ export async function DELETE(
       return NextResponse.json({ error: "Template not found" }, { status: 404 });
     }
 
-    db.delete(schema.importTemplates)
+    await db.delete(schema.importTemplates)
       .where(and(eq(schema.importTemplates.id, templateId), eq(schema.importTemplates.userId, userId)))
       .run();
 

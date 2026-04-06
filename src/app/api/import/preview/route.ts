@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
       let suggestedTemplate = null;
 
       // Load all user templates for matching
-      const templateRows = db
+      const templateRows = await db
         .select()
         .from(schema.importTemplates)
         .where(eq(schema.importTemplates.userId, userId))

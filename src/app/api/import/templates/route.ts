@@ -12,7 +12,7 @@ export async function GET(request: NextRequest) {
   const { userId } = auth.context;
 
   try {
-    const rows = db
+    const rows = await db
       .select()
       .from(schema.importTemplates)
       .where(eq(schema.importTemplates.userId, userId))
@@ -60,13 +60,13 @@ export async function POST(request: NextRequest) {
 
     // If this is set as default, clear other defaults for user
     if (body.isDefault) {
-      db.update(schema.importTemplates)
+      await db.update(schema.importTemplates)
         .set({ isDefault: 0 })
         .where(eq(schema.importTemplates.userId, userId))
         .run();
     }
 
-    const result = db
+    const result = await db
       .insert(schema.importTemplates)
       .values({
         userId,

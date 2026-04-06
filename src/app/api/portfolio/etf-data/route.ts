@@ -20,8 +20,12 @@ import {
 
 // GET: list all ETFs in the shared ETF database (no unlock required — public data)
 export async function GET() {
-  const etfs = getEtfInfoAll();
-  return NextResponse.json({ etfs, count: etfs.length });
+  try {
+    const etfs = getEtfInfoAll();
+    return NextResponse.json({ etfs, count: etfs.length });
+  } catch {
+    return NextResponse.json({ etfs: [], count: 0 });
+  }
 }
 
 // POST: seed or refresh ETF breakdown data (requires auth)
