@@ -74,9 +74,10 @@ export async function POST(request: NextRequest) {
 
         // Store Stripe customer ID
         const now = new Date().toISOString();
-        await db.update(schema.users)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (db.update(schema.users) as any)
           .set({
-            stripeCustomerId: customer ?? null,
+            stripeCustomerId: typeof customer === "string" ? customer : undefined,
             updatedAt: now,
           })
           .where(eq(schema.users.id, userId))

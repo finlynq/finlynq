@@ -6,7 +6,6 @@ import {
   csvToRawTransactionsWithMapping,
   extractCSVHeaders,
 } from "@/lib/csv-parser";
-import { parsePdfToTransactions } from "@/lib/pdf-parser";
 import { extractExcelRows, parseExcelSheets } from "@/lib/excel-parser";
 import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
@@ -69,6 +68,7 @@ export async function POST(request: NextRequest) {
         }
       } else if (ext === "pdf") {
         const buffer = Buffer.from(await value.arrayBuffer());
+        const { parsePdfToTransactions } = await import("@/lib/pdf-parser");
         const result = await parsePdfToTransactions(buffer);
         rows = result.rows;
       } else if (ext === "xlsx" || ext === "xls") {
