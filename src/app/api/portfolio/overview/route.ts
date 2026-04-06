@@ -100,7 +100,20 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // 6b. Auto-seed any ETF symbols not yet in the shared ETF database
+  // 6b. Add synthetic entries for investment transactions whose portfolioHolding
+  //     name doesn't match any registered portfolioHoldings entry (quantity != 0)
+  const registeredNames = new Set(holdings.map((h) => h.name));
+  const orphanSymbols: string[] = [];
+  for (const t of txQuantities) {
+    if (t.portfolioHolding && !registeredNames.has(t.portfolioHolding) && t.totalQty !== 0) {
+      orphanSymbols.push(t.portfolioHolding);
+      registeredNames.add(t.portfolioHolding);
+    }
+  }
+  // Fetch prices for orphan symbols separately
+  const orphanQuotes = orphanSymbols.length > 0 ? await fetchMultipleQuotes(orphanSymbols) : new Map();
+
+  // 6c. Auto-seed any ETF symbols not yet in the shared ETF database
   for (const h of nonCryptoWithSymbol) {
     if (h.symbol) autoSeedEtfIfMissing(h.symbol);
   }
@@ -185,6 +198,46 @@ export async function GET(request: NextRequest) {
       marketValueCAD,
     };
   });
+
+  // 7b. Append orphan holdings (transaction-based, not in portfolioHoldings table)
+  for (const sym of orphanSymbols) {
+    const txData = qtyMap.get(sym);
+    if (!txData || txData.qty === 0) continue;
+    const isCrypto = isCryptoSymbol(sym);
+    const q = orphanQuotes.get(sym);
+    const price = q?.price ?? null;
+    const change = q?.change ?? null;
+    const changePct = q?.changePct ? Math.round(q.changePct * 100) / 100 : null;
+    const quoteCurrency = q?.currency ?? "CAD";
+    const isEtf = getEtfRegionBreakdown(sym) !== null;
+    const assetType: AssetType = isCrypto ? "crypto" : isEtf ? "etf" : "stock";
+    let marketValue: number | null = null;
+    let marketValueCAD: number | null = null;
+    if (price !== null && txData.qty !== 0) {
+      marketValue = price * txData.qty;
+      const fxRate = fxRates.get(quoteCurrency) ?? 1;
+      marketValueCAD = convertCurrency(marketValue, fxRate);
+    }
+    enrichedHoldings.push({
+      id: -1,
+      accountId: null,
+      accountName: "Auto-detected",
+      name: sym,
+      symbol: sym,
+      currency: "CAD",
+      assetType,
+      price,
+      change,
+      changePct,
+      quoteCurrency,
+      marketCap: null,
+      image: null,
+      quantity: txData.qty,
+      costBasis: txData.costBasis,
+      marketValue,
+      marketValueCAD,
+    });
+  }
 
   // 8. Compute summaries
   const totalValueCAD = enrichedHoldings.reduce((s, h) => s + (h.marketValueCAD ?? 0), 0);

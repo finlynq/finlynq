@@ -1,10 +1,10 @@
 "use client";
 
 /**
- * SplitDialog — allows splitting a transaction across multiple categories.
+ * SplitDialog — allows splitting a transaction across multiple categories/accounts.
  *
- * Opens a dialog with rows of (category, amount, note). Rows must sum to
- * the transaction total. On confirm, PUTs to /api/transactions/splits.
+ * Opens a dialog with rows of (category, account, amount, description, tags). Rows must sum to
+ * the transaction total. On confirm, POSTs to /api/transactions/splits.
  */
 
 import { useEffect, useState } from "react";
@@ -17,11 +17,15 @@ import { formatCurrency } from "@/lib/currency";
 import { Plus, Trash2, Scissors } from "lucide-react";
 
 type Category = { id: number; name: string; type: string; group: string };
+type Account = { id: number; name: string; currency: string };
 
 type SplitRow = {
   categoryId: string;
+  accountId: string;
   amount: string;
   note: string;
+  description: string;
+  tags: string;
 };
 
 interface Props {
@@ -31,6 +35,7 @@ interface Props {
   totalAmount: number;
   currency: string;
   categories: Category[];
+  accounts: Account[];
   onSaved: () => void;
 }
 
@@ -41,10 +46,11 @@ export function SplitDialog({
   totalAmount,
   currency,
   categories,
+  accounts,
   onSaved,
 }: Props) {
   const [rows, setRows] = useState<SplitRow[]>([
-    { categoryId: "", amount: String(Math.abs(totalAmount)), note: "" },
+    { categoryId: "", accountId: "", amount: String(Math.abs(totalAmount)), note: "", description: "", tags: "" },
   ]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -55,26 +61,29 @@ export function SplitDialog({
     if (!open || !transactionId) return;
     fetch(`/api/transactions/splits?transactionId=${transactionId}`)
       .then((r) => (r.ok ? r.json() : []))
-      .then((data: Array<{ categoryId: number | null; amount: number; note: string }>) => {
+      .then((data: Array<{ categoryId: number | null; accountId: number | null; amount: number; note: string; description: string; tags: string }>) => {
         if (data.length > 0) {
           setHasSplits(true);
           setRows(
             data.map((s) => ({
               categoryId: s.categoryId ? String(s.categoryId) : "",
+              accountId: s.accountId ? String(s.accountId) : "",
               amount: String(s.amount),
               note: s.note ?? "",
+              description: s.description ?? "",
+              tags: s.tags ?? "",
             }))
           );
         } else {
           setHasSplits(false);
-          setRows([{ categoryId: "", amount: String(Math.abs(totalAmount)), note: "" }]);
+          setRows([{ categoryId: "", accountId: "", amount: String(Math.abs(totalAmount)), note: "", description: "", tags: "" }]);
         }
       })
       .catch(() => {});
   }, [open, transactionId, totalAmount]);
 
   function addRow() {
-    setRows([...rows, { categoryId: "", amount: "", note: "" }]);
+    setRows([...rows, { categoryId: "", accountId: "", amount: "", note: "", description: "", tags: "" }]);
   }
 
   function removeRow(index: number) {
@@ -110,8 +119,11 @@ export function SplitDialog({
           transactionId,
           splits: rows.map((r) => ({
             categoryId: r.categoryId ? parseInt(r.categoryId) : null,
+            accountId: r.accountId ? parseInt(r.accountId) : null,
             amount: sign * Math.abs(parseFloat(r.amount) || 0),
             note: r.note,
+            description: r.description,
+            tags: r.tags,
           })),
         }),
       });
@@ -134,7 +146,7 @@ export function SplitDialog({
     try {
       await fetch(`/api/transactions/splits?transactionId=${transactionId}`, { method: "DELETE" });
       setHasSplits(false);
-      setRows([{ categoryId: "", amount: String(Math.abs(totalAmount)), note: "" }]);
+      setRows([{ categoryId: "", accountId: "", amount: String(Math.abs(totalAmount)), note: "", description: "", tags: "" }]);
       onSaved();
       onOpenChange(false);
     } catch {
@@ -146,7 +158,7 @@ export function SplitDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Scissors className="h-4 w-4" />
@@ -162,47 +174,77 @@ export function SplitDialog({
             </span>
           </div>
 
+          {/* Column headers */}
+          <div className="grid grid-cols-[1fr_1fr_80px_1fr_1fr_32px] gap-1.5 text-[10px] text-muted-foreground font-medium uppercase tracking-wide px-0.5">
+            <span>Category</span>
+            <span>Account</span>
+            <span>Amount</span>
+            <span>Note</span>
+            <span>Tags</span>
+            <span />
+          </div>
+
           {/* Split rows */}
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {rows.map((row, i) => (
-              <div key={i} className="flex gap-2 items-start">
-                <div className="flex-1 min-w-0">
-                  <Select
-                    value={row.categoryId}
-                    onValueChange={(v) => updateRow(i, "categoryId", v ?? "")}
-                  >
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue placeholder="Category (optional)" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="">No category</SelectItem>
-                      {categories.map((c) => (
-                        <SelectItem key={c.id} value={String(c.id)}>
-                          {c.group} — {c.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div key={i} className="grid grid-cols-[1fr_1fr_80px_1fr_1fr_32px] gap-1.5 items-center">
+                <Select
+                  value={row.categoryId}
+                  onValueChange={(v) => updateRow(i, "categoryId", v ?? "")}
+                >
+                  <SelectTrigger className="h-7 text-xs">
+                    <SelectValue placeholder="Category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">No category</SelectItem>
+                    {categories.map((c) => (
+                      <SelectItem key={c.id} value={String(c.id)}>
+                        {c.group} — {c.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={row.accountId}
+                  onValueChange={(v) => updateRow(i, "accountId", v ?? "")}
+                >
+                  <SelectTrigger className="h-7 text-xs">
+                    <SelectValue placeholder="Account" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">No account</SelectItem>
+                    {accounts.map((a) => (
+                      <SelectItem key={a.id} value={String(a.id)}>
+                        {a.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <Input
                   type="number"
                   step="0.01"
                   min="0"
                   value={row.amount}
                   onChange={(e) => updateRow(i, "amount", e.target.value)}
-                  className="w-24 h-8 text-xs font-mono"
+                  className="h-7 text-xs font-mono"
                   placeholder="0.00"
                 />
                 <Input
                   value={row.note}
                   onChange={(e) => updateRow(i, "note", e.target.value)}
-                  className="w-28 h-8 text-xs"
+                  className="h-7 text-xs"
                   placeholder="Note"
+                />
+                <Input
+                  value={row.tags}
+                  onChange={(e) => updateRow(i, "tags", e.target.value)}
+                  className="h-7 text-xs"
+                  placeholder="Tags"
                 />
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 shrink-0 text-muted-foreground"
+                  className="h-7 w-7 shrink-0 text-muted-foreground"
                   onClick={() => removeRow(i)}
                   disabled={rows.length <= 1}
                 >
@@ -213,7 +255,7 @@ export function SplitDialog({
           </div>
 
           {/* Add row */}
-          <Button variant="outline" size="sm" onClick={addRow} className="w-full h-8 text-xs">
+          <Button variant="outline" size="sm" onClick={addRow} className="w-full h-7 text-xs">
             <Plus className="h-3.5 w-3.5 mr-1.5" /> Add row
           </Button>
 

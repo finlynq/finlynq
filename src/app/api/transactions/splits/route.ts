@@ -2,6 +2,7 @@
  * /api/transactions/splits — CRUD for transaction splits
  *
  * GET    ?transactionId=N  → list splits for a transaction
+ * GET    (no params)        → list ALL splits for the user (for export)
  * POST                     → create/replace all splits for a transaction
  * DELETE ?transactionId=N  → delete all splits for a transaction
  */
@@ -9,15 +10,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { db } from "@/db";
-import { transactionSplits, transactions } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { db, schema } from "@/db";
+import { eq, and, inArray } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const { transactionSplits, transactions } = schema;
 
 const splitSchema = z.object({
   categoryId: z.number().nullable().optional(),
+  accountId: z.number().nullable().optional(),
   amount: z.number(),
   note: z.string().optional(),
+  description: z.string().optional(),
+  tags: z.string().optional(),
 });
 
 const postSchema = z.object({
@@ -39,7 +44,26 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
 
-  const transactionId = Number(request.nextUrl.searchParams.get("transactionId"));
+  const transactionIdParam = request.nextUrl.searchParams.get("transactionId");
+
+  // Return all splits for the user (used by export)
+  if (!transactionIdParam) {
+    const userTxnIds = await db
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(eq(transactions.userId, auth.context.userId))
+      .all();
+    const ids = userTxnIds.map((t) => t.id);
+    if (ids.length === 0) return NextResponse.json([]);
+    const splits = await db
+      .select()
+      .from(transactionSplits)
+      .where(inArray(transactionSplits.transactionId, ids))
+      .all();
+    return NextResponse.json(splits);
+  }
+
+  const transactionId = Number(transactionIdParam);
   if (!transactionId) {
     return NextResponse.json({ error: "transactionId is required" }, { status: 400 });
   }
@@ -78,8 +102,11 @@ export async function POST(request: NextRequest) {
     const rows = splits.map((s) => ({
       transactionId,
       categoryId: s.categoryId ?? null,
+      accountId: s.accountId ?? null,
       amount: s.amount,
       note: s.note ?? "",
+      description: s.description ?? "",
+      tags: s.tags ?? "",
     }));
 
     const inserted = await db.insert(transactionSplits).values(rows).returning().all();

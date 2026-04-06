@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAccounts, createAccount } from "@/lib/queries";
+import { getAccounts, createAccount, updateAccount } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
@@ -9,6 +9,15 @@ const postSchema = z.object({
   type: z.string(),
   group: z.string(),
   currency: z.string(),
+  note: z.string().optional(),
+});
+
+const putSchema = z.object({
+  id: z.number(),
+  name: z.string().optional(),
+  type: z.string().optional(),
+  group: z.string().optional(),
+  currency: z.string().optional(),
   note: z.string().optional(),
 });
 
@@ -34,5 +43,21 @@ export async function POST(request: NextRequest) {
   } catch (error: unknown) {
     await logApiError("POST", "/api/accounts", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create account") }, { status: 500 });
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  try {
+    const body = await request.json();
+    const parsed = validateBody(body, putSchema);
+    if (parsed.error) return parsed.error;
+    const { id, ...data } = parsed.data;
+    const account = await updateAccount(id, auth.context.userId, data);
+    if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    return NextResponse.json(account);
+  } catch (error: unknown) {
+    await logApiError("PUT", "/api/accounts", error, auth.context.userId);
+    return NextResponse.json({ error: safeErrorMessage(error, "Failed to update account") }, { status: 500 });
   }
 }

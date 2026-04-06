@@ -201,9 +201,10 @@ export default function SettingsPage() {
     let ok = 0;
     let failed = 0;
     try {
-      for (const row of importAllRows) {
-        try {
-          if (importSection === "accounts") {
+      // For transactions: group rows by split_parent_id to handle split imports
+      if (importSection === "accounts") {
+        for (const row of importAllRows) {
+          try {
             await fetch("/api/accounts", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -215,7 +216,12 @@ export default function SettingsPage() {
                 note: row.note || row.Note || "",
               }),
             });
-          } else if (importSection === "categories") {
+            ok++;
+          } catch { failed++; }
+        }
+      } else if (importSection === "categories") {
+        for (const row of importAllRows) {
+          try {
             await fetch("/api/categories", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -226,7 +232,12 @@ export default function SettingsPage() {
                 note: row.note || row.Note || "",
               }),
             });
-          } else if (importSection === "portfolio") {
+            ok++;
+          } catch { failed++; }
+        }
+      } else if (importSection === "portfolio") {
+        for (const row of importAllRows) {
+          try {
             await fetch("/api/portfolio", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -238,12 +249,11 @@ export default function SettingsPage() {
                 note: row.note || row.Note || "",
               }),
             });
-          }
-          ok++;
-        } catch {
-          failed++;
+            ok++;
+          } catch { failed++; }
         }
       }
+
       setImportStatus(`Imported ${ok} rows${failed > 0 ? `, ${failed} failed` : ""}.`);
       setImportPreview([]);
       setImportAllRows([]);
@@ -528,29 +538,66 @@ export default function SettingsPage() {
     ? [{ value: "greater_than", label: "Greater than" }, { value: "less_than", label: "Less than" }, { value: "exact", label: "Exact" }]
     : [{ value: "contains", label: "Contains" }, { value: "exact", label: "Exact match" }, { value: "regex", label: "Regex" }];
 
+  function csvCell(val: unknown): string {
+    const s = String(val ?? "");
+    return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function buildCsv(rows: Record<string, unknown>[]): string {
+    if (rows.length === 0) return "";
+    const headers = Object.keys(rows[0]);
+    return [headers.join(","), ...rows.map((r) => headers.map((h) => csvCell(r[h])).join(","))].join("\n");
+  }
+
   async function handleExport(type: string) {
     setExportStatus(`Exporting ${type}...`);
     try {
-      const res = await fetch(`/api/${type}`);
+      const res = await fetch(type === "transactions" ? `/api/${type}?limit=99999` : `/api/${type}`);
       const data = await res.json();
-      const rows = Array.isArray(data) ? data : data.data ?? [];
+      let rows: Record<string, unknown>[] = Array.isArray(data) ? data : data.data ?? [];
 
       if (rows.length === 0) {
         setExportStatus("No data to export");
         return;
       }
 
-      const headers = Object.keys(rows[0]);
-      const csv = [
-        headers.join(","),
-        ...rows.map((row: Record<string, unknown>) =>
-          headers.map((h) => {
-            const val = String(row[h] ?? "");
-            return val.includes(",") ? `"${val}"` : val;
-          }).join(",")
-        ),
-      ].join("\n");
+      // For transactions: expand split transactions into individual split rows
+      if (type === "transactions") {
+        const splitsRes = await fetch("/api/transactions/splits");
+        const allSplits: Array<{ transactionId: number; categoryId: number | null; accountId: number | null; amount: number; note: string; description: string; tags: string }> = splitsRes.ok ? await splitsRes.json() : [];
+        const splitMap = new Map<number, typeof allSplits>();
+        for (const s of allSplits) {
+          const arr = splitMap.get(s.transactionId) ?? [];
+          arr.push(s);
+          splitMap.set(s.transactionId, arr);
+        }
 
+        const expanded: Record<string, unknown>[] = [];
+        for (const txn of rows) {
+          const txnId = txn.id as number;
+          const splits = splitMap.get(txnId);
+          if (splits && splits.length > 0) {
+            // Emit one row per split; omit the parent's category, use split fields instead
+            for (const s of splits) {
+              expanded.push({
+                ...txn,
+                split_parent_id: txnId,
+                categoryId: s.categoryId ?? "",
+                amount: s.amount,
+                note: s.note || txn.note,
+                split_account_id: s.accountId ?? "",
+                split_description: s.description,
+                split_tags: s.tags,
+              });
+            }
+          } else {
+            expanded.push({ ...txn, split_parent_id: "" });
+          }
+        }
+        rows = expanded;
+      }
+
+      const csv = buildCsv(rows);
       const blob = new Blob([csv], { type: "text/csv" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");

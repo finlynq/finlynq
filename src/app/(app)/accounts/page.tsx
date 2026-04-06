@@ -20,6 +20,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Plus,
+  Pencil,
 } from "lucide-react";
 
 type AccountBalance = {
@@ -111,6 +112,14 @@ export default function AccountsPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
 
+  // Edit account dialog
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editAccountId, setEditAccountId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "CAD", note: "" });
+  const [editFormErrors, setEditFormErrors] = useState<Record<string, string>>({});
+  const [editSaving, setEditSaving] = useState(false);
+  const [editSaveError, setEditSaveError] = useState("");
+
   function loadAccounts() {
     setLoading(true);
     setError(false);
@@ -190,6 +199,44 @@ export default function AccountsPage() {
     }
   }
 
+  function openEditDialog(a: AccountBalance) {
+    setEditAccountId(a.accountId);
+    setEditForm({ name: a.accountName, type: a.accountType, group: a.accountGroup || "", currency: a.currency, note: "" });
+    setEditFormErrors({});
+    setEditSaveError("");
+    setEditDialogOpen(true);
+  }
+
+  async function handleEdit(e: React.FormEvent) {
+    e.preventDefault();
+    const errs: Record<string, string> = {};
+    if (!editForm.name.trim()) errs.name = "Name is required";
+    setEditFormErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+
+    setEditSaving(true);
+    setEditSaveError("");
+    try {
+      const res = await fetch("/api/accounts", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: editAccountId, name: editForm.name.trim(), type: editForm.type, group: editForm.group.trim(), currency: editForm.currency, note: editForm.note.trim() }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setEditSaveError(data.error ?? "Failed to update account");
+        setEditSaving(false);
+        return;
+      }
+      setEditDialogOpen(false);
+      loadAccounts();
+    } catch {
+      setEditSaveError("Failed to update account");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
   const assets = accounts.filter((a) => a.accountType === "A");
   const liabilities = accounts.filter((a) => a.accountType === "L");
 
@@ -223,26 +270,36 @@ export default function AccountsPage() {
           </CardHeader>
           <CardContent className="space-y-1">
             {accts.map((a) => (
-              <Link
-                key={a.accountId}
-                href={`/accounts/${a.accountId}`}
-                className="flex items-center justify-between hover:bg-muted/50 transition-colors rounded-lg py-2.5 px-3 gap-2"
-              >
-                <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <div
-                    className={`h-8 w-8 shrink-0 rounded-lg flex items-center justify-center text-xs font-bold ${avatarClasses}`}
-                  >
-                    {a.accountName.charAt(0).toUpperCase()}
+              <div key={a.accountId} className="flex items-center gap-1 rounded-lg hover:bg-muted/50 transition-colors group">
+                <Link
+                  href={`/accounts/${a.accountId}`}
+                  className="flex items-center justify-between flex-1 py-2.5 px-3 gap-2 min-w-0"
+                >
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div
+                      className={`h-8 w-8 shrink-0 rounded-lg flex items-center justify-center text-xs font-bold ${avatarClasses}`}
+                    >
+                      {a.accountName.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="font-medium text-sm truncate">{a.accountName}</p>
+                      <Badge variant="outline" className="text-[10px] mt-0.5">{a.currency}</Badge>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <p className="font-medium text-sm truncate">{a.accountName}</p>
-                    <Badge variant="outline" className="text-[10px] mt-0.5">{a.currency}</Badge>
-                  </div>
-                </div>
-                <span className={`font-mono text-sm font-semibold shrink-0 ${a.balance >= 0 ? color : "text-rose-600"}`}>
-                  {formatCurrency(a.balance, a.currency)}
-                </span>
-              </Link>
+                  <span className={`font-mono text-sm font-semibold shrink-0 ${a.balance >= 0 ? color : "text-rose-600"}`}>
+                    {formatCurrency(a.balance, a.currency)}
+                  </span>
+                </Link>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity mr-1"
+                  onClick={(e) => { e.preventDefault(); openEditDialog(a); }}
+                  title="Edit account"
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              </div>
             ))}
           </CardContent>
         </Card>
@@ -427,6 +484,72 @@ export default function AccountsPage() {
         {renderSection("Assets", assets, "text-emerald-600", ArrowUpRight, "bg-indigo-100 text-indigo-700")}
         {renderSection("Liabilities", liabilities, "text-rose-600", ArrowDownRight, "bg-rose-100 text-rose-700")}
       </div>
+
+      {/* Edit account dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={(open) => { setEditDialogOpen(open); if (!open) { setEditAccountId(null); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Account</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleEdit} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label>Account Name</Label>
+              <Input
+                value={editForm.name}
+                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                autoFocus
+              />
+              {editFormErrors.name && <p className="text-xs text-destructive">{editFormErrors.name}</p>}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Type</Label>
+                <Select value={editForm.type} onValueChange={(v) => {
+                  const t = v ?? "A";
+                  const defaultGroup = ACCOUNT_GROUPS[t]?.[0] ?? "";
+                  setEditForm({ ...editForm, type: t, group: defaultGroup });
+                }}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {ACCOUNT_TYPES.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Group</Label>
+                <Select value={editForm.group} onValueChange={(v) => setEditForm({ ...editForm, group: v ?? "" })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {(ACCOUNT_GROUPS[editForm.type] ?? []).map((g) => <SelectItem key={g} value={g}>{g}</SelectItem>)}
+                    <SelectItem value="Other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Currency</Label>
+              <Select value={editForm.currency} onValueChange={(v) => setEditForm({ ...editForm, currency: v ?? "CAD" })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="CAD">CAD</SelectItem>
+                  <SelectItem value="USD">USD</SelectItem>
+                  <SelectItem value="EUR">EUR</SelectItem>
+                  <SelectItem value="GBP">GBP</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
+              <Input value={editForm.note} onChange={(e) => setEditForm({ ...editForm, note: e.target.value })} />
+            </div>
+            {editSaveError && <p className="text-sm text-destructive">{editSaveError}</p>}
+            <div className="flex gap-2 pt-1">
+              <Button type="button" variant="outline" className="flex-1" onClick={() => setEditDialogOpen(false)}>Cancel</Button>
+              <Button type="submit" className="flex-1" disabled={editSaving}>{editSaving ? "Saving…" : "Save Changes"}</Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

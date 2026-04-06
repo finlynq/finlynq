@@ -34,8 +34,6 @@ export const transactions = sqliteTable("transactions", {
   payee: text("payee").default(""),
   tags: text("tags").default(""),
   isBusiness: integer("is_business").default(0),
-  splitPerson: text("split_person"),
-  splitRatio: real("split_ratio"),
   importHash: text("import_hash"),
   fitId: text("fit_id"),
 });
@@ -266,11 +264,14 @@ export const importTemplates = sqliteTable("import_templates", {
   updatedAt: text("updated_at").notNull(),
 });
 
-// Transaction Splits — split a single transaction across multiple categories
+// Transaction Splits — split a single transaction across multiple categories/accounts
 export const transactionSplits = sqliteTable("transaction_splits", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   transactionId: integer("transaction_id").notNull().references(() => transactions.id),
   categoryId: integer("category_id").references(() => categories.id),
+  accountId: integer("account_id").references(() => accounts.id),
   amount: real("amount").notNull(),
   note: text("note").default(""),
+  description: text("description").default(""),
+  tags: text("tags").default(""),
 });

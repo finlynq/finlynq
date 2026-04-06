@@ -7,15 +7,20 @@
  *   delete              — delete all transactions in ids[]
  *   update_category     — set categoryId for all ids[]
  *   update_account      — set accountId for all ids[]
+ *   update_date         — set date for all ids[]
+ *   update_note         — set note for all ids[]
+ *   update_payee        — set payee for all ids[]
+ *   update_tags         — set tags for all ids[]
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { db } from "@/db";
-import { transactions } from "@/db/schema";
+import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+
+const { transactions } = schema;
 
 const bulkSchema = z.discriminatedUnion("action", [
   z.object({
@@ -31,6 +36,26 @@ const bulkSchema = z.discriminatedUnion("action", [
     action: z.literal("update_account"),
     ids: z.array(z.number()).min(1),
     accountId: z.number(),
+  }),
+  z.object({
+    action: z.literal("update_date"),
+    ids: z.array(z.number()).min(1),
+    date: z.string(),
+  }),
+  z.object({
+    action: z.literal("update_note"),
+    ids: z.array(z.number()).min(1),
+    note: z.string(),
+  }),
+  z.object({
+    action: z.literal("update_payee"),
+    ids: z.array(z.number()).min(1),
+    payee: z.string(),
+  }),
+  z.object({
+    action: z.literal("update_tags"),
+    ids: z.array(z.number()).min(1),
+    tags: z.string(),
   }),
 ]);
 
@@ -68,6 +93,38 @@ export async function POST(request: NextRequest) {
         await db
           .update(transactions)
           .set({ accountId: parsed.data.accountId })
+          .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
+          .run();
+        break;
+
+      case "update_date":
+        await db
+          .update(transactions)
+          .set({ date: parsed.data.date })
+          .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
+          .run();
+        break;
+
+      case "update_note":
+        await db
+          .update(transactions)
+          .set({ note: parsed.data.note })
+          .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
+          .run();
+        break;
+
+      case "update_payee":
+        await db
+          .update(transactions)
+          .set({ payee: parsed.data.payee })
+          .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
+          .run();
+        break;
+
+      case "update_tags":
+        await db
+          .update(transactions)
+          .set({ tags: parsed.data.tags })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           .run();
         break;

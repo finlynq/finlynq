@@ -31,12 +31,16 @@ type Transaction = {
   payee: string;
   tags: string;
   isBusiness: number | null;
-  splitPerson: string | null;
-  splitRatio: number | null;
 };
 
 type Account = { id: number; name: string; currency: string };
 type Category = { id: number; name: string; type: string; group: string };
+
+type SplitRow = {
+  categoryId: string;
+  amount: string;
+  note: string;
+};
 
 const categoryColorMap: Record<string, string> = {
   income: "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
@@ -87,6 +91,8 @@ function SplitBadge({ transactionId }: { transactionId: number }) {
   );
 }
 
+const emptySplitRow = (): SplitRow => ({ categoryId: "", amount: "", note: "" });
+
 export default function TransactionsPage() {
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [total, setTotal] = useState(0);
@@ -117,19 +123,21 @@ export default function TransactionsPage() {
     payee: "",
     note: "",
     tags: "",
-    splitPerson: "",
-    splitRatio: "",
     isBusiness: false,
     quantity: "",
     portfolioHoldingId: "",
   });
+
+  // Inline split rows in the add/edit form (Task 6)
+  const [showSplits, setShowSplits] = useState(false);
+  const [splitRows, setSplitRows] = useState<SplitRow[]>([emptySplitRow(), emptySplitRow()]);
 
   // Delete confirmation
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [deleteConfirmPayee, setDeleteConfirmPayee] = useState("");
   const [deleting, setDeleting] = useState(false);
 
-  // Split dialog
+  // Split dialog (for existing transactions)
   const [splitDialogOpen, setSplitDialogOpen] = useState(false);
   const [splitTxn, setSplitTxn] = useState<Transaction | null>(null);
 
@@ -138,6 +146,10 @@ export default function TransactionsPage() {
   const [bulkAction, setBulkAction] = useState("");
   const [bulkCategoryId, setBulkCategoryId] = useState("");
   const [bulkAccountId, setBulkAccountId] = useState("");
+  const [bulkDate, setBulkDate] = useState("");
+  const [bulkNote, setBulkNote] = useState("");
+  const [bulkPayee, setBulkPayee] = useState("");
+  const [bulkTags, setBulkTags] = useState("");
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
 
@@ -185,6 +197,13 @@ export default function TransactionsPage() {
     setPage(0);
   }
 
+  function resetForm() {
+    setForm({ date: new Date().toISOString().split("T")[0], accountId: "", categoryId: "", currency: "CAD", amount: "", payee: "", note: "", tags: "", isBusiness: false, quantity: "", portfolioHoldingId: "" });
+    setShowAdvanced(false);
+    setShowSplits(false);
+    setSplitRows([emptySplitRow(), emptySplitRow()]);
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const body: Record<string, unknown> = {
@@ -199,26 +218,45 @@ export default function TransactionsPage() {
       tags: form.tags,
       isBusiness: form.isBusiness ? 1 : 0,
     };
-    if (form.splitPerson) body.splitPerson = form.splitPerson;
-    if (form.splitRatio) body.splitRatio = parseFloat(form.splitRatio);
     if (form.quantity) body.quantity = parseFloat(form.quantity);
     if (form.portfolioHoldingId) body.portfolioHolding = form.portfolioHoldingId;
 
-    await fetch("/api/transactions", {
+    const res = await fetch("/api/transactions", {
       method: editId ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
 
+    // If splits are enabled and we have 2+ valid rows, save them
+    if (showSplits && splitRows.filter((r) => r.amount).length >= 2) {
+      let txnId = editId;
+      if (!txnId && res.ok) {
+        const created = await res.json();
+        txnId = created.id;
+      }
+      if (txnId) {
+        const sign = parseFloat(form.amount) < 0 ? -1 : 1;
+        await fetch("/api/transactions/splits", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transactionId: txnId,
+            splits: splitRows
+              .filter((r) => r.amount)
+              .map((r) => ({
+                categoryId: r.categoryId ? parseInt(r.categoryId) : null,
+                amount: sign * Math.abs(parseFloat(r.amount) || 0),
+                note: r.note,
+              })),
+          }),
+        });
+      }
+    }
+
     setDialogOpen(false);
     setEditId(null);
     resetForm();
     loadTxns();
-  }
-
-  function resetForm() {
-    setForm({ date: new Date().toISOString().split("T")[0], accountId: "", categoryId: "", currency: "CAD", amount: "", payee: "", note: "", tags: "", splitPerson: "", splitRatio: "", isBusiness: false, quantity: "", portfolioHoldingId: "" });
-    setShowAdvanced(false);
   }
 
   function startEdit(t: Transaction) {
@@ -232,13 +270,11 @@ export default function TransactionsPage() {
       payee: t.payee || "",
       note: t.note || "",
       tags: t.tags || "",
-      splitPerson: t.splitPerson || "",
-      splitRatio: t.splitRatio != null ? String(t.splitRatio) : "",
       isBusiness: t.isBusiness === 1,
       quantity: t.quantity != null ? String(t.quantity) : "",
       portfolioHoldingId: t.portfolioHolding || "",
     });
-    if (t.splitPerson || t.splitRatio != null || t.isBusiness === 1 || t.quantity != null || t.portfolioHolding) {
+    if (t.isBusiness === 1 || t.quantity != null || t.portfolioHolding) {
       setShowAdvanced(true);
     }
     setDialogOpen(true);
@@ -281,6 +317,15 @@ export default function TransactionsPage() {
     setSelected(next);
   }
 
+  function resetBulkFields() {
+    setBulkCategoryId("");
+    setBulkAccountId("");
+    setBulkDate("");
+    setBulkNote("");
+    setBulkPayee("");
+    setBulkTags("");
+  }
+
   async function executeBulkAction() {
     if (!someSelected) return;
     const ids = Array.from(selected);
@@ -294,6 +339,10 @@ export default function TransactionsPage() {
     const body: Record<string, unknown> = { action: bulkAction, ids };
     if (bulkAction === "update_category") body.categoryId = Number(bulkCategoryId);
     if (bulkAction === "update_account") body.accountId = Number(bulkAccountId);
+    if (bulkAction === "update_date") body.date = bulkDate;
+    if (bulkAction === "update_note") body.note = bulkNote;
+    if (bulkAction === "update_payee") body.payee = bulkPayee;
+    if (bulkAction === "update_tags") body.tags = bulkTags;
 
     await fetch("/api/transactions/bulk", {
       method: "POST",
@@ -303,8 +352,7 @@ export default function TransactionsPage() {
 
     setSelected(new Set());
     setBulkAction("");
-    setBulkCategoryId("");
-    setBulkAccountId("");
+    resetBulkFields();
     setBulkProcessing(false);
     loadTxns();
   }
@@ -323,6 +371,15 @@ export default function TransactionsPage() {
     loadTxns();
   }
 
+  const isBulkApplyDisabled =
+    bulkProcessing ||
+    !bulkAction ||
+    (bulkAction === "update_category" && !bulkCategoryId) ||
+    (bulkAction === "update_account" && !bulkAccountId) ||
+    (bulkAction === "update_date" && !bulkDate) ||
+    (bulkAction === "update_note" && bulkNote === "" && bulkAction === "update_note") ||
+    (bulkAction === "update_payee" && bulkPayee === "" && bulkAction === "update_payee");
+
   const totalPages = Math.ceil(total / limit);
 
   function getPageNumbers(): (number | "ellipsis")[] {
@@ -337,6 +394,11 @@ export default function TransactionsPage() {
     return pages;
   }
 
+  // Split allocated total for inline split editor
+  const splitAllocated = splitRows.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+  const splitRemaining = Math.abs(parseFloat(form.amount) || 0) - splitAllocated;
+  const splitBalanced = Math.abs(splitRemaining) < 0.01;
+
   return (
     <div className="space-y-6">
       <OnboardingTips page="transactions" />
@@ -349,11 +411,11 @@ export default function TransactionsPage() {
           <DialogTrigger render={<Button className="bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 shadow-sm" />}>
             <Plus className="h-4 w-4 mr-2" /> Add Transaction
           </DialogTrigger>
-          <DialogContent>
+          <DialogContent className="max-w-lg">
             <DialogHeader>
               <DialogTitle>{editId ? "Edit Transaction" : "New Transaction"}</DialogTitle>
             </DialogHeader>
-            <form onSubmit={handleSubmit} className="space-y-5">
+            <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>Date</Label>
@@ -417,6 +479,89 @@ export default function TransactionsPage() {
                 <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
               </div>
 
+              {/* Inline split editor (Task 6) */}
+              <button
+                type="button"
+                className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors w-full"
+                onClick={() => setShowSplits(!showSplits)}
+              >
+                <Scissors className={`h-4 w-4 transition-transform ${showSplits ? "text-violet-500" : ""}`} />
+                {showSplits ? "Hide splits" : "Split this transaction"}
+              </button>
+
+              {showSplits && (
+                <div className="space-y-2 border rounded-lg p-3 bg-muted/20">
+                  <div className="text-xs text-muted-foreground font-medium">Split rows (must sum to total amount)</div>
+                  {splitRows.map((row, i) => (
+                    <div key={i} className="flex gap-1.5 items-center">
+                      <Select value={row.categoryId} onValueChange={(v) => {
+                        const next = [...splitRows];
+                        next[i] = { ...next[i], categoryId: v ?? "" };
+                        setSplitRows(next);
+                      }}>
+                        <SelectTrigger className="h-7 text-xs flex-1"><SelectValue placeholder="Category" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="">No category</SelectItem>
+                          {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        className="h-7 text-xs w-24 font-mono"
+                        placeholder="0.00"
+                        value={row.amount}
+                        onChange={(e) => {
+                          const next = [...splitRows];
+                          next[i] = { ...next[i], amount: e.target.value };
+                          setSplitRows(next);
+                        }}
+                      />
+                      <Input
+                        className="h-7 text-xs w-24"
+                        placeholder="Note"
+                        value={row.note}
+                        onChange={(e) => {
+                          const next = [...splitRows];
+                          next[i] = { ...next[i], note: e.target.value };
+                          setSplitRows(next);
+                        }}
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 shrink-0 text-muted-foreground"
+                        onClick={() => setSplitRows(splitRows.filter((_, j) => j !== i))}
+                        disabled={splitRows.length <= 2}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-7 text-xs"
+                    onClick={() => setSplitRows([...splitRows, emptySplitRow()])}
+                  >
+                    <Plus className="h-3 w-3 mr-1" /> Add row
+                  </Button>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-muted-foreground">Allocated: <span className="font-mono">{formatCurrency(splitAllocated, form.currency)}</span></span>
+                    {splitBalanced ? (
+                      <Badge variant="outline" className="text-[10px] border-emerald-300 text-emerald-600 bg-emerald-50">Balanced</Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-[10px] border-rose-300 text-rose-600 bg-rose-50">
+                        {splitRemaining > 0 ? `${formatCurrency(splitRemaining, form.currency)} left` : `${formatCurrency(Math.abs(splitRemaining), form.currency)} over`}
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              )}
+
               <button
                 type="button"
                 className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors w-full"
@@ -428,16 +573,6 @@ export default function TransactionsPage() {
 
               {showAdvanced && (
                 <div className="space-y-4 border rounded-lg p-4 bg-muted/20">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <Label>Split Person</Label>
-                      <Input value={form.splitPerson} onChange={(e) => setForm({ ...form, splitPerson: e.target.value })} placeholder="e.g. John" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Split Ratio</Label>
-                      <Input type="number" step="0.01" min="0" max="1" value={form.splitRatio} onChange={(e) => setForm({ ...form, splitRatio: e.target.value })} placeholder="0.5 = 50%" />
-                    </div>
-                  </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1.5">
                       <Label>Quantity</Label>
@@ -521,11 +656,15 @@ export default function TransactionsPage() {
         <div className="flex items-center gap-3 px-4 py-2.5 bg-primary/5 border border-primary/20 rounded-lg text-sm">
           <span className="font-medium text-primary">{selected.size} selected</span>
           <div className="flex items-center gap-2 flex-1 flex-wrap">
-            <Select value={bulkAction} onValueChange={(v) => setBulkAction(v ?? "")}>
+            <Select value={bulkAction} onValueChange={(v) => { setBulkAction(v ?? ""); resetBulkFields(); }}>
               <SelectTrigger className="w-44 h-7 text-xs"><SelectValue placeholder="Choose action…" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="update_category">Change category</SelectItem>
                 <SelectItem value="update_account">Change account</SelectItem>
+                <SelectItem value="update_date">Change date</SelectItem>
+                <SelectItem value="update_payee">Change payee</SelectItem>
+                <SelectItem value="update_note">Change note</SelectItem>
+                <SelectItem value="update_tags">Change tags</SelectItem>
                 <SelectItem value="delete">Delete selected</SelectItem>
               </SelectContent>
             </Select>
@@ -545,16 +684,23 @@ export default function TransactionsPage() {
                 </SelectContent>
               </Select>
             )}
+            {bulkAction === "update_date" && (
+              <Input type="date" className="h-7 text-xs w-36" value={bulkDate} onChange={(e) => setBulkDate(e.target.value)} />
+            )}
+            {bulkAction === "update_payee" && (
+              <Input className="h-7 text-xs w-44" placeholder="New payee" value={bulkPayee} onChange={(e) => setBulkPayee(e.target.value)} />
+            )}
+            {bulkAction === "update_note" && (
+              <Input className="h-7 text-xs w-44" placeholder="New note" value={bulkNote} onChange={(e) => setBulkNote(e.target.value)} />
+            )}
+            {bulkAction === "update_tags" && (
+              <Input className="h-7 text-xs w-44" placeholder="New tags" value={bulkTags} onChange={(e) => setBulkTags(e.target.value)} />
+            )}
             <Button
               size="sm"
               className="h-7 text-xs"
               onClick={executeBulkAction}
-              disabled={
-                bulkProcessing ||
-                !bulkAction ||
-                (bulkAction === "update_category" && !bulkCategoryId) ||
-                (bulkAction === "update_account" && !bulkAccountId)
-              }
+              disabled={isBulkApplyDisabled}
               variant={bulkAction === "delete" ? "destructive" : "default"}
             >
               {bulkProcessing ? "Processing…" : "Apply"}
@@ -715,7 +861,7 @@ export default function TransactionsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Split dialog */}
+      {/* Split dialog (for existing transactions) */}
       {splitTxn && (
         <SplitDialog
           open={splitDialogOpen}
@@ -724,6 +870,7 @@ export default function TransactionsPage() {
           totalAmount={splitTxn.amount}
           currency={splitTxn.currency}
           categories={categories}
+          accounts={accounts}
           onSaved={loadTxns}
         />
       )}

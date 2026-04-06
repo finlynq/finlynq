@@ -50,8 +50,6 @@ export const transactions = pgTable("transactions", {
   payee: text("payee").default(""),
   tags: text("tags").default(""),
   isBusiness: integer("is_business").default(0),
-  splitPerson: text("split_person"),
-  splitRatio: doublePrecision("split_ratio"),
   importHash: text("import_hash"),
   fitId: text("fit_id"),
 });
@@ -275,11 +273,14 @@ export const importTemplates = pgTable("import_templates", {
   updatedAt: text("updated_at").notNull(),
 });
 
-// Transaction Splits — split a single transaction across multiple categories
+// Transaction Splits — split a single transaction across multiple categories/accounts
 export const transactionSplits = pgTable("transaction_splits", {
   id: serial("id").primaryKey(),
   transactionId: integer("transaction_id").notNull().references(() => transactions.id),
   categoryId: integer("category_id").references(() => categories.id),
+  accountId: integer("account_id").references(() => accounts.id),
   amount: doublePrecision("amount").notNull(),
   note: text("note").default(""),
+  description: text("description").default(""),
+  tags: text("tags").default(""),
 });
