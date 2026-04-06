@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { requireAuth } from "@/lib/auth";
 import {
   getEtfInfoAll,
   getEtfInfoBySymbol,
@@ -23,11 +24,14 @@ export async function GET() {
   return NextResponse.json({ etfs, count: etfs.length });
 }
 
-// POST: seed or refresh ETF breakdown data
+// POST: seed or refresh ETF breakdown data (requires auth)
 // body: { action: "seed" } — populate all from hardcoded data
 // body: { action: "seed-symbol", symbol: "VUN.TO" } — seed one ETF from hardcoded
 // body: { action: "refresh", symbol: "VUN.TO", regions: {...}, sectors: {...}, constituents: [...] } — update one ETF
 export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+
   try {
     const body = await request.json();
 

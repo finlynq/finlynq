@@ -15,6 +15,9 @@ import {
   User,
   FileSpreadsheet,
   Database,
+  Bot,
+  Target,
+  DollarSign,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -24,15 +27,16 @@ interface OnboardingWizardProps {
   onComplete: () => void;
 }
 
-type Step = "welcome" | "profile" | "accounts" | "data" | "done";
+type Step = "welcome" | "accounts" | "data" | "budget" | "mcp" | "done";
 
-const STEPS: Step[] = ["welcome", "profile", "accounts", "data", "done"];
+const STEPS: Step[] = ["welcome", "accounts", "data", "budget", "mcp", "done"];
 
 const STEP_LABELS: Record<Step, string> = {
   welcome: "Welcome",
-  profile: "Profile",
   accounts: "Accounts",
-  data: "Your data",
+  data: "Import",
+  budget: "Budget",
+  mcp: "Connect AI",
   done: "All set",
 };
 
@@ -43,6 +47,14 @@ const ACCOUNT_PRESETS = [
   { name: "Investment Account", type: "A", group: "Investments", icon: TrendingUp },
 ] as const;
 
+const BUDGET_CATEGORIES = [
+  { name: "Groceries", amount: 600, icon: "🛒" },
+  { name: "Dining", amount: 300, icon: "🍽️" },
+  { name: "Transport", amount: 200, icon: "🚗" },
+  { name: "Entertainment", amount: 150, icon: "🎬" },
+  { name: "Utilities", amount: 250, icon: "💡" },
+];
+
 const slideVariants = {
   enter: (d: number) => ({ x: d > 0 ? 80 : -80, opacity: 0 }),
   center: { x: 0, opacity: 1 },
@@ -51,15 +63,18 @@ const slideVariants = {
 
 export function OnboardingWizard({
   userEmail,
-  displayName: initialName,
+  displayName: _displayName,
   onComplete,
 }: OnboardingWizardProps) {
   const [step, setStep] = useState<Step>("welcome");
   const [direction, setDirection] = useState(1);
-  const [displayName, setDisplayName] = useState(initialName || "");
   const [currency, setCurrency] = useState("CAD");
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([0]);
-  const [dataChoice, setDataChoice] = useState<"demo" | "import" | "skip">("demo");
+  const [dataChoice, setDataChoice] = useState<"demo" | "import" | "skip">("import");
+  const [budgetAmounts, setBudgetAmounts] = useState<Record<string, number>>(
+    Object.fromEntries(BUDGET_CATEGORIES.map((c) => [c.name, c.amount]))
+  );
+  const [selectedBudgets, setSelectedBudgets] = useState<string[]>(["Groceries", "Dining", "Transport"]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -83,6 +98,12 @@ export function OnboardingWizard({
     );
   }
 
+  function toggleBudget(name: string) {
+    setSelectedBudgets((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
+    );
+  }
+
   async function handleFinish() {
     setLoading(true);
     setError("");
@@ -94,18 +115,39 @@ export function OnboardingWizard({
         await fetch("/api/accounts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: preset.name,
-            type: preset.type,
-            group: preset.group,
-            currency,
-          }),
+          body: JSON.stringify({ name: preset.name, type: preset.type, group: preset.group, currency }),
         });
       }
 
       // Load demo data if selected
       if (dataChoice === "demo") {
         await fetch("/api/onboarding/sample-data", { method: "POST" });
+      }
+
+      // Create selected budgets
+      const now = new Date();
+      const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+      for (const name of selectedBudgets) {
+        const cat = BUDGET_CATEGORIES.find((c) => c.name === name);
+        if (!cat) continue;
+        // Find or create category, then create budget
+        const catRes = await fetch("/api/categories", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, group: "General", type: "E" }),
+        });
+        if (catRes.ok) {
+          const catData = await catRes.json();
+          const catId = catData.id ?? catData.data?.id;
+          if (catId) {
+            await fetch("/api/budgets", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ categoryId: catId, amount: budgetAmounts[name] ?? cat.amount, month }),
+            });
+          }
+        }
       }
 
       // Save currency preference
@@ -137,9 +179,7 @@ export function OnboardingWizard({
             <div
               key={s}
               className={`h-1 flex-1 rounded-full transition-colors ${
-                i <= stepIndex
-                  ? "bg-foreground"
-                  : "bg-muted"
+                i <= stepIndex ? "bg-foreground" : "bg-muted"
               }`}
             />
           ))}
@@ -153,7 +193,7 @@ export function OnboardingWizard({
         </div>
 
         {/* Content */}
-        <div className="px-6 pb-6 min-h-[340px] flex flex-col">
+        <div className="px-6 pb-6 min-h-[360px] flex flex-col">
           <AnimatePresence mode="wait" custom={direction}>
             <motion.div
               key={step}
@@ -175,42 +215,50 @@ export function OnboardingWizard({
                   >
                     <Sparkles className="h-14 w-14 text-amber-500 mb-4" />
                   </motion.div>
-                  <h2 className="text-2xl font-bold mb-2">
-                    Welcome to Personal Finance
-                  </h2>
-                  <p className="text-muted-foreground max-w-sm">
-                    Let&apos;s set up your account in a few quick steps. You&apos;ll
-                    be tracking your finances in no time.
+                  <h2 className="text-2xl font-bold mb-2">Welcome to Personal Finance</h2>
+                  <p className="text-muted-foreground max-w-sm mb-4">
+                    Let&apos;s get you set up in 5 steps. You&apos;ll be tracking your finances and
+                    querying them with your AI in under 10 minutes.
                   </p>
+                  <p className="text-xs text-muted-foreground">Signed in as {userEmail}</p>
+
+                  <div className="flex items-center gap-6 mt-6 text-sm text-muted-foreground">
+                    <div className="flex flex-col items-center gap-1.5">
+                      <Wallet className="h-5 w-5" />
+                      <span>Accounts</span>
+                    </div>
+                    <div className="text-muted-foreground/30">→</div>
+                    <div className="flex flex-col items-center gap-1.5">
+                      <Upload className="h-5 w-5" />
+                      <span>Import</span>
+                    </div>
+                    <div className="text-muted-foreground/30">→</div>
+                    <div className="flex flex-col items-center gap-1.5">
+                      <Target className="h-5 w-5" />
+                      <span>Budget</span>
+                    </div>
+                    <div className="text-muted-foreground/30">→</div>
+                    <div className="flex flex-col items-center gap-1.5">
+                      <Bot className="h-5 w-5" />
+                      <span>AI</span>
+                    </div>
+                  </div>
                 </div>
               )}
 
-              {/* ─── Profile ─────────────────────────────── */}
-              {step === "profile" && (
-                <div className="flex-1 flex flex-col py-6 gap-5">
-                  <div className="flex items-center gap-3 mb-2">
-                    <User className="h-6 w-6 text-muted-foreground" />
-                    <h2 className="text-lg font-semibold">Your profile</h2>
+              {/* ─── Accounts ────────────────────────────── */}
+              {step === "accounts" && (
+                <div className="flex-1 flex flex-col py-6 gap-4">
+                  <div className="flex items-center gap-3 mb-1">
+                    <Wallet className="h-6 w-6 text-muted-foreground" />
+                    <h2 className="text-lg font-semibold">Add accounts</h2>
                   </div>
+                  <p className="text-sm text-muted-foreground">
+                    Pick the accounts you use. You can add more later.
+                  </p>
 
                   <div>
-                    <label className="text-sm font-medium" htmlFor="name">
-                      Display name
-                    </label>
-                    <input
-                      id="name"
-                      type="text"
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="Your name"
-                      className="mt-1.5 w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-sm font-medium" htmlFor="currency">
-                      Default currency
-                    </label>
+                    <label className="text-sm font-medium" htmlFor="currency">Currency</label>
                     <select
                       id="currency"
                       value={currency}
@@ -224,23 +272,7 @@ export function OnboardingWizard({
                     </select>
                   </div>
 
-                  <p className="text-xs text-muted-foreground">
-                    Signed in as {userEmail}
-                  </p>
-                </div>
-              )}
-
-              {/* ─── Accounts ────────────────────────────── */}
-              {step === "accounts" && (
-                <div className="flex-1 flex flex-col py-6 gap-4">
-                  <div className="flex items-center gap-3 mb-1">
-                    <Wallet className="h-6 w-6 text-muted-foreground" />
-                    <h2 className="text-lg font-semibold">Add accounts</h2>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Pick the accounts you use. You can always add more later.
-                  </p>
-                  <div className="grid grid-cols-2 gap-3 mt-2">
+                  <div className="grid grid-cols-2 gap-3 mt-1">
                     {ACCOUNT_PRESETS.map((preset, idx) => {
                       const Icon = preset.icon;
                       const selected = selectedAccounts.includes(idx);
@@ -255,12 +287,8 @@ export function OnboardingWizard({
                           }`}
                         >
                           <Icon className="h-5 w-5 shrink-0" />
-                          <span className="text-sm font-medium leading-tight">
-                            {preset.name}
-                          </span>
-                          {selected && (
-                            <Check className="h-4 w-4 ml-auto text-emerald-500" />
-                          )}
+                          <span className="text-sm font-medium leading-tight">{preset.name}</span>
+                          {selected && <Check className="h-4 w-4 ml-auto text-emerald-500" />}
                         </button>
                       );
                     })}
@@ -273,13 +301,19 @@ export function OnboardingWizard({
                 <div className="flex-1 flex flex-col py-6 gap-4">
                   <div className="flex items-center gap-3 mb-1">
                     <Database className="h-6 w-6 text-muted-foreground" />
-                    <h2 className="text-lg font-semibold">Get started with data</h2>
+                    <h2 className="text-lg font-semibold">Import your data</h2>
                   </div>
                   <p className="text-sm text-muted-foreground">
-                    How would you like to begin?
+                    How would you like to start?
                   </p>
                   <div className="space-y-3 mt-2">
                     {[
+                      {
+                        key: "import" as const,
+                        icon: FileSpreadsheet,
+                        label: "Import from my bank",
+                        desc: "Upload a CSV or OFX file — takes about 2 minutes",
+                      },
                       {
                         key: "demo" as const,
                         icon: Sparkles,
@@ -287,16 +321,10 @@ export function OnboardingWizard({
                         desc: "3 months of realistic transactions to explore features",
                       },
                       {
-                        key: "import" as const,
-                        icon: FileSpreadsheet,
-                        label: "Import your data",
-                        desc: "CSV, Excel, PDF, or OFX from your bank",
-                      },
-                      {
                         key: "skip" as const,
                         icon: ArrowRight,
                         label: "Start from scratch",
-                        desc: "Add transactions manually as you go",
+                        desc: "Add transactions manually, import later",
                       },
                     ].map(({ key, icon: Icon, label, desc }) => (
                       <button
@@ -313,12 +341,109 @@ export function OnboardingWizard({
                           <p className="text-sm font-medium">{label}</p>
                           <p className="text-xs text-muted-foreground">{desc}</p>
                         </div>
+                        {dataChoice === key && (
+                          <Check className="h-4 w-4 ml-auto mt-0.5 text-emerald-500 shrink-0" />
+                        )}
                       </button>
                     ))}
                   </div>
-                  {error && (
-                    <p className="text-sm text-destructive">{error}</p>
-                  )}
+                </div>
+              )}
+
+              {/* ─── Budget ───────────────────────────────── */}
+              {step === "budget" && (
+                <div className="flex-1 flex flex-col py-6 gap-4">
+                  <div className="flex items-center gap-3 mb-1">
+                    <Target className="h-6 w-6 text-muted-foreground" />
+                    <h2 className="text-lg font-semibold">Set monthly budgets</h2>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Pick categories and set limits. You can adjust these anytime.
+                  </p>
+                  <div className="space-y-2 mt-1 max-h-56 overflow-y-auto pr-1">
+                    {BUDGET_CATEGORIES.map((cat) => {
+                      const selected = selectedBudgets.includes(cat.name);
+                      return (
+                        <div
+                          key={cat.name}
+                          className={`flex items-center gap-3 rounded-xl border-2 px-3.5 py-2.5 transition-all ${
+                            selected ? "border-foreground bg-foreground/5" : "border-muted"
+                          }`}
+                        >
+                          <button
+                            onClick={() => toggleBudget(cat.name)}
+                            className="flex items-center gap-2.5 flex-1 text-left"
+                          >
+                            <span className="text-lg">{cat.icon}</span>
+                            <span className="text-sm font-medium">{cat.name}</span>
+                            {selected && <Check className="h-3.5 w-3.5 text-emerald-500" />}
+                          </button>
+                          {selected && (
+                            <div className="flex items-center gap-1">
+                              <DollarSign className="h-3.5 w-3.5 text-muted-foreground" />
+                              <input
+                                type="number"
+                                value={budgetAmounts[cat.name] ?? cat.amount}
+                                onChange={(e) =>
+                                  setBudgetAmounts((prev) => ({
+                                    ...prev,
+                                    [cat.name]: Number(e.target.value),
+                                  }))
+                                }
+                                className="w-20 rounded-md border bg-background px-2 py-1 text-sm text-right focus:outline-none focus:ring-1 focus:ring-foreground/20"
+                                min={0}
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Skip for now — you can set budgets anytime from the Budgets page.
+                  </p>
+                  {error && <p className="text-sm text-destructive">{error}</p>}
+                </div>
+              )}
+
+              {/* ─── MCP ─────────────────────────────────── */}
+              {step === "mcp" && (
+                <div className="flex-1 flex flex-col py-6 gap-4">
+                  <div className="flex items-center gap-3 mb-1">
+                    <Bot className="h-6 w-6 text-muted-foreground" />
+                    <h2 className="text-lg font-semibold">Connect your AI assistant</h2>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    The MCP server lets Claude, Cursor, or any AI client query your financial data
+                    using natural language — no manual exports needed.
+                  </p>
+
+                  <div className="rounded-xl border bg-muted/30 p-4 space-y-3">
+                    <p className="text-sm font-medium">Quick start: Claude Desktop</p>
+                    <p className="text-xs text-muted-foreground mb-1">
+                      Add this to your <code className="font-mono bg-muted px-1 py-0.5 rounded">claude_desktop_config.json</code>:
+                    </p>
+                    <pre className="text-xs bg-background rounded-lg p-3 overflow-x-auto border font-mono leading-relaxed">
+{`{
+  "mcpServers": {
+    "personal-finance": {
+      "command": "curl",
+      "args": ["-X", "POST",
+        "https://finance.nextsoftwareconsulting.com/api/mcp"]
+    }
+  }
+}`}
+                    </pre>
+                    <p className="text-xs text-muted-foreground">
+                      Then try: &ldquo;What did I spend on groceries last month?&rdquo;
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs">?</span>
+                    Full setup guide for Cursor, Cline &amp; others on the MCP Guide page.
+                  </div>
                 </div>
               )}
 
@@ -335,8 +460,9 @@ export function OnboardingWizard({
                   </motion.div>
                   <h2 className="text-2xl font-bold mb-2">You&apos;re all set!</h2>
                   <p className="text-muted-foreground max-w-sm">
-                    Your account is ready. Head to the dashboard to start
-                    tracking your finances.
+                    {dataChoice === "import"
+                      ? "Head to the Import page to upload your bank statement, then come back to see your data."
+                      : "Your account is ready. Head to the dashboard to start tracking your finances."}
                   </p>
                 </div>
               )}
@@ -371,14 +497,22 @@ export function OnboardingWizard({
                 {dataChoice === "import" ? "Go to Import" : "Go to Dashboard"}
                 <ArrowRight className="h-4 w-4" />
               </button>
-            ) : step === "data" ? (
+            ) : step === "budget" ? (
               <button
                 onClick={handleFinish}
                 disabled={loading}
                 className="ml-auto flex items-center gap-2 rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background hover:opacity-90 transition-opacity disabled:opacity-50"
               >
-                {loading ? "Setting up..." : "Finish Setup"}
-                {!loading && <Check className="h-4 w-4" />}
+                {loading ? "Setting up..." : "Continue"}
+                {!loading && <ArrowRight className="h-4 w-4" />}
+              </button>
+            ) : step === "mcp" ? (
+              <button
+                onClick={goNext}
+                className="ml-auto flex items-center gap-2 rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background hover:opacity-90 transition-opacity"
+              >
+                Finish Setup
+                <Check className="h-4 w-4" />
               </button>
             ) : (
               <button
