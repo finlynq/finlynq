@@ -109,6 +109,7 @@ export function Nav() {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [hostingMode, setHostingMode] = useState<"managed" | "self-hosted" | null>(null);
   const [devMode, setDevMode] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
 
   // Close desktop account menu on outside click
@@ -137,11 +138,12 @@ export function Nav() {
     const groups: Record<string, boolean> = {};
     navGroups.forEach((g) => { if (g.label) groups[g.label] = true; });
     setOpenGroups(groups);
-    // Detect hosting mode
+    // Detect hosting mode and admin status
     fetch("/api/auth/unlock")
       .then((r) => r.json())
       .then((data) => {
         setHostingMode(data.authMethod === "account" ? "managed" : "self-hosted");
+        setIsAdmin(data.isAdmin === true);
       })
       .catch(() => {});
     // Load dev mode
@@ -310,7 +312,7 @@ export function Nav() {
 
       {/* Bottom section */}
       <div className="px-2 pb-3 pt-2 border-t border-sidebar-border/50 space-y-0.5">
-        {toolLinks.filter((item) => devMode || item.mode !== "dev").map((item) => renderLink(item, !collapsed))}
+        {toolLinks.filter((item) => (devMode || item.mode !== "dev") && (item.href !== "/admin" || isAdmin)).map((item) => renderLink(item, !collapsed))}
         <div className={cn("flex items-center mt-2", collapsed ? "justify-center" : "justify-between px-1")}>
           <ThemeToggle />
           <button
@@ -386,6 +388,7 @@ export function Nav() {
         {allFlatItems
           .filter((item) => !mobileBarItems.some((m) => m.href === item.href))
           .filter((item) => devMode || item.mode !== "dev")
+          .filter((item) => item.href !== "/admin" || isAdmin)
           .map((item) => renderLink(item, true))}
       </div>
     </div>

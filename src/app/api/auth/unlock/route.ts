@@ -23,6 +23,7 @@ import fs from "fs";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { createSessionToken, verifySessionToken, AUTH_COOKIE } from "@/lib/auth";
+import { getUserById } from "@/lib/auth/queries";
 
 const unlockSchema = z.discriminatedUnion("action", [
   z.object({
@@ -76,10 +77,15 @@ export async function GET(request: NextRequest) {
   // In managed mode, check for a valid account session
   if (dialect === "postgres") {
     let clientUnlocked = false;
+    let isAdmin = false;
     const token = request.cookies.get(AUTH_COOKIE)?.value;
     if (token) {
       const payload = await verifySessionToken(token);
       clientUnlocked = payload !== null;
+      if (payload !== null) {
+        const user = await getUserById(payload.sub);
+        isAdmin = user?.role === "admin";
+      }
     }
     return NextResponse.json({
       unlocked: clientUnlocked,
@@ -87,6 +93,7 @@ export async function GET(request: NextRequest) {
       mode: "managed",
       authMethod: "account",
       hasExistingData: false,
+      isAdmin,
     });
   }
 
