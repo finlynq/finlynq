@@ -8,6 +8,70 @@ import { PostgresAdapter } from "./adapters/postgres";
 
 type DrizzleSqliteDb = ReturnType<typeof drizzle<typeof sqliteSchema>>;
 
+/**
+ * Add SQLite-compatible .all(), .get(), .run() methods to a PG query builder.
+ * These are added non-destructively — if the property already exists it's left alone.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function addSqliteCompat(obj: any): any {
+  if (!obj || typeof obj !== "object") return obj;
+
+  // .all() → returns the thenable itself (awaiting it returns rows)
+  if (!obj.all) {
+    Object.defineProperty(obj, "all", {
+      value: function () { return this; },
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  // .get() → awaits and returns first row
+  if (!obj.get && typeof obj.then === "function") {
+    Object.defineProperty(obj, "get", {
+      value: function () {
+        return this.then((rows: unknown[]) => rows?.[0] ?? undefined);
+      },
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  // .run() → awaits and discards result
+  if (!obj.run && typeof obj.then === "function") {
+    Object.defineProperty(obj, "run", {
+      value: function () {
+        return this.then(() => undefined);
+      },
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  // Wrap chainable methods so the compat methods propagate through the chain
+  const chainMethods = [
+    "from", "where", "orderBy", "groupBy", "limit", "offset",
+    "leftJoin", "innerJoin", "rightJoin", "fullJoin",
+    "having", "set", "values", "returning", "onConflictDoNothing",
+    "onConflictDoUpdate",
+  ];
+  for (const method of chainMethods) {
+    const original = obj[method];
+    if (typeof original === "function" && !original.__pgCompat) {
+      const wrapped = function (this: unknown, ...args: unknown[]) {
+        const result = original.apply(this, args);
+        if (result && typeof result === "object") {
+          return addSqliteCompat(result);
+        }
+        return result;
+      };
+      (wrapped as unknown as { __pgCompat: boolean }).__pgCompat = true;
+      obj[method] = wrapped;
+    }
+  }
+
+  return obj;
+}
+
 // ─── Adapter registry ────────────────────────────────────────────────────────
 
 const g = globalThis as typeof globalThis & {
@@ -54,7 +118,8 @@ export function resetDb(): void {
 /**
  * Lazy Proxy — all existing `import { db } from "@/db"` calls continue to work.
  *
- * When the adapter is set to PostgreSQL, the proxy delegates to the PG adapter.
+ * When the adapter is set to PostgreSQL, the proxy delegates to the PG adapter
+ * and patches query builders with SQLite-compatible .all()/.get()/.run() shims.
  * Otherwise it falls through to the existing SQLite behavior.
  */
 export const db = new Proxy({} as DrizzleSqliteDb, {
@@ -63,9 +128,16 @@ export const db = new Proxy({} as DrizzleSqliteDb, {
     const adapter = g.__pfAdapter;
     if (adapter && adapter.dialect !== "sqlite") {
       const adapterDb = adapter.getDb();
-      const value = Reflect.get(adapterDb, prop, receiver);
+      const value = Reflect.get(adapterDb, prop, adapterDb);
       if (typeof value === "function") {
-        return value.bind(adapterDb);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return function (this: unknown, ...args: any[]) {
+          const result = value.apply(adapterDb, args);
+          if (result && typeof result === "object") {
+            return addSqliteCompat(result);
+          }
+          return result;
+        };
       }
       return value;
     }
