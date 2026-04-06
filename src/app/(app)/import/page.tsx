@@ -6,18 +6,29 @@ import { Button } from "@/components/ui/button";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Upload,
   CheckCircle2,
   AlertCircle,
   Mail,
   Copy,
   RefreshCw,
+  BookTemplate,
+  Sparkles,
 } from "lucide-react";
 import { FileDropZone } from "./components/file-drop-zone";
 import { ImportPreviewDialog } from "./components/import-preview-dialog";
 import { OfxPreview } from "./components/ofx-preview";
+import { TemplateManager } from "./components/template-manager";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import type { OfxTransaction, OfxAccountInfo } from "@/lib/ofx-parser";
+import type { ImportTemplate } from "@/lib/import-templates";
 
 interface PreviewRow extends RawTransaction {
   hash: string;
@@ -33,7 +44,15 @@ export default function ImportPage() {
   const [isImporting, setIsImporting] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
-  const [accounts, setAccounts] = useState<string[]>([]);
+  // CSV template state
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
+  const [appliedTemplateId, setAppliedTemplateId] = useState<number | null>(null);
+  const [suggestedTemplate, setSuggestedTemplate] = useState<{ id: number; name: string; score: number } | null>(null);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  const [templates, setTemplates] = useState<ImportTemplate[]>([]);
+  const [lastUploadedFile, setLastUploadedFile] = useState<File | null>(null);
+
+  const [accountNames, setAccountNames] = useState<string[]>([]);
 
   // OFX preview state
   const [ofxPreviewOpen, setOfxPreviewOpen] = useState(false);
@@ -49,13 +68,18 @@ export default function ImportPage() {
   const [emailLoading, setEmailLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Fetch accounts + email config on mount
+  // Fetch accounts, templates, and email config on mount
   useEffect(() => {
     fetch("/api/accounts")
       .then((r) => r.json())
       .then((data) => {
-        if (Array.isArray(data)) setAccounts(data.map((a: { name: string }) => a.name));
+        if (Array.isArray(data)) setAccountNames(data.map((a: { name: string }) => a.name));
       })
+      .catch(() => {});
+
+    fetch("/api/import/templates")
+      .then((r) => r.json())
+      .then((data) => { if (Array.isArray(data)) setTemplates(data); })
       .catch(() => {});
 
     fetch("/api/import/email-config")
@@ -64,12 +88,14 @@ export default function ImportPage() {
       .catch(() => {});
   }, []);
 
-  // Universal file upload handler
-  const handleFileUpload = useCallback(async (file: File) => {
+  // Core file preview function — called with optional templateId override
+  const previewFile = useCallback(async (file: File, templateId?: number) => {
     setUploadStatus(null);
+    setSuggestedTemplate(null);
 
     const formData = new FormData();
     formData.append("file", file);
+    if (templateId !== undefined) formData.append("templateId", String(templateId));
 
     try {
       const res = await fetch("/api/import/preview", { method: "POST", body: formData });
@@ -85,7 +111,14 @@ export default function ImportPage() {
         setOfxCurrency(data.currency ?? "CAD");
         setOfxPreviewOpen(true);
       } else if (data.type === "csv" || data.valid !== undefined) {
-        // CSV — show preview dialog directly
+        setCsvHeaders(data.headers ?? []);
+        setAppliedTemplateId(data.appliedTemplateId ?? null);
+
+        // Show suggestion banner if server found a match and no template was forced
+        if (!templateId && data.suggestedTemplate) {
+          setSuggestedTemplate(data.suggestedTemplate);
+        }
+
         setValidRows(data.valid ?? []);
         setDuplicateRows(data.duplicates ?? []);
         setErrorRows(data.errors ?? []);
@@ -99,10 +132,24 @@ export default function ImportPage() {
     }
   }, []);
 
+  // Universal file upload handler
+  const handleFileUpload = useCallback(async (file: File) => {
+    setLastUploadedFile(file);
+    const tid = selectedTemplateId ? parseInt(selectedTemplateId, 10) : undefined;
+    await previewFile(file, tid);
+  }, [previewFile, selectedTemplateId]);
+
+  // Apply suggested template
+  const applySuggested = useCallback(async () => {
+    if (!suggestedTemplate || !lastUploadedFile) return;
+    setSuggestedTemplate(null);
+    setPreviewOpen(false);
+    await previewFile(lastUploadedFile, suggestedTemplate.id);
+  }, [suggestedTemplate, lastUploadedFile, previewFile]);
+
   // OFX confirm callback
   const handleOfxConfirm = useCallback(async (rows: RawTransaction[]) => {
     setOfxPreviewOpen(false);
-
     try {
       const res = await fetch("/api/import/execute", {
         method: "POST",
@@ -111,7 +158,6 @@ export default function ImportPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-
       setUploadStatus({
         type: "success",
         message: `Imported ${data.imported} transactions (${data.skippedDuplicates ?? 0} duplicates skipped)`,
@@ -136,7 +182,6 @@ export default function ImportPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-
       setPreviewOpen(false);
       setUploadStatus({
         type: "success",
@@ -192,12 +237,72 @@ export default function ImportPage() {
             <Mail className="h-4 w-4 mr-1.5" />
             Email Import
           </TabsTrigger>
+          <TabsTrigger value="templates">
+            <BookTemplate className="h-4 w-4 mr-1.5" />
+            Templates
+            {templates.length > 0 && (
+              <span className="ml-1.5 text-[10px] bg-muted rounded-full px-1.5 py-0.5 font-mono">
+                {templates.length}
+              </span>
+            )}
+          </TabsTrigger>
         </TabsList>
 
         {/* Tab 1: Upload Files */}
         <TabsContent value="upload">
           <div className="space-y-4 mt-4">
+            {/* Template selector */}
+            {templates.length > 0 && (
+              <div className="flex items-center gap-2">
+                <BookTemplate className="h-4 w-4 text-muted-foreground shrink-0" />
+                <Select value={selectedTemplateId} onValueChange={(v) => setSelectedTemplateId(v ?? "")}>
+                  <SelectTrigger className="flex-1 h-8 text-sm">
+                    <SelectValue placeholder="Use a saved template (optional)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Auto-detect</SelectItem>
+                    {templates.map((t) => (
+                      <SelectItem key={t.id} value={String(t.id)}>
+                        {t.name}
+                        {t.defaultAccount && ` · ${t.defaultAccount}`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {selectedTemplateId && (
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setSelectedTemplateId("")}>
+                    Clear
+                  </Button>
+                )}
+              </div>
+            )}
+
             <FileDropZone onFileSelected={handleFileUpload} />
+
+            {/* Auto-match suggestion banner */}
+            {suggestedTemplate && (
+              <Card className="border-blue-200 bg-blue-50/40">
+                <CardContent className="py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-blue-600 shrink-0" />
+                      <p className="text-sm text-blue-800">
+                        This looks like <span className="font-medium">{suggestedTemplate.name}</span>
+                        {" "}({suggestedTemplate.score}% match). Re-import using this template?
+                      </p>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setSuggestedTemplate(null)}>
+                        Ignore
+                      </Button>
+                      <Button size="sm" className="h-7 text-xs" onClick={applySuggested}>
+                        Apply
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             {uploadStatus && (
               <Card className={uploadStatus.type === "success" ? "border-emerald-200 bg-emerald-50/30" : "border-rose-200 bg-rose-50/30"}>
@@ -225,7 +330,7 @@ export default function ImportPage() {
                   <div className="rounded-lg border p-3">
                     <p className="text-sm font-medium">CSV</p>
                     <p className="text-xs text-muted-foreground mt-1">
-                      Standard CSV transaction files. Automatically parsed and previewed with deduplication.
+                      Standard CSV transaction files. Save a template to auto-map columns on future uploads.
                     </p>
                   </div>
                   <div className="rounded-lg border p-3">
@@ -285,8 +390,8 @@ export default function ImportPage() {
                 <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
                   <p className="text-sm font-medium">How it works</p>
                   <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
-                    <li>Forward your bank statement email (or attach CSV/Excel/PDF files) to the address above.</li>
-                    <li>Attachments are automatically extracted and parsed.</li>
+                    <li>Forward your bank statement email (or attach a CSV file) to the address above.</li>
+                    <li>CSV attachments are matched against your saved import templates automatically.</li>
                     <li>Duplicate transactions are detected and skipped.</li>
                     <li>You&apos;ll receive a notification when the import completes.</li>
                   </ol>
@@ -296,6 +401,24 @@ export default function ImportPage() {
           </div>
         </TabsContent>
 
+        {/* Tab 3: Templates */}
+        <TabsContent value="templates">
+          <div className="space-y-4 mt-4">
+            <div>
+              <p className="text-sm text-muted-foreground">
+                Templates save your CSV column mappings so future uploads from the same bank are automatically recognized.
+                Upload a CSV and click <span className="font-medium">Save as Template</span> in the preview dialog to create one.
+              </p>
+            </div>
+            <TemplateManager
+              templates={templates}
+              onDeleted={(id) => setTemplates((prev) => prev.filter((t) => t.id !== id))}
+              onRenamed={(id, name) =>
+                setTemplates((prev) => prev.map((t) => (t.id === id ? { ...t, name } : t)))
+              }
+            />
+          </div>
+        </TabsContent>
       </Tabs>
 
       {/* Dialogs */}
@@ -307,6 +430,20 @@ export default function ImportPage() {
         errorRows={errorRows}
         onConfirm={handleImportConfirm}
         isImporting={isImporting}
+        csvHeaders={csvHeaders}
+        accounts={accountNames}
+        appliedTemplateId={appliedTemplateId}
+        onTemplateSaved={(t) => {
+          setTemplates((prev) => {
+            if (prev.find((x) => x.id === t.id)) return prev;
+            // Refetch to get full template data
+            fetch("/api/import/templates")
+              .then((r) => r.json())
+              .then((data) => { if (Array.isArray(data)) setTemplates(data); })
+              .catch(() => {});
+            return prev;
+          });
+        }}
       />
 
       <OfxPreview
@@ -318,7 +455,7 @@ export default function ImportPage() {
         balanceDate={ofxBalanceDate}
         dateRange={ofxDateRange}
         currency={ofxCurrency}
-        accounts={accounts}
+        accounts={accountNames}
         onConfirm={handleOfxConfirm}
       />
     </div>

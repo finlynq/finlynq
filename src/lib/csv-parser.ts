@@ -2,6 +2,7 @@ import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { generateImportHash, checkDuplicates } from "./import-hash";
 import type { RawTransaction } from "./import-pipeline";
+import type { ColumnMapping } from "./import-templates";
 
 /**
  * Robust CSV parser that handles:
@@ -210,6 +211,63 @@ function validateDate(dateStr: string): boolean {
   const [y, m, d] = dateStr.split("-").map(Number);
   const date = new Date(y, m - 1, d);
   return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
+}
+
+/** Extract just the header row from a CSV without parsing all rows. */
+export function extractCSVHeaders(csvText: string): string[] {
+  const cleaned = csvText.replace(/^\uFEFF/, "");
+  if (!cleaned.trim()) return [];
+  const lines = splitCSVLines(cleaned);
+  if (lines.length === 0) return [];
+  return parseCSVRow(lines[0]);
+}
+
+/**
+ * Parse a CSV using an explicit column mapping instead of assuming standard column names.
+ * Used when importing with a saved template.
+ */
+export function csvToRawTransactionsWithMapping(
+  csvText: string,
+  mapping: ColumnMapping,
+): { rows: RawTransaction[]; errors: Array<{ row: number; message: string }> } {
+  const parsed = parseCSV(csvText);
+  const rows: RawTransaction[] = [];
+  const errors: Array<{ row: number; message: string }> = [];
+
+  if (parsed.length === 0) {
+    return { rows: [], errors: [{ row: 0, message: "File is empty or contains only headers" }] };
+  }
+
+  for (let i = 0; i < parsed.length; i++) {
+    const row = parsed[i];
+    const dateRaw = row[mapping.date] ?? "";
+    const amountRaw = row[mapping.amount] ?? "";
+
+    const date = normalizeDate(dateRaw);
+    if (!date) {
+      errors.push({ row: i + 2, message: `Invalid date: "${dateRaw}"` });
+      continue;
+    }
+
+    const amount = parseAmount(amountRaw);
+    if (isNaN(amount)) {
+      errors.push({ row: i + 2, message: `Invalid amount: "${amountRaw}"` });
+      continue;
+    }
+
+    rows.push({
+      date,
+      account: mapping.account ? (row[mapping.account] ?? "") : "",
+      amount,
+      payee: mapping.payee ? (row[mapping.payee] ?? "") : "",
+      category: mapping.category ? (row[mapping.category] ?? "") : "",
+      currency: mapping.currency ? (row[mapping.currency] ?? "CAD") : "CAD",
+      note: mapping.note ? (row[mapping.note] ?? "") : "",
+      tags: mapping.tags ? (row[mapping.tags] ?? "") : "",
+    });
+  }
+
+  return { rows, errors };
 }
 
 export function csvToRawTransactions(csvText: string): { rows: RawTransaction[]; errors: Array<{ row: number; message: string }> } {

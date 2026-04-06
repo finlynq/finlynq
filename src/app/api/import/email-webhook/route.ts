@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and } from "drizzle-orm";
-import { csvToRawTransactions } from "@/lib/csv-parser";
+import { eq } from "drizzle-orm";
+import {
+  csvToRawTransactions,
+  csvToRawTransactionsWithMapping,
+  extractCSVHeaders,
+} from "@/lib/csv-parser";
 import { parsePdfToTransactions } from "@/lib/pdf-parser";
 import { extractExcelRows, parseExcelSheets } from "@/lib/excel-parser";
 import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
+import { deserializeTemplate, findBestTemplate, autoDetectColumnMapping } from "@/lib/import-templates";
 
 export async function POST(request: NextRequest) {
   try {
@@ -22,8 +27,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Resolve the userId that owns this webhook secret
     const userId = storedSecret.userId;
+
+    // Load user's import templates for CSV matching
+    const templateRows = db
+      .select()
+      .from(schema.importTemplates)
+      .where(eq(schema.importTemplates.userId, userId))
+      .all();
+    const templates = templateRows.map(deserializeTemplate);
 
     const formData = await request.formData() as unknown as globalThis.FormData;
     const allRows: RawTransaction[] = [];
@@ -39,7 +51,22 @@ export async function POST(request: NextRequest) {
 
       if (ext === "csv") {
         const text = await value.text();
-        rows = csvToRawTransactions(text).rows;
+        const headers = extractCSVHeaders(text);
+        const bestMatch = findBestTemplate(headers, templates);
+
+        if (bestMatch) {
+          const result = csvToRawTransactionsWithMapping(text, bestMatch.template.columnMapping);
+          rows = result.rows;
+          // Apply template's default account to rows without one
+          if (bestMatch.template.defaultAccount) {
+            rows = rows.map((r) => ({
+              ...r,
+              account: r.account || bestMatch.template.defaultAccount!,
+            }));
+          }
+        } else {
+          rows = csvToRawTransactions(text).rows;
+        }
       } else if (ext === "pdf") {
         const buffer = Buffer.from(await value.arrayBuffer());
         const result = await parsePdfToTransactions(buffer);
@@ -48,21 +75,16 @@ export async function POST(request: NextRequest) {
         const buffer = Buffer.from(await value.arrayBuffer());
         const sheets = parseExcelSheets(buffer);
         if (sheets.length > 0 && sheets[0].headers.length > 0) {
-          // Auto-detect column mapping for email imports
           const sheet = sheets[0];
-          const mapping = autoDetectMapping(sheet.headers);
+          const mapping = autoDetectColumnMapping(sheet.headers);
           if (mapping) {
             rows = extractExcelRows(buffer, sheet.name, mapping).rows;
           }
         }
       }
 
-      // Set default account for PDF/Excel rows that don't have one
       if (defaultAccount) {
-        rows = rows.map((r) => ({
-          ...r,
-          account: r.account || defaultAccount,
-        }));
+        rows = rows.map((r) => ({ ...r, account: r.account || defaultAccount }));
       }
 
       allRows.push(...rows);
@@ -74,7 +96,6 @@ export async function POST(request: NextRequest) {
 
     const result = executeImport(allRows, [], userId);
 
-    // Create notification scoped to user
     db.insert(schema.notifications)
       .values({
         type: "import",
@@ -91,25 +112,4 @@ export async function POST(request: NextRequest) {
     const message = safeErrorMessage(error, "Email import failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
-}
-
-function autoDetectMapping(headers: string[]) {
-  const lower = headers.map((h) => h.toLowerCase());
-  const find = (keywords: string[]) =>
-    headers[lower.findIndex((h) => keywords.some((k) => h.includes(k)))] || undefined;
-
-  const date = find(["date", "posted", "transaction date"]);
-  const amount = find(["amount", "total", "debit", "credit"]);
-
-  if (!date || !amount) return null;
-
-  return {
-    date,
-    amount,
-    account: find(["account"]),
-    payee: find(["payee", "description", "merchant", "name", "memo"]),
-    category: find(["category", "type"]),
-    currency: find(["currency"]),
-    note: find(["note", "memo", "reference"]),
-  };
 }

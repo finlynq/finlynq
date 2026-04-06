@@ -261,3 +261,16 @@ export const contributionRoom = pgTable("contribution_room", {
   used: doublePrecision("used").default(0),
   note: text("note").default(""),
 });
+
+// Import Templates — saved CSV column mappings for re-use
+export const importTemplates = pgTable("import_templates", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  name: text("name").notNull(),
+  fileHeaders: text("file_headers").notNull(), // JSON: string[]
+  columnMapping: text("column_mapping").notNull(), // JSON: {date, amount, account?, payee?, category?, currency?, note?, tags?}
+  defaultAccount: text("default_account"),
+  isDefault: integer("is_default").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});

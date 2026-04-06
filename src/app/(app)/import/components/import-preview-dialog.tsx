@@ -19,8 +19,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { AlertCircle, CheckCircle2, Copy } from "lucide-react";
+import { AlertCircle, BookTemplate, CheckCircle2, Copy } from "lucide-react";
 import type { RawTransaction } from "@/lib/import-pipeline";
+import { SaveTemplateDialog } from "./save-template-dialog";
 
 interface PreviewRow extends RawTransaction {
   hash: string;
@@ -35,6 +36,10 @@ interface ImportPreviewDialogProps {
   errorRows: Array<{ rowIndex: number; message: string }>;
   onConfirm: (rows: RawTransaction[], forceImportIndices: number[]) => void;
   isImporting: boolean;
+  csvHeaders?: string[];
+  accounts?: string[];
+  appliedTemplateId?: number | null;
+  onTemplateSaved?: (template: { id: number; name: string }) => void;
 }
 
 export function ImportPreviewDialog({
@@ -45,8 +50,13 @@ export function ImportPreviewDialog({
   errorRows,
   onConfirm,
   isImporting,
+  csvHeaders = [],
+  accounts = [],
+  appliedTemplateId,
+  onTemplateSaved,
 }: ImportPreviewDialogProps) {
   const [includeDuplicates, setIncludeDuplicates] = useState<Set<number>>(new Set());
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
 
   const toggleDuplicate = (rowIndex: number) => {
     setIncludeDuplicates((prev) => {
@@ -77,7 +87,7 @@ export function ImportPreviewDialog({
         </DialogHeader>
 
         {/* Summary badges */}
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge variant="default" className="bg-emerald-600">
             <CheckCircle2 className="h-3 w-3 mr-1" />
             {validRows.length} new
@@ -93,6 +103,22 @@ export function ImportPreviewDialog({
               <AlertCircle className="h-3 w-3 mr-1" />
               {errorRows.length} errors
             </Badge>
+          )}
+          {appliedTemplateId && (
+            <Badge variant="outline" className="text-[10px] text-blue-700 border-blue-200 bg-blue-50">
+              Template applied
+            </Badge>
+          )}
+          {csvHeaders.length > 0 && !appliedTemplateId && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 text-xs ml-auto"
+              onClick={() => setSaveTemplateOpen(true)}
+            >
+              <BookTemplate className="h-3 w-3 mr-1" />
+              Save as Template
+            </Button>
           )}
         </div>
 
@@ -188,6 +214,19 @@ export function ImportPreviewDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
+
+      {csvHeaders.length > 0 && (
+        <SaveTemplateDialog
+          open={saveTemplateOpen}
+          onOpenChange={setSaveTemplateOpen}
+          csvHeaders={csvHeaders}
+          accounts={accounts}
+          onSaved={(t) => {
+            onTemplateSaved?.(t);
+            setSaveTemplateOpen(false);
+          }}
+        />
+      )}
     </Dialog>
   );
 }
