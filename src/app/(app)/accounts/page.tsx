@@ -132,18 +132,20 @@ export default function AccountsPage() {
               <Link
                 key={a.accountId}
                 href={`/accounts/${a.accountId}`}
-                className="flex items-center justify-between hover:bg-muted/50 transition-colors rounded-lg py-2.5 px-3"
+                className="flex items-center justify-between hover:bg-muted/50 transition-colors rounded-lg py-2.5 px-3 gap-2"
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
                   <div
-                    className={`h-8 w-8 rounded-lg flex items-center justify-center text-xs font-bold ${avatarClasses}`}
+                    className={`h-8 w-8 shrink-0 rounded-lg flex items-center justify-center text-xs font-bold ${avatarClasses}`}
                   >
                     {a.accountName.charAt(0).toUpperCase()}
                   </div>
-                  <span className="font-medium text-sm">{a.accountName}</span>
-                  <Badge variant="outline" className="text-xs">{a.currency}</Badge>
+                  <div className="min-w-0">
+                    <p className="font-medium text-sm truncate">{a.accountName}</p>
+                    <Badge variant="outline" className="text-[10px] mt-0.5">{a.currency}</Badge>
+                  </div>
                 </div>
-                <span className={`font-mono text-sm font-semibold ${a.balance >= 0 ? color : "text-rose-600"}`}>
+                <span className={`font-mono text-sm font-semibold shrink-0 ${a.balance >= 0 ? color : "text-rose-600"}`}>
                   {formatCurrency(a.balance, a.currency)}
                 </span>
               </Link>

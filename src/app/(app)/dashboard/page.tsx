@@ -12,11 +12,7 @@ import { StatCard } from "./_components/stat-card";
 import { HealthScoreCard } from "./_components/health-score-card";
 import { ActionCenter } from "./_components/action-center";
 import { WeeklyRecap } from "./_components/weekly-recap";
-import { IncomeExpenseChart } from "./_components/income-expense-chart";
-import { SpendingCategoryChart } from "./_components/spending-category-chart";
-import { NetWorthChart } from "./_components/net-worth-chart";
-import { AvailableToSpend } from "./_components/available-to-spend";
-import { InsightsSection } from "./_components/insights-section";
+import { QuickImport } from "./_components/quick-import";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import type { DashboardData } from "./_components/types";
 
@@ -120,11 +116,6 @@ export default function DashboardPage() {
   const lastMonthIncome = incExpData.length > 0 ? incExpData[incExpData.length - 1].income : 0;
   const lastMonthExpenses = incExpData.length > 0 ? incExpData[incExpData.length - 1].expenses : 0;
   const availableToSpend = lastMonthIncome - lastMonthExpenses;
-
-  // Spending by category
-  const spendingData = (data.spendingByCategory ?? [])
-    .map((c) => ({ name: c.categoryName ?? "Uncategorized", value: Math.abs(c.total) }))
-    .slice(0, 8);
 
   const budgetSparkline = incExpLast6.map((d) => d.income - d.expenses);
 
@@ -272,33 +263,15 @@ export default function DashboardPage() {
       </div>
 
       {/* ============================================
-          ROW 3 — Action Center + Weekly Recap
-          ============================================ */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <ActionCenter />
-        <WeeklyRecap />
-      </div>
-
-      {/* ============================================
-          ROW 4 — Charts (Income/Expense + Spending)
-          ============================================ */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <IncomeExpenseChart data={incExpData} />
-        <SpendingCategoryChart data={spendingData} />
-      </div>
-
-      {/* ============================================
-          ROW 5 — Available to Spend + Net Worth Trend
+          ROW 3 — Action Center + Weekly Recap + Quick Import
           ============================================ */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <AvailableToSpend income={lastMonthIncome} expenses={lastMonthExpenses} />
-        <NetWorthChart data={netWorthData} />
+        <ActionCenter />
+        <WeeklyRecap />
+        <motion.div variants={itemVariants}>
+          <QuickImport />
+        </motion.div>
       </div>
-
-      {/* ============================================
-          ROW 6 — Insights (Alerts, Recurring, Merchants, Trends)
-          ============================================ */}
-      <InsightsSection />
     </motion.div>
   );
 }

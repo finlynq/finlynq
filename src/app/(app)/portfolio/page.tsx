@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
+import { useDevMode } from "@/hooks/use-dev-mode";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -271,6 +272,7 @@ function PortfolioSkeleton() {
 
 // ── Main Page ───────────────────────────────────────────────────────
 export default function PortfolioPage() {
+  const devMode = useDevMode();
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<FilterType>("all");
@@ -636,8 +638,8 @@ export default function PortfolioPage() {
         </CardContent>
       </Card>
 
-      {/* ── ETF X-Ray (Combined) ──────────────────────────────── */}
-      {hasEtfData && (
+      {/* ── ETF X-Ray (Combined) — dev mode only ─────────────── */}
+      {devMode && hasEtfData && (
         <Card>
           <CardHeader className="pb-2">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1037,8 +1039,8 @@ export default function PortfolioPage() {
         </Card>
       </div>
 
-      {/* ── Performance vs Benchmarks ─────────────────────────── */}
-      <Card>
+      {/* ── Performance vs Benchmarks — dev mode only ─────────── */}
+      {devMode && <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <div>
@@ -1129,7 +1131,7 @@ export default function PortfolioPage() {
             </div>
           )}
         </CardContent>
-      </Card>
+      </Card>}
 
       {/* ── Holdings by Account (Collapsible) ─────────────────── */}
       <Card>

@@ -184,14 +184,21 @@ export default function GoalsPage() {
       {/* Empty state */}
       {active.length === 0 && (
         <Card>
-          <CardContent className="py-12 flex flex-col items-center text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted mb-4">
-              <Target className="h-7 w-7 text-muted-foreground" />
+          <CardContent className="py-14 flex flex-col items-center text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-100 dark:bg-indigo-950/60 mb-4">
+              <Target className="h-7 w-7 text-indigo-600 dark:text-indigo-400" />
             </div>
             <h3 className="text-lg font-semibold mb-1">No active goals yet</h3>
-            <p className="text-sm text-muted-foreground max-w-sm">
-              Set a financial goal to start tracking your progress. Whether it&apos;s saving for an emergency fund, paying off debt, or building investments, every journey starts with a goal.
+            <p className="text-sm text-muted-foreground max-w-sm mb-5">
+              Set a financial goal to start tracking your progress — saving for an emergency fund, paying off debt, or building investments.
             </p>
+            <button
+              onClick={() => setDialogOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+            >
+              <Plus className="h-4 w-4" />
+              Add your first goal
+            </button>
           </CardContent>
         </Card>
       )}

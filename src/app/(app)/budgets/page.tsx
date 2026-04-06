@@ -277,14 +277,14 @@ export default function BudgetsPage() {
     <div className="space-y-6">
       <OnboardingTips page="budgets" />
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Budgets</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Set spending limits and track how you&apos;re doing each month.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Mode toggle */}
           <div className="inline-flex items-center rounded-lg bg-muted/50 p-0.5">
             <button
@@ -598,14 +598,21 @@ export default function BudgetsPage() {
       {/* Budget items */}
       {budgets.length === 0 ? (
         <Card>
-          <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted mb-4">
-              <LayoutGrid className="h-7 w-7 text-muted-foreground" />
+          <CardContent className="flex flex-col items-center justify-center py-14 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-100 dark:bg-indigo-950/60 mb-4">
+              <LayoutGrid className="h-7 w-7 text-indigo-600 dark:text-indigo-400" />
             </div>
-            <p className="text-base font-medium mb-1">No budgets for {getMonthLabel(month)}</p>
-            <p className="text-sm text-muted-foreground max-w-xs">
-              Click &ldquo;Add Budget&rdquo; above to set a spending limit for a category and start tracking your progress.
+            <p className="text-base font-semibold mb-1">No budgets for {getMonthLabel(month)}</p>
+            <p className="text-sm text-muted-foreground max-w-xs mb-5">
+              Set spending limits for your categories and track how you&apos;re doing throughout the month.
             </p>
+            <button
+              onClick={() => setDialogOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+            >
+              <Plus className="h-4 w-4" />
+              Add your first budget
+            </button>
           </CardContent>
         </Card>
       ) : (

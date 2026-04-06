@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,7 @@ import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X } from "lucide-react";
 
 type Transaction = {
   id: number;
@@ -74,6 +74,7 @@ export default function TransactionsPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [searchInput, setSearchInput] = useState(""); // local (unthrottled) state
   const [filters, setFilters] = useState({
     startDate: "",
     endDate: "",
@@ -81,6 +82,25 @@ export default function TransactionsPage() {
     categoryId: "",
     search: "",
   });
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const hasActiveFilters =
+    filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search;
+
+  function clearFilters() {
+    setSearchInput("");
+    setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "" });
+    setPage(0);
+  }
+
+  function handleSearchChange(value: string) {
+    setSearchInput(value);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      setFilters((f) => ({ ...f, search: value }));
+      setPage(0);
+    }, 350);
+  }
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -346,16 +366,48 @@ export default function TransactionsPage() {
 
       {/* Filters */}
       <Card className="bg-muted/30 border-dashed">
-        <CardContent className="pt-4">
-          <div className="flex items-center gap-2 mb-3">
-            <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-medium text-muted-foreground">Filters</span>
+        <CardContent className="pt-4 pb-4">
+          {/* Search bar — full width, prominent */}
+          <div className="relative mb-3">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+            <Input
+              className="pl-9 pr-8"
+              placeholder="Search payee, note, tags…"
+              value={searchInput}
+              onChange={(e) => handleSearchChange(e.target.value)}
+            />
+            {searchInput && (
+              <button
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                onClick={() => handleSearchChange("")}
+                aria-label="Clear search"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            <Input type="date" placeholder="Start date" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
-            <Input type="date" placeholder="End date" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
+
+          {/* Secondary filters row */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              <span className="font-medium">Filters:</span>
+            </div>
+            <Input
+              type="date"
+              className="h-8 text-xs w-36"
+              value={filters.startDate}
+              onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }}
+            />
+            <span className="text-xs text-muted-foreground">–</span>
+            <Input
+              type="date"
+              className="h-8 text-xs w-36"
+              value={filters.endDate}
+              onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }}
+            />
             <Select value={filters.accountId} onValueChange={(v) => { setFilters({ ...filters, accountId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger><SelectValue placeholder="All accounts" /></SelectTrigger>
+              <SelectTrigger className="h-8 text-xs w-36"><SelectValue placeholder="All accounts" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All accounts</SelectItem>
                 {accounts.map((a) => (
@@ -364,7 +416,7 @@ export default function TransactionsPage() {
               </SelectContent>
             </Select>
             <Select value={filters.categoryId} onValueChange={(v) => { setFilters({ ...filters, categoryId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger><SelectValue placeholder="All categories" /></SelectTrigger>
+              <SelectTrigger className="h-8 text-xs w-36"><SelectValue placeholder="All categories" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All categories</SelectItem>
                 {categories.map((c) => (
@@ -372,7 +424,15 @@ export default function TransactionsPage() {
                 ))}
               </SelectContent>
             </Select>
-            <Input placeholder="Search payee, note, tags..." value={filters.search} onChange={(e) => { setFilters({ ...filters, search: e.target.value }); setPage(0); }} />
+            {hasActiveFilters && (
+              <button
+                onClick={clearFilters}
+                className="ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <X className="h-3 w-3" />
+                Clear filters
+              </button>
+            )}
           </div>
         </CardContent>
       </Card>

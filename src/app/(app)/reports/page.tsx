@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from "react";
+import { useDevMode } from "@/hooks/use-dev-mode";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -166,6 +167,8 @@ export default function ReportsPage() {
   // Expand/collapse groups
   const [expandedIncomeGroups, setExpandedIncomeGroups] = useState<Set<string>>(new Set());
   const [expandedExpenseGroups, setExpandedExpenseGroups] = useState<Set<string>>(new Set());
+
+  const devMode = useDevMode();
 
   // Active tab
   const [activeTab, setActiveTab] = useState("income");
@@ -517,12 +520,16 @@ export default function ReportsPage() {
           <TabsTrigger value="balance">
             <FileText className="h-3.5 w-3.5 mr-1.5" /> Balance Sheet
           </TabsTrigger>
-          <TabsTrigger value="cashflow">
-            <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
-          </TabsTrigger>
-          <TabsTrigger value="yoy">
-            <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
-          </TabsTrigger>
+          {devMode && (
+            <TabsTrigger value="cashflow">
+              <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
+            </TabsTrigger>
+          )}
+          {devMode && (
+            <TabsTrigger value="yoy">
+              <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* ============ Income Statement ============ */}
