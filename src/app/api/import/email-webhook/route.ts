@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and } from "drizzle-orm";
-import { csvToRawTransactions } from "@/lib/csv-parser";
+import { eq } from "drizzle-orm";
+import { csvToRawTransactions, csvToRawTransactionsWithMapping, extractCsvHeaders } from "@/lib/csv-parser";
 import { parsePdfToTransactions } from "@/lib/pdf-parser";
 import { extractExcelRows, parseExcelSheets } from "@/lib/excel-parser";
 import { executeImport } from "@/lib/import-pipeline";
@@ -25,6 +25,13 @@ export async function POST(request: NextRequest) {
     // Resolve the userId that owns this webhook secret
     const userId = storedSecret.userId;
 
+    // Load saved import templates for this user (for CSV matching)
+    const savedTemplates = db
+      .select()
+      .from(schema.importTemplates)
+      .where(eq(schema.importTemplates.userId, userId))
+      .all();
+
     const formData = await request.formData() as unknown as globalThis.FormData;
     const allRows: RawTransaction[] = [];
     const defaultAccount = formData.get("defaultAccount") as string | null;
@@ -39,7 +46,24 @@ export async function POST(request: NextRequest) {
 
       if (ext === "csv") {
         const text = await value.text();
-        rows = csvToRawTransactions(text).rows;
+        const fileHeaders = extractCsvHeaders(text);
+
+        // Try to match against saved templates
+        const matchedTemplate = findBestTemplate(savedTemplates, fileHeaders);
+
+        if (matchedTemplate) {
+          const mapping = JSON.parse(matchedTemplate.columnMapping) as Record<string, string>;
+          const templateDefault = matchedTemplate.defaultAccount ?? "";
+          const result = csvToRawTransactionsWithMapping(text, mapping);
+          rows = result.rows;
+          // Apply template's default account if no account column mapped
+          if (templateDefault) {
+            rows = rows.map((r) => ({ ...r, account: r.account || templateDefault }));
+          }
+        } else {
+          // Fall back to standard column names
+          rows = csvToRawTransactions(text).rows;
+        }
       } else if (ext === "pdf") {
         const buffer = Buffer.from(await value.arrayBuffer());
         const result = await parsePdfToTransactions(buffer);
@@ -48,21 +72,17 @@ export async function POST(request: NextRequest) {
         const buffer = Buffer.from(await value.arrayBuffer());
         const sheets = parseExcelSheets(buffer);
         if (sheets.length > 0 && sheets[0].headers.length > 0) {
-          // Auto-detect column mapping for email imports
           const sheet = sheets[0];
-          const mapping = autoDetectMapping(sheet.headers);
+          const mapping = autoDetectExcelMapping(sheet.headers);
           if (mapping) {
             rows = extractExcelRows(buffer, sheet.name, mapping).rows;
           }
         }
       }
 
-      // Set default account for PDF/Excel rows that don't have one
+      // Apply global default account for rows that don't have one
       if (defaultAccount) {
-        rows = rows.map((r) => ({
-          ...r,
-          account: r.account || defaultAccount,
-        }));
+        rows = rows.map((r) => ({ ...r, account: r.account || defaultAccount }));
       }
 
       allRows.push(...rows);
@@ -93,7 +113,31 @@ export async function POST(request: NextRequest) {
   }
 }
 
-function autoDetectMapping(headers: string[]) {
+/** Score a file's headers against a template and return the best match (≥80%). */
+function findBestTemplate(
+  templates: Array<{ headers: string; columnMapping: string; defaultAccount: string | null }>,
+  fileHeaders: string[],
+) {
+  if (templates.length === 0 || fileHeaders.length === 0) return null;
+  const fileSet = new Set(fileHeaders.map((h) => h.toLowerCase().trim()));
+
+  let best: (typeof templates)[number] | null = null;
+  let bestScore = 0;
+
+  for (const t of templates) {
+    const tHeaders = JSON.parse(t.headers ?? "[]") as string[];
+    if (tHeaders.length === 0) continue;
+    const matches = tHeaders.filter((h) => fileSet.has(h.toLowerCase().trim())).length;
+    const score = Math.round((matches / tHeaders.length) * 100);
+    if (score > bestScore && score >= 80) {
+      bestScore = score;
+      best = t;
+    }
+  }
+  return best;
+}
+
+function autoDetectExcelMapping(headers: string[]) {
   const lower = headers.map((h) => h.toLowerCase());
   const find = (keywords: string[]) =>
     headers[lower.findIndex((h) => keywords.some((k) => h.includes(k)))] || undefined;

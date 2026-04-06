@@ -255,6 +255,75 @@ export function csvToRawTransactions(csvText: string): { rows: RawTransaction[];
   return { rows, errors };
 }
 
+/**
+ * Parse CSV using a user-provided column mapping.
+ * mapping format: { date: "Column Header", amount: "Column Header", payee?: "...", ... }
+ * Mirrors the ColumnMapping format used by the Excel parser.
+ */
+export function csvToRawTransactionsWithMapping(
+  csvText: string,
+  mapping: Record<string, string>,
+): { rows: RawTransaction[]; errors: Array<{ row: number; message: string }> } {
+  const parsed = parseCSV(csvText);
+  const rows: RawTransaction[] = [];
+  const errors: Array<{ row: number; message: string }> = [];
+
+  if (parsed.length === 0) {
+    return { rows: [], errors: [{ row: 0, message: "File is empty or contains only headers" }] };
+  }
+
+  // Invert: field → header  (mapping already is { field: header })
+  const dateCol = mapping["date"];
+  const amountCol = mapping["amount"];
+
+  if (!dateCol || !amountCol) {
+    return { rows: [], errors: [{ row: 0, message: "Column mapping must include date and amount" }] };
+  }
+
+  for (let i = 0; i < parsed.length; i++) {
+    const row = parsed[i];
+    const dateRaw = row[dateCol] ?? "";
+    const amountRaw = row[amountCol] ?? "";
+
+    const date = normalizeDate(dateRaw);
+    if (!date) {
+      errors.push({ row: i + 2, message: `Invalid date: "${dateRaw}"` });
+      continue;
+    }
+
+    const amount = parseAmount(amountRaw);
+    if (isNaN(amount)) {
+      errors.push({ row: i + 2, message: `Invalid amount: "${amountRaw}"` });
+      continue;
+    }
+
+    rows.push({
+      date,
+      account: mapping["account"] ? (row[mapping["account"]] ?? "") : "",
+      amount,
+      payee: mapping["payee"] ? (row[mapping["payee"]] ?? "") : "",
+      category: mapping["category"] ? (row[mapping["category"]] ?? "") : undefined,
+      currency: mapping["currency"] ? (row[mapping["currency"]] ?? "CAD") : "CAD",
+      note: mapping["note"] ? (row[mapping["note"]] ?? "") : undefined,
+      tags: mapping["tags"] ? (row[mapping["tags"]] ?? "") : undefined,
+      quantity: mapping["quantity"] ? (parseFloat(row[mapping["quantity"]] ?? "") || undefined) : undefined,
+      portfolioHolding: mapping["portfolioHolding"] ? (row[mapping["portfolioHolding"]] || undefined) : undefined,
+    });
+  }
+
+  return { rows, errors };
+}
+
+/**
+ * Extract just the header row from a CSV text (for template matching).
+ */
+export function extractCsvHeaders(csvText: string): string[] {
+  const cleaned = csvText.replace(/^\uFEFF/, "");
+  const lines = splitCSVLines(cleaned);
+  if (lines.length === 0) return [];
+  return parseCSVRow(lines[0]);
+}
+
 export async function importAccounts(csvText: string, userId?: string) {
   const rows = parseCSV(csvText);
   if (rows.length === 0) return { total: 0, imported: 0, errors: ["File is empty or contains only headers"] };

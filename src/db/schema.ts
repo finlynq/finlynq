@@ -242,6 +242,20 @@ export const passwordResetTokens = sqliteTable("password_reset_tokens", {
   createdAt: text("created_at").notNull(),
 });
 
+// Import Templates — saved CSV/Excel column mappings
+export const importTemplates = sqliteTable("import_templates", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
+  name: text("name").notNull(),
+  fileType: text("file_type").notNull().default("csv"), // 'csv' | 'excel'
+  headers: text("headers").notNull(), // JSON array of original file headers
+  columnMapping: text("column_mapping").notNull(), // JSON: { date: "Col", amount: "Col", ... }
+  defaultAccount: text("default_account").default(""),
+  isDefault: integer("is_default").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 // Feature 8: Tax - Contribution Room
 export const contributionRoom = sqliteTable("contribution_room", {
   id: integer("id").primaryKey({ autoIncrement: true }),

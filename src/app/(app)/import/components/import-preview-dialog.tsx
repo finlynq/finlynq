@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -19,7 +20,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { AlertCircle, CheckCircle2, Copy } from "lucide-react";
+import { AlertCircle, CheckCircle2, Copy, BookmarkPlus, Check } from "lucide-react";
 import type { RawTransaction } from "@/lib/import-pipeline";
 
 interface PreviewRow extends RawTransaction {
@@ -35,6 +36,10 @@ interface ImportPreviewDialogProps {
   errorRows: Array<{ rowIndex: number; message: string }>;
   onConfirm: (rows: RawTransaction[], forceImportIndices: number[]) => void;
   isImporting: boolean;
+  // Template saving — only shown when a custom mapping was used
+  csvHeaders?: string[];
+  columnMapping?: Record<string, string>;
+  defaultAccount?: string;
 }
 
 export function ImportPreviewDialog({
@@ -45,8 +50,20 @@ export function ImportPreviewDialog({
   errorRows,
   onConfirm,
   isImporting,
+  csvHeaders,
+  columnMapping,
+  defaultAccount,
 }: ImportPreviewDialogProps) {
   const [includeDuplicates, setIncludeDuplicates] = useState<Set<number>>(new Set());
+
+  // Template save state
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  const canSaveTemplate = !!csvHeaders && !!columnMapping;
 
   const toggleDuplicate = (rowIndex: number) => {
     setIncludeDuplicates((prev) => {
@@ -64,6 +81,36 @@ export function ImportPreviewDialog({
     const allToImport = [...validRows, ...duplicateRows];
     const forceIndices = Array.from(includeDuplicates);
     onConfirm(allToImport, forceIndices);
+  };
+
+  const handleSaveTemplate = async () => {
+    if (!templateName.trim() || !csvHeaders || !columnMapping) return;
+    setSaving(true);
+    setSaveError("");
+    try {
+      const res = await fetch("/api/import/templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: templateName.trim(),
+          fileType: "csv",
+          headers: csvHeaders,
+          columnMapping,
+          defaultAccount: defaultAccount ?? "",
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json() as { error?: string };
+        throw new Error(data.error ?? "Save failed");
+      }
+      setSaved(true);
+      setShowSaveTemplate(false);
+      setTemplateName("");
+    } catch (err: unknown) {
+      setSaveError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -92,6 +139,12 @@ export function ImportPreviewDialog({
             <Badge variant="destructive">
               <AlertCircle className="h-3 w-3 mr-1" />
               {errorRows.length} errors
+            </Badge>
+          )}
+          {saved && (
+            <Badge variant="secondary" className="bg-indigo-100 text-indigo-700">
+              <Check className="h-3 w-3 mr-1" />
+              Template saved
             </Badge>
           )}
         </div>
@@ -171,6 +224,41 @@ export function ImportPreviewDialog({
                 Row {err.rowIndex + 1}: {err.message}
               </p>
             ))}
+          </div>
+        )}
+
+        {/* Save as Template */}
+        {canSaveTemplate && !saved && (
+          <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
+            {!showSaveTemplate ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowSaveTemplate(true)}
+                className="text-xs h-7"
+              >
+                <BookmarkPlus className="h-3.5 w-3.5 mr-1.5" />
+                Save column mapping as template
+              </Button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Input
+                  placeholder="Template name (e.g. CIBC Chequing)"
+                  value={templateName}
+                  onChange={(e) => setTemplateName(e.target.value)}
+                  className="h-8 text-sm flex-1"
+                  onKeyDown={(e) => e.key === "Enter" && handleSaveTemplate()}
+                  autoFocus
+                />
+                <Button size="sm" onClick={handleSaveTemplate} disabled={!templateName.trim() || saving} className="h-8">
+                  {saving ? "Saving…" : "Save"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => { setShowSaveTemplate(false); setSaveError(""); }} className="h-8">
+                  Cancel
+                </Button>
+              </div>
+            )}
+            {saveError && <p className="text-xs text-rose-600">{saveError}</p>}
           </div>
         )}
 

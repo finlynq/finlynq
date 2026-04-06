@@ -252,6 +252,20 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
   createdAt: text("created_at").notNull(),
 });
 
+// Import Templates — saved CSV/Excel column mappings
+export const importTemplates = pgTable("import_templates", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  name: text("name").notNull(),
+  fileType: text("file_type").notNull().default("csv"),
+  headers: text("headers").notNull(), // JSON array
+  columnMapping: text("column_mapping").notNull(), // JSON
+  defaultAccount: text("default_account").default(""),
+  isDefault: integer("is_default").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const contributionRoom = pgTable("contribution_room", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
