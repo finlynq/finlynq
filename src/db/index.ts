@@ -83,12 +83,34 @@ export const db = new Proxy({} as DrizzleSqliteDb, {
 /**
  * Schema export — returns the correct schema for the active dialect.
  * PG schema when PostgreSQL adapter is active, SQLite schema otherwise.
+ *
+ * NOTE: The proxy target MUST be a plain object `{}`, NOT `sqliteSchema`.
+ * ES module namespace objects have non-configurable, non-writable properties.
+ * If the target were `sqliteSchema`, returning `pgSchema.accounts` when the
+ * target has a different `accounts` value violates the Proxy invariant and
+ * throws: "property 'X' is a read-only and non-configurable data property
+ * on the proxy target but the proxy did not return its actual value".
  */
-export const schema = new Proxy(sqliteSchema as typeof sqliteSchema, {
-  get(_target, prop, receiver) {
+export const schema = new Proxy({} as typeof sqliteSchema & typeof pgSchema, {
+  get(_target, prop, _receiver) {
     const dialect = g.__pfDialect ?? "sqlite";
     const activeSchema = dialect === "postgres" ? pgSchema : sqliteSchema;
-    return Reflect.get(activeSchema, prop, receiver);
+    return Reflect.get(activeSchema, prop, activeSchema);
+  },
+  has(_target, prop) {
+    const dialect = g.__pfDialect ?? "sqlite";
+    const activeSchema = dialect === "postgres" ? pgSchema : sqliteSchema;
+    return Reflect.has(activeSchema, prop);
+  },
+  ownKeys() {
+    const dialect = g.__pfDialect ?? "sqlite";
+    const activeSchema = dialect === "postgres" ? pgSchema : sqliteSchema;
+    return Reflect.ownKeys(activeSchema);
+  },
+  getOwnPropertyDescriptor(_target, prop) {
+    const dialect = g.__pfDialect ?? "sqlite";
+    const activeSchema = dialect === "postgres" ? pgSchema : sqliteSchema;
+    return Reflect.getOwnPropertyDescriptor(activeSchema, prop);
   },
 });
 export type { DatabaseAdapter, DbDialect, DrizzleDb };
