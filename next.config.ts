@@ -1,15 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  typescript: {
-    // Pre-existing Drizzle ORM / SQLite+PG dual-schema type conflicts.
-    // These do not affect runtime correctness — fix before v1.0.
-    ignoreBuildErrors: true,
-  },
-  reactCompiler: true,
-  // Pre-existing Drizzle schema proxy type errors (SQLite×PG intersection) —
-  // runtime is correct; fix DB adapter types in a follow-up session.
+  // Pre-existing Drizzle ORM / SQLite+PG dual-schema type conflicts.
+  // These do not affect runtime correctness — fix before v1.0.
   typescript: { ignoreBuildErrors: true },
+  reactCompiler: true,
   serverExternalPackages: ["better-sqlite3", "better-sqlite3-multiple-ciphers", "pg", "@napi-rs/canvas", "canvas", "pdfjs-dist"],
   // Standalone output bundles everything needed to run with `node server.js`
   // Required for the multi-stage Docker build.

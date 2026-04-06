@@ -33,7 +33,7 @@ fi
 
 # 2. Install dependencies
 echo "==> Installing dependencies..."
-npm ci --prefer-offline
+npm install --prefer-offline
 
 # 3. Build
 if [ "$SKIP_BUILD" = false ]; then

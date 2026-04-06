@@ -84,13 +84,14 @@ export async function POST(request: NextRequest) {
 
         // Store Stripe customer ID
         const now = new Date().toISOString();
+        const stripeCustomer = session.customer;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (db.update(schema.users) as any)
+        await (db.update(pgSchema.users) as any)
           .set({
-            stripeCustomerId: typeof customer === "string" ? customer : undefined,
+            stripeCustomerId: typeof stripeCustomer === "string" ? stripeCustomer : undefined,
             updatedAt: now,
           } as any)
-          .where(eq(schema.users.id, userId))
+          .where(eq(pgSchema.users.id, userId))
           .run();
 
         // Activate plan
