@@ -32,6 +32,9 @@ export async function createUser(input: CreateUserInput) {
   const now = new Date().toISOString();
   const emailVerifyToken = crypto.randomUUID();
 
+  // New managed-mode users get a 14-day trial
+  const trialExpiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+
   await db.insert(getSchema().users)
     .values({
       id,
@@ -44,7 +47,8 @@ export async function createUser(input: CreateUserInput) {
       mfaEnabled: 0,
       mfaSecret: null,
       onboardingComplete: 0,
-      plan: "free",
+      plan: "trial",
+      planExpiresAt: trialExpiresAt,
       createdAt: now,
       updatedAt: now,
     });
