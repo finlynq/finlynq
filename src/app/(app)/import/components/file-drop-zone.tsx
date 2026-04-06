@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState, useCallback } from "react";
-import { Upload, FileText, FileSpreadsheet, File, Landmark } from "lucide-react";
+import { Upload, FileText, Landmark } from "lucide-react";
 
 interface FileDropZoneProps {
   onFileSelected: (file: File) => void;
@@ -9,7 +9,7 @@ interface FileDropZoneProps {
   disabled?: boolean;
 }
 
-const ACCEPT = ".csv,.xlsx,.xls,.pdf,.ofx,.qfx";
+const ACCEPT = ".csv,.ofx,.qfx";
 
 export function FileDropZone({ onFileSelected, accept = ACCEPT, disabled }: FileDropZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
@@ -77,21 +77,13 @@ export function FileDropZone({ onFileSelected, accept = ACCEPT, disabled }: File
           {isDragging ? "Drop your file here" : "Drag & drop or click to upload"}
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
-          Supports CSV, Excel (.xlsx, .xls), PDF, OFX, and QFX files
+          Supports CSV, OFX, and QFX files
         </p>
       </div>
       <div className="flex items-center gap-3 text-muted-foreground">
         <div className="flex items-center gap-1 text-xs">
           <FileText className="h-3.5 w-3.5" />
           CSV
-        </div>
-        <div className="flex items-center gap-1 text-xs">
-          <FileSpreadsheet className="h-3.5 w-3.5" />
-          Excel
-        </div>
-        <div className="flex items-center gap-1 text-xs">
-          <File className="h-3.5 w-3.5" />
-          PDF
         </div>
         <div className="flex items-center gap-1 text-xs">
           <Landmark className="h-3.5 w-3.5" />

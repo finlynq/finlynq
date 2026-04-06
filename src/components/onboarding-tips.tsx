@@ -45,7 +45,7 @@ const TIPS_BY_PAGE: Record<string, OnboardingTip[]> = {
       id: "dash-import",
       title: "Import your bank statements",
       description:
-        "Bring in CSV, Excel, or PDF files from your bank to see real data here. The more data you add, the better your insights.",
+        "Bring in CSV or OFX/QFX files from your bank to see real data here. The more data you add, the better your insights.",
       action: { label: "Import files", href: "/import" },
     },
   ],
@@ -84,7 +84,7 @@ const TIPS_BY_PAGE: Record<string, OnboardingTip[]> = {
       id: "import-formats",
       title: "Multiple formats supported",
       description:
-        "Upload CSV, Excel (.xlsx), PDF bank statements, or OFX/QFX files. We'll detect duplicates automatically so nothing gets counted twice.",
+        "Upload CSV or OFX/QFX files from your bank. We'll detect duplicates automatically so nothing gets counted twice.",
     },
   ],
 };

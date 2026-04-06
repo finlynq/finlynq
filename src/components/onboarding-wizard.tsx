@@ -380,7 +380,6 @@ export function OnboardingWizard({
                   <p className="text-xs text-muted-foreground">
                     These budgets will be created for the current month.
                   </p>
-                  {error && <p className="text-sm text-destructive">{error}</p>}
                 </div>
               )}
 
@@ -433,6 +432,7 @@ export function OnboardingWizard({
                     <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs">?</span>
                     Full setup guide for Cursor, Cline &amp; others on the MCP Guide page.
                   </div>
+                  {error && <p className="text-sm text-destructive">{error}</p>}
                 </div>
               )}
 
@@ -488,20 +488,20 @@ export function OnboardingWizard({
               </button>
             ) : step === "budget" ? (
               <button
+                onClick={goNext}
+                className="ml-auto flex items-center gap-2 rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background hover:opacity-90 transition-opacity"
+              >
+                Continue
+                <ArrowRight className="h-4 w-4" />
+              </button>
+            ) : step === "mcp" ? (
+              <button
                 onClick={handleFinish}
                 disabled={loading}
                 className="ml-auto flex items-center gap-2 rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background hover:opacity-90 transition-opacity disabled:opacity-50"
               >
-                {loading ? "Setting up..." : "Continue"}
-                {!loading && <ArrowRight className="h-4 w-4" />}
-              </button>
-            ) : step === "mcp" ? (
-              <button
-                onClick={goNext}
-                className="ml-auto flex items-center gap-2 rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background hover:opacity-90 transition-opacity"
-              >
-                Finish Setup
-                <Check className="h-4 w-4" />
+                {loading ? "Setting up..." : "Finish Setup"}
+                {!loading && <Check className="h-4 w-4" />}
               </button>
             ) : (
               <button
