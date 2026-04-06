@@ -23,8 +23,8 @@ export function DevModeGuard({ children }: { children: React.ReactNode }) {
         }
       })
       .catch(() => {
-        // On error, allow access (fail open for dev mode)
-        setChecking(false);
+        // On error, deny access — fail closed for prod safety
+        router.replace("/dashboard");
       });
   }, [router]);
 

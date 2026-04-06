@@ -12,12 +12,13 @@ import {
   PiggyBank,
   TrendingUp,
   Building2,
-  User,
   FileSpreadsheet,
   Database,
   Bot,
   Target,
-  DollarSign,
+  Terminal,
+  Copy,
+  CheckCheck,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -47,12 +48,12 @@ const ACCOUNT_PRESETS = [
   { name: "Investment Account", type: "A", group: "Investments", icon: TrendingUp },
 ] as const;
 
-const BUDGET_CATEGORIES = [
-  { name: "Groceries", amount: 600, icon: "🛒" },
-  { name: "Dining", amount: 300, icon: "🍽️" },
-  { name: "Transport", amount: 200, icon: "🚗" },
-  { name: "Entertainment", amount: 150, icon: "🎬" },
-  { name: "Utilities", amount: 250, icon: "💡" },
+const BUDGET_PRESETS = [
+  { category: "Groceries", amount: 600 },
+  { category: "Dining Out", amount: 300 },
+  { category: "Transportation", amount: 200 },
+  { category: "Entertainment", amount: 150 },
+  { category: "Utilities", amount: 150 },
 ];
 
 const slideVariants = {
@@ -72,11 +73,11 @@ export function OnboardingWizard({
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([0]);
   const [dataChoice, setDataChoice] = useState<"demo" | "import" | "skip">("import");
   const [budgetAmounts, setBudgetAmounts] = useState<Record<string, number>>(
-    Object.fromEntries(BUDGET_CATEGORIES.map((c) => [c.name, c.amount]))
+    Object.fromEntries(BUDGET_PRESETS.map((p) => [p.category, p.amount]))
   );
-  const [selectedBudgets, setSelectedBudgets] = useState<string[]>(["Groceries", "Dining", "Transport"]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const stepIndex = STEPS.indexOf(step);
 
@@ -98,10 +99,11 @@ export function OnboardingWizard({
     );
   }
 
-  function toggleBudget(name: string) {
-    setSelectedBudgets((prev) =>
-      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
-    );
+  function copyMcpUrl() {
+    navigator.clipboard.writeText(window.location.origin + "/api/mcp").then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   }
 
   async function handleFinish() {
@@ -119,35 +121,21 @@ export function OnboardingWizard({
         });
       }
 
+      // Create budgets for current month
+      const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+      for (const [categoryName, amount] of Object.entries(budgetAmounts)) {
+        if (amount > 0) {
+          await fetch("/api/budgets/seed", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ categoryName, amount, month }),
+          }).catch(() => {/* ignore */});
+        }
+      }
+
       // Load demo data if selected
       if (dataChoice === "demo") {
         await fetch("/api/onboarding/sample-data", { method: "POST" });
-      }
-
-      // Create selected budgets
-      const now = new Date();
-      const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-
-      for (const name of selectedBudgets) {
-        const cat = BUDGET_CATEGORIES.find((c) => c.name === name);
-        if (!cat) continue;
-        // Find or create category, then create budget
-        const catRes = await fetch("/api/categories", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, group: "General", type: "E" }),
-        });
-        if (catRes.ok) {
-          const catData = await catRes.json();
-          const catId = catData.id ?? catData.data?.id;
-          if (catId) {
-            await fetch("/api/budgets", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ categoryId: catId, amount: budgetAmounts[name] ?? cat.amount, month }),
-            });
-          }
-        }
       }
 
       // Save currency preference
@@ -165,6 +153,10 @@ export function OnboardingWizard({
       setLoading(false);
     }
   }
+
+  const mcpUrl = typeof window !== "undefined"
+    ? window.location.origin + "/api/mcp"
+    : "http://localhost:3000/api/mcp";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
@@ -355,53 +347,38 @@ export function OnboardingWizard({
                 <div className="flex-1 flex flex-col py-6 gap-4">
                   <div className="flex items-center gap-3 mb-1">
                     <Target className="h-6 w-6 text-muted-foreground" />
-                    <h2 className="text-lg font-semibold">Set monthly budgets</h2>
+                    <h2 className="text-lg font-semibold">Set a starter budget</h2>
                   </div>
                   <p className="text-sm text-muted-foreground">
-                    Pick categories and set limits. You can adjust these anytime.
+                    Adjust these monthly amounts to match your spending. You can fine-tune anytime.
                   </p>
-                  <div className="space-y-2 mt-1 max-h-56 overflow-y-auto pr-1">
-                    {BUDGET_CATEGORIES.map((cat) => {
-                      const selected = selectedBudgets.includes(cat.name);
-                      return (
-                        <div
-                          key={cat.name}
-                          className={`flex items-center gap-3 rounded-xl border-2 px-3.5 py-2.5 transition-all ${
-                            selected ? "border-foreground bg-foreground/5" : "border-muted"
-                          }`}
-                        >
-                          <button
-                            onClick={() => toggleBudget(cat.name)}
-                            className="flex items-center gap-2.5 flex-1 text-left"
-                          >
-                            <span className="text-lg">{cat.icon}</span>
-                            <span className="text-sm font-medium">{cat.name}</span>
-                            {selected && <Check className="h-3.5 w-3.5 text-emerald-500" />}
-                          </button>
-                          {selected && (
-                            <div className="flex items-center gap-1">
-                              <DollarSign className="h-3.5 w-3.5 text-muted-foreground" />
-                              <input
-                                type="number"
-                                value={budgetAmounts[cat.name] ?? cat.amount}
-                                onChange={(e) =>
-                                  setBudgetAmounts((prev) => ({
-                                    ...prev,
-                                    [cat.name]: Number(e.target.value),
-                                  }))
-                                }
-                                className="w-20 rounded-md border bg-background px-2 py-1 text-sm text-right focus:outline-none focus:ring-1 focus:ring-foreground/20"
-                                min={0}
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            </div>
-                          )}
+                  <div className="space-y-3 mt-1">
+                    {BUDGET_PRESETS.map(({ category }) => (
+                      <div key={category} className="flex items-center gap-3">
+                        <span className="w-36 text-sm font-medium shrink-0">{category}</span>
+                        <div className="relative flex-1">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                            {currency === "USD" ? "$" : currency === "EUR" ? "€" : currency === "GBP" ? "£" : "$"}
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            step={10}
+                            value={budgetAmounts[category]}
+                            onChange={(e) =>
+                              setBudgetAmounts((prev) => ({
+                                ...prev,
+                                [category]: Number(e.target.value),
+                              }))
+                            }
+                            className="w-full rounded-lg border bg-background pl-7 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
+                          />
                         </div>
-                      );
-                    })}
+                      </div>
+                    ))}
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Skip for now — you can set budgets anytime from the Budgets page.
+                    These budgets will be created for the current month.
                   </p>
                   {error && <p className="text-sm text-destructive">{error}</p>}
                 </div>
@@ -419,25 +396,37 @@ export function OnboardingWizard({
                     using natural language — no manual exports needed.
                   </p>
 
-                  <div className="rounded-xl border bg-muted/30 p-4 space-y-3">
-                    <p className="text-sm font-medium">Quick start: Claude Desktop</p>
-                    <p className="text-xs text-muted-foreground mb-1">
-                      Add this to your <code className="font-mono bg-muted px-1 py-0.5 rounded">claude_desktop_config.json</code>:
-                    </p>
-                    <pre className="text-xs bg-background rounded-lg p-3 overflow-x-auto border font-mono leading-relaxed">
-{`{
-  "mcpServers": {
-    "personal-finance": {
-      "command": "curl",
-      "args": ["-X", "POST",
-        "https://finance.nextsoftwareconsulting.com/api/mcp"]
-    }
-  }
-}`}
-                    </pre>
-                    <p className="text-xs text-muted-foreground">
-                      Then try: &ldquo;What did I spend on groceries last month?&rdquo;
-                    </p>
+                  <div className="rounded-xl border bg-muted/40 p-4 space-y-3">
+                    <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                      <Terminal className="h-3.5 w-3.5" />
+                      MCP Server URL
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 rounded-lg bg-background border px-3 py-2 text-sm font-mono truncate">
+                        {mcpUrl}
+                      </code>
+                      <button
+                        onClick={copyMcpUrl}
+                        className="flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm hover:bg-muted transition-colors shrink-0"
+                      >
+                        {copied ? (
+                          <CheckCheck className="h-4 w-4 text-emerald-500" />
+                        ) : (
+                          <Copy className="h-4 w-4" />
+                        )}
+                        {copied ? "Copied!" : "Copy"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-muted-foreground">Quick setup:</p>
+                    <ol className="text-sm text-muted-foreground space-y-1.5 list-decimal list-inside">
+                      <li>Copy the URL above</li>
+                      <li>Open Claude Desktop → Settings → MCP Servers</li>
+                      <li>Add a new server with the URL</li>
+                      <li>Ask Claude anything about your finances!</li>
+                    </ol>
                   </div>
 
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">

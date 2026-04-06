@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from "recharts";
 import { Plus, Trash2, Landmark, CreditCard, FileText, Calendar } from "lucide-react";
+import { EmptyState } from "@/components/empty-state";
 
 type Loan = {
   id: number; name: string; type: string; principal: number; annualRate: number;
@@ -172,7 +173,7 @@ function LoansPageContent() {
           <p className="text-sm text-muted-foreground mt-1">Track balances, amortization schedules, and payoff strategies</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger render={<Button />}><Plus className="h-4 w-4 mr-1" /> Add Loan</DialogTrigger>
+          <DialogTrigger render={<Button id="add-loan-btn" />}><Plus className="h-4 w-4 mr-1" /> Add Loan</DialogTrigger>
           <DialogContent>
             <DialogHeader><DialogTitle>Add Loan</DialogTitle></DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-3">
@@ -267,6 +268,16 @@ function LoansPageContent() {
           <CardContent><p className="text-2xl font-bold">{loans.length}</p></CardContent>
         </Card>
       </div>
+
+      {/* Empty state */}
+      {loans.length === 0 && (
+        <EmptyState
+          icon={Landmark}
+          title="No loans tracked yet"
+          description="Add a mortgage, car loan, student loan, or any other debt to see amortization schedules and payoff projections."
+          action={{ label: "Add your first loan", onClick: () => document.getElementById("add-loan-btn")?.click() }}
+        />
+      )}
 
       {/* Loan cards */}
       {loans.map((loan) => {
