@@ -136,7 +136,6 @@ export default function LandingPage() {
             Self-host for free →
           </Link>
         </div>
-      </header>
 
         {/* Demo video placeholder */}
         <div className="mt-16 mx-auto max-w-3xl rounded-2xl border border-border/50 bg-card/50 overflow-hidden shadow-2xl shadow-black/20">

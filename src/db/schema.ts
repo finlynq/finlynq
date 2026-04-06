@@ -242,22 +242,6 @@ export const passwordResetTokens = sqliteTable("password_reset_tokens", {
   createdAt: text("created_at").notNull(),
 });
 
-// Import Templates — saved CSV column mappings for recurring imports
-export const importTemplates = sqliteTable("import_templates", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  userId: text("user_id").notNull().default(DEFAULT_USER_ID),
-  name: text("name").notNull(),
-  accountId: integer("account_id").references(() => accounts.id),
-  fileType: text("file_type").notNull().default("csv"), // 'csv'
-  columnMapping: text("column_mapping").notNull(), // JSON: { date, amount, payee, category, note, tags, currency, debit, credit }
-  hasHeaders: integer("has_headers").notNull().default(1),
-  dateFormat: text("date_format").notNull().default("YYYY-MM-DD"),
-  amountFormat: text("amount_format").notNull().default("standard"), // 'standard' | 'negate' | 'debit_credit'
-  isDefault: integer("is_default").notNull().default(0),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
-
 // Feature 8: Tax - Contribution Room
 export const contributionRoom = sqliteTable("contribution_room", {
   id: integer("id").primaryKey({ autoIncrement: true }),

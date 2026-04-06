@@ -276,7 +276,6 @@ export default function PortfolioPage() {
   const devMode = useDevMode();
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [devMode, setDevMode] = useState(false);
   const [filter, setFilter] = useState<FilterType>("all");
   const [benchmarks, setBenchmarks] = useState<BenchmarkData[]>([]);
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");
@@ -287,7 +286,6 @@ export default function PortfolioPage() {
   const [etfXrayTab, setEtfXrayTab] = useState<EtfXrayTab>("stocks");
   const [stocksPage, setStocksPage] = useState(1);
   const STOCKS_PER_PAGE = 25;
-  const [devMode, setDevMode] = useState(true); // default true to avoid flash
 
   // Fetch portfolio overview
   useEffect(() => {

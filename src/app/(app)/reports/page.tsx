@@ -13,7 +13,6 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { formatCurrency } from "@/lib/currency";
 import { CHART_COLORS } from "@/lib/chart-colors";
-import { useDevMode } from "@/hooks/use-dev-mode";
 import { SankeyChart } from "@/components/sankey-chart";
 import {
   Download,
@@ -173,7 +172,6 @@ export default function ReportsPage() {
 
   // Active tab
   const [activeTab, setActiveTab] = useState("income");
-  const devMode = useDevMode();
 
   // Preset handler
   const handlePreset = useCallback((preset: string) => {
@@ -181,21 +179,6 @@ export default function ReportsPage() {
     const { start, end } = getPresetRange(preset);
     setStartDate(start);
     setEndDate(end);
-  }, []);
-
-  // Fetch dev mode
-  useEffect(() => {
-    fetch("/api/settings/dev-mode")
-      .then((r) => r.json())
-      .then((d) => {
-        const dm = Boolean(d.devMode);
-        setDevMode(dm);
-        if (!dm && (activeTab === "cashflow" || activeTab === "yoy")) {
-          setActiveTab("income");
-        }
-      })
-      .catch(() => setDevMode(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fetch trends data
@@ -212,16 +195,6 @@ export default function ReportsPage() {
       .then((r) => r.json())
       .then(setBalanceSheet);
   }, [endDate]);
-
-  // Fetch dev mode
-  useEffect(() => {
-    fetch("/api/settings/dev-mode").then(r => r.ok ? r.json() : { devMode: false }).then(d => {
-      const dm = d.devMode ?? false;
-      setDevMode(dm);
-      if (!dm && (activeTab === "cashflow" || activeTab === "yoy")) setActiveTab("income");
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // Fetch YoY (dev mode only)
   useEffect(() => {
