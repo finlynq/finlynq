@@ -85,6 +85,11 @@ jobs:
               SKIP_BUILD_FLAG="--skip-build"
             fi
             sudo /home/paperclip-agent/projects/pf/deploy.sh $SKIP_BUILD_FLAG
+            # Verify static assets were copied (belt-and-suspenders check)
+            if [ ! -d "/home/paperclip-agent/projects/pf/.next/standalone/.next/static" ]; then
+              echo "FATAL: static assets missing from standalone — deploy aborted"
+              exit 1
+            fi
 
       - name: Verify deployment
         uses: appleboy/ssh-action@v1.2.0
