@@ -1,0 +1,100 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_build:
+        description: "Skip the build step on the server (use cached .next)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false   # never cancel an in-flight deploy
+
+# ── CI Gate ───────────────────────────────────────────────────────────────────
+# All three checks must pass before the deploy job runs.
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # ── Deploy ────────────────────────────────────────────────────────────────
+  # SSH into the VPS and run the server-side deploy.sh script.
+  # The script: git pull → npm ci → npm run build → copy static assets → restart pf.service
+
+  deploy:
+    name: Deploy to finance.nextsoftwareconsulting.com
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, test]
+    environment:
+      name: production
+      url: https://finance.nextsoftwareconsulting.com
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT }}
+          script: |
+            SKIP_BUILD_FLAG=""
+            if [ "${{ github.event.inputs.skip_build }}" = "true" ]; then
+              SKIP_BUILD_FLAG="--skip-build"
+            fi
+            sudo /home/paperclip-agent/projects/pf/deploy.sh $SKIP_BUILD_FLAG
+
+      - name: Verify deployment
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT }}
+          script: |
+            echo "==> Service status:"
+            sudo systemctl status pf --no-pager -l
+            echo ""
+            echo "==> Health check (localhost:3456):"
+            curl -sf http://localhost:3456/ -o /dev/null -w "HTTP %{http_code}\n" || \
+            curl -sf http://localhost:3456/api/health -o /dev/null -w "HTTP %{http_code}\n" || \
+            echo "Note: app may still be warming up"
