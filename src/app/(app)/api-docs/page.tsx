@@ -1,5 +1,7 @@
 "use client";
 
+import { DevModeGuard } from "@/components/dev-mode-guard";
+
 import { useState } from "react";
 
 // ============ API ROUTE DEFINITIONS ============
@@ -466,7 +468,7 @@ const MCP_TOOLS = [
 
 // ============ PAGE ============
 
-export default function ApiDocsPage() {
+function ApiDocsPageContent() {
   const [activeTab, setActiveTab] = useState<"rest" | "mcp">("rest");
 
   return (
@@ -651,3 +653,5 @@ npx tsx mcp-server/index.ts
     </div>
   );
 }
+
+export default function ApiDocsPage() { return <DevModeGuard><ApiDocsPageContent /></DevModeGuard>; }

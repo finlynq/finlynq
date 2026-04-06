@@ -1,5 +1,7 @@
 "use client";
 
+import { DevModeGuard } from "@/components/dev-mode-guard";
+
 import { useEffect, useState, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -110,7 +112,7 @@ function toMonthlyAmount(amount: number, frequency: string): number {
   }
 }
 
-export default function SubscriptionsPage() {
+function SubscriptionsPageContent() {
   const [subs, setSubs] = useState<Subscription[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -786,3 +788,5 @@ export default function SubscriptionsPage() {
     </div>
   );
 }
+
+export default function SubscriptionsPage() { return <DevModeGuard><SubscriptionsPageContent /></DevModeGuard>; }

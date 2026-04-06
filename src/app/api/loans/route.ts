@@ -7,6 +7,7 @@ import {
   calculateDebtPayoff,
 } from "@/lib/loan-calculator";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -26,6 +27,7 @@ const createLoanSchema = z.object({
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   const loans = db
     .select({
@@ -80,6 +82,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   try {
     const body = await request.json();
 
@@ -132,6 +135,7 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
   db.delete(schema.loans).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).run();

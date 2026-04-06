@@ -10,10 +10,12 @@ import {
   rrspVsTfsa,
 } from "@/lib/tax-optimizer";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireDevMode } from "@/lib/require-dev-mode";
 import { safeErrorMessage } from "@/lib/validate";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   // Get contribution room records
   const contributions = db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)).all();
@@ -76,6 +78,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   try {
     const body = await request.json();

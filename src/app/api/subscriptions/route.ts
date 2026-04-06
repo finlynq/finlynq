@@ -3,6 +3,7 @@ import { db, schema } from "@/db";
 import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions } from "@/lib/recurring-detector";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -25,6 +26,7 @@ const putSchema = z.object({
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   const subs = db
     .select({
@@ -54,6 +56,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   try {
     const body = await request.json();
@@ -142,6 +145,7 @@ export async function POST(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   try {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
@@ -161,6 +165,7 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
   db.delete(schema.subscriptions).where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, auth.context.userId))).run();

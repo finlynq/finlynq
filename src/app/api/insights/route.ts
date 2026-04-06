@@ -3,9 +3,11 @@ import { getMonthlySpending, getTransactions } from "@/lib/queries";
 import { detectAnomalies, analyzeTrends, analyzeMerchants, spendingByDayOfWeek } from "@/lib/spending-insights";
 import { getCurrentMonth } from "@/lib/currency";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireDevMode } from "@/lib/require-dev-mode";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   const now = new Date();
   const startDate = `${now.getFullYear() - 1}-01-01`;

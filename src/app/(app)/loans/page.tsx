@@ -1,5 +1,7 @@
 "use client";
 
+import { DevModeGuard } from "@/components/dev-mode-guard";
+
 import { useEffect, useState, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -102,7 +104,7 @@ function LoansSkeleton() {
   );
 }
 
-export default function LoansPage() {
+function LoansPageContent() {
   const [loans, setLoans] = useState<Loan[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
@@ -359,3 +361,5 @@ export default function LoansPage() {
     </div>
   );
 }
+
+export default function LoansPage() { return <DevModeGuard><LoansPageContent /></DevModeGuard>; }

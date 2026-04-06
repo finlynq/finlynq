@@ -1,5 +1,7 @@
 "use client";
 
+import { DevModeGuard } from "@/components/dev-mode-guard";
+
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -66,7 +68,7 @@ function ResultCard({ label, value, icon, color }: { label: string; value: strin
   );
 }
 
-export default function FirePage() {
+function FirePageContent() {
   const [form, setForm] = useState({
     currentAge: "30",
     targetRetirementAge: "65",
@@ -601,3 +603,5 @@ export default function FirePage() {
     </div>
   );
 }
+
+export default function FirePage() { return <DevModeGuard><FirePageContent /></DevModeGuard>; }

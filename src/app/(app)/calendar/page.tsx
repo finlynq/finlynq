@@ -1,5 +1,7 @@
 "use client";
 
+import { DevModeGuard } from "@/components/dev-mode-guard";
+
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -124,7 +126,7 @@ function generateOccurrences(
   return events;
 }
 
-export default function CalendarPage() {
+function CalendarPageContent() {
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
@@ -477,3 +479,5 @@ export default function CalendarPage() {
     </div>
   );
 }
+
+export default function CalendarPage() { return <DevModeGuard><CalendarPageContent /></DevModeGuard>; }

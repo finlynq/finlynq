@@ -1,5 +1,7 @@
 "use client";
 
+import { DevModeGuard } from "@/components/dev-mode-guard";
+
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,7 +22,7 @@ type TaxData = {
   marginalRates: Record<string, { federal: number; provincial: number; combined: number }>;
 };
 
-export default function TaxPage() {
+function TaxPageContent() {
   const [data, setData] = useState<TaxData | null>(null);
   const [income, setIncome] = useState("100000");
   const [contribution, setContribution] = useState("10000");
@@ -230,3 +232,5 @@ export default function TaxPage() {
     </div>
   );
 }
+
+export default function TaxPage() { return <DevModeGuard><TaxPageContent /></DevModeGuard>; }

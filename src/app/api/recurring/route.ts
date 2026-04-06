@@ -3,9 +3,11 @@ import { db, schema } from "@/db";
 import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireDevMode } from "@/lib/require-dev-mode";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   // Fetch last 12 months of transactions with payees
   const cutoff = new Date();

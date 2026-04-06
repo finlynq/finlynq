@@ -1,5 +1,7 @@
 "use client";
 
+import { DevModeGuard } from "@/components/dev-mode-guard";
+
 import { useEffect, useState, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -508,7 +510,7 @@ function IncomeChangeTab() {
 }
 
 // ===== MAIN PAGE =====
-export default function ScenariosPage() {
+function ScenariosPageContent() {
   return (
     <div className="space-y-6">
       <div>
@@ -533,3 +535,5 @@ export default function ScenariosPage() {
     </div>
   );
 }
+
+export default function ScenariosPage() { return <DevModeGuard><ScenariosPageContent /></DevModeGuard>; }

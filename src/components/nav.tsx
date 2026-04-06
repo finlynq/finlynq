@@ -36,54 +36,55 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-type NavItem = { href: string; label: string; icon: LucideIcon; color: string };
+type NavItem = { href: string; label: string; icon: LucideIcon; color: string; mode?: "prod" | "dev" };
 
 const navGroups: { label: string; items: NavItem[] }[] = [
   {
     label: "",
     items: [
-      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, color: "text-blue-400" },
-      { href: "/chat", label: "AI Chat", icon: MessageSquare, color: "text-indigo-400" },
+      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, color: "text-blue-400", mode: "prod" },
+      { href: "/chat", label: "AI Chat", icon: MessageSquare, color: "text-indigo-400", mode: "dev" },
     ],
   },
   {
     label: "Tracking",
     items: [
-      { href: "/transactions", label: "Transactions", icon: ArrowLeftRight, color: "text-amber-400" },
-      { href: "/budgets", label: "Budgets", icon: PiggyBank, color: "text-emerald-400" },
-      { href: "/goals", label: "Goals", icon: Target, color: "text-orange-400" },
-      { href: "/subscriptions", label: "Subscriptions", icon: CreditCard, color: "text-pink-400" },
-      { href: "/calendar", label: "Calendar", icon: CalendarDays, color: "text-sky-400" },
+      { href: "/transactions", label: "Transactions", icon: ArrowLeftRight, color: "text-amber-400", mode: "prod" },
+      { href: "/budgets", label: "Budgets", icon: PiggyBank, color: "text-emerald-400", mode: "prod" },
+      { href: "/goals", label: "Goals", icon: Target, color: "text-orange-400", mode: "prod" },
+      { href: "/subscriptions", label: "Subscriptions", icon: CreditCard, color: "text-pink-400", mode: "dev" },
+      { href: "/calendar", label: "Calendar", icon: CalendarDays, color: "text-sky-400", mode: "dev" },
     ],
   },
   {
     label: "Wealth",
     items: [
-      { href: "/accounts", label: "Accounts", icon: Wallet, color: "text-violet-400" },
-      { href: "/portfolio", label: "Portfolio", icon: TrendingUp, color: "text-cyan-400" },
-      { href: "/loans", label: "Loans & Debt", icon: Landmark, color: "text-rose-400" },
+      { href: "/accounts", label: "Accounts", icon: Wallet, color: "text-violet-400", mode: "prod" },
+      { href: "/portfolio", label: "Portfolio", icon: TrendingUp, color: "text-cyan-400", mode: "prod" },
+      { href: "/loans", label: "Loans & Debt", icon: Landmark, color: "text-rose-400", mode: "dev" },
     ],
   },
   {
     label: "Analysis",
     items: [
-      { href: "/reports", label: "Reports", icon: FileText, color: "text-slate-400" },
-      { href: "/tax", label: "Tax", icon: Calculator, color: "text-teal-400" },
+      { href: "/reports", label: "Reports", icon: FileText, color: "text-slate-400", mode: "prod" },
+      { href: "/tax", label: "Tax", icon: Calculator, color: "text-teal-400", mode: "dev" },
     ],
   },
   {
     label: "Planning",
     items: [
-      { href: "/scenarios", label: "Scenarios", icon: GitBranch, color: "text-purple-400" },
-      { href: "/fire", label: "FIRE Calculator", icon: FlameKindling, color: "text-red-400" },
+      { href: "/scenarios", label: "Scenarios", icon: GitBranch, color: "text-purple-400", mode: "dev" },
+      { href: "/fire", label: "FIRE Calculator", icon: FlameKindling, color: "text-red-400", mode: "dev" },
     ],
   },
 ];
 
 const toolLinks: NavItem[] = [
-  { href: "/import", label: "Import", icon: Upload, color: "text-blue-400" },
-  { href: "/admin", label: "Admin", icon: ShieldCheck, color: "text-amber-400" },
-  { href: "/settings", label: "Settings", icon: Settings, color: "text-slate-400" },
+  { href: "/import", label: "Import", icon: Upload, color: "text-blue-400", mode: "prod" },
+  { href: "/api-docs", label: "API Docs", icon: FileText, color: "text-slate-400", mode: "dev" },
+  { href: "/admin", label: "Admin", icon: ShieldCheck, color: "text-amber-400", mode: "prod" },
+  { href: "/settings", label: "Settings", icon: Settings, color: "text-slate-400", mode: "prod" },
 ];
 
 // Bottom bar items for mobile (5th slot is the account icon, handled separately)
@@ -105,6 +106,7 @@ export function Nav() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [hostingMode, setHostingMode] = useState<"managed" | "self-hosted" | null>(null);
+  const [devMode, setDevMode] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
 
   // Close desktop account menu on outside click
@@ -139,6 +141,11 @@ export function Nav() {
       .then((data) => {
         setHostingMode(data.authMethod === "account" ? "managed" : "self-hosted");
       })
+      .catch(() => {});
+    // Load dev mode
+    fetch("/api/settings/dev-mode")
+      .then((r) => r.json())
+      .then((data) => { if (data.devMode) setDevMode(true); })
       .catch(() => {});
   }, []);
 
@@ -270,7 +277,10 @@ export function Nav() {
 
       {/* Nav groups */}
       <div className="flex-1 px-2 space-y-1 overflow-y-auto">
-        {navGroups.map((group) => (
+        {navGroups.map((group) => {
+          const visibleItems = group.items.filter((item) => devMode || item.mode !== "dev");
+          if (visibleItems.length === 0) return null;
+          return (
           <div key={group.label || "top"}>
             {group.label && !collapsed && (
               <button
@@ -290,14 +300,15 @@ export function Nav() {
               <div className="mx-auto my-2 w-6 border-t border-sidebar-border" />
             )}
             {(collapsed || !group.label || openGroups[group.label]) &&
-              group.items.map((item) => renderLink(item, !collapsed))}
+              visibleItems.map((item) => renderLink(item, !collapsed))}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Bottom section */}
       <div className="px-2 pb-3 pt-2 border-t border-sidebar-border/50 space-y-0.5">
-        {toolLinks.map((item) => renderLink(item, !collapsed))}
+        {toolLinks.filter((item) => devMode || item.mode !== "dev").map((item) => renderLink(item, !collapsed))}
         <div className={cn("flex items-center mt-2", collapsed ? "justify-center" : "justify-between px-1")}>
           <ThemeToggle />
           <button
@@ -372,6 +383,7 @@ export function Nav() {
         </div>
         {allFlatItems
           .filter((item) => !mobileBarItems.some((m) => m.href === item.href))
+          .filter((item) => devMode || item.mode !== "dev")
           .map((item) => renderLink(item, true))}
       </div>
     </div>

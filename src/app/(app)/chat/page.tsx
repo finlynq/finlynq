@@ -1,5 +1,7 @@
 "use client";
 
+import { DevModeGuard } from "@/components/dev-mode-guard";
+
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -252,7 +254,7 @@ function InlineTable({ data }: { data: Record<string, unknown>[] }) {
 
 // ─── Main chat page ─────────────────────────────────────────────────
 
-export default function ChatPage() {
+function ChatPageContent() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -519,3 +521,5 @@ export default function ChatPage() {
     </div>
   );
 }
+
+export default function ChatPage() { return <DevModeGuard><ChatPageContent /></DevModeGuard>; }
