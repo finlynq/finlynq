@@ -26,8 +26,9 @@ export async function POST(request: NextRequest) {
           tx.amount,
           tx.payee ?? "",
         );
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         db.update(schema.transactions)
-          .set({ importHash: hash })
+          .set({ importHash: hash } as any)
           .where(and(eq(schema.transactions.id, tx.id), eq(schema.transactions.userId, userId)))
           .run();
         updated++;

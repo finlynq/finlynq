@@ -39,7 +39,8 @@ export async function GET() {
           getDb: () => import("drizzle-orm/node-postgres").NodePgDatabase;
         };
         const { sql } = await import("drizzle-orm");
-        await pgAdapter.getDb().execute(sql`SELECT 1`);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (pgAdapter.getDb() as any).execute(sql`SELECT 1`);
       }
     } else {
       // SQLite: just check if the connection is open

@@ -35,9 +35,11 @@ export async function POST(request: NextRequest) {
 
     if (body.action === "mark-read") {
       if (body.id) {
-        db.update(schema.notifications).set({ read: 1 }).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        db.update(schema.notifications).set({ read: 1 } as any).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
       } else {
-        db.update(schema.notifications).set({ read: 1 }).where(eq(schema.notifications.userId, userId)).run();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        db.update(schema.notifications).set({ read: 1 } as any).where(eq(schema.notifications.userId, userId)).run();
       }
       return NextResponse.json({ success: true });
     }

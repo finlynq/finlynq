@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
           .set({
             stripeCustomerId: typeof customer === "string" ? customer : undefined,
             updatedAt: now,
-          })
+          } as any)
           .where(eq(schema.users.id, userId))
           .run();
 
