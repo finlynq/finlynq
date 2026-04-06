@@ -496,7 +496,7 @@ export default function BudgetsPage() {
       </div>
 
       {/* Summary Cards */}
-      <div className={`grid grid-cols-1 gap-4 ${mode === "envelope" ? "md:grid-cols-4" : ageOfMoney ? "md:grid-cols-4" : "md:grid-cols-3"}`}>
+      <div className={`grid grid-cols-2 gap-3 ${mode === "envelope" ? "md:grid-cols-4" : ageOfMoney ? "md:grid-cols-4" : "md:grid-cols-3"}`}>
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">

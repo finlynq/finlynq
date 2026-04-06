@@ -183,6 +183,21 @@ export default function ReportsPage() {
     setEndDate(end);
   }, []);
 
+  // Fetch dev mode
+  useEffect(() => {
+    fetch("/api/settings/dev-mode")
+      .then((r) => r.json())
+      .then((d) => {
+        const dm = Boolean(d.devMode);
+        setDevMode(dm);
+        if (!dm && (activeTab === "cashflow" || activeTab === "yoy")) {
+          setActiveTab("income");
+        }
+      })
+      .catch(() => setDevMode(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Fetch trends data
   useEffect(() => {
     const biz = isBusiness ? "&business=true" : "";

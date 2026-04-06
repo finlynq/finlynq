@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/currency";
 import { Sparkline } from "@/components/sparkline";
-import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User } from "lucide-react";
+import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User, Upload, FileUp } from "lucide-react";
 import { motion } from "framer-motion";
 import { AnimatedNumber } from "./_components/animated-number";
 import { StatCard } from "./_components/stat-card";
@@ -22,6 +23,57 @@ import { AvailableToSpend } from "./_components/available-to-spend";
 import { InsightsSection } from "./_components/insights-section";
 import { useDevMode } from "@/hooks/use-dev-mode";
 import type { DashboardData } from "./_components/types";
+
+// --- Quick Import Widget ---
+function QuickImportWidget() {
+  const router = useRouter();
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    router.push("/import");
+  }
+
+  function handleFileChange() {
+    router.push("/import");
+  }
+
+  return (
+    <Card
+      className={`relative overflow-hidden border-dashed transition-colors cursor-pointer ${
+        dragOver
+          ? "border-primary bg-primary/5"
+          : "border-border/60 hover:border-primary/50 hover:bg-muted/30"
+      }`}
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={handleDrop}
+      onClick={() => inputRef.current?.click()}
+    >
+      <input ref={inputRef} type="file" accept=".csv,.ofx,.qfx" className="hidden" onChange={handleFileChange} />
+      <CardContent className="flex flex-col items-center justify-center py-8 gap-3 text-center">
+        <div className={`flex h-12 w-12 items-center justify-center rounded-2xl transition-colors ${
+          dragOver ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+        }`}>
+          {dragOver ? <FileUp className="h-6 w-6" /> : <Upload className="h-6 w-6" />}
+        </div>
+        <div>
+          <p className="text-sm font-medium">{dragOver ? "Drop to import" : "Quick Import"}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Drop CSV, OFX, or QFX files here</p>
+        </div>
+        <Link
+          href="/import"
+          className="text-xs text-primary hover:underline"
+          onClick={(e) => e.stopPropagation()}
+        >
+          Or browse files →
+        </Link>
+      </CardContent>
+    </Card>
+  );
+}
 
 // --- Animation variants ---
 const containerVariants = {
