@@ -1,49 +1,132 @@
 {
   "name": "pf-finance",
   "version": "2.3.0",
-  "description": "Personal Finance MCP Server — query and manage financial data (accounts, transactions, budgets, investments, goals, subscriptions) via AI assistants.",
+  "description": "PersonalFi MCP Server — connect your AI assistant to your personal finance data. Ask questions in plain English: spending, budgets, net worth, goals, investments, cash flow, and more.",
   "transport": {
     "type": "streamable-http",
     "url": "/api/mcp"
   },
-  "tools": 27,
-  "capabilities": {
+  "tools_count": 27,
+  "tools": {
     "read": [
-      "get_account_balances",
-      "get_transactions",
-      "get_budget_summary",
-      "get_spending_trends",
-      "get_portfolio_summary",
-      "get_net_worth",
-      "get_categories",
-      "get_loans",
-      "get_goals",
-      "get_recurring_transactions",
-      "get_income_statement",
-      "get_transaction_rules",
-      "apply_rules_to_uncategorized",
-      "get_spotlight_items",
-      "get_weekly_recap",
-      "get_financial_health_score",
-      "get_spending_anomalies",
-      "get_subscription_summary",
-      "get_cash_flow_forecast",
-      "search_transactions",
-      "get_net_worth_trend"
+      {
+        "name": "get_account_balances",
+        "description": "Returns current balances for all accounts (checking, savings, credit cards, investment accounts). Includes account type, institution, and balance."
+      },
+      {
+        "name": "get_transactions",
+        "description": "Retrieves transactions with optional filters: date range, account, category, amount range, or keyword. Returns paginated results."
+      },
+      {
+        "name": "search_transactions",
+        "description": "Full-text search across transaction descriptions, merchant names, and notes. Use for 'find my Netflix charges' type queries."
+      },
+      {
+        "name": "get_budget_summary",
+        "description": "Returns budget vs. actual spending for each category in the current (or specified) month. Includes over/under amounts and percent used."
+      },
+      {
+        "name": "get_spending_trends",
+        "description": "Month-by-month spending breakdown by category over a date range. Useful for spotting trends and seasonal patterns."
+      },
+      {
+        "name": "get_net_worth",
+        "description": "Calculates current net worth: total assets minus total liabilities. Broken down by account type."
+      },
+      {
+        "name": "get_net_worth_trend",
+        "description": "Historical net worth snapshots over time. Shows how net worth has changed month by month."
+      },
+      {
+        "name": "get_income_statement",
+        "description": "Income vs. expenses summary for a given period. Shows total income, total spending, and net cash flow."
+      },
+      {
+        "name": "get_categories",
+        "description": "Lists all transaction categories with their icons and parent/child relationships."
+      },
+      {
+        "name": "get_goals",
+        "description": "Returns all savings and debt payoff goals with current progress, target amounts, and projected completion dates."
+      },
+      {
+        "name": "get_loans",
+        "description": "Returns loan and debt details including outstanding balance, interest rate, minimum payment, and payoff projections."
+      },
+      {
+        "name": "get_recurring_transactions",
+        "description": "Identifies recurring transactions (subscriptions, bills, regular income) and their detected frequency."
+      },
+      {
+        "name": "get_cash_flow_forecast",
+        "description": "Projects upcoming income and bills over the next 30–90 days based on recurring transaction patterns."
+      },
+      {
+        "name": "get_portfolio_summary",
+        "description": "Investment portfolio overview: holdings, total value, unrealized gains/losses, and asset allocation breakdown."
+      },
+      {
+        "name": "get_financial_health_score",
+        "description": "Composite score (0–100) across 6 components: savings rate, debt-to-income, emergency fund, budget adherence, net worth growth, and investment diversification."
+      },
+      {
+        "name": "get_spending_anomalies",
+        "description": "Detects unusual transactions: one-time large charges, merchants you haven't used before, or categories significantly over their average."
+      },
+      {
+        "name": "get_subscription_summary",
+        "description": "Lists detected recurring subscriptions with estimated monthly cost and last charge date."
+      },
+      {
+        "name": "get_spotlight_items",
+        "description": "Returns actionable alerts and insights: upcoming bills, budget overruns, goal milestones, and anomalies worth reviewing."
+      },
+      {
+        "name": "get_weekly_recap",
+        "description": "Summary of this week's spending vs. last week, top categories, and notable transactions."
+      },
+      {
+        "name": "get_transaction_rules",
+        "description": "Lists saved auto-categorization rules (keyword → category mappings)."
+      },
+      {
+        "name": "apply_rules_to_uncategorized",
+        "description": "Runs categorization rules against all uncategorized transactions and returns how many were matched."
+      }
     ],
     "write": [
-      "add_transaction",
-      "set_budget",
-      "add_goal",
-      "add_snapshot",
-      "categorize_transaction",
-      "add_account"
+      {
+        "name": "add_transaction",
+        "description": "Creates a new transaction. Requires: date, description, amount, account ID. Optional: category, notes."
+      },
+      {
+        "name": "categorize_transaction",
+        "description": "Sets or updates the category for a specific transaction by ID."
+      },
+      {
+        "name": "set_budget",
+        "description": "Creates or updates a monthly budget amount for a category."
+      },
+      {
+        "name": "add_goal",
+        "description": "Creates a new savings or debt payoff goal with target amount and optional deadline."
+      },
+      {
+        "name": "add_account",
+        "description": "Adds a new financial account (bank, credit card, investment, loan)."
+      },
+      {
+        "name": "add_snapshot",
+        "description": "Records a net worth snapshot for historical tracking. Useful for accounts without automatic balance updates."
+      }
     ]
   },
   "security": {
-    "model": "local-only",
-    "description": "Runs on localhost only. No bank integrations. Data stays on the user's machine. Requires app to be unlocked."
+    "model": "authenticated",
+    "description": "Requires the user to be logged in. Cloud mode uses session-based auth. Self-hosted mode requires the database to be unlocked. No bank credentials are stored — data comes from manual imports (CSV, OFX).",
+    "data_stays_local": true
   },
-  "homepage": "http://localhost:3000",
-  "apiDocs": "http://localhost:3000/api-docs"
+  "setup_guide": "/mcp-guide",
+  "homepage": "https://finance.nextsoftwareconsulting.com",
+  "api_docs": "https://finance.nextsoftwareconsulting.com/api-docs"
 }

@@ -1,67 +1,115 @@
 import Link from "next/link";
 
+const features = [
+  {
+    icon: "🤖",
+    title: "Ask Your AI Anything",
+    desc: "Connect Claude, Cursor, or any MCP client. Ask \"How much did I spend on groceries?\" and get instant answers from 27 financial tools.",
+  },
+  {
+    icon: "📥",
+    title: "Import From Anywhere",
+    desc: "Upload CSV or OFX files from any bank. Save import templates so the next upload is one click.",
+  },
+  {
+    icon: "🔒",
+    title: "Private By Default",
+    desc: "Cloud mode encrypts everything. Self-hosted runs entirely on your machine with SQLCipher AES-256 — your data never leaves.",
+  },
+];
+
 export default function LandingPage() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-dot-pattern ambient-glow">
-      <div className="mx-auto w-full max-w-lg px-6 py-12 text-center">
-        {/* Logo */}
-        <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary">
-          <span className="text-2xl font-extrabold tracking-wide text-primary-foreground">
-            PF
+    <div className="min-h-screen bg-dot-pattern ambient-glow">
+      {/* Header */}
+      <header className="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 shadow-lg shadow-indigo-500/30">
+            <span className="text-xs font-bold text-white tracking-tight">PF</span>
+          </div>
+          <span className="text-sm font-semibold text-foreground">PersonalFi</span>
+        </div>
+        <Link
+          href="/cloud"
+          className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+        >
+          Sign In
+        </Link>
+      </header>
+
+      {/* Hero */}
+      <main className="mx-auto max-w-5xl px-6 pt-20 pb-32 text-center">
+        {/* Badge */}
+        <div className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-4 py-1.5 mb-8">
+          <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+          <span className="text-xs font-medium text-primary">
+            MCP-powered · 27 financial tools · Works with Claude &amp; Cursor
           </span>
         </div>
 
-        <h1 className="mb-2 text-3xl font-bold tracking-tight text-foreground">
-          Welcome to PF
+        <h1 className="mb-6 text-5xl sm:text-6xl font-extrabold tracking-tight text-foreground leading-[1.05]">
+          Track your money.
+          <br />
+          <span className="text-gradient">Analyze it anywhere.</span>
         </h1>
-        <p className="mb-10 text-muted-foreground">
-          Choose how you want to manage your finances
+
+        <p className="mx-auto mb-10 max-w-xl text-lg text-muted-foreground leading-relaxed">
+          The first personal finance app with a built-in MCP server. Connect Claude, Cursor, or any AI
+          assistant — then just ask about your finances in plain English.
         </p>
 
-        <div className="grid gap-4">
-          {/* Self-Hosted Card */}
-          <Link
-            href="/self-hosted"
-            className="group flex items-center gap-4 rounded-xl border border-border bg-card p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent"
-          >
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-secondary text-2xl">
-              🔒
-            </div>
-            <div>
-              <h2 className="text-base font-semibold text-foreground group-hover:text-primary">
-                Self-Hosted
-              </h2>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Your data stays on your device. Secured with a passphrase. No
-                account needed.
-              </p>
-            </div>
-          </Link>
-
-          {/* Cloud / Managed Card */}
+        {/* CTAs */}
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
           <Link
             href="/cloud"
-            className="group flex items-center gap-4 rounded-xl border border-border bg-card p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent"
+            className="rounded-xl bg-primary px-8 py-3.5 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/30 hover:bg-primary/90 transition-all hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.99]"
           >
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-secondary text-2xl">
-              ☁️
-            </div>
-            <div>
-              <h2 className="text-base font-semibold text-foreground group-hover:text-primary">
-                Cloud
-              </h2>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Sign in with your account. Access your data from any device.
-                Synced and backed up.
-              </p>
-            </div>
+            Start Free Trial
+          </Link>
+          <Link
+            href="/self-hosted"
+            className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Self-host for free →
           </Link>
         </div>
 
-        <p className="mt-8 text-xs text-muted-foreground/60">
-          PF &mdash; Track your money here, analyze it anywhere
+        {/* Demo video placeholder */}
+        <div className="mt-16 mx-auto max-w-3xl rounded-2xl border border-border/50 bg-card/50 overflow-hidden shadow-2xl shadow-black/20">
+          <div className="aspect-video flex flex-col items-center justify-center bg-muted/30 gap-3">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 border border-primary/20">
+              <svg className="h-6 w-6 text-primary" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-muted-foreground">60-second demo</p>
+              <p className="text-xs text-muted-foreground/50 mt-0.5 text-center">Coming soon</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Feature cards */}
+        <div className="mt-20 grid gap-6 sm:grid-cols-3 text-left">
+          {features.map((f) => (
+            <div key={f.title} className="rounded-xl border border-border/50 bg-card p-6 card-hover">
+              <div className="mb-3 text-2xl">{f.icon}</div>
+              <h3 className="mb-2 text-sm font-semibold text-foreground">{f.title}</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">{f.desc}</p>
+            </div>
+          ))}
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-border/50 py-8 text-center">
+        <p className="text-xs text-muted-foreground/60">
+          PersonalFi &mdash; Track your money here, analyze it anywhere &mdash;{" "}
+          <Link href="/self-hosted" className="hover:text-muted-foreground transition-colors">
+            Self-host
+          </Link>
         </p>
-      </div>
+      </footer>
     </div>
   );
 }
