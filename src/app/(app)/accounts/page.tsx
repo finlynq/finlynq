@@ -4,6 +4,11 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { formatCurrency } from "@/lib/currency";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
@@ -14,6 +19,7 @@ import {
   Wallet,
   ArrowUpRight,
   ArrowDownRight,
+  Plus,
 } from "lucide-react";
 
 type AccountBalance = {
@@ -23,6 +29,16 @@ type AccountBalance = {
   accountGroup: string;
   currency: string;
   balance: number;
+};
+
+const ACCOUNT_TYPES = [
+  { value: "A", label: "Asset" },
+  { value: "L", label: "Liability" },
+];
+
+const ACCOUNT_GROUPS: Record<string, string[]> = {
+  A: ["Cash", "Checking", "Savings", "Investment", "Property", "Other"],
+  L: ["Credit Card", "Loan", "Mortgage", "Other"],
 };
 
 function SummarySkeleton() {
@@ -74,10 +90,26 @@ function SummarySkeleton() {
   );
 }
 
+const emptyForm = {
+  name: "",
+  type: "A",
+  group: "Checking",
+  currency: "CAD",
+  initialBalance: "0",
+  note: "",
+};
+
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<AccountBalance[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+
+  // Create account dialog
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [form, setForm] = useState(emptyForm);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   function loadAccounts() {
     setLoading(true);
@@ -91,9 +123,72 @@ export default function AccountsPage() {
       .catch(() => { setError(true); setLoading(false); });
   }
 
-  useEffect(() => {
-    loadAccounts();
-  }, []);
+  useEffect(() => { loadAccounts(); }, []);
+
+  function resetForm() {
+    setForm(emptyForm);
+    setFormErrors({});
+    setSaveError("");
+  }
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault();
+    const errs: Record<string, string> = {};
+    if (!form.name.trim()) errs.name = "Name is required";
+    if (!form.type) errs.type = "Type is required";
+    if (!form.group.trim()) errs.group = "Group is required";
+    setFormErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+
+    setSaving(true);
+    setSaveError("");
+    try {
+      const res = await fetch("/api/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: form.name.trim(),
+          type: form.type,
+          group: form.group.trim(),
+          currency: form.currency,
+          note: form.note.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setSaveError(data.error ?? "Failed to create account");
+        setSaving(false);
+        return;
+      }
+
+      // If initial balance is non-zero, create an opening balance transaction
+      const initialBalance = parseFloat(form.initialBalance);
+      if (!isNaN(initialBalance) && initialBalance !== 0) {
+        const account = await res.json();
+        await fetch("/api/transactions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            date: new Date().toISOString().split("T")[0],
+            accountId: account.id,
+            categoryId: 1,
+            currency: form.currency,
+            amount: initialBalance,
+            payee: "Opening Balance",
+            note: "Initial account balance",
+          }),
+        });
+      }
+
+      setDialogOpen(false);
+      resetForm();
+      loadAccounts();
+    } catch {
+      setSaveError("Failed to create account");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   const assets = accounts.filter((a) => a.accountType === "A");
   const liabilities = accounts.filter((a) => a.accountType === "L");
@@ -160,9 +255,114 @@ export default function AccountsPage() {
   const totalLiabilities = (currency: string) =>
     liabilities.filter((a) => a.currency === currency).reduce((s, a) => s + a.balance, 0);
 
-  if (loading) {
-    return <SummarySkeleton />;
-  }
+  const createAccountDialog = (
+    <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
+      <DialogTrigger render={<Button size="sm" className="bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 shadow-sm" />}>
+        <Plus className="h-4 w-4 mr-1.5" /> Create Account
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Create Account</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>Account Name</Label>
+            <Input
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="e.g. TD Chequing"
+              autoFocus
+            />
+            {formErrors.name && <p className="text-xs text-destructive">{formErrors.name}</p>}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Type</Label>
+              <Select
+                value={form.type}
+                onValueChange={(v) => {
+                  const t = v ?? "A";
+                  const defaultGroup = ACCOUNT_GROUPS[t]?.[0] ?? "";
+                  setForm({ ...form, type: t, group: defaultGroup });
+                }}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {ACCOUNT_TYPES.map((t) => (
+                    <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {formErrors.type && <p className="text-xs text-destructive">{formErrors.type}</p>}
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Group</Label>
+              <Select value={form.group} onValueChange={(v) => setForm({ ...form, group: v ?? "" })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(ACCOUNT_GROUPS[form.type] ?? []).map((g) => (
+                    <SelectItem key={g} value={g}>{g}</SelectItem>
+                  ))}
+                  <SelectItem value="Other">Other</SelectItem>
+                </SelectContent>
+              </Select>
+              {formErrors.group && <p className="text-xs text-destructive">{formErrors.group}</p>}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Currency</Label>
+              <Select value={form.currency} onValueChange={(v) => setForm({ ...form, currency: v ?? "CAD" })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="CAD">CAD</SelectItem>
+                  <SelectItem value="USD">USD</SelectItem>
+                  <SelectItem value="EUR">EUR</SelectItem>
+                  <SelectItem value="GBP">GBP</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Initial Balance</Label>
+              <Input
+                type="number"
+                step="0.01"
+                value={form.initialBalance}
+                onChange={(e) => setForm({ ...form, initialBalance: e.target.value })}
+                placeholder="0.00"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
+            <Input
+              value={form.note}
+              onChange={(e) => setForm({ ...form, note: e.target.value })}
+              placeholder="e.g. Joint account"
+            />
+          </div>
+
+          {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+
+          <div className="flex gap-2 pt-1">
+            <Button type="button" variant="outline" className="flex-1" onClick={() => setDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" className="flex-1" disabled={saving}>
+              {saving ? "Creating…" : "Create Account"}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+
+  if (loading) return <SummarySkeleton />;
 
   if (error) {
     return <ErrorState title="Couldn't load accounts" message="We had trouble loading your account data." onRetry={loadAccounts} />;
@@ -172,10 +372,17 @@ export default function AccountsPage() {
     return (
       <div className="space-y-6">
         <OnboardingTips page="accounts" />
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">Accounts</h1>
+            <p className="text-sm text-muted-foreground mt-1">Overview of your assets, liabilities, and net worth</p>
+          </div>
+          {createAccountDialog}
+        </div>
         <EmptyState
           icon={Wallet}
           title="No accounts yet"
-          description="Add your bank accounts, credit cards, and investments to start tracking your net worth."
+          description="Create your first account or import bank data to start tracking your net worth."
           action={{ label: "Import data", href: "/import" }}
         />
       </div>
@@ -185,11 +392,14 @@ export default function AccountsPage() {
   return (
     <div className="space-y-6">
       <OnboardingTips page="accounts" />
-      <div>
-        <h1 className="text-2xl font-bold">Accounts</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Overview of your assets, liabilities, and net worth
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Accounts</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Overview of your assets, liabilities, and net worth
+          </p>
+        </div>
+        {createAccountDialog}
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -214,20 +424,8 @@ export default function AccountsPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {renderSection(
-          "Assets",
-          assets,
-          "text-emerald-600",
-          ArrowUpRight,
-          "bg-indigo-100 text-indigo-700",
-        )}
-        {renderSection(
-          "Liabilities",
-          liabilities,
-          "text-rose-600",
-          ArrowDownRight,
-          "bg-rose-100 text-rose-700",
-        )}
+        {renderSection("Assets", assets, "text-emerald-600", ArrowUpRight, "bg-indigo-100 text-indigo-700")}
+        {renderSection("Liabilities", liabilities, "text-rose-600", ArrowDownRight, "bg-rose-100 text-rose-700")}
       </div>
     </div>
   );

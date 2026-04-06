@@ -265,3 +265,12 @@ export const importTemplates = sqliteTable("import_templates", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+// Transaction Splits — split a single transaction across multiple categories
+export const transactionSplits = sqliteTable("transaction_splits", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  transactionId: integer("transaction_id").notNull().references(() => transactions.id),
+  categoryId: integer("category_id").references(() => categories.id),
+  amount: real("amount").notNull(),
+  note: text("note").default(""),
+});

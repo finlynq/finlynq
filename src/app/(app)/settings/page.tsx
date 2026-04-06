@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, Database, Server, Shield, Wallet, Tag, ArrowLeftRight, Briefcase, Trash2, Pencil, Plus, AlertTriangle, Settings2, Check, X, Zap, ToggleLeft, ToggleRight, Play, Lock, Eye, EyeOff, FolderOpen, HardDrive, Cloud, RefreshCw, BarChart3, CreditCard } from "lucide-react";
+import { Download, Database, Server, Shield, Wallet, Tag, ArrowLeftRight, Briefcase, Trash2, Pencil, Plus, AlertTriangle, Settings2, Check, X, Zap, ToggleLeft, ToggleRight, Play, Lock, Eye, EyeOff, FolderOpen, HardDrive, Cloud, RefreshCw, BarChart3, CreditCard, Upload, FileText } from "lucide-react";
 
 type Category = { id: number; type: string; group: string; name: string; note: string };
 
@@ -96,6 +96,16 @@ export default function SettingsPage() {
   const [etfLoading, setEtfLoading] = useState(false);
   const [etfStatus, setEtfStatus] = useState("");
 
+  // CSV Import (accounts, categories, portfolio)
+  type ImportSection = "accounts" | "categories" | "portfolio";
+  type ImportRow = Record<string, string>;
+  const [importSection, setImportSection] = useState<ImportSection | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportRow[]>([]);
+  const [importHeaders, setImportHeaders] = useState<string[]>([]);
+  const [importFileName, setImportFileName] = useState("");
+  const [importStatus, setImportStatus] = useState("");
+  const [importLoading, setImportLoading] = useState(false);
+
   // Load dev mode
   useEffect(() => {
     fetch("/api/settings/dev-mode")
@@ -146,6 +156,112 @@ export default function SettingsPage() {
     } finally {
       setBillingLoading(false);
     }
+  }
+
+  // CSV Import helpers
+  const [importAllRows, setImportAllRows] = useState<ImportRow[]>([]);
+
+  function parseCSV(text: string): { headers: string[]; rows: ImportRow[] } {
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+    if (lines.length < 2) return { headers: [], rows: [] };
+    const headers = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
+    const rows: ImportRow[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const vals = lines[i].split(",").map((v) => v.trim().replace(/^"|"$/g, ""));
+      const row: ImportRow = {};
+      headers.forEach((h, j) => { row[h] = vals[j] ?? ""; });
+      rows.push(row);
+    }
+    return { headers, rows };
+  }
+
+  function handleImportFile(section: ImportSection, file: File) {
+    setImportSection(section);
+    setImportStatus("");
+    setImportPreview([]);
+    setImportAllRows([]);
+    setImportFileName(file.name);
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      const { headers, rows } = parseCSV(text);
+      if (rows.length === 0) { setImportStatus("File appears empty or has no data rows."); return; }
+      setImportHeaders(headers);
+      setImportPreview(rows.slice(0, 5));
+      setImportAllRows(rows);
+    };
+    reader.readAsText(file);
+  }
+
+  async function handleImportConfirm() {
+    if (!importSection || importAllRows.length === 0) return;
+    setImportLoading(true);
+    setImportStatus(`Importing ${importAllRows.length} rows…`);
+    let ok = 0;
+    let failed = 0;
+    try {
+      for (const row of importAllRows) {
+        try {
+          if (importSection === "accounts") {
+            await fetch("/api/accounts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: row.name || row.Name || "",
+                type: row.type || row.Type || "A",
+                group: row.group || row.Group || "Other",
+                currency: row.currency || row.Currency || "CAD",
+                note: row.note || row.Note || "",
+              }),
+            });
+          } else if (importSection === "categories") {
+            await fetch("/api/categories", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: row.name || row.Name || "",
+                type: row.type || row.Type || "E",
+                group: row.group || row.Group || "Other",
+                note: row.note || row.Note || "",
+              }),
+            });
+          } else if (importSection === "portfolio") {
+            await fetch("/api/portfolio", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                symbol: row.symbol || row.Symbol || row.ticker || "",
+                name: row.name || row.Name || "",
+                quantity: parseFloat(row.quantity || row.Quantity || "0") || 0,
+                currency: row.currency || row.Currency || "CAD",
+                note: row.note || row.Note || "",
+              }),
+            });
+          }
+          ok++;
+        } catch {
+          failed++;
+        }
+      }
+      setImportStatus(`Imported ${ok} rows${failed > 0 ? `, ${failed} failed` : ""}.`);
+      setImportPreview([]);
+      setImportAllRows([]);
+      setImportSection(null);
+      setImportFileName("");
+    } catch {
+      setImportStatus("Import failed");
+    } finally {
+      setImportLoading(false);
+    }
+  }
+
+  function handleImportFileInput(section: ImportSection) {
+    return (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) handleImportFile(section, file);
+      e.target.value = "";
+    };
   }
 
   // Load currency from localStorage
@@ -923,6 +1039,91 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* CSV Import */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-teal-100 text-teal-600">
+              <Upload className="h-5 w-5" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Import Data</CardTitle>
+              <CardDescription>Import accounts, categories, or portfolio holdings from CSV</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Import type buttons */}
+          <div className="grid grid-cols-3 gap-3">
+            {([
+              { key: "accounts" as const, label: "Accounts", icon: Wallet, color: "text-violet-500", hint: "Columns: name, type, group, currency, note" },
+              { key: "categories" as const, label: "Categories", icon: Tag, color: "text-emerald-500", hint: "Columns: name, type, group, note" },
+              { key: "portfolio" as const, label: "Portfolio", icon: Briefcase, color: "text-cyan-500", hint: "Columns: symbol, name, quantity, currency, note" },
+            ] as const).map(({ key, label, icon: Icon, color, hint }) => (
+              <div key={key} className="space-y-1">
+                <label className={`flex flex-col items-center gap-2 border rounded-lg p-3 cursor-pointer hover:bg-muted/50 transition-colors text-center ${importSection === key ? "border-primary bg-primary/5" : ""}`}>
+                  <Icon className={`h-5 w-5 ${color}`} />
+                  <span className="text-sm font-medium">{label}</span>
+                  <span className="text-[10px] text-muted-foreground">{hint}</span>
+                  <input
+                    type="file"
+                    accept=".csv"
+                    className="sr-only"
+                    onChange={handleImportFileInput(key)}
+                  />
+                </label>
+              </div>
+            ))}
+          </div>
+
+          {/* Preview */}
+          {importPreview.length > 0 && importSection && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-sm">
+                <FileText className="h-4 w-4 text-muted-foreground" />
+                <span className="font-medium truncate">{importFileName}</span>
+                <Badge variant="outline" className="text-[10px]">Preview</Badge>
+              </div>
+              <div className="overflow-x-auto rounded border text-xs">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-muted/50">
+                      {importHeaders.map((h) => (
+                        <th key={h} className="px-2 py-1.5 text-left font-medium text-muted-foreground whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {importPreview.map((row, i) => (
+                      <tr key={i} className="border-t">
+                        {importHeaders.map((h) => (
+                          <td key={h} className="px-2 py-1.5 whitespace-nowrap">{row[h] ?? ""}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[10px] text-muted-foreground">Showing first {importPreview.length} rows. Full file will be imported on confirm.</p>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => { setImportPreview([]); setImportSection(null); setImportFileName(""); setImportStatus(""); }}>
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={handleImportConfirm} disabled={importLoading}>
+                  {importLoading ? "Importing…" : `Import ${importSection}`}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {importStatus && (
+            <p className={`text-xs flex items-center gap-1 ${importStatus.includes("fail") || importStatus.includes("error") ? "text-destructive" : "text-muted-foreground"}`}>
+              <Upload className="h-3 w-3" /> {importStatus}
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Data Export */}
       <Card>

@@ -12,7 +12,8 @@ import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle } from "lucide-react";
+import { SplitDialog } from "./_components/split-dialog";
 
 type Transaction = {
   id: number;
@@ -67,6 +68,25 @@ function TableSkeleton() {
   );
 }
 
+// Split indicator — shows a small badge if the transaction has splits
+function SplitBadge({ transactionId }: { transactionId: number }) {
+  const [hasSplits, setHasSplits] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/transactions/splits?transactionId=${transactionId}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d: unknown[]) => setHasSplits(d.length > 0))
+      .catch(() => setHasSplits(false));
+  }, [transactionId]);
+
+  if (!hasSplits) return null;
+  return (
+    <Badge variant="outline" className="text-[10px] border-violet-300 bg-violet-50 text-violet-700 ml-1">
+      split
+    </Badge>
+  );
+}
+
 export default function TransactionsPage() {
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [total, setTotal] = useState(0);
@@ -74,7 +94,7 @@ export default function TransactionsPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [searchInput, setSearchInput] = useState(""); // local (unthrottled) state
+  const [searchInput, setSearchInput] = useState("");
   const [filters, setFilters] = useState({
     startDate: "",
     endDate: "",
@@ -84,23 +104,7 @@ export default function TransactionsPage() {
   });
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const hasActiveFilters =
-    filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search;
-
-  function clearFilters() {
-    setSearchInput("");
-    setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "" });
-    setPage(0);
-  }
-
-  function handleSearchChange(value: string) {
-    setSearchInput(value);
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => {
-      setFilters((f) => ({ ...f, search: value }));
-      setPage(0);
-    }, 350);
-  }
+  // Add/edit dialog
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -119,6 +123,23 @@ export default function TransactionsPage() {
     quantity: "",
     portfolioHoldingId: "",
   });
+
+  // Delete confirmation
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [deleteConfirmPayee, setDeleteConfirmPayee] = useState("");
+  const [deleting, setDeleting] = useState(false);
+
+  // Split dialog
+  const [splitDialogOpen, setSplitDialogOpen] = useState(false);
+  const [splitTxn, setSplitTxn] = useState<Transaction | null>(null);
+
+  // Bulk selection
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [bulkAction, setBulkAction] = useState("");
+  const [bulkCategoryId, setBulkCategoryId] = useState("");
+  const [bulkAccountId, setBulkAccountId] = useState("");
+  const [bulkProcessing, setBulkProcessing] = useState(false);
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
 
   const limit = 50;
 
@@ -142,14 +163,27 @@ export default function TransactionsPage() {
       .finally(() => setLoading(false));
   }, [filters, page]);
 
-  useEffect(() => {
-    loadTxns();
-  }, [loadTxns]);
+  useEffect(() => { loadTxns(); }, [loadTxns]);
 
   useEffect(() => {
     fetch("/api/accounts").then((r) => r.ok ? r.json() : []).then(setAccounts);
     fetch("/api/categories").then((r) => r.ok ? r.json() : []).then(setCategories);
   }, []);
+
+  function handleSearchChange(value: string) {
+    setSearchInput(value);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      setFilters((f) => ({ ...f, search: value }));
+      setPage(0);
+    }, 350);
+  }
+
+  function clearFilters() {
+    setSearchInput("");
+    setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "" });
+    setPage(0);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -204,25 +238,95 @@ export default function TransactionsPage() {
       quantity: t.quantity != null ? String(t.quantity) : "",
       portfolioHoldingId: t.portfolioHolding || "",
     });
-    // Show advanced section if any advanced fields have values
     if (t.splitPerson || t.splitRatio != null || t.isBusiness === 1 || t.quantity != null || t.portfolioHolding) {
       setShowAdvanced(true);
     }
     setDialogOpen(true);
   }
 
-  async function handleDelete(id: number) {
-    await fetch(`/api/transactions?id=${id}`, { method: "DELETE" });
+  function confirmDelete(t: Transaction) {
+    setDeleteConfirmId(t.id);
+    setDeleteConfirmPayee(t.payee || `Transaction #${t.id}`);
+  }
+
+  async function handleDelete() {
+    if (!deleteConfirmId) return;
+    setDeleting(true);
+    await fetch(`/api/transactions?id=${deleteConfirmId}`, { method: "DELETE" });
+    setDeleteConfirmId(null);
+    setDeleting(false);
+    loadTxns();
+  }
+
+  function openSplitDialog(t: Transaction) {
+    setSplitTxn(t);
+    setSplitDialogOpen(true);
+  }
+
+  // Bulk selection helpers
+  const allSelected = txns.length > 0 && txns.every((t) => selected.has(t.id));
+  const someSelected = selected.size > 0;
+
+  function toggleAll() {
+    if (allSelected) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(txns.map((t) => t.id)));
+    }
+  }
+
+  function toggleOne(id: number) {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setSelected(next);
+  }
+
+  async function executeBulkAction() {
+    if (!someSelected) return;
+    const ids = Array.from(selected);
+
+    if (bulkAction === "delete") {
+      setBulkDeleteConfirm(true);
+      return;
+    }
+
+    setBulkProcessing(true);
+    const body: Record<string, unknown> = { action: bulkAction, ids };
+    if (bulkAction === "update_category") body.categoryId = Number(bulkCategoryId);
+    if (bulkAction === "update_account") body.accountId = Number(bulkAccountId);
+
+    await fetch("/api/transactions/bulk", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    setSelected(new Set());
+    setBulkAction("");
+    setBulkCategoryId("");
+    setBulkAccountId("");
+    setBulkProcessing(false);
+    loadTxns();
+  }
+
+  async function confirmBulkDelete() {
+    setBulkProcessing(true);
+    await fetch("/api/transactions/bulk", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "delete", ids: Array.from(selected) }),
+    });
+    setSelected(new Set());
+    setBulkAction("");
+    setBulkDeleteConfirm(false);
+    setBulkProcessing(false);
     loadTxns();
   }
 
   const totalPages = Math.ceil(total / limit);
 
-  // Compute visible page numbers for pagination
   function getPageNumbers(): (number | "ellipsis")[] {
-    if (totalPages <= 7) {
-      return Array.from({ length: totalPages }, (_, i) => i);
-    }
+    if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i);
     const pages: (number | "ellipsis")[] = [0];
     if (page > 2) pages.push("ellipsis");
     for (let i = Math.max(1, page - 1); i <= Math.min(totalPages - 2, page + 1); i++) {
@@ -313,7 +417,6 @@ export default function TransactionsPage() {
                 <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
               </div>
 
-              {/* Advanced fields toggle */}
               <button
                 type="button"
                 className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors w-full"
@@ -346,19 +449,23 @@ export default function TransactionsPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      id="isBusiness"
-                      checked={form.isBusiness}
-                      onChange={(e) => setForm({ ...form, isBusiness: e.target.checked })}
-                      className="h-4 w-4 rounded border-input"
-                    />
+                    <input type="checkbox" id="isBusiness" checked={form.isBusiness} onChange={(e) => setForm({ ...form, isBusiness: e.target.checked })} className="h-4 w-4 rounded border-input" />
                     <Label htmlFor="isBusiness" className="cursor-pointer">Business expense</Label>
                   </div>
                 </div>
               )}
 
-              <Button type="submit" className="w-full">{editId ? "Update" : "Create"} Transaction</Button>
+              <div className="flex gap-2">
+                {editId && (
+                  <Button type="button" variant="outline" className="text-destructive border-destructive/30" onClick={() => {
+                    const t = txns.find((t) => t.id === editId);
+                    if (t) { confirmDelete(t); setDialogOpen(false); }
+                  }}>
+                    <Trash2 className="h-4 w-4 mr-1.5" /> Delete
+                  </Button>
+                )}
+                <Button type="submit" className="flex-1">{editId ? "Update" : "Create"} Transaction</Button>
+              </div>
             </form>
           </DialogContent>
         </Dialog>
@@ -367,59 +474,97 @@ export default function TransactionsPage() {
       {/* Search + Filters */}
       <Card className="bg-muted/30 border-dashed">
         <CardContent className="pt-4 space-y-3">
-          {/* Search bar — prominent */}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
             <Input
               className="pl-9 pr-8"
               placeholder="Search payee, note, or tags…"
-              value={filters.search}
-              onChange={(e) => { setFilters({ ...filters, search: e.target.value }); setPage(0); }}
+              value={searchInput}
+              onChange={(e) => handleSearchChange(e.target.value)}
             />
-            {filters.search && (
-              <button
-                onClick={() => { setFilters({ ...filters, search: "" }); setPage(0); }}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-muted transition-colors"
-              >
+            {searchInput && (
+              <button onClick={() => { setSearchInput(""); setFilters({ ...filters, search: "" }); setPage(0); }} className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-muted transition-colors">
                 <X className="h-3.5 w-3.5 text-muted-foreground" />
               </button>
             )}
           </div>
-          {/* Secondary filters */}
           <div className="flex flex-wrap gap-2 items-center">
             <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-            <Input type="date" className="w-36 h-8 text-xs" placeholder="Start date" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
+            <Input type="date" className="w-36 h-8 text-xs" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
             <span className="text-xs text-muted-foreground">to</span>
-            <Input type="date" className="w-36 h-8 text-xs" placeholder="End date" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
+            <Input type="date" className="w-36 h-8 text-xs" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
             <Select value={filters.accountId} onValueChange={(v) => { setFilters({ ...filters, accountId: !v || v === "all" ? "" : v }); setPage(0); }}>
               <SelectTrigger className="w-40 h-8 text-xs"><SelectValue placeholder="All accounts" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All accounts</SelectItem>
-                {accounts.map((a) => (
-                  <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>
-                ))}
+                {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={filters.categoryId} onValueChange={(v) => { setFilters({ ...filters, categoryId: !v || v === "all" ? "" : v }); setPage(0); }}>
               <SelectTrigger className="w-44 h-8 text-xs"><SelectValue placeholder="All categories" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All categories</SelectItem>
-                {categories.map((c) => (
-                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                ))}
+                {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
               </SelectContent>
             </Select>
             {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search) && (
-              <button
-                onClick={() => { setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "" }); setPage(0); }}
-                className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors ml-1"
-              >
+              <button onClick={clearFilters} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors ml-1">
                 <X className="h-3 w-3" /> Clear all
               </button>
             )}
           </div>
         </CardContent>
       </Card>
+
+      {/* Bulk action bar */}
+      {someSelected && (
+        <div className="flex items-center gap-3 px-4 py-2.5 bg-primary/5 border border-primary/20 rounded-lg text-sm">
+          <span className="font-medium text-primary">{selected.size} selected</span>
+          <div className="flex items-center gap-2 flex-1 flex-wrap">
+            <Select value={bulkAction} onValueChange={(v) => setBulkAction(v ?? "")}>
+              <SelectTrigger className="w-44 h-7 text-xs"><SelectValue placeholder="Choose action…" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="update_category">Change category</SelectItem>
+                <SelectItem value="update_account">Change account</SelectItem>
+                <SelectItem value="delete">Delete selected</SelectItem>
+              </SelectContent>
+            </Select>
+            {bulkAction === "update_category" && (
+              <Select value={bulkCategoryId} onValueChange={(v) => setBulkCategoryId(v ?? "")}>
+                <SelectTrigger className="w-44 h-7 text-xs"><SelectValue placeholder="Select category" /></SelectTrigger>
+                <SelectContent>
+                  {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.group} — {c.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+            {bulkAction === "update_account" && (
+              <Select value={bulkAccountId} onValueChange={(v) => setBulkAccountId(v ?? "")}>
+                <SelectTrigger className="w-44 h-7 text-xs"><SelectValue placeholder="Select account" /></SelectTrigger>
+                <SelectContent>
+                  {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+            <Button
+              size="sm"
+              className="h-7 text-xs"
+              onClick={executeBulkAction}
+              disabled={
+                bulkProcessing ||
+                !bulkAction ||
+                (bulkAction === "update_category" && !bulkCategoryId) ||
+                (bulkAction === "update_account" && !bulkAccountId)
+              }
+              variant={bulkAction === "delete" ? "destructive" : "default"}
+            >
+              {bulkProcessing ? "Processing…" : "Apply"}
+            </Button>
+          </div>
+          <button onClick={() => setSelected(new Set())} className="text-muted-foreground hover:text-foreground transition-colors">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
 
       {/* Table */}
       <Card>
@@ -437,24 +582,46 @@ export default function TransactionsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleAll}
+                      className="h-4 w-4 rounded border-input cursor-pointer"
+                      title="Select all"
+                    />
+                  </TableHead>
                   <TableHead>Date</TableHead>
                   <TableHead>Account</TableHead>
                   <TableHead>Category</TableHead>
                   <TableHead>Payee</TableHead>
                   <TableHead>Note</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
-                  <TableHead className="w-20"></TableHead>
+                  <TableHead className="w-24"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {txns.map((t) => (
-                  <TableRow key={t.id} className="hover:bg-muted/30">
+                  <TableRow key={t.id} className={`hover:bg-muted/30 ${selected.has(t.id) ? "bg-primary/5" : ""}`}>
+                    <TableCell>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(t.id)}
+                        onChange={() => toggleOne(t.id)}
+                        className="h-4 w-4 rounded border-input cursor-pointer"
+                      />
+                    </TableCell>
                     <TableCell className="text-sm">{formatDate(t.date)}</TableCell>
                     <TableCell className="text-sm">{t.accountName}</TableCell>
                     <TableCell className="text-sm">
                       {t.categoryName ? (
-                        <Badge variant="outline" className={`text-xs ${getCategoryBadgeClass(t.categoryType)}`}>{t.categoryName}</Badge>
-                      ) : "-"}
+                        <span className="flex items-center gap-1">
+                          <Badge variant="outline" className={`text-xs ${getCategoryBadgeClass(t.categoryType)}`}>{t.categoryName}</Badge>
+                          <SplitBadge transactionId={t.id} />
+                        </span>
+                      ) : (
+                        <SplitBadge transactionId={t.id} />
+                      )}
                     </TableCell>
                     <TableCell className="text-sm">{t.payee || "-"}</TableCell>
                     <TableCell className="text-sm text-muted-foreground max-w-40 truncate">{t.note || "-"}</TableCell>
@@ -462,11 +629,14 @@ export default function TransactionsPage() {
                       {formatCurrency(t.amount, t.currency)}
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(t)}>
+                      <div className="flex gap-0.5">
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(t)} title="Edit">
                           <Pencil className="h-3 w-3" />
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => handleDelete(t.id)}>
+                        <Button variant="ghost" size="icon" className="h-7 w-7 text-violet-500" onClick={() => openSplitDialog(t)} title="Split">
+                          <Scissors className="h-3 w-3" />
+                        </Button>
+                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => confirmDelete(t)} title="Delete">
                           <Trash2 className="h-3 w-3" />
                         </Button>
                       </div>
@@ -482,7 +652,7 @@ export default function TransactionsPage() {
       {/* Pagination */}
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          Showing {page * limit + 1}-{Math.min((page + 1) * limit, total)} of {total}
+          Showing {page * limit + 1}–{Math.min((page + 1) * limit, total)} of {total}
         </p>
         <div className="flex items-center gap-1">
           <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage(page - 1)}>
@@ -492,13 +662,7 @@ export default function TransactionsPage() {
             p === "ellipsis" ? (
               <span key={`ellipsis-${idx}`} className="px-2 text-sm text-muted-foreground">...</span>
             ) : (
-              <Button
-                key={p}
-                variant={page === p ? "default" : "outline"}
-                size="sm"
-                className="h-8 w-8 p-0 text-sm"
-                onClick={() => setPage(p)}
-              >
+              <Button key={p} variant={page === p ? "default" : "outline"} size="sm" className="h-8 w-8 p-0 text-sm" onClick={() => setPage(p)}>
                 {p + 1}
               </Button>
             )
@@ -508,6 +672,61 @@ export default function TransactionsPage() {
           </Button>
         </div>
       </div>
+
+      {/* Single delete confirmation dialog */}
+      <Dialog open={deleteConfirmId !== null} onOpenChange={(open) => { if (!open) setDeleteConfirmId(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <AlertTriangle className="h-4 w-4" />
+              Delete Transaction
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to delete <strong>{deleteConfirmPayee}</strong>? This cannot be undone.
+          </p>
+          <div className="flex gap-2 mt-2">
+            <Button variant="outline" className="flex-1" onClick={() => setDeleteConfirmId(null)}>Cancel</Button>
+            <Button variant="destructive" className="flex-1" disabled={deleting} onClick={handleDelete}>
+              {deleting ? "Deleting…" : "Delete"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk delete confirmation dialog */}
+      <Dialog open={bulkDeleteConfirm} onOpenChange={(open) => { if (!open) setBulkDeleteConfirm(false); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <AlertTriangle className="h-4 w-4" />
+              Delete {selected.size} Transactions
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            This will permanently delete <strong>{selected.size} transaction{selected.size !== 1 ? "s" : ""}</strong>. This cannot be undone.
+          </p>
+          <div className="flex gap-2 mt-2">
+            <Button variant="outline" className="flex-1" onClick={() => setBulkDeleteConfirm(false)}>Cancel</Button>
+            <Button variant="destructive" className="flex-1" disabled={bulkProcessing} onClick={confirmBulkDelete}>
+              {bulkProcessing ? "Deleting…" : `Delete ${selected.size}`}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Split dialog */}
+      {splitTxn && (
+        <SplitDialog
+          open={splitDialogOpen}
+          onOpenChange={(open) => { setSplitDialogOpen(open); if (!open) setSplitTxn(null); }}
+          transactionId={splitTxn.id}
+          totalAmount={splitTxn.amount}
+          currency={splitTxn.currency}
+          categories={categories}
+          onSaved={loadTxns}
+        />
+      )}
     </div>
   );
 }
