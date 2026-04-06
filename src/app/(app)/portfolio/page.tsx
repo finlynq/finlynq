@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -354,6 +355,31 @@ export default function PortfolioPage() {
 
   if (loading) return <PortfolioSkeleton />;
   if (!data) return <div className="text-center py-12 text-muted-foreground">Unable to load portfolio data.</div>;
+
+  // Empty state — no holdings yet
+  if (data.summary.totalHoldings === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center gap-4">
+        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-100 text-cyan-600">
+          <TrendingUp className="h-8 w-8" />
+        </div>
+        <div>
+          <h3 className="text-lg font-semibold">No holdings yet</h3>
+          <p className="text-sm text-muted-foreground mt-1 max-w-xs">
+            Add investment accounts and holdings to track your portfolio performance.
+          </p>
+        </div>
+        <div className="flex gap-3">
+          <Link href="/accounts" className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors">
+            Add Account
+          </Link>
+          <Link href="/import" className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium hover:bg-accent transition-colors">
+            Import Data
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   const { summary, byType, etfXray, topGainers, topLosers } = data;
 

@@ -13,6 +13,7 @@ import { HealthScoreCard } from "./_components/health-score-card";
 import { ActionCenter } from "./_components/action-center";
 import { WeeklyRecap } from "./_components/weekly-recap";
 import { OnboardingTips } from "@/components/onboarding-tips";
+import { OnboardingWizard } from "@/components/onboarding-wizard";
 import { QuickImport } from "./_components/quick-import";
 import { IncomeExpenseChart } from "./_components/income-expense-chart";
 import { SpendingCategoryChart } from "./_components/spending-category-chart";
@@ -59,11 +60,24 @@ function DashboardSkeleton() {
 export default function DashboardPage() {
   const devMode = useDevMode();
   const [data, setData] = useState<DashboardData | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [userInfo, setUserInfo] = useState<{ email: string; displayName?: string } | null>(null);
 
   useEffect(() => {
     fetch("/api/dashboard")
       .then((r) => { if (r.ok) return r.json(); })
       .then((d) => { if (d) setData(d); });
+
+    // Check if onboarding is needed (managed mode only)
+    fetch("/api/billing/status")
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => {
+        if (d && d.onboardingComplete === false) {
+          setUserInfo({ email: d.email, displayName: d.displayName });
+          setShowOnboarding(true);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -175,6 +189,14 @@ export default function DashboardPage() {
   ];
 
   return (
+    <>
+      {showOnboarding && userInfo && (
+        <OnboardingWizard
+          userEmail={userInfo.email}
+          displayName={userInfo.displayName}
+          onComplete={() => setShowOnboarding(false)}
+        />
+      )}
     <motion.div
       className="space-y-5"
       variants={containerVariants}
@@ -300,5 +322,6 @@ export default function DashboardPage() {
       )}
 
     </motion.div>
+    </>
   );
 }

@@ -27,5 +27,8 @@ export async function GET(request: NextRequest) {
     plan: user.plan ?? "free",
     planExpiresAt: user.planExpiresAt,
     stripeCustomerId: user.stripeCustomerId ? "connected" : null,
+    onboardingComplete: user.onboardingComplete === 1,
+    email: user.email,
+    displayName: user.displayName,
   });
 }
