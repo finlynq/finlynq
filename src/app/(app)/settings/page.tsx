@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, Database, Server, Shield, Wallet, Tag, ArrowLeftRight, Briefcase, Trash2, Pencil, Plus, AlertTriangle, Settings2, Check, X, Zap, ToggleLeft, ToggleRight, Play, Lock, Eye, EyeOff, FolderOpen, HardDrive, Cloud, RefreshCw, BarChart3 } from "lucide-react";
+import { Download, Database, Server, Shield, Wallet, Tag, ArrowLeftRight, Briefcase, Trash2, Pencil, Plus, AlertTriangle, Settings2, Check, X, Zap, ToggleLeft, ToggleRight, Play, Lock, Eye, EyeOff, FolderOpen, HardDrive, Cloud, RefreshCw, BarChart3, CreditCard } from "lucide-react";
 
 type Category = { id: number; type: string; group: string; name: string; note: string };
 
@@ -87,6 +87,10 @@ export default function SettingsPage() {
   const [devModeLoading, setDevModeLoading] = useState(false);
   const [devModeStatus, setDevModeStatus] = useState("");
 
+  // Billing
+  const [billingStatus, setBillingStatus] = useState<{ plan: string; planExpiresAt: string | null; stripeCustomerId: string | null } | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+
   // ETF Data
   const [etfData, setEtfData] = useState<{ etfs: { symbol: string; full_name: string; total_holdings: number; updated_at: string }[]; count: number } | null>(null);
   const [etfLoading, setEtfLoading] = useState(false);
@@ -97,6 +101,14 @@ export default function SettingsPage() {
     fetch("/api/settings/dev-mode")
       .then((r) => r.json())
       .then((data) => { if (typeof data.devMode === "boolean") setDevMode(data.devMode); })
+      .catch(() => {});
+  }, []);
+
+  // Load billing status (managed mode only — silently fails in self-hosted)
+  useEffect(() => {
+    fetch("/api/billing/status")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data?.plan) setBillingStatus(data); })
       .catch(() => {});
   }, []);
 
@@ -121,6 +133,19 @@ export default function SettingsPage() {
       setDevModeStatus("Failed to update dev mode");
     }
     setDevModeLoading(false);
+  }
+
+  async function handleBillingUpgrade() {
+    setBillingLoading(true);
+    try {
+      const res = await fetch("/api/billing/checkout", { method: "POST" });
+      const data = await res.json();
+      if (data.url) window.location.href = data.url;
+    } catch {
+      // ignore — user stays on page
+    } finally {
+      setBillingLoading(false);
+    }
   }
 
   // Load currency from localStorage
@@ -578,6 +603,75 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Plan & Billing — only shown in managed mode */}
+      {billingStatus && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600">
+                <CreditCard className="h-5 w-5" />
+              </div>
+              <div>
+                <CardTitle className="text-base">Plan &amp; Billing</CardTitle>
+                <CardDescription>Manage your subscription</CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium capitalize">{billingStatus.plan} plan</p>
+                {billingStatus.plan === "trial" && billingStatus.planExpiresAt && (
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Trial expires{" "}
+                    {new Date(billingStatus.planExpiresAt).toLocaleDateString(undefined, {
+                      month: "long",
+                      day: "numeric",
+                      year: "numeric",
+                    })}
+                  </p>
+                )}
+                {billingStatus.plan === "free" && (
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Upgrade to Pro for full access
+                  </p>
+                )}
+                {(billingStatus.plan === "pro" || billingStatus.plan === "premium") && billingStatus.planExpiresAt && (
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Renews{" "}
+                    {new Date(billingStatus.planExpiresAt).toLocaleDateString(undefined, {
+                      month: "long",
+                      day: "numeric",
+                      year: "numeric",
+                    })}
+                  </p>
+                )}
+              </div>
+              {(billingStatus.plan === "free" || billingStatus.plan === "trial") && (
+                <Button
+                  size="sm"
+                  onClick={handleBillingUpgrade}
+                  disabled={billingLoading}
+                >
+                  <Zap className="h-4 w-4 mr-1.5" />
+                  {billingLoading ? "Redirecting…" : "Upgrade to Pro"}
+                </Button>
+              )}
+              {billingStatus.stripeCustomerId && (billingStatus.plan === "pro" || billingStatus.plan === "premium") && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleBillingUpgrade}
+                  disabled={billingLoading}
+                >
+                  Manage billing
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Display Preferences */}
       <Card>

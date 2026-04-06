@@ -1,5 +1,5 @@
 /**
- * POST /api/billing/webhook — Stripe webhook handler (Phase 6: NS-36)
+ * POST /api/billing/webhook — Stripe webhook handler (Session 2)
  *
  * Handles subscription lifecycle events from Stripe:
  *  - checkout.session.completed → activate plan
@@ -7,36 +7,32 @@
  *  - customer.subscription.deleted → revert to free
  *  - invoice.payment_failed → notify user
  *
- * In production, verify the Stripe-Signature header.
- * Set STRIPE_WEBHOOK_SECRET env var for verification.
+ * Requires STRIPE_WEBHOOK_SECRET env var for signature verification.
+ * Set STRIPE_SECRET_KEY env var for the Stripe client.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDialect } from "@/db";
+import Stripe from "stripe";
+import { getDialect, db } from "@/db";
+import * as pgSchema from "@/db/schema-pg";
 import { getUserById, updateUserPlan } from "@/lib/auth/queries";
-import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 
-interface StripeEvent {
-  type: string;
-  data: {
-    object: {
-      customer?: string;
-      subscription?: string;
-      metadata?: Record<string, string>;
-      status?: string;
-      current_period_end?: number;
-      items?: { data: Array<{ price: { lookup_key?: string } }> };
-    };
-  };
+function getStripe(): Stripe {
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!key) throw new Error("STRIPE_SECRET_KEY is not configured.");
+  return new Stripe(key);
 }
 
-function planFromLookupKey(key?: string): string {
+function planFromLookupKey(key?: string | null): string {
   if (!key) return "pro";
   if (key.includes("premium")) return "premium";
   if (key.includes("pro")) return "pro";
   return "pro";
 }
+
+// Stripe sends the raw body for signature verification — must disable body parsing
+export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
   if (getDialect() !== "postgres") {
@@ -46,27 +42,41 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // In production: verify Stripe-Signature header
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const sig = request.headers.get("stripe-signature");
+  const rawBody = await request.text();
+
+  let event: Stripe.Event;
+
   if (webhookSecret) {
-    const sig = request.headers.get("stripe-signature");
+    // Verify signature to ensure the request genuinely came from Stripe
     if (!sig) {
       return NextResponse.json(
-        { error: "Missing Stripe signature." },
+        { error: "Missing Stripe-Signature header." },
         { status: 400 }
       );
     }
-    // TODO: Use stripe.webhooks.constructEvent() for full verification
-    // For now, we accept the event if the secret is configured and sig is present
+    try {
+      const stripe = getStripe();
+      event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Signature verification failed";
+      return NextResponse.json({ error: msg }, { status: 400 });
+    }
+  } else {
+    // No webhook secret configured — parse without verification (dev/test only)
+    try {
+      event = JSON.parse(rawBody) as Stripe.Event;
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+    }
   }
 
   try {
-    const event: StripeEvent = await request.json();
-
     switch (event.type) {
       case "checkout.session.completed": {
-        const { metadata, customer, subscription } = event.data.object;
-        const userId = metadata?.userId;
+        const session = event.data.object as Stripe.Checkout.Session;
+        const userId = session.metadata?.userId ?? session.client_reference_id;
         if (!userId) break;
 
         const user = await getUserById(userId);
@@ -83,46 +93,49 @@ export async function POST(request: NextRequest) {
           .where(eq(schema.users.id, userId))
           .run();
 
-        // Activate plan (default to pro for checkout)
+        // Activate plan
         await updateUserPlan(userId, "pro");
         break;
       }
 
       case "customer.subscription.updated": {
-        const obj = event.data.object;
-        const customerId = obj.customer;
+        const sub = event.data.object as Stripe.Subscription;
+        const customerId =
+          typeof sub.customer === "string" ? sub.customer : sub.customer.id;
         if (!customerId) break;
 
-        // Find user by Stripe customer ID
         const user = await db
           .select()
-          .from(schema.users)
-          .where(eq(schema.users.stripeCustomerId, customerId))
+          .from(pgSchema.users)
+          .where(eq(pgSchema.users.stripeCustomerId, customerId))
           .get();
         if (!user) break;
 
-        const lookupKey = obj.items?.data?.[0]?.price?.lookup_key;
+        const lookupKey = sub.items?.data?.[0]?.price?.lookup_key;
         const plan = planFromLookupKey(lookupKey);
-        const expiresAt = obj.current_period_end
-          ? new Date(obj.current_period_end * 1000).toISOString()
+        // Use trial_end (v22 API — current_period_end was removed)
+        const expiresAt = sub.trial_end
+          ? new Date(sub.trial_end * 1000).toISOString()
           : undefined;
 
-        if (obj.status === "active" || obj.status === "trialing") {
+        if (sub.status === "active" || sub.status === "trialing") {
           await updateUserPlan(user.id, plan, expiresAt);
-        } else if (obj.status === "canceled" || obj.status === "unpaid") {
+        } else if (sub.status === "canceled" || sub.status === "unpaid") {
           await updateUserPlan(user.id, "free");
         }
         break;
       }
 
       case "customer.subscription.deleted": {
-        const customerId = event.data.object.customer;
+        const sub = event.data.object as Stripe.Subscription;
+        const customerId =
+          typeof sub.customer === "string" ? sub.customer : sub.customer.id;
         if (!customerId) break;
 
         const user = await db
           .select()
-          .from(schema.users)
-          .where(eq(schema.users.stripeCustomerId, customerId))
+          .from(pgSchema.users)
+          .where(eq(pgSchema.users.stripeCustomerId, customerId))
           .get();
         if (!user) break;
 
@@ -131,18 +144,22 @@ export async function POST(request: NextRequest) {
       }
 
       case "invoice.payment_failed": {
-        const customerId = event.data.object.customer;
+        const invoice = event.data.object as Stripe.Invoice;
+        const customerId =
+          typeof invoice.customer === "string"
+            ? invoice.customer
+            : invoice.customer?.id;
         if (!customerId) break;
 
         const user = await db
           .select()
-          .from(schema.users)
-          .where(eq(schema.users.stripeCustomerId, customerId))
+          .from(pgSchema.users)
+          .where(eq(pgSchema.users.stripeCustomerId, customerId))
           .get();
         if (!user) break;
 
-        // Create in-app notification about payment failure
-        await db.insert(schema.notifications)
+        await db
+          .insert(pgSchema.notifications)
           .values({
             userId: user.id,
             type: "billing",
