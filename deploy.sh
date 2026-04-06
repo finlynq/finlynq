@@ -9,7 +9,7 @@ set -euo pipefail
 #   1. package.json "postbuild" script — fires automatically after every npm run build
 #   2. Steps 4-5 below — explicit copy with error checking as a final safety net
 
-APP_DIR="/home/paperclip-agent/projects/pf"
+APP_DIR="/home/projects/pf"
 SERVICE_NAME="pf"
 
 SKIP_PULL=false

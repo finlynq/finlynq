@@ -19,7 +19,7 @@ push to main
            ▼ (all pass)
         deploy
            │
-           ├─ SSH → sudo /home/paperclip-agent/projects/pf/deploy.sh
+           ├─ SSH → sudo /home/projects/pf/deploy.sh
            └─ Verify: systemctl status pf + HTTP health check
 ```
 
@@ -80,11 +80,11 @@ VPS: 77.42.84.176
 │
 ├── systemd: pf.service
 │   ├── User: paperclip-agent
-│   ├── WorkingDirectory: /home/paperclip-agent/projects/pf
+│   ├── WorkingDirectory: /home/projects/pf
 │   ├── ExecStart: /usr/bin/node .next/standalone/server.js
 │   └── PORT=3456, NODE_ENV=production
 │
-├── App: /home/paperclip-agent/projects/pf/
+├── App: /home/projects/pf/
 │   ├── .next/standalone/server.js  ← production entrypoint
 │   ├── deploy.sh                   ← called by CI/CD
 │   └── .env                        ← runtime secrets (not in git)
@@ -119,11 +119,11 @@ SSH in and run the deploy script manually:
 
 ```bash
 ssh deploy@77.42.84.176
-sudo /home/paperclip-agent/projects/pf/deploy.sh
+sudo /home/projects/pf/deploy.sh
 
 # Options:
-sudo /home/paperclip-agent/projects/pf/deploy.sh --skip-pull   # build + restart without git pull
-sudo /home/paperclip-agent/projects/pf/deploy.sh --skip-build  # pull + restart without rebuild
+sudo /home/projects/pf/deploy.sh --skip-pull   # build + restart without git pull
+sudo /home/projects/pf/deploy.sh --skip-build  # pull + restart without rebuild
 ```
 
 ---
@@ -145,7 +145,7 @@ ssh deploy@77.42.84.176 "sudo journalctl -u pf -f"
 
 ## Environment Variables
 
-Runtime environment is configured in `/home/paperclip-agent/projects/pf/.env` on the server (not committed to git). Key variables:
+Runtime environment is configured in `/home/projects/pf/.env` on the server (not committed to git). Key variables:
 
 | Variable | Description |
 |----------|-------------|
@@ -159,6 +159,6 @@ To update a production env var, edit `.env` on the server and restart:
 
 ```bash
 ssh deploy@77.42.84.176
-sudo nano /home/paperclip-agent/projects/pf/.env
+sudo nano /home/projects/pf/.env
 sudo systemctl restart pf
 ```
