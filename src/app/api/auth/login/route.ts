@@ -14,7 +14,7 @@ import {
   AUTH_COOKIE,
 } from "@/lib/auth";
 import { getUserByEmail } from "@/lib/auth/queries";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 const loginSchema = z.object({
@@ -92,6 +92,7 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
+    await logApiError("POST", "/api/auth/login", error);
     return NextResponse.json(
       { error: safeErrorMessage(error, "Login failed") },
       { status: 500 }

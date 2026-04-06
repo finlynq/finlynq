@@ -58,7 +58,7 @@ export async function GET(request: NextRequest) {
   ];
   if (isBusiness) conditions.push(eq(schema.transactions.isBusiness, 1));
 
-  const timeseriesRows = db
+  const timeseriesRows = await db
     .select({
       period: periodCol,
       categoryType: schema.categories.type,
@@ -94,7 +94,7 @@ export async function GET(request: NextRequest) {
   // Breakdown by category or group per period
   const groupCol = groupBy === "group" ? schema.categories.group : schema.categories.name;
 
-  const breakdownRows = db
+  const breakdownRows = await db
     .select({
       period: periodCol,
       categoryType: schema.categories.type,
@@ -106,7 +106,7 @@ export async function GET(request: NextRequest) {
     .from(schema.transactions)
     .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
     .where(and(...conditions))
-    .groupBy(periodCol, groupCol, schema.categories.type)
+    .groupBy(periodCol, groupCol, schema.categories.type, schema.categories.group)
     .orderBy(periodCol, schema.categories.type, groupCol)
     .all();
 

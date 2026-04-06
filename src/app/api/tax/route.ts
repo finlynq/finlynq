@@ -18,10 +18,10 @@ export async function GET(request: NextRequest) {
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   // Get contribution room records
-  const contributions = db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)).all();
+  const contributions = await db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)).all();
 
   // Get holdings for asset location advice
-  const holdings = db
+  const holdings = await db
     .select({
       name: schema.portfolioHoldings.name,
       symbol: schema.portfolioHoldings.symbol,
@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Save contribution room
-    const record = db.insert(schema.contributionRoom).values({
+    const record = await db.insert(schema.contributionRoom).values({
       userId,
       type: body.type,
       year: body.year,

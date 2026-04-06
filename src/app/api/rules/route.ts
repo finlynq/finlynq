@@ -35,7 +35,7 @@ const { transactionRules, categories } = schema;
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const rules = db
+  const rules = await db
     .select({
       id: transactionRules.id,
       name: transactionRules.name,
@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
     if (parsed.error) return parsed.error;
     const { name, matchField, matchType, matchValue, assignCategoryId, assignTags, renameTo, priority } = parsed.data;
 
-    const rule = db
+    const rule = await db
       .insert(transactionRules)
       .values({
         userId: auth.context.userId,
@@ -113,7 +113,7 @@ export async function PUT(req: NextRequest) {
     if (updates.isActive !== undefined) data.isActive = updates.isActive;
     if (updates.priority !== undefined) data.priority = updates.priority;
 
-    const rule = db
+    const rule = await db
       .update(transactionRules)
       .set(data)
       .where(and(eq(transactionRules.id, id), eq(transactionRules.userId, auth.context.userId)))
@@ -134,6 +134,6 @@ export async function DELETE(req: NextRequest) {
   const id = searchParams.get("id");
   if (!id) return NextResponse.json({ error: "ID is required" }, { status: 400 });
 
-  db.delete(transactionRules).where(and(eq(transactionRules.id, parseInt(id)), eq(transactionRules.userId, auth.context.userId))).run();
+  await db.delete(transactionRules).where(and(eq(transactionRules.id, parseInt(id)), eq(transactionRules.userId, auth.context.userId))).run();
   return NextResponse.json({ success: true });
 }

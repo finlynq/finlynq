@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
   cutoff.setFullYear(cutoff.getFullYear() - 1);
   const cutoffStr = cutoff.toISOString().split("T")[0];
 
-  const txns = db
+  const txns = await db
     .select({
       id: schema.transactions.id,
       date: schema.transactions.date,
@@ -40,7 +40,7 @@ export async function GET(request: NextRequest) {
   );
 
   // Get current total balance across all bank/checking accounts
-  const bankAccounts = db
+  const bankAccounts = await db
     .select({ id: schema.accounts.id })
     .from(schema.accounts)
     .where(and(
@@ -51,7 +51,7 @@ export async function GET(request: NextRequest) {
 
   let currentBalance = 0;
   for (const ba of bankAccounts) {
-    const result = db
+    const result = await db
       .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
       .from(schema.transactions)
       .where(and(eq(schema.transactions.accountId, ba.id), eq(schema.transactions.userId, userId)))

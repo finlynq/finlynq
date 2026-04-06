@@ -12,8 +12,8 @@ export async function GET(request: NextRequest) {
   const year2 = parseInt(params.get("year2") ?? String(currentYear), 10);
 
   // Category comparison for each year
-  function getCategoryTotals(year: number) {
-    return db
+  async function getCategoryTotals(year: number) {
+    return await db
       .select({
         categoryName: schema.categories.name,
         categoryType: schema.categories.type,
@@ -29,13 +29,13 @@ export async function GET(request: NextRequest) {
           lte(schema.transactions.date, `${year}-12-31`)
         )
       )
-      .groupBy(schema.categories.id)
+      .groupBy(schema.categories.id, schema.categories.name, schema.categories.type, schema.categories.group)
       .all();
   }
 
   // Monthly totals for each year
-  function getMonthlyTotals(year: number) {
-    return db
+  async function getMonthlyTotals(year: number) {
+    return await db
       .select({
         month: sql<string>`SUBSTR(${schema.transactions.date}, 6, 2)`,
         categoryType: schema.categories.type,
@@ -55,10 +55,10 @@ export async function GET(request: NextRequest) {
       .all();
   }
 
-  const cat1 = getCategoryTotals(year1);
-  const cat2 = getCategoryTotals(year2);
-  const monthly1 = getMonthlyTotals(year1);
-  const monthly2 = getMonthlyTotals(year2);
+  const cat1 = await getCategoryTotals(year1);
+  const cat2 = await getCategoryTotals(year2);
+  const monthly1 = await getMonthlyTotals(year1);
+  const monthly2 = await getMonthlyTotals(year2);
 
   // Build category comparison
   const allCategories = new Set([

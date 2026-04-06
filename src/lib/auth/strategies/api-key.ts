@@ -15,7 +15,7 @@ import type { AuthStrategy, AuthResult } from "../strategy";
 export class ApiKeyStrategy implements AuthStrategy {
   readonly method = "api_key" as const;
 
-  authenticate(request: NextRequest): AuthResult {
+  async authenticate(request: NextRequest): Promise<AuthResult> {
     const headerKey = request.headers.get("X-API-Key");
 
     if (!headerKey) {
@@ -39,7 +39,7 @@ export class ApiKeyStrategy implements AuthStrategy {
       };
     }
 
-    const error = validateApiKey(request);
+    const error = await validateApiKey(request);
     if (error) {
       return {
         authenticated: false,

@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
   try {
     // Verify webhook secret
     const secret = request.headers.get("x-webhook-secret");
-    const storedSecret = db
+    const storedSecret = await db
       .select()
       .from(schema.settings)
       .where(eq(schema.settings.key, "email_webhook_secret"))
@@ -94,7 +94,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "No importable data found in attachments" });
     }
 
-    const result = executeImport(allRows, [], userId);
+    const result = await executeImport(allRows, [], userId);
 
     // Create notification scoped to user
     await db.insert(schema.notifications)

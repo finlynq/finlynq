@@ -5,7 +5,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
-    const result = calculateAgeOfMoney(auth.context.userId);
+    const result = await calculateAgeOfMoney(auth.context.userId);
     return NextResponse.json(result);
   } catch (error: unknown) {
     const message =

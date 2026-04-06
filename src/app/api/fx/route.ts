@@ -8,11 +8,11 @@ export async function GET(request: NextRequest) {
   const { userId } = auth.context;
   const target = request.nextUrl.searchParams.get("target") ?? "CAD";
 
-  const balances = getAccountBalances(userId);
-  const activeCurrencies = getActiveCurrencies();
+  const balances = await getAccountBalances(userId);
+  const activeCurrencies = await getActiveCurrencies();
 
   // Build rate map: every active currency → target
-  const rateMap = await getRateMap(target);
+  const rateMap = await getRateMap(target, userId);
 
   // Build rates object for response
   const rates: Record<string, number> = {};

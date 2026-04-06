@@ -146,7 +146,7 @@ async function cacheCryptoPrice(symbol: string, price: number, currency: string)
   const today = new Date().toISOString().split("T")[0];
 
   try {
-    const existing = db
+    const existing = await db
       .select()
       .from(schema.priceCache)
       .where(
@@ -158,12 +158,12 @@ async function cacheCryptoPrice(symbol: string, price: number, currency: string)
       .get();
 
     if (existing) {
-      db.update(schema.priceCache)
+      await db.update(schema.priceCache)
         .set({ price, currency })
         .where(eq(schema.priceCache.id, existing.id))
         .run();
     } else {
-      db.insert(schema.priceCache)
+      await db.insert(schema.priceCache)
         .values({ symbol: cacheSymbol, date: today, price, currency })
         .run();
     }
@@ -172,11 +172,11 @@ async function cacheCryptoPrice(symbol: string, price: number, currency: string)
   }
 }
 
-export function getCachedCryptoPrice(
+export async function getCachedCryptoPrice(
   symbol: string
-): { price: number; currency: string; date: string } | null {
+): Promise<{ price: number; currency: string; date: string } | null> {
   const cacheSymbol = `CRYPTO:${symbol.toUpperCase()}`;
-  const row = db
+  const row = await db
     .select()
     .from(schema.priceCache)
     .where(eq(schema.priceCache.symbol, cacheSymbol))

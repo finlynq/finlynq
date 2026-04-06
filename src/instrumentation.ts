@@ -10,7 +10,7 @@ export async function register() {
   // Only run on the server
   if (typeof window !== "undefined") return;
 
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = process.env.PF_DATABASE_URL || process.env.DATABASE_URL;
   if (!databaseUrl) return; // SQLite mode — initialized on unlock
 
   const { PostgresAdapter } = await import("@/db/adapters/postgres");

@@ -18,7 +18,7 @@ export async function GET(request: NextRequest) {
 
   // If no symbol, return all ETFs in portfolio with their breakdown availability
   if (!symbol) {
-    const holdings = db
+    const holdings = await db
       .select({
         id: schema.portfolioHoldings.id,
         name: schema.portfolioHoldings.name,

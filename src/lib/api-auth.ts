@@ -12,8 +12,8 @@ const API_KEY_SETTING = "api_key";
  * Get or generate the API key from the settings table.
  * Creates a new key on first access.
  */
-export function getOrCreateApiKey(): string {
-  const existing = db
+export async function getOrCreateApiKey(): Promise<string> {
+  const existing = await db
     .select()
     .from(schema.settings)
     .where(eq(schema.settings.key, API_KEY_SETTING))
@@ -23,7 +23,7 @@ export function getOrCreateApiKey(): string {
 
   // Generate a new API key
   const key = `pf_${crypto.randomBytes(24).toString("hex")}`;
-  db.insert(schema.settings).values({ key: API_KEY_SETTING, value: key }).run();
+  await db.insert(schema.settings).values({ key: API_KEY_SETTING, value: key }).run();
   return key;
 }
 
@@ -31,14 +31,14 @@ export function getOrCreateApiKey(): string {
  * Validate X-API-Key header against the stored key.
  * Returns null if valid, or an error message if invalid.
  */
-export function validateApiKey(request: NextRequest): string | null {
+export async function validateApiKey(request: NextRequest): Promise<string | null> {
   const headerKey = request.headers.get("X-API-Key");
 
   if (!headerKey) {
     return "Missing X-API-Key header";
   }
 
-  const storedKey = getOrCreateApiKey();
+  const storedKey = await getOrCreateApiKey();
 
   if (headerKey !== storedKey) {
     return "Invalid API key";

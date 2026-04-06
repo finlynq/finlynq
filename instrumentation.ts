@@ -12,7 +12,7 @@ export async function register() {
   // Only runs in the Node.js runtime (not Edge), where native pg is available.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = process.env.PF_DATABASE_URL || process.env.DATABASE_URL;
   if (!databaseUrl) {
     // Self-hosted mode — SQLite adapter is initialized on first unlock via the UI.
     return;

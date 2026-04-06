@@ -5,7 +5,7 @@ import { detectRecurringTransactions } from "@/lib/recurring-detector";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
 const createSchema = z.object({
   name: z.string(),
@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
-  const subs = db
+  const subs = await db
     .select({
       id: schema.subscriptions.id,
       name: schema.subscriptions.name,
@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
       cutoff.setFullYear(cutoff.getFullYear() - 1);
       const cutoffStr = cutoff.toISOString().split("T")[0];
 
-      const txns = db
+      const txns = await db
         .select({
           id: schema.transactions.id,
           date: schema.transactions.date,
@@ -119,7 +119,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, createSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
-    const sub = db
+    const sub = await db
       .insert(schema.subscriptions)
       .values({
         userId,
@@ -139,6 +139,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(sub, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/subscriptions", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
@@ -151,7 +152,7 @@ export async function PUT(request: NextRequest) {
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
-    const sub = db
+    const sub = await db
       .update(schema.subscriptions)
       .set(data)
       .where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, auth.context.userId)))
@@ -159,6 +160,7 @@ export async function PUT(request: NextRequest) {
       .get();
     return NextResponse.json(sub);
   } catch (error: unknown) {
+    await logApiError("PUT", "/api/subscriptions", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
@@ -168,6 +170,6 @@ export async function DELETE(request: NextRequest) {
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  db.delete(schema.subscriptions).where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, auth.context.userId))).run();
+  await db.delete(schema.subscriptions).where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, auth.context.userId))).run();
   return NextResponse.json({ success: true });
 }

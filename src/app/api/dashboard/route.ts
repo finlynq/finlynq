@@ -7,6 +7,7 @@ import {
 } from "@/lib/queries";
 import { getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { logApiError } from "@/lib/validate";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -23,18 +24,18 @@ export async function GET(request: NextRequest) {
       params.get("endDate") ??
       `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-31`;
 
-    const rateMap = await getRateMap(displayCurrency);
+    const rateMap = await getRateMap(displayCurrency, userId);
 
-    const balances = getAccountBalances(userId);
+    const balances = await getAccountBalances(userId);
     const convertedBalances = balances.map((b) => ({
       ...b,
       convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
       displayCurrency,
     }));
 
-    const incomeVsExpenses = getIncomeVsExpenses(userId, startDate, endDate);
-    const spendingByCategory = getSpendingByCategory(userId, startDate, endDate);
-    const netWorthRaw = getNetWorthOverTime(userId);
+    const incomeVsExpenses = await getIncomeVsExpenses(userId, startDate, endDate);
+    const spendingByCategory = await getSpendingByCategory(userId, startDate, endDate);
+    const netWorthRaw = await getNetWorthOverTime(userId);
 
     // Consolidate net worth across currencies into display currency
     const netWorthByMonth = new Map<string, number>();
@@ -54,6 +55,7 @@ export async function GET(request: NextRequest) {
       netWorthOverTime,
     });
   } catch (error: unknown) {
+    await logApiError("GET", "/api/dashboard", error, userId);
     const message = error instanceof Error ? error.message : "Failed to load dashboard data";
     return NextResponse.json({ error: message }, { status: 500 });
   }

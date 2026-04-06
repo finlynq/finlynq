@@ -3,7 +3,7 @@ import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -23,9 +23,10 @@ export async function POST(request: NextRequest) {
       forceImportIndices: number[];
     };
 
-    const result = executeImport(rows, forceImportIndices, userId);
+    const result = await executeImport(rows, forceImportIndices, userId);
     return NextResponse.json(result);
   } catch (error: unknown) {
+    await logApiError("POST", "/api/import/execute", error, userId);
     const message = safeErrorMessage(error, "Import failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
   const endDate = `${now.getFullYear()}-12-31`;
   const currentMonth = getCurrentMonth();
 
-  const monthlySpending = getMonthlySpending(userId, startDate, endDate);
+  const monthlySpending = await getMonthlySpending(userId, startDate, endDate);
   const anomalies = detectAnomalies(
     monthlySpending.map((r) => ({
       month: r.month,
@@ -37,7 +37,7 @@ export async function GET(request: NextRequest) {
   // Merchant analysis (last 6 months)
   const sixMonthsAgo = new Date(now);
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-  const recentTxns = getTransactions(userId, {
+  const recentTxns = await getTransactions(userId, {
     startDate: sixMonthsAgo.toISOString().split("T")[0],
     endDate: endDate,
     limit: 5000,

@@ -59,8 +59,8 @@ function parseDateRange(msg: string): { start: string; end: string; label: strin
   return { start: startOfMonth(0), end: endOfMonth(0), label: monthLabel(0) };
 }
 
-function findCategoryName(msg: string): string | null {
-  const cats = db.select({ name: schema.categories.name }).from(schema.categories).all();
+async function findCategoryName(msg: string): Promise<string | null> {
+  const cats = await db.select({ name: schema.categories.name }).from(schema.categories).all();
   const lower = msg.toLowerCase();
   // Match longest category name first to avoid partial matches
   const sorted = cats.sort((a, b) => b.name.length - a.name.length);
@@ -70,8 +70,8 @@ function findCategoryName(msg: string): string | null {
   return null;
 }
 
-function findAccountName(msg: string): string | null {
-  const accs = db.select({ name: schema.accounts.name }).from(schema.accounts).all();
+async function findAccountName(msg: string): Promise<string | null> {
+  const accs = await db.select({ name: schema.accounts.name }).from(schema.accounts).all();
   const lower = msg.toLowerCase();
   const sorted = accs.sort((a, b) => b.name.length - a.name.length);
   for (const a of sorted) {
@@ -82,10 +82,10 @@ function findAccountName(msg: string): string | null {
 
 // ─── Intent matchers ────────────────────────────────────────────────
 
-type IntentHandler = (msg: string) => ChatResponse | null;
+type IntentHandler = (msg: string) => Promise<ChatResponse | null>;
 
-const handleNetWorth: IntentHandler = () => {
-  const balances = db
+const handleNetWorth: IntentHandler = async () => {
+  const balances = await db
     .select({
       accountName: schema.accounts.name,
       accountType: schema.accounts.type,
@@ -95,7 +95,7 @@ const handleNetWorth: IntentHandler = () => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .groupBy(schema.accounts.id)
+    .groupBy(schema.accounts.id, schema.accounts.name, schema.accounts.type, schema.accounts.group, schema.accounts.currency)
     .orderBy(schema.accounts.type, schema.accounts.group)
     .all();
 
@@ -122,16 +122,16 @@ const handleNetWorth: IntentHandler = () => {
   };
 };
 
-const handleSpending: IntentHandler = (msg) => {
+const handleSpending: IntentHandler = async (msg) => {
   const range = parseDateRange(msg);
-  const categoryName = findCategoryName(msg);
+  const categoryName = await findCategoryName(msg);
 
   if (categoryName) {
     // Spending on a specific category
-    const cat = db.select().from(schema.categories).where(eq(schema.categories.name, categoryName)).get();
+    const cat = await db.select().from(schema.categories).where(eq(schema.categories.name, categoryName)).get();
     if (!cat) return { text: `I couldn't find a category named "${categoryName}".` };
 
-    const result = db
+    const result = await db
       .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
       .from(schema.transactions)
       .where(
@@ -150,7 +150,7 @@ const handleSpending: IntentHandler = (msg) => {
   }
 
   // Overall spending by category
-  const spending = db
+  const spending = await db
     .select({
       categoryName: schema.categories.name,
       total: sql<number>`SUM(${schema.transactions.amount})`,
@@ -164,7 +164,7 @@ const handleSpending: IntentHandler = (msg) => {
         lte(schema.transactions.date, range.end)
       )
     )
-    .groupBy(schema.categories.id)
+    .groupBy(schema.categories.id, schema.categories.name)
     .orderBy(sql`SUM(${schema.transactions.amount}) ASC`)
     .all();
 
@@ -185,14 +185,14 @@ const handleSpending: IntentHandler = (msg) => {
   };
 };
 
-const handleBalance: IntentHandler = (msg) => {
-  const accountName = findAccountName(msg);
+const handleBalance: IntentHandler = async (msg) => {
+  const accountName = await findAccountName(msg);
 
   if (accountName) {
-    const acc = db.select().from(schema.accounts).where(eq(schema.accounts.name, accountName)).get();
+    const acc = await db.select().from(schema.accounts).where(eq(schema.accounts.name, accountName)).get();
     if (!acc) return { text: `I couldn't find an account named "${accountName}".` };
 
-    const result = db
+    const result = await db
       .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
       .from(schema.transactions)
       .where(eq(schema.transactions.accountId, acc.id))
@@ -204,7 +204,7 @@ const handleBalance: IntentHandler = (msg) => {
   }
 
   // All account balances
-  const balances = db
+  const balances = await db
     .select({
       accountName: schema.accounts.name,
       accountType: schema.accounts.type,
@@ -213,7 +213,7 @@ const handleBalance: IntentHandler = (msg) => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .groupBy(schema.accounts.id)
+    .groupBy(schema.accounts.id, schema.accounts.name, schema.accounts.type, schema.accounts.currency)
     .orderBy(schema.accounts.type, schema.accounts.name)
     .all();
 
@@ -235,11 +235,11 @@ const handleBalance: IntentHandler = (msg) => {
   };
 };
 
-const handleBudget: IntentHandler = (msg) => {
+const handleBudget: IntentHandler = async (msg) => {
   const month = getCurrentMonth();
-  const categoryName = findCategoryName(msg);
+  const categoryName = await findCategoryName(msg);
 
-  const budgetRows = db
+  const budgetRows = await db
     .select({
       categoryId: schema.budgets.categoryId,
       categoryName: schema.categories.name,
@@ -258,8 +258,8 @@ const handleBudget: IntentHandler = (msg) => {
   const start = startOfMonth(0);
   const end = endOfMonth(0);
 
-  const results = budgetRows.map((b) => {
-    const spent = db
+  const results = await Promise.all(budgetRows.map(async (b) => {
+    const spent = await db
       .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
       .from(schema.transactions)
       .where(
@@ -282,7 +282,7 @@ const handleBudget: IntentHandler = (msg) => {
       pct,
       status,
     };
-  });
+  }));
 
   if (categoryName) {
     const match = results.find((r) => r.name.toLowerCase() === categoryName.toLowerCase());
@@ -322,13 +322,13 @@ const handleBudget: IntentHandler = (msg) => {
   };
 };
 
-const handleTransactions: IntentHandler = (msg) => {
+const handleTransactions: IntentHandler = async (msg) => {
   const lower = msg.toLowerCase();
 
   // "largest expense" / "biggest purchase"
   if (lower.includes("largest") || lower.includes("biggest") || lower.includes("most expensive")) {
     const range = parseDateRange(msg);
-    const result = db
+    const result = await db
       .select({
         date: schema.transactions.date,
         payee: schema.transactions.payee,
@@ -385,7 +385,7 @@ const handleTransactions: IntentHandler = (msg) => {
     );
   }
 
-  const txns = db
+  const txns = await db
     .select({
       date: schema.transactions.date,
       payee: schema.transactions.payee,
@@ -422,7 +422,7 @@ const handleTransactions: IntentHandler = (msg) => {
   };
 };
 
-const handleTrends: IntentHandler = (msg) => {
+const handleTrends: IntentHandler = async (msg) => {
   // Compare spending month over month
   const months = 6;
   const monthlyData: { month: string; income: number; expenses: number }[] = [];
@@ -432,7 +432,7 @@ const handleTrends: IntentHandler = (msg) => {
     const end = endOfMonth(-i);
     const label = monthLabel(-i);
 
-    const result = db
+    const result = await db
       .select({
         type: schema.categories.type,
         total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
@@ -477,8 +477,8 @@ const handleTrends: IntentHandler = (msg) => {
   };
 };
 
-const handleGoals: IntentHandler = (msg) => {
-  const goals = db
+const handleGoals: IntentHandler = async (msg) => {
+  const goals = await db
     .select({
       id: schema.goals.id,
       name: schema.goals.name,
@@ -496,10 +496,10 @@ const handleGoals: IntentHandler = (msg) => {
     return { text: "You don't have any active goals. Head to the Goals page to create one!" };
   }
 
-  const withProgress = goals.map((g) => {
+  const withProgress = await Promise.all(goals.map(async (g) => {
     let currentAmount = 0;
     if (g.accountId) {
-      const result = db
+      const result = await db
         .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
         .from(schema.transactions)
         .where(eq(schema.transactions.accountId, g.accountId))
@@ -514,7 +514,7 @@ const handleGoals: IntentHandler = (msg) => {
       progress: Math.round(progress),
       deadline: g.deadline,
     };
-  });
+  }));
 
   const lines = withProgress.map(
     (g) => `  ${g.name}: ${g.progress}% (${formatCurrency(g.current, "CAD")} / ${formatCurrency(g.target, "CAD")})${g.deadline ? ` — due ${g.deadline}` : ""}`
@@ -534,7 +534,7 @@ const handleGoals: IntentHandler = (msg) => {
   };
 };
 
-const handleForecast: IntentHandler = (msg) => {
+const handleForecast: IntentHandler = async (msg) => {
   const lower = msg.toLowerCase();
 
   // "Can I afford [amount]?"
@@ -542,7 +542,7 @@ const handleForecast: IntentHandler = (msg) => {
   if (affordMatch) {
     const amount = parseFloat(affordMatch[1].replace(/,/g, ""));
     // Get total balance across bank accounts
-    const bankAccounts = db
+    const bankAccounts = await db
       .select({ id: schema.accounts.id })
       .from(schema.accounts)
       .where(sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`)
@@ -550,7 +550,7 @@ const handleForecast: IntentHandler = (msg) => {
 
     let currentBalance = 0;
     for (const ba of bankAccounts) {
-      const result = db
+      const result = await db
         .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
         .from(schema.transactions)
         .where(eq(schema.transactions.accountId, ba.id))
@@ -568,7 +568,7 @@ const handleForecast: IntentHandler = (msg) => {
   }
 
   // "Upcoming bills"
-  const recurring = db
+  const recurring = await db
     .select({
       payee: schema.recurringTransactions.payee,
       amount: schema.recurringTransactions.amount,
@@ -606,20 +606,20 @@ const handleForecast: IntentHandler = (msg) => {
   };
 };
 
-const handleSummary: IntentHandler = () => {
+const handleSummary: IntentHandler = async () => {
   const month = getCurrentMonth();
   const start = startOfMonth(0);
   const end = endOfMonth(0);
 
   // Net worth
-  const balances = db
+  const balances = await db
     .select({
       accountType: schema.accounts.type,
       balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .groupBy(schema.accounts.id)
+    .groupBy(schema.accounts.id, schema.accounts.type)
     .all();
 
   let assets = 0, liabilities = 0;
@@ -630,7 +630,7 @@ const handleSummary: IntentHandler = () => {
   const netWorth = assets + liabilities;
 
   // Month income vs expenses
-  const monthResult = db
+  const monthResult = await db
     .select({
       type: schema.categories.type,
       total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
@@ -652,17 +652,17 @@ const handleSummary: IntentHandler = () => {
   const savings = income - expenses;
 
   // Active goals count
-  const goalCount = db
+  const goalCount = await db
     .select({ count: sql<number>`count(*)` })
     .from(schema.goals)
     .where(eq(schema.goals.status, "active"))
     .get();
 
   // Budgets over
-  const budgetRows = db.select().from(schema.budgets).where(eq(schema.budgets.month, month)).all();
+  const budgetRows = await db.select().from(schema.budgets).where(eq(schema.budgets.month, month)).all();
   let overBudgetCount = 0;
   for (const b of budgetRows) {
-    const spent = db
+    const spent = await db
       .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
       .from(schema.transactions)
       .where(
@@ -751,7 +751,7 @@ const intents: IntentPattern[] = [
   },
 ];
 
-export function processMessage(message: string): ChatResponse {
+export async function processMessage(message: string): Promise<ChatResponse> {
   const lower = message.toLowerCase().trim();
 
   if (!lower) {
@@ -761,7 +761,7 @@ export function processMessage(message: string): ChatResponse {
   // Match intent by keyword
   for (const intent of intents) {
     if (intent.keywords.some((kw) => lower.includes(kw))) {
-      const result = intent.handler(message);
+      const result = await intent.handler(message);
       if (result) return result;
     }
   }

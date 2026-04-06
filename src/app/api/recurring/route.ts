@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
   cutoff.setFullYear(cutoff.getFullYear() - 1);
   const cutoffStr = cutoff.toISOString().split("T")[0];
 
-  const txns = db
+  const txns = await db
     .select({
       id: schema.transactions.id,
       date: schema.transactions.date,
