@@ -2,12 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { safeErrorMessage } from "@/lib/validate";
+import { safeErrorMessage, logApiError } from "@/lib/validate";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const notifications = db
+  const notifications = await db
     .select()
     .from(schema.notifications)
     .where(eq(schema.notifications.userId, userId))
@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
     .limit(50)
     .all();
 
-  const unreadCount = db
+  const unreadCount = await db
     .select({ count: sql<number>`COUNT(*)` })
     .from(schema.notifications)
     .where(and(eq(schema.notifications.userId, userId), eq(schema.notifications.read, 0)))
@@ -35,11 +35,9 @@ export async function POST(request: NextRequest) {
 
     if (body.action === "mark-read") {
       if (body.id) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        db.update(schema.notifications).set({ read: 1 } as any).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
+        await db.update(schema.notifications).set({ read: 1 }).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
       } else {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        db.update(schema.notifications).set({ read: 1 } as any).where(eq(schema.notifications.userId, userId)).run();
+        await db.update(schema.notifications).set({ read: 1 }).where(eq(schema.notifications.userId, userId)).run();
       }
       return NextResponse.json({ success: true });
     }
@@ -54,7 +52,7 @@ export async function POST(request: NextRequest) {
       const startDate = `${month}-01`;
       const endDate = `${month}-${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()}`;
 
-      const budgets = db
+      const budgets = await db
         .select({
           categoryName: schema.categories.name,
           budgetAmount: schema.budgets.amount,
@@ -64,7 +62,7 @@ export async function POST(request: NextRequest) {
         .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
         .leftJoin(schema.transactions, eq(schema.transactions.categoryId, schema.categories.id))
         .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId)))
-        .groupBy(schema.budgets.id)
+        .groupBy(schema.budgets.id, schema.categories.name, schema.budgets.amount)
         .all();
 
       for (const b of budgets) {
@@ -93,14 +91,14 @@ export async function POST(request: NextRequest) {
       }
 
       if (generated.length > 0) {
-        db.insert(schema.notifications).values(generated).run();
+        await db.insert(schema.notifications).values(generated).run();
       }
 
       return NextResponse.json({ generated: generated.length });
     }
 
     // Create custom notification
-    const notif = db.insert(schema.notifications).values({
+    const notif = await db.insert(schema.notifications).values({
       userId,
       type: body.type ?? "info",
       title: body.title,
@@ -111,6 +109,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(notif, { status: 201 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/notifications", error, userId);
     const message = safeErrorMessage(error, "Notification operation failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }

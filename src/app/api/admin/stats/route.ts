@@ -35,13 +35,13 @@ export async function GET(request: NextRequest) {
   const planCounts: Record<string, number> = { free: 0, pro: 0, premium: 0 };
 
   for (const u of allUsers) {
-    const t = new Date(u.createdAt as string | number | Date).getTime();
+    const t = new Date(u.createdAt as string | number).getTime();
     if (t >= d7) last7++;
     if (t >= d30) last30++;
     if (u.emailVerified) verified++;
     if (u.mfaEnabled) mfaEnabled++;
-    const planKey = (u.plan as string | null | undefined) ?? "free";
-    planCounts[planKey] = (planCounts[planKey] || 0) + 1;
+    const plan = (u.plan as string) ?? "free";
+    planCounts[plan] = (planCounts[plan] || 0) + 1;
   }
 
   return NextResponse.json({
