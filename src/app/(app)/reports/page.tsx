@@ -533,6 +533,23 @@ export default function ReportsPage() {
 
         {/* ============ Income Statement ============ */}
         <TabsContent value="income">
+          {!trendsData && (
+            <div className="flex flex-col items-center justify-center py-20 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-muted/60 mb-4">
+                <BarChart3 className="h-8 w-8 text-muted-foreground" />
+              </div>
+              <h3 className="text-lg font-semibold mb-1">No transaction data yet</h3>
+              <p className="text-sm text-muted-foreground max-w-sm mb-4">
+                Import your bank statements to see income vs. expenses, spending breakdowns, and trends.
+              </p>
+              <a
+                href="/import"
+                className="inline-flex items-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+              >
+                Import transactions
+              </a>
+            </div>
+          )}
           {trendsData && (
             <div className="space-y-6">
               {/* Expense breakdown bar chart */}
