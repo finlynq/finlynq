@@ -276,6 +276,7 @@ export default function PortfolioPage() {
   const devMode = useDevMode();
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [devMode, setDevMode] = useState(false);
   const [filter, setFilter] = useState<FilterType>("all");
   const [benchmarks, setBenchmarks] = useState<BenchmarkData[]>([]);
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");

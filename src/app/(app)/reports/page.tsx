@@ -198,12 +198,23 @@ export default function ReportsPage() {
       .then(setBalanceSheet);
   }, [endDate]);
 
-  // Fetch YoY
+  // Fetch dev mode
   useEffect(() => {
+    fetch("/api/settings/dev-mode").then(r => r.ok ? r.json() : { devMode: false }).then(d => {
+      const dm = d.devMode ?? false;
+      setDevMode(dm);
+      if (!dm && (activeTab === "cashflow" || activeTab === "yoy")) setActiveTab("income");
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fetch YoY (dev mode only)
+  useEffect(() => {
+    if (!devMode) return;
     fetch(`/api/reports/yoy?year1=${yoyYear1}&year2=${yoyYear2}`)
       .then((r) => r.json())
       .then(setYoyData);
-  }, [yoyYear1, yoyYear2]);
+  }, [yoyYear1, yoyYear2, devMode]);
 
   // Sankey data
   const sankeyIncome = useMemo(() => {

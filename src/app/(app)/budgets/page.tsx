@@ -648,10 +648,10 @@ export default function BudgetsPage() {
                     key={b.id}
                     className="rounded-lg px-3 py-3 -mx-3 transition-colors hover:bg-muted/50"
                   >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{b.categoryName}</span>
-                        <span className={`text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full ${
+                    <div className="flex flex-wrap items-center justify-between gap-y-1 mb-1.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-sm font-medium truncate">{b.categoryName}</span>
+                        <span className={`shrink-0 text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full ${
                           over
                             ? "bg-rose-100 text-rose-700"
                             : rawPct >= 75
@@ -672,17 +672,12 @@ export default function BudgetsPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         {mode === "envelope" ? (
-                          <span className={`text-sm font-mono ${envelopeAvailable < 0 ? "text-rose-600" : ""}`}>
-                            {formatCurrency(envelopeAvailable, "CAD")} available
+                          <span className={`text-sm font-mono tabular-nums ${envelopeAvailable < 0 ? "text-rose-600" : ""}`}>
+                            {formatCurrency(envelopeAvailable, "CAD")} left
                           </span>
                         ) : (
-                          <span className={`text-sm font-mono ${over ? "text-rose-600" : ""}`}>
+                          <span className={`text-sm font-mono tabular-nums ${over ? "text-rose-600" : ""}`}>
                             {formatCurrency(spent, "CAD")} / {formatCurrency(effectiveBudget, "CAD")}
-                            {rollover > 0 && (
-                              <span className="text-xs text-muted-foreground ml-1">
-                                (was {formatCurrency(b.amount, "CAD")})
-                              </span>
-                            )}
                           </span>
                         )}
                         <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => handleDelete(b.id)}>
