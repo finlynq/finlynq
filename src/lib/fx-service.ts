@@ -1,6 +1,6 @@
 // Feature 5: Multi-Currency FX Engine
 
-import { db, schema } from "@/db";
+import { db, schema, DEFAULT_USER_ID } from "@/db";
 import { and, eq, desc, sql } from "drizzle-orm";
 
 export async function fetchFxRate(from: string, to: string): Promise<number | null> {
@@ -20,8 +20,9 @@ export async function fetchFxRate(from: string, to: string): Promise<number | nu
   }
 }
 
-export async function getLatestFxRate(from: string, to: string): Promise<number> {
+export async function getLatestFxRate(from: string, to: string, userId?: string): Promise<number> {
   if (from === to) return 1;
+  const uid = userId ?? DEFAULT_USER_ID;
 
   const cached = await db
     .select()
@@ -39,7 +40,7 @@ export async function getLatestFxRate(from: string, to: string): Promise<number>
   const rate = await fetchFxRate(from, to);
   if (rate !== null) {
     await db.insert(schema.fxRates)
-      .values({ date: today, fromCurrency: from, toCurrency: to, rate })
+      .values({ date: today, fromCurrency: from, toCurrency: to, rate, userId: uid })
       .run();
     return rate;
   }
@@ -64,14 +65,15 @@ export function convertCurrency(amount: number, rate: number): number {
 
 export async function getConsolidatedBalances(
   balances: { currency: string; balance: number }[],
-  targetCurrency: string
+  targetCurrency: string,
+  userId?: string
 ): Promise<{ original: number; converted: number; currency: string; rate: number }[]> {
   const rateCache = new Map<string, number>();
   const results = [];
   for (const b of balances) {
     const key = `${b.currency}:${targetCurrency}`;
     if (!rateCache.has(key)) {
-      rateCache.set(key, await getLatestFxRate(b.currency, targetCurrency));
+      rateCache.set(key, await getLatestFxRate(b.currency, targetCurrency, userId));
     }
     const rate = rateCache.get(key)!;
     results.push({
@@ -123,14 +125,15 @@ export async function getActiveCurrencyPairs(displayCurrency: string): Promise<A
  * Refresh FX rates for all active currency pairs. Returns a rate map for immediate use.
  */
 export async function refreshAllRates(
-  displayCurrency: string
+  displayCurrency: string,
+  userId?: string
 ): Promise<Map<string, number>> {
   const pairs = await getActiveCurrencyPairs(displayCurrency);
   const rateMap = new Map<string, number>();
   rateMap.set(displayCurrency, 1);
 
   for (const { from, to } of pairs) {
-    const rate = await getLatestFxRate(from, to);
+    const rate = await getLatestFxRate(from, to, userId);
     rateMap.set(from, rate);
   }
   return rateMap;
@@ -140,8 +143,8 @@ export async function refreshAllRates(
  * Build a rate map for converting any active currency to the target.
  * Uses cached rates where available (no network calls for fresh data).
  */
-export async function getRateMap(targetCurrency: string): Promise<Map<string, number>> {
-  return refreshAllRates(targetCurrency);
+export async function getRateMap(targetCurrency: string, userId?: string): Promise<Map<string, number>> {
+  return refreshAllRates(targetCurrency, userId);
 }
 
 /**

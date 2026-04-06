@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -55,6 +55,7 @@ export default function ImportPage() {
   const [results, setResults] = useState<Record<string, ImportResult>>({});
   const [statuses, setStatuses] = useState<Record<string, ImportStatus>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   // File upload state
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -509,21 +510,23 @@ export default function ImportPage() {
                     </div>
                   </CardHeader>
                   <CardContent>
-                    <div className="flex items-center gap-4">
-                      <label className="flex-1">
+                    <div className="flex items-center gap-4 flex-1">
                         <input
                           type="file"
                           accept=".csv"
                           className="hidden"
+                          ref={(el) => { fileInputRefs.current[step.type] = el; }}
                           onChange={(e) => {
                             const file = e.target.files?.[0];
                             if (file) handleStructuredImport(step.type, file);
+                            e.target.value = "";
                           }}
                         />
                         <Button
                           variant={statuses[step.type] === "success" ? "outline" : "default"}
                           className="w-full cursor-pointer"
                           disabled={statuses[step.type] === "loading"}
+                          onClick={() => fileInputRefs.current[step.type]?.click()}
                         >
                           <Upload className="h-4 w-4 mr-2" />
                           {statuses[step.type] === "loading"
@@ -532,7 +535,6 @@ export default function ImportPage() {
                               ? "Re-upload"
                               : `Upload ${step.file}`}
                         </Button>
-                      </label>
                     </div>
                     {results[step.type] && (
                       <p className="text-xs text-muted-foreground mt-2">

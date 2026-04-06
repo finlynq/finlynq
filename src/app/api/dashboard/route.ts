@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
       params.get("endDate") ??
       `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-31`;
 
-    const rateMap = await getRateMap(displayCurrency);
+    const rateMap = await getRateMap(displayCurrency, userId);
 
     const balances = await getAccountBalances(userId);
     const convertedBalances = balances.map((b) => ({

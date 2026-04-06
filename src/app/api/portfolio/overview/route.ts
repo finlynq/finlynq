@@ -75,7 +75,7 @@ export async function GET(request: NextRequest) {
   const currencies = [...new Set(holdings.map(h => h.currency))];
   const fxRates = new Map<string, number>();
   for (const cur of currencies) {
-    fxRates.set(cur, await getLatestFxRate(cur, "CAD"));
+    fxRates.set(cur, await getLatestFxRate(cur, "CAD", userId));
   }
 
   // 6. Get transaction-based quantities for each holding
