@@ -252,6 +252,22 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
   createdAt: text("created_at").notNull(),
 });
 
+// Import Templates — saved CSV column mappings for recurring imports
+export const importTemplates = pgTable("import_templates", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  name: text("name").notNull(),
+  accountId: integer("account_id").references(() => accounts.id),
+  fileType: text("file_type").notNull().default("csv"),
+  columnMapping: text("column_mapping").notNull(), // JSON: { date, amount, payee, category, note, tags, currency, debit, credit }
+  hasHeaders: integer("has_headers").notNull().default(1),
+  dateFormat: text("date_format").notNull().default("YYYY-MM-DD"),
+  amountFormat: text("amount_format").notNull().default("standard"), // 'standard' | 'negate' | 'debit_credit'
+  isDefault: integer("is_default").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const contributionRoom = pgTable("contribution_room", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),

@@ -7,6 +7,7 @@ import { readConfig, resolveDbPath } from "../shared/config.js";
 import { checkLock, isReadOnly } from "../src/db/sync.js";
 import { registerCoreTools } from "./register-core-tools.js";
 import { registerV2Tools } from "./tools-v2.js";
+import { registerImportTemplateTools } from "./tools-import-templates.js";
 
 const passphrase = process.env.PF_PASSPHRASE;
 if (!passphrase) {
@@ -57,11 +58,12 @@ const server = new McpServer({
 
 registerCoreTools(server, sqlite);
 registerV2Tools(server, sqlite);
+registerImportTemplateTools(server, sqlite);
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("PF MCP server v2.3 running on stdio — 27 tools (21 read, 6 write)");
+  console.error("PF MCP server v2.3 running on stdio — 29 tools (23 read, 6 write)");
 }
 
 main().catch(console.error);
