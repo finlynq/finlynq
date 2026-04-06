@@ -1,4 +1,67 @@
 import Link from "next/link";
+import {
+  ArrowRight,
+  Plug,
+  Shield,
+  BarChart3,
+  Zap,
+  Bot,
+  Upload,
+  PiggyBank,
+  HardDrive,
+} from "lucide-react";
+
+const FEATURES = [
+  {
+    icon: Bot,
+    title: "AI-native from day one",
+    desc: "Connect Claude, Cursor, or any MCP client. Ask questions in plain English — no dashboards needed.",
+    color: "text-violet-400",
+    bg: "bg-violet-400/10",
+  },
+  {
+    icon: BarChart3,
+    title: "Full financial picture",
+    desc: "Accounts, budgets, portfolio, goals, and loans — all in one place. CSV and OFX import with saved templates.",
+    color: "text-cyan-400",
+    bg: "bg-cyan-400/10",
+  },
+  {
+    icon: Upload,
+    title: "Import once, done",
+    desc: "Save column mappings as templates. Drop a file and the app auto-matches your bank format.",
+    color: "text-amber-400",
+    bg: "bg-amber-400/10",
+  },
+  {
+    icon: PiggyBank,
+    title: "Envelope budgeting",
+    desc: "Month-by-month envelope budgets with rollover support. Know exactly what you have left to spend.",
+    color: "text-emerald-400",
+    bg: "bg-emerald-400/10",
+  },
+  {
+    icon: Zap,
+    title: "27 MCP tools",
+    desc: "Read balances, search transactions, forecast cash flow, set budgets, and more — all via your AI.",
+    color: "text-yellow-400",
+    bg: "bg-yellow-400/10",
+  },
+  {
+    icon: Shield,
+    title: "Privacy first",
+    desc: "Self-hosted option: your data never leaves your machine. AES-256 encryption with SQLCipher.",
+    color: "text-rose-400",
+    bg: "bg-rose-400/10",
+  },
+];
+
+const EXAMPLE_PROMPTS = [
+  "How much did I spend on groceries last month?",
+  "Am I on track with my budgets this month?",
+  "What is my current net worth?",
+  "Show me any unusual transactions recently",
+];
 
 const features = [
   {
@@ -73,6 +136,7 @@ export default function LandingPage() {
             Self-host for free →
           </Link>
         </div>
+      </header>
 
         {/* Demo video placeholder */}
         <div className="mt-16 mx-auto max-w-3xl rounded-2xl border border-border/50 bg-card/50 overflow-hidden shadow-2xl shadow-black/20">
