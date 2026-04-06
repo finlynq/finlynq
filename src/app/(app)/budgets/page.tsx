@@ -606,14 +606,21 @@ export default function BudgetsPage() {
       {/* Budget items */}
       {budgets.length === 0 ? (
         <Card>
-          <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted mb-4">
-              <LayoutGrid className="h-7 w-7 text-muted-foreground" />
+          <CardContent className="flex flex-col items-center justify-center py-14 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-100 dark:bg-indigo-950/60 mb-4">
+              <LayoutGrid className="h-7 w-7 text-indigo-600 dark:text-indigo-400" />
             </div>
-            <p className="text-base font-medium mb-1">No budgets for {getMonthLabel(month)}</p>
-            <p className="text-sm text-muted-foreground max-w-xs">
-              Click &ldquo;Add Budget&rdquo; above to set a spending limit for a category and start tracking your progress.
+            <p className="text-base font-semibold mb-1">No budgets for {getMonthLabel(month)}</p>
+            <p className="text-sm text-muted-foreground max-w-xs mb-5">
+              Set spending limits for your categories and track how you&apos;re doing throughout the month.
             </p>
+            <button
+              onClick={() => setDialogOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+            >
+              <Plus className="h-4 w-4" />
+              Add your first budget
+            </button>
           </CardContent>
         </Card>
       ) : (

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from "react";
+import { useDevMode } from "@/hooks/use-dev-mode";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -167,6 +168,8 @@ export default function ReportsPage() {
   // Expand/collapse groups
   const [expandedIncomeGroups, setExpandedIncomeGroups] = useState<Set<string>>(new Set());
   const [expandedExpenseGroups, setExpandedExpenseGroups] = useState<Set<string>>(new Set());
+
+  const devMode = useDevMode();
 
   // Active tab
   const [activeTab, setActiveTab] = useState("income");

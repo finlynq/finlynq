@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
@@ -74,6 +74,7 @@ export default function TransactionsPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [searchInput, setSearchInput] = useState(""); // local (unthrottled) state
   const [filters, setFilters] = useState({
     startDate: "",
     endDate: "",
@@ -81,6 +82,25 @@ export default function TransactionsPage() {
     categoryId: "",
     search: "",
   });
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const hasActiveFilters =
+    filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search;
+
+  function clearFilters() {
+    setSearchInput("");
+    setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "" });
+    setPage(0);
+  }
+
+  function handleSearchChange(value: string) {
+    setSearchInput(value);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      setFilters((f) => ({ ...f, search: value }));
+      setPage(0);
+    }, 350);
+  }
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
