@@ -4,7 +4,6 @@ import {
   csvToRawTransactionsWithMapping,
   extractCSVHeaders,
 } from "@/lib/csv-parser";
-import { parsePdfToTransactions } from "@/lib/pdf-parser";
 import { parseExcelSheets } from "@/lib/excel-parser";
 import { parseOfx } from "@/lib/ofx-parser";
 import { previewImport } from "@/lib/import-pipeline";
@@ -114,6 +113,7 @@ export async function POST(request: NextRequest) {
 
     if (ext === "pdf") {
       const buffer = Buffer.from(await file.arrayBuffer());
+      const { parsePdfToTransactions } = await import("@/lib/pdf-parser");
       const result = await parsePdfToTransactions(buffer);
       if (result.errors.length > 0 && result.rows.length === 0) {
         return NextResponse.json({ error: result.errors.join(". ") }, { status: 400 });
