@@ -96,7 +96,8 @@ export async function POST(request: NextRequest) {
 
     const result = executeImport(allRows, [], userId);
 
-    db.insert(schema.notifications)
+    // Create notification scoped to user
+    await db.insert(schema.notifications)
       .values({
         type: "import",
         title: "Email Import Complete",

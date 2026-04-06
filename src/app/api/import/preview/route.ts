@@ -8,7 +8,7 @@ import { parseExcelSheets } from "@/lib/excel-parser";
 import { parseOfx } from "@/lib/ofx-parser";
 import { previewImport } from "@/lib/import-pipeline";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { safeErrorMessage } from "@/lib/validate";
+import { safeErrorMessage, logApiError } from "@/lib/validate";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { deserializeTemplate, findBestTemplate } from "@/lib/import-templates";
@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
         parseErrors = result.errors;
       }
 
-      const preview = previewImport(rows);
+      const preview = await previewImport(rows);
       if (parseErrors.length > 0) {
         preview.errors.push(...parseErrors.map((e) => ({ rowIndex: e.row - 2, message: e.message })));
       }
@@ -118,7 +118,7 @@ export async function POST(request: NextRequest) {
       if (result.errors.length > 0 && result.rows.length === 0) {
         return NextResponse.json({ error: result.errors.join(". ") }, { status: 400 });
       }
-      const preview = previewImport(result.rows);
+      const preview = await previewImport(result.rows);
       return NextResponse.json({
         type: "pdf",
         confidence: result.confidence,
@@ -136,6 +136,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ error: "Unsupported file type. Use CSV, Excel, PDF, OFX, or QFX." }, { status: 400 });
   } catch (error: unknown) {
+    await logApiError("POST", "/api/import/preview", error, auth.context.userId);
     const message = safeErrorMessage(error, "Preview failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
