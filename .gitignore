@@ -48,3 +48,7 @@ next-env.d.ts
 
 # app config (contains encryption salt)
 pf-config.json
+
+# Claude Code worktrees and logs
+.claude/
+pf-server.log
