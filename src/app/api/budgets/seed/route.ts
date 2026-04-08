@@ -22,9 +22,9 @@ export async function POST(request: NextRequest) {
   if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
 
-  const body = await validateBody(request, schema);
-  if (body instanceof NextResponse) return body;
-  const { categoryName, amount, month } = body;
+  const parsed = validateBody(await request.json(), schema);
+  if (parsed.error) return parsed.error;
+  const { categoryName, amount, month } = parsed.data;
 
   try {
     // Find existing category by name or create it
