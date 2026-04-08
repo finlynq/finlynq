@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: msg }, { status: 400 });
     }
 
-    const preview = previewImport(processedRows);
+    const preview = await previewImport(processedRows);
     if (parseErrors.length > 0) {
       preview.errors.push(...parseErrors.map((e) => ({ rowIndex: e.row - 2, message: e.message })));
     }

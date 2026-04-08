@@ -24,7 +24,7 @@ export async function POST(request: NextRequest) {
     if (ext === "csv") {
       const text = await file.text();
       const { rows, errors: parseErrors } = csvToRawTransactions(text);
-      const preview = previewImport(rows);
+      const preview = await previewImport(rows);
       if (parseErrors.length > 0) {
         preview.errors.push(...parseErrors.map((e) => ({ rowIndex: e.row - 2, message: e.message })));
       }
@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
       if (result.errors.length > 0 && result.rows.length === 0) {
         return NextResponse.json({ error: result.errors.join(". ") }, { status: 400 });
       }
-      const preview = previewImport(result.rows);
+      const preview = await previewImport(result.rows);
       return NextResponse.json({
         type: "pdf",
         confidence: result.confidence,
