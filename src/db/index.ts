@@ -84,9 +84,9 @@ export const db = new Proxy({} as DrizzleSqliteDb, {
  * Schema export — returns the correct schema for the active dialect.
  * PG schema when PostgreSQL adapter is active, SQLite schema otherwise.
  */
-// The proxy switches between SQLite and PG schemas at runtime.
-// Typed as sqliteSchema for TypeScript compatibility; PG operations work at runtime.
-export const schema = new Proxy(sqliteSchema as typeof sqliteSchema & typeof pgSchema, {
+// Proxy switches between SQLite and PG schemas at runtime.
+// Typed as sqliteSchema for TypeScript inference; PG schema used at runtime only.
+export const schema = new Proxy(sqliteSchema, {
   get(_target, prop, receiver) {
     const dialect = g.__pfDialect ?? "sqlite";
     const activeSchema = dialect === "postgres" ? pgSchema : sqliteSchema;
