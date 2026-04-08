@@ -85,12 +85,15 @@ export const db = new Proxy({} as DrizzleSqliteDb, {
  * PG schema when PostgreSQL adapter is active, SQLite schema otherwise.
  */
 // Proxy switches between SQLite and PG schemas at runtime.
+// Target is {} to avoid ES module non-configurable property invariant violations.
 // Typed as sqliteSchema for TypeScript inference; PG schema used at runtime only.
-export const schema = new Proxy(sqliteSchema, {
-  get(_target, prop, receiver) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const schema = new Proxy({} as typeof sqliteSchema, {
+  get(_target, prop) {
     const dialect = g.__pfDialect ?? "sqlite";
     const activeSchema = dialect === "postgres" ? pgSchema : sqliteSchema;
-    return Reflect.get(activeSchema, prop, receiver);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (activeSchema as any)[prop as string];
   },
 });
 export type { DatabaseAdapter, DbDialect, DrizzleDb };
