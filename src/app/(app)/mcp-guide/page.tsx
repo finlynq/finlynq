@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot } from "lucide-react";
+import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff } from "lucide-react";
 
 type ClientTab = "claude-desktop" | "cursor" | "cline" | "chatgpt" | "custom";
 type StatusState = "checking" | "connected" | "disconnected";
@@ -63,6 +63,8 @@ export default function McpGuidePage() {
   const [status, setStatus] = useState<StatusState>("checking");
   const [serverUrl, setServerUrl] = useState("http://localhost:3000");
   const [apiKey, setApiKey] = useState<string | null>(null);
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [apiKeyCopied, setApiKeyCopied] = useState(false);
 
   useEffect(() => {
     setServerUrl(window.location.origin);
@@ -170,6 +172,46 @@ export default function McpGuidePage() {
             {status === "disconnected" && "MCP server not reachable — is the app running?"}
           </div>
         </div>
+
+        {/* API Key */}
+        <section className="mb-8">
+          <h2 className="mb-3 text-lg font-semibold text-foreground">Your API Key</h2>
+          <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <Key className="h-4 w-4 text-indigo-400 shrink-0" />
+              <span className="text-sm text-muted-foreground">
+                Use this key in the config snippets below to authenticate with the MCP server.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 font-mono text-sm bg-background/60 border border-border rounded-lg px-3 py-2 text-foreground truncate">
+                {apiKey
+                  ? (apiKeyVisible ? apiKey : `${apiKey.slice(0, 6)}${"•".repeat(20)}${apiKey.slice(-4)}`)
+                  : "Loading…"}
+              </code>
+              <button
+                onClick={() => setApiKeyVisible(!apiKeyVisible)}
+                className="p-2 rounded-lg border border-border bg-background/60 text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+                title={apiKeyVisible ? "Hide key" : "Show key"}
+              >
+                {apiKeyVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+              <button
+                onClick={() => {
+                  if (!apiKey) return;
+                  navigator.clipboard.writeText(apiKey);
+                  setApiKeyCopied(true);
+                  setTimeout(() => setApiKeyCopied(false), 2000);
+                }}
+                className="p-2 rounded-lg border border-border bg-background/60 text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+                title="Copy key"
+                disabled={!apiKey}
+              >
+                {apiKeyCopied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+        </section>
 
         {/* Setup Instructions */}
         <section className="mb-10">

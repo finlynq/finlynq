@@ -48,20 +48,53 @@ export async function getOrCreateApiKey(userId: string = DEFAULT_USER_ID): Promi
 }
 
 /**
+ * Regenerate (replace) the API key for the given user.
+ */
+export async function regenerateApiKey(userId: string = DEFAULT_USER_ID): Promise<string> {
+  const key = `pf_${crypto.randomBytes(24).toString("hex")}`;
+
+  if (getDialect() === "postgres") {
+    const { sql } = await import("drizzle-orm");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (db as any).execute(sql`
+      INSERT INTO settings (key, user_id, value)
+      VALUES (${API_KEY_SETTING}, ${userId}, ${key})
+      ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
+    `);
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any)
+      .delete(schema.settings)
+      .where(and(eq(schema.settings.key, API_KEY_SETTING), eq(schema.settings.userId, userId)))
+      .run();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any)
+      .insert(schema.settings)
+      .values({ key: API_KEY_SETTING, userId, value: key })
+      .run();
+  }
+
+  return key;
+}
+
+/**
  * Validate an API key from the request.
  *
  * Accepts:
  *   Authorization: Bearer pf_<key>
  *   X-API-Key: pf_<key>
+ *   ?token=pf_<key>  (URL query parameter — for clients that only accept a URL)
  *
  * Returns { userId } on success, or an error string on failure.
  */
 export async function validateApiKey(request: NextRequest): Promise<{ userId: string } | string> {
-  // Extract the key from X-API-Key header or Authorization: Bearer pf_...
   const xApiKey = request.headers.get("X-API-Key");
   const authHeader = request.headers.get("authorization") ?? "";
   const bearerKey = authHeader.startsWith("Bearer pf_") ? authHeader.slice(7) : null;
-  const headerKey = xApiKey ?? bearerKey;
+  // URL token: ?token=pf_xxx (for Claude.ai / connectors that only accept a plain URL)
+  let urlToken: string | null = null;
+  try { urlToken = request.nextUrl.searchParams.get("token"); } catch { /* ignore */ }
+  const headerKey = xApiKey ?? bearerKey ?? (urlToken?.startsWith("pf_") ? urlToken : null);
 
   if (!headerKey) {
     return "Missing X-API-Key or Authorization: Bearer <key> header";

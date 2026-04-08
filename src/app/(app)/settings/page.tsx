@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, Database, Server, Shield, Wallet, Tag, ArrowLeftRight, Briefcase, Trash2, Pencil, Plus, AlertTriangle, Settings2, Check, X, Zap, ToggleLeft, ToggleRight, Play, Lock, Eye, EyeOff, FolderOpen, HardDrive, Cloud, RefreshCw, BarChart3, CreditCard, Upload, FileText } from "lucide-react";
+import { Download, Database, Server, Shield, Wallet, Tag, ArrowLeftRight, Briefcase, Trash2, Pencil, Plus, AlertTriangle, Settings2, Check, X, Zap, ToggleLeft, ToggleRight, Play, Lock, Eye, EyeOff, FolderOpen, HardDrive, Cloud, RefreshCw, BarChart3, CreditCard, Upload, FileText, Key } from "lucide-react";
 
 type Category = { id: number; type: string; group: string; name: string; note: string };
 
@@ -87,6 +87,13 @@ export default function SettingsPage() {
   const [devModeLoading, setDevModeLoading] = useState(false);
   const [devModeStatus, setDevModeStatus] = useState("");
 
+  // API Key
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [apiKeyCopied, setApiKeyCopied] = useState(false);
+  const [apiKeyRegenerating, setApiKeyRegenerating] = useState(false);
+  const [apiKeyStatus, setApiKeyStatus] = useState("");
+
   // Billing
   const [billingStatus, setBillingStatus] = useState<{ plan: string; planExpiresAt: string | null; stripeCustomerId: string | null } | null>(null);
   const [billingLoading, setBillingLoading] = useState(false);
@@ -113,6 +120,40 @@ export default function SettingsPage() {
       .then((data) => { if (typeof data.devMode === "boolean") setDevMode(data.devMode); })
       .catch(() => {});
   }, []);
+
+  // Load API key
+  useEffect(() => {
+    fetch("/api/settings/api-key")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data?.apiKey) setApiKey(data.apiKey); })
+      .catch(() => {});
+  }, []);
+
+  async function handleRegenerateApiKey() {
+    setApiKeyRegenerating(true);
+    setApiKeyStatus("");
+    try {
+      const res = await fetch("/api/settings/api-key", { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setApiKey(data.apiKey);
+        setApiKeyVisible(true);
+        setApiKeyStatus("New key generated");
+      } else {
+        setApiKeyStatus(data.error || "Failed to regenerate");
+      }
+    } catch {
+      setApiKeyStatus("Failed to regenerate key");
+    }
+    setApiKeyRegenerating(false);
+  }
+
+  function handleCopyApiKey() {
+    if (!apiKey) return;
+    navigator.clipboard.writeText(apiKey);
+    setApiKeyCopied(true);
+    setTimeout(() => setApiKeyCopied(false), 2000);
+  }
 
   // Load billing status (managed mode only — silently fails in self-hosted)
   useEffect(() => {
@@ -835,6 +876,66 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* API Key */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 text-violet-600">
+              <Key className="h-5 w-5" />
+            </div>
+            <div>
+              <CardTitle className="text-base">API Key</CardTitle>
+              <CardDescription>Use this key to connect AI assistants via MCP</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Input
+              readOnly
+              value={apiKey
+                ? (apiKeyVisible ? apiKey : `${apiKey.slice(0, 6)}${"•".repeat(20)}${apiKey.slice(-4)}`)
+                : "Loading…"}
+              className="font-mono text-sm flex-1"
+            />
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => setApiKeyVisible(!apiKeyVisible)}
+              title={apiKeyVisible ? "Hide key" : "Show key"}
+            >
+              {apiKeyVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={handleCopyApiKey}
+              title="Copy key"
+              disabled={!apiKey}
+            >
+              {apiKeyCopied ? <Check className="h-4 w-4 text-emerald-500" /> : <FileText className="h-4 w-4" />}
+            </Button>
+          </div>
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRegenerateApiKey}
+              disabled={apiKeyRegenerating}
+            >
+              <RefreshCw className={`h-4 w-4 mr-1.5 ${apiKeyRegenerating ? "animate-spin" : ""}`} />
+              {apiKeyRegenerating ? "Regenerating…" : "Regenerate Key"}
+            </Button>
+            {apiKeyStatus && (
+              <p className="text-xs text-muted-foreground">{apiKeyStatus}</p>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Regenerating invalidates your current key — update any connected MCP clients.
+          </p>
+        </CardContent>
+      </Card>
 
       {/* Display Preferences */}
       <Card>

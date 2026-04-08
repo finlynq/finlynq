@@ -40,9 +40,15 @@ export async function requireAuth(request: NextRequest): Promise<AuthResult> {
 
 /** Select the appropriate strategy based on request headers and dialect */
 function selectStrategy(request: NextRequest): AuthStrategy {
-  // API key: explicit X-API-Key header, or Bearer token that looks like an API key (pf_...)
+  // API key: explicit X-API-Key header, Bearer pf_ token, or ?token=pf_ query param
   const auth = request.headers.get("authorization") ?? "";
-  if (request.headers.get("X-API-Key") || auth.startsWith("Bearer pf_")) {
+  let urlToken: string | null = null;
+  try { urlToken = request.nextUrl.searchParams.get("token"); } catch { /* ignore */ }
+  if (
+    request.headers.get("X-API-Key") ||
+    auth.startsWith("Bearer pf_") ||
+    (urlToken?.startsWith("pf_") ?? false)
+  ) {
     return apiKeyStrategy;
   }
 
