@@ -30,15 +30,13 @@ export async function GET(request: NextRequest) {
   const fmt = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 
-  const incomeExpenses = getIncomeVsExpenses(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`);
-  const balances = getAccountBalances(userId);
-  const netWorthData = getNetWorthOverTime(userId);
-  const budgetsData = getBudgets(userId, currentMonth);
-  const spending = getSpendingByCategory(
-    userId,
-    `${currentMonth}-01`,
-    `${currentMonth}-31`
-  );
+  const [incomeExpenses, balances, netWorthData, budgetsData, spending] = await Promise.all([
+    getIncomeVsExpenses(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`),
+    getAccountBalances(userId),
+    getNetWorthOverTime(userId),
+    getBudgets(userId, currentMonth),
+    getSpendingByCategory(userId, `${currentMonth}-01`, `${currentMonth}-31`),
+  ]);
 
   // --- 1. Savings Rate (30%) ---
   const recentMonths = new Set<string>();
