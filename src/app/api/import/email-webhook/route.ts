@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
         const bestMatch = findBestTemplate(headers, templates);
 
         if (bestMatch) {
-          const result = csvToRawTransactionsWithMapping(text, bestMatch.template.columnMapping as Record<string, string>);
+          const result = csvToRawTransactionsWithMapping(text, bestMatch.template.columnMapping as unknown as Record<string, string>);
           rows = result.rows;
           // Apply template's default account to rows without one
           if (bestMatch.template.defaultAccount) {
