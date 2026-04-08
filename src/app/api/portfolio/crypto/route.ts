@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
     const cryptoHoldings = allHoldings.filter((h) => {
       if (h.isCrypto === 1) return true;
       if (!h.symbol) return false;
-      const base = h.symbol.toUpperCase().split("-")[0];
+      const base = String(h.symbol).toUpperCase().split("-")[0];
       return CRYPTO_SYMBOLS.has(base);
     });
 
@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
     const symbolToId = new Map<string, string>();
     for (const h of cryptoHoldings) {
       if (!h.symbol) continue;
-      const base = h.symbol.toUpperCase().split("-")[0];
+      const base = String(h.symbol).toUpperCase().split("-")[0];
       const cgId = symbolToCoinGeckoId(base);
       if (cgId && !symbolToId.has(base)) {
         symbolToId.set(base, cgId);
@@ -60,7 +60,7 @@ export async function GET(request: NextRequest) {
 
     // Enrich holdings with price data
     const enriched = cryptoHoldings.map((h) => {
-      const base = h.symbol?.toUpperCase().split("-")[0] ?? "";
+      const base = h.symbol ? String(h.symbol).toUpperCase().split("-")[0] : "";
       const priceData = priceMap.get(base);
       return {
         ...h,

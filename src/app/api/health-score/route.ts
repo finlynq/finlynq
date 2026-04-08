@@ -100,9 +100,9 @@ export async function GET(request: NextRequest) {
     .filter(
       (b) =>
         b.accountType === "A" &&
-        !b.accountGroup.toLowerCase().includes("investment") &&
-        !b.accountGroup.toLowerCase().includes("portfolio") &&
-        !b.accountGroup.toLowerCase().includes("retirement")
+        !String(b.accountGroup).toLowerCase().includes("investment") &&
+        !String(b.accountGroup).toLowerCase().includes("portfolio") &&
+        !String(b.accountGroup).toLowerCase().includes("retirement")
     )
     .reduce((s, b) => s + b.balance, 0);
 

@@ -148,23 +148,26 @@ export async function completeOnboarding(userId: string) {
 
 export async function listUsers(options: { limit?: number; offset?: number } = {}) {
   const { limit = 50, offset = 0 } = options;
-  return db
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const s = getSchema() as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (db as any)
     .select({
-      id: getSchema().users.id,
-      email: getSchema().users.email,
-      displayName: getSchema().users.displayName,
-      role: getSchema().users.role,
-      emailVerified: getSchema().users.emailVerified,
-      mfaEnabled: getSchema().users.mfaEnabled,
-      onboardingComplete: getSchema().users.onboardingComplete,
-      plan: getSchema().users.plan,
-      planExpiresAt: getSchema().users.planExpiresAt,
-      createdAt: getSchema().users.createdAt,
-      updatedAt: getSchema().users.updatedAt,
+      id: s.users.id,
+      email: s.users.email,
+      displayName: s.users.displayName,
+      role: s.users.role,
+      emailVerified: s.users.emailVerified,
+      mfaEnabled: s.users.mfaEnabled,
+      onboardingComplete: s.users.onboardingComplete,
+      plan: s.users.plan,
+      planExpiresAt: s.users.planExpiresAt,
+      createdAt: s.users.createdAt,
+      updatedAt: s.users.updatedAt,
     })
-    .from(getSchema().users)
+    .from(s.users)
     .limit(limit)
-    .offset(offset);
+    .offset(offset) as Promise<{ id: string; email: string; displayName: string | null; role: string; emailVerified: number | boolean; mfaEnabled: number | boolean; onboardingComplete: number | boolean; plan: string; planExpiresAt: string | null; createdAt: string; updatedAt: string }[]>;
 }
 
 export async function getUserCount() {

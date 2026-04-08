@@ -63,9 +63,9 @@ function findCategoryName(msg: string): string | null {
   const cats = db.select({ name: schema.categories.name }).from(schema.categories).all();
   const lower = msg.toLowerCase();
   // Match longest category name first to avoid partial matches
-  const sorted = cats.sort((a, b) => b.name.length - a.name.length);
+  const sorted = cats.sort((a, b) => String(b.name).length - String(a.name).length);
   for (const c of sorted) {
-    if (lower.includes(c.name.toLowerCase())) return c.name;
+    if (lower.includes(String(c.name).toLowerCase())) return String(c.name);
   }
   return null;
 }
@@ -73,9 +73,9 @@ function findCategoryName(msg: string): string | null {
 function findAccountName(msg: string): string | null {
   const accs = db.select({ name: schema.accounts.name }).from(schema.accounts).all();
   const lower = msg.toLowerCase();
-  const sorted = accs.sort((a, b) => b.name.length - a.name.length);
+  const sorted = accs.sort((a, b) => String(b.name).length - String(a.name).length);
   for (const a of sorted) {
-    if (lower.includes(a.name.toLowerCase())) return a.name;
+    if (lower.includes(String(a.name).toLowerCase())) return String(a.name);
   }
   return null;
 }

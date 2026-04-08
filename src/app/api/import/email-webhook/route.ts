@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
+
 import { db, schema } from "@/db";
 import { eq, and } from "drizzle-orm";
 import { csvToRawTransactions } from "@/lib/csv-parser";

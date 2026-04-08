@@ -1,5 +1,5 @@
 /**
- * API Key Auth Strategy — validates X-API-Key header.
+ * API Key Auth Strategy — validates X-API-Key or Authorization: Bearer pf_<key>.
  *
  * Works in both self-hosted and managed editions.
  * In self-hosted mode, requires the DB to be unlocked first.
@@ -7,7 +7,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { isUnlocked, DEFAULT_USER_ID } from "@/db";
+import { isUnlocked } from "@/db";
 import { getDialect } from "@/db";
 import { validateApiKey } from "@/lib/api-auth";
 import type { AuthStrategy, AuthResult } from "../strategy";
@@ -15,19 +15,7 @@ import type { AuthStrategy, AuthResult } from "../strategy";
 export class ApiKeyStrategy implements AuthStrategy {
   readonly method = "api_key" as const;
 
-  authenticate(request: NextRequest): AuthResult {
-    const headerKey = request.headers.get("X-API-Key");
-
-    if (!headerKey) {
-      return {
-        authenticated: false,
-        response: NextResponse.json(
-          { error: "Missing X-API-Key header" },
-          { status: 401 }
-        ),
-      };
-    }
-
+  async authenticate(request: NextRequest): Promise<AuthResult> {
     // In self-hosted mode, DB must be unlocked to validate the key
     if (getDialect() === "sqlite" && !isUnlocked()) {
       return {
@@ -39,18 +27,18 @@ export class ApiKeyStrategy implements AuthStrategy {
       };
     }
 
-    const error = validateApiKey(request);
-    if (error) {
+    const result = await validateApiKey(request);
+    if (typeof result === "string") {
       return {
         authenticated: false,
-        response: NextResponse.json({ error }, { status: 401 }),
+        response: NextResponse.json({ error: result }, { status: 401 }),
       };
     }
 
     return {
       authenticated: true,
       context: {
-        userId: DEFAULT_USER_ID, // TODO: scope to user in managed mode
+        userId: result.userId,
         method: "api_key",
         mfaVerified: false,
       },

@@ -35,11 +35,10 @@ export async function GET() {
         checks.db = "error";
       } else {
         // Run a trivial query to confirm the pool is live
-        const pgAdapter = adapter as import("@/db").DatabaseAdapter & {
-          getDb: () => import("drizzle-orm/node-postgres").NodePgDatabase;
-        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const pgDb = (adapter as any).getDb() as any;
         const { sql } = await import("drizzle-orm");
-        await pgAdapter.getDb().execute(sql`SELECT 1`);
+        await pgDb.execute(sql`SELECT 1`);
       }
     } else {
       // SQLite: just check if the connection is open

@@ -35,9 +35,11 @@ export async function POST(request: NextRequest) {
 
     if (body.action === "mark-read") {
       if (body.id) {
-        db.update(schema.notifications).set({ read: 1 }).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        db.update(schema.notifications).set({ read: 1 } as any).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
       } else {
-        db.update(schema.notifications).set({ read: 1 }).where(eq(schema.notifications.userId, userId)).run();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        db.update(schema.notifications).set({ read: 1 } as any).where(eq(schema.notifications.userId, userId)).run();
       }
       return NextResponse.json({ success: true });
     }
@@ -73,7 +75,7 @@ export async function POST(request: NextRequest) {
               userId,
               type: "budget_exceeded",
               title: `Budget Exceeded: ${b.categoryName}`,
-              message: `You've spent $${b.spent.toFixed(2)} of your $${b.budgetAmount.toFixed(2)} ${b.categoryName} budget (${Math.round(pct)}%)`,
+              message: `You've spent $${Number(b.spent).toFixed(2)} of your $${Number(b.budgetAmount).toFixed(2)} ${b.categoryName} budget (${Math.round(pct)}%)`,
               read: 0,
               createdAt: new Date().toISOString(),
             });
@@ -82,7 +84,7 @@ export async function POST(request: NextRequest) {
               userId,
               type: "budget_warning",
               title: `Budget Warning: ${b.categoryName}`,
-              message: `You've used ${Math.round(pct)}% of your ${b.categoryName} budget ($${b.spent.toFixed(2)} / $${b.budgetAmount.toFixed(2)})`,
+              message: `You've used ${Math.round(pct)}% of your ${b.categoryName} budget ($${Number(b.spent).toFixed(2)} / $${Number(b.budgetAmount).toFixed(2)})`,
               read: 0,
               createdAt: new Date().toISOString(),
             });

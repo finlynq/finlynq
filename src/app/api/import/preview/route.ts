@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
 import { csvToRawTransactions } from "@/lib/csv-parser";
 import { parsePdfToTransactions } from "@/lib/pdf-parser";
 import { parseExcelSheets } from "@/lib/excel-parser";

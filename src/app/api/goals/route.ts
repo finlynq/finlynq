@@ -119,7 +119,8 @@ export async function PUT(request: NextRequest) {
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
-    const goal = db.update(schema.goals).set(data).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).returning().get();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const goal = db.update(schema.goals).set(data as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).returning().get();
     return NextResponse.json(goal);
   } catch (error: unknown) {
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });

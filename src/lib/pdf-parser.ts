@@ -1,4 +1,6 @@
-import { PDFParse } from "pdf-parse";
+// Lazy-loaded to prevent DOMMatrix/canvas errors at module evaluation time in Next.js builds
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let PDFParse: any;
 import type { RawTransaction } from "./import-pipeline";
 import { normalizeDate, parseAmount } from "./csv-parser";
 
@@ -50,6 +52,7 @@ export async function parsePdfToTransactions(buffer: Buffer): Promise<PdfParseRe
 
   let rawText = "";
   try {
+    if (!PDFParse) ({ PDFParse } = await import("pdf-parse"));
     const parser: PdfParser = new PDFParse({ verbosity: 0 });
     await parser.load(buffer);
     const info = await parser.getInfo();

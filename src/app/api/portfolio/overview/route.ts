@@ -61,7 +61,7 @@ export async function GET(request: NextRequest) {
   const symbolToId = new Map<string, string>();
   for (const h of cryptoHoldings) {
     if (!h.symbol) continue;
-    const base = h.symbol.toUpperCase().split("-")[0];
+    const base = String(h.symbol).toUpperCase().split("-")[0];
     const cgId = symbolToCoinGeckoId(base);
     if (cgId && !symbolToId.has(base)) {
       symbolToId.set(base, cgId);
@@ -126,7 +126,7 @@ export async function GET(request: NextRequest) {
     let image: string | null = null;
 
     if (isCrypto && h.symbol) {
-      const base = h.symbol.toUpperCase().split("-")[0];
+      const base = String(h.symbol).toUpperCase().split("-")[0];
       const cp = cryptoPriceMap.get(base);
       if (cp) {
         price = cp.price;

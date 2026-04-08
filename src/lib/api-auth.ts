@@ -1,48 +1,91 @@
-// Simple X-API-Key authentication for API routes
-// Key is stored in the settings table and generated on first access.
+/**
+ * API key management — works in both self-hosted (SQLite) and managed (PostgreSQL) modes.
+ *
+ * In self-hosted mode, a single key is tied to DEFAULT_USER_ID.
+ * In managed mode, each user has their own key (stored with their user_id).
+ */
 
 import { NextRequest } from "next/server";
-import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { db, schema, DEFAULT_USER_ID, getDialect } from "@/db";
+import { eq, and } from "drizzle-orm";
 import crypto from "crypto";
 
 const API_KEY_SETTING = "api_key";
 
 /**
- * Get or generate the API key from the settings table.
+ * Get or generate an API key for the given user.
  * Creates a new key on first access.
  */
-export function getOrCreateApiKey(): string {
-  const existing = db
-    .select()
+export async function getOrCreateApiKey(userId: string = DEFAULT_USER_ID): Promise<string> {
+  const existing = await db
+    .select({ value: schema.settings.value })
     .from(schema.settings)
-    .where(eq(schema.settings.key, API_KEY_SETTING))
+    .where(and(eq(schema.settings.key, API_KEY_SETTING), eq(schema.settings.userId, userId)))
     .get();
 
-  if (existing) return existing.value;
+  if (existing) return existing.value as string;
 
-  // Generate a new API key
   const key = `pf_${crypto.randomBytes(24).toString("hex")}`;
-  db.insert(schema.settings).values({ key: API_KEY_SETTING, value: key }).run();
+
+  if (getDialect() === "postgres") {
+    // postgres: use raw execute to avoid insert/onConflict type issues
+    const { sql } = await import("drizzle-orm");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (db as any).execute(sql`
+      INSERT INTO settings (key, user_id, value)
+      VALUES (${API_KEY_SETTING}, ${userId}, ${key})
+      ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
+    `);
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any)
+      .insert(schema.settings)
+      .values({ key: API_KEY_SETTING, userId, value: key })
+      .run();
+  }
+
   return key;
 }
 
 /**
- * Validate X-API-Key header against the stored key.
- * Returns null if valid, or an error message if invalid.
+ * Validate an API key from the request.
+ *
+ * Accepts:
+ *   Authorization: Bearer pf_<key>
+ *   X-API-Key: pf_<key>
+ *
+ * Returns { userId } on success, or an error string on failure.
  */
-export function validateApiKey(request: NextRequest): string | null {
-  const headerKey = request.headers.get("X-API-Key");
+export async function validateApiKey(request: NextRequest): Promise<{ userId: string } | string> {
+  // Extract the key from X-API-Key header or Authorization: Bearer pf_...
+  const xApiKey = request.headers.get("X-API-Key");
+  const authHeader = request.headers.get("authorization") ?? "";
+  const bearerKey = authHeader.startsWith("Bearer pf_") ? authHeader.slice(7) : null;
+  const headerKey = xApiKey ?? bearerKey;
 
   if (!headerKey) {
-    return "Missing X-API-Key header";
+    return "Missing X-API-Key or Authorization: Bearer <key> header";
   }
 
-  const storedKey = getOrCreateApiKey();
-
-  if (headerKey !== storedKey) {
-    return "Invalid API key";
+  if (getDialect() === "sqlite") {
+    // Self-hosted: single key for DEFAULT_USER_ID
+    const storedKey = await getOrCreateApiKey(DEFAULT_USER_ID);
+    if (headerKey !== storedKey) return "Invalid API key";
+    return { userId: DEFAULT_USER_ID };
   }
 
-  return null; // Valid
+  // Postgres: look up which user owns this key
+  const rows = await db
+    .select({ userId: schema.settings.userId })
+    .from(schema.settings)
+    .where(
+      and(
+        eq(schema.settings.key, API_KEY_SETTING),
+        eq(schema.settings.value, headerKey)
+      )
+    )
+    .execute();
+
+  if (!rows.length) return "Invalid API key";
+  return { userId: rows[0].userId as string };
 }
