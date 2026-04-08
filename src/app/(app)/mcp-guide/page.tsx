@@ -62,15 +62,22 @@ export default function McpGuidePage() {
   const [activeTab, setActiveTab] = useState<ClientTab>("claude-desktop");
   const [status, setStatus] = useState<StatusState>("checking");
   const [serverUrl, setServerUrl] = useState("http://localhost:3000");
+  const [apiKey, setApiKey] = useState<string | null>(null);
 
   useEffect(() => {
     setServerUrl(window.location.origin);
     fetch("/api/healthz")
       .then((r) => setStatus(r.ok ? "connected" : "disconnected"))
       .catch(() => setStatus("disconnected"));
+    // Load API key so config snippets are ready to paste
+    fetch("/api/settings/api-key")
+      .then((r) => r.json())
+      .then((d) => { if (d.apiKey) setApiKey(d.apiKey); })
+      .catch(() => {});
   }, []);
 
   const mcpUrl = `${serverUrl}/api/mcp`;
+  const displayKey = apiKey ?? "YOUR_API_KEY";
 
   const claudeConfig = JSON.stringify(
     {
@@ -78,6 +85,9 @@ export default function McpGuidePage() {
         "finlynq": {
           type: "streamable-http",
           url: mcpUrl,
+          headers: {
+            "Authorization": `Bearer ${displayKey}`,
+          },
         },
       },
     },
@@ -91,6 +101,9 @@ export default function McpGuidePage() {
         "finlynq": {
           type: "streamable-http",
           url: mcpUrl,
+          headers: {
+            "Authorization": `Bearer ${displayKey}`,
+          },
         },
       },
     },

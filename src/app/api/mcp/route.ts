@@ -1,3 +1,14 @@
+/**
+ * Finlynq MCP Endpoint — Streamable HTTP transport (stateless mode)
+ *
+ * Stateless mode: each POST is fully self-contained (no session tracking).
+ * enableJsonResponse: true — returns JSON rather than SSE, required by
+ * Claude's remote MCP connector and most other clients.
+ *
+ * Auth: accepts either X-API-Key header or Authorization: Bearer <api-key>
+ * (Claude's custom connector uses the Bearer form).
+ */
+
 import { NextRequest } from "next/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -5,77 +16,63 @@ import { getConnection } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { registerCoreTools } from "../../../../mcp-server/register-core-tools";
 import { registerV2Tools } from "../../../../mcp-server/tools-v2";
+import { registerImportTemplateTools } from "../../../../mcp-server/tools-import-templates";
 
-// Session map for stateful MCP connections
-const g = globalThis as typeof globalThis & {
-  __mcpSessions?: Map<string, { server: McpServer; transport: WebStandardStreamableHTTPServerTransport }>;
-};
-function getSessions() {
-  if (!g.__mcpSessions) g.__mcpSessions = new Map();
-  return g.__mcpSessions;
+/**
+ * Normalize Authorization: Bearer <pf_...> → X-API-Key: <pf_...>
+ * so the existing API key strategy can validate it.
+ * JWTs start with "eyJ" and are left untouched (handled by AccountStrategy).
+ */
+function normalizeAuthHeader(request: NextRequest): NextRequest {
+  const auth = request.headers.get("authorization");
+  if (auth?.startsWith("Bearer ") && !auth.startsWith("Bearer eyJ")) {
+    const key = auth.slice(7);
+    const headers = new Headers(request.headers);
+    headers.set("x-api-key", key);
+    return new NextRequest(request.url, { method: request.method, headers, body: request.body });
+  }
+  return request;
 }
 
-function createSession(): { server: McpServer; transport: WebStandardStreamableHTTPServerTransport } {
+/** Create a fresh stateless MCP server + transport for a single request */
+function createStatelessHandler() {
   const sqlite = getConnection();
-
-  const server = new McpServer({
-    name: "finlynq",
-    version: "2.3.0",
-  });
+  const server = new McpServer({ name: "finlynq", version: "2.3.0" });
   registerCoreTools(server, sqlite);
   registerV2Tools(server, sqlite);
+  registerImportTemplateTools(server, sqlite);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: () => crypto.randomUUID(),
-    onsessioninitialized: (sessionId) => {
-      getSessions().set(sessionId, { server, transport });
-    },
-    onsessionclosed: (sessionId) => {
-      getSessions().delete(sessionId);
-    },
+    sessionIdGenerator: undefined, // stateless — no session tracking
+    enableJsonResponse: true,      // JSON responses instead of SSE streams
   });
 
-  server.connect(transport);
   return { server, transport };
-}
-
-function getSessionByRequest(request: Request): { server: McpServer; transport: WebStandardStreamableHTTPServerTransport } | undefined {
-  const sessionId = request.headers.get("mcp-session-id");
-  if (sessionId) return getSessions().get(sessionId);
-  return undefined;
 }
 
 // POST — MCP messages (initialization + tool calls)
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const normalized = normalizeAuthHeader(request);
+  const auth = await requireAuth(normalized);
+  if (!auth.authenticated) return auth.response;
 
-  // Existing session or new one (initialization)
-  const existing = getSessionByRequest(request);
-  const { transport } = existing ?? createSession();
-  return transport.handleRequest(request);
+  const { server, transport } = createStatelessHandler();
+  await server.connect(transport);
+  return transport.handleRequest(normalized);
 }
 
-// GET — SSE stream for server-initiated messages
-export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-
-  const existing = getSessionByRequest(request);
-  if (!existing) {
-    return Response.json(
-      { error: "No active session. Send an initialization POST first." },
-      { status: 400 }
-    );
-  }
-  return existing.transport.handleRequest(request);
+// GET — not used in stateless mode; return 405 with helpful message
+export async function GET() {
+  return Response.json(
+    { error: "Finlynq MCP runs in stateless mode. Use POST requests only." },
+    { status: 405, headers: { Allow: "POST" } }
+  );
 }
 
-// DELETE — close MCP session
-export async function DELETE(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-
-  const existing = getSessionByRequest(request);
-  if (!existing) {
-    return Response.json({ error: "Session not found." }, { status: 404 });
-  }
-  return existing.transport.handleRequest(request);
+// DELETE — not used in stateless mode
+export async function DELETE() {
+  return Response.json(
+    { error: "Stateless mode — no sessions to delete." },
+    { status: 405, headers: { Allow: "POST" } }
+  );
 }
