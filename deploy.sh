@@ -27,24 +27,34 @@ cd "$APP_DIR"
 
 echo "==> PF Deploy started at $(date)"
 
+# Determine repo owner to run git/npm as the correct user
+REPO_OWNER=$(stat -c '%U' "$APP_DIR/.git" 2>/dev/null || echo "")
+run_as() {
+  if [ -n "$REPO_OWNER" ] && [ "$REPO_OWNER" != "$(whoami)" ]; then
+    sudo -u "$REPO_OWNER" bash -c "cd $APP_DIR && $*"
+  else
+    bash -c "cd $APP_DIR && $*"
+  fi
+}
+
 # 1. Pull latest code
 if [ "$SKIP_PULL" = false ]; then
   echo "==> Pulling latest code..."
-  git pull --ff-only
+  run_as "git pull --ff-only"
 else
   echo "==> Skipping git pull"
 fi
 
 # 2. Install dependencies
 echo "==> Installing dependencies..."
-npm install --prefer-offline
+run_as "npm install --prefer-offline"
 
 # 3. Build (postbuild in package.json copies static assets automatically)
 if [ "$SKIP_BUILD" = false ]; then
   echo "==> Removing stale build output..."
-  rm -rf .next
+  run_as "rm -rf .next"
   echo "==> Building Next.js (standalone)..."
-  npm run build
+  run_as "npm run build"
   # postbuild script runs automatically here: cp .next/static + public → standalone
 else
   echo "==> Skipping build"

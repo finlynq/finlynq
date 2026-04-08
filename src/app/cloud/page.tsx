@@ -1,14 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useState, Suspense } from "react";
 
 type Tab = "login" | "register";
 
-export default function CloudAuthPage() {
+function CloudAuthPageInner() {
   const router = useRouter();
-  const [tab, setTab] = useState<Tab>("login");
+  const searchParams = useSearchParams();
+  const initialTab = searchParams.get("tab") === "register" ? "register" : "login";
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -247,5 +249,13 @@ export default function CloudAuthPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function CloudAuthPage() {
+  return (
+    <Suspense>
+      <CloudAuthPageInner />
+    </Suspense>
   );
 }
