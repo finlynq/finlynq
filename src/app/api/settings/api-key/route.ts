@@ -7,6 +7,6 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
 
-  const apiKey = await getOrCreateApiKey();
+  const apiKey = await getOrCreateApiKey(auth.context.userId);
   return NextResponse.json({ apiKey });
 }

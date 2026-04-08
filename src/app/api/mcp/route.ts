@@ -1,12 +1,14 @@
 /**
  * Finlynq MCP Endpoint — Streamable HTTP transport (stateless mode)
  *
- * Stateless mode: each POST is fully self-contained (no session tracking).
- * enableJsonResponse: true — returns JSON rather than SSE, required by
- * Claude's remote MCP connector and most other clients.
+ * Stateless: each POST is fully self-contained — no session tracking needed.
+ * enableJsonResponse: true — returns JSON (not SSE), required by Claude's
+ * remote MCP connector and most other clients.
  *
- * Auth: accepts either X-API-Key header or Authorization: Bearer <api-key>
- * (Claude's custom connector uses the Bearer form).
+ * Auth: accepts any of:
+ *   Authorization: Bearer pf_<key>   ← Claude custom connector / Cursor
+ *   Authorization: Bearer eyJ<jwt>   ← cloud session token
+ *   X-API-Key: pf_<key>              ← direct API key header
  */
 
 import { NextRequest } from "next/server";
@@ -18,24 +20,8 @@ import { registerCoreTools } from "../../../../mcp-server/register-core-tools";
 import { registerV2Tools } from "../../../../mcp-server/tools-v2";
 import { registerImportTemplateTools } from "../../../../mcp-server/tools-import-templates";
 
-/**
- * Normalize Authorization: Bearer <pf_...> → X-API-Key: <pf_...>
- * so the existing API key strategy can validate it.
- * JWTs start with "eyJ" and are left untouched (handled by AccountStrategy).
- */
-function normalizeAuthHeader(request: NextRequest): NextRequest {
-  const auth = request.headers.get("authorization");
-  if (auth?.startsWith("Bearer ") && !auth.startsWith("Bearer eyJ")) {
-    const key = auth.slice(7);
-    const headers = new Headers(request.headers);
-    headers.set("x-api-key", key);
-    return new NextRequest(request.url, { method: request.method, headers, body: request.body });
-  }
-  return request;
-}
-
-/** Create a fresh stateless MCP server + transport for a single request */
-function createStatelessHandler() {
+/** Create a fresh stateless MCP server + transport for one request */
+function createHandler() {
   const sqlite = getConnection();
   const server = new McpServer({ name: "finlynq", version: "2.3.0" });
   registerCoreTools(server, sqlite);
@@ -44,21 +30,20 @@ function createStatelessHandler() {
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless — no session tracking
-    enableJsonResponse: true,      // JSON responses instead of SSE streams
+    enableJsonResponse: true,      // JSON responses, not SSE
   });
 
   return { server, transport };
 }
 
-// POST — MCP messages (initialization + tool calls)
+// POST — MCP messages (initialize + tool calls)
 export async function POST(request: NextRequest) {
-  const normalized = normalizeAuthHeader(request);
-  const auth = await requireAuth(normalized);
+  const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
 
-  const { server, transport } = createStatelessHandler();
+  const { server, transport } = createHandler();
   await server.connect(transport);
-  return transport.handleRequest(normalized);
+  return transport.handleRequest(request);
 }
 
 // GET — not used in stateless mode; return 405 with helpful message
