@@ -8,7 +8,7 @@
 import { TOTP } from "otpauth";
 import crypto from "crypto";
 
-const ISSUER = "PersonalFinance";
+const ISSUER = "Finlynq";
 const DIGITS = 6;
 const PERIOD = 30; // seconds
 const ALGORITHM = "SHA1";

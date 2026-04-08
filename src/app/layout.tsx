@@ -7,8 +7,8 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "PF - Personal Finance",
-  description: "Track your money here, analyze it anywhere",
+  title: "Finlynq",
+  description: "Track your money here, analyze it anywhere — Finlynq",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

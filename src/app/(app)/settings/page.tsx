@@ -1684,7 +1684,7 @@ export default function SettingsPage() {
             </div>
             <div>
               <CardTitle className="text-base">About</CardTitle>
-              <CardDescription>PersonalFi - Personal Finance</CardDescription>
+              <CardDescription>Finlynq</CardDescription>
             </div>
           </div>
         </CardHeader>

@@ -75,7 +75,7 @@ export default function McpGuidePage() {
   const claudeConfig = JSON.stringify(
     {
       mcpServers: {
-        "pf-finance": {
+        "finlynq": {
           type: "streamable-http",
           url: mcpUrl,
         },
@@ -88,7 +88,7 @@ export default function McpGuidePage() {
   const cursorConfig = JSON.stringify(
     {
       mcpServers: {
-        "pf-finance": {
+        "finlynq": {
           type: "streamable-http",
           url: mcpUrl,
         },
@@ -101,7 +101,7 @@ export default function McpGuidePage() {
   const stdioConfig = JSON.stringify(
     {
       mcpServers: {
-        "pf-finance": {
+        "finlynq": {
           command: "node",
           args: ["/path/to/pf-app/mcp-server/dist/index.js"],
           env: {
@@ -184,7 +184,7 @@ export default function McpGuidePage() {
             {activeTab === "claude-desktop" && (
               <ol className="space-y-5 text-sm text-foreground">
                 <p className="text-sm text-muted-foreground">
-                  Claude Desktop natively supports MCP. Add PersonalFi to your config file and restart Claude.
+                  Claude Desktop natively supports MCP. Add Finlynq to your config file and restart Claude.
                 </p>
                 <li className="flex gap-3">
                   <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
@@ -223,8 +223,8 @@ export default function McpGuidePage() {
                   <div>
                     <p className="font-medium mb-1">Restart Claude Desktop</p>
                     <p className="text-muted-foreground">
-                      PersonalFi tools will appear in Claude&apos;s tool panel (hammer icon). Make sure
-                      PersonalFi is running at{" "}
+                      Finlynq tools will appear in Claude&apos;s tool panel (hammer icon). Make sure
+                      Finlynq is running at{" "}
                       <code className="text-xs bg-muted px-1 py-0.5 rounded">{serverUrl}</code>.
                     </p>
                   </div>
@@ -235,7 +235,7 @@ export default function McpGuidePage() {
             {activeTab === "cursor" && (
               <ol className="space-y-5 text-sm text-foreground">
                 <p className="text-sm text-muted-foreground">
-                  Cursor supports MCP through its settings. Add PersonalFi as an MCP server.
+                  Cursor supports MCP through its settings. Add Finlynq as an MCP server.
                 </p>
                 <li className="flex gap-3">
                   <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
@@ -272,7 +272,7 @@ export default function McpGuidePage() {
                   <div>
                     <p className="font-medium mb-1">Enable the server</p>
                     <p className="text-muted-foreground">
-                      Toggle &quot;pf-finance&quot; on in Cursor&apos;s MCP settings panel and reload the window.
+                      Toggle &quot;finlynq&quot; on in Cursor&apos;s MCP settings panel and reload the window.
                     </p>
                   </div>
                 </li>
@@ -327,7 +327,7 @@ export default function McpGuidePage() {
             {activeTab === "chatgpt" && (
               <div className="space-y-5 text-sm text-foreground">
                 <p className="text-muted-foreground">
-                  ChatGPT supports remote MCP servers in Projects. You can add PersonalFi as a custom connector so ChatGPT can query your financial data.
+                  ChatGPT supports remote MCP servers in Projects. You can add Finlynq as a custom connector so ChatGPT can query your financial data.
                 </p>
                 <ol className="space-y-5">
                   <li className="flex gap-3">
@@ -349,7 +349,7 @@ export default function McpGuidePage() {
                     <div className="flex-1 min-w-0">
                       <p className="font-medium mb-1">Add a remote MCP server</p>
                       <p className="text-muted-foreground mb-2">
-                        Choose <strong>MCP Server</strong> → <strong>HTTP</strong> and enter the PersonalFi endpoint:
+                        Choose <strong>MCP Server</strong> → <strong>HTTP</strong> and enter the Finlynq endpoint:
                       </p>
                       <div className="relative">
                         <pre className="text-xs bg-muted rounded-lg p-4 overflow-x-auto text-muted-foreground pr-10">
@@ -366,7 +366,7 @@ export default function McpGuidePage() {
                     <div>
                       <p className="font-medium mb-1">Authorize the connection</p>
                       <p className="text-muted-foreground">
-                        ChatGPT will redirect you to PersonalFi to confirm access. After approving, the 27
+                        ChatGPT will redirect you to Finlynq to confirm access. After approving, the 27
                         financial tools will be available in your project conversations.
                       </p>
                     </div>

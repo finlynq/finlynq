@@ -1,7 +1,7 @@
 {
-  "name": "pf-finance",
+  "name": "finlynq",
   "version": "2.3.0",
-  "description": "PersonalFi MCP Server — connect your AI assistant to your personal finance data. Ask questions in plain English: spending, budgets, net worth, goals, investments, cash flow, and more.",
+  "description": "Finlynq MCP Server — connect your AI assistant to your personal finance data. Ask questions in plain English: spending, budgets, net worth, goals, investments, cash flow, and more.",
   "transport": {
     "type": "streamable-http",
     "url": "/api/mcp"
@@ -127,6 +127,6 @@
     "data_stays_local": true
   },
   "setup_guide": "/mcp-guide",
-  "homepage": "https://finance.nextsoftwareconsulting.com",
-  "api_docs": "https://finance.nextsoftwareconsulting.com/api-docs"
+  "homepage": "https://finlynq.com",
+  "api_docs": "https://finlynq.com/api-docs"
 }

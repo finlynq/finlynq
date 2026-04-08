@@ -114,13 +114,13 @@ jobs:
   # ── Deploy (main branch only, after build passes) ────────────────────────────
 
   deploy:
-    name: Deploy to finance.nextsoftwareconsulting.com
+    name: Deploy to finlynq.com
     runs-on: ubuntu-latest
     needs: [build]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     environment:
       name: production
-      url: https://finance.nextsoftwareconsulting.com
+      url: https://finlynq.com
 
     steps:
       - name: Deploy via SSH

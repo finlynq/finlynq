@@ -88,9 +88,9 @@ export default function LandingPage() {
       <header className="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 shadow-lg shadow-indigo-500/30">
-            <span className="text-xs font-bold text-white tracking-tight">PF</span>
+            <span className="text-xs font-bold text-white tracking-tight">FL</span>
           </div>
-          <span className="text-sm font-semibold text-foreground">PersonalFi</span>
+          <span className="text-sm font-semibold text-foreground">Finlynq</span>
         </div>
         <Link
           href="/cloud"
@@ -167,7 +167,7 @@ export default function LandingPage() {
       {/* Footer */}
       <footer className="border-t border-border/50 py-8 text-center">
         <p className="text-xs text-muted-foreground/60">
-          PersonalFi &mdash; Track your money here, analyze it anywhere &mdash;{" "}
+          Finlynq &mdash; Track your money here, analyze it anywhere &mdash;{" "}
           <Link href="/self-hosted" className="hover:text-muted-foreground transition-colors">
             Self-host
           </Link>

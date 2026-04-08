@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
   const { userId } = auth.context;
   try {
     const uuid = randomUUID().slice(0, 8);
-    const email = `import-${uuid}@pf.app`;
+    const email = `import-${uuid}@finlynq.com`;
     const webhookSecret = randomBytes(32).toString("hex");
 
     // Upsert email address

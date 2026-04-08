@@ -52,7 +52,7 @@ if (!cloudReadOnly) {
 sqlite.pragma("foreign_keys = ON");
 
 const server = new McpServer({
-  name: "pf-finance",
+  name: "finlynq",
   version: "2.3.0",
 });
 
@@ -63,7 +63,7 @@ registerImportTemplateTools(server, sqlite);
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("PF MCP server v2.3 running on stdio — 29 tools (23 read, 6 write)");
+  console.error("Finlynq MCP server v2.3 running on stdio — 29 tools (23 read, 6 write)");
 }
 
 main().catch(console.error);

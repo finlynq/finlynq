@@ -15,7 +15,7 @@ export default function SelfHostedPage() {
         {/* Logo */}
         <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary">
           <span className="text-2xl font-extrabold tracking-wide text-primary-foreground">
-            PF
+            FL
           </span>
         </div>
 
@@ -23,7 +23,7 @@ export default function SelfHostedPage() {
           Self-Hosted Setup
         </h1>
         <p className="mb-10 text-muted-foreground">
-          Run PF on your own machine. Your data stays local, encrypted with your
+          Run Finlynq on your own machine. Your data stays local, encrypted with your
           passphrase.
         </p>
 
@@ -37,7 +37,7 @@ export default function SelfHostedPage() {
   --name pf \\
   -p 3000:3000 \\
   -v pf-data:/app/data \\
-  ghcr.io/nextsoftwareconsulting/pf:latest`}</code>
+  ghcr.io/finlynq/finlynq:latest`}</code>
           </pre>
           <p className="mt-3 text-sm text-muted-foreground">
             Then open{" "}
@@ -56,7 +56,7 @@ export default function SelfHostedPage() {
           <pre className="overflow-x-auto rounded-xl bg-muted p-4 text-sm">
             <code>{`services:
   app:
-    image: ghcr.io/nextsoftwareconsulting/pf:latest
+    image: ghcr.io/finlynq/finlynq:latest
     ports:
       - "3000:3000"
     volumes:

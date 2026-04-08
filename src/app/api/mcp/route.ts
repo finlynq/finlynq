@@ -19,7 +19,7 @@ function createSession(): { server: McpServer; transport: WebStandardStreamableH
   const sqlite = getConnection();
 
   const server = new McpServer({
-    name: "pf-finance",
+    name: "finlynq",
     version: "2.3.0",
   });
   registerCoreTools(server, sqlite);

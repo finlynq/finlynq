@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Production URL: **https://finance.nextsoftwareconsulting.com**
+Production URL: **https://finlynq.com**
 VPS IP: `77.42.84.176`
 
 ---
@@ -42,7 +42,7 @@ Go to **GitHub → Settings → Secrets and variables → Actions** and add:
 
 | Secret | Value | Notes |
 |--------|-------|-------|
-| `DEPLOY_SSH_HOST` | `77.42.84.176` | VPS IP (or `finance.nextsoftwareconsulting.com`) |
+| `DEPLOY_SSH_HOST` | `77.42.84.176` | VPS IP (or `finlynq.com`) |
 | `DEPLOY_SSH_USER` | `deploy` | Deploy user with passwordless sudo |
 | `DEPLOY_SSH_PRIVATE_KEY` | (private key contents) | See SSH key setup below |
 | `DEPLOY_SSH_PORT` | `22` | Standard SSH port |
@@ -76,7 +76,7 @@ Paste the entire output (including `-----BEGIN...` and `-----END...` lines) as t
 ```
 VPS: 77.42.84.176
 ├── Caddy (reverse proxy)
-│   └── finance.nextsoftwareconsulting.com → localhost:3456
+│   └── finlynq.com → localhost:3456
 │
 ├── systemd: pf.service
 │   ├── User: paperclip-agent
@@ -153,7 +153,7 @@ Runtime environment is configured in `/home/projects/pf/.env` on the server (not
 | `NODE_ENV` | `production` — set in systemd unit |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `PF_JWT_SECRET` | JWT signing secret |
-| `APP_URL` | `https://finance.nextsoftwareconsulting.com` |
+| `APP_URL` | `https://finlynq.com` |
 
 To update a production env var, edit `.env` on the server and restart:
 

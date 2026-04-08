@@ -207,7 +207,7 @@ export function OnboardingWizard({
                   >
                     <Sparkles className="h-14 w-14 text-amber-500 mb-4" />
                   </motion.div>
-                  <h2 className="text-2xl font-bold mb-2">Welcome to Personal Finance</h2>
+                  <h2 className="text-2xl font-bold mb-2">Welcome to Finlynq</h2>
                   <p className="text-muted-foreground max-w-sm mb-4">
                     Let&apos;s get you set up in 5 steps. You&apos;ll be tracking your finances and
                     querying them with your AI in under 10 minutes.

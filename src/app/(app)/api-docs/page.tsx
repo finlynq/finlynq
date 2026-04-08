@@ -557,7 +557,7 @@ function ApiDocsPageContent() {
             <div>
               <h3 className="mb-2 text-sm font-semibold text-zinc-500 dark:text-zinc-400">Connection</h3>
               <CodeBlock>{`Transport: stdio
-Server name: pf-finance
+Server name: finlynq
 Version: 2.2.0
 
 # Run with:
@@ -566,7 +566,7 @@ npx tsx mcp-server/index.ts
 # Or add to Claude Desktop config:
 {
   "mcpServers": {
-    "pf-finance": {
+    "finlynq": {
       "command": "npx",
       "args": ["tsx", "/path/to/pf-app/mcp-server/index.ts"]
     }
@@ -647,7 +647,7 @@ npx tsx mcp-server/index.ts
 
         {/* Footer */}
         <div className="mt-12 border-t border-zinc-200 pt-6 text-center text-xs text-zinc-400 dark:border-zinc-800">
-          PF Finance v2.2 &mdash; Local-first personal finance. Track your money here, analyze it anywhere.
+          Finlynq v2.3 &mdash; Local-first personal finance. Track your money here, analyze it anywhere.
         </div>
       </div>
     </div>

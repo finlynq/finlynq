@@ -6,7 +6,7 @@
  *
  * Environment variables:
  *  - SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS — SMTP credentials
- *  - EMAIL_FROM — sender address (default: noreply@pf.app)
+ *  - EMAIL_FROM — sender address (default: noreply@finlynq.com)
  *  - APP_URL — base URL for links in emails (default: http://localhost:3000)
  */
 
@@ -51,7 +51,7 @@ function createSmtpTransport(): EmailTransport {
       });
 
       await transporter.sendMail({
-        from: process.env.EMAIL_FROM || "noreply@pf.app",
+        from: process.env.EMAIL_FROM || "noreply@finlynq.com",
         to: message.to,
         subject: message.subject,
         html: message.html,
@@ -88,14 +88,14 @@ function baseLayout(title: string, content: string): string {
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
   <div style="max-width:560px;margin:40px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
     <div style="background:#18181b;padding:24px 32px">
-      <h1 style="margin:0;color:#fff;font-size:20px;font-weight:600">Personal Finance</h1>
+      <h1 style="margin:0;color:#fff;font-size:20px;font-weight:600">Finlynq</h1>
     </div>
     <div style="padding:32px">
       <h2 style="margin:0 0 16px;color:#18181b;font-size:18px">${title}</h2>
       ${content}
     </div>
     <div style="padding:16px 32px;background:#fafafa;border-top:1px solid #e4e4e7;font-size:12px;color:#71717a;text-align:center">
-      &copy; ${new Date().getFullYear()} Personal Finance App
+      &copy; ${new Date().getFullYear()} Finlynq
     </div>
   </div>
 </body>
@@ -110,14 +110,14 @@ export function emailVerificationEmail(email: string, token: string) {
   const url = `${APP_URL()}/api/auth/verify-email?token=${encodeURIComponent(token)}`;
   const html = baseLayout(
     "Verify your email",
-    `<p style="color:#3f3f46;line-height:1.6">Welcome to Personal Finance! Please verify your email address to get started.</p>
+    `<p style="color:#3f3f46;line-height:1.6">Welcome to Finlynq! Please verify your email address to get started.</p>
      ${buttonHtml("Verify Email", url)}
      <p style="color:#71717a;font-size:13px">If the button doesn't work, copy this link:<br>
      <a href="${url}" style="color:#2563eb;word-break:break-all">${url}</a></p>`
   );
   return {
     to: email,
-    subject: "Verify your email — Personal Finance",
+    subject: "Verify your email — Finlynq",
     html,
     text: `Verify your email by visiting: ${url}`,
   };
@@ -135,7 +135,7 @@ export function passwordResetEmail(email: string, token: string) {
   );
   return {
     to: email,
-    subject: "Password reset — Personal Finance",
+    subject: "Password reset — Finlynq",
     html,
     text: `Reset your password by visiting: ${url}`,
   };
@@ -145,7 +145,7 @@ export function welcomeEmail(email: string, displayName?: string) {
   const name = displayName || "there";
   const html = baseLayout(
     `Welcome, ${name}!`,
-    `<p style="color:#3f3f46;line-height:1.6">Your account is all set. Here's how to get the most out of Personal Finance:</p>
+    `<p style="color:#3f3f46;line-height:1.6">Your account is all set. Here's how to get the most out of Finlynq:</p>
      <ul style="color:#3f3f46;line-height:1.8;padding-left:20px">
        <li><strong>Add your accounts</strong> — checking, savings, credit cards, investments</li>
        <li><strong>Import transactions</strong> — CSV, Excel, PDF, or forward bank emails</li>
@@ -157,7 +157,7 @@ export function welcomeEmail(email: string, displayName?: string) {
   );
   return {
     to: email,
-    subject: "Welcome to Personal Finance!",
+    subject: "Welcome to Finlynq!",
     html,
     text: `Welcome, ${name}! Get started at ${APP_URL()}/dashboard`,
   };
@@ -189,7 +189,7 @@ export function budgetAlertEmail(
   );
   return {
     to: email,
-    subject: `${title} — Personal Finance`,
+    subject: `${title} — Finlynq`,
     html,
     text: `${title}: ${currency} ${spentAmount.toFixed(2)} of ${currency} ${budgetAmount.toFixed(2)} (${Math.round(percentUsed)}%)`,
   };
