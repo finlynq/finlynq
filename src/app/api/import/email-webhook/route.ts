@@ -37,7 +37,8 @@ export async function POST(request: NextRequest) {
       .from(schema.importTemplates)
       .where(eq(schema.importTemplates.userId, userId))
       .all();
-    const templates = templateRows.map(deserializeTemplate);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const templates = (templateRows as any[]).map(deserializeTemplate);
 
     const formData = await request.formData() as unknown as globalThis.FormData;
     const allRows: RawTransaction[] = [];
@@ -57,7 +58,7 @@ export async function POST(request: NextRequest) {
         const bestMatch = findBestTemplate(headers, templates);
 
         if (bestMatch) {
-          const result = csvToRawTransactionsWithMapping(text, bestMatch.template.columnMapping);
+          const result = csvToRawTransactionsWithMapping(text, bestMatch.template.columnMapping as Record<string, string>);
           rows = result.rows;
           // Apply template's default account to rows without one
           if (bestMatch.template.defaultAccount) {
