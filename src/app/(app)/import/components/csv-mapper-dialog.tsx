@@ -120,7 +120,7 @@ export function CsvMapperDialog({
                 {header}
               </Badge>
               <ArrowRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-              <Select value={mapping[header] ?? ""} onValueChange={(v) => updateMapping(header, v === "_skip" ? "" : v)}>
+              <Select value={mapping[header] ?? ""} onValueChange={(v) => updateMapping(header, v === "_skip" ? "" : (v ?? ""))}>
                 <SelectTrigger className="w-52" size="sm">
                   <SelectValue placeholder="Skip" />
                 </SelectTrigger>
