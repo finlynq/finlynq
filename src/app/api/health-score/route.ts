@@ -175,7 +175,7 @@ export async function GET(request: NextRequest) {
   let aomScore = 50;
   let aomDetail = "Insufficient data";
   try {
-    const aom = calculateAgeOfMoney(userId);
+    const aom = await calculateAgeOfMoney(userId);
     if (aom.ageInDays > 0) {
       aomScore = Math.min(100, Math.max(0, (aom.ageInDays / 30) * 100));
       aomDetail = `${aom.ageInDays} days`;
