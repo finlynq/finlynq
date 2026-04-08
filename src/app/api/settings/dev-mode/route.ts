@@ -24,7 +24,8 @@ export async function PUT(request: NextRequest) {
   await db
     .insert(schema.settings)
     .values({ key: "dev_mode", userId: DEFAULT_USER_ID, value })
-    .onConflictDoUpdate({ target: schema.settings.key, set: { value } });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .onConflictDoUpdate({ target: schema.settings.key, set: { value } as any });
 
   return NextResponse.json({ devMode });
 }

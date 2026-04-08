@@ -35,8 +35,9 @@ export async function GET() {
         checks.db = "error";
       } else {
         // Run a trivial query to confirm the pool is live
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const pgDb = (adapter as any).getDb() as any;
         const { sql } = await import("drizzle-orm");
-        const pgDb = adapter.getDb() as unknown as import("drizzle-orm/node-postgres").NodePgDatabase;
         await pgDb.execute(sql`SELECT 1`);
       }
     } else {

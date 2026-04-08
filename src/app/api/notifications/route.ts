@@ -2,12 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { safeErrorMessage, logApiError } from "@/lib/validate";
+import { safeErrorMessage } from "@/lib/validate";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const notifications = await db
+  const notifications = db
     .select()
     .from(schema.notifications)
     .where(eq(schema.notifications.userId, userId))
@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
     .limit(50)
     .all();
 
-  const unreadCount = await db
+  const unreadCount = db
     .select({ count: sql<number>`COUNT(*)` })
     .from(schema.notifications)
     .where(and(eq(schema.notifications.userId, userId), eq(schema.notifications.read, 0)))
@@ -35,9 +35,11 @@ export async function POST(request: NextRequest) {
 
     if (body.action === "mark-read") {
       if (body.id) {
-        await db.update(schema.notifications).set({ read: 1 }).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        db.update(schema.notifications).set({ read: 1 } as any).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
       } else {
-        await db.update(schema.notifications).set({ read: 1 }).where(eq(schema.notifications.userId, userId)).run();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        db.update(schema.notifications).set({ read: 1 } as any).where(eq(schema.notifications.userId, userId)).run();
       }
       return NextResponse.json({ success: true });
     }
@@ -52,7 +54,7 @@ export async function POST(request: NextRequest) {
       const startDate = `${month}-01`;
       const endDate = `${month}-${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()}`;
 
-      const budgets = await db
+      const budgets = db
         .select({
           categoryName: schema.categories.name,
           budgetAmount: schema.budgets.amount,
@@ -62,7 +64,7 @@ export async function POST(request: NextRequest) {
         .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
         .leftJoin(schema.transactions, eq(schema.transactions.categoryId, schema.categories.id))
         .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId)))
-        .groupBy(schema.budgets.id, schema.categories.name, schema.budgets.amount)
+        .groupBy(schema.budgets.id)
         .all();
 
       for (const b of budgets) {
@@ -73,7 +75,7 @@ export async function POST(request: NextRequest) {
               userId,
               type: "budget_exceeded",
               title: `Budget Exceeded: ${b.categoryName}`,
-              message: `You've spent $${b.spent.toFixed(2)} of your $${b.budgetAmount.toFixed(2)} ${b.categoryName} budget (${Math.round(pct)}%)`,
+              message: `You've spent $${Number(b.spent).toFixed(2)} of your $${Number(b.budgetAmount).toFixed(2)} ${b.categoryName} budget (${Math.round(pct)}%)`,
               read: 0,
               createdAt: new Date().toISOString(),
             });
@@ -82,7 +84,7 @@ export async function POST(request: NextRequest) {
               userId,
               type: "budget_warning",
               title: `Budget Warning: ${b.categoryName}`,
-              message: `You've used ${Math.round(pct)}% of your ${b.categoryName} budget ($${b.spent.toFixed(2)} / $${b.budgetAmount.toFixed(2)})`,
+              message: `You've used ${Math.round(pct)}% of your ${b.categoryName} budget ($${Number(b.spent).toFixed(2)} / $${Number(b.budgetAmount).toFixed(2)})`,
               read: 0,
               createdAt: new Date().toISOString(),
             });
@@ -91,14 +93,14 @@ export async function POST(request: NextRequest) {
       }
 
       if (generated.length > 0) {
-        await db.insert(schema.notifications).values(generated).run();
+        db.insert(schema.notifications).values(generated).run();
       }
 
       return NextResponse.json({ generated: generated.length });
     }
 
     // Create custom notification
-    const notif = await db.insert(schema.notifications).values({
+    const notif = db.insert(schema.notifications).values({
       userId,
       type: body.type ?? "info",
       title: body.title,
@@ -109,7 +111,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(notif, { status: 201 });
   } catch (error: unknown) {
-    await logApiError("POST", "/api/notifications", error, userId);
     const message = safeErrorMessage(error, "Notification operation failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }

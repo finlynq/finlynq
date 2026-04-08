@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
   try {
-    const emailSetting = await db
+    const emailSetting = db
       .select()
       .from(schema.settings)
       .where(and(eq(schema.settings.key, "import_email"), eq(schema.settings.userId, userId)))
@@ -28,19 +28,21 @@ export async function POST(request: NextRequest) {
   const { userId } = auth.context;
   try {
     const uuid = randomUUID().slice(0, 8);
-    const email = `import-${uuid}@finlynq.com`;
+    const email = `import-${uuid}@pf.app`;
     const webhookSecret = randomBytes(32).toString("hex");
 
     // Upsert email address
-    await db.insert(schema.settings)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.insert(schema.settings)
       .values({ key: "import_email", value: email, userId })
-      .onConflictDoUpdate({ target: schema.settings.key, set: { value: email } })
+      .onConflictDoUpdate({ target: schema.settings.key, set: { value: email } as any })
       .run();
 
     // Upsert webhook secret
-    await db.insert(schema.settings)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.insert(schema.settings)
       .values({ key: "email_webhook_secret", value: webhookSecret, userId })
-      .onConflictDoUpdate({ target: schema.settings.key, set: { value: webhookSecret } })
+      .onConflictDoUpdate({ target: schema.settings.key, set: { value: webhookSecret } as any })
       .run();
 
     return NextResponse.json({ email, webhookSecret });

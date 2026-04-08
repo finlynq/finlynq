@@ -30,11 +30,11 @@ export async function GET(request: NextRequest) {
   const fmt = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 
-  const incomeExpenses = await getIncomeVsExpenses(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`);
-  const balances = await getAccountBalances(userId);
-  const netWorthData = await getNetWorthOverTime(userId);
-  const budgetsData = await getBudgets(userId, currentMonth);
-  const spending = await getSpendingByCategory(
+  const incomeExpenses = getIncomeVsExpenses(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`);
+  const balances = getAccountBalances(userId);
+  const netWorthData = getNetWorthOverTime(userId);
+  const budgetsData = getBudgets(userId, currentMonth);
+  const spending = getSpendingByCategory(
     userId,
     `${currentMonth}-01`,
     `${currentMonth}-31`
@@ -100,9 +100,9 @@ export async function GET(request: NextRequest) {
     .filter(
       (b) =>
         b.accountType === "A" &&
-        !(b.accountGroup as string).toLowerCase().includes("investment") &&
-        !(b.accountGroup as string).toLowerCase().includes("portfolio") &&
-        !(b.accountGroup as string).toLowerCase().includes("retirement")
+        !String(b.accountGroup).toLowerCase().includes("investment") &&
+        !String(b.accountGroup).toLowerCase().includes("portfolio") &&
+        !String(b.accountGroup).toLowerCase().includes("retirement")
     )
     .reduce((s, b) => s + b.balance, 0);
 
@@ -177,7 +177,7 @@ export async function GET(request: NextRequest) {
   let aomScore = 50;
   let aomDetail = "Insufficient data";
   try {
-    const aom = await calculateAgeOfMoney(userId);
+    const aom = calculateAgeOfMoney(userId);
     if (aom.ageInDays > 0) {
       aomScore = Math.min(100, Math.max(0, (aom.ageInDays / 30) * 100));
       aomDetail = `${aom.ageInDays} days`;

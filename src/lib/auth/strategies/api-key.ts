@@ -1,5 +1,5 @@
 /**
- * API Key Auth Strategy — validates X-API-Key header.
+ * API Key Auth Strategy — validates X-API-Key or Authorization: Bearer pf_<key>.
  *
  * Works in both self-hosted and managed editions.
  * In self-hosted mode, requires the DB to be unlocked first.

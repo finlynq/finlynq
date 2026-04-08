@@ -14,34 +14,36 @@
 import { NextRequest } from "next/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { getConnection } from "@/db";
+import { getDialect, getConnection } from "@/db";
+import { db } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { registerCoreTools } from "../../../../mcp-server/register-core-tools";
 import { registerV2Tools } from "../../../../mcp-server/tools-v2";
-import { registerImportTemplateTools } from "../../../../mcp-server/tools-import-templates";
-
-/** Create a fresh stateless MCP server + transport for one request */
-function createHandler() {
-  const sqlite = getConnection();
-  const server = new McpServer({ name: "finlynq", version: "2.3.0" });
-  registerCoreTools(server, sqlite);
-  registerV2Tools(server, sqlite);
-  registerImportTemplateTools(server, sqlite);
-
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // stateless — no session tracking
-    enableJsonResponse: true,      // JSON responses, not SSE
-  });
-
-  return { server, transport };
-}
+import { registerPgTools } from "../../../../mcp-server/register-tools-pg";
 
 // POST — MCP messages (initialize + tool calls)
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
 
-  const { server, transport } = createHandler();
+  const server = new McpServer({ name: "finlynq", version: "2.3.0" });
+
+  if (getDialect() === "postgres") {
+    // Cloud / managed mode — async Drizzle queries, user-scoped
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    registerPgTools(server, db as any, auth.context.userId);
+  } else {
+    // Self-hosted mode — sync SQLite queries
+    const sqlite = getConnection();
+    registerCoreTools(server, sqlite);
+    registerV2Tools(server, sqlite);
+  }
+
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined, // stateless — no session tracking
+    enableJsonResponse: true,      // JSON responses, not SSE
+  });
+
   await server.connect(transport);
   return transport.handleRequest(request);
 }

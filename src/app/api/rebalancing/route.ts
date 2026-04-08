@@ -27,9 +27,10 @@ export async function GET(request: NextRequest) {
   const prices = await db.select().from(schema.priceCache).where(eq(schema.priceCache.userId, userId)).all();
   const priceMap = new Map<string, number>();
   for (const p of prices) {
-    const existing = priceMap.get(p.symbol);
-    if (!existing || p.date > (prices.find((pp) => pp.symbol === p.symbol && pp.price === existing)?.date ?? "")) {
-      priceMap.set(p.symbol, p.price);
+    const sym = String(p.symbol);
+    const existing = priceMap.get(sym);
+    if (!existing || String(p.date) > (prices.find((pp) => String(pp.symbol) === sym && Number(pp.price) === existing)?.date ?? "")) {
+      priceMap.set(sym, Number(p.price));
     }
   }
 
@@ -44,7 +45,7 @@ export async function GET(request: NextRequest) {
   // Compare with targets
   const comparison = targets.map((t) => {
     const matchingHoldings = holdingsWithValue.filter((h) => {
-      const sym = h.symbol ?? "";
+      const sym = String(h.symbol ?? "");
       if (t.category === "US" && (sym.includes("VUN") || sym === "VTI" || sym.includes("VUAA") || sym.includes("VUSD") || sym.includes("VNRA") || sym.includes("TPU"))) return true;
       if (t.category === "Canada" && sym.includes("VCN")) return true;
       if (t.category === "International" && (sym.includes("VIU") || sym.includes("VWRA") || sym.includes("VWRD") || sym.includes("VHVE") || sym.includes("TPE"))) return true;
