@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
     .from(schema.loans)
     .leftJoin(schema.accounts, eq(schema.loans.accountId, schema.accounts.id))
     .where(eq(schema.loans.userId, userId))
-    ;
+    .all();
 
   // Add amortization summary for each loan
   const withSummary = loans.map((loan) => {

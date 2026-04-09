@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
     .where(eq(schema.portfolioHoldings.userId, userId))
     .orderBy(schema.accounts.name, schema.portfolioHoldings.name)
-    ;
+    .all();
 
   // 2. Classify holdings
   const cryptoHoldings = holdings.filter(h => {
@@ -88,7 +88,7 @@ export async function GET(request: NextRequest) {
     .from(schema.transactions)
     .where(and(isNotNull(schema.transactions.portfolioHolding), eq(schema.transactions.userId, userId)))
     .groupBy(schema.transactions.portfolioHolding)
-    ;
+    .all();
 
   const qtyMap = new Map<string, { qty: number; costBasis: number }>();
   for (const t of txQuantities) {

@@ -65,7 +65,7 @@ async function getSpendingForPeriod(userId: string, start: string, end: string) 
       )
     )
     .groupBy(categories.id, categories.name)
-    ;
+    .all();
 
   const total = rows.reduce((s, r) => s + (r.total ?? 0), 0);
   const topCategories = rows
@@ -128,7 +128,7 @@ export async function generateWeeklyRecap(userId: string, endDate?: string): Pro
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
     .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
     .groupBy(budgets.id, categories.name, budgets.amount)
-    ;
+    .all();
 
   const budgetStatus = budgetRows
     .map((r) => ({
@@ -159,7 +159,7 @@ export async function generateWeeklyRecap(userId: string, endDate?: string): Pro
     )
     .orderBy(sql`${transactions.amount} ASC`)
     .limit(5)
-    ;
+    .all();
 
   const notableTransactions = notable.map((t) => ({
     date: t.date,
@@ -184,7 +184,7 @@ export async function generateWeeklyRecap(userId: string, endDate?: string): Pro
         lte(schema.subscriptions.nextDate, weekAhead)
       )
     )
-    ;
+    .all();
 
   const upcomingBills = subs.map((s) => ({
     name: s.name,

@@ -52,14 +52,14 @@ export async function GET(request: NextRequest) {
       .select({ id: transactions.id })
       .from(transactions)
       .where(eq(transactions.userId, auth.context.userId))
-      ;
+      .all();
     const ids = userTxnIds.map((t) => t.id);
     if (ids.length === 0) return NextResponse.json([]);
     const splits = await db
       .select()
       .from(transactionSplits)
       .where(inArray(transactionSplits.transactionId, ids))
-      ;
+      .all();
     return NextResponse.json(splits);
   }
 
@@ -76,7 +76,7 @@ export async function GET(request: NextRequest) {
     .select()
     .from(transactionSplits)
     .where(eq(transactionSplits.transactionId, transactionId))
-    ;
+    .all();
 
   return NextResponse.json(splits);
 }
@@ -109,7 +109,7 @@ export async function POST(request: NextRequest) {
       tags: s.tags ?? "",
     }));
 
-    const inserted = await db.insert(transactionSplits).values(rows).returning();
+    const inserted = await db.insert(transactionSplits).values(rows).returning().all();
     return NextResponse.json(inserted, { status: 201 });
   } catch (error) {
     return NextResponse.json(

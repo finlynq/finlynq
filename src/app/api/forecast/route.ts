@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
       eq(schema.transactions.userId, userId),
       sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
     ))
-    ;
+    .all();
 
   const detected = detectRecurringTransactions(
     txns.map((t) => ({
@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
       eq(schema.accounts.userId, userId),
       sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`
     ))
-    ;
+    .all();
 
   let currentBalance = 0;
   for (const ba of bankAccounts) {

@@ -26,7 +26,7 @@ export async function calculateAgeOfMoney(userId: string): Promise<{
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(and(eq(transactions.userId, userId), eq(categories.type, "I")))
     .orderBy(asc(transactions.date))
-    ;
+    .all();
 
   // Get the last 10 expense transactions ordered by date descending
   const expenseRows = await db
@@ -39,7 +39,7 @@ export async function calculateAgeOfMoney(userId: string): Promise<{
     .where(and(eq(transactions.userId, userId), eq(categories.type, "E")))
     .orderBy(desc(transactions.date))
     .limit(10)
-    ;
+    .all();
 
   if (incomeRows.length === 0 || expenseRows.length === 0) {
     return { ageInDays: 0, trend: 0, history: [] };
@@ -119,7 +119,7 @@ export async function calculateAgeOfMoney(userId: string): Promise<{
     .orderBy(desc(transactions.date))
     .limit(10)
     .offset(10)
-    ;
+    .all();
 
   let trend = 0;
   if (olderExpenseRows.length > 0) {

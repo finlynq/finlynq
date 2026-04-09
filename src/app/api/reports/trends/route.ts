@@ -69,7 +69,7 @@ export async function GET(request: NextRequest) {
     .where(and(...conditions))
     .groupBy(periodCol, schema.categories.type)
     .orderBy(periodCol)
-    ;
+    .all();
 
   // Build timeseries
   const periodMap = new Map<string, { income: number; expenses: number }>();
@@ -108,7 +108,7 @@ export async function GET(request: NextRequest) {
     .where(and(...conditions))
     .groupBy(periodCol, groupCol, schema.categories.type, schema.categories.group)
     .orderBy(periodCol, schema.categories.type, groupCol)
-    ;
+    .all();
 
   // Build grouped breakdown (totals across all periods)
   const incomeGroups = new Map<string, { group: string; total: number; count: number; periods: Record<string, number> }>();

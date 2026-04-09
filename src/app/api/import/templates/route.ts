@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
       .select()
       .from(schema.importTemplates)
       .where(eq(schema.importTemplates.userId, userId))
-      ;
+      .all();
 
     return NextResponse.json(rows.map(deserializeTemplate));
   } catch (error: unknown) {

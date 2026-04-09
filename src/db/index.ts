@@ -52,6 +52,31 @@ export function resetDb(): void {
 }
 
 /**
+ * Wraps a PG Drizzle query builder so that .all() is a valid no-op that
+ * returns the same awaitable object.  Every chained method (from/where/
+ * groupBy/orderBy/limit/offset/leftJoin/returning…) is also wrapped so
+ * the whole chain stays compatible with the SQLite .all() call sites.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapPgBuilder(obj: any): any {
+  if (!obj || typeof obj !== "object") return obj;
+  return new Proxy(obj, {
+    get(target, prop) {
+      // .all() in PG mode: just return the awaitable query builder itself
+      if (prop === "all") return () => target;
+      // .get() in PG mode: execute and return first row
+      if (prop === "get") return async () => { const rows = await target; return rows[0] ?? undefined; };
+      const val = Reflect.get(target, prop);
+      if (typeof val === "function") {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (...args: any[]) => wrapPgBuilder(val.apply(target, args));
+      }
+      return val;
+    },
+  });
+}
+
+/**
  * Lazy Proxy — all existing `import { db } from "@/db"` calls continue to work.
  *
  * When the adapter is set to PostgreSQL, the proxy delegates to the PG adapter.
@@ -65,7 +90,8 @@ export const db = new Proxy({} as DrizzleSqliteDb, {
       const adapterDb = adapter.getDb();
       const value = Reflect.get(adapterDb, prop, receiver);
       if (typeof value === "function") {
-        return value.bind(adapterDb);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (...args: any[]) => wrapPgBuilder((value as (...a: any[]) => any).apply(adapterDb, args));
       }
       return value;
     }

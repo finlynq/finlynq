@@ -94,14 +94,14 @@ export async function getActiveCurrencies(): Promise<string[]> {
     .select({ currency: schema.accounts.currency })
     .from(schema.accounts)
     .groupBy(schema.accounts.currency)
-    ;
+    .all();
   const accountCurrencies = accountCurrencyRows.map((r) => r.currency);
 
   const txnCurrencyRows = await db
     .select({ currency: schema.transactions.currency })
     .from(schema.transactions)
     .groupBy(schema.transactions.currency)
-    ;
+    .all();
   const txnCurrencies = txnCurrencyRows.map((r) => r.currency);
 
   return [...new Set([...accountCurrencies, ...txnCurrencies])];
