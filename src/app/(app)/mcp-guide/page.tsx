@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff } from "lucide-react";
 
-type ClientTab = "claude-desktop" | "cursor" | "cline" | "chatgpt" | "custom";
+type ClientTab = "claude-desktop" | "cursor" | "cline" | "windsurf" | "custom";
 type StatusState = "checking" | "connected" | "disconnected";
 
 const examplePrompts = [
@@ -81,14 +81,15 @@ export default function McpGuidePage() {
   const mcpUrl = `${serverUrl}/api/mcp`;
   const displayKey = apiKey ?? "YOUR_API_KEY";
 
-  const claudeConfig = JSON.stringify(
+  // Config snippets always use a placeholder — users copy their actual key from the section above
+  const httpConfig = JSON.stringify(
     {
       mcpServers: {
         "finlynq": {
           type: "streamable-http",
           url: mcpUrl,
           headers: {
-            "Authorization": `Bearer ${displayKey}`,
+            "Authorization": "Bearer YOUR_API_KEY",
           },
         },
       },
@@ -97,21 +98,9 @@ export default function McpGuidePage() {
     2
   );
 
-  const cursorConfig = JSON.stringify(
-    {
-      mcpServers: {
-        "finlynq": {
-          type: "streamable-http",
-          url: mcpUrl,
-          headers: {
-            "Authorization": `Bearer ${displayKey}`,
-          },
-        },
-      },
-    },
-    null,
-    2
-  );
+  const claudeConfig = httpConfig;
+  const cursorConfig = httpConfig;
+  const windsurfConfig = httpConfig;
 
   const stdioConfig = JSON.stringify(
     {
@@ -133,7 +122,7 @@ export default function McpGuidePage() {
     { id: "claude-desktop", label: "Claude Desktop", icon: "🤖" },
     { id: "cursor", label: "Cursor", icon: "⚡" },
     { id: "cline", label: "Cline (VS Code)", icon: "🔌" },
-    { id: "chatgpt", label: "ChatGPT", icon: "💬" },
+    { id: "windsurf", label: "Windsurf", icon: "🌊" },
     { id: "custom", label: "Custom / Local LLMs", icon: "🛠️" },
   ];
 
@@ -148,7 +137,7 @@ export default function McpGuidePage() {
             </div>
             <div>
               <h1 className="text-2xl font-bold tracking-tight text-foreground">Connect Your AI</h1>
-              <p className="text-sm text-muted-foreground">Ask Claude, Cursor, or any MCP client about your finances</p>
+              <p className="text-sm text-muted-foreground">Ask Claude, Cursor, Windsurf, or any MCP client about your finances</p>
             </div>
           </div>
 
@@ -379,68 +368,56 @@ export default function McpGuidePage() {
               </ol>
             )}
 
-            {activeTab === "chatgpt" && (
-              <div className="space-y-5 text-sm text-foreground">
-                <p className="text-muted-foreground">
-                  ChatGPT supports remote MCP servers in Projects. You can add Finlynq as a custom connector so ChatGPT can query your financial data.
+            {activeTab === "windsurf" && (
+              <ol className="space-y-5 text-sm text-foreground">
+                <p className="text-sm text-muted-foreground">
+                  Windsurf (by Codeium) supports MCP servers via its config file. Add Finlynq to start
+                  querying your finances from the AI coding assistant.
                 </p>
-                <ol className="space-y-5">
-                  <li className="flex gap-3">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
-                      1
-                    </span>
-                    <div>
-                      <p className="font-medium mb-1">Open a ChatGPT Project</p>
-                      <p className="text-muted-foreground">
-                        Go to <strong>chatgpt.com</strong>, create or open a Project, then click{" "}
-                        <strong>Add tools</strong> in the project sidebar.
-                      </p>
+                <li className="flex gap-3">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                    1
+                  </span>
+                  <div>
+                    <p className="font-medium mb-1">Open your Windsurf MCP config</p>
+                    <code className="mt-1 block text-xs text-muted-foreground leading-relaxed">
+                      Mac/Linux: ~/.codeium/windsurf/mcp_config.json
+                      <br />
+                      Windows: %USERPROFILE%\.codeium\windsurf\mcp_config.json
+                    </code>
+                  </div>
+                </li>
+                <li className="flex gap-3">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                    2
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium mb-2">Add the Finlynq server</p>
+                    <div className="relative">
+                      <pre className="text-xs bg-muted rounded-lg p-4 overflow-x-auto text-muted-foreground leading-relaxed pr-10">
+                        {windsurfConfig}
+                      </pre>
+                      <CopyButton text={windsurfConfig} />
                     </div>
-                  </li>
-                  <li className="flex gap-3">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
-                      2
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium mb-1">Add a remote MCP server</p>
-                      <p className="text-muted-foreground mb-2">
-                        Choose <strong>MCP Server</strong> → <strong>HTTP</strong> and enter the Finlynq endpoint:
-                      </p>
-                      <div className="relative">
-                        <pre className="text-xs bg-muted rounded-lg p-4 overflow-x-auto text-muted-foreground pr-10">
-                          {mcpUrl}
-                        </pre>
-                        <CopyButton text={mcpUrl} />
-                      </div>
-                    </div>
-                  </li>
-                  <li className="flex gap-3">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
-                      3
-                    </span>
-                    <div>
-                      <p className="font-medium mb-1">Authorize the connection</p>
-                      <p className="text-muted-foreground">
-                        ChatGPT will redirect you to Finlynq to confirm access. After approving, the 27
-                        financial tools will be available in your project conversations.
-                      </p>
-                    </div>
-                  </li>
-                </ol>
-                <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-4">
-                  <p className="text-xs text-muted-foreground">
-                    <strong className="text-foreground">Note:</strong> Remote MCP in ChatGPT is available to
-                    Plus and Pro subscribers. If you don&apos;t see the option, use{" "}
-                    <button
-                      onClick={() => setActiveTab("claude-desktop")}
-                      className="underline underline-offset-2 text-foreground hover:text-primary transition-colors"
-                    >
-                      Claude Desktop
-                    </button>{" "}
-                    instead — it has the best MCP support.
-                  </p>
-                </div>
-              </div>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Replace <code className="bg-muted px-1 rounded">YOUR_API_KEY</code> with your key from
+                      the section above.
+                    </p>
+                  </div>
+                </li>
+                <li className="flex gap-3">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                    3
+                  </span>
+                  <div>
+                    <p className="font-medium mb-1">Reload Windsurf</p>
+                    <p className="text-muted-foreground">
+                      Open the Command Palette → <strong>Windsurf: Reload MCP Servers</strong>. The Finlynq
+                      tools will appear in Cascade when you start a new conversation.
+                    </p>
+                  </div>
+                </li>
+              </ol>
             )}
 
             {activeTab === "custom" && (
@@ -489,12 +466,12 @@ export default function McpGuidePage() {
 
                 <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-4">
                   <p className="text-xs text-muted-foreground">
-                    <strong className="text-foreground">ChatGPT:</strong> Use the dedicated{" "}
+                    <strong className="text-foreground">Windsurf:</strong> Use the dedicated{" "}
                     <button
-                      onClick={() => setActiveTab("chatgpt")}
+                      onClick={() => setActiveTab("windsurf")}
                       className="underline underline-offset-2 text-foreground hover:text-primary transition-colors"
                     >
-                      ChatGPT tab
+                      Windsurf tab
                     </button>{" "}
                     for step-by-step setup instructions.
                   </p>

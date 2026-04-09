@@ -61,9 +61,22 @@ type EnrichedHolding = {
   marketCap: number | null;
   image: string | null;
   quantity: number | null;
-  costBasis: number | null;
+  avgCostPerShare: number | null;
+  totalCostBasis: number | null;
+  lifetimeCostBasis: number | null;
   marketValue: number | null;
   marketValueCAD: number | null;
+  unrealizedGain: number | null;
+  unrealizedGainPct: number | null;
+  unrealizedGainCAD: number | null;
+  realizedGain: number | null;
+  dividendsReceived: number | null;
+  totalReturn: number | null;
+  totalReturnCAD: number | null;
+  totalReturnPct: number | null;
+  firstPurchaseDate: string | null;
+  daysHeld: number | null;
+  pctOfPortfolio: number | null;
 };
 
 type AggregatedStock = {
@@ -95,6 +108,13 @@ type OverviewData = {
     dayChangeCAD: number;
     dayChangePct: number;
     hasQuantityData: boolean;
+    totalCostBasisCAD: number;
+    totalUnrealizedGainCAD: number;
+    totalUnrealizedGainPct: number;
+    totalRealizedGainCAD: number;
+    totalDividendsCAD: number;
+    totalReturnCAD: number;
+    totalReturnPct: number;
   };
   byType: Record<AssetType, { count: number; value: number }>;
   byAccount: Record<string, { count: number; value: number }>;
@@ -209,7 +229,7 @@ function exportStocksToCSV(stocks: AggregatedStock[], etfTotalValueCAD: number) 
 }
 
 function exportHoldingsToCSV(holdings: EnrichedHolding[], totalValueCAD: number) {
-  const header = ["#", "Account", "Name", "Symbol", "Type", "Currency", "Price", "Change", "Change %", "Quantity", "Cost Basis", "Market Value", "Market Value CAD", "Weight %"];
+  const header = ["#", "Account", "Name", "Symbol", "Type", "Currency", "Qty", "Avg Cost", "Price", "Mkt Value CAD", "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "First Purchase", "Days Held", "Weight %"];
   const rows = holdings.map((h, i) => [
     i + 1,
     `"${h.accountName}"`,
@@ -217,19 +237,24 @@ function exportHoldingsToCSV(holdings: EnrichedHolding[], totalValueCAD: number)
     h.symbol ?? "",
     h.assetType,
     h.currency,
-    h.price?.toFixed(2) ?? "",
-    h.change?.toFixed(2) ?? "",
-    h.changePct?.toFixed(2) ?? "",
     h.quantity ?? "",
-    h.costBasis?.toFixed(2) ?? "",
-    h.marketValue?.toFixed(2) ?? "",
+    h.avgCostPerShare?.toFixed(4) ?? "",
+    h.price?.toFixed(4) ?? "",
     h.marketValueCAD?.toFixed(2) ?? "",
+    h.unrealizedGain?.toFixed(2) ?? "",
+    h.unrealizedGainPct?.toFixed(2) ?? "",
+    h.realizedGain?.toFixed(2) ?? "",
+    h.dividendsReceived?.toFixed(2) ?? "",
+    h.totalReturn?.toFixed(2) ?? "",
+    h.totalReturnPct?.toFixed(2) ?? "",
+    h.firstPurchaseDate ?? "",
+    h.daysHeld ?? "",
     totalValueCAD > 0 && h.marketValueCAD ? ((h.marketValueCAD / totalValueCAD) * 100).toFixed(2) : "",
   ]);
   const totalMV = holdings.reduce((s, h) => s + (h.marketValueCAD ?? 0), 0);
-  rows.push(["", "", "", "", "", "", "", "", "", "", "TOTAL", "", totalMV.toFixed(2), "100.00"] as unknown as string[]);
+  rows.push(["", "", "", "", "", "", "", "", "", totalMV.toFixed(2), "", "", "", "", "", "", "", "", "100.00"] as unknown as string[]);
 
-  const csv = [header.join(","), ...rows.map(r => (r as (string | number)[]).join(","))].join("\n");
+  const csv = [header.join(","), ...rows.map(r => (r as (string | number | null)[]).join(","))].join("\n");
   downloadCSV(csv, `portfolio-holdings-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
@@ -281,8 +306,9 @@ export default function PortfolioPage() {
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
-  const [sortField, setSortField] = useState<"name" | "changePct" | "price" | "account">("account");
+  const [sortField, setSortField] = useState<"name" | "changePct" | "price" | "account" | "marketValueCAD" | "unrealizedGainPct">("account");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [etfXrayTab, setEtfXrayTab] = useState<EtfXrayTab>("stocks");
   const [stocksPage, setStocksPage] = useState(1);
   const STOCKS_PER_PAGE = 25;
@@ -318,6 +344,8 @@ export default function PortfolioPage() {
         case "changePct": cmp = (a.changePct ?? 0) - (b.changePct ?? 0); break;
         case "price": cmp = (a.price ?? 0) - (b.price ?? 0); break;
         case "account": cmp = a.accountName.localeCompare(b.accountName) || a.name.localeCompare(b.name); break;
+        case "marketValueCAD": cmp = (a.marketValueCAD ?? 0) - (b.marketValueCAD ?? 0); break;
+        case "unrealizedGainPct": cmp = (a.unrealizedGainPct ?? 0) - (b.unrealizedGainPct ?? 0); break;
       }
       return sortDir === "desc" ? -cmp : cmp;
     });
@@ -346,6 +374,14 @@ export default function PortfolioPage() {
   const handleSort = (field: typeof sortField) => {
     if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
     else { setSortField(field); setSortDir("asc"); }
+  };
+
+  const toggleRow = (id: number) => {
+    setExpandedRows(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   };
 
   const SortIcon = ({ field }: { field: typeof sortField }) => {
@@ -499,6 +535,66 @@ export default function PortfolioPage() {
         </Card>
       </div>
 
+      {/* ── Investment P&L Summary ────────────────────────────── */}
+      {summary.hasQuantityData && summary.totalCostBasisCAD > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-indigo-500" />
+              <CardTitle className="text-base">Investment Returns</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+              {/* Market Value */}
+              <div className="space-y-0.5">
+                <p className="text-xs text-muted-foreground">Market Value</p>
+                <p className="text-sm font-bold font-mono hero-number">{formatCurrency(summary.totalValueCAD, "CAD")}</p>
+              </div>
+              {/* Cost Basis */}
+              <div className="space-y-0.5">
+                <p className="text-xs text-muted-foreground">Cost Basis</p>
+                <p className="text-sm font-bold font-mono hero-number">{formatCurrency(summary.totalCostBasisCAD, "CAD")}</p>
+              </div>
+              {/* Unrealized G/L */}
+              <div className="space-y-0.5">
+                <p className="text-xs text-muted-foreground">Unrealized G/L</p>
+                <p className={`text-sm font-bold font-mono hero-number ${summary.totalUnrealizedGainCAD >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                  {summary.totalUnrealizedGainCAD >= 0 ? "+" : ""}{formatCurrency(summary.totalUnrealizedGainCAD, "CAD")}
+                </p>
+                <p className={`text-xs font-mono ${summary.totalUnrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                  {summary.totalUnrealizedGainPct >= 0 ? "+" : ""}{summary.totalUnrealizedGainPct.toFixed(2)}%
+                </p>
+              </div>
+              {/* Realized G/L */}
+              <div className="space-y-0.5">
+                <p className="text-xs text-muted-foreground">Realized G/L</p>
+                <p className={`text-sm font-bold font-mono hero-number ${summary.totalRealizedGainCAD >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                  {summary.totalRealizedGainCAD >= 0 ? "+" : ""}{formatCurrency(summary.totalRealizedGainCAD, "CAD")}
+                </p>
+              </div>
+              {/* Dividends */}
+              <div className="space-y-0.5">
+                <p className="text-xs text-muted-foreground">Dividends</p>
+                <p className="text-sm font-bold font-mono hero-number text-emerald-600 dark:text-emerald-400">
+                  +{formatCurrency(summary.totalDividendsCAD, "CAD")}
+                </p>
+              </div>
+              {/* Total Return */}
+              <div className="space-y-0.5">
+                <p className="text-xs text-muted-foreground">Total Return</p>
+                <p className={`text-sm font-bold font-mono hero-number ${summary.totalReturnCAD >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                  {summary.totalReturnCAD >= 0 ? "+" : ""}{formatCurrency(summary.totalReturnCAD, "CAD")}
+                </p>
+                <p className={`text-xs font-mono ${summary.totalReturnPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                  {summary.totalReturnPct >= 0 ? "+" : ""}{summary.totalReturnPct.toFixed(2)}%
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* ── Top Movers ────────────────────────────────────────── */}
       {(topGainers.length > 0 || topLosers.length > 0) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -597,64 +693,149 @@ export default function PortfolioPage() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="cursor-pointer select-none w-8" />
                   <TableHead className="cursor-pointer select-none" onClick={() => handleSort("name")}>
                     Holding <SortIcon field="name" />
                   </TableHead>
-                  <TableHead>Symbol</TableHead>
-                  <TableHead>Type</TableHead>
+                  <TableHead className="cursor-pointer select-none" onClick={() => handleSort("account")}>
+                    Account <SortIcon field="account" />
+                  </TableHead>
+                  <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Avg Cost</TableHead>
                   <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("price")}>
                     Price <SortIcon field="price" />
                   </TableHead>
-                  <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("changePct")}>
-                    Change <SortIcon field="changePct" />
+                  <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("marketValueCAD")}>
+                    Mkt Value <SortIcon field="marketValueCAD" />
                   </TableHead>
-                  <TableHead className="cursor-pointer select-none" onClick={() => handleSort("account")}>
-                    Account <SortIcon field="account" />
+                  <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("unrealizedGainPct")}>
+                    Unrealized G/L <SortIcon field="unrealizedGainPct" />
+                  </TableHead>
+                  <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("changePct")}>
+                    Day Chg <SortIcon field="changePct" />
                   </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {filteredHoldings.map(h => {
                   const typeConf = ASSET_TYPE_CONFIG[h.assetType];
+                  const isExpanded = expandedRows.has(h.id);
+                  const hasMetrics = h.quantity !== null && h.quantity !== 0;
                   return (
-                    <TableRow key={h.id} className="hover:bg-muted/30 transition-colors">
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          {h.image && <img src={h.image} alt="" className="h-6 w-6 rounded-full" />}
-                          <span className="font-medium text-sm">{h.name}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        {h.symbol ? (
-                          <Badge variant="secondary" className="font-mono text-xs">{h.symbol}</Badge>
-                        ) : (
-                          <span className="text-muted-foreground text-xs">--</span>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className="text-[10px] font-medium"
-                          style={{ borderColor: typeConf?.color, color: typeConf?.color }}
-                        >
-                          {typeConf?.label ?? h.assetType}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-sm">
-                        {h.price != null ? formatCurrency(h.price, h.quoteCurrency ?? h.currency) : <span className="text-muted-foreground">--</span>}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <ChangeBadge value={h.changePct} />
-                      </TableCell>
-                      <TableCell>
-                        <span className="text-xs text-muted-foreground">{h.accountName}</span>
-                      </TableCell>
-                    </TableRow>
+                    <>
+                      <TableRow
+                        key={h.id}
+                        className="hover:bg-muted/30 transition-colors cursor-pointer"
+                        onClick={() => toggleRow(h.id)}
+                      >
+                        <TableCell className="text-muted-foreground">
+                          {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            {h.image && <img src={h.image} alt="" className="h-6 w-6 rounded-full" />}
+                            <div>
+                              <span className="font-medium text-sm">{h.name}</span>
+                              <div className="flex items-center gap-1 mt-0.5">
+                                {h.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{h.symbol}</Badge>}
+                                <Badge variant="outline" className="text-[10px] h-4 px-1" style={{ borderColor: typeConf?.color, color: typeConf?.color }}>
+                                  {typeConf?.label ?? h.assetType}
+                                </Badge>
+                              </div>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs text-muted-foreground">{h.accountName}</span>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {hasMetrics && h.quantity != null
+                            ? h.quantity.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: h.quantity % 1 === 0 ? 0 : 4 })
+                            : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {hasMetrics && h.avgCostPerShare != null
+                            ? formatCurrency(h.avgCostPerShare, h.quoteCurrency ?? h.currency)
+                            : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {h.price != null ? formatCurrency(h.price, h.quoteCurrency ?? h.currency) : <span className="text-muted-foreground">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm font-medium">
+                          {hasMetrics && h.marketValueCAD != null
+                            ? formatCurrency(h.marketValueCAD, "CAD")
+                            : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {hasMetrics && h.unrealizedGain != null ? (
+                            <div className="text-right">
+                              <p className={`text-sm font-mono font-medium ${h.unrealizedGain >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                {h.unrealizedGain >= 0 ? "+" : ""}{formatCurrency(h.unrealizedGain, h.quoteCurrency ?? h.currency)}
+                              </p>
+                              {h.unrealizedGainPct != null && (
+                                <p className={`text-xs font-mono ${h.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                  {h.unrealizedGainPct >= 0 ? "+" : ""}{h.unrealizedGainPct.toFixed(2)}%
+                                </p>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">--</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <ChangeBadge value={h.changePct} />
+                        </TableCell>
+                      </TableRow>
+                      {isExpanded && (
+                        <TableRow key={`${h.id}-detail`} className="bg-muted/10 border-0">
+                          <TableCell />
+                          <TableCell colSpan={8} className="py-3">
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-xs">
+                              <div>
+                                <p className="text-muted-foreground">First Purchase</p>
+                                <p className="font-medium">{h.firstPurchaseDate ?? "--"}</p>
+                              </div>
+                              <div>
+                                <p className="text-muted-foreground">Days Held</p>
+                                <p className="font-medium">{h.daysHeld != null ? `${h.daysHeld.toLocaleString()} days` : "--"}</p>
+                              </div>
+                              <div>
+                                <p className="text-muted-foreground">% of Portfolio</p>
+                                <p className="font-medium">{h.pctOfPortfolio != null ? `${h.pctOfPortfolio.toFixed(2)}%` : "--"}</p>
+                              </div>
+                              <div>
+                                <p className="text-muted-foreground">Realized G/L</p>
+                                <p className={`font-medium font-mono ${(h.realizedGain ?? 0) >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                  {h.realizedGain != null ? `${h.realizedGain >= 0 ? "+" : ""}${formatCurrency(h.realizedGain, h.quoteCurrency ?? h.currency)}` : "--"}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-muted-foreground">Dividends</p>
+                                <p className="font-medium font-mono text-emerald-600 dark:text-emerald-400">
+                                  {h.dividendsReceived != null && h.dividendsReceived > 0
+                                    ? `+${formatCurrency(h.dividendsReceived, h.quoteCurrency ?? h.currency)}`
+                                    : "--"}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-muted-foreground">Total Return</p>
+                                <p className={`font-medium font-mono ${(h.totalReturn ?? 0) >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                  {h.totalReturn != null ? `${h.totalReturn >= 0 ? "+" : ""}${formatCurrency(h.totalReturn, h.quoteCurrency ?? h.currency)}` : "--"}
+                                  {h.totalReturnPct != null && (
+                                    <span className="ml-1 text-[10px]">({h.totalReturnPct >= 0 ? "+" : ""}{h.totalReturnPct.toFixed(1)}%)</span>
+                                  )}
+                                </p>
+                              </div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </>
                   );
                 })}
                 {filteredHoldings.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                       No {filter === "all" ? "" : ASSET_TYPE_CONFIG[filter]?.label} holdings found.
                     </TableCell>
                   </TableRow>
@@ -1211,44 +1392,62 @@ export default function PortfolioPage() {
                           <TableHeader>
                             <TableRow>
                               <TableHead>Holding</TableHead>
-                              <TableHead>Symbol</TableHead>
-                              <TableHead>Type</TableHead>
+                              <TableHead className="text-right">Qty</TableHead>
+                              <TableHead className="text-right">Avg Cost</TableHead>
                               <TableHead className="text-right">Price</TableHead>
-                              <TableHead className="text-right">Change</TableHead>
-                              <TableHead>Currency</TableHead>
+                              <TableHead className="text-right">Mkt Value</TableHead>
+                              <TableHead className="text-right">Unrealized G/L</TableHead>
+                              <TableHead className="text-right">Day Chg</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
                             {items.map(h => {
-                              const typeConf = ASSET_TYPE_CONFIG[h.assetType];
+                              const hasMetrics = h.quantity !== null && h.quantity !== 0;
                               return (
                                 <TableRow key={h.id} className="hover:bg-muted/30 transition-colors">
                                   <TableCell>
                                     <div className="flex items-center gap-2">
                                       {h.image && <img src={h.image} alt="" className="h-5 w-5 rounded-full" />}
-                                      <span className="font-medium text-sm">{h.name}</span>
+                                      <div>
+                                        <span className="font-medium text-sm">{h.name}</span>
+                                        {h.symbol && <Badge variant="secondary" className="ml-1 font-mono text-[10px] h-4 px-1">{h.symbol}</Badge>}
+                                      </div>
                                     </div>
                                   </TableCell>
-                                  <TableCell>
-                                    {h.symbol ? (
-                                      <Badge variant="secondary" className="font-mono text-xs">{h.symbol}</Badge>
-                                    ) : (
-                                      <span className="text-muted-foreground text-xs">--</span>
-                                    )}
+                                  <TableCell className="text-right font-mono text-sm">
+                                    {hasMetrics && h.quantity != null
+                                      ? h.quantity.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: h.quantity % 1 === 0 ? 0 : 4 })
+                                      : <span className="text-muted-foreground text-xs">--</span>}
                                   </TableCell>
-                                  <TableCell>
-                                    <Badge variant="outline" className="text-[10px]" style={{ borderColor: typeConf?.color, color: typeConf?.color }}>
-                                      {typeConf?.label ?? h.assetType}
-                                    </Badge>
+                                  <TableCell className="text-right font-mono text-sm">
+                                    {hasMetrics && h.avgCostPerShare != null
+                                      ? formatCurrency(h.avgCostPerShare, h.quoteCurrency ?? h.currency)
+                                      : <span className="text-muted-foreground text-xs">--</span>}
                                   </TableCell>
                                   <TableCell className="text-right font-mono text-sm">
                                     {h.price != null ? formatCurrency(h.price, h.quoteCurrency ?? h.currency) : "--"}
                                   </TableCell>
+                                  <TableCell className="text-right font-mono text-sm font-medium">
+                                    {hasMetrics && h.marketValueCAD != null
+                                      ? formatCurrency(h.marketValueCAD, "CAD")
+                                      : <span className="text-muted-foreground text-xs">--</span>}
+                                  </TableCell>
+                                  <TableCell className="text-right">
+                                    {hasMetrics && h.unrealizedGain != null ? (
+                                      <div>
+                                        <p className={`text-xs font-mono font-medium ${h.unrealizedGain >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                          {h.unrealizedGain >= 0 ? "+" : ""}{formatCurrency(h.unrealizedGain, h.quoteCurrency ?? h.currency)}
+                                        </p>
+                                        {h.unrealizedGainPct != null && (
+                                          <p className={`text-[10px] font-mono ${h.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                            {h.unrealizedGainPct >= 0 ? "+" : ""}{h.unrealizedGainPct.toFixed(2)}%
+                                          </p>
+                                        )}
+                                      </div>
+                                    ) : <span className="text-muted-foreground text-xs">--</span>}
+                                  </TableCell>
                                   <TableCell className="text-right">
                                     <ChangeBadge value={h.changePct} />
-                                  </TableCell>
-                                  <TableCell>
-                                    <Badge variant="outline" className="text-xs">{h.currency}</Badge>
                                   </TableCell>
                                 </TableRow>
                               );

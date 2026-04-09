@@ -78,34 +78,84 @@ export async function GET(request: NextRequest) {
     fxRates.set(cur, await getLatestFxRate(cur, "CAD", userId));
   }
 
-  // 6. Get transaction-based quantities for each holding
-  const txQuantities = await db
+  // 6. Get detailed transaction metrics per holding (average cost method)
+  const txDetails = await db
     .select({
       portfolioHolding: schema.transactions.portfolioHolding,
-      totalQty: sql<number>`COALESCE(SUM(${schema.transactions.quantity}), 0)`,
-      totalAmount: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
+      // Buys: negative amounts, positive quantity
+      totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} < 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)`,
+      totalBuyAmount: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} < 0 THEN ABS(${schema.transactions.amount}) ELSE 0 END), 0)`,
+      // Sells: positive amounts, negative quantity
+      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} > 0 AND ${schema.transactions.quantity} < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)`,
+      totalSellAmount: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} > 0 AND ${schema.transactions.quantity} < 0 THEN ${schema.transactions.amount} ELSE 0 END), 0)`,
+      // Dividends: positive amounts with zero/null quantity
+      dividendsReceived: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} > 0 AND (${schema.transactions.quantity} = 0 OR ${schema.transactions.quantity} IS NULL) THEN ${schema.transactions.amount} ELSE 0 END), 0)`,
+      // Date tracking
+      firstPurchaseDate: sql<string>`MIN(CASE WHEN ${schema.transactions.amount} < 0 THEN ${schema.transactions.date} ELSE NULL END)`,
     })
     .from(schema.transactions)
     .where(and(isNotNull(schema.transactions.portfolioHolding), eq(schema.transactions.userId, userId)))
     .groupBy(schema.transactions.portfolioHolding)
     .all();
 
-  const qtyMap = new Map<string, { qty: number; costBasis: number }>();
-  for (const t of txQuantities) {
-    if (t.portfolioHolding) {
-      qtyMap.set(t.portfolioHolding, {
-        qty: t.totalQty,
-        costBasis: Math.abs(t.totalAmount),
-      });
-    }
+  type TxMetrics = {
+    qty: number;
+    totalBuyQty: number;
+    totalBuyAmount: number;
+    totalSellQty: number;
+    totalSellAmount: number;
+    avgCostPerShare: number | null;
+    totalCostBasis: number | null;   // remaining cost basis
+    lifetimeCostBasis: number;       // total ever invested
+    realizedGain: number;
+    dividendsReceived: number;
+    firstPurchaseDate: string | null;
+    daysHeld: number | null;
+  };
+
+  const today = new Date();
+  const qtyMap = new Map<string, TxMetrics>();
+  for (const t of txDetails) {
+    if (!t.portfolioHolding) continue;
+    const buyQty = Number(t.totalBuyQty);
+    const buyAmt = Number(t.totalBuyAmount);
+    const sellQty = Number(t.totalSellQty);
+    const sellAmt = Number(t.totalSellAmount);
+    const divs = Number(t.dividendsReceived);
+
+    const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
+    const remainingQty = buyQty - sellQty;
+    const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
+    const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
+
+    const fpDate = t.firstPurchaseDate ?? null;
+    const daysHeld = fpDate
+      ? Math.floor((today.getTime() - new Date(fpDate).getTime()) / 86400000)
+      : null;
+
+    qtyMap.set(t.portfolioHolding, {
+      qty: remainingQty,
+      totalBuyQty: buyQty,
+      totalBuyAmount: buyAmt,
+      totalSellQty: sellQty,
+      totalSellAmount: sellAmt,
+      avgCostPerShare: avgCost,
+      totalCostBasis: costBasis,
+      lifetimeCostBasis: buyAmt,
+      realizedGain,
+      dividendsReceived: divs,
+      firstPurchaseDate: fpDate,
+      daysHeld,
+    });
   }
 
   // 6b. Add synthetic entries for investment transactions whose portfolioHolding
   //     name doesn't match any registered portfolioHoldings entry (quantity != 0)
   const registeredNames = new Set(holdings.map((h) => h.name));
   const orphanSymbols: string[] = [];
-  for (const t of txQuantities) {
-    if (t.portfolioHolding && !registeredNames.has(t.portfolioHolding) && t.totalQty !== 0) {
+  for (const t of txDetails) {
+    const totalQty = (t.totalBuyQty ?? 0) - (t.totalSellQty ?? 0);
+    if (t.portfolioHolding && !registeredNames.has(t.portfolioHolding) && totalQty !== 0) {
       orphanSymbols.push(t.portfolioHolding);
       registeredNames.add(t.portfolioHolding);
     }
@@ -159,10 +209,16 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Get quantity from transactions
+    // Get quantity and cost metrics from transactions
     const txData = h.name ? qtyMap.get(h.name) : null;
     const quantity = txData?.qty ?? null;
-    const costBasis = txData?.costBasis ?? null;
+    const avgCostPerShare = txData?.avgCostPerShare ?? null;
+    const totalCostBasis = txData?.totalCostBasis ?? null;
+    const lifetimeCostBasis = txData?.lifetimeCostBasis ?? null;
+    const realizedGain = txData?.realizedGain ?? null;
+    const dividendsReceived = txData?.dividendsReceived ?? null;
+    const firstPurchaseDate = txData?.firstPurchaseDate ?? null;
+    const daysHeld = txData?.daysHeld ?? null;
 
     // Calculate market value
     let marketValue: number | null = null;
@@ -171,12 +227,33 @@ export async function GET(request: NextRequest) {
       marketValue = price * quantity;
       const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
       marketValueCAD = convertCurrency(marketValue, fxRate);
-    } else if (price !== null) {
-      // No quantity data — just show the price as informational
+    } else if (price !== null && !quantity) {
+      // No quantity data — show price as informational only
       marketValue = price;
       const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
       marketValueCAD = convertCurrency(price, fxRate);
     }
+
+    // Compute unrealized gain using remaining cost basis
+    const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
+    let unrealizedGain: number | null = null;
+    let unrealizedGainPct: number | null = null;
+    if (marketValue !== null && totalCostBasis !== null && quantity !== null && quantity !== 0) {
+      unrealizedGain = marketValue - totalCostBasis;
+      unrealizedGainPct = totalCostBasis > 0 ? (unrealizedGain / totalCostBasis) * 100 : null;
+    }
+
+    // CAD-converted unrealized for summaries
+    const unrealizedGainCAD = unrealizedGain !== null ? convertCurrency(unrealizedGain, fxRate) : null;
+
+    // Total return: unrealized + realized + dividends
+    const totalReturn = unrealizedGain !== null || realizedGain !== null || dividendsReceived !== null
+      ? ((unrealizedGain ?? 0) + (realizedGain ?? 0) + (dividendsReceived ?? 0))
+      : null;
+    const totalReturnCAD = totalReturn !== null ? convertCurrency(totalReturn, fxRate) : null;
+    const totalReturnPct = totalReturn !== null && lifetimeCostBasis !== null && lifetimeCostBasis > 0
+      ? (totalReturn / lifetimeCostBasis) * 100
+      : null;
 
     return {
       id: h.id,
@@ -193,9 +270,21 @@ export async function GET(request: NextRequest) {
       marketCap,
       image,
       quantity,
-      costBasis,
+      avgCostPerShare,
+      totalCostBasis,
+      lifetimeCostBasis,
       marketValue,
       marketValueCAD,
+      unrealizedGain,
+      unrealizedGainPct,
+      unrealizedGainCAD,
+      realizedGain,
+      dividendsReceived,
+      totalReturn,
+      totalReturnCAD,
+      totalReturnPct,
+      firstPurchaseDate,
+      daysHeld,
     };
   });
 
@@ -204,20 +293,34 @@ export async function GET(request: NextRequest) {
     const txData = qtyMap.get(sym);
     if (!txData || txData.qty === 0) continue;
     const isCrypto = isCryptoSymbol(sym);
-    const q = orphanQuotes.get(sym);
-    const price = q?.price ?? null;
-    const change = q?.change ?? null;
-    const changePct = q?.changePct ? Math.round(q.changePct * 100) / 100 : null;
-    const quoteCurrency = q?.currency ?? "CAD";
+    const oq = orphanQuotes.get(sym);
+    const price = oq?.price ?? null;
+    const change = oq?.change ?? null;
+    const changePct = oq?.changePct ? Math.round(oq.changePct * 100) / 100 : null;
+    const quoteCurrency = oq?.currency ?? "CAD";
     const isEtf = getEtfRegionBreakdown(sym) !== null;
     const assetType: AssetType = isCrypto ? "crypto" : isEtf ? "etf" : "stock";
+    const fxRate = fxRates.get(quoteCurrency) ?? 1;
     let marketValue: number | null = null;
     let marketValueCAD: number | null = null;
     if (price !== null && txData.qty !== 0) {
       marketValue = price * txData.qty;
-      const fxRate = fxRates.get(quoteCurrency) ?? 1;
       marketValueCAD = convertCurrency(marketValue, fxRate);
     }
+    const unrealizedGain = marketValue !== null && txData.totalCostBasis !== null && txData.qty !== 0
+      ? marketValue - txData.totalCostBasis
+      : null;
+    const unrealizedGainPct = unrealizedGain !== null && txData.totalCostBasis !== null && txData.totalCostBasis > 0
+      ? (unrealizedGain / txData.totalCostBasis) * 100
+      : null;
+    const unrealizedGainCAD = unrealizedGain !== null ? convertCurrency(unrealizedGain, fxRate) : null;
+    const totalReturn = unrealizedGain !== null || txData.realizedGain !== 0 || txData.dividendsReceived !== 0
+      ? (unrealizedGain ?? 0) + txData.realizedGain + txData.dividendsReceived
+      : null;
+    const totalReturnCAD = totalReturn !== null ? convertCurrency(totalReturn, fxRate) : null;
+    const totalReturnPct = totalReturn !== null && txData.lifetimeCostBasis > 0
+      ? (totalReturn / txData.lifetimeCostBasis) * 100
+      : null;
     enrichedHoldings.push({
       id: -1,
       accountId: null,
@@ -233,9 +336,21 @@ export async function GET(request: NextRequest) {
       marketCap: null,
       image: null,
       quantity: txData.qty,
-      costBasis: txData.costBasis,
+      avgCostPerShare: txData.avgCostPerShare,
+      totalCostBasis: txData.totalCostBasis,
+      lifetimeCostBasis: txData.lifetimeCostBasis,
       marketValue,
       marketValueCAD,
+      unrealizedGain,
+      unrealizedGainPct,
+      unrealizedGainCAD,
+      realizedGain: txData.realizedGain,
+      dividendsReceived: txData.dividendsReceived,
+      totalReturn,
+      totalReturnCAD,
+      totalReturnPct,
+      firstPurchaseDate: txData.firstPurchaseDate,
+      daysHeld: txData.daysHeld,
     });
   }
 
@@ -253,6 +368,35 @@ export async function GET(request: NextRequest) {
   const totalDayChangePct = totalValueCAD > 0
     ? (totalDayChangeCAD / (totalValueCAD - totalDayChangeCAD)) * 100
     : 0;
+
+  // Investment P&L summaries
+  const holdingsWithMetrics = enrichedHoldings.filter(h => h.quantity !== null && h.quantity !== 0);
+  const totalCostBasisCAD = holdingsWithMetrics.reduce((s, h) => {
+    if (h.totalCostBasis === null) return s;
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    return s + convertCurrency(h.totalCostBasis, fxRate);
+  }, 0);
+  const totalUnrealizedGainCAD = holdingsWithMetrics.reduce((s, h) => s + (h.unrealizedGainCAD ?? 0), 0);
+  const totalUnrealizedGainPct = totalCostBasisCAD > 0
+    ? (totalUnrealizedGainCAD / totalCostBasisCAD) * 100
+    : 0;
+  const totalRealizedGainCAD = holdingsWithMetrics.reduce((s, h) => {
+    if (h.realizedGain === null) return s;
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    return s + convertCurrency(h.realizedGain, fxRate);
+  }, 0);
+  const totalDividendsCAD = holdingsWithMetrics.reduce((s, h) => {
+    if (h.dividendsReceived === null) return s;
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    return s + convertCurrency(h.dividendsReceived, fxRate);
+  }, 0);
+  const totalReturnCAD = totalUnrealizedGainCAD + totalRealizedGainCAD + totalDividendsCAD;
+  const lifetimeCostBasisCAD = holdingsWithMetrics.reduce((s, h) => {
+    if (h.lifetimeCostBasis === null) return s;
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    return s + convertCurrency(h.lifetimeCostBasis, fxRate);
+  }, 0);
+  const totalReturnPct = lifetimeCostBasisCAD > 0 ? (totalReturnCAD / lifetimeCostBasisCAD) * 100 : 0;
 
   // Asset type breakdown
   const byType: Record<AssetType, { count: number; value: number }> = {
@@ -408,8 +552,16 @@ export async function GET(request: NextRequest) {
   const topGainers = movers.filter(h => (h.changePct ?? 0) > 0).slice(0, 5);
   const topLosers = movers.filter(h => (h.changePct ?? 0) < 0).slice(0, 5);
 
+  // Add pctOfPortfolio to each holding
+  const holdingsWithPct = enrichedHoldings.map(h => ({
+    ...h,
+    pctOfPortfolio: totalValueCAD > 0 && h.marketValueCAD != null
+      ? Math.round((h.marketValueCAD / totalValueCAD) * 10000) / 100
+      : null,
+  }));
+
   return NextResponse.json({
-    holdings: enrichedHoldings,
+    holdings: holdingsWithPct,
     summary: {
       totalHoldings: holdings.length,
       totalAccounts: byAccount.size,
@@ -417,6 +569,14 @@ export async function GET(request: NextRequest) {
       dayChangeCAD: Math.round(totalDayChangeCAD * 100) / 100,
       dayChangePct: Math.round(totalDayChangePct * 100) / 100,
       hasQuantityData,
+      // Investment P&L
+      totalCostBasisCAD: Math.round(totalCostBasisCAD * 100) / 100,
+      totalUnrealizedGainCAD: Math.round(totalUnrealizedGainCAD * 100) / 100,
+      totalUnrealizedGainPct: Math.round(totalUnrealizedGainPct * 100) / 100,
+      totalRealizedGainCAD: Math.round(totalRealizedGainCAD * 100) / 100,
+      totalDividendsCAD: Math.round(totalDividendsCAD * 100) / 100,
+      totalReturnCAD: Math.round(totalReturnCAD * 100) / 100,
+      totalReturnPct: Math.round(totalReturnPct * 100) / 100,
     },
     byType,
     byAccount: Object.fromEntries(byAccount),

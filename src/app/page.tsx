@@ -253,7 +253,7 @@ export default function LandingPage() {
           {/* Badge */}
           <div className="anim-fade-in inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/8 px-4 py-1.5 mb-7 text-xs font-medium text-primary">
             <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
-            MCP-powered · 27 financial tools · Works with Claude &amp; Cursor
+            MCP-powered · 27 financial tools · Works with Claude, Cursor, Windsurf &amp; more
           </div>
 
           {/* Headline */}
@@ -421,7 +421,7 @@ export default function LandingPage() {
                 {[
                   "27 read + write tools",
                   "Streamable HTTP + stdio transports",
-                  "Works with Claude, Cursor, Cline, and more",
+                  "Works with Claude, Cursor, Windsurf, Cline, and more",
                   "Responds with charts & structured data",
                 ].map((item) => (
                   <div key={item} className="flex items-center gap-2.5 text-sm text-muted-foreground">

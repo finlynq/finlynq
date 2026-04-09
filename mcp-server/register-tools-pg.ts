@@ -1409,58 +1409,96 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with allocation breakdown by asset class and currency",
+    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio",
     {},
     async () => {
-      const holdings = await q(db, sql`
-        SELECT ph.id, ph.name, ph.symbol, ph.currency, ph.note,
-               a.name as account_name, a.type as account_type,
-               COALESCE(SUM(t.quantity), 0) as total_quantity,
-               COALESCE(SUM(t.amount), 0) as book_value
-        FROM portfolio_holdings ph
-        JOIN accounts a ON a.id = ph.account_id
-        LEFT JOIN transactions t ON t.portfolio_holding = ph.name AND t.user_id = ${userId}
-        WHERE ph.user_id = ${userId}
-        GROUP BY ph.id, ph.name, ph.symbol, ph.currency, ph.note, a.name, a.type
-        ORDER BY ABS(COALESCE(SUM(t.amount), 0)) DESC
+      const metrics = await q(db, sql`
+        SELECT
+          portfolio_holding as name,
+          SUM(CASE WHEN amount < 0 THEN quantity ELSE 0 END) as buy_qty,
+          SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as buy_amount,
+          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN ABS(quantity) ELSE 0 END) as sell_qty,
+          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN amount ELSE 0 END) as sell_amount,
+          SUM(CASE WHEN amount > 0 AND (quantity = 0 OR quantity IS NULL) THEN amount ELSE 0 END) as dividends,
+          MIN(CASE WHEN amount < 0 THEN date ELSE NULL END) as first_purchase
+        FROM transactions
+        WHERE user_id = ${userId} AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
+        GROUP BY portfolio_holding
       `);
 
-      const byCurrency: Record<string, number> = {};
-      const byAccount: Record<string, number> = {};
-      let totalBookValue = 0;
+      const ph = await q(db, sql`
+        SELECT ph.name, ph.symbol, ph.currency, a.name as account_name
+        FROM portfolio_holdings ph
+        JOIN accounts a ON a.id = ph.account_id
+        WHERE ph.user_id = ${userId}
+      `);
+      const phMap = new Map(ph.map(p => [String(p.name), p]));
 
-      for (const h of holdings) {
-        const bv = Math.abs(Number(h.book_value));
-        byCurrency[h.currency] = (byCurrency[h.currency] ?? 0) + bv;
-        byAccount[h.account_name] = (byAccount[h.account_name] ?? 0) + bv;
-        totalBookValue += bv;
+      const today = new Date();
+      type HoldingResult = {
+        name: unknown; symbol: unknown; account: unknown; currency: string;
+        quantity: number; avgCostPerShare: number | null; totalCostBasis: number | null;
+        lifetimeCostBasis: number; realizedGain: number; dividendsReceived: number;
+        totalReturn: number | null; totalReturnPct: number | null;
+        firstPurchaseDate: unknown; daysHeld: number | null;
+      };
+      const results: HoldingResult[] = [];
+
+      for (const m of metrics) {
+        const buyQty = Number(m.buy_qty ?? 0);
+        const buyAmt = Number(m.buy_amount ?? 0);
+        const sellQty = Number(m.sell_qty ?? 0);
+        const sellAmt = Number(m.sell_amount ?? 0);
+        const divs = Number(m.dividends ?? 0);
+        const remainingQty = buyQty - sellQty;
+        const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
+        const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
+        const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
+        const totalReturn = realizedGain + divs; // unrealized excluded (no live prices in MCP)
+        const totalReturnPct = buyAmt > 0 ? (totalReturn / buyAmt) * 100 : null;
+        const fpDate = m.first_purchase ?? null;
+        const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
+        const info = phMap.get(String(m.name));
+
+        results.push({
+          name: m.name,
+          symbol: info?.symbol ?? null,
+          account: info?.account_name ?? null,
+          currency: String(info?.currency ?? "CAD"),
+          quantity: Math.round(remainingQty * 10000) / 10000,
+          avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
+          totalCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
+          lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
+          realizedGain: Math.round(realizedGain * 100) / 100,
+          dividendsReceived: Math.round(divs * 100) / 100,
+          totalReturn: Math.round(totalReturn * 100) / 100,
+          totalReturnPct: totalReturnPct ? Math.round(totalReturnPct * 100) / 100 : null,
+          firstPurchaseDate: fpDate,
+          daysHeld,
+        });
       }
 
-      const allocationByCurrency = Object.entries(byCurrency).map(([currency, value]) => ({
-        currency,
-        value: Math.round(value * 100) / 100,
-        pct: totalBookValue > 0 ? Math.round((value / totalBookValue) * 1000) / 10 : 0,
-      }));
+      results.sort((a, b) => (b.lifetimeCostBasis ?? 0) - (a.lifetimeCostBasis ?? 0));
+
+      const totalCostBasis = results.reduce((s, r) => s + (r.totalCostBasis ?? 0), 0);
+      const totalLifetime = results.reduce((s, r) => s + r.lifetimeCostBasis, 0);
+      const totalRealized = results.reduce((s, r) => s + r.realizedGain, 0);
+      const totalDivs = results.reduce((s, r) => s + r.dividendsReceived, 0);
+      const totalReturn = totalRealized + totalDivs;
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        totalHoldings: holdings.length,
-        totalBookValue: Math.round(totalBookValue * 100) / 100,
-        holdings: holdings.map(h => ({
-          name: h.name,
-          symbol: h.symbol,
-          account: h.account_name,
-          currency: h.currency,
-          quantity: Number(h.total_quantity),
-          bookValue: Math.round(Math.abs(Number(h.book_value)) * 100) / 100,
-          pct: totalBookValue > 0 ? Math.round((Math.abs(Number(h.book_value)) / totalBookValue) * 1000) / 10 : 0,
-        })),
-        allocationByCurrency,
-        allocationByAccount: Object.entries(byAccount).map(([account, value]) => ({
-          account,
-          value: Math.round(value * 100) / 100,
-          pct: totalBookValue > 0 ? Math.round((value / totalBookValue) * 1000) / 10 : 0,
-        })),
+        note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics.",
+        totalHoldings: results.length,
+        summary: {
+          totalCostBasis: Math.round(totalCostBasis * 100) / 100,
+          lifetimeCostBasis: Math.round(totalLifetime * 100) / 100,
+          totalRealizedGain: Math.round(totalRealized * 100) / 100,
+          totalDividends: Math.round(totalDivs * 100) / 100,
+          totalReturn: Math.round(totalReturn * 100) / 100,
+          totalReturnPct: totalLifetime > 0 ? Math.round((totalReturn / totalLifetime) * 10000) / 100 : null,
+        },
+        holdings: results,
       });
     }
   );
@@ -1468,7 +1506,7 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
   // ── get_portfolio_performance ──────────────────────────────────────────────
   server.tool(
     "get_portfolio_performance",
-    "Portfolio performance: cost basis, realized/unrealized P&L by holding",
+    "Portfolio performance with avg-cost method: realized P&L, dividends, total return, days held per holding",
     {
       period: z.enum(["1m", "3m", "6m", "1y", "all"]).optional().describe("Lookback period (default: all)"),
     },
@@ -1481,55 +1519,76 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
         "all": "1900-01-01",
       };
       const since = cutoff[period ?? "all"];
+      const today = new Date();
 
       const perf = await q(db, sql`
         SELECT
-          t.portfolio_holding as holding,
+          portfolio_holding as holding,
           COUNT(*) as tx_count,
-          SUM(CASE WHEN t.amount < 0 THEN ABS(t.amount) ELSE 0 END) as cost_basis,
-          SUM(CASE WHEN t.amount > 0 THEN t.amount ELSE 0 END) as proceeds,
-          SUM(t.quantity) as net_quantity,
-          SUM(t.amount) as net_cashflow,
-          MIN(t.date) as first_purchase,
-          MAX(t.date) as last_activity
-        FROM transactions t
-        WHERE t.user_id = ${userId}
-          AND t.portfolio_holding IS NOT NULL
-          AND t.portfolio_holding != ''
-          AND t.date >= ${since}
-        GROUP BY t.portfolio_holding
-        ORDER BY cost_basis DESC
+          SUM(CASE WHEN amount < 0 THEN quantity ELSE 0 END) as buy_qty,
+          SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as buy_amount,
+          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN ABS(quantity) ELSE 0 END) as sell_qty,
+          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN amount ELSE 0 END) as sell_amount,
+          SUM(CASE WHEN amount > 0 AND (quantity = 0 OR quantity IS NULL) THEN amount ELSE 0 END) as dividends,
+          SUM(quantity) as net_quantity,
+          MIN(CASE WHEN amount < 0 THEN date ELSE NULL END) as first_purchase,
+          MAX(date) as last_activity
+        FROM transactions
+        WHERE user_id = ${userId}
+          AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
+          AND date >= ${since}
+        GROUP BY portfolio_holding
+        ORDER BY buy_amount DESC
       `);
 
       const results = perf.map(p => {
-        const costBasis = Number(p.cost_basis ?? 0);
-        const proceeds = Number(p.proceeds ?? 0);
-        const realizedPnl = proceeds - costBasis;
+        const buyQty = Number(p.buy_qty ?? 0);
+        const buyAmt = Number(p.buy_amount ?? 0);
+        const sellQty = Number(p.sell_qty ?? 0);
+        const sellAmt = Number(p.sell_amount ?? 0);
+        const divs = Number(p.dividends ?? 0);
+        const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
+        const remainingQty = Number(p.net_quantity ?? 0);
+        const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
+        const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
+        const totalReturn = realizedGain + divs;
+        const fpDate = p.first_purchase ?? null;
+        const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
         return {
           holding: p.holding,
           txCount: Number(p.tx_count),
-          costBasis: Math.round(costBasis * 100) / 100,
-          proceeds: Math.round(proceeds * 100) / 100,
-          realizedPnL: Math.round(realizedPnl * 100) / 100,
-          realizedPnLPct: costBasis > 0 ? Math.round((realizedPnl / costBasis) * 1000) / 10 : null,
-          netQuantity: Number(p.net_quantity ?? 0),
-          firstPurchase: p.first_purchase,
+          quantity: Math.round(remainingQty * 10000) / 10000,
+          lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
+          currentCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
+          avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
+          realizedGain: Math.round(realizedGain * 100) / 100,
+          realizedGainPct: buyAmt > 0 ? Math.round((realizedGain / buyAmt) * 10000) / 100 : null,
+          dividendsReceived: Math.round(divs * 100) / 100,
+          totalReturn: Math.round(totalReturn * 100) / 100,
+          totalReturnPct: buyAmt > 0 ? Math.round((totalReturn / buyAmt) * 10000) / 100 : null,
+          firstPurchase: fpDate,
           lastActivity: p.last_activity,
+          daysHeld,
         };
       });
 
-      const totalCost = results.reduce((s, r) => s + r.costBasis, 0);
-      const totalProceeds = results.reduce((s, r) => s + r.proceeds, 0);
+      const totLifetime = results.reduce((s, r) => s + r.lifetimeCostBasis, 0);
+      const totRealized = results.reduce((s, r) => s + r.realizedGain, 0);
+      const totDivs = results.reduce((s, r) => s + r.dividendsReceived, 0);
+      const totReturn = totRealized + totDivs;
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
+        note: "unrealizedGain requires live prices. Use the portfolio page for full metrics.",
         period: period ?? "all",
         since,
         summary: {
           holdings: results.length,
-          totalCostBasis: Math.round(totalCost * 100) / 100,
-          totalProceeds: Math.round(totalProceeds * 100) / 100,
-          totalRealizedPnL: Math.round((totalProceeds - totalCost) * 100) / 100,
+          lifetimeCostBasis: Math.round(totLifetime * 100) / 100,
+          totalRealizedGain: Math.round(totRealized * 100) / 100,
+          totalDividends: Math.round(totDivs * 100) / 100,
+          totalReturn: Math.round(totReturn * 100) / 100,
+          totalReturnPct: totLifetime > 0 ? Math.round((totReturn / totLifetime) * 10000) / 100 : null,
         },
         holdings: results,
       });
@@ -1539,14 +1598,14 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
   // ── analyze_holding ────────────────────────────────────────────────────────
   server.tool(
     "analyze_holding",
-    "Deep-dive analysis of a single holding: transaction history, avg cost, P&L",
+    "Deep-dive on a single holding: avg cost, realized gain, dividends, days held, full transaction history",
     {
       symbol: z.string().describe("Holding name or symbol (fuzzy matched)"),
     },
     async ({ symbol }) => {
       const lo = `%${symbol.toLowerCase()}%`;
       const txns = await q(db, sql`
-        SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.portfolio_holding,
+        SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags, t.portfolio_holding,
                a.name as account_name, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
@@ -1558,40 +1617,167 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
       if (!txns.length) return err(`No transactions found for holding matching "${symbol}"`);
 
       const holdingName = txns[0].portfolio_holding || txns[0].payee;
-      let totalShares = 0;
-      let totalCost = 0;
+      const today = new Date();
+
+      let buyQty = 0, buyAmt = 0, sellQty = 0, sellAmt = 0, divAmt = 0;
       const purchases: typeof txns = [];
       const sales: typeof txns = [];
+      const dividends: typeof txns = [];
 
       for (const t of txns) {
         const qty = Number(t.quantity ?? 0);
         const amt = Number(t.amount);
         if (amt < 0) {
-          totalShares += qty;
-          totalCost += Math.abs(amt);
-          purchases.push(t);
-        } else {
-          totalShares -= qty;
-          sales.push(t);
+          buyQty += qty; buyAmt += Math.abs(amt); purchases.push(t);
+        } else if (amt > 0 && qty < 0) {
+          sellQty += Math.abs(qty); sellAmt += amt; sales.push(t);
+        } else if (amt > 0 && (qty === 0 || qty === null)) {
+          divAmt += amt; dividends.push(t);
         }
       }
 
-      const avgCostPerShare = totalShares > 0 && totalCost > 0 ? totalCost / (purchases.reduce((s, t) => s + Number(t.quantity ?? 0), 0)) : null;
+      const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
+      const remainingQty = buyQty - sellQty;
+      const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
+      const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
+      const totalReturn = realizedGain + divAmt; // no live price = no unrealized
+      const firstDate = txns[0].date;
+      const daysHeld = firstDate
+        ? Math.floor((today.getTime() - new Date(String(firstDate)).getTime()) / 86400000)
+        : null;
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
+        note: "unrealizedGain requires live prices — not available in MCP.",
         holding: holdingName,
-        totalTransactions: txns.length,
+        // Position
+        currentShares: Math.round(remainingQty * 10000) / 10000,
+        avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
+        currentCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
+        lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
+        // Performance
+        realizedGain: Math.round(realizedGain * 100) / 100,
+        realizedGainPct: buyAmt > 0 ? Math.round((realizedGain / buyAmt) * 10000) / 100 : null,
+        dividendsReceived: Math.round(divAmt * 100) / 100,
+        totalReturn: Math.round(totalReturn * 100) / 100,
+        totalReturnPct: buyAmt > 0 ? Math.round((totalReturn / buyAmt) * 10000) / 100 : null,
+        // Time
+        firstPurchaseDate: firstDate,
+        lastActivity: txns[txns.length - 1].date,
+        daysHeld,
+        // Transaction counts
         purchases: purchases.length,
         sales: sales.length,
-        currentShares: Math.round(totalShares * 10000) / 10000,
-        totalCostBasis: Math.round(totalCost * 100) / 100,
-        avgCostPerShare: avgCostPerShare ? Math.round(avgCostPerShare * 100) / 100 : null,
-        firstPurchase: txns[0].date,
-        lastActivity: txns[txns.length - 1].date,
-        recentTransactions: txns.slice(-5).map(t => ({
-          date: t.date, amount: t.amount, quantity: t.quantity, account: t.account_name,
+        dividendPayments: dividends.length,
+        totalTransactions: txns.length,
+        // Recent history
+        recentTransactions: txns.slice(-8).map(t => ({
+          date: t.date,
+          amount: t.amount,
+          quantity: t.quantity,
+          type: Number(t.amount) < 0 ? "buy" : (Number(t.quantity ?? 0) < 0 ? "sell" : "dividend"),
+          account: t.account_name,
+          note: t.note || undefined,
         })),
+      });
+    }
+  );
+
+  // ── get_holding_metrics ────────────────────────────────────────────────────
+  server.tool(
+    "get_holding_metrics",
+    "Compact metrics table for all holdings (or specified symbols): quantity, avg cost, cost basis, realized P&L, dividends, total return",
+    {
+      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols (omit for all)"),
+    },
+    async ({ symbols }) => {
+      const metrics = await q(db, sql`
+        SELECT
+          portfolio_holding as name,
+          SUM(CASE WHEN amount < 0 THEN quantity ELSE 0 END) as buy_qty,
+          SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as buy_amount,
+          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN ABS(quantity) ELSE 0 END) as sell_qty,
+          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN amount ELSE 0 END) as sell_amount,
+          SUM(CASE WHEN amount > 0 AND (quantity = 0 OR quantity IS NULL) THEN amount ELSE 0 END) as dividends,
+          MIN(CASE WHEN amount < 0 THEN date ELSE NULL END) as first_purchase
+        FROM transactions
+        WHERE user_id = ${userId} AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
+        GROUP BY portfolio_holding
+        ORDER BY buy_amount DESC
+      `);
+
+      const ph = await q(db, sql`
+        SELECT ph.name, ph.symbol, ph.currency, a.name as account_name
+        FROM portfolio_holdings ph
+        JOIN accounts a ON a.id = ph.account_id
+        WHERE ph.user_id = ${userId}
+      `);
+      const phMap = new Map(ph.map(p => [String(p.name), p]));
+
+      const today = new Date();
+      const rows = [];
+      let totCostBasis = 0, totRealized = 0, totDivs = 0;
+
+      for (const m of metrics) {
+        const name = String(m.name);
+        // Filter if symbols specified
+        if (symbols?.length) {
+          const lo = symbols.map(s => s.toLowerCase());
+          const info2 = phMap.get(name);
+          const sym = String(info2?.symbol ?? "").toLowerCase();
+          if (!lo.some(s => name.toLowerCase().includes(s) || sym.includes(s))) continue;
+        }
+
+        const buyQty = Number(m.buy_qty ?? 0);
+        const buyAmt = Number(m.buy_amount ?? 0);
+        const sellQty = Number(m.sell_qty ?? 0);
+        const sellAmt = Number(m.sell_amount ?? 0);
+        const divs = Number(m.dividends ?? 0);
+        const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
+        const remainQty = buyQty - sellQty;
+        const costBasis = avgCost !== null && remainQty > 0 ? remainQty * avgCost : null;
+        const realGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
+        const totalRet = realGain + divs;
+        const fpDate = m.first_purchase ?? null;
+        const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
+        const info = phMap.get(name);
+
+        totCostBasis += costBasis ?? 0;
+        totRealized += realGain;
+        totDivs += divs;
+
+        rows.push({
+          name,
+          symbol: info?.symbol ?? null,
+          account: info?.account_name ?? null,
+          qty: Math.round(remainQty * 10000) / 10000,
+          avgCost: avgCost ? Math.round(avgCost * 100) / 100 : null,
+          costBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
+          lifetimeCost: Math.round(buyAmt * 100) / 100,
+          realizedGain: Math.round(realGain * 100) / 100,
+          dividends: Math.round(divs * 100) / 100,
+          totalReturn: Math.round(totalRet * 100) / 100,
+          returnPct: buyAmt > 0 ? Math.round((totalRet / buyAmt) * 10000) / 100 : null,
+          firstPurchase: fpDate,
+          daysHeld,
+        });
+      }
+
+      const totReturn = totRealized + totDivs;
+      const totLifetime = rows.reduce((s, r) => s + r.lifetimeCost, 0);
+
+      return text({
+        disclaimer: PORTFOLIO_DISCLAIMER,
+        note: "currentPrice and unrealizedGain require live prices — not available in MCP.",
+        totalHoldings: rows.length,
+        summary: {
+          totalCostBasis: Math.round(totCostBasis * 100) / 100,
+          totalRealizedGain: Math.round(totRealized * 100) / 100,
+          totalDividends: Math.round(totDivs * 100) / 100,
+          totalReturn: Math.round(totReturn * 100) / 100,
+          returnPct: totLifetime > 0 ? Math.round((totReturn / totLifetime) * 10000) / 100 : null,
+        },
+        holdings: rows,
       });
     }
   );
