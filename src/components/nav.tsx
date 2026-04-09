@@ -36,6 +36,7 @@ import {
   ArrowRightLeft,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { FinlynqLogo } from "@/components/FinlynqLogo";
 
 type NavItem = { href: string; label: string; icon: LucideIcon; color: string; mode?: "prod" | "dev" };
 
@@ -204,9 +205,8 @@ export function Nav() {
     >
       {/* Logo */}
       <Link href="/dashboard" className={cn("flex items-center gap-3 py-5 mb-2 group/logo", collapsed ? "px-3 justify-center" : "px-5")}>
-        <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 shadow-lg shadow-indigo-500/30 shrink-0 transition-transform duration-300 group-hover/logo:scale-110 group-hover/logo:shadow-indigo-500/40">
-          <span className="text-sm font-bold text-white tracking-tight">FL</span>
-          <div className="absolute inset-0 rounded-xl bg-gradient-to-br from-white/20 to-transparent" />
+        <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-card/50 shrink-0 transition-transform duration-300 group-hover/logo:scale-110">
+          <FinlynqLogo size={28} />
         </div>
         {!collapsed && (
           <div className="overflow-hidden">

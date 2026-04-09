@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { FinlynqLogo } from "@/components/FinlynqLogo";
 import {
   ArrowRight,
   Shield,
@@ -205,8 +206,8 @@ export default function LandingPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3.5">
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2.5 group">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 shadow-md shadow-indigo-500/25 transition-all group-hover:shadow-indigo-500/40 group-hover:scale-105">
-              <span className="text-xs font-bold text-white tracking-tight">FL</span>
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl transition-all group-hover:scale-105">
+              <FinlynqLogo size={28} />
             </div>
             <span className="text-sm font-semibold tracking-tight">Finlynq</span>
           </Link>
@@ -707,8 +708,8 @@ export default function LandingPage() {
             {/* Brand */}
             <div className="col-span-2">
               <Link href="/" className="flex items-center gap-2.5 mb-4 group w-fit">
-                <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600">
-                  <span className="text-xs font-bold text-white">FL</span>
+                <div className="flex h-8 w-8 items-center justify-center rounded-xl">
+                  <FinlynqLogo size={28} />
                 </div>
                 <span className="text-sm font-semibold tracking-tight">Finlynq</span>
               </Link>
