@@ -16,6 +16,9 @@ import {
   Globe,
   Code2,
   DollarSign,
+  Key,
+  AlertTriangle,
+  EyeOff,
 } from "lucide-react";
 
 /* ─── Data ─────────────────────────────────────────────────────────────────── */
@@ -262,8 +265,9 @@ export default function LandingPage() {
 
           {/* Subheadline */}
           <p className="anim-fade-up anim-delay-2 mx-auto mb-10 max-w-2xl text-lg sm:text-xl text-muted-foreground leading-relaxed font-normal">
-            The personal finance app built for the AI era. Import your bank transactions,
-            connect Claude or Cursor, and ask questions about your money in plain English.
+            The personal finance app built for the AI era. Encrypted, private, and yours —
+            import your bank data, connect Claude or Cursor, and ask questions about your
+            money in plain English.
           </p>
 
           {/* CTAs */}
@@ -460,6 +464,122 @@ export default function LandingPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Privacy & Security ─────────────────────────────────────────────── */}
+      <section id="security" className="bg-muted/30 border-y border-border/50">
+        <div className="mx-auto max-w-6xl px-5 py-24">
+          <div className="text-center mb-16">
+            <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3 opacity-70">Privacy First</p>
+            <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-foreground leading-tight">
+              Bank-grade encryption. Zero-knowledge.{" "}
+              <span className="text-gradient">Truly private.</span>
+            </h2>
+            <p className="mt-4 text-lg text-muted-foreground max-w-xl mx-auto leading-relaxed">
+              Your financial data is encrypted with your password before it ever touches our servers.
+              We designed the system so we mathematically cannot read it.
+            </p>
+          </div>
+
+          {/* Encryption flow diagram */}
+          <div className="flex flex-wrap items-center justify-center gap-3 mb-14 text-sm font-medium">
+            {[
+              { icon: Key, label: "Your Password", color: "text-indigo-500", bg: "bg-indigo-50 dark:bg-indigo-500/10 border-indigo-100 dark:border-indigo-500/20" },
+              { icon: null, label: "→", color: "text-muted-foreground/40", bg: "" },
+              { icon: Lock, label: "Derive Key", color: "text-violet-500", bg: "bg-violet-50 dark:bg-violet-500/10 border-violet-100 dark:border-violet-500/20" },
+              { icon: null, label: "→", color: "text-muted-foreground/40", bg: "" },
+              { icon: Shield, label: "AES-256 Encrypt", color: "text-emerald-500", bg: "bg-emerald-50 dark:bg-emerald-500/10 border-emerald-100 dark:border-emerald-500/20" },
+              { icon: null, label: "→", color: "text-muted-foreground/40", bg: "" },
+              { icon: EyeOff, label: "Stored Encrypted", color: "text-rose-500", bg: "bg-rose-50 dark:bg-rose-500/10 border-rose-100 dark:border-rose-500/20" },
+            ].map((item, i) =>
+              item.icon ? (
+                <div key={i} className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 ${item.bg}`}>
+                  <item.icon className={`h-4 w-4 ${item.color}`} />
+                  <span className={`text-sm font-medium ${item.color}`}>{item.label}</span>
+                </div>
+              ) : (
+                <span key={i} className={`text-xl font-light ${item.color}`}>{item.label}</span>
+              )
+            )}
+          </div>
+
+          {/* Feature cards */}
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4">
+            {/* AES-256 */}
+            <div className="group relative rounded-2xl border border-indigo-100 dark:border-indigo-500/20 bg-card p-7 card-hover gradient-border transition-all">
+              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-100 dark:border-indigo-500/20 transition-transform group-hover:scale-110">
+                <Shield className="h-5 w-5 text-indigo-500" />
+              </div>
+              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">AES-256 Encryption</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                The same standard used by banks and governments. All your financial data is encrypted
+                before it touches any storage — in transit and at rest.
+              </p>
+            </div>
+
+            {/* Your password is the key */}
+            <div className="group relative rounded-2xl border border-violet-100 dark:border-violet-500/20 bg-card p-7 card-hover gradient-border transition-all">
+              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-violet-50 dark:bg-violet-500/10 border border-violet-100 dark:border-violet-500/20 transition-transform group-hover:scale-110">
+                <Key className="h-5 w-5 text-violet-500" />
+              </div>
+              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">Your Password Is The Key</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Your encryption key is derived from your password using PBKDF2. Finlynq never sees
+                your passphrase or your plaintext data — not even in memory on our servers.
+              </p>
+            </div>
+
+            {/* Zero-knowledge */}
+            <div className="group relative rounded-2xl border border-emerald-100 dark:border-emerald-500/20 bg-card p-7 card-hover gradient-border transition-all">
+              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-100 dark:border-emerald-500/20 transition-transform group-hover:scale-110">
+                <EyeOff className="h-5 w-5 text-emerald-500" />
+              </div>
+              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">Zero-Knowledge Architecture</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                We designed the system so we <em>cannot</em> see your transactions, balances, or accounts.
+                It&apos;s mathematically impossible for Finlynq to read your data without your password.
+              </p>
+            </div>
+
+            {/* Open source / self-host */}
+            <div className="group relative rounded-2xl border border-cyan-100 dark:border-cyan-500/20 bg-card p-7 card-hover gradient-border transition-all">
+              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-50 dark:bg-cyan-500/10 border border-cyan-100 dark:border-cyan-500/20 transition-transform group-hover:scale-110">
+                <Globe className="h-5 w-5 text-cyan-500" />
+              </div>
+              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">Self-Host for Free</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Don&apos;t trust the cloud? Run the entire app on your own server or local machine.
+                Your data never leaves your hardware. Free forever with full feature access.
+              </p>
+            </div>
+          </div>
+
+          {/* Warning box */}
+          <div className="mt-8 rounded-2xl border border-amber-300/60 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-500/8 p-6 sm:p-8 flex flex-col sm:flex-row gap-5 items-start">
+            <div className="shrink-0 flex h-11 w-11 items-center justify-center rounded-xl bg-amber-100 dark:bg-amber-500/20 border border-amber-200 dark:border-amber-500/30">
+              <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-[15px] font-semibold text-amber-900 dark:text-amber-300">
+                Password Recovery Is Impossible — By Design
+              </h3>
+              <p className="text-sm text-amber-800/80 dark:text-amber-400/80 leading-relaxed">
+                Because only you hold the encryption key, if you lose your password your data is
+                permanently inaccessible. Even Finlynq cannot recover it. This is a feature, not a bug —
+                it&apos;s what makes your data truly private.{" "}
+                <strong className="font-semibold text-amber-900 dark:text-amber-300">
+                  Write your password down and store it somewhere safe.
+                </strong>
+              </p>
+              <p className="text-sm text-amber-700/70 dark:text-amber-400/70 leading-relaxed">
+                <strong className="font-medium text-amber-900 dark:text-amber-300">Your escape hatch:</strong>{" "}
+                You can always download a full backup of your data from Settings → Privacy &amp; Backup.
+                If you ever lose your password, reset your account and restore from your backup file —
+                you never permanently lose your data as long as you have a backup.
+              </p>
             </div>
           </div>
         </div>
