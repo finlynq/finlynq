@@ -10,6 +10,7 @@ function CloudAuthPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialTab = searchParams.get("tab") === "register" ? "register" : "login";
+  const redirectTo = searchParams.get("redirect") ?? "/dashboard";
   const [tab, setTab] = useState<Tab>(initialTab);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -40,7 +41,7 @@ function CloudAuthPageInner() {
         setMfaPendingToken(data.mfaPendingToken);
         return;
       }
-      router.push("/dashboard");
+      router.push(redirectTo);
       router.refresh();
     } catch {
       setError("Something went wrong. Please try again.");
@@ -64,7 +65,7 @@ function CloudAuthPageInner() {
         setError(data.error || "Verification failed");
         return;
       }
-      router.push("/dashboard");
+      router.push(redirectTo);
       router.refresh();
     } catch {
       setError("Something went wrong. Please try again.");
@@ -88,7 +89,7 @@ function CloudAuthPageInner() {
         setError(data.error || "Registration failed");
         return;
       }
-      router.push("/dashboard");
+      router.push(redirectTo);
       router.refresh();
     } catch {
       setError("Something went wrong. Please try again.");

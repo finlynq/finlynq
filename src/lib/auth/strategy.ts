@@ -17,7 +17,7 @@ export interface AuthContext {
   /** User ID for scoping all data queries */
   userId: string;
   /** Authentication method that produced this context */
-  method: "passphrase" | "account" | "api_key";
+  method: "passphrase" | "account" | "api_key" | "oauth";
   /** Whether MFA has been verified for this session */
   mfaVerified: boolean;
 }

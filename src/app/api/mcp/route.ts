@@ -6,43 +6,81 @@
  * remote MCP connector and most other clients.
  *
  * Auth (checked in order):
- *   1. Authorization: Bearer pf_<key>   ← Claude custom connector / Cursor
- *   2. X-API-Key: pf_<key>              ← direct API key header
- *   3. ?token=pf_<key>                  ← URL query parameter
- *   4. Session cookie                   ← browser session (same as app routes)
+ *   1. Authorization: Bearer pf_oauth_<token>  ← OAuth 2.1 access token
+ *   2. Authorization: Bearer pf_<key>          ← API key (Claude custom connector)
+ *   3. X-API-Key: pf_<key>                     ← direct API key header
+ *   4. ?token=pf_<key>                         ← URL query parameter
+ *   5. Session cookie                          ← browser session
  */
 
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { getDialect, getConnection } from "@/db";
 import { db } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { accountStrategy } from "@/lib/auth/require-auth";
+import { validateOauthToken, getIssuer } from "@/lib/oauth";
 import { registerCoreTools } from "../../../../mcp-server/register-core-tools";
 import { registerV2Tools } from "../../../../mcp-server/tools-v2";
 import { registerPgTools } from "../../../../mcp-server/register-tools-pg";
 
 /**
- * Authenticate with API key first; fall back to session cookie for browser access.
+ * Authenticate for MCP: OAuth token > API key > session cookie.
  */
 async function authenticateMcp(request: NextRequest) {
-  const auth = request.headers.get("authorization") ?? "";
+  const authHeader = request.headers.get("authorization") ?? "";
+  const urlToken = request.nextUrl.searchParams.get("token") ?? "";
+
+  // 1. OAuth 2.1 access token (pf_oauth_...)
+  const oauthCandidate = authHeader.startsWith("Bearer pf_oauth_") ? authHeader.slice(7) : null;
+  if (oauthCandidate) {
+    const result = await validateOauthToken(oauthCandidate);
+    if (result) {
+      return {
+        authenticated: true as const,
+        context: { userId: result.userId, method: "oauth" as const, mfaVerified: false },
+      };
+    }
+    // Token looks like OAuth but failed validation — return 401 with WWW-Authenticate
+    const issuer = getIssuer();
+    return {
+      authenticated: false as const,
+      response: NextResponse.json(
+        { error: "invalid_token", error_description: "OAuth access token is invalid or expired" },
+        { status: 401, headers: { "WWW-Authenticate": `Bearer realm="${issuer}", error="invalid_token"` } }
+      ),
+    };
+  }
+
+  // 2 & 3. API key (pf_...) or X-API-Key header or ?token=
   const hasApiKey =
     request.headers.get("X-API-Key") ||
-    auth.startsWith("Bearer pf_") ||
-    (request.nextUrl.searchParams.get("token") ?? "").startsWith("pf_");
+    authHeader.startsWith("Bearer pf_") ||
+    urlToken.startsWith("pf_");
 
   if (hasApiKey) {
     return requireAuth(request);
   }
 
-  // No API key — try session cookie (browser / in-app use)
+  // 4. Session cookie
   const sessionResult = await accountStrategy.authenticate(request);
   if (sessionResult.authenticated) return sessionResult;
 
-  // Fall back to normal requireAuth which will return the appropriate 401
-  return requireAuth(request);
+  // Nothing matched — return 401 with WWW-Authenticate pointing to OAuth
+  const issuer = getIssuer();
+  return {
+    authenticated: false as const,
+    response: NextResponse.json(
+      { error: "unauthorized", error_description: "Authentication required" },
+      {
+        status: 401,
+        headers: {
+          "WWW-Authenticate": `Bearer realm="${issuer}", resource_metadata="${issuer}/api/mcp/.well-known/oauth-protected-resource"`,
+        },
+      }
+    ),
+  };
 }
 
 // POST — MCP messages (initialize + tool calls)
@@ -72,11 +110,17 @@ export async function POST(request: NextRequest) {
   return transport.handleRequest(request);
 }
 
-// GET — not used in stateless mode; return 405 with helpful message
+// GET — return 401 with WWW-Authenticate so MCP clients can discover OAuth endpoints
 export async function GET() {
-  return Response.json(
-    { error: "Finlynq MCP runs in stateless mode. Use POST requests only." },
-    { status: 405, headers: { Allow: "POST" } }
+  const issuer = getIssuer();
+  return NextResponse.json(
+    { error: "Finlynq MCP requires authentication. Use POST with a valid Bearer token." },
+    {
+      status: 401,
+      headers: {
+        "WWW-Authenticate": `Bearer realm="${issuer}", resource_metadata="${issuer}/api/mcp/.well-known/oauth-protected-resource"`,
+      },
+    }
   );
 }
 

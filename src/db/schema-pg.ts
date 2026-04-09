@@ -284,3 +284,31 @@ export const transactionSplits = pgTable("transaction_splits", {
   description: text("description").default(""),
   tags: text("tags").default(""),
 });
+
+// ─── OAuth 2.1 Tables ──────────────────────────────────────────────────────
+
+/** Short-lived authorization codes issued during the OAuth authorize flow */
+export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  code: text("code").notNull().unique(),
+  codeChallenge: text("code_challenge").notNull(),
+  codeChallengeMethod: text("code_challenge_method").notNull().default("S256"),
+  redirectUri: text("redirect_uri").notNull(),
+  clientId: text("client_id").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  used: integer("used").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+});
+
+/** Long-lived access + refresh token pairs issued after code exchange */
+export const oauthAccessTokens = pgTable("oauth_access_tokens", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  token: text("token").notNull().unique(),
+  refreshToken: text("refresh_token").notNull().unique(),
+  clientId: text("client_id").notNull(),
+  expiresAt: text("expires_at").notNull(),        // 1 hour
+  refreshExpiresAt: text("refresh_expires_at").notNull(), // 30 days
+  createdAt: text("created_at").notNull(),
+});
