@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
       eq(schema.transactions.userId, userId),
       sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
     ))
-    .all();
+    ;
 
   const detected = detectRecurringTransactions(
     txns.map((t) => ({

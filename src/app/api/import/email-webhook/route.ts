@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
       .select()
       .from(schema.importTemplates)
       .where(eq(schema.importTemplates.userId, userId))
-      .all();
+      ;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const templates = (templateRows as any[]).map(deserializeTemplate);
 

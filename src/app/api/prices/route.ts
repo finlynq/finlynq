@@ -19,7 +19,7 @@ export async function GET(request: NextRequest) {
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
     .where(eq(schema.portfolioHoldings.userId, userId))
-    .all();
+    ;
 
   const symbols = holdings.map((h) => h.symbol).filter(Boolean) as string[];
   const quotes = await fetchMultipleQuotes(symbols);

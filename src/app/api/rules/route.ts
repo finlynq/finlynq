@@ -54,7 +54,7 @@ export async function GET(request: NextRequest) {
     .leftJoin(categories, eq(transactionRules.assignCategoryId, categories.id))
     .where(eq(transactionRules.userId, userId))
     .orderBy(asc(transactionRules.priority))
-    .all();
+    ;
 
   return NextResponse.json(rules);
 }

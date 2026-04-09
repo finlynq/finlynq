@@ -60,7 +60,7 @@ function parseDateRange(msg: string): { start: string; end: string; label: strin
 }
 
 async function findCategoryName(msg: string): Promise<string | null> {
-  const cats = await db.select({ name: schema.categories.name }).from(schema.categories).all();
+  const cats = await db.select({ name: schema.categories.name }).from(schema.categories);
   const lower = msg.toLowerCase();
   // Match longest category name first to avoid partial matches
   const sorted = cats.sort((a, b) => String(b.name).length - String(a.name).length);
@@ -71,7 +71,7 @@ async function findCategoryName(msg: string): Promise<string | null> {
 }
 
 async function findAccountName(msg: string): Promise<string | null> {
-  const accs = await db.select({ name: schema.accounts.name }).from(schema.accounts).all();
+  const accs = await db.select({ name: schema.accounts.name }).from(schema.accounts);
   const lower = msg.toLowerCase();
   const sorted = accs.sort((a, b) => String(b.name).length - String(a.name).length);
   for (const a of sorted) {
@@ -97,7 +97,7 @@ const handleNetWorth: IntentHandler = async () => {
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
     .groupBy(schema.accounts.id, schema.accounts.name, schema.accounts.type, schema.accounts.group, schema.accounts.currency)
     .orderBy(schema.accounts.type, schema.accounts.group)
-    .all();
+    ;
 
   let assets = 0;
   let liabilities = 0;
@@ -166,7 +166,7 @@ const handleSpending: IntentHandler = async (msg) => {
     )
     .groupBy(schema.categories.id, schema.categories.name)
     .orderBy(sql`SUM(${schema.transactions.amount}) ASC`)
-    .all();
+    ;
 
   const total = spending.reduce((s, c) => s + Math.abs(c.total), 0);
   const chartData = spending.map((c) => ({
@@ -215,7 +215,7 @@ const handleBalance: IntentHandler = async (msg) => {
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
     .groupBy(schema.accounts.id, schema.accounts.name, schema.accounts.type, schema.accounts.currency)
     .orderBy(schema.accounts.type, schema.accounts.name)
-    .all();
+    ;
 
   const lines = balances
     .filter((b) => Math.abs(b.balance) > 0.01)
@@ -248,7 +248,7 @@ const handleBudget: IntentHandler = async (msg) => {
     .from(schema.budgets)
     .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
     .where(eq(schema.budgets.month, month))
-    .all();
+    ;
 
   if (budgetRows.length === 0) {
     return { text: `You don't have any budgets set for ${getMonthLabel(month)}.` };
@@ -346,7 +346,7 @@ const handleTransactions: IntentHandler = async (msg) => {
       )
       .orderBy(asc(schema.transactions.amount))
       .limit(5)
-      .all();
+      ;
 
     if (result.length === 0) return { text: `No expenses found during ${range.label}.` };
 
@@ -399,7 +399,7 @@ const handleTransactions: IntentHandler = async (msg) => {
     .where(and(...conditions))
     .orderBy(desc(schema.transactions.date))
     .limit(10)
-    .all();
+    ;
 
   if (txns.length === 0) {
     return { text: searchTerm ? `No transactions matching "${searchTerm}" found.` : `No transactions found for ${range.label}.` };
@@ -447,7 +447,7 @@ const handleTrends: IntentHandler = async (msg) => {
         )
       )
       .groupBy(schema.categories.type)
-      .all();
+      ;
 
     const income = result.find((r) => r.type === "I")?.total ?? 0;
     const expenses = Math.abs(result.find((r) => r.type === "E")?.total ?? 0);
@@ -490,7 +490,7 @@ const handleGoals: IntentHandler = async (msg) => {
     })
     .from(schema.goals)
     .where(eq(schema.goals.status, "active"))
-    .all();
+    ;
 
   if (goals.length === 0) {
     return { text: "You don't have any active goals. Head to the Goals page to create one!" };
@@ -546,7 +546,7 @@ const handleForecast: IntentHandler = async (msg) => {
       .select({ id: schema.accounts.id })
       .from(schema.accounts)
       .where(sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`)
-      .all();
+      ;
 
     let currentBalance = 0;
     for (const ba of bankAccounts) {
@@ -578,7 +578,7 @@ const handleForecast: IntentHandler = async (msg) => {
     .from(schema.recurringTransactions)
     .where(eq(schema.recurringTransactions.active, 1))
     .orderBy(schema.recurringTransactions.nextDate)
-    .all();
+    ;
 
   if (recurring.length === 0) {
     return { text: "No upcoming recurring bills found. You can set them up on the Calendar page." };
@@ -620,7 +620,7 @@ const handleSummary: IntentHandler = async () => {
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
     .groupBy(schema.accounts.id, schema.accounts.type)
-    .all();
+    ;
 
   let assets = 0, liabilities = 0;
   for (const b of balances) {
@@ -645,7 +645,7 @@ const handleSummary: IntentHandler = async () => {
       )
     )
     .groupBy(schema.categories.type)
-    .all();
+    ;
 
   const income = monthResult.find((r) => r.type === "I")?.total ?? 0;
   const expenses = Math.abs(monthResult.find((r) => r.type === "E")?.total ?? 0);
@@ -659,7 +659,7 @@ const handleSummary: IntentHandler = async () => {
     .get();
 
   // Budgets over
-  const budgetRows = await db.select().from(schema.budgets).where(eq(schema.budgets.month, month)).all();
+  const budgetRows = await db.select().from(schema.budgets).where(eq(schema.budgets.month, month));
   let overBudgetCount = 0;
   for (const b of budgetRows) {
     const spent = await db

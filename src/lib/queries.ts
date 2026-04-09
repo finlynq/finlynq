@@ -13,7 +13,7 @@ function monthExpr(dateCol: typeof transactions.date | typeof transactions.date)
 
 // Accounts
 export async function getAccounts(userId: string) {
-  return db.select().from(accounts).where(eq(accounts.userId, userId)).orderBy(accounts.type, accounts.group, accounts.name).all();
+  return db.select().from(accounts).where(eq(accounts.userId, userId)).orderBy(accounts.type, accounts.group, accounts.name);
 }
 
 export async function getAccountById(id: number, userId: string) {
@@ -34,7 +34,7 @@ export async function deleteAccount(id: number, userId: string) {
 
 // Categories
 export async function getCategories(userId: string) {
-  return db.select().from(categories).where(eq(categories.userId, userId)).orderBy(categories.type, categories.group, categories.name).all();
+  return db.select().from(categories).where(eq(categories.userId, userId)).orderBy(categories.type, categories.group, categories.name);
 }
 
 export async function getCategoryById(id: number, userId: string) {
@@ -104,7 +104,7 @@ export async function getTransactions(userId: string, filters?: {
     .limit(filters?.limit ?? 100)
     .offset(filters?.offset ?? 0);
 
-  return query.all();
+  return query;
 }
 
 export async function getTransactionCount(userId: string, filters?: {
@@ -190,7 +190,7 @@ export async function getPortfolioHoldings(userId: string) {
     .leftJoin(accounts, eq(portfolioHoldings.accountId, accounts.id))
     .where(eq(portfolioHoldings.userId, userId))
     .orderBy(accounts.name, portfolioHoldings.name)
-    .all();
+    ;
 }
 
 // Budgets
@@ -212,7 +212,7 @@ export async function getBudgets(userId: string, month?: string) {
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .where(and(...conditions))
     .orderBy(categories.group, categories.name)
-    .all();
+    ;
 }
 
 export async function upsertBudget(userId: string, data: { categoryId: number; month: string; amount: number; currency?: string }) {
@@ -250,7 +250,7 @@ export async function getBudgetTemplates(userId: string) {
     .leftJoin(categories, eq(budgetTemplates.categoryId, categories.id))
     .where(eq(budgetTemplates.userId, userId))
     .orderBy(budgetTemplates.name)
-    .all();
+    ;
 }
 
 export async function createBudgetTemplate(userId: string, data: { name: string; categoryId: number; amount: number }) {
@@ -316,7 +316,7 @@ export async function getAccountBalances(userId: string) {
     .where(eq(accounts.userId, userId))
     .groupBy(accounts.id, accounts.name, accounts.type, accounts.group, accounts.currency)
     .orderBy(accounts.type, accounts.group, accounts.name)
-    .all();
+    ;
 }
 
 export async function getMonthlySpending(userId: string, startDate: string, endDate: string) {
@@ -333,7 +333,7 @@ export async function getMonthlySpending(userId: string, startDate: string, endD
     .where(and(eq(transactions.userId, userId), gte(transactions.date, startDate), lte(transactions.date, endDate)))
     .groupBy(monthExpr(transactions.date), categories.name, categories.group, categories.type)
     .orderBy(monthExpr(transactions.date))
-    .all();
+    ;
 }
 
 export async function getSpendingByCategory(userId: string, startDate: string, endDate: string) {
@@ -357,7 +357,7 @@ export async function getSpendingByCategory(userId: string, startDate: string, e
     )
     .groupBy(categories.id, categories.name, categories.group, categories.type)
     .orderBy(sql`SUM(${transactions.amount})`)
-    .all();
+    ;
 }
 
 export async function getSpendingByCategoryAndCurrency(userId: string, startDate: string, endDate: string) {
@@ -382,7 +382,7 @@ export async function getSpendingByCategoryAndCurrency(userId: string, startDate
     )
     .groupBy(categories.id, categories.name, categories.group, categories.type, transactions.currency)
     .orderBy(sql`SUM(${transactions.amount})`)
-    .all();
+    ;
 }
 
 export async function getIncomeVsExpenses(userId: string, startDate: string, endDate: string) {
@@ -404,7 +404,7 @@ export async function getIncomeVsExpenses(userId: string, startDate: string, end
     )
     .groupBy(monthExpr(transactions.date), categories.type)
     .orderBy(monthExpr(transactions.date))
-    .all();
+    ;
 }
 
 export async function getNetWorthOverTime(userId: string) {
@@ -419,5 +419,5 @@ export async function getNetWorthOverTime(userId: string) {
     .where(eq(transactions.userId, userId))
     .groupBy(monthExpr(transactions.date), accounts.currency)
     .orderBy(monthExpr(transactions.date))
-    .all();
+    ;
 }

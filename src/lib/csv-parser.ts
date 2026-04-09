@@ -470,10 +470,10 @@ export async function importTransactions(csvText: string, userId?: string) {
   let skippedDuplicates = 0;
   const batchSize = 500;
 
-  const allAccounts = await db.select().from(schema.accounts).all();
+  const allAccounts = await db.select().from(schema.accounts);
   const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
 
-  const allCategories = await db.select().from(schema.categories).all();
+  const allCategories = await db.select().from(schema.categories);
   const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
 
   for (let i = 0; i < rows.length; i += batchSize) {

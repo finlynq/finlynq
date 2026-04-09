@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
       .select()
       .from(schema.transactions)
       .where(and(isNull(schema.transactions.importHash), eq(schema.transactions.userId, userId)))
-      .all();
+      ;
 
     let updated = 0;
     const batchSize = 500;

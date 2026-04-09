@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
       .where(and(...conditions))
       .groupBy(schema.categories.id, schema.categories.type, schema.categories.group, schema.categories.name, schema.transactions.currency)
       .orderBy(schema.categories.type, schema.categories.group)
-      .all();
+      ;
 
     // Aggregate across currencies per category
     const categoryTotals = new Map<string, { categoryType: string; categoryGroup: string; categoryName: string; total: number; count: number }>();
@@ -96,7 +96,7 @@ export async function GET(request: NextRequest) {
       .where(eq(schema.accounts.userId, userId))
       .groupBy(schema.accounts.id, schema.accounts.type, schema.accounts.group, schema.accounts.name, schema.accounts.currency)
       .orderBy(schema.accounts.type, schema.accounts.group)
-      .all();
+      ;
 
     const converted = balances.map((b) => ({
       ...b,
@@ -148,7 +148,7 @@ export async function GET(request: NextRequest) {
         )
       )
       .groupBy(schema.categories.id, schema.categories.group, schema.categories.name, schema.transactions.currency)
-      .all();
+      ;
 
     // Aggregate across currencies per category
     const categoryTotals = new Map<string, { group: string; category: string; total: number; isIncome: boolean }>();

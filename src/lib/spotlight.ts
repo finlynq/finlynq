@@ -53,7 +53,7 @@ async function getOverspentBudgets(userId: string): Promise<SpotlightItem[]> {
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
     .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
     .groupBy(budgets.id, categories.name, budgets.amount)
-    .all();
+    ;
 
   const items: SpotlightItem[] = [];
   for (const row of rows) {
@@ -91,7 +91,7 @@ async function getUpcomingLargeBills(userId: string): Promise<SpotlightItem[]> {
         lte(subscriptions.nextDate, weekAhead)
       )
     )
-    .all();
+    ;
 
   const items: SpotlightItem[] = [];
   for (const sub of subs) {
@@ -123,7 +123,7 @@ async function getGoalDeadlines(userId: string): Promise<SpotlightItem[]> {
     })
     .from(goals)
     .where(and(eq(goals.userId, userId), eq(goals.status, "active")))
-    .all();
+    ;
 
   const items: SpotlightItem[] = [];
   for (const goal of goalRows) {
@@ -186,7 +186,7 @@ async function getSpendingAnomalies(userId: string): Promise<SpotlightItem[]> {
       )
     )
     .groupBy(categories.id, categories.name)
-    .all();
+    ;
 
   const prevSpend = await db
     .select({
@@ -204,7 +204,7 @@ async function getSpendingAnomalies(userId: string): Promise<SpotlightItem[]> {
       )
     )
     .groupBy(categories.id)
-    .all();
+    ;
 
   const prevMap = new Map(prevSpend.map((r) => [r.categoryId, r.avgTotal]));
 
@@ -277,7 +277,7 @@ async function getLowBalances(userId: string): Promise<SpotlightItem[]> {
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
     .where(and(eq(accounts.userId, userId), eq(accounts.type, "A")))
     .groupBy(accounts.id, accounts.name, accounts.type)
-    .all();
+    ;
 
   const items: SpotlightItem[] = [];
   for (const row of rows) {
@@ -317,7 +317,7 @@ async function getUpcomingSubscriptions(userId: string): Promise<SpotlightItem[]
         lte(subscriptions.nextDate, weekAhead)
       )
     )
-    .all();
+    ;
 
   return subs
     .filter((s) => Math.abs(s.amount) < 100)

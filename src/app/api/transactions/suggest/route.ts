@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
           sql`${transactions.payee} IS NOT NULL AND ${transactions.payee} != '' AND ${transactions.categoryId} IS NOT NULL`
         )
       )
-      .all();
+      ;
 
     const suggestedCategoryId = suggestCategory(payee, existing);
 

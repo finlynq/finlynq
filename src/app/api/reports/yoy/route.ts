@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
         )
       )
       .groupBy(schema.categories.id, schema.categories.name, schema.categories.type, schema.categories.group)
-      .all();
+      ;
   }
 
   // Monthly totals for each year
@@ -52,7 +52,7 @@ export async function GET(request: NextRequest) {
         )
       )
       .groupBy(sql`SUBSTR(${schema.transactions.date}, 6, 2)`, schema.categories.type)
-      .all();
+      ;
   }
 
   const cat1 = await getCategoryTotals(year1);

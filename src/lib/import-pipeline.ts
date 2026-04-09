@@ -35,10 +35,10 @@ export interface ImportResult {
 const MAX_IMPORT_ROWS = 50_000;
 
 async function buildLookups() {
-  const allAccounts = await db.select().from(schema.accounts).all();
+  const allAccounts = await db.select().from(schema.accounts);
   const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
   const accountCurrencyMap = new Map(allAccounts.map((a) => [a.name, a.currency]));
-  const allCategories = await db.select().from(schema.categories).all();
+  const allCategories = await db.select().from(schema.categories);
   const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
   return { accountMap, accountCurrencyMap, categoryMap };
 }
@@ -250,7 +250,7 @@ export async function executeImport(
       .select()
       .from(schema.transactionRules)
       .where(eq(schema.transactionRules.isActive, 1))
-      .all() as TransactionRule[];
+       as TransactionRule[];
 
     if (activeRules.length > 0) {
       const uncategorized = toInsert.filter((r) => !r.categoryId);

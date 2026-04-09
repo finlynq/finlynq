@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
     .leftJoin(schema.accounts, eq(schema.snapshots.accountId, schema.accounts.id))
     .where(eq(schema.snapshots.userId, userId))
     .orderBy(desc(schema.snapshots.date))
-    .all();
+    ;
   return NextResponse.json(data);
 }
 

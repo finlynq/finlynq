@@ -7,7 +7,7 @@ import { safeErrorMessage } from "@/lib/validate";
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const targets = await db.select().from(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).all();
+  const targets = await db.select().from(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId));
 
   // Get portfolio holdings with cached prices
   const holdings = await db
@@ -21,10 +21,10 @@ export async function GET(request: NextRequest) {
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
     .where(eq(schema.portfolioHoldings.userId, userId))
-    .all();
+    ;
 
   // Get latest cached prices
-  const prices = await db.select().from(schema.priceCache).where(eq(schema.priceCache.userId, userId)).all();
+  const prices = await db.select().from(schema.priceCache).where(eq(schema.priceCache.userId, userId));
   const priceMap = new Map<string, number>();
   for (const p of prices) {
     const sym = String(p.symbol);

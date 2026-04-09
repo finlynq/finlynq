@@ -29,7 +29,7 @@ export async function checkDuplicates(hashes: string[]): Promise<Set<string>> {
       .select({ hash: schema.transactions.importHash })
       .from(schema.transactions)
       .where(inArray(schema.transactions.importHash, batch))
-      .all();
+      ;
     for (const row of rows) {
       if (row.hash) existing.add(row.hash);
     }
@@ -54,7 +54,7 @@ export async function checkFitIdDuplicates(fitIds: string[]): Promise<Set<string
       .select({ fitId: schema.transactions.fitId })
       .from(schema.transactions)
       .where(inArray(schema.transactions.fitId, batch))
-      .all();
+      ;
     for (const row of rows) {
       if (row.fitId) existing.add(row.fitId);
     }

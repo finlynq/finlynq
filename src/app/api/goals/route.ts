@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
     .leftJoin(schema.accounts, eq(schema.goals.accountId, schema.accounts.id))
     .where(eq(schema.goals.userId, userId))
     .orderBy(schema.goals.priority, schema.goals.name)
-    .all();
+    ;
 
   // Calculate current amount from linked account balances
   const withProgress = goals.map((g) => {

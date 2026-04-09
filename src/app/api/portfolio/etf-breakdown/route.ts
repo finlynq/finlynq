@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
       .from(schema.portfolioHoldings)
       .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
       .where(eq(schema.portfolioHoldings.userId, userId))
-      .all();
+      ;
 
     const availableSymbols = new Set(getAvailableEtfSymbols());
 

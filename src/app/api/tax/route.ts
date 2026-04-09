@@ -18,7 +18,7 @@ export async function GET(request: NextRequest) {
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
   // Get contribution room records
-  const contributions = await db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)).all();
+  const contributions = await db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId));
 
   // Get holdings for asset location advice
   const holdings = await db
@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
     .where(eq(schema.portfolioHoldings.userId, userId))
-    .all();
+    ;
 
   const advice = getAssetLocationAdvice(
     holdings.map((h) => ({

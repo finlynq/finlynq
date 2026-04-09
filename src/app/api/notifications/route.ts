@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
     .where(eq(schema.notifications.userId, userId))
     .orderBy(desc(schema.notifications.createdAt))
     .limit(50)
-    .all();
+    ;
 
   const unreadCount = db
     .select({ count: sql<number>`COUNT(*)` })
@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
         .leftJoin(schema.transactions, eq(schema.transactions.categoryId, schema.categories.id))
         .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId)))
         .groupBy(schema.budgets.id)
-        .all();
+        ;
 
       for (const b of budgets) {
         if (b.budgetAmount > 0) {

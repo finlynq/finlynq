@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
       .from(schema.portfolioHoldings)
       .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
       .where(eq(schema.portfolioHoldings.userId, userId))
-      .all();
+      ;
 
     // Filter to crypto holdings
     const CRYPTO_SYMBOLS = new Set([

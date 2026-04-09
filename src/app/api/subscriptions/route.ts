@@ -49,7 +49,7 @@ export async function GET(request: NextRequest) {
     .leftJoin(schema.accounts, eq(schema.subscriptions.accountId, schema.accounts.id))
     .where(eq(schema.subscriptions.userId, userId))
     .orderBy(schema.subscriptions.status, schema.subscriptions.name)
-    .all();
+    ;
 
   return NextResponse.json(subs);
 }
@@ -81,7 +81,7 @@ export async function POST(request: NextRequest) {
           eq(schema.transactions.userId, userId),
           sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
         ))
-        .all();
+        ;
 
       const detected = detectRecurringTransactions(
         txns.map((t) => ({
