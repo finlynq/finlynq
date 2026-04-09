@@ -45,6 +45,52 @@ function err(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
 }
 
+/** Fuzzy name → row match: exact → startsWith → contains → reverse-contains */
+function fuzzyFind(input: string, options: Row[]): Row | null {
+  if (!input || !options.length) return null;
+  const lo = input.toLowerCase().trim();
+  return (
+    options.find(o => String(o.name ?? "").toLowerCase() === lo) ??
+    options.find(o => String(o.name ?? "").toLowerCase().startsWith(lo)) ??
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => lo.includes(String(o.name ?? "").toLowerCase())) ??
+    null
+  );
+}
+
+/** Auto-categorize payee: transaction_rules → historical frequency */
+async function autoCategory(db: DbLike, userId: string, payee: string): Promise<number | null> {
+  if (!payee) return null;
+  const lo = `%${payee.toLowerCase()}%`;
+  const rules = await q(db, sql`
+    SELECT assign_category_id FROM transaction_rules
+    WHERE user_id = ${userId} AND is_active = 1
+      AND (LOWER(match_payee) LIKE ${lo} OR LOWER(${payee}) LIKE LOWER(match_payee))
+    ORDER BY priority DESC LIMIT 1
+  `);
+  if (rules.length && rules[0].assign_category_id) return Number(rules[0].assign_category_id);
+  const hist = await q(db, sql`
+    SELECT category_id, COUNT(*) as cnt FROM transactions
+    WHERE user_id = ${userId} AND LOWER(payee) = LOWER(${payee}) AND category_id IS NOT NULL
+    GROUP BY category_id ORDER BY cnt DESC LIMIT 1
+  `);
+  return hist.length ? Number(hist[0].category_id) : null;
+}
+
+/** Most-recently-used account for the user */
+async function defaultAccount(db: DbLike, userId: string): Promise<Row | null> {
+  const r = await q(db, sql`
+    SELECT a.id, a.name, a.currency FROM transactions t
+    JOIN accounts a ON a.id = t.account_id
+    WHERE t.user_id = ${userId}
+    ORDER BY t.date DESC, t.id DESC LIMIT 1
+  `);
+  return r.length ? r[0] : null;
+}
+
+const PORTFOLIO_DISCLAIMER =
+  "⚠️ DISCLAIMER: This analysis is for informational purposes only and does not constitute financial advice. Past performance is not indicative of future results. Consult a qualified financial advisor before making investment decisions.";
+
 // ─── registration ─────────────────────────────────────────────────────────────
 
 export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
@@ -853,6 +899,883 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
       `);
 
       return text({ success: true, accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})` });
+    }
+  );
+
+  // ── record_transaction ─────────────────────────────────────────────────────
+  server.tool(
+    "record_transaction",
+    "Record a transaction with smart defaults: fuzzy account/category matching, auto-categorize from payee, defaults to most-recent account.",
+    {
+      amount: z.number().describe("Amount (negative=expense, positive=income/transfer-in)"),
+      payee: z.string().describe("Payee or merchant name"),
+      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      account: z.string().optional().describe("Account name (default: most-recently-used)"),
+      category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
+      note: z.string().optional().describe("Optional note"),
+      tags: z.string().optional().describe("Comma-separated tags"),
+    },
+    async ({ amount, payee, date, account, category, note, tags }) => {
+      const today = new Date().toISOString().split("T")[0];
+      const txDate = date ?? today;
+
+      // Resolve account (fuzzy or MRU)
+      const allAccounts = await q(db, sql`SELECT id, name, currency FROM accounts WHERE user_id = ${userId}`);
+      let acct: Row | null = account ? fuzzyFind(account, allAccounts) : await defaultAccount(db, userId);
+      if (!acct) return err(account ? `Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}` : "No accounts found — create an account first.");
+
+      // Resolve category (fuzzy or auto)
+      let catId: number | null = null;
+      if (category) {
+        const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+        const cat = fuzzyFind(category, allCats);
+        if (!cat) return err(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
+        catId = Number(cat.id);
+      } else {
+        catId = await autoCategory(db, userId, payee);
+      }
+
+      const result = await q(db, sql`
+        INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags)
+        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${acct.currency}, ${amount}, ${payee}, ${note ?? ""}, ${tags ?? ""})
+        RETURNING id
+      `);
+
+      const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
+      return text({
+        success: true,
+        transactionId: result[0]?.id,
+        message: `Recorded: ${amount > 0 ? "+" : ""}${amount} on ${txDate} — "${payee}" → ${acct.name} (${catName})`,
+      });
+    }
+  );
+
+  // ── bulk_record_transactions ───────────────────────────────────────────────
+  server.tool(
+    "bulk_record_transactions",
+    "Record multiple transactions at once. Same smart defaults as record_transaction.",
+    {
+      transactions: z.array(z.object({
+        amount: z.number(),
+        payee: z.string(),
+        date: z.string().optional(),
+        account: z.string().optional(),
+        category: z.string().optional(),
+        note: z.string().optional(),
+        tags: z.string().optional(),
+      })).describe("Array of transactions to record"),
+    },
+    async ({ transactions }) => {
+      const today = new Date().toISOString().split("T")[0];
+      const allAccounts = await q(db, sql`SELECT id, name, currency FROM accounts WHERE user_id = ${userId}`);
+      const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+      const mru = await defaultAccount(db, userId);
+
+      const results: { index: number; success: boolean; message: string }[] = [];
+      for (let i = 0; i < transactions.length; i++) {
+        const t = transactions[i];
+        try {
+          const acct = t.account ? fuzzyFind(t.account, allAccounts) : mru;
+          if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
+
+          let catId: number | null = null;
+          if (t.category) {
+            const cat = fuzzyFind(t.category, allCats);
+            catId = cat ? Number(cat.id) : null;
+          } else {
+            catId = await autoCategory(db, userId, t.payee);
+          }
+
+          await db.execute(sql`
+            INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags)
+            VALUES (${userId}, ${t.date ?? today}, ${acct.id}, ${catId}, ${acct.currency}, ${t.amount}, ${t.payee}, ${t.note ?? ""}, ${t.tags ?? ""})
+          `);
+          results.push({ index: i, success: true, message: `${t.payee}: ${t.amount}` });
+        } catch (e) {
+          results.push({ index: i, success: false, message: String(e) });
+        }
+      }
+
+      const ok = results.filter(r => r.success).length;
+      return text({ imported: ok, failed: results.length - ok, results });
+    }
+  );
+
+  // ── update_transaction ─────────────────────────────────────────────────────
+  server.tool(
+    "update_transaction",
+    "Update fields of an existing transaction by ID",
+    {
+      id: z.number().describe("Transaction ID"),
+      date: z.string().optional(),
+      amount: z.number().optional(),
+      payee: z.string().optional(),
+      category: z.string().optional().describe("Category name (fuzzy matched)"),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async ({ id, date, amount, payee, category, note, tags }) => {
+      const existing = await q(db, sql`SELECT id FROM transactions WHERE user_id = ${userId} AND id = ${id}`);
+      if (!existing.length) return err(`Transaction #${id} not found`);
+
+      let catId: number | undefined;
+      if (category !== undefined) {
+        const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+        const cat = fuzzyFind(category, allCats);
+        if (!cat) return err(`Category "${category}" not found`);
+        catId = Number(cat.id);
+      }
+
+      // Build SET clause dynamically
+      const updates: string[] = [];
+      if (date !== undefined) updates.push(`date = '${date}'`);
+      if (amount !== undefined) updates.push(`amount = ${amount}`);
+      if (payee !== undefined) updates.push(`payee = '${payee.replace(/'/g, "''")}'`);
+      if (catId !== undefined) updates.push(`category_id = ${catId}`);
+      if (note !== undefined) updates.push(`note = '${note.replace(/'/g, "''")}'`);
+      if (tags !== undefined) updates.push(`tags = '${tags.replace(/'/g, "''")}'`);
+
+      if (!updates.length) return err("No fields to update");
+
+      await db.execute(sql`UPDATE transactions SET ${sql.raw(updates.join(", "))} WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, message: `Transaction #${id} updated (${updates.length} field(s))` });
+    }
+  );
+
+  // ── delete_transaction ─────────────────────────────────────────────────────
+  server.tool(
+    "delete_transaction",
+    "Permanently delete a transaction by ID",
+    {
+      id: z.number().describe("Transaction ID to delete"),
+    },
+    async ({ id }) => {
+      const existing = await q(db, sql`SELECT id, payee, amount, date FROM transactions WHERE user_id = ${userId} AND id = ${id}`);
+      if (!existing.length) return err(`Transaction #${id} not found`);
+      const t = existing[0];
+      await db.execute(sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}` });
+    }
+  );
+
+  // ── delete_budget ──────────────────────────────────────────────────────────
+  server.tool(
+    "delete_budget",
+    "Delete a budget entry for a category/month",
+    {
+      category: z.string().describe("Category name"),
+      month: z.string().describe("Month (YYYY-MM)"),
+    },
+    async ({ category, month }) => {
+      const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+      const cat = fuzzyFind(category, allCats);
+      if (!cat) return err(`Category "${category}" not found`);
+
+      const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
+      if (!existing.length) return err(`No budget found for "${cat.name}" in ${month}`);
+
+      await db.execute(sql`DELETE FROM budgets WHERE id = ${existing[0].id} AND user_id = ${userId}`);
+      return text({ success: true, message: `Budget deleted: ${cat.name} for ${month}` });
+    }
+  );
+
+  // ── update_account ─────────────────────────────────────────────────────────
+  server.tool(
+    "update_account",
+    "Update name, group, currency, or note of an account",
+    {
+      account: z.string().describe("Current account name (fuzzy matched)"),
+      name: z.string().optional().describe("New name"),
+      group: z.string().optional().describe("New group"),
+      currency: z.enum(["CAD", "USD"]).optional().describe("New currency"),
+      note: z.string().optional().describe("New note"),
+    },
+    async ({ account, name, group, currency, note }) => {
+      const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+      const acct = fuzzyFind(account, allAccounts);
+      if (!acct) return err(`Account "${account}" not found`);
+
+      const updates: string[] = [];
+      if (name !== undefined) updates.push(`name = '${name.replace(/'/g, "''")}'`);
+      if (group !== undefined) updates.push(`"group" = '${group.replace(/'/g, "''")}'`);
+      if (currency !== undefined) updates.push(`currency = '${currency}'`);
+      if (note !== undefined) updates.push(`note = '${note.replace(/'/g, "''")}'`);
+      if (!updates.length) return err("No fields to update");
+
+      await db.execute(sql`UPDATE accounts SET ${sql.raw(updates.join(", "))} WHERE id = ${acct.id} AND user_id = ${userId}`);
+      return text({ success: true, message: `Account "${acct.name}" updated` });
+    }
+  );
+
+  // ── delete_account ─────────────────────────────────────────────────────────
+  server.tool(
+    "delete_account",
+    "Delete an account (only if it has no transactions)",
+    {
+      account: z.string().describe("Account name (fuzzy matched)"),
+      force: z.boolean().optional().describe("Delete even if transactions exist (moves them to uncategorized)"),
+    },
+    async ({ account, force }) => {
+      const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+      const acct = fuzzyFind(account, allAccounts);
+      if (!acct) return err(`Account "${account}" not found`);
+
+      const txnCount = await q(db, sql`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ${userId} AND account_id = ${acct.id}`);
+      const count = Number(txnCount[0]?.cnt ?? 0);
+      if (count > 0 && !force) {
+        return err(`Account "${acct.name}" has ${count} transaction(s). Pass force=true to delete anyway.`);
+      }
+
+      await db.execute(sql`DELETE FROM accounts WHERE id = ${acct.id} AND user_id = ${userId}`);
+      return text({ success: true, message: `Account "${acct.name}" deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` });
+    }
+  );
+
+  // ── update_goal ────────────────────────────────────────────────────────────
+  server.tool(
+    "update_goal",
+    "Update a financial goal's target, deadline, or status",
+    {
+      goal: z.string().describe("Goal name (fuzzy matched)"),
+      target_amount: z.number().optional(),
+      deadline: z.string().optional().describe("YYYY-MM-DD"),
+      status: z.enum(["active", "completed", "paused"]).optional(),
+      name: z.string().optional().describe("Rename the goal"),
+    },
+    async ({ goal, target_amount, deadline, status, name }) => {
+      const allGoals = await q(db, sql`SELECT id, name FROM goals WHERE user_id = ${userId}`);
+      const g = fuzzyFind(goal, allGoals);
+      if (!g) return err(`Goal "${goal}" not found`);
+
+      const updates: string[] = [];
+      if (name !== undefined) updates.push(`name = '${name.replace(/'/g, "''")}'`);
+      if (target_amount !== undefined) updates.push(`target_amount = ${target_amount}`);
+      if (deadline !== undefined) updates.push(`deadline = '${deadline}'`);
+      if (status !== undefined) updates.push(`status = '${status}'`);
+      if (!updates.length) return err("No fields to update");
+
+      await db.execute(sql`UPDATE goals SET ${sql.raw(updates.join(", "))} WHERE id = ${g.id} AND user_id = ${userId}`);
+      return text({ success: true, message: `Goal "${g.name}" updated` });
+    }
+  );
+
+  // ── delete_goal ────────────────────────────────────────────────────────────
+  server.tool(
+    "delete_goal",
+    "Delete a financial goal by name",
+    {
+      goal: z.string().describe("Goal name (fuzzy matched)"),
+    },
+    async ({ goal }) => {
+      const allGoals = await q(db, sql`SELECT id, name FROM goals WHERE user_id = ${userId}`);
+      const g = fuzzyFind(goal, allGoals);
+      if (!g) return err(`Goal "${goal}" not found`);
+
+      await db.execute(sql`DELETE FROM goals WHERE id = ${g.id} AND user_id = ${userId}`);
+      return text({ success: true, message: `Goal "${g.name}" deleted` });
+    }
+  );
+
+  // ── create_category ────────────────────────────────────────────────────────
+  server.tool(
+    "create_category",
+    "Create a new transaction category",
+    {
+      name: z.string().describe("Category name (must be unique)"),
+      type: z.enum(["E", "I", "T"]).describe("Type: 'E'=expense, 'I'=income, 'T'=transfer"),
+      group: z.string().optional().describe("Group label (e.g. 'Housing', 'Food')"),
+      note: z.string().optional(),
+    },
+    async ({ name, type, group, note }) => {
+      const existing = await q(db, sql`SELECT id FROM categories WHERE user_id = ${userId} AND name = ${name}`);
+      if (existing.length) return err(`Category "${name}" already exists`);
+
+      const result = await q(db, sql`
+        INSERT INTO categories (user_id, name, type, "group", note)
+        VALUES (${userId}, ${name}, ${type}, ${group ?? ""}, ${note ?? ""})
+        RETURNING id
+      `);
+      return text({ success: true, categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` });
+    }
+  );
+
+  // ── create_rule ────────────────────────────────────────────────────────────
+  server.tool(
+    "create_rule",
+    "Create an auto-categorization rule for future imports",
+    {
+      match_payee: z.string().describe("Payee pattern to match (supports LIKE wildcards: %)"),
+      assign_category: z.string().describe("Category name to assign (fuzzy matched)"),
+      rename_to: z.string().optional().describe("Optionally rename matched payee to this"),
+      assign_tags: z.string().optional().describe("Tags to assign (comma-separated)"),
+      priority: z.number().optional().describe("Rule priority (higher = checked first, default 0)"),
+    },
+    async ({ match_payee, assign_category, rename_to, assign_tags, priority }) => {
+      const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+      const cat = fuzzyFind(assign_category, allCats);
+      if (!cat) return err(`Category "${assign_category}" not found`);
+
+      await db.execute(sql`
+        INSERT INTO transaction_rules (user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active)
+        VALUES (${userId}, ${match_payee}, ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, 1)
+      `);
+      return text({ success: true, message: `Rule created: "${match_payee}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` });
+    }
+  );
+
+  // ── add_snapshot ───────────────────────────────────────────────────────────
+  server.tool(
+    "add_snapshot",
+    "Record a net-worth snapshot for tracking wealth over time",
+    {
+      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      note: z.string().optional(),
+    },
+    async ({ date, note }) => {
+      const snapshotDate = date ?? new Date().toISOString().split("T")[0];
+      const balances = await q(db, sql`
+        SELECT a.currency, COALESCE(SUM(t.amount), 0) as balance
+        FROM accounts a
+        LEFT JOIN transactions t ON t.account_id = a.id AND t.user_id = ${userId}
+        WHERE a.user_id = ${userId}
+        GROUP BY a.id, a.currency
+      `);
+      const totalByCurrency: Record<string, number> = {};
+      for (const b of balances) {
+        totalByCurrency[b.currency] = (totalByCurrency[b.currency] ?? 0) + Number(b.balance);
+      }
+      await db.execute(sql`
+        INSERT INTO net_worth_snapshots (user_id, date, balances, note)
+        VALUES (${userId}, ${snapshotDate}, ${JSON.stringify(totalByCurrency)}, ${note ?? ""})
+      `);
+      return text({ success: true, date: snapshotDate, balances: totalByCurrency });
+    }
+  );
+
+  // ── apply_rules_to_uncategorized ───────────────────────────────────────────
+  server.tool(
+    "apply_rules_to_uncategorized",
+    "Run all active categorization rules against uncategorized transactions",
+    {
+      dry_run: z.boolean().optional().describe("Preview matches without saving (default false)"),
+      limit: z.number().optional().describe("Max transactions to process (default 500)"),
+    },
+    async ({ dry_run, limit }) => {
+      const maxRows = limit ?? 500;
+      const txns = await q(db, sql`
+        SELECT id, payee, amount FROM transactions
+        WHERE user_id = ${userId} AND (category_id IS NULL OR category_id = 0)
+        ORDER BY date DESC LIMIT ${maxRows}
+      `);
+      if (!txns.length) return text({ message: "No uncategorized transactions found", updated: 0 });
+
+      const rules = await q(db, sql`
+        SELECT match_payee, assign_category_id, rename_to, assign_tags, priority
+        FROM transaction_rules WHERE user_id = ${userId} AND is_active = 1
+        ORDER BY priority DESC
+      `);
+
+      let updated = 0;
+      const preview: { id: number; payee: string; categoryId: number }[] = [];
+
+      for (const txn of txns) {
+        for (const rule of rules) {
+          const pattern = String(rule.match_payee ?? "").toLowerCase().replace(/%/g, "");
+          if (String(txn.payee).toLowerCase().includes(pattern)) {
+            if (!dry_run) {
+              await db.execute(sql`
+                UPDATE transactions SET category_id = ${rule.assign_category_id}
+                ${rule.rename_to ? sql`, payee = ${rule.rename_to}` : sql``}
+                ${rule.assign_tags ? sql`, tags = ${rule.assign_tags}` : sql``}
+                WHERE id = ${txn.id} AND user_id = ${userId}
+              `);
+            }
+            preview.push({ id: Number(txn.id), payee: String(txn.payee), categoryId: Number(rule.assign_category_id) });
+            updated++;
+            break;
+          }
+        }
+      }
+
+      return text({
+        dry_run: dry_run ?? false,
+        updated,
+        scanned: txns.length,
+        matches: preview.slice(0, 20),
+        message: dry_run ? `Would update ${updated} of ${txns.length} transactions` : `Updated ${updated} of ${txns.length} transactions`,
+      });
+    }
+  );
+
+  // ── finlynq_help ───────────────────────────────────────────────────────────
+  server.tool(
+    "finlynq_help",
+    "Discover available tools, schema, and usage examples",
+    {
+      topic: z.enum(["tools", "schema", "examples", "write", "portfolio"]).optional().describe("Help topic (default: tools)"),
+      tool_name: z.string().optional().describe("Get help for a specific tool"),
+    },
+    async ({ topic, tool_name }) => {
+      if (tool_name) {
+        const docs: Record<string, string> = {
+          record_transaction: "record_transaction(amount, payee, date?, account?, category?, note?, tags?) — Smart defaults: account defaults to MRU, category auto-detected from payee rules/history.",
+          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Same smart defaults. Returns per-item success/failure.",
+          update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?) — Update any field by transaction ID.",
+          delete_transaction: "delete_transaction(id) — Permanently delete. Cannot be undone.",
+          set_budget: "set_budget(category, month, amount) — Upsert budget. month=YYYY-MM.",
+          delete_budget: "delete_budget(category, month) — Remove budget entry.",
+          add_account: "add_account(name, type, group?, currency?, note?) — type: 'A'=asset, 'L'=liability.",
+          update_account: "update_account(account, name?, group?, currency?, note?) — Fuzzy account name.",
+          delete_account: "delete_account(account, force?) — force=true to delete with transactions.",
+          add_goal: "add_goal(name, type, target_amount, deadline?, account?) — type: savings|debt_payoff|investment|emergency_fund.",
+          update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?) — status: active|completed|paused.",
+          delete_goal: "delete_goal(goal) — Fuzzy goal name.",
+          create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'T'=transfer.",
+          create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?) — match_payee supports % wildcards.",
+          apply_rules_to_uncategorized: "apply_rules_to_uncategorized(dry_run?, limit?) — Batch-apply rules to uncategorized transactions.",
+          get_portfolio_analysis: "get_portfolio_analysis() — Holdings + allocation by asset class/currency. Includes disclaimer.",
+          compare_to_benchmark: "compare_to_benchmark(benchmark?) — Compare portfolio vs index. benchmark: SP500|TSX|MSCI_WORLD.",
+        };
+        return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
+      }
+
+      const t = topic ?? "tools";
+
+      if (t === "tools") {
+        return text({
+          read_tools: ["get_account_balances", "get_transactions", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_net_worth_trend", "get_goals", "get_portfolio_summary", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
+          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "add_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized", "categorize_transaction"],
+          portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_rebalancing_suggestions", "get_investment_insights", "compare_to_benchmark"],
+          tip: "Use tool_name='record_transaction' for detailed usage of any tool",
+        });
+      }
+
+      if (t === "write") {
+        return text({
+          primary_add: "record_transaction — smart defaults, fuzzy matching",
+          bulk_add: "bulk_record_transactions — array of transactions",
+          edits: ["update_transaction(id, ...fields)", "delete_transaction(id)", "categorize_transaction(id, category)"],
+          budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
+          accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
+          goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
+          categories: ["create_category(name, type)", "create_rule(match_payee, assign_category)"],
+          note: "All name inputs use fuzzy matching — partial names work",
+        });
+      }
+
+      if (t === "schema") {
+        return text({
+          key_tables: {
+            transactions: "id, user_id, date, account_id, category_id, currency, amount, payee, note, tags, import_hash, fit_id",
+            accounts: "id, user_id, type(A/L), group, name, currency, note",
+            categories: "id, user_id, type(E/I/T), group, name, note",
+            budgets: "id, user_id, category_id, month(YYYY-MM), amount, currency",
+            goals: "id, user_id, name, type, target_amount, current_amount, deadline, status, account_id",
+            transaction_rules: "id, user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active",
+            portfolio_holdings: "id, user_id, account_id, name, symbol, currency, note",
+          },
+          amount_convention: "Negative=expense/debit, Positive=income/credit",
+          date_format: "YYYY-MM-DD strings",
+        });
+      }
+
+      if (t === "examples") {
+        return text({
+          examples: [
+            { task: "Log a coffee purchase", call: 'record_transaction(amount=-5.50, payee="Tim Hortons")' },
+            { task: "Log salary deposit", call: 'record_transaction(amount=3500, payee="Employer", category="Salary")' },
+            { task: "Import bank statement rows", call: "bulk_record_transactions([{amount, payee, date, account}, ...])" },
+            { task: "Set grocery budget", call: 'set_budget(category="Groceries", month="2026-04", amount=600)' },
+            { task: "Fix wrong category", call: 'categorize_transaction(transaction_id=42, category="Restaurants")' },
+            { task: "Auto-categorize backlog", call: "apply_rules_to_uncategorized(dry_run=true)" },
+            { task: "Create savings goal", call: 'add_goal(name="Emergency Fund", type="emergency_fund", target_amount=10000)' },
+            { task: "Analyze investments", call: "get_portfolio_analysis()" },
+          ],
+        });
+      }
+
+      if (t === "portfolio") {
+        return text({
+          tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_rebalancing_suggestions", "get_investment_insights", "compare_to_benchmark"],
+          disclaimer: PORTFOLIO_DISCLAIMER,
+          note: "All portfolio tools return a disclaimer field. Not financial advice.",
+        });
+      }
+
+      return text({ error: "Unknown topic" });
+    }
+  );
+
+  // ── get_portfolio_analysis ─────────────────────────────────────────────────
+  server.tool(
+    "get_portfolio_analysis",
+    "Portfolio holdings with allocation breakdown by asset class and currency",
+    {},
+    async () => {
+      const holdings = await q(db, sql`
+        SELECT ph.id, ph.name, ph.symbol, ph.currency, ph.note,
+               a.name as account_name, a.type as account_type,
+               COALESCE(SUM(t.quantity), 0) as total_quantity,
+               COALESCE(SUM(t.amount), 0) as book_value
+        FROM portfolio_holdings ph
+        JOIN accounts a ON a.id = ph.account_id
+        LEFT JOIN transactions t ON t.portfolio_holding = ph.name AND t.user_id = ${userId}
+        WHERE ph.user_id = ${userId}
+        GROUP BY ph.id, ph.name, ph.symbol, ph.currency, ph.note, a.name, a.type
+        ORDER BY ABS(COALESCE(SUM(t.amount), 0)) DESC
+      `);
+
+      const byCurrency: Record<string, number> = {};
+      const byAccount: Record<string, number> = {};
+      let totalBookValue = 0;
+
+      for (const h of holdings) {
+        const bv = Math.abs(Number(h.book_value));
+        byCurrency[h.currency] = (byCurrency[h.currency] ?? 0) + bv;
+        byAccount[h.account_name] = (byAccount[h.account_name] ?? 0) + bv;
+        totalBookValue += bv;
+      }
+
+      const allocationByCurrency = Object.entries(byCurrency).map(([currency, value]) => ({
+        currency,
+        value: Math.round(value * 100) / 100,
+        pct: totalBookValue > 0 ? Math.round((value / totalBookValue) * 1000) / 10 : 0,
+      }));
+
+      return text({
+        disclaimer: PORTFOLIO_DISCLAIMER,
+        totalHoldings: holdings.length,
+        totalBookValue: Math.round(totalBookValue * 100) / 100,
+        holdings: holdings.map(h => ({
+          name: h.name,
+          symbol: h.symbol,
+          account: h.account_name,
+          currency: h.currency,
+          quantity: Number(h.total_quantity),
+          bookValue: Math.round(Math.abs(Number(h.book_value)) * 100) / 100,
+          pct: totalBookValue > 0 ? Math.round((Math.abs(Number(h.book_value)) / totalBookValue) * 1000) / 10 : 0,
+        })),
+        allocationByCurrency,
+        allocationByAccount: Object.entries(byAccount).map(([account, value]) => ({
+          account,
+          value: Math.round(value * 100) / 100,
+          pct: totalBookValue > 0 ? Math.round((value / totalBookValue) * 1000) / 10 : 0,
+        })),
+      });
+    }
+  );
+
+  // ── get_portfolio_performance ──────────────────────────────────────────────
+  server.tool(
+    "get_portfolio_performance",
+    "Portfolio performance: cost basis, realized/unrealized P&L by holding",
+    {
+      period: z.enum(["1m", "3m", "6m", "1y", "all"]).optional().describe("Lookback period (default: all)"),
+    },
+    async ({ period }) => {
+      const cutoff: Record<string, string> = {
+        "1m": new Date(Date.now() - 30 * 86400000).toISOString().split("T")[0],
+        "3m": new Date(Date.now() - 90 * 86400000).toISOString().split("T")[0],
+        "6m": new Date(Date.now() - 180 * 86400000).toISOString().split("T")[0],
+        "1y": new Date(Date.now() - 365 * 86400000).toISOString().split("T")[0],
+        "all": "1900-01-01",
+      };
+      const since = cutoff[period ?? "all"];
+
+      const perf = await q(db, sql`
+        SELECT
+          t.portfolio_holding as holding,
+          COUNT(*) as tx_count,
+          SUM(CASE WHEN t.amount < 0 THEN ABS(t.amount) ELSE 0 END) as cost_basis,
+          SUM(CASE WHEN t.amount > 0 THEN t.amount ELSE 0 END) as proceeds,
+          SUM(t.quantity) as net_quantity,
+          SUM(t.amount) as net_cashflow,
+          MIN(t.date) as first_purchase,
+          MAX(t.date) as last_activity
+        FROM transactions t
+        WHERE t.user_id = ${userId}
+          AND t.portfolio_holding IS NOT NULL
+          AND t.portfolio_holding != ''
+          AND t.date >= ${since}
+        GROUP BY t.portfolio_holding
+        ORDER BY cost_basis DESC
+      `);
+
+      const results = perf.map(p => {
+        const costBasis = Number(p.cost_basis ?? 0);
+        const proceeds = Number(p.proceeds ?? 0);
+        const realizedPnl = proceeds - costBasis;
+        return {
+          holding: p.holding,
+          txCount: Number(p.tx_count),
+          costBasis: Math.round(costBasis * 100) / 100,
+          proceeds: Math.round(proceeds * 100) / 100,
+          realizedPnL: Math.round(realizedPnl * 100) / 100,
+          realizedPnLPct: costBasis > 0 ? Math.round((realizedPnl / costBasis) * 1000) / 10 : null,
+          netQuantity: Number(p.net_quantity ?? 0),
+          firstPurchase: p.first_purchase,
+          lastActivity: p.last_activity,
+        };
+      });
+
+      const totalCost = results.reduce((s, r) => s + r.costBasis, 0);
+      const totalProceeds = results.reduce((s, r) => s + r.proceeds, 0);
+
+      return text({
+        disclaimer: PORTFOLIO_DISCLAIMER,
+        period: period ?? "all",
+        since,
+        summary: {
+          holdings: results.length,
+          totalCostBasis: Math.round(totalCost * 100) / 100,
+          totalProceeds: Math.round(totalProceeds * 100) / 100,
+          totalRealizedPnL: Math.round((totalProceeds - totalCost) * 100) / 100,
+        },
+        holdings: results,
+      });
+    }
+  );
+
+  // ── analyze_holding ────────────────────────────────────────────────────────
+  server.tool(
+    "analyze_holding",
+    "Deep-dive analysis of a single holding: transaction history, avg cost, P&L",
+    {
+      symbol: z.string().describe("Holding name or symbol (fuzzy matched)"),
+    },
+    async ({ symbol }) => {
+      const lo = `%${symbol.toLowerCase()}%`;
+      const txns = await q(db, sql`
+        SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.portfolio_holding,
+               a.name as account_name, a.currency
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        WHERE t.user_id = ${userId}
+          AND (LOWER(t.portfolio_holding) LIKE ${lo} OR LOWER(t.payee) LIKE ${lo})
+        ORDER BY t.date ASC
+      `);
+
+      if (!txns.length) return err(`No transactions found for holding matching "${symbol}"`);
+
+      const holdingName = txns[0].portfolio_holding || txns[0].payee;
+      let totalShares = 0;
+      let totalCost = 0;
+      const purchases: typeof txns = [];
+      const sales: typeof txns = [];
+
+      for (const t of txns) {
+        const qty = Number(t.quantity ?? 0);
+        const amt = Number(t.amount);
+        if (amt < 0) {
+          totalShares += qty;
+          totalCost += Math.abs(amt);
+          purchases.push(t);
+        } else {
+          totalShares -= qty;
+          sales.push(t);
+        }
+      }
+
+      const avgCostPerShare = totalShares > 0 && totalCost > 0 ? totalCost / (purchases.reduce((s, t) => s + Number(t.quantity ?? 0), 0)) : null;
+
+      return text({
+        disclaimer: PORTFOLIO_DISCLAIMER,
+        holding: holdingName,
+        totalTransactions: txns.length,
+        purchases: purchases.length,
+        sales: sales.length,
+        currentShares: Math.round(totalShares * 10000) / 10000,
+        totalCostBasis: Math.round(totalCost * 100) / 100,
+        avgCostPerShare: avgCostPerShare ? Math.round(avgCostPerShare * 100) / 100 : null,
+        firstPurchase: txns[0].date,
+        lastActivity: txns[txns.length - 1].date,
+        recentTransactions: txns.slice(-5).map(t => ({
+          date: t.date, amount: t.amount, quantity: t.quantity, account: t.account_name,
+        })),
+      });
+    }
+  );
+
+  // ── get_rebalancing_suggestions ────────────────────────────────────────────
+  server.tool(
+    "get_rebalancing_suggestions",
+    "Suggest rebalancing based on target allocations vs current book-value weights",
+    {
+      targets: z.array(z.object({
+        holding: z.string().describe("Holding name or symbol"),
+        target_pct: z.number().describe("Target allocation percentage (0-100)"),
+      })).describe("Target allocations (must sum to ~100)"),
+    },
+    async ({ targets }) => {
+      const holdings = await q(db, sql`
+        SELECT t.portfolio_holding as name,
+               SUM(ABS(t.amount)) as book_value,
+               a.currency
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        WHERE t.user_id = ${userId}
+          AND t.portfolio_holding IS NOT NULL AND t.portfolio_holding != ''
+          AND t.amount < 0
+        GROUP BY t.portfolio_holding, a.currency
+      `);
+
+      const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
+      if (totalBV === 0) return err("No portfolio holdings found");
+
+      const currentAlloc = new Map(holdings.map(h => [
+        String(h.name).toLowerCase(),
+        { name: h.name, value: Number(h.book_value), pct: (Number(h.book_value) / totalBV) * 100 }
+      ]));
+
+      const suggestions = targets.map(t => {
+        const lo = t.holding.toLowerCase();
+        const current = [...currentAlloc.entries()].find(([k]) => k.includes(lo) || lo.includes(k))?.[1];
+        const currentPct = current?.pct ?? 0;
+        const currentValue = current?.value ?? 0;
+        const targetValue = (t.target_pct / 100) * totalBV;
+        const diff = targetValue - currentValue;
+        return {
+          holding: t.holding,
+          currentPct: Math.round(currentPct * 10) / 10,
+          targetPct: t.target_pct,
+          currentValue: Math.round(currentValue * 100) / 100,
+          targetValue: Math.round(targetValue * 100) / 100,
+          action: diff > 0 ? "BUY" : diff < 0 ? "SELL" : "HOLD",
+          amount: Math.round(Math.abs(diff) * 100) / 100,
+        };
+      });
+
+      return text({
+        disclaimer: PORTFOLIO_DISCLAIMER,
+        totalPortfolioValue: Math.round(totalBV * 100) / 100,
+        suggestions,
+        note: "Values based on book cost, not market price. Get current prices for accurate rebalancing.",
+      });
+    }
+  );
+
+  // ── get_investment_insights ────────────────────────────────────────────────
+  server.tool(
+    "get_investment_insights",
+    "Investment patterns: contribution frequency, largest positions, diversification score",
+    {},
+    async () => {
+      const contributions = await q(db, sql`
+        SELECT DATE_TRUNC('month', date::date) as month, SUM(ABS(amount)) as invested
+        FROM transactions
+        WHERE user_id = ${userId} AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+        GROUP BY DATE_TRUNC('month', date::date)
+        ORDER BY month DESC LIMIT 12
+      `);
+
+      const positions = await q(db, sql`
+        SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value, COUNT(*) as purchases
+        FROM transactions
+        WHERE user_id = ${userId} AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+        GROUP BY portfolio_holding
+        ORDER BY book_value DESC
+      `);
+
+      const totalInvested = positions.reduce((s, p) => s + Number(p.book_value), 0);
+      const top3Pct = positions.slice(0, 3).reduce((s, p) => s + Number(p.book_value), 0) / (totalInvested || 1);
+      const diversificationScore = Math.max(0, Math.round((1 - top3Pct) * 100));
+
+      const avgMonthlyContrib = contributions.length > 0
+        ? contributions.reduce((s, c) => s + Number(c.invested), 0) / contributions.length
+        : 0;
+
+      return text({
+        disclaimer: PORTFOLIO_DISCLAIMER,
+        summary: {
+          totalPositions: positions.length,
+          totalInvested: Math.round(totalInvested * 100) / 100,
+          avgMonthlyContribution: Math.round(avgMonthlyContrib * 100) / 100,
+          diversificationScore,
+          diversificationLabel: diversificationScore > 70 ? "Well diversified" : diversificationScore > 40 ? "Moderately diversified" : "Concentrated",
+          concentration: `Top 3 positions = ${Math.round(top3Pct * 1000) / 10}% of portfolio`,
+        },
+        topPositions: positions.slice(0, 5).map(p => ({
+          name: p.name,
+          bookValue: Math.round(Number(p.book_value) * 100) / 100,
+          pct: Math.round((Number(p.book_value) / totalInvested) * 1000) / 10,
+          purchases: Number(p.purchases),
+        })),
+        monthlyContributions: contributions.slice(0, 6).map(c => ({
+          month: c.month,
+          invested: Math.round(Number(c.invested) * 100) / 100,
+        })),
+      });
+    }
+  );
+
+  // ── compare_to_benchmark ───────────────────────────────────────────────────
+  server.tool(
+    "compare_to_benchmark",
+    "Compare portfolio book-value growth to a reference benchmark (informational only)",
+    {
+      benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional().describe("Benchmark to compare against (default SP500)"),
+    },
+    async ({ benchmark }) => {
+      const bm = benchmark ?? "SP500";
+      // Approximate annualized returns (10-year historical averages, informational only)
+      const bmReturns: Record<string, { label: string; annualizedReturn: number; description: string }> = {
+        SP500:      { label: "S&P 500",           annualizedReturn: 10.5, description: "US large-cap equities (USD)" },
+        TSX:        { label: "S&P/TSX Composite",  annualizedReturn: 8.2,  description: "Canadian equities (CAD)" },
+        MSCI_WORLD: { label: "MSCI World",          annualizedReturn: 9.4,  description: "Global developed markets (USD)" },
+        BONDS_CA:   { label: "Canadian Bonds",      annualizedReturn: 3.8,  description: "Canadian aggregate bonds (CAD)" },
+      };
+      const bmInfo = bmReturns[bm];
+
+      const firstTxn = await q(db, sql`
+        SELECT MIN(date) as first_date, MAX(date) as last_date,
+               SUM(ABS(amount)) as total_invested,
+               SUM(amount) as net_cashflow
+        FROM transactions
+        WHERE user_id = ${userId}
+          AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
+          AND amount < 0
+      `);
+
+      if (!firstTxn.length || !firstTxn[0].first_date) {
+        return text({ disclaimer: PORTFOLIO_DISCLAIMER, message: "No investment transactions found" });
+      }
+
+      const info = firstTxn[0];
+      const firstDate = new Date(String(info.first_date));
+      const lastDate = new Date(String(info.last_date));
+      const yearsHeld = Math.max(0.1, (lastDate.getTime() - firstDate.getTime()) / (365.25 * 86400000));
+      const totalInvested = Number(info.total_invested);
+
+      // What totalInvested would be worth today at benchmark's annualized return
+      const benchmarkFinalValue = totalInvested * Math.pow(1 + bmInfo.annualizedReturn / 100, yearsHeld);
+      const benchmarkGain = benchmarkFinalValue - totalInvested;
+
+      return text({
+        disclaimer: PORTFOLIO_DISCLAIMER,
+        note: "Comparison uses book cost (not market value) and historical average returns. This is illustrative only.",
+        yourPortfolio: {
+          totalInvested: Math.round(totalInvested * 100) / 100,
+          investingSince: info.first_date,
+          yearsInvesting: Math.round(yearsHeld * 10) / 10,
+        },
+        benchmark: {
+          name: bmInfo.label,
+          description: bmInfo.description,
+          historicalAnnualizedReturn: `${bmInfo.annualizedReturn}%`,
+          period: "10-year historical average (approximate)",
+        },
+        hypothetical: {
+          message: `If your total invested ($${Math.round(totalInvested)} over ${Math.round(yearsHeld * 10) / 10} years) had earned ${bmInfo.annualizedReturn}% annually:`,
+          finalValue: Math.round(benchmarkFinalValue * 100) / 100,
+          gain: Math.round(benchmarkGain * 100) / 100,
+          gainPct: Math.round((benchmarkGain / totalInvested) * 1000) / 10,
+        },
+        limitations: [
+          "Book cost ≠ market value — add current prices for real comparison",
+          "Dollar-cost averaging timing not accounted for precisely",
+          "Benchmark returns exclude fees, taxes, and currency conversion",
+        ],
+      });
     }
   );
 }
