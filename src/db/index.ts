@@ -62,8 +62,11 @@ function wrapPgBuilder(obj: any): any {
   if (!obj || typeof obj !== "object") return obj;
   return new Proxy(obj, {
     get(target, prop) {
-      // .all() in PG mode: just return the awaitable query builder itself
-      if (prop === "all") return () => target;
+      // .all() in PG mode: execute the query and return a real Promise<rows[]>.
+      // Using async/await here (rather than () => target) ensures the return value
+      // is always a concrete Promise that resolves to an array, never a bare thenable.
+      // This prevents "x.map is not a function" when callers don't double-await.
+      if (prop === "all") return async () => { const rows = await target; return Array.isArray(rows) ? rows : (rows as { rows?: unknown[] }).rows ?? []; };
       // .get() in PG mode: execute and return first row
       if (prop === "get") return async () => { const rows = await target; return rows[0] ?? undefined; };
       const val = Reflect.get(target, prop);

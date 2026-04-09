@@ -62,13 +62,23 @@ chown -R paperclip-agent:paperclip-agent .next || true
 echo "==> Restarting $SERVICE_NAME service..."
 sudo systemctl restart "$SERVICE_NAME"
 
-# 6. Wait and verify
+# 6. Wait and verify service started
 sleep 3
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-  echo "==> $SERVICE_NAME is running"
-  echo "==> Deploy completed successfully at $(date)"
-else
+if ! systemctl is-active --quiet "$SERVICE_NAME"; then
   echo "==> ERROR: $SERVICE_NAME failed to start!"
   sudo systemctl status "$SERVICE_NAME" --no-pager
   exit 1
 fi
+echo "==> $SERVICE_NAME is running"
+
+# 7. Health check — confirm the app is serving requests
+echo "==> Running health check..."
+sleep 2
+APP_PORT=$(sudo systemctl show "$SERVICE_NAME" -p Environment --value 2>/dev/null | tr ' ' '\n' | grep '^PORT=' | cut -d= -f2 || echo "3000")
+HEALTH_URL="http://localhost:${APP_PORT}/api/healthz"
+if curl -fs --max-time 10 "$HEALTH_URL" -o /dev/null; then
+  echo "==> Health check passed ($HEALTH_URL)"
+else
+  echo "==> Warning: health check at $HEALTH_URL did not respond (app may still be warming up)"
+fi
+echo "==> Deploy completed successfully at $(date)"

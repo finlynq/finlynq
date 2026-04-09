@@ -37,8 +37,7 @@ export async function GET(request: NextRequest) {
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
     .where(eq(schema.portfolioHoldings.userId, userId))
-    .orderBy(schema.accounts.name, schema.portfolioHoldings.name)
-    .all();
+    .orderBy(schema.accounts.name, schema.portfolioHoldings.name);
 
   // 2. Classify holdings
   const cryptoHoldings = holdings.filter(h => {
@@ -95,8 +94,7 @@ export async function GET(request: NextRequest) {
     })
     .from(schema.transactions)
     .where(and(isNotNull(schema.transactions.portfolioHolding), eq(schema.transactions.userId, userId)))
-    .groupBy(schema.transactions.portfolioHolding)
-    .all();
+    .groupBy(schema.transactions.portfolioHolding);
 
   type TxMetrics = {
     qty: number;
