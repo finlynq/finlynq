@@ -246,11 +246,10 @@ export async function executeImport(
 
   // Auto-categorize uncategorized transactions using rules
   try {
-    const activeRules = await db
+    const activeRules = (await db
       .select()
       .from(schema.transactionRules)
-      .where(eq(schema.transactionRules.isActive, 1))
-       as TransactionRule[];
+      .where(eq(schema.transactionRules.isActive, 1))) as unknown as TransactionRule[];
 
     if (activeRules.length > 0) {
       const uncategorized = toInsert.filter((r) => !r.categoryId);
