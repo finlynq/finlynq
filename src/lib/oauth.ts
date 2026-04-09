@@ -187,3 +187,70 @@ export function isValidRedirectUri(uri: string): boolean {
     return false;
   }
 }
+
+// ─── Dynamic Client Registration (RFC 7591) ──────────────────────────────────
+
+export interface ClientRegistrationInput {
+  client_name?: string;
+  redirect_uris?: string[];
+  grant_types?: string[];
+  response_types?: string[];
+  token_endpoint_auth_method?: string;
+}
+
+export interface RegisteredClient {
+  client_id: string;
+  client_name: string;
+  redirect_uris: string[];
+  grant_types: string[];
+  response_types: string[];
+  token_endpoint_auth_method: string;
+}
+
+/** Register a new OAuth client and return its metadata. */
+export async function registerClient(input: ClientRegistrationInput): Promise<RegisteredClient> {
+  const clientId = crypto.randomUUID();
+  const clientName = input.client_name ?? "Unknown Client";
+  const redirectUris = input.redirect_uris ?? [];
+  const grantTypes = input.grant_types ?? ["authorization_code"];
+  const responseTypes = input.response_types ?? ["code"];
+  const authMethod = input.token_endpoint_auth_method ?? "none";
+  const now = new Date().toISOString();
+
+  await pgDb.execute(sql`
+    INSERT INTO oauth_clients
+      (client_id, client_name, redirect_uris, grant_types, response_types, token_endpoint_auth_method, created_at)
+    VALUES
+      (${clientId}, ${clientName}, ${JSON.stringify(redirectUris)},
+       ${JSON.stringify(grantTypes)}, ${JSON.stringify(responseTypes)}, ${authMethod}, ${now})
+  `);
+
+  return { client_id: clientId, client_name: clientName, redirect_uris: redirectUris, grant_types: grantTypes, response_types: responseTypes, token_endpoint_auth_method: authMethod };
+}
+
+type ClientRow = {
+  client_id: string;
+  client_name: string;
+  redirect_uris: string;
+  grant_types: string;
+  response_types: string;
+  token_endpoint_auth_method: string;
+};
+
+/** Look up a registered client by client_id. Returns null if not found. */
+export async function getClient(clientId: string): Promise<RegisteredClient | null> {
+  const result = await pgDb.execute(sql`
+    SELECT * FROM oauth_clients WHERE client_id = ${clientId} LIMIT 1
+  `);
+  const rows: ClientRow[] = result.rows ?? result ?? [];
+  if (!rows.length) return null;
+  const r = rows[0];
+  return {
+    client_id: r.client_id,
+    client_name: r.client_name,
+    redirect_uris: JSON.parse(r.redirect_uris ?? "[]"),
+    grant_types: JSON.parse(r.grant_types ?? '["authorization_code"]'),
+    response_types: JSON.parse(r.response_types ?? '["code"]'),
+    token_endpoint_auth_method: r.token_endpoint_auth_method ?? "none",
+  };
+}

@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { consumeAuthCode, createAccessToken, refreshAccessToken } from "@/lib/oauth";
+import { consumeAuthCode, createAccessToken, refreshAccessToken, getClient } from "@/lib/oauth";
 
 // Token responses must include CORS headers so Claude can call this endpoint
 const CORS_HEADERS = {
@@ -59,6 +59,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Validate client exists
+    const registeredClient = await getClient(client_id);
+    if (!registeredClient) {
+      return NextResponse.json(
+        { error: "invalid_client", error_description: "Unknown client_id" },
+        { status: 401, headers: CORS_HEADERS }
+      );
+    }
+
     const result = await consumeAuthCode({ code, redirectUri: redirect_uri, clientId: client_id, codeVerifier: code_verifier });
     if (!result) {
       return NextResponse.json(
@@ -85,6 +94,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "invalid_request", error_description: "refresh_token and client_id are required" },
         { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
+    // Validate client exists
+    const registeredClient = await getClient(client_id);
+    if (!registeredClient) {
+      return NextResponse.json(
+        { error: "invalid_client", error_description: "Unknown client_id" },
+        { status: 401, headers: CORS_HEADERS }
       );
     }
 

@@ -287,6 +287,18 @@ export const transactionSplits = pgTable("transaction_splits", {
 
 // ─── OAuth 2.1 Tables ──────────────────────────────────────────────────────
 
+/** Registered OAuth clients (Dynamic Client Registration, RFC 7591) */
+export const oauthClients = pgTable("oauth_clients", {
+  id: serial("id").primaryKey(),
+  clientId: text("client_id").notNull().unique(),
+  clientName: text("client_name"),
+  redirectUris: text("redirect_uris").default("[]"),   // JSON array
+  grantTypes: text("grant_types").default('["authorization_code"]'),
+  responseTypes: text("response_types").default('["code"]'),
+  tokenEndpointAuthMethod: text("token_endpoint_auth_method").default("none"),
+  createdAt: text("created_at").notNull(),
+});
+
 /** Short-lived authorization codes issued during the OAuth authorize flow */
 export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
   id: serial("id").primaryKey(),

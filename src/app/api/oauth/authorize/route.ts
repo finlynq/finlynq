@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken, AUTH_COOKIE } from "@/lib/auth";
-import { createAuthCode, isValidRedirectUri } from "@/lib/oauth";
+import { createAuthCode, isValidRedirectUri, getClient } from "@/lib/oauth";
 
 export async function POST(request: NextRequest) {
   // Require session cookie — user must be logged in
@@ -52,6 +52,18 @@ export async function POST(request: NextRequest) {
   if (!client_id) {
     return NextResponse.json({ error: "client_id is required" }, { status: 400 });
   }
+
+  // Validate client_id exists in the registry
+  const registeredClient = await getClient(client_id);
+  if (!registeredClient) {
+    return NextResponse.json({ error: "invalid_client", error_description: "Unknown client_id — register via /api/oauth/register first" }, { status: 400 });
+  }
+
+  // Validate redirect_uri is registered for this client (allow any if client registered with empty list)
+  if (registeredClient.redirect_uris.length > 0 && !registeredClient.redirect_uris.includes(redirect_uri)) {
+    return NextResponse.json({ error: "invalid_request", error_description: "redirect_uri not registered for this client" }, { status: 400 });
+  }
+
   if (!code_challenge) {
     return NextResponse.json({ error: "code_challenge is required (PKCE)" }, { status: 400 });
   }
