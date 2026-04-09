@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff } from "lucide-react";
+import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff, Globe, Plus, Shield } from "lucide-react";
 
-type ClientTab = "claude-desktop" | "cursor" | "cline" | "windsurf" | "custom";
+type ClientTab = "claude-desktop" | "claude-web" | "cursor" | "cline" | "windsurf" | "custom";
 type StatusState = "checking" | "connected" | "disconnected";
 
 const examplePrompts = [
@@ -120,6 +120,7 @@ export default function McpGuidePage() {
 
   const tabs: { id: ClientTab; label: string; icon: string }[] = [
     { id: "claude-desktop", label: "Claude Desktop", icon: "🤖" },
+    { id: "claude-web", label: "Claude Web / Mobile", icon: "🌐" },
     { id: "cursor", label: "Cursor", icon: "⚡" },
     { id: "cline", label: "Cline (VS Code)", icon: "🔌" },
     { id: "windsurf", label: "Windsurf", icon: "🌊" },
@@ -274,6 +275,136 @@ export default function McpGuidePage() {
                   </div>
                 </li>
               </ol>
+            )}
+
+            {activeTab === "claude-web" && (
+              <div className="space-y-5 text-sm text-foreground">
+                {/* Easy-mode callout */}
+                <div className="flex items-start gap-3 rounded-xl border border-indigo-500/25 bg-indigo-500/8 p-4">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15">
+                    <Globe className="h-4 w-4 text-indigo-400" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-foreground mb-0.5">Easiest way to connect</p>
+                    <p className="text-xs text-muted-foreground">
+                      No config files, no API keys to paste. Just click, log in, and authorize — done in under
+                      a minute. Works on claude.ai in any browser, and on the Claude iOS / Android app.
+                    </p>
+                  </div>
+                </div>
+
+                <ol className="space-y-5">
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      1
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1">Open Claude on the web or mobile</p>
+                      <p className="text-muted-foreground">
+                        Go to <strong>claude.ai</strong> or open the Claude app on your phone. Start a new
+                        conversation or open any existing one.
+                      </p>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      2
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1">
+                        Click the{" "}
+                        <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                          <Plus className="h-3 w-3" /> plus
+                        </span>{" "}
+                        icon in the chat input
+                      </p>
+                      <p className="text-muted-foreground">
+                        Or go to <strong>Settings → Integrations</strong> and click{" "}
+                        <strong>Add custom integration</strong>.
+                      </p>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      3
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium mb-2">Fill in the connector details</p>
+                      <div className="rounded-lg border border-border bg-muted/40 divide-y divide-border/50 text-xs overflow-hidden">
+                        <div className="flex items-center gap-3 px-3 py-2">
+                          <span className="w-28 shrink-0 text-muted-foreground">Name</span>
+                          <code className="text-foreground font-mono">Finlynq</code>
+                        </div>
+                        <div className="flex items-center gap-3 px-3 py-2">
+                          <span className="w-28 shrink-0 text-muted-foreground">Server URL</span>
+                          <div className="relative flex-1 min-w-0">
+                            <code className="text-foreground font-mono break-all">{mcpUrl}</code>
+                          </div>
+                          <CopyButton text={mcpUrl} />
+                        </div>
+                        <div className="flex items-center gap-3 px-3 py-2">
+                          <span className="w-28 shrink-0 text-muted-foreground">Advanced</span>
+                          <span className="text-muted-foreground italic">Leave collapsed — OAuth handles auth</span>
+                        </div>
+                      </div>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      4
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1">Click <strong>Add</strong>, then <strong>Connect</strong></p>
+                      <p className="text-muted-foreground">
+                        Claude will open a Finlynq authorization page. Log in if prompted, then click{" "}
+                        <strong>Allow</strong> to grant access.
+                      </p>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-[11px] font-bold text-emerald-500 mt-0.5">
+                      ✓
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1 text-emerald-500">You&apos;re connected!</p>
+                      <p className="text-muted-foreground mb-3">
+                        The Finlynq tools are now available in every Claude conversation. Try one of these:
+                      </p>
+                      <div className="space-y-1.5">
+                        {[
+                          "What's my current net worth?",
+                          "How much did I spend on groceries last month?",
+                          "Show me my investment portfolio performance",
+                          "Record a $45 Starbucks transaction from yesterday",
+                        ].map((prompt) => (
+                          <button
+                            key={prompt}
+                            onClick={() => navigator.clipboard.writeText(prompt)}
+                            className="flex w-full items-center gap-2 rounded-lg border border-border/50 bg-card px-3 py-2 text-left text-xs text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors"
+                            title="Click to copy"
+                          >
+                            <Copy className="h-3 w-3 shrink-0 opacity-40" />
+                            {prompt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </li>
+                </ol>
+
+                <div className="flex items-start gap-2 rounded-lg bg-amber-500/5 border border-amber-500/20 p-3">
+                  <Shield className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-muted-foreground">
+                    <strong className="text-foreground">Privacy note:</strong> Claude Web uses OAuth 2.1 — your
+                    Finlynq passphrase and financial data are never shared with Anthropic. Only the tool
+                    responses (query results) pass through Claude&apos;s servers.
+                  </p>
+                </div>
+              </div>
             )}
 
             {activeTab === "cursor" && (
