@@ -45,6 +45,21 @@ fi
 echo "==> Installing dependencies..."
 run_as "npm install --prefer-offline"
 
+# 2.5. Backup database before deploy
+echo "==> Backing up database..."
+if [ -n "${DATABASE_URL:-}" ]; then
+  mkdir -p /opt/finlynq-backups
+  pg_dump "$DATABASE_URL" > "/opt/finlynq-backups/prod_$(date +%Y%m%d_%H%M%S).sql"
+  echo "==> Backup complete"
+else
+  echo "==> Warning: DATABASE_URL not set, skipping backup"
+fi
+
+# 2.7. Run database migrations
+echo "==> Running database migrations..."
+run_as "npm run db:push"
+echo "==> Migrations complete"
+
 # 3. Build
 if [ "$SKIP_BUILD" = false ]; then
   echo "==> Removing stale build output..."

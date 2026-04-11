@@ -52,3 +52,12 @@ pf-config.json
 # Claude Code worktrees and logs
 .claude/
 pf-server.log
+/.next-build/
+/.next-managed/
+/.next-test/
+/.next-verify/
+/build.log
+/pf-managed*.log
+/pf-managed.log
+/test-results/
+/e2e/
