@@ -68,7 +68,9 @@ function wrapPgBuilder(obj: any): any {
       // This prevents "x.map is not a function" when callers don't double-await.
       if (prop === "all") return async () => { const rows = await target; return Array.isArray(rows) ? rows : (rows as { rows?: unknown[] }).rows ?? []; };
       // .get() in PG mode: execute and return first row
-      if (prop === "get") return async () => { const rows = await target; return rows[0] ?? undefined; };
+      if (prop === "get") return async () => { const rows = await target; return Array.isArray(rows) ? rows[0] ?? undefined : rows; };
+      // .run() in PG mode: execute write query (INSERT/UPDATE/DELETE) and return result
+      if (prop === "run") return async () => { return await target; };
       const val = Reflect.get(target, prop);
       if (typeof val === "function") {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
