@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+import { createPgCompat } from "./pg-compat.js";
 import { registerCoreTools } from "./register-core-tools.js";
 import { registerV2Tools } from "./tools-v2.js";
 import { registerImportTemplateTools } from "./tools-import-templates.js";
@@ -10,30 +10,30 @@ const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
   console.error("ERROR: DATABASE_URL environment variable is required.");
   console.error("Set it in your Claude Desktop MCP config or export it before running.");
+  console.error("Example: DATABASE_URL=postgresql://user:pass@localhost:5432/finlynq");
   process.exit(1);
 }
 
-// Create PostgreSQL pool
-const pool = new Pool({
-  connectionString: databaseUrl,
-});
+const pool = new Pool({ connectionString: databaseUrl });
 
-// Validate database connection
+// Validate connection
 try {
   const client = await pool.connect();
   await client.query("SELECT 1");
   client.release();
-  console.error("Database connection verified.");
-} catch (error) {
-  console.error("ERROR: Could not connect to PostgreSQL database:", error);
+} catch (err) {
+  console.error("ERROR: Could not connect to PostgreSQL database.");
+  console.error(err);
   process.exit(1);
 }
 
-const db = drizzle(pool);
+// Create PostgreSQL-compatible database interface
+// This translates SQLite-style prepare/all/get/run calls to async PostgreSQL queries
+const db = createPgCompat(pool);
 
 const server = new McpServer({
   name: "finlynq",
-  version: "2.3.0",
+  version: "3.0.0",
 });
 
 registerCoreTools(server, db);
@@ -43,7 +43,7 @@ registerImportTemplateTools(server, db);
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Finlynq MCP server v2.3 running on stdio — 29 tools (23 read, 6 write)");
+  console.error("Finlynq MCP server v3.0 running on stdio (PostgreSQL mode)");
 }
 
 main().catch(console.error);

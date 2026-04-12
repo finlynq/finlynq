@@ -2,7 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type BetterSqlite3 from "better-sqlite3";
+import type { PgCompatDb } from "./pg-compat.js";
 
 // Helper for MCP rule matching
 function matchesRule(
@@ -52,21 +52,21 @@ function fuzzyFind(input: string, options: SqliteRow[]): SqliteRow | null {
 }
 
 /** Auto-categorize payee: rules → historical frequency */
-function autoCategory(sqlite: BetterSqlite3.Database, payee: string): number | null {
+async function autoCategory(sqlite: PgCompatDb, payee: string): Promise<number | null> {
   if (!payee) return null;
-  const rule = sqlite.prepare(
+  const rule = await sqlite.prepare(
     `SELECT assign_category_id FROM transaction_rules WHERE is_active = 1 AND LOWER(?) LIKE LOWER(match_payee) ORDER BY priority DESC LIMIT 1`
   ).get(payee) as { assign_category_id: number } | undefined;
   if (rule?.assign_category_id) return rule.assign_category_id;
-  const hist = sqlite.prepare(
+  const hist = await sqlite.prepare(
     `SELECT category_id, COUNT(*) as cnt FROM transactions WHERE LOWER(payee) = LOWER(?) AND category_id IS NOT NULL GROUP BY category_id ORDER BY cnt DESC LIMIT 1`
   ).get(payee) as { category_id: number } | undefined;
   return hist?.category_id ?? null;
 }
 
 /** Most-recently-used account */
-function defaultAccount(sqlite: BetterSqlite3.Database): SqliteRow | null {
-  return sqlite.prepare(
+async function defaultAccount(sqlite: PgCompatDb): Promise<SqliteRow | null> {
+  return await sqlite.prepare(
     `SELECT a.id, a.name, a.currency FROM transactions t JOIN accounts a ON a.id = t.account_id ORDER BY t.date DESC, t.id DESC LIMIT 1`
   ).get() as SqliteRow | null;
 }
@@ -82,7 +82,7 @@ function sqliteErr(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
 }
 
-export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Database) {
+export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
   // ============ READ TOOLS ============
 
   server.tool(
@@ -94,7 +94,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       const params: string[] = [];
       if (currency && currency !== "all") { query += " WHERE a.currency = ?"; params.push(currency); }
       query += ` GROUP BY a.id ORDER BY a.type, a."group", a.name`;
-      const rows = sqlite.prepare(query).all(...params);
+      const rows = await sqlite.prepare(query).all(...params);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
@@ -120,7 +120,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       if (max_amount !== undefined) { query += " AND t.amount <= ?"; params.push(max_amount); }
       query += ` ORDER BY t.date DESC LIMIT ?`;
       params.push(limit ?? 100);
-      const rows = sqlite.prepare(query).all(...params);
+      const rows = await sqlite.prepare(query).all(...params);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
@@ -133,7 +133,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       const [y, m] = month.split("-").map(Number);
       const startDate = `${month}-01`;
       const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
-      const rows = sqlite.prepare(`SELECT b.id, c.name as category, c."group" as category_group, b.amount as budget, COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? THEN t.amount ELSE 0 END)), 0) as spent FROM budgets b JOIN categories c ON b.category_id = c.id LEFT JOIN transactions t ON t.category_id = c.id WHERE b.month = ? GROUP BY b.id ORDER BY c."group", c.name`).all(startDate, endDate, month);
+      const rows = await sqlite.prepare(`SELECT b.id, c.name as category, c."group" as category_group, b.amount as budget, COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? THEN t.amount ELSE 0 END)), 0) as spent FROM budgets b JOIN categories c ON b.category_id = c.id LEFT JOIN transactions t ON t.category_id = c.id WHERE b.month = ? GROUP BY b.id ORDER BY c."group", c.name`).all(startDate, endDate, month);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
@@ -146,13 +146,13 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       const lookback = months ?? 12;
       const startDate = new Date(new Date().getFullYear(), new Date().getMonth() - lookback, 1).toISOString().split("T")[0];
       const groupExpr = period === "weekly" ? "strftime('%Y-W%W', t.date)" : period === "yearly" ? "strftime('%Y', t.date)" : "strftime('%Y-%m', t.date)";
-      const rows = sqlite.prepare(`SELECT ${groupExpr} as period, c.name as category, c."group" as category_group, SUM(t.amount) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.date >= ? AND c.type = 'E' GROUP BY ${groupExpr}, c.name ORDER BY ${groupExpr}, total`).all(startDate);
+      const rows = await sqlite.prepare(`SELECT ${groupExpr} as period, c.name as category, c."group" as category_group, SUM(t.amount) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.date >= ? AND c.type = 'E' GROUP BY ${groupExpr}, c.name ORDER BY ${groupExpr}, total`).all(startDate);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
 
   server.tool("get_portfolio_summary", "Get all investment holdings grouped by account", {}, async () => {
-    const rows = sqlite.prepare(`SELECT ph.name as holding, ph.symbol, ph.currency, a.name as account FROM portfolio_holdings ph LEFT JOIN accounts a ON ph.account_id = a.id ORDER BY a.name, ph.name`).all();
+    const rows = await sqlite.prepare(`SELECT ph.name as holding, ph.symbol, ph.currency, a.name as account FROM portfolio_holdings ph LEFT JOIN accounts a ON ph.account_id = a.id ORDER BY a.name, ph.name`).all();
     return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
   });
 
@@ -165,7 +165,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       const params: string[] = [];
       if (currency && currency !== "all") { query += " WHERE a.currency = ?"; params.push(currency); }
       query += " GROUP BY a.type, a.currency";
-      const rows = sqlite.prepare(query).all(...params) as { type: string; currency: string; total: number }[];
+      const rows = await sqlite.prepare(query).all(...params) as { type: string; currency: string; total: number }[];
       const summary: Record<string, { assets: number; liabilities: number; net: number }> = {};
       for (const row of rows) {
         if (!summary[row.currency]) summary[row.currency] = { assets: 0, liabilities: 0, net: 0 };
@@ -178,17 +178,17 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
   );
 
   server.tool("get_categories", "List all available transaction categories", {}, async () => {
-    const rows = sqlite.prepare(`SELECT name, type, "group" FROM categories ORDER BY type, "group", name`).all();
+    const rows = await sqlite.prepare(`SELECT name, type, "group" FROM categories ORDER BY type, "group", name`).all();
     return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
   });
 
   server.tool("get_loans", "Get all loans with amortization summary", {}, async () => {
-    const rows = sqlite.prepare(`SELECT id, name, type, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment FROM loans`).all();
+    const rows = await sqlite.prepare(`SELECT id, name, type, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment FROM loans`).all();
     return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
   });
 
   server.tool("get_goals", "Get all financial goals with progress", {}, async () => {
-    const goals = sqlite.prepare(`SELECT g.id, g.name, g.type, g.target_amount, g.deadline, g.status, g.priority, a.name as account FROM goals g LEFT JOIN accounts a ON g.account_id = a.id ORDER BY g.priority`).all();
+    const goals = await sqlite.prepare(`SELECT g.id, g.name, g.type, g.target_amount, g.deadline, g.status, g.priority, a.name as account FROM goals g LEFT JOIN accounts a ON g.account_id = a.id ORDER BY g.priority`).all();
     return { content: [{ type: "text" as const, text: JSON.stringify(goals, null, 2) }] };
   });
 
@@ -199,7 +199,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     async () => {
       const cutoff = new Date();
       cutoff.setFullYear(cutoff.getFullYear() - 1);
-      const txns = sqlite.prepare(`SELECT id, date, payee, amount, account_id, category_id FROM transactions WHERE date >= ? AND payee != '' ORDER BY date`).all(cutoff.toISOString().split("T")[0]) as { id: number; date: string; payee: string; amount: number; account_id: number; category_id: number }[];
+      const txns = await sqlite.prepare(`SELECT id, date, payee, amount, account_id, category_id FROM transactions WHERE date >= ? AND payee != '' ORDER BY date`).all(cutoff.toISOString().split("T")[0]) as { id: number; date: string; payee: string; amount: number; account_id: number; category_id: number }[];
       const groups = new Map<string, typeof txns>();
       for (const t of txns) {
         const key = t.payee.trim().toLowerCase();
@@ -223,7 +223,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     "Generate income statement for a period",
     { start_date: z.string().describe("Start date"), end_date: z.string().describe("End date") },
     async ({ start_date, end_date }) => {
-      const rows = sqlite.prepare(`SELECT c.type as category_type, c."group" as category_group, c.name as category, SUM(t.amount) as total, COUNT(*) as count FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.date >= ? AND t.date <= ? AND c.type IN ('I','E') GROUP BY c.id ORDER BY c.type, c."group"`).all(start_date, end_date);
+      const rows = await sqlite.prepare(`SELECT c.type as category_type, c."group" as category_group, c.name as category, SUM(t.amount) as total, COUNT(*) as count FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.date >= ? AND t.date <= ? AND c.type IN ('I','E') GROUP BY c.id ORDER BY c.type, c."group"`).all(start_date, end_date);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
@@ -243,13 +243,13 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       tags: z.string().optional().describe("Comma-separated tags"),
     },
     async ({ date, account, category, amount, payee, note, tags }) => {
-      const acct = sqlite.prepare("SELECT id, currency FROM accounts WHERE name = ?").get(account) as { id: number; currency: string } | undefined;
+      const acct = await sqlite.prepare("SELECT id, currency FROM accounts WHERE name = ?").get(account) as { id: number; currency: string } | undefined;
       if (!acct) return { content: [{ type: "text" as const, text: `Error: Account "${account}" not found` }] };
 
-      const cat = sqlite.prepare("SELECT id FROM categories WHERE name = ?").get(category) as { id: number } | undefined;
+      const cat = await sqlite.prepare("SELECT id FROM categories WHERE name = ?").get(category) as { id: number } | undefined;
       if (!cat) return { content: [{ type: "text" as const, text: `Error: Category "${category}" not found` }] };
 
-      sqlite.prepare("INSERT INTO transactions (date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(date, acct.id, cat.id, acct.currency, amount, payee ?? "", note ?? "", tags ?? "");
+      await sqlite.prepare("INSERT INTO transactions (date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(date, acct.id, cat.id, acct.currency, amount, payee ?? "", note ?? "", tags ?? "");
       return { content: [{ type: "text" as const, text: `Transaction added: ${amount} to ${account} (${category}) on ${date}` }] };
     }
   );
@@ -263,14 +263,14 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       amount: z.number().describe("Budget amount (positive number)"),
     },
     async ({ category, month, amount }) => {
-      const cat = sqlite.prepare("SELECT id FROM categories WHERE name = ?").get(category) as { id: number } | undefined;
+      const cat = await sqlite.prepare("SELECT id FROM categories WHERE name = ?").get(category) as { id: number } | undefined;
       if (!cat) return { content: [{ type: "text" as const, text: `Error: Category "${category}" not found` }] };
 
-      const existing = sqlite.prepare("SELECT id FROM budgets WHERE category_id = ? AND month = ?").get(cat.id, month) as { id: number } | undefined;
+      const existing = await sqlite.prepare("SELECT id FROM budgets WHERE category_id = ? AND month = ?").get(cat.id, month) as { id: number } | undefined;
       if (existing) {
-        sqlite.prepare("UPDATE budgets SET amount = ? WHERE id = ?").run(amount, existing.id);
+        await sqlite.prepare("UPDATE budgets SET amount = ? WHERE id = ?").run(amount, existing.id);
       } else {
-        sqlite.prepare("INSERT INTO budgets (category_id, month, amount) VALUES (?, ?, ?)").run(cat.id, month, amount);
+        await sqlite.prepare("INSERT INTO budgets (category_id, month, amount) VALUES (?, ?, ?)").run(cat.id, month, amount);
       }
       return { content: [{ type: "text" as const, text: `Budget set: ${category} = $${amount} for ${month}` }] };
     }
@@ -289,10 +289,10 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     async ({ name, type, target_amount, deadline, account }) => {
       let accountId = null;
       if (account) {
-        const acct = sqlite.prepare("SELECT id FROM accounts WHERE name = ?").get(account) as { id: number } | undefined;
+        const acct = await sqlite.prepare("SELECT id FROM accounts WHERE name = ?").get(account) as { id: number } | undefined;
         accountId = acct?.id ?? null;
       }
-      sqlite.prepare("INSERT INTO goals (name, type, target_amount, deadline, account_id, status) VALUES (?, ?, ?, ?, ?, 'active')").run(name, type, target_amount, deadline ?? null, accountId);
+      await sqlite.prepare("INSERT INTO goals (name, type, target_amount, deadline, account_id, status) VALUES (?, ?, ?, ?, ?, 'active')").run(name, type, target_amount, deadline ?? null, accountId);
       return { content: [{ type: "text" as const, text: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` }] };
     }
   );
@@ -307,10 +307,10 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       note: z.string().optional().describe("Optional note"),
     },
     async ({ account, value, date, note }) => {
-      const acct = sqlite.prepare("SELECT id FROM accounts WHERE name = ?").get(account) as { id: number } | undefined;
+      const acct = await sqlite.prepare("SELECT id FROM accounts WHERE name = ?").get(account) as { id: number } | undefined;
       if (!acct) return { content: [{ type: "text" as const, text: `Error: Account "${account}" not found` }] };
       const d = date ?? new Date().toISOString().split("T")[0];
-      sqlite.prepare("INSERT INTO snapshots (account_id, date, value, note) VALUES (?, ?, ?, ?)").run(acct.id, d, value, note ?? "");
+      await sqlite.prepare("INSERT INTO snapshots (account_id, date, value, note) VALUES (?, ?, ?, ?)").run(acct.id, d, value, note ?? "");
       return { content: [{ type: "text" as const, text: `Snapshot recorded: ${account} = $${value} on ${d}` }] };
     }
   );
@@ -322,7 +322,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     "List all transaction auto-categorization rules",
     {},
     async () => {
-      const rows = sqlite.prepare(
+      const rows = await sqlite.prepare(
         `SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
                 r.assign_category_id, c.name as category_name,
                 r.assign_tags, r.rename_to, r.is_active, r.priority
@@ -343,7 +343,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     async ({ limit }) => {
       const maxRows = limit ?? 500;
 
-      const rules = sqlite.prepare(
+      const rules = await sqlite.prepare(
         `SELECT id, name, match_field, match_type, match_value,
                 assign_category_id, assign_tags, rename_to, is_active, priority
          FROM transaction_rules WHERE is_active = 1 ORDER BY priority DESC`
@@ -358,7 +358,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
         return { content: [{ type: "text" as const, text: "No active rules found." }] };
       }
 
-      const uncategorized = sqlite.prepare(
+      const uncategorized = await sqlite.prepare(
         `SELECT id, payee, amount, tags FROM transactions
          WHERE category_id IS NULL ORDER BY date DESC LIMIT ?`
       ).all(maxRows) as Array<{ id: number; payee: string; amount: number; tags: string }>;
@@ -377,7 +377,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
         for (const rule of rules) {
           if (matchesRule(txn, rule)) {
             if (rule.assign_category_id) {
-              updateStmt.run(
+              await updateStmt.run(
                 rule.assign_category_id,
                 rule.assign_tags, rule.assign_tags ?? txn.tags,
                 rule.rename_to, rule.rename_to ?? txn.payee,
@@ -416,7 +416,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
 
       const items: { type: string; severity: string; title: string; description: string; amount?: number }[] = [];
 
-      const budgetRows = sqlite.prepare(`
+      const budgetRows = await sqlite.prepare(`
         SELECT b.id, c.name as cat, b.amount as budget,
           COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? THEN t.amount ELSE 0 END)), 0) as spent
         FROM budgets b LEFT JOIN categories c ON b.category_id = c.id
@@ -430,14 +430,14 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
         }
       }
 
-      const subs = sqlite.prepare(`SELECT * FROM subscriptions WHERE status = 'active' AND next_date >= ? AND next_date <= ?`).all(today, weekAhead) as { id: number; name: string; amount: number; next_date: string; frequency: string }[];
+      const subs = await sqlite.prepare(`SELECT * FROM subscriptions WHERE status = 'active' AND next_date >= ? AND next_date <= ?`).all(today, weekAhead) as { id: number; name: string; amount: number; next_date: string; frequency: string }[];
       for (const s of subs) {
         if (Math.abs(s.amount) >= 100) {
           items.push({ type: "large_bill", severity: "warning", title: `${s.name} due soon`, description: `$${Math.abs(s.amount).toFixed(2)} ${s.frequency}`, amount: Math.abs(s.amount) });
         }
       }
 
-      const uncat = sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE date >= ? AND date <= ? AND category_id IS NULL`).get(monthStart, monthEnd) as { cnt: number };
+      const uncat = await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE date >= ? AND date <= ? AND category_id IS NULL`).get(monthStart, monthEnd) as { cnt: number };
       if (uncat.cnt > 0) {
         items.push({ type: "uncategorized", severity: uncat.cnt > 10 ? "warning" : "info", title: `${uncat.cnt} uncategorized transaction(s)`, description: "Categorize for better tracking" });
       }
@@ -466,15 +466,15 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       const ps = prevStart.toISOString().split("T")[0];
       const pe = prevEnd.toISOString().split("T")[0];
 
-      const spending = sqlite.prepare(`SELECT c.name, ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ? GROUP BY c.id ORDER BY total DESC`).all(ws, we) as { name: string; total: number }[];
+      const spending = await sqlite.prepare(`SELECT c.name, ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ? GROUP BY c.id ORDER BY total DESC`).all(ws, we) as { name: string; total: number }[];
       const totalSpent = spending.reduce((s, r) => s + r.total, 0);
-      const prevSpending = sqlite.prepare(`SELECT ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ?`).get(ps, pe) as { total: number } | undefined;
+      const prevSpending = await sqlite.prepare(`SELECT ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ?`).get(ps, pe) as { total: number } | undefined;
       const prevTotal = prevSpending?.total ?? 0;
       const changePct = prevTotal > 0 ? Math.round(((totalSpent - prevTotal) / prevTotal) * 100) : 0;
 
-      const inc = sqlite.prepare(`SELECT COALESCE(SUM(t.amount), 0) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'I' AND t.date >= ? AND t.date <= ?`).get(ws, we) as { total: number };
+      const inc = await sqlite.prepare(`SELECT COALESCE(SUM(t.amount), 0) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'I' AND t.date >= ? AND t.date <= ?`).get(ws, we) as { total: number };
 
-      const notable = sqlite.prepare(`SELECT t.date, t.payee, c.name as category, ABS(t.amount) as amt FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ? ORDER BY ABS(t.amount) DESC LIMIT 5`).all(ws, we);
+      const notable = await sqlite.prepare(`SELECT t.date, t.payee, c.name as category, ABS(t.amount) as amt FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ? ORDER BY ABS(t.amount) DESC LIMIT 5`).all(ws, we);
 
       const recap = {
         weekStart: ws, weekEnd: we,
@@ -505,25 +505,25 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
-      const allAccounts = sqlite.prepare(`SELECT id, name, currency FROM accounts`).all() as SqliteRow[];
-      const acct = account ? fuzzyFind(account, allAccounts) : defaultAccount(sqlite);
+      const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts`).all() as SqliteRow[];
+      const acct = account ? fuzzyFind(account, allAccounts) : await defaultAccount(sqlite);
       if (!acct) return sqliteErr(account ? `Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}` : "No accounts found — create an account first.");
 
       let catId: number | null = null;
       if (category) {
-        const allCats = sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+        const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
         const cat = fuzzyFind(category, allCats);
         if (!cat) return sqliteErr(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
         catId = Number(cat.id);
       } else {
-        catId = autoCategory(sqlite, payee);
+        catId = await autoCategory(sqlite, payee);
       }
 
-      const result = sqlite.prepare(
+      const result = await sqlite.prepare(
         `INSERT INTO transactions (date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       ).get(txDate, acct.id, catId, acct.currency, amount, payee, note ?? "", tags ?? "") as { id: number };
 
-      const catName = catId ? (sqlite.prepare(`SELECT name FROM categories WHERE id = ?`).get(catId) as { name: string } | undefined)?.name ?? "uncategorized" : "uncategorized";
+      const catName = catId ? (await sqlite.prepare(`SELECT name FROM categories WHERE id = ?`).get(catId) as { name: string } | undefined)?.name ?? "uncategorized" : "uncategorized";
       return txt({ success: true, transactionId: result?.id, message: `Recorded: ${amount > 0 ? "+" : ""}${amount} on ${txDate} — "${payee}" → ${acct.name} (${catName})` });
     }
   );
@@ -545,9 +545,9 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     },
     async ({ transactions }) => {
       const today = new Date().toISOString().split("T")[0];
-      const allAccounts = sqlite.prepare(`SELECT id, name, currency FROM accounts`).all() as SqliteRow[];
-      const allCats = sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
-      const mru = defaultAccount(sqlite);
+      const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts`).all() as SqliteRow[];
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+      const mru = await defaultAccount(sqlite);
       const stmt = sqlite.prepare(`INSERT INTO transactions (date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
 
       const results: { index: number; success: boolean; message: string }[] = [];
@@ -558,8 +558,8 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
           if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
           let catId: number | null = null;
           if (t.category) { const cat = fuzzyFind(t.category, allCats); catId = cat ? Number(cat.id) : null; }
-          else catId = autoCategory(sqlite, t.payee);
-          stmt.run(t.date ?? today, acct.id, catId, acct.currency, t.amount, t.payee, t.note ?? "", t.tags ?? "");
+          else catId = await autoCategory(sqlite, t.payee);
+          await stmt.run(t.date ?? today, acct.id, catId, acct.currency, t.amount, t.payee, t.note ?? "", t.tags ?? "");
           results.push({ index: i, success: true, message: `${t.payee}: ${t.amount}` });
         } catch (e) {
           results.push({ index: i, success: false, message: String(e) });
@@ -584,12 +584,12 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       tags: z.string().optional(),
     },
     async ({ id, date, amount, payee, category, note, tags }) => {
-      const existing = sqlite.prepare(`SELECT id FROM transactions WHERE id = ?`).get(id);
+      const existing = await sqlite.prepare(`SELECT id FROM transactions WHERE id = ?`).get(id);
       if (!existing) return sqliteErr(`Transaction #${id} not found`);
 
       let catId: number | undefined;
       if (category !== undefined) {
-        const allCats = sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+        const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
         const cat = fuzzyFind(category, allCats);
         if (!cat) return sqliteErr(`Category "${category}" not found`);
         catId = Number(cat.id);
@@ -606,7 +606,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       if (!updates.length) return sqliteErr("No fields to update");
 
       params.push(id);
-      sqlite.prepare(`UPDATE transactions SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      await sqlite.prepare(`UPDATE transactions SET ${updates.join(", ")} WHERE id = ?`).run(...params);
       return txt({ success: true, message: `Transaction #${id} updated (${updates.length} field(s))` });
     }
   );
@@ -617,9 +617,9 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     "Permanently delete a transaction by ID",
     { id: z.number().describe("Transaction ID to delete") },
     async ({ id }) => {
-      const t = sqlite.prepare(`SELECT id, payee, amount, date FROM transactions WHERE id = ?`).get(id) as { id: number; payee: string; amount: number; date: string } | undefined;
+      const t = await sqlite.prepare(`SELECT id, payee, amount, date FROM transactions WHERE id = ?`).get(id) as { id: number; payee: string; amount: number; date: string } | undefined;
       if (!t) return sqliteErr(`Transaction #${id} not found`);
-      sqlite.prepare(`DELETE FROM transactions WHERE id = ?`).run(id);
+      await sqlite.prepare(`DELETE FROM transactions WHERE id = ?`).run(id);
       return txt({ success: true, message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}` });
     }
   );
@@ -630,12 +630,12 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     "Delete a budget entry for a category/month",
     { category: z.string().describe("Category name"), month: z.string().describe("Month (YYYY-MM)") },
     async ({ category, month }) => {
-      const allCats = sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
       const cat = fuzzyFind(category, allCats);
       if (!cat) return sqliteErr(`Category "${category}" not found`);
-      const existing = sqlite.prepare(`SELECT id FROM budgets WHERE category_id = ? AND month = ?`).get(cat.id, month) as { id: number } | undefined;
+      const existing = await sqlite.prepare(`SELECT id FROM budgets WHERE category_id = ? AND month = ?`).get(cat.id, month) as { id: number } | undefined;
       if (!existing) return sqliteErr(`No budget for "${cat.name}" in ${month}`);
-      sqlite.prepare(`DELETE FROM budgets WHERE id = ?`).run(existing.id);
+      await sqlite.prepare(`DELETE FROM budgets WHERE id = ?`).run(existing.id);
       return txt({ success: true, message: `Budget deleted: ${cat.name} for ${month}` });
     }
   );
@@ -652,9 +652,9 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       note: z.string().optional(),
     },
     async ({ name, type, group, currency, note }) => {
-      const existing = sqlite.prepare(`SELECT id FROM accounts WHERE name = ?`).get(name);
+      const existing = await sqlite.prepare(`SELECT id FROM accounts WHERE name = ?`).get(name);
       if (existing) return sqliteErr(`Account "${name}" already exists`);
-      const result = sqlite.prepare(`INSERT INTO accounts (type, "group", name, currency, note) VALUES (?, ?, ?, ?, ?) RETURNING id`).get(type, group ?? "", name, currency ?? "CAD", note ?? "") as { id: number };
+      const result = await sqlite.prepare(`INSERT INTO accounts (type, "group", name, currency, note) VALUES (?, ?, ?, ?, ?) RETURNING id`).get(type, group ?? "", name, currency ?? "CAD", note ?? "") as { id: number };
       return txt({ success: true, accountId: result?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})` });
     }
   );
@@ -671,7 +671,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       note: z.string().optional(),
     },
     async ({ account, name, group, currency, note }) => {
-      const allAccounts = sqlite.prepare(`SELECT id, name FROM accounts`).all() as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts`).all() as SqliteRow[];
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found`);
       const updates: string[] = []; const params: unknown[] = [];
@@ -681,7 +681,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
       if (!updates.length) return sqliteErr("No fields to update");
       params.push(acct.id);
-      sqlite.prepare(`UPDATE accounts SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      await sqlite.prepare(`UPDATE accounts SET ${updates.join(", ")} WHERE id = ?`).run(...params);
       return txt({ success: true, message: `Account "${acct.name}" updated` });
     }
   );
@@ -695,12 +695,12 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       force: z.boolean().optional(),
     },
     async ({ account, force }) => {
-      const allAccounts = sqlite.prepare(`SELECT id, name FROM accounts`).all() as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts`).all() as SqliteRow[];
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found`);
-      const count = (sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE account_id = ?`).get(acct.id) as { cnt: number }).cnt;
+      const count = (await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE account_id = ?`).get(acct.id) as { cnt: number }).cnt;
       if (count > 0 && !force) return sqliteErr(`Account "${acct.name}" has ${count} transaction(s). Pass force=true to delete.`);
-      sqlite.prepare(`DELETE FROM accounts WHERE id = ?`).run(acct.id);
+      await sqlite.prepare(`DELETE FROM accounts WHERE id = ?`).run(acct.id);
       return txt({ success: true, message: `Account "${acct.name}" deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` });
     }
   );
@@ -717,7 +717,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       name: z.string().optional().describe("Rename the goal"),
     },
     async ({ goal, target_amount, deadline, status, name }) => {
-      const allGoals = sqlite.prepare(`SELECT id, name FROM goals`).all() as SqliteRow[];
+      const allGoals = await sqlite.prepare(`SELECT id, name FROM goals`).all() as SqliteRow[];
       const g = fuzzyFind(goal, allGoals);
       if (!g) return sqliteErr(`Goal "${goal}" not found`);
       const updates: string[] = []; const params: unknown[] = [];
@@ -727,7 +727,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       if (status !== undefined) { updates.push(`status = ?`); params.push(status); }
       if (!updates.length) return sqliteErr("No fields to update");
       params.push(g.id);
-      sqlite.prepare(`UPDATE goals SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      await sqlite.prepare(`UPDATE goals SET ${updates.join(", ")} WHERE id = ?`).run(...params);
       return txt({ success: true, message: `Goal "${g.name}" updated` });
     }
   );
@@ -738,10 +738,10 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     "Delete a financial goal by name",
     { goal: z.string().describe("Goal name (fuzzy matched)") },
     async ({ goal }) => {
-      const allGoals = sqlite.prepare(`SELECT id, name FROM goals`).all() as SqliteRow[];
+      const allGoals = await sqlite.prepare(`SELECT id, name FROM goals`).all() as SqliteRow[];
       const g = fuzzyFind(goal, allGoals);
       if (!g) return sqliteErr(`Goal "${goal}" not found`);
-      sqlite.prepare(`DELETE FROM goals WHERE id = ?`).run(g.id);
+      await sqlite.prepare(`DELETE FROM goals WHERE id = ?`).run(g.id);
       return txt({ success: true, message: `Goal "${g.name}" deleted` });
     }
   );
@@ -757,9 +757,9 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       note: z.string().optional(),
     },
     async ({ name, type, group, note }) => {
-      const existing = sqlite.prepare(`SELECT id FROM categories WHERE name = ?`).get(name);
+      const existing = await sqlite.prepare(`SELECT id FROM categories WHERE name = ?`).get(name);
       if (existing) return sqliteErr(`Category "${name}" already exists`);
-      const result = sqlite.prepare(`INSERT INTO categories (name, type, "group", note) VALUES (?, ?, ?, ?) RETURNING id`).get(name, type, group ?? "", note ?? "") as { id: number };
+      const result = await sqlite.prepare(`INSERT INTO categories (name, type, "group", note) VALUES (?, ?, ?, ?) RETURNING id`).get(name, type, group ?? "", note ?? "") as { id: number };
       return txt({ success: true, categoryId: result?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` });
     }
   );
@@ -776,10 +776,10 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       priority: z.number().optional().describe("Default 0"),
     },
     async ({ match_payee, assign_category, rename_to, assign_tags, priority }) => {
-      const allCats = sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
       const cat = fuzzyFind(assign_category, allCats);
       if (!cat) return sqliteErr(`Category "${assign_category}" not found`);
-      sqlite.prepare(`INSERT INTO transaction_rules (match_payee, assign_category_id, rename_to, assign_tags, priority, is_active) VALUES (?, ?, ?, ?, ?, 1)`).run(match_payee, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0);
+      await sqlite.prepare(`INSERT INTO transaction_rules (match_payee, assign_category_id, rename_to, assign_tags, priority, is_active) VALUES (?, ?, ?, ?, ?, 1)`).run(match_payee, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0);
       return txt({ success: true, message: `Rule created: "${match_payee}" → ${cat.name}` });
     }
   );
@@ -793,12 +793,12 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       category: z.string().describe("Category name to assign"),
     },
     async ({ transaction_id, category }) => {
-      const allCats = sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
       const cat = fuzzyFind(category, allCats);
       if (!cat) return sqliteErr(`Category "${category}" not found`);
-      const txn = sqlite.prepare(`SELECT id, payee FROM transactions WHERE id = ?`).get(transaction_id) as { id: number; payee: string } | undefined;
+      const txn = await sqlite.prepare(`SELECT id, payee FROM transactions WHERE id = ?`).get(transaction_id) as { id: number; payee: string } | undefined;
       if (!txn) return sqliteErr(`Transaction #${transaction_id} not found`);
-      sqlite.prepare(`UPDATE transactions SET category_id = ? WHERE id = ?`).run(cat.id, transaction_id);
+      await sqlite.prepare(`UPDATE transactions SET category_id = ? WHERE id = ?`).run(cat.id, transaction_id);
       return txt({ success: true, message: `Transaction #${transaction_id} ("${txn.payee}") categorized as "${cat.name}"` });
     }
   );
@@ -809,7 +809,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     "Portfolio holdings with allocation breakdown by asset class and currency",
     {},
     async () => {
-      const holdings = sqlite.prepare(`
+      const holdings = await sqlite.prepare(`
         SELECT ph.id, ph.name, ph.symbol, ph.currency, a.name as account_name,
                COALESCE(SUM(t.quantity), 0) as total_quantity,
                COALESCE(SUM(t.amount), 0) as book_value
@@ -866,7 +866,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
         "all": "1900-01-01",
       };
       const since = cutoff[period ?? "all"];
-      const perf = sqlite.prepare(`
+      const perf = await sqlite.prepare(`
         SELECT portfolio_holding as holding, COUNT(*) as tx_count,
                SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as cost_basis,
                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as proceeds,
@@ -910,7 +910,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     "Deep-dive analysis of a single holding: transaction history, avg cost, P&L",
     { symbol: z.string().describe("Holding name or symbol (fuzzy matched)") },
     async ({ symbol }) => {
-      const txns = sqlite.prepare(`
+      const txns = await sqlite.prepare(`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding, a.name as account_name, a.currency
         FROM transactions t JOIN accounts a ON a.id = t.account_id
         WHERE (LOWER(t.portfolio_holding) LIKE LOWER(?) OR LOWER(t.payee) LIKE LOWER(?))
@@ -954,7 +954,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       })).describe("Target allocations (should sum to ~100)"),
     },
     async ({ targets }) => {
-      const holdings = sqlite.prepare(`
+      const holdings = await sqlite.prepare(`
         SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value
         FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
         GROUP BY portfolio_holding
@@ -996,13 +996,13 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
     "Investment patterns: contribution frequency, top positions, diversification score",
     {},
     async () => {
-      const positions = sqlite.prepare(`
+      const positions = await sqlite.prepare(`
         SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value, COUNT(*) as purchases
         FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
         GROUP BY portfolio_holding ORDER BY book_value DESC
       `).all() as SqliteRow[];
 
-      const contributions = sqlite.prepare(`
+      const contributions = await sqlite.prepare(`
         SELECT strftime('%Y-%m', date) as month, SUM(ABS(amount)) as invested
         FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
         GROUP BY strftime('%Y-%m', date) ORDER BY month DESC LIMIT 12
@@ -1049,7 +1049,7 @@ export function registerCoreTools(server: McpServer, sqlite: BetterSqlite3.Datab
       };
       const info = bmInfo[bm];
 
-      const row = sqlite.prepare(`
+      const row = await sqlite.prepare(`
         SELECT MIN(date) as first_date, MAX(date) as last_date, SUM(ABS(amount)) as total_invested
         FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
       `).get() as { first_date: string | null; last_date: string; total_invested: number } | undefined;

@@ -5,9 +5,9 @@ vi.mock("@/db", () => ({
   initializeConnection: vi.fn(),
   isUnlocked: vi.fn(() => false),
   closeConnection: vi.fn(),
-  getConnection: vi.fn(() => ({ pragma: vi.fn() })),
+  getConnection: vi.fn(() => null),
   resetDb: vi.fn(),
-  getDialect: vi.fn(() => "sqlite"),
+  getDialect: vi.fn(() => "postgres"),
   DEFAULT_USER_ID: "default",
 }));
 
@@ -17,20 +17,16 @@ vi.mock("@shared/crypto", () => ({
 }));
 
 vi.mock("@shared/config", () => ({
-  readConfig: vi.fn(() => ({ dbPath: "/tmp/test.db", mode: "local", salt: "a".repeat(64) })),
+  readConfig: vi.fn(() => ({ mode: "postgres" })),
   writeConfig: vi.fn(),
   configExists: vi.fn(() => true),
-  resolveDbPath: vi.fn(() => "/tmp/test.db"),
+  resolveDbPath: vi.fn(() => ""),
 }));
 
 vi.mock("@/db/migration", () => ({
-  detectDbState: vi.fn(() => "encrypted"),
+  detectDbState: vi.fn(() => "ready"),
   migrateToEncrypted: vi.fn(),
 }));
-
-vi.mock("better-sqlite3-multiple-ciphers", () => {
-  return { default: vi.fn() };
-});
 
 vi.mock("fs", () => ({
   default: { existsSync: vi.fn(() => true) },

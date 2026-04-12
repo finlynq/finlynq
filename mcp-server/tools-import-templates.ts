@@ -3,7 +3,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type Database from "better-sqlite3";
+import type { PgCompatDb } from "./pg-compat.js";
 
 type TemplateRow = {
   id: number;
@@ -58,7 +58,7 @@ function parseAmount(raw: string, format: string, debitRaw = "", creditRaw = "")
   return format === "negate" ? -amount : amount;
 }
 
-export function registerImportTemplateTools(server: McpServer, sqlite: Database.Database) {
+export function registerImportTemplateTools(server: McpServer, sqlite: PgCompatDb) {
   // ---- get_import_templates ----
   server.tool(
     "get_import_templates",
@@ -70,7 +70,7 @@ export function registerImportTemplateTools(server: McpServer, sqlite: Database.
         .describe("Comma-separated CSV column headers to score against templates"),
     },
     async ({ headers }) => {
-      const templates = sqlite
+      const templates = await sqlite
         .prepare(
           `SELECT id, name, account_id, file_type, column_mapping, has_headers,
                   date_format, amount_format, is_default, created_at, updated_at
@@ -170,7 +170,7 @@ export function registerImportTemplateTools(server: McpServer, sqlite: Database.
         .describe("If true, parse and validate without inserting. Default: false"),
     },
     async ({ template_id, csv_content, account_id, dry_run }) => {
-      const tmpl = sqlite
+      const tmpl = await sqlite
         .prepare(
           `SELECT id, name, account_id, column_mapping, has_headers,
                   date_format, amount_format
@@ -195,7 +195,7 @@ export function registerImportTemplateTools(server: McpServer, sqlite: Database.
         return mcpError("No account_id provided and template has no default account");
       }
 
-      const account = sqlite
+      const account = await sqlite
         .prepare(`SELECT id, currency FROM accounts WHERE id = ?`)
         .get(resolvedAccountId) as { id: number; currency: string } | undefined;
       if (!account) return mcpError(`Account ${resolvedAccountId} not found`);
@@ -203,7 +203,7 @@ export function registerImportTemplateTools(server: McpServer, sqlite: Database.
       // Build a map of existing import hashes to detect duplicates
       const existingHashes = new Set<string>(
         (
-          sqlite
+          await sqlite
             .prepare(`SELECT import_hash FROM transactions WHERE import_hash IS NOT NULL`)
             .all() as { import_hash: string }[]
         ).map((r) => r.import_hash)
@@ -222,12 +222,12 @@ export function registerImportTemplateTools(server: McpServer, sqlite: Database.
       );
 
       // Get first row's user_id from accounts
-      const accountRow = sqlite
+      const accountRow = await sqlite
         .prepare(`SELECT user_id FROM accounts WHERE id = ?`)
         .get(resolvedAccountId) as { user_id: string } | undefined;
       const userId = accountRow?.user_id ?? "default";
 
-      const importBatch = sqlite.transaction(() => {
+      const importBatch = async () => {
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i];
           try {
@@ -261,7 +261,7 @@ export function registerImportTemplateTools(server: McpServer, sqlite: Database.
             }
 
             if (!dry_run) {
-              insertStmt.run(userId, rawDate, resolvedAccountId, currency, amount, payee, note, tags, hash);
+              await insertStmt.run(userId, rawDate, resolvedAccountId, currency, amount, payee, note, tags, hash);
               existingHashes.add(hash);
             }
             imported.push({ row: i + 1, date: rawDate, amount, payee });
@@ -269,9 +269,9 @@ export function registerImportTemplateTools(server: McpServer, sqlite: Database.
             errors.push(`Row ${i + 1}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
-      });
+      };
 
-      importBatch();
+      await importBatch();
 
       return mcpText({
         dry_run: dry_run ?? false,
