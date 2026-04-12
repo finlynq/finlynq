@@ -1,17 +1,11 @@
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import * as sqliteSchema from "./schema";
 import * as pgSchema from "./schema-pg";
-import { getConnection } from "./connection";
 import type { DatabaseAdapter, DbDialect, DrizzleDb } from "./adapter";
-import { SqliteAdapter } from "./adapters/sqlite";
 import { PostgresAdapter } from "./adapters/postgres";
-
-type DrizzleSqliteDb = ReturnType<typeof drizzle<typeof sqliteSchema>>;
 
 // ─── Adapter registry ────────────────────────────────────────────────────────
 
 const g = globalThis as typeof globalThis & {
-  __pfDrizzle?: DrizzleSqliteDb | null;
+  __pfDrizzle?: DrizzleDb | null;
   __pfAdapter?: DatabaseAdapter | null;
   __pfDialect?: DbDialect;
 };
@@ -26,9 +20,9 @@ export function setAdapter(adapter: DatabaseAdapter): void {
   g.__pfAdapter = adapter;
 }
 
-/** Get the current dialect (defaults to "sqlite" for backward compat) */
+/** Get the current dialect (defaults to "postgres") */
 export function getDialect(): DbDialect {
-  return g.__pfDialect ?? "sqlite";
+  return g.__pfDialect ?? "postgres";
 }
 
 /** Set the active dialect */
@@ -36,17 +30,7 @@ export function setDialect(dialect: DbDialect): void {
   g.__pfDialect = dialect;
 }
 
-// ─── Backward-compatible SQLite Drizzle instance ─────────────────────────────
-
-function getDb(): DrizzleSqliteDb {
-  if (!g.__pfDrizzle) {
-    const sqlite = getConnection(); // throws DatabaseLockedError if not unlocked
-    g.__pfDrizzle = drizzle(sqlite, { schema: sqliteSchema });
-  }
-  return g.__pfDrizzle;
-}
-
-/** Reset the cached Drizzle instance (call after lock/close) */
+/** Reset the cached Drizzle instance (call after close) */
 export function resetDb(): void {
   g.__pfDrizzle = null;
 }
@@ -84,52 +68,32 @@ function wrapPgBuilder(obj: any): any {
 /**
  * Lazy Proxy — all existing `import { db } from "@/db"` calls continue to work.
  *
- * When the adapter is set to PostgreSQL, the proxy delegates to the PG adapter.
- * Otherwise it falls through to the existing SQLite behavior.
+ * The proxy delegates to the PostgreSQL adapter.
  */
-export const db = new Proxy({} as DrizzleSqliteDb, {
+export const db = new Proxy({} as DrizzleDb, {
   get(_target, prop, receiver) {
-    // If a non-SQLite adapter is active, delegate to it
     const adapter = g.__pfAdapter;
-    if (adapter && adapter.dialect !== "sqlite") {
-      const adapterDb = adapter.getDb();
-      const value = Reflect.get(adapterDb, prop, receiver);
-      if (typeof value === "function") {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (...args: any[]) => wrapPgBuilder((value as (...a: any[]) => any).apply(adapterDb, args));
-      }
-      return value;
+    if (!adapter) {
+      throw new Error("Database adapter not initialized. Call setAdapter() first.");
     }
-
-    // Default: existing SQLite path
-    const real = getDb();
-    const value = Reflect.get(real, prop, receiver);
+    const adapterDb = adapter.getDb();
+    const value = Reflect.get(adapterDb, prop, receiver);
     if (typeof value === "function") {
-      return value.bind(real);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (...args: any[]) => wrapPgBuilder((value as (...a: any[]) => any).apply(adapterDb, args));
     }
     return value;
   },
 });
 
 /**
- * Schema export — returns the correct schema for the active dialect.
- * PG schema when PostgreSQL adapter is active, SQLite schema otherwise.
+ * Schema export — always PostgreSQL schema (PostgreSQL-only mode)
  */
-// Proxy switches between SQLite and PG schemas at runtime.
-// Target is {} to avoid ES module non-configurable property invariant violations.
-// Typed as sqliteSchema for TypeScript inference; PG schema used at runtime only.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const schema = new Proxy({} as typeof sqliteSchema, {
-  get(_target, prop) {
-    const dialect = g.__pfDialect ?? "sqlite";
-    const activeSchema = dialect === "postgres" ? pgSchema : sqliteSchema;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (activeSchema as any)[prop as string];
-  },
-});
+export const schema = pgSchema;
+
 export type { DatabaseAdapter, DbDialect, DrizzleDb };
 export { DEFAULT_USER_ID } from "./adapter";
-export { SqliteAdapter, PostgresAdapter };
+export { PostgresAdapter };
 export {
   initializeConnection,
   isUnlocked,

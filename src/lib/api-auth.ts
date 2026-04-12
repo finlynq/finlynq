@@ -1,12 +1,11 @@
 /**
- * API key management — works in both self-hosted (SQLite) and managed (PostgreSQL) modes.
+ * API key management — PostgreSQL-only mode
  *
- * In self-hosted mode, a single key is tied to DEFAULT_USER_ID.
- * In managed mode, each user has their own key (stored with their user_id).
+ * Each user has their own key (stored with their user_id).
  */
 
 import { NextRequest } from "next/server";
-import { db, schema, DEFAULT_USER_ID, getDialect } from "@/db";
+import { db, schema, DEFAULT_USER_ID } from "@/db";
 import { eq, and } from "drizzle-orm";
 import crypto from "crypto";
 
@@ -27,22 +26,14 @@ export async function getOrCreateApiKey(userId: string = DEFAULT_USER_ID): Promi
 
   const key = `pf_${crypto.randomBytes(24).toString("hex")}`;
 
-  if (getDialect() === "postgres") {
-    // postgres: use raw execute to avoid insert/onConflict type issues
-    const { sql } = await import("drizzle-orm");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (db as any).execute(sql`
-      INSERT INTO settings (key, user_id, value)
-      VALUES (${API_KEY_SETTING}, ${userId}, ${key})
-      ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
-    `);
-  } else {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (db as any)
-      .insert(schema.settings)
-      .values({ key: API_KEY_SETTING, userId, value: key })
-      .run();
-  }
+  // PostgreSQL: use raw execute to avoid insert/onConflict type issues
+  const { sql } = await import("drizzle-orm");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (db as any).execute(sql`
+    INSERT INTO settings (key, user_id, value)
+    VALUES (${API_KEY_SETTING}, ${userId}, ${key})
+    ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
+  `);
 
   return key;
 }
@@ -53,26 +44,14 @@ export async function getOrCreateApiKey(userId: string = DEFAULT_USER_ID): Promi
 export async function regenerateApiKey(userId: string = DEFAULT_USER_ID): Promise<string> {
   const key = `pf_${crypto.randomBytes(24).toString("hex")}`;
 
-  if (getDialect() === "postgres") {
-    const { sql } = await import("drizzle-orm");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (db as any).execute(sql`
-      INSERT INTO settings (key, user_id, value)
-      VALUES (${API_KEY_SETTING}, ${userId}, ${key})
-      ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
-    `);
-  } else {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (db as any)
-      .delete(schema.settings)
-      .where(and(eq(schema.settings.key, API_KEY_SETTING), eq(schema.settings.userId, userId)))
-      .run();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (db as any)
-      .insert(schema.settings)
-      .values({ key: API_KEY_SETTING, userId, value: key })
-      .run();
-  }
+  // PostgreSQL: use raw execute
+  const { sql } = await import("drizzle-orm");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (db as any).execute(sql`
+    INSERT INTO settings (key, user_id, value)
+    VALUES (${API_KEY_SETTING}, ${userId}, ${key})
+    ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
+  `);
 
   return key;
 }
@@ -91,23 +70,15 @@ export async function validateApiKey(request: NextRequest): Promise<{ userId: st
   const xApiKey = request.headers.get("X-API-Key");
   const authHeader = request.headers.get("authorization") ?? "";
   const bearerKey = authHeader.startsWith("Bearer pf_") ? authHeader.slice(7) : null;
-  // URL token: ?token=pf_xxx (for Claude.ai / connectors that only accept a plain URL)
-  let urlToken: string | null = null;
-  try { urlToken = request.nextUrl.searchParams.get("token"); } catch { /* ignore */ }
-  const headerKey = xApiKey ?? bearerKey ?? (urlToken?.startsWith("pf_") ? urlToken : null);
+  // URL token support removed for security — tokens in URLs leak via logs, history, and Referer headers.
+  // API keys must be sent via X-API-Key header or Authorization: Bearer header.
+  const headerKey = xApiKey ?? bearerKey;
 
   if (!headerKey) {
     return "Missing X-API-Key or Authorization: Bearer <key> header";
   }
 
-  if (getDialect() === "sqlite") {
-    // Self-hosted: single key for DEFAULT_USER_ID
-    const storedKey = await getOrCreateApiKey(DEFAULT_USER_ID);
-    if (headerKey !== storedKey) return "Invalid API key";
-    return { userId: DEFAULT_USER_ID };
-  }
-
-  // Postgres: look up which user owns this key
+  // PostgreSQL: look up which user owns this key
   const rows = await db
     .select({ userId: schema.settings.userId })
     .from(schema.settings)

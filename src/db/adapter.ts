@@ -1,8 +1,7 @@
 /**
  * Database Adapter Interface
  *
- * Abstracts the database connection lifecycle so both SQLite (self-hosted)
- * and PostgreSQL (managed hosted) share the same data access layer.
+ * Abstracts the database connection lifecycle for PostgreSQL.
  *
  * The adapter handles:
  *  - Connection initialization and teardown
@@ -11,29 +10,19 @@
  *  - Read-only mode detection
  */
 
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import type * as sqliteSchema from "./schema";
 import type * as pgSchema from "./schema-pg";
 
-/** Union of Drizzle database instances across supported dialects */
-export type DrizzleSqliteDb = BetterSQLite3Database<typeof sqliteSchema>;
+/** Drizzle database instance for PostgreSQL */
 export type DrizzlePgDb = NodePgDatabase<typeof pgSchema>;
-export type DrizzleDb = DrizzleSqliteDb | DrizzlePgDb;
+export type DrizzleDb = DrizzlePgDb;
 
-/** Supported database dialects */
-export type DbDialect = "sqlite" | "postgres";
+/** Supported database dialects (PostgreSQL only) */
+export type DbDialect = "postgres";
 
 /** Configuration for initializing a database adapter */
 export interface DbAdapterConfig {
   dialect: DbDialect;
-
-  /** SQLite-specific options */
-  sqlite?: {
-    passphrase: string;
-    dbPath?: string;
-    mode?: "local" | "cloud";
-  };
 
   /** PostgreSQL-specific options */
   postgres?: {
@@ -45,12 +34,12 @@ export interface DbAdapterConfig {
   };
 }
 
-/** Database adapter interface — implemented by each dialect */
+/** Database adapter interface — implemented by PostgreSQL */
 export interface DatabaseAdapter {
   /** Which dialect this adapter handles */
   readonly dialect: DbDialect;
 
-  /** Initialize the connection (open file / connect to server) */
+  /** Initialize the connection (connect to server) */
   initialize(config: DbAdapterConfig): Promise<void> | void;
 
   /** Return the Drizzle ORM instance for queries */
@@ -59,7 +48,7 @@ export interface DatabaseAdapter {
   /** Whether the adapter has an active connection */
   isConnected(): boolean;
 
-  /** Whether the connection is read-only (e.g. cloud-locked SQLite) */
+  /** Whether the connection is read-only */
   isReadOnly(): boolean;
 
   /** Run pending migrations */

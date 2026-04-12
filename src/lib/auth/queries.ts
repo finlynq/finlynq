@@ -1,22 +1,19 @@
 /**
- * Database queries for authentication (managed edition).
+ * Database queries for authentication (PostgreSQL-only mode).
  *
- * These queries operate on the users and password_reset_tokens tables
- * added in Phase 2 (NS-32).
+ * These queries operate on the users and password_reset_tokens tables.
  *
- * All functions are async to support both SQLite (synchronous) and
- * PostgreSQL (async) Drizzle adapters via the db proxy.
+ * All functions are async for PostgreSQL Drizzle adapter via the db proxy.
  */
 
-import { db, getDialect } from "@/db";
-import * as sqliteSchema from "@/db/schema";
+import { db } from "@/db";
 import * as pgSchema from "@/db/schema-pg";
 import { eq, count } from "drizzle-orm";
 import crypto from "crypto";
 
-/** Returns the correct schema tables for the active dialect */
-function getSchema(): typeof sqliteSchema {
-  return (getDialect() === "postgres" ? pgSchema : sqliteSchema) as typeof sqliteSchema;
+/** Returns the PostgreSQL schema tables */
+function getSchema(): typeof pgSchema {
+  return pgSchema;
 }
 
 // ─── User queries ────────────────────────────────────────────────────────────
