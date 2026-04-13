@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
 
   // Consolidated total
   let total = 0;
-  const byAccount = balances.map((b) => {
+  const byAccount = balances.map((b: any) => {
     const converted = convertWithRateMap(b.balance, b.currency, rateMap);
     total += converted;
     return {
