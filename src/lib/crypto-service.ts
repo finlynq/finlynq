@@ -161,11 +161,11 @@ async function cacheCryptoPrice(symbol: string, price: number, currency: string)
       await db.update(schema.priceCache)
         .set({ price, currency })
         .where(eq(schema.priceCache.id, existing.id))
-        .run();
+        ;
     } else {
       await db.insert(schema.priceCache)
         .values({ symbol: cacheSymbol, date: today, price, currency })
-        .run();
+        ;
     }
   } catch {
     // Silently fail cache writes

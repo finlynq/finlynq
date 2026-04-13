@@ -110,7 +110,7 @@ export async function POST(request: NextRequest) {
         createdAt: new Date().toISOString(),
         userId,
       })
-      .run();
+      ;
 
     return NextResponse.json(result);
   } catch (error: unknown) {

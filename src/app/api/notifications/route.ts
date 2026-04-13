@@ -36,10 +36,10 @@ export async function POST(request: NextRequest) {
     if (body.action === "mark-read") {
       if (body.id) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        db.update(schema.notifications).set({ read: 1 } as any).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId))).run();
+        db.update(schema.notifications).set({ read: 1 } as any).where(and(eq(schema.notifications.id, body.id), eq(schema.notifications.userId, userId)));
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        db.update(schema.notifications).set({ read: 1 } as any).where(eq(schema.notifications.userId, userId)).run();
+        db.update(schema.notifications).set({ read: 1 } as any).where(eq(schema.notifications.userId, userId));
       }
       return NextResponse.json({ success: true });
     }
@@ -93,7 +93,7 @@ export async function POST(request: NextRequest) {
       }
 
       if (generated.length > 0) {
-        db.insert(schema.notifications).values(generated).run();
+        db.insert(schema.notifications).values(generated);
       }
 
       return NextResponse.json({ generated: generated.length });

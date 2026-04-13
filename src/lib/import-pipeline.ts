@@ -279,7 +279,7 @@ export async function executeImport(
     const values = batch.map(({ rowIndex: _, ...rest }) => ({ ...rest, ...(userId ? { userId } : {}) }));
     if (values.length > 0) {
       try {
-        await db.insert(schema.transactions).values(values).run();
+        await db.insert(schema.transactions).values(values);
         imported += values.length;
       } catch (e) {
         importErrors.push(`Batch insert failed at row ${i + 1}: ${e instanceof Error ? e.message : "Unknown error"}`);

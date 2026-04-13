@@ -139,6 +139,6 @@ export async function DELETE(request: NextRequest) {
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  await db.delete(schema.loans).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).run();
+  await db.delete(schema.loans).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId)));
   return NextResponse.json({ success: true });
 }

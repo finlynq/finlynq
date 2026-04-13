@@ -78,7 +78,7 @@ export async function POST(request: NextRequest) {
         await db
           .delete(transactions)
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
-          .run();
+          ;
         break;
 
       case "update_category":
@@ -86,7 +86,7 @@ export async function POST(request: NextRequest) {
           .update(transactions)
           .set({ categoryId: parsed.data.categoryId })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
-          .run();
+          ;
         break;
 
       case "update_account":
@@ -94,7 +94,7 @@ export async function POST(request: NextRequest) {
           .update(transactions)
           .set({ accountId: parsed.data.accountId })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
-          .run();
+          ;
         break;
 
       case "update_date":
@@ -102,7 +102,7 @@ export async function POST(request: NextRequest) {
           .update(transactions)
           .set({ date: parsed.data.date })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
-          .run();
+          ;
         break;
 
       case "update_note":
@@ -110,7 +110,7 @@ export async function POST(request: NextRequest) {
           .update(transactions)
           .set({ note: parsed.data.note })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
-          .run();
+          ;
         break;
 
       case "update_payee":
@@ -118,7 +118,7 @@ export async function POST(request: NextRequest) {
           .update(transactions)
           .set({ payee: parsed.data.payee })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
-          .run();
+          ;
         break;
 
       case "update_tags":
@@ -126,7 +126,7 @@ export async function POST(request: NextRequest) {
           .update(transactions)
           .set({ tags: parsed.data.tags })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
-          .run();
+          ;
         break;
     }
 
