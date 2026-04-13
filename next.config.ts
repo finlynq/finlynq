@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactCompiler: true,
+  // Standalone output for Docker deployments (produces .next/standalone)
+  output: "standalone",
   typescript: {
     // TypeScript errors are checked in CI, skip during production build
     ignoreBuildErrors: true,
