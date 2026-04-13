@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
     // Find existing category by name or create it
     const cats = await getCategories(userId);
     const existing = cats.find(
-      (c) => c.name.toLowerCase() === categoryName.toLowerCase()
+      (c: any) => c.name.toLowerCase() === categoryName.toLowerCase()
     );
 
     const category = existing ?? await createCategory(userId, {

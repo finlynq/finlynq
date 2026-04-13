@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
     const rateMap = await getRateMap(displayCurrency, userId);
 
     const balances = await getAccountBalances(userId);
-    const convertedBalances = balances.map((b) => ({
+    const convertedBalances = balances.map((b: any) => ({
       ...b,
       convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
       displayCurrency,
