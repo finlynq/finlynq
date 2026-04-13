@@ -361,7 +361,7 @@ export async function importAccounts(csvText: string, userId?: string) {
             note: row["Note"] ?? "",
             ...(userId ? { userId } : {}),
           })
-          .run();
+          ;
         imported++;
       }
     } catch (e) {
@@ -398,7 +398,7 @@ export async function importCategories(csvText: string, userId?: string) {
             note: row["Note"] ?? "",
             ...(userId ? { userId } : {}),
           })
-          .run();
+          ;
         imported++;
       }
     } catch (e) {
@@ -442,7 +442,7 @@ export async function importPortfolio(csvText: string, userId?: string) {
             note: row["Note"] ?? "",
             ...(userId ? { userId } : {}),
           })
-          .run();
+          ;
         imported++;
       }
     } catch (e) {
@@ -510,7 +510,7 @@ export async function importTransactions(csvText: string, userId?: string) {
       skippedDuplicates += values.length - newValues.length;
 
       if (newValues.length > 0) {
-        await db.insert(schema.transactions).values(newValues).run();
+        await db.insert(schema.transactions).values(newValues);
         imported += newValues.length;
       }
     }

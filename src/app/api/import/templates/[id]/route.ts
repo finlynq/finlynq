@@ -44,7 +44,7 @@ export async function PUT(
       await db.update(schema.importTemplates)
         .set({ isDefault: 0 })
         .where(eq(schema.importTemplates.userId, userId))
-        .run();
+        ;
     }
 
     const updated = await db
@@ -94,7 +94,7 @@ export async function DELETE(
 
     await db.delete(schema.importTemplates)
       .where(and(eq(schema.importTemplates.id, templateId), eq(schema.importTemplates.userId, userId)))
-      .run();
+      ;
 
     return NextResponse.json({ success: true });
   } catch (error: unknown) {

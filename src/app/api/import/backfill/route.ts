@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
         db.update(schema.transactions)
           .set({ importHash: hash } as any)
           .where(and(eq(schema.transactions.id, tx.id), eq(schema.transactions.userId, userId)))
-          .run();
+          ;
         updated++;
       }
     }

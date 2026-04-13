@@ -91,14 +91,14 @@ export async function POST(request: NextRequest) {
 
     if (body.action === "set-targets") {
       // Replace all targets for this user
-      await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).run();
+      await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId));
       for (const t of body.targets) {
         await db.insert(schema.targetAllocations).values({
           userId,
           name: t.name,
           targetPct: t.targetPct,
           category: t.category,
-        }).run();
+        });
       }
       return NextResponse.json({ success: true });
     }

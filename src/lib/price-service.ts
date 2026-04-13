@@ -81,9 +81,9 @@ export async function cachePrice(symbol: string, price: number, currency: string
     await db.update(schema.priceCache)
       .set({ price, currency })
       .where(eq(schema.priceCache.id, existing.id))
-      .run();
+      ;
   } else {
-    await db.insert(schema.priceCache).values({ symbol, date: today, price, currency }).run();
+    await db.insert(schema.priceCache).values({ symbol, date: today, price, currency });
   }
 }
 
