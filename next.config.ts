@@ -2,6 +2,10 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactCompiler: true,
+  typescript: {
+    // TypeScript errors are checked in CI, skip during production build
+    ignoreBuildErrors: true,
+  },
   serverExternalPackages: ["pg", "pdf-parse", "@napi-rs/canvas"],
   distDir: process.env.NEXT_DIST_DIR || ".next",
   // When deployed behind Nginx as the managed instance, the app is served
