@@ -114,7 +114,7 @@ export async function POST(request: NextRequest) {
       await db
         .delete(schema.transactionSplits)
         .where(inArray(schema.transactionSplits.transactionId, existingTxns.map((t) => t.id)))
-        .run();
+        ;
     }
 
     await db.delete(schema.transactions).where(eq(schema.transactions.userId, userId));
@@ -150,7 +150,7 @@ export async function POST(request: NextRequest) {
       await db
         .insert(schema.portfolioHoldings)
         .values(strip(d.portfolioHoldings, userId) as (typeof schema.portfolioHoldings.$inferInsert)[])
-        .run();
+        ;
     }
 
     // Insert transactions, remapping FK references
@@ -185,45 +185,45 @@ export async function POST(request: NextRequest) {
         await db
           .insert(schema.transactionSplits)
           .values(remapped as (typeof schema.transactionSplits.$inferInsert)[])
-          .run();
+          ;
       }
     }
 
     if (d.budgets?.length) {
-      await db.insert(schema.budgets).values(strip(d.budgets, userId) as (typeof schema.budgets.$inferInsert)[]).run();
+      await db.insert(schema.budgets).values(strip(d.budgets, userId) as (typeof schema.budgets.$inferInsert)[]);
     }
     if (d.budgetTemplates?.length) {
-      await db.insert(schema.budgetTemplates).values(strip(d.budgetTemplates, userId) as (typeof schema.budgetTemplates.$inferInsert)[]).run();
+      await db.insert(schema.budgetTemplates).values(strip(d.budgetTemplates, userId) as (typeof schema.budgetTemplates.$inferInsert)[]);
     }
     if (d.loans?.length) {
-      await db.insert(schema.loans).values(strip(d.loans, userId) as (typeof schema.loans.$inferInsert)[]).run();
+      await db.insert(schema.loans).values(strip(d.loans, userId) as (typeof schema.loans.$inferInsert)[]);
     }
     if (d.goals?.length) {
-      await db.insert(schema.goals).values(strip(d.goals, userId) as (typeof schema.goals.$inferInsert)[]).run();
+      await db.insert(schema.goals).values(strip(d.goals, userId) as (typeof schema.goals.$inferInsert)[]);
     }
     if (d.snapshots?.length) {
-      await db.insert(schema.snapshots).values(strip(d.snapshots, userId) as (typeof schema.snapshots.$inferInsert)[]).run();
+      await db.insert(schema.snapshots).values(strip(d.snapshots, userId) as (typeof schema.snapshots.$inferInsert)[]);
     }
     if (d.targetAllocations?.length) {
-      await db.insert(schema.targetAllocations).values(strip(d.targetAllocations, userId) as (typeof schema.targetAllocations.$inferInsert)[]).run();
+      await db.insert(schema.targetAllocations).values(strip(d.targetAllocations, userId) as (typeof schema.targetAllocations.$inferInsert)[]);
     }
     if (d.recurringTransactions?.length) {
-      await db.insert(schema.recurringTransactions).values(strip(d.recurringTransactions, userId) as (typeof schema.recurringTransactions.$inferInsert)[]).run();
+      await db.insert(schema.recurringTransactions).values(strip(d.recurringTransactions, userId) as (typeof schema.recurringTransactions.$inferInsert)[]);
     }
     if (d.subscriptions?.length) {
-      await db.insert(schema.subscriptions).values(strip(d.subscriptions, userId) as (typeof schema.subscriptions.$inferInsert)[]).run();
+      await db.insert(schema.subscriptions).values(strip(d.subscriptions, userId) as (typeof schema.subscriptions.$inferInsert)[]);
     }
     if (d.transactionRules?.length) {
-      await db.insert(schema.transactionRules).values(strip(d.transactionRules, userId) as (typeof schema.transactionRules.$inferInsert)[]).run();
+      await db.insert(schema.transactionRules).values(strip(d.transactionRules, userId) as (typeof schema.transactionRules.$inferInsert)[]);
     }
     if (d.importTemplates?.length) {
-      await db.insert(schema.importTemplates).values(strip(d.importTemplates, userId) as (typeof schema.importTemplates.$inferInsert)[]).run();
+      await db.insert(schema.importTemplates).values(strip(d.importTemplates, userId) as (typeof schema.importTemplates.$inferInsert)[]);
     }
     if (d.fxRates?.length) {
-      await db.insert(schema.fxRates).values(strip(d.fxRates, userId) as (typeof schema.fxRates.$inferInsert)[]).run();
+      await db.insert(schema.fxRates).values(strip(d.fxRates, userId) as (typeof schema.fxRates.$inferInsert)[]);
     }
     if (d.contributionRoom?.length) {
-      await db.insert(schema.contributionRoom).values(strip(d.contributionRoom, userId) as (typeof schema.contributionRoom.$inferInsert)[]).run();
+      await db.insert(schema.contributionRoom).values(strip(d.contributionRoom, userId) as (typeof schema.contributionRoom.$inferInsert)[]);
     }
 
     // Settings: upsert by key
@@ -237,7 +237,7 @@ export async function POST(request: NextRequest) {
             target: schema.settings.key,
             set: { value: value as string, userId },
           })
-          .run();
+          ;
       }
     }
 
