@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
   const rateMap = await getRateMap(displayCurrency, userId);
 
   // Convert budget amounts to display currency
-  let enriched = data.map((b) => ({
+  let enriched = data.map((b: any) => ({
     ...b,
     convertedAmount: convertWithRateMap(b.amount, b.currency, rateMap),
     displayCurrency,
@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    enriched = enriched.map((b) => ({
+    enriched = enriched.map((b: any) => ({
       ...b,
       convertedSpent: Math.round((spentMap.get(b.categoryId) ?? 0) * 100) / 100,
     }));
@@ -58,9 +58,9 @@ export async function GET(request: NextRequest) {
 
   if (includeRollover && month) {
     const rollovers = await getBudgetRollover(userId, month);
-    const rolloverMap = new Map(rollovers.map((r) => [r.categoryId, r.rolloverAmount]));
+    const rolloverMap = new Map(rollovers.map((r: any) => [r.categoryId, r.rolloverAmount]));
 
-    enriched = enriched.map((b) => ({
+    enriched = enriched.map((b: any) => ({
       ...b,
       rolloverAmount: rolloverMap.get(b.categoryId) ?? 0,
     }));

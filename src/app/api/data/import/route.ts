@@ -91,20 +91,20 @@ export async function POST(request: NextRequest) {
 
   try {
     // Delete existing data in FK-safe order
-    await db.delete(schema.notifications).where(eq(schema.notifications.userId, userId)).run();
-    await db.delete(schema.subscriptions).where(eq(schema.subscriptions.userId, userId)).run();
-    await db.delete(schema.recurringTransactions).where(eq(schema.recurringTransactions.userId, userId)).run();
-    await db.delete(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)).run();
-    await db.delete(schema.priceCache).where(eq(schema.priceCache.userId, userId)).run();
-    await db.delete(schema.fxRates).where(eq(schema.fxRates.userId, userId)).run();
-    await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId)).run();
-    await db.delete(schema.snapshots).where(eq(schema.snapshots.userId, userId)).run();
-    await db.delete(schema.goals).where(eq(schema.goals.userId, userId)).run();
-    await db.delete(schema.loans).where(eq(schema.loans.userId, userId)).run();
-    await db.delete(schema.budgets).where(eq(schema.budgets.userId, userId)).run();
-    await db.delete(schema.budgetTemplates).where(eq(schema.budgetTemplates.userId, userId)).run();
-    await db.delete(schema.transactionRules).where(eq(schema.transactionRules.userId, userId)).run();
-    await db.delete(schema.importTemplates).where(eq(schema.importTemplates.userId, userId)).run();
+    await db.delete(schema.notifications).where(eq(schema.notifications.userId, userId));
+    await db.delete(schema.subscriptions).where(eq(schema.subscriptions.userId, userId));
+    await db.delete(schema.recurringTransactions).where(eq(schema.recurringTransactions.userId, userId));
+    await db.delete(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId));
+    await db.delete(schema.priceCache).where(eq(schema.priceCache.userId, userId));
+    await db.delete(schema.fxRates).where(eq(schema.fxRates.userId, userId));
+    await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId));
+    await db.delete(schema.snapshots).where(eq(schema.snapshots.userId, userId));
+    await db.delete(schema.goals).where(eq(schema.goals.userId, userId));
+    await db.delete(schema.loans).where(eq(schema.loans.userId, userId));
+    await db.delete(schema.budgets).where(eq(schema.budgets.userId, userId));
+    await db.delete(schema.budgetTemplates).where(eq(schema.budgetTemplates.userId, userId));
+    await db.delete(schema.transactionRules).where(eq(schema.transactionRules.userId, userId));
+    await db.delete(schema.importTemplates).where(eq(schema.importTemplates.userId, userId));
 
     const existingTxns = await db
       .select({ id: schema.transactions.id })
@@ -117,10 +117,10 @@ export async function POST(request: NextRequest) {
         .run();
     }
 
-    await db.delete(schema.transactions).where(eq(schema.transactions.userId, userId)).run();
-    await db.delete(schema.portfolioHoldings).where(eq(schema.portfolioHoldings.userId, userId)).run();
-    await db.delete(schema.categories).where(eq(schema.categories.userId, userId)).run();
-    await db.delete(schema.accounts).where(eq(schema.accounts.userId, userId)).run();
+    await db.delete(schema.transactions).where(eq(schema.transactions.userId, userId));
+    await db.delete(schema.portfolioHoldings).where(eq(schema.portfolioHoldings.userId, userId));
+    await db.delete(schema.categories).where(eq(schema.categories.userId, userId));
+    await db.delete(schema.accounts).where(eq(schema.accounts.userId, userId));
 
     // Insert accounts, build old→new ID map
     const accountIdMap = new Map<number, number>();
