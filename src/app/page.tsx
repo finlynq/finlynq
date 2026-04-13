@@ -20,6 +20,9 @@ import {
   Key,
   AlertTriangle,
   EyeOff,
+  Heart,
+  Github,
+  Coffee,
 } from "lucide-react";
 
 /* ─── Data ─────────────────────────────────────────────────────────────────── */
@@ -28,7 +31,7 @@ const STATS = [
   { value: "27+", label: "MCP tools" },
   { value: "AES-256", label: "Encryption" },
   { value: "6", label: "Import formats" },
-  { value: "100%", label: "Local-first" },
+  { value: "100%", label: "Free & open source" },
 ];
 
 const FEATURES = [
@@ -116,57 +119,22 @@ const MCP_PROMPTS = [
   { q: "Show me any unusual transactions recently", a: "Found 2 anomalies in the last 30 days" },
 ];
 
-const PRICING = [
-  {
-    name: "Self-Hosted",
-    price: "Free",
-    period: "forever",
-    desc: "Full control. Your hardware, your data.",
-    cta: "Get Started",
-    href: "/self-hosted",
-    featured: false,
-    features: [
-      "All features included",
-      "SQLite + AES-256 encryption",
-      "MCP server (stdio transport)",
-      "Local data — never leaves your machine",
-      "Community support",
-    ],
-  },
-  {
-    name: "Cloud",
-    price: "$9",
-    period: "/ month",
-    desc: "Managed hosting with automatic backups.",
-    cta: "Start Free Trial",
-    href: "/cloud?tab=register",
-    featured: true,
-    features: [
-      "Everything in Self-Hosted",
-      "Hosted PostgreSQL database",
-      "Automatic daily backups",
-      "MCP over HTTP (access anywhere)",
-      "Email-based transaction import",
-      "Priority support",
-    ],
-  },
-  {
-    name: "Power User",
-    price: "$19",
-    period: "/ month",
-    desc: "For power users who want it all.",
-    cta: "Start Free Trial",
-    href: "/cloud?tab=register",
-    featured: false,
-    features: [
-      "Everything in Cloud",
-      "Up to 5 team members",
-      "Advanced tax optimization",
-      "Monte Carlo retirement sim",
-      "REST API access",
-      "Dedicated support",
-    ],
-  },
+const HIGHLIGHTS = [
+  "27+ MCP tools — read & write",
+  "AES-256 encryption (SQLCipher)",
+  "CSV, Excel, OFX/QFX, PDF import",
+  "Budgets, portfolio, goals, loans",
+  "AI chat with natural-language queries",
+  "FIRE calculator & Monte Carlo sim",
+  "Transaction rules & auto-categorize",
+  "Self-host or use our cloud — same features",
+  "REST API + MCP (HTTP & stdio)",
+  "Dark mode, mobile-friendly UI",
+];
+
+const DONATE_LINKS = [
+  { icon: Github, label: "GitHub Sponsors", href: "https://github.com/sponsors/finlynq" },
+  { icon: Coffee, label: "Ko-fi", href: "https://ko-fi.com/finlynq" },
 ];
 
 const TRUST = [
@@ -180,18 +148,18 @@ const FOOTER_LINKS = {
   Product: [
     { label: "Features", href: "#features" },
     { label: "How it works", href: "#how-it-works" },
-    { label: "Pricing", href: "#pricing" },
     { label: "MCP Guide", href: "/mcp-guide" },
     { label: "API Docs", href: "/api-docs" },
+    { label: "GitHub", href: "https://github.com/finlynq/finlynq" },
   ],
   Hosting: [
-    { label: "Cloud", href: "/cloud?tab=register" },
+    { label: "Cloud (free)", href: "/cloud?tab=register" },
     { label: "Self-Hosted", href: "/self-hosted" },
   ],
-  Account: [
-    { label: "Log In", href: "/cloud" },
-    { label: "Sign Up", href: "/cloud?tab=register" },
-    { label: "Dashboard", href: "/dashboard" },
+  Community: [
+    { label: "Support Us", href: "#support" },
+    { label: "GitHub Sponsors", href: "https://github.com/sponsors/finlynq" },
+    { label: "Ko-fi", href: "https://ko-fi.com/finlynq" },
   ],
 };
 
@@ -214,7 +182,7 @@ export default function LandingPage() {
 
           {/* Nav links */}
           <nav className="hidden md:flex items-center gap-1">
-            {["Features", "How it works", "MCP", "Pricing"].map((label) => (
+            {["Features", "How it works", "MCP", "Support"].map((label) => (
               <a
                 key={label}
                 href={`#${label.toLowerCase().replace(" ", "-")}`}
@@ -277,14 +245,14 @@ export default function LandingPage() {
               href="/cloud?tab=register"
               className="flex items-center gap-2 rounded-xl bg-primary px-8 py-3.5 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90 hover:shadow-primary/35 hover:scale-[1.02] active:scale-[0.99] transition-all w-full sm:w-auto justify-center"
             >
-              Start Free Trial
+              Get Started Free
               <ArrowRight className="h-4 w-4" />
             </Link>
             <Link
               href="/self-hosted"
               className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
-              Self-host for free →
+              Self-host with Docker →
             </Link>
           </div>
 
@@ -600,66 +568,88 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── Pricing ────────────────────────────────────────────────────────── */}
-      <section id="pricing" className="mx-auto max-w-6xl px-5 py-24">
+      {/* ── Free & Open Source + Support ─────────────────────────────────── */}
+      <section id="support" className="mx-auto max-w-6xl px-5 py-24">
         <div className="text-center mb-16">
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3 opacity-70">Pricing</p>
+          <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3 opacity-70">Open Source</p>
           <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-foreground">
-            Simple, transparent pricing
+            100% free. No paywalls. <span className="text-gradient">Ever.</span>
           </h2>
           <p className="mt-4 text-lg text-muted-foreground max-w-xl mx-auto leading-relaxed">
-            Start free. Self-host forever. Or let us handle the infrastructure.
+            Finlynq is open-source (AGPL v3) and every feature is free — self-hosted or cloud.
+            If you find it useful, consider supporting development with a donation.
           </p>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-3 items-start">
-          {PRICING.map((plan) => (
-            <div
-              key={plan.name}
-              className={`relative rounded-2xl border p-8 flex flex-col transition-all ${
-                plan.featured
-                  ? "border-primary/40 bg-gradient-to-b from-primary/8 to-card shadow-xl shadow-primary/8 scale-[1.02] lg:scale-105"
-                  : "border-border/60 bg-card card-hover"
-              }`}
-            >
-              {plan.featured && (
-                <div className="absolute -top-3.5 left-1/2 -translate-x-1/2">
-                  <span className="rounded-full bg-primary px-4 py-1 text-[11px] font-bold text-primary-foreground shadow-md tracking-wide uppercase">
-                    Most Popular
-                  </span>
-                </div>
-              )}
+        <div className="grid gap-8 lg:grid-cols-2 items-start">
+          {/* What you get card */}
+          <div className="rounded-2xl border border-primary/40 bg-gradient-to-b from-primary/8 to-card shadow-xl shadow-primary/8 p-8">
+            <div className="flex items-baseline gap-1 mb-2">
+              <span className="text-4xl font-extrabold tracking-tight text-foreground hero-number">Free</span>
+              <span className="text-sm text-muted-foreground">forever — all features</span>
+            </div>
+            <p className="text-sm text-muted-foreground mb-6">Self-host with Docker or use our managed cloud. Same app, same features, zero cost.</p>
 
-              <div className="mb-7">
-                <h3 className="text-base font-semibold text-foreground mb-1">{plan.name}</h3>
-                <div className="flex items-baseline gap-1 mb-2">
-                  <span className="text-4xl font-extrabold tracking-tight text-foreground hero-number">{plan.price}</span>
-                  <span className="text-sm text-muted-foreground">{plan.period}</span>
-                </div>
-                <p className="text-sm text-muted-foreground">{plan.desc}</p>
-              </div>
+            <ul className="space-y-3 mb-8">
+              {HIGHLIGHTS.map((feat) => (
+                <li key={feat} className="flex items-start gap-2.5 text-sm">
+                  <Check className="h-4 w-4 text-emerald-500 mt-0.5 shrink-0" />
+                  <span className="text-muted-foreground">{feat}</span>
+                </li>
+              ))}
+            </ul>
 
-              <ul className="space-y-3 mb-8 flex-1">
-                {plan.features.map((feat) => (
-                  <li key={feat} className="flex items-start gap-2.5 text-sm">
-                    <Check className="h-4 w-4 text-emerald-500 mt-0.5 shrink-0" />
-                    <span className="text-muted-foreground">{feat}</span>
-                  </li>
-                ))}
-              </ul>
-
+            <div className="flex flex-col sm:flex-row gap-3">
               <Link
-                href={plan.href}
-                className={`rounded-xl px-6 py-3 text-sm font-semibold text-center transition-all hover:scale-[1.02] active:scale-[0.99] ${
-                  plan.featured
-                    ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90"
-                    : "border border-border/80 text-foreground hover:bg-muted/50 hover:border-border"
-                }`}
+                href="/cloud?tab=register"
+                className="inline-flex items-center gap-2 justify-center rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90 hover:scale-[1.02] active:scale-[0.99] transition-all"
               >
-                {plan.cta}
+                Get Started Free <ArrowRight className="h-4 w-4" />
+              </Link>
+              <Link
+                href="/self-hosted"
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-border px-6 py-3 text-sm font-medium text-muted-foreground hover:text-foreground hover:border-border/80 hover:bg-muted/40 transition-all"
+              >
+                Self-Host Guide
               </Link>
             </div>
-          ))}
+          </div>
+
+          {/* Support / donate card */}
+          <div className="rounded-2xl border border-border/60 bg-card p-8 card-hover">
+            <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-rose-50 dark:bg-rose-500/10 border border-rose-100 dark:border-rose-500/20">
+              <Heart className="h-5 w-5 text-rose-500" />
+            </div>
+            <h3 className="text-xl font-bold text-foreground mb-2">Support Finlynq</h3>
+            <p className="text-sm text-muted-foreground leading-relaxed mb-6">
+              Finlynq is built and maintained by a small team. Donations keep the servers running,
+              fund new features, and ensure the project stays independent and ad-free.
+              Every contribution — big or small — makes a difference.
+            </p>
+
+            <div className="space-y-3 mb-8">
+              {DONATE_LINKS.map((d) => (
+                <a
+                  key={d.label}
+                  href={d.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 rounded-xl border border-border/60 px-5 py-3.5 text-sm font-medium text-foreground hover:bg-muted/50 hover:border-border transition-all group"
+                >
+                  <d.icon className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
+                  {d.label}
+                  <ArrowRight className="h-3.5 w-3.5 ml-auto text-muted-foreground/50 group-hover:translate-x-0.5 transition-transform" />
+                </a>
+              ))}
+            </div>
+
+            <p className="text-xs text-muted-foreground/60 leading-relaxed">
+              Finlynq is licensed under AGPL v3. Source code is available on{" "}
+              <a href="https://github.com/finlynq/finlynq" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground transition-colors">
+                GitHub
+              </a>.
+            </p>
+          </div>
         </div>
       </section>
 
@@ -679,7 +669,7 @@ export default function LandingPage() {
               Start understanding your finances today
             </h2>
             <p className="text-lg text-muted-foreground max-w-lg mx-auto mb-10 leading-relaxed">
-              Join the first personal finance app built for AI assistants.
+              Open-source, free forever, and built for the AI era.
               Cloud or self-hosted — your data, your rules.
             </p>
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -687,15 +677,18 @@ export default function LandingPage() {
                 href="/cloud?tab=register"
                 className="flex items-center gap-2 justify-center rounded-xl bg-primary px-8 py-3.5 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90 hover:scale-[1.02] active:scale-[0.99] transition-all w-full sm:w-auto"
               >
-                Create Free Account
+                Get Started Free
                 <ArrowRight className="h-4 w-4" />
               </Link>
-              <Link
-                href="/cloud"
-                className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+              <a
+                href="https://github.com/finlynq/finlynq"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
-                Already have an account? Log in →
-              </Link>
+                <Github className="h-4 w-4" />
+                View on GitHub →
+              </a>
             </div>
           </div>
         </div>
@@ -744,9 +737,9 @@ export default function LandingPage() {
               &copy; {new Date().getFullYear()} Finlynq. All rights reserved.
             </p>
             <div className="flex items-center gap-5 text-xs text-muted-foreground/50">
-              <span>AES-256 Encrypted</span>
+              <span>AGPL v3</span>
               <span>·</span>
-              <span>Local-first</span>
+              <span>AES-256 Encrypted</span>
               <span>·</span>
               <span>MCP-powered</span>
             </div>
