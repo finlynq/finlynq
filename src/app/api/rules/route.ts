@@ -134,6 +134,6 @@ export async function DELETE(req: NextRequest) {
   const id = searchParams.get("id");
   if (!id) return NextResponse.json({ error: "ID is required" }, { status: 400 });
 
-  await db.delete(transactionRules).where(and(eq(transactionRules.id, parseInt(id)), eq(transactionRules.userId, auth.context.userId))).run();
+  await db.delete(transactionRules).where(and(eq(transactionRules.id, parseInt(id)), eq(transactionRules.userId, auth.context.userId)));
   return NextResponse.json({ success: true });
 }

@@ -97,7 +97,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Replace existing splits atomically
-    await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId)).run();
+    await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId));
 
     const rows = splits.map((s) => ({
       transactionId,
@@ -132,6 +132,6 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId)).run();
+  await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId));
   return NextResponse.json({ success: true });
 }

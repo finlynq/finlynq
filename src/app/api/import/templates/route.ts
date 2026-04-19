@@ -63,7 +63,7 @@ export async function POST(request: NextRequest) {
       await db.update(schema.importTemplates)
         .set({ isDefault: 0 })
         .where(eq(schema.importTemplates.userId, userId))
-        .run();
+        ;
     }
 
     const result = await db

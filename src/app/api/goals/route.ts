@@ -131,6 +131,6 @@ export async function DELETE(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const id = parseInt(request.nextUrl.searchParams.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
-  db.delete(schema.goals).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).run();
+  db.delete(schema.goals).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId)));
   return NextResponse.json({ success: true });
 }

@@ -185,7 +185,7 @@ export async function POST(request: NextRequest) {
 
     // Bulk insert transactions
     if (sampleTransactions.length > 0) {
-      await db.insert(schema.transactions).values(sampleTransactions).run();
+      await db.insert(schema.transactions).values(sampleTransactions);
     }
 
     return NextResponse.json({ success: true, transactionsCreated: sampleTransactions.length });

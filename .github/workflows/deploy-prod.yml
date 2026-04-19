@@ -28,6 +28,8 @@ jobs:
           NEXTAUTH_URL: https://finlynq.com
 
   deploy:
+    permissions:
+      issues: write
     name: Deploy to finlynq.com
     runs-on: ubuntu-latest
     needs: [validate]

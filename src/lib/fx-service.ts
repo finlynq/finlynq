@@ -41,7 +41,7 @@ export async function getLatestFxRate(from: string, to: string, userId?: string)
   if (rate !== null) {
     await db.insert(schema.fxRates)
       .values({ date: today, fromCurrency: from, toCurrency: to, rate, userId: uid })
-      .run();
+      ;
     return rate;
   }
 

@@ -29,7 +29,7 @@ export async function updateAccount(id: number, userId: string, data: Partial<{ 
 }
 
 export async function deleteAccount(id: number, userId: string) {
-  return db.delete(accounts).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).run();
+  return db.delete(accounts).where(and(eq(accounts.id, id), eq(accounts.userId, userId)));
 }
 
 // Categories
@@ -50,7 +50,7 @@ export async function updateCategory(id: number, userId: string, data: Partial<{
 }
 
 export async function deleteCategory(id: number, userId: string) {
-  return db.delete(categories).where(and(eq(categories.id, id), eq(categories.userId, userId))).run();
+  return db.delete(categories).where(and(eq(categories.id, id), eq(categories.userId, userId)));
 }
 
 export async function getTransactionCountByCategory(categoryId: number, userId: string): Promise<number> {
@@ -171,7 +171,7 @@ export async function updateTransaction(id: number, userId: string, data: Partia
 }
 
 export async function deleteTransaction(id: number, userId: string) {
-  return db.delete(transactions).where(and(eq(transactions.id, id), eq(transactions.userId, userId))).run();
+  return db.delete(transactions).where(and(eq(transactions.id, id), eq(transactions.userId, userId)));
 }
 
 // Portfolio
@@ -231,7 +231,7 @@ export async function upsertBudget(userId: string, data: { categoryId: number; m
 }
 
 export async function deleteBudget(id: number, userId: string) {
-  return db.delete(budgets).where(and(eq(budgets.id, id), eq(budgets.userId, userId))).run();
+  return db.delete(budgets).where(and(eq(budgets.id, id), eq(budgets.userId, userId)));
 }
 
 // Budget Templates
@@ -262,7 +262,7 @@ export async function createBudgetTemplate(userId: string, data: { name: string;
 }
 
 export async function deleteBudgetTemplate(id: number, userId: string) {
-  return db.delete(budgetTemplates).where(and(eq(budgetTemplates.id, id), eq(budgetTemplates.userId, userId))).run();
+  return db.delete(budgetTemplates).where(and(eq(budgetTemplates.id, id), eq(budgetTemplates.userId, userId)));
 }
 
 // Budget Rollover: get previous month overspend per category

@@ -36,14 +36,14 @@ export async function POST(request: NextRequest) {
     db.insert(schema.settings)
       .values({ key: "import_email", value: email, userId })
       .onConflictDoUpdate({ target: schema.settings.key, set: { value: email } as any })
-      .run();
+      ;
 
     // Upsert webhook secret
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db.insert(schema.settings)
       .values({ key: "email_webhook_secret", value: webhookSecret, userId })
       .onConflictDoUpdate({ target: schema.settings.key, set: { value: webhookSecret } as any })
-      .run();
+      ;
 
     return NextResponse.json({ email, webhookSecret });
   } catch (error: unknown) {
