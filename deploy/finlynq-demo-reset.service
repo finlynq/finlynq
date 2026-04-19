@@ -1,0 +1,28 @@
+[Unit]
+Description=Finlynq — reseed the public demo account
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+# Adjust WorkingDirectory to match the environment being reset.
+# Typical paths on the Finlynq server:
+#   prod:    /var/www/finlynq
+#   staging: /var/www/finlynq-staging
+#   dev:     /var/www/finlynq-dev
+WorkingDirectory=/var/www/finlynq
+# EnvironmentFile should point at the same .env used by the Next.js service for
+# this environment — in particular, it must define DATABASE_URL (or PF_DATABASE_URL).
+EnvironmentFile=/etc/finlynq/finlynq.env
+ExecStart=/usr/bin/env npx tsx scripts/seed-demo.ts
+# Run as the same user that owns the repo files.
+User=finlynq
+Group=finlynq
+StandardOutput=journal
+StandardError=journal
+# Demo resets are idempotent — no point retrying a hard failure indefinitely.
+Restart=no
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

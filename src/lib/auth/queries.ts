@@ -8,7 +8,7 @@
 
 import { db } from "@/db";
 import * as pgSchema from "@/db/schema-pg";
-import { eq, count } from "drizzle-orm";
+import { eq, count, sql } from "drizzle-orm";
 import crypto from "crypto";
 
 /** Returns the PostgreSQL schema tables */
@@ -87,6 +87,17 @@ export async function disableUserMfa(userId: string) {
   const now = new Date().toISOString();
   await db.update(getSchema().users)
     .set({ mfaEnabled: 0, mfaSecret: null, updatedAt: now })
+    .where(eq(getSchema().users.id, userId));
+}
+
+/** Record a successful login: bump the counter and stamp the timestamp. */
+export async function recordSuccessfulLogin(userId: string) {
+  const now = new Date().toISOString();
+  await db.update(getSchema().users)
+    .set({
+      loginCount: sql`${getSchema().users.loginCount} + 1`,
+      lastLoginAt: now,
+    })
     .where(eq(getSchema().users.id, userId));
 }
 

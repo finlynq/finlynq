@@ -14,6 +14,7 @@
     "db:push": "drizzle-kit push",
     "db:push:encrypted": "npx tsx scripts/db-push.ts",
     "db:push:pg": "drizzle-kit push --config=drizzle-pg.config.ts",
+    "seed:demo": "npx tsx scripts/seed-demo.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

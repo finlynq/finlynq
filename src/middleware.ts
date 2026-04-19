@@ -56,7 +56,7 @@ export function middleware(request: NextRequest) {
       "default-src 'self'",
       "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob:",
+      "img-src 'self' data: blob: https://coin-images.coingecko.com https://assets.coingecko.com",
       "font-src 'self'",
       "connect-src 'self'",
       "frame-ancestors 'none'",

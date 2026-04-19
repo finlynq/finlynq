@@ -6,6 +6,7 @@ import {
   getNetWorthOverTime,
 } from "@/lib/queries";
 import { getRateMap, convertWithRateMap } from "@/lib/fx-service";
+import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { logApiError } from "@/lib/validate";
 
@@ -27,11 +28,20 @@ export async function GET(request: NextRequest) {
     const rateMap = await getRateMap(displayCurrency, userId);
 
     const balances = await getAccountBalances(userId);
-    const convertedBalances = balances.map((b) => ({
-      ...b,
-      convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
-      displayCurrency,
-    }));
+    // Add live market value of holdings to accounts that have any — so investment
+    // accounts reflect total value (cash + positions), not just cash flow.
+    const holdingsByAccount = await getHoldingsValueByAccount(userId);
+    const convertedBalances = balances.map((b: any) => {
+      const holdings = holdingsByAccount.get(b.accountId);
+      const totalBalance = holdings ? b.balance + holdings.value : b.balance;
+      return {
+        ...b,
+        balance: totalBalance,
+        holdingsValue: holdings?.value ?? 0,
+        convertedBalance: convertWithRateMap(totalBalance, b.currency, rateMap),
+        displayCurrency,
+      };
+    });
 
     const incomeVsExpenses = await getIncomeVsExpenses(userId, startDate, endDate);
     const spendingByCategory = await getSpendingByCategory(userId, startDate, endDate);

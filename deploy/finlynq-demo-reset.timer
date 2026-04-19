@@ -1,0 +1,14 @@
+[Unit]
+Description=Finlynq — nightly demo-account reseed
+
+[Timer]
+# 03:00 UTC daily. Quiet traffic window for LinkedIn/HN/X demo visitors
+# regardless of their timezone.
+OnCalendar=*-*-* 03:00:00 UTC
+# If the machine was off at the scheduled time, run the job once the machine is back up.
+Persistent=true
+# A few seconds of jitter so timers across environments don't hammer the DB together.
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

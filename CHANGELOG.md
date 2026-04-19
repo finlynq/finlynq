@@ -6,6 +6,19 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Added
+- **Public demo account** (`demo@finlynq.com` / `finlynq-demo`) seeded on production with 6 months of realistic sample data (253 transactions across 4 accounts, 4 investment buys, 4 budgets, 3 portfolio holdings, 2 goals) so first-time visitors can explore the app without signing up
+- `scripts/seed-demo.ts` — idempotent demo seeder; `npm run seed:demo`
+- `deploy/finlynq-demo-reset.{service,timer}` — systemd unit + timer that reseeds the demo account nightly at 03:00 UTC; install script at `deploy/install-demo-reset.sh`
+- `login_count` and `last_login_at` columns on the users table; incremented on every successful login (and every MFA-completed login) so demo engagement can be measured with one SQL query
+- `/mcp` and `/mcp/*` vanity redirects (308) to `/api/mcp` — shorter URL for the "Connect to Claude" paste flow
+- `src/lib/holdings-value.ts` — computes live market value of portfolio holdings grouped by account, with FX conversion to the account's native currency
+- Dashboard account balances now include market value of holdings (previously cash-only — brokerage accounts looked artificially negative)
+- ETF registry expanded from 19 to ~65 symbols in `src/lib/price-service.ts`: SPY, IVV, QQQ, SCHB, SCHD, VUG, VTV, VYM, DIA, ITOT, SPLG, VO, VB, VXF, IJH, IJR, IWM, sector ETFs (XLK/XLF/XLV/XLE/…), VEA/IEFA/EFA/SCHF, VWO/IEMG/EEM/SCHE, VXUS/VT/ACWI/IXUS, bond ETFs (BND/AGG/TLT/SHY/LQD/HYG/MUB/BNDX), VNQ/VNQI/GLD/IAU/SLV, and Canadian ETFs (VFV/XIC/XIU/ZCN/VGRO/VEQT/VBAL/XEQT/XGRO/XBAL/ZSP/ZEA/XEC/XUU/XEF/VDY/XAW). Fixes common ETFs being miscategorized as "stock"
+- Donation banner (shown after 30 days, fully dismissible)
+- Support page with donation links
+- docker-compose.yml for one-command self-hosting
+
 ### Changed
 - Pivoted to open source under AGPL v3 with commercial exception
 - Replaced Stripe subscription billing with donation model (GitHub Sponsors, Ko-fi)
@@ -13,16 +26,13 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - Added staging/demo environment (demo.finlynq.com)
 - Multi-branch CI/CD pipeline (dev → staging → main)
 - Docker image published to ghcr.io/finlynq/finlynq on every release
+- CSP `img-src` now allows CoinGecko image domains so crypto icons render in the portfolio page
 
 ### Removed
 - Stripe billing integration
 - SQLite / SQLCipher database adapter
 - Trial banner and subscription gating
-
-### Added
-- Donation banner (shown after 30 days, fully dismissible)
-- Support page with donation links
-- docker-compose.yml for one-command self-hosting
+- Redis and S3/AWS backup sections removed from `.env.example` (no longer applicable)
 
 ## [0.1.0] - 2026-04-11
 

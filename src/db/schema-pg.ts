@@ -234,6 +234,8 @@ export const users = pgTable("users", {
   plan: text("plan").notNull().default("free"), // 'free' | 'pro' | 'premium'
   planExpiresAt: text("plan_expires_at"),
   stripeCustomerId: text("stripe_customer_id"),
+  loginCount: integer("login_count").notNull().default(0),
+  lastLoginAt: text("last_login_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

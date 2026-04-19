@@ -13,7 +13,7 @@ import {
   createSessionToken,
   AUTH_COOKIE,
 } from "@/lib/auth";
-import { getUserByEmail } from "@/lib/auth/queries";
+import { getUserByEmail, recordSuccessfulLogin } from "@/lib/auth/queries";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 
@@ -78,6 +78,7 @@ export async function POST(request: NextRequest) {
     }
 
     // No MFA — issue full session
+    await recordSuccessfulLogin(user.id);
     const token = await createSessionToken(user.id, email, false);
 
     const response = NextResponse.json({ success: true });
