@@ -12,6 +12,10 @@
 
 import pg from "pg";
 import bcrypt from "bcryptjs";
+import {
+  createWrappedDEKForPassword,
+  encryptField,
+} from "../src/lib/crypto/envelope";
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -242,16 +246,37 @@ async function main() {
     console.log(`[seed-demo] Target DB: ${databaseUrl.split("@")[1] ?? "(hidden)"}`);
     const now = new Date().toISOString();
 
-    // 1. Upsert demo user
+    // 1. Upsert demo user (with envelope-encryption DEK).
+    //
+    // Every reseed rotates the wrapped DEK — crucially, also rotating the DEK
+    // itself — because we're inserting freshly-encrypted ciphertext using
+    // whichever DEK we generate here. That means old rows wouldn't decrypt,
+    // but the wipe step below drops them first so there's no mismatch.
     const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 12);
+    const { dek: demoDek, wrapped: demoWrap } = createWrappedDEKForPassword(DEMO_PASSWORD);
     await client.query(
-      `INSERT INTO users (id, email, password_hash, display_name, role, email_verified, mfa_enabled, onboarding_complete, plan, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, 'user', 1, 0, 1, 'free', $5, $5)
+      `INSERT INTO users (id, email, password_hash, display_name, role, email_verified, mfa_enabled, onboarding_complete, plan, kek_salt, dek_wrapped, dek_wrapped_iv, dek_wrapped_tag, encryption_v, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'user', 1, 0, 1, 'free', $5, $6, $7, $8, 1, $9, $9)
        ON CONFLICT (email) DO UPDATE SET
          password_hash = EXCLUDED.password_hash,
          display_name = EXCLUDED.display_name,
+         kek_salt = EXCLUDED.kek_salt,
+         dek_wrapped = EXCLUDED.dek_wrapped,
+         dek_wrapped_iv = EXCLUDED.dek_wrapped_iv,
+         dek_wrapped_tag = EXCLUDED.dek_wrapped_tag,
+         encryption_v = EXCLUDED.encryption_v,
          updated_at = EXCLUDED.updated_at`,
-      [DEMO_USER_ID, DEMO_EMAIL, passwordHash, DEMO_DISPLAY_NAME, now]
+      [
+        DEMO_USER_ID,
+        DEMO_EMAIL,
+        passwordHash,
+        DEMO_DISPLAY_NAME,
+        demoWrap.salt.toString("base64"),
+        demoWrap.wrapped.toString("base64"),
+        demoWrap.iv.toString("base64"),
+        demoWrap.tag.toString("base64"),
+        now,
+      ]
     );
 
     // Ensure the user row we just upserted has the canonical ID, in case it was created earlier with a different one
@@ -317,7 +342,8 @@ async function main() {
       categoryIds[c.name] = rows[0].id;
     }
 
-    // 5. Insert transactions
+    // 5. Insert transactions — payee, note, tags, portfolio_holding encrypted
+    //    with the demo user's DEK.
     const txs = generateTransactions();
     console.log(`[seed-demo] Inserting ${txs.length} transactions…`);
     for (const tx of txs) {
@@ -326,8 +352,17 @@ async function main() {
       if (!accountId || !categoryId) continue;
       await client.query(
         `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, is_business)
-         VALUES ($1, $2, $3, $4, 'CAD', $5, $6, $7, '', 0)`,
-        [userId, tx.date, accountId, categoryId, tx.amount, tx.payee, tx.note ?? ""]
+         VALUES ($1, $2, $3, $4, 'CAD', $5, $6, $7, $8, 0)`,
+        [
+          userId,
+          tx.date,
+          accountId,
+          categoryId,
+          tx.amount,
+          encryptField(demoDek, tx.payee),
+          encryptField(demoDek, tx.note ?? ""),
+          encryptField(demoDek, ""),
+        ]
       );
     }
 
@@ -341,8 +376,18 @@ async function main() {
       const d = new Date(invStart); d.setDate(d.getDate() + i.daysFromStart);
       await client.query(
         `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, quantity, portfolio_holding, payee, note, tags, is_business)
-         VALUES ($1, $2, $3, NULL, 'CAD', $4, $5, $6, $7, '', '', 0)`,
-        [userId, isoDate(d), brokerageId, i.amount, i.quantity, i.holding, i.payee]
+         VALUES ($1, $2, $3, NULL, 'CAD', $4, $5, $6, $7, $8, $9, 0)`,
+        [
+          userId,
+          isoDate(d),
+          brokerageId,
+          i.amount,
+          i.quantity,
+          encryptField(demoDek, i.holding),
+          encryptField(demoDek, i.payee),
+          encryptField(demoDek, ""),
+          encryptField(demoDek, ""),
+        ]
       );
     }
 

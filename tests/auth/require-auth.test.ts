@@ -53,6 +53,7 @@ describe("requireAuth", () => {
     it("uses passphrase strategy and succeeds when unlocked with valid session", async () => {
       vi.mocked(verifySessionToken).mockResolvedValue({
         sub: "default",
+        jti: "test-jti",
         email: "self-hosted",
         mfa: false,
         iss: "pf-auth",
@@ -92,6 +93,7 @@ describe("requireAuth", () => {
     it("uses account strategy with valid Bearer token", async () => {
       vi.mocked(verifySessionToken).mockResolvedValue({
         sub: "user-abc",
+        jti: "test-jti-2",
         email: "test@test.com",
         mfa: true,
         iss: "pf-auth",
@@ -131,7 +133,7 @@ describe("requireAuth", () => {
 
   describe("API key strategy", () => {
     it("uses API key strategy when X-API-Key header is present", async () => {
-      vi.mocked(validateApiKey).mockReturnValue(null); // valid
+      vi.mocked(validateApiKey).mockResolvedValue({ userId: "default", dek: null }); // valid
       const result = await requireAuth(
         makeRequest({ "X-API-Key": "pf_test123" })
       );
@@ -142,7 +144,7 @@ describe("requireAuth", () => {
     });
 
     it("returns 401 for invalid API key", async () => {
-      vi.mocked(validateApiKey).mockReturnValue("Invalid API key");
+      vi.mocked(validateApiKey).mockResolvedValue("Invalid API key");
       const result = await requireAuth(
         makeRequest({ "X-API-Key": "pf_bad" })
       );
@@ -154,7 +156,7 @@ describe("requireAuth", () => {
 
     it("API key takes priority over dialect-based strategy", async () => {
       mockGetDialect.mockReturnValue("postgres");
-      vi.mocked(validateApiKey).mockReturnValue(null);
+      vi.mocked(validateApiKey).mockResolvedValue({ userId: "default", dek: null });
       const result = await requireAuth(
         makeRequest({ "X-API-Key": "pf_test" })
       );

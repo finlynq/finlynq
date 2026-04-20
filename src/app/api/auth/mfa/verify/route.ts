@@ -13,9 +13,11 @@ import {
   createSessionToken,
   AUTH_COOKIE,
 } from "@/lib/auth";
+import { SESSION_TTL_MS } from "@/lib/auth/jwt";
 import { getUserById, recordSuccessfulLogin } from "@/lib/auth/queries";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { getDEK, putDEK, deleteDEK } from "@/lib/crypto/dek-cache";
 
 const verifySchema = z.object({
   mfaPendingToken: z.string().min(1, "Pending token is required"),
@@ -66,9 +68,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Promote the pending session's cached DEK onto the full session.
+    // Pending token has its own jti; the new full-session jti is different,
+    // so we move the DEK from one key to the other and delete the pending entry.
+    const pendingJti = (payload.jti as string | undefined) ?? null;
+    const pendingDek = pendingJti ? getDEK(pendingJti) : null;
+
     // Issue full session with MFA verified
     await recordSuccessfulLogin(user.id);
-    const token = await createSessionToken(user.id, user.email, true);
+    const { token, jti } = await createSessionToken(user.id, user.email, true);
+    if (pendingDek) {
+      putDEK(jti, pendingDek, SESSION_TTL_MS);
+      if (pendingJti) deleteDEK(pendingJti);
+    }
 
     const response = NextResponse.json({ success: true });
 

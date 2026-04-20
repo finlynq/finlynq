@@ -20,12 +20,22 @@ export class ApiKeyStrategy implements AuthStrategy {
       };
     }
 
+    // `dek` is populated when the API key was created/regenerated with an
+    // envelope wrap (logged-in flow). Legacy API keys (from before the
+    // encryption rollout) validate successfully but carry null DEK; the
+    // caller should prompt the user to regenerate the key in settings.
+    //
+    // sessionId is synthesized from the key-value pair so each key gets a
+    // unique identity for rate-limiting or audit logging without exposing
+    // the key itself.
     return {
       authenticated: true,
       context: {
         userId: result.userId,
         method: "api_key",
         mfaVerified: false,
+        dek: result.dek,
+        sessionId: `apikey:${result.userId}`,
       },
     };
   }

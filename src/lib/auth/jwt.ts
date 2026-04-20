@@ -11,6 +11,7 @@ import crypto from "crypto";
 /** JWT claims for authenticated sessions */
 export interface SessionPayload extends JWTPayload {
   sub: string; // user ID
+  jti: string; // unique session ID (used as key for DEK cache)
   email: string;
   mfa: boolean; // whether MFA was verified
 }
@@ -38,21 +39,25 @@ const getSecret = (() => {
 const ISSUER = "pf-auth";
 const AUDIENCE = "pf-app";
 const EXPIRATION = "24h";
+export const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
-/** Create a signed JWT for the given user session */
+/** Create a signed JWT for the given user session. Returns token + jti. */
 export async function createSessionToken(
   userId: string,
   email: string,
   mfaVerified: boolean
-): Promise<string> {
-  return new SignJWT({ email, mfa: mfaVerified })
+): Promise<{ token: string; jti: string }> {
+  const jti = crypto.randomUUID();
+  const token = await new SignJWT({ email, mfa: mfaVerified })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(userId)
+    .setJti(jti)
     .setIssuer(ISSUER)
     .setAudience(AUDIENCE)
     .setIssuedAt()
     .setExpirationTime(EXPIRATION)
     .sign(getSecret());
+  return { token, jti };
 }
 
 /** Verify and decode a session JWT. Returns null if invalid. */

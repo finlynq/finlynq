@@ -7,6 +7,8 @@
 
 export { requireAuth } from "./require-auth";
 export { requireAdmin } from "./require-admin";
+export { requireEncryption } from "./require-encryption";
+export type { EncryptionAuthResult } from "./require-encryption";
 export type { AuthContext, AuthResult, AuthStrategy } from "./strategy";
 export { PassphraseStrategy } from "./strategies/passphrase";
 export { AccountStrategy, AUTH_COOKIE } from "./strategies/account";
