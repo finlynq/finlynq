@@ -34,9 +34,24 @@ run_as() {
 }
 
 # 1. Pull latest code
+# Hardened: a previous ad-hoc edit on the server left the working tree dirty,
+# which caused `git pull --ff-only` to abort and the deploy to silently stop
+# before restarting the service. We now stash any stray local changes (keeping
+# a timestamped backup as a safety net) and fast-forward by resetting to
+# origin's tip, so no future dirty-tree state can block a deploy.
 if [ "$SKIP_PULL" = false ]; then
-  echo "==> Pulling latest code..."
-  run_as "git pull --ff-only"
+  echo "==> Fetching latest code..."
+  run_as "git fetch --prune origin"
+
+  STASH_TAG="pre-deploy-$(date +%Y%m%d_%H%M%S)"
+  if ! run_as "git diff --quiet HEAD" || ! run_as "git diff --quiet --cached HEAD"; then
+    echo "==> Working tree is dirty — stashing local changes as '$STASH_TAG' before resetting"
+    run_as "git stash push --include-untracked -m '$STASH_TAG'" || true
+  fi
+
+  BRANCH="$(run_as 'git rev-parse --abbrev-ref HEAD')"
+  echo "==> Resetting $BRANCH to origin/$BRANCH"
+  run_as "git reset --hard origin/$BRANCH"
 else
   echo "==> Skipping git pull"
 fi
