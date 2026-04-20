@@ -35,7 +35,7 @@ async function authenticateMcp(request: NextRequest) {
     if (result) {
       return {
         authenticated: true as const,
-        context: { userId: result.userId, method: "oauth" as const, mfaVerified: false },
+        context: { userId: result.userId, method: "oauth" as const, mfaVerified: false, dek: null as Buffer | null, sessionId: null as string | null },
       };
     }
     // Token looks like OAuth but failed validation — return 401 with WWW-Authenticate
@@ -94,9 +94,12 @@ export async function POST(request: NextRequest) {
 
   const server = new McpServer({ name: "finlynq", version: "2.3.0" });
 
-  // PostgreSQL-only mode — async Drizzle queries, user-scoped
+  // PostgreSQL-only mode — async Drizzle queries, user-scoped.
+  // DEK comes from whichever auth path we matched: API-key envelope, session
+  // cookie cache, or null for OAuth (OAuth DEK envelope is Phase 3).
+  const dek = "dek" in auth.context ? auth.context.dek : null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  registerPgTools(server, db as any, auth.context.userId);
+  registerPgTools(server, db as any, auth.context.userId, dek);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless — no session tracking

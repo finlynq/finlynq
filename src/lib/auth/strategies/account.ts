@@ -7,6 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken } from "../jwt";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import type { AuthStrategy, AuthResult } from "../strategy";
 
 const AUTH_COOKIE = "pf_session";
@@ -40,12 +41,22 @@ export class AccountStrategy implements AuthStrategy {
       };
     }
 
+    // DEK lives in the in-memory cache, populated on login. A cache miss here
+    // means the server restarted since the user's last login — the JWT is
+    // still valid but the key to decrypt their data isn't in memory. The
+    // caller decides whether to 423 (encrypted work) or proceed (plaintext-only
+    // routes like /api/usage).
+    const sessionId = (payload.jti as string | undefined) ?? null;
+    const dek = sessionId ? getDEK(sessionId) : null;
+
     return {
       authenticated: true,
       context: {
         userId: payload.sub,
         method: "account",
         mfaVerified: payload.mfa ?? false,
+        dek,
+        sessionId,
       },
     };
   }

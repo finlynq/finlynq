@@ -13,9 +13,12 @@ import {
   createSessionToken,
   AUTH_COOKIE,
 } from "@/lib/auth";
-import { getUserByEmail, recordSuccessfulLogin } from "@/lib/auth/queries";
+import { SESSION_TTL_MS } from "@/lib/auth/jwt";
+import { getUserByEmail, recordSuccessfulLogin, promoteUserToEncryption } from "@/lib/auth/queries";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { deriveKEK, unwrapDEK, createWrappedDEKForPassword } from "@/lib/crypto/envelope";
+import { putDEK } from "@/lib/crypto/dek-cache";
 
 const loginSchema = z.object({
   email: z.string().email("Invalid email address"),
@@ -67,19 +70,69 @@ export async function POST(request: NextRequest) {
     const valid = await verifyPassword(password, user.passwordHash);
     if (!valid) return invalidCredentials;
 
-    // If MFA is enabled, return a pending state (no session yet)
+    // Derive KEK from the plaintext password, unwrap the DEK. Failure here
+    // with a matching bcrypt hash would indicate a corrupted DEK envelope
+    // (migration bug, not an attack) — treat as fatal and surface to caller.
+    let dek: Buffer | null = null;
+    if (user.kekSalt && user.dekWrapped && user.dekWrappedIv && user.dekWrappedTag) {
+      try {
+        const kek = deriveKEK(password, Buffer.from(user.kekSalt, "base64"));
+        dek = unwrapDEK(kek, {
+          salt: Buffer.from(user.kekSalt, "base64"),
+          wrapped: Buffer.from(user.dekWrapped, "base64"),
+          iv: Buffer.from(user.dekWrappedIv, "base64"),
+          tag: Buffer.from(user.dekWrappedTag, "base64"),
+        });
+      } catch (err) {
+        await logApiError("POST", "/api/auth/login (unwrap)", err);
+        return NextResponse.json(
+          { error: "Unable to unlock your encrypted data. Please contact support." },
+          { status: 500 }
+        );
+      }
+    } else {
+      // Grace migration: pre-encryption account. bcrypt just verified the
+      // password, so derive KEK right now, generate a fresh DEK, persist the
+      // envelope, and proceed as if the account had always been encrypted.
+      // Existing plaintext rows keep working because decryptField passes
+      // through values without the `v1:` prefix.
+      try {
+        const { dek: newDek, wrapped } = createWrappedDEKForPassword(password);
+        await promoteUserToEncryption(user.id, {
+          kekSalt: wrapped.salt.toString("base64"),
+          dekWrapped: wrapped.wrapped.toString("base64"),
+          dekWrappedIv: wrapped.iv.toString("base64"),
+          dekWrappedTag: wrapped.tag.toString("base64"),
+        });
+        dek = newDek;
+      } catch (err) {
+        await logApiError("POST", "/api/auth/login (promote)", err);
+        // Proceed without DEK — encrypted-column routes will 423. Non-critical.
+      }
+    }
+
+    // If MFA is enabled, return a pending state (no session yet).
+    // The DEK is cached under the pending jti with a 5-minute TTL so MFA
+    // verify can promote it to the real session without asking the user to
+    // re-enter their password. If MFA verify fails or times out, the entry
+    // ages out naturally.
     if (user.mfaEnabled) {
-      // Issue a short-lived MFA-pending token (5 min)
-      const pendingToken = await createSessionToken(user.id, email, false);
+      const { token: pendingToken, jti: pendingJti } = await createSessionToken(
+        user.id,
+        email,
+        false
+      );
+      if (dek) putDEK(pendingJti, dek, 5 * 60_000);
       return NextResponse.json({
         mfaRequired: true,
         mfaPendingToken: pendingToken,
       });
     }
 
-    // No MFA — issue full session
+    // No MFA — issue full session and cache the DEK under this session's jti.
     await recordSuccessfulLogin(user.id);
-    const token = await createSessionToken(user.id, email, false);
+    const { token, jti } = await createSessionToken(user.id, email, false);
+    if (dek) putDEK(jti, dek, SESSION_TTL_MS);
 
     const response = NextResponse.json({ success: true });
 

@@ -40,8 +40,9 @@ vi.mock("@/lib/rate-limit", () => ({
 
 // Mock JWT for session cookie issuance
 vi.mock("@/lib/auth/jwt", () => ({
-  createSessionToken: vi.fn(async () => "mock-session-token"),
+  createSessionToken: vi.fn(async () => ({ token: "mock-session-token", jti: "mock-jti" })),
   verifySessionToken: vi.fn(async () => null),
+  SESSION_TTL_MS: 86400000,
 }));
 
 import { GET, POST } from "@/app/api/auth/unlock/route";
@@ -83,6 +84,7 @@ describe("API /api/auth/unlock", () => {
       vi.mocked(isUnlocked).mockReturnValueOnce(true);
       vi.mocked(verifySessionToken).mockResolvedValueOnce({
         sub: "default",
+        jti: "test-jti",
         email: "self-hosted",
         mfa: false,
         iss: "pf-auth",

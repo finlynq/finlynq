@@ -58,6 +58,10 @@ export class PassphraseStrategy implements AuthStrategy {
         userId: DEFAULT_USER_ID,
         method: "passphrase",
         mfaVerified: false,
+        // Self-hosted (SQLite) mode is retired; kept as a null DEK stub so the
+        // AuthContext interface stays total.
+        dek: null,
+        sessionId: null,
       },
     };
   }

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch } from "@/lib/crypto/encrypted-columns";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
@@ -38,56 +40,74 @@ const putSchema = z.object({
 });
 
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
+
   const params = request.nextUrl.searchParams;
+  const search = params.get("search") ?? undefined;
   const filters = {
     startDate: params.get("startDate") ?? undefined,
     endDate: params.get("endDate") ?? undefined,
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
     categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
-    search: params.get("search") ?? undefined,
+    // Search is applied after decryption, so don't push it into the SQL filter.
     limit: params.get("limit") ? parseInt(params.get("limit")!) : 100,
     offset: params.get("offset") ? parseInt(params.get("offset")!) : 0,
   };
 
-  const data = await getTransactions(userId, filters);
-  const total = await getTransactionCount(userId, filters);
+  const rawRows = await getTransactions(userId, filters);
+  let decrypted = decryptTxRows(dek, rawRows as Array<Parameters<typeof decryptTxRows>[1][number]>);
 
-  return NextResponse.json({ data, total });
+  if (search) {
+    decrypted = filterDecryptedBySearch(decrypted, search);
+  }
+
+  // Count mirrors the filtered set; legacy callers use this for pagination UI.
+  const total = search
+    ? decrypted.length
+    : await getTransactionCount(userId, filters);
+
+  return NextResponse.json({ data: decrypted, total });
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
-    const tx = await createTransaction(auth.context.userId, parsed.data);
+    const encrypted = encryptTxWrite(auth.dek, parsed.data);
+    const tx = await createTransaction(auth.userId, encrypted);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {
-    await logApiError("POST", "/api/transactions", error, auth.context.userId);
+    await logApiError("POST", "/api/transactions", error, auth.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create transaction") }, { status: 500 });
   }
 }
 
 export async function PUT(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
   try {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
-    const tx = await updateTransaction(id, auth.context.userId, data);
+    const encrypted = encryptTxWrite(auth.dek, data);
+    const tx = await updateTransaction(id, auth.userId, encrypted);
     return NextResponse.json(tx);
   } catch (error: unknown) {
-    await logApiError("PUT", "/api/transactions", error, auth.context.userId);
+    await logApiError("PUT", "/api/transactions", error, auth.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update transaction") }, { status: 500 });
   }
 }
 
 export async function DELETE(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // DELETE doesn't need the DEK — IDs and user-scope only.
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
   const params = request.nextUrl.searchParams;
   const id = parseInt(params.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });

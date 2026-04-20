@@ -799,7 +799,9 @@ export function SetupWizard({ hasExistingData, onComplete }: SetupWizardProps) {
                     <Check className="h-4 w-4 text-emerald-500 shrink-0" />
                     <div>
                       <p className="text-sm font-medium">Data protection</p>
-                      <p className="text-xs text-muted-foreground">AES-256 encryption with your password</p>
+                      <p className="text-xs text-muted-foreground">
+                        Sensitive fields (payees, notes, tags) encrypted with AES-256-GCM; key derived from your password and held only in server memory while you&apos;re logged in.
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3 rounded-lg border border-border p-3">

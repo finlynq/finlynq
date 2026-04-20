@@ -11,6 +11,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { decryptField } from "../src/lib/crypto/envelope";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -93,7 +94,32 @@ const PORTFOLIO_DISCLAIMER =
 
 // ─── registration ─────────────────────────────────────────────────────────────
 
-export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
+/**
+ * Decrypt the text fields on a transaction row in place. Tolerates legacy
+ * plaintext rows (values without the `v1:` prefix pass through unchanged)
+ * and missing DEK (returns the row untouched so legacy API keys still work
+ * for plaintext data).
+ */
+function decryptTxRowFields(
+  dek: Buffer | null | undefined,
+  row: Record<string, unknown>
+): Record<string, unknown> {
+  if (!dek) return row;
+  for (const k of ["payee", "note", "tags", "portfolio_holding"] as const) {
+    const v = row[k];
+    if (typeof v === "string") {
+      row[k] = decryptField(dek, v) ?? v;
+    }
+  }
+  return row;
+}
+
+export function registerPgTools(
+  server: McpServer,
+  db: DbLike,
+  userId: string,
+  dek: Buffer | null = null
+) {
 
   // ── get_account_balances ───────────────────────────────────────────────────
   server.tool(
@@ -146,14 +172,15 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
         ORDER BY t.date DESC
         LIMIT ${lim}
       `);
-      return text(rows);
+      const decrypted = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
+      return text(decrypted);
     }
   );
 
   // ── search_transactions ────────────────────────────────────────────────────
   server.tool(
     "search_transactions",
-    "Flexible transaction search with partial payee match, amount range, date range, category, and tags",
+    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. When text fields are encrypted, payee/tags substring match runs in memory after decryption.",
     {
       payee: z.string().optional().describe("Partial payee/merchant name match"),
       min_amount: z.number().optional().describe("Minimum amount"),
@@ -166,6 +193,10 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
     },
     async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, limit }) => {
       const lim = limit ?? 50;
+      // Push amount/date/category to SQL; payee/tags filter must happen in memory
+      // after decryption when the data is encrypted. Fetch a larger window then
+      // trim to lim after filtering.
+      const fetchCap = payee || tags ? Math.max(lim * 10, 500) : lim;
       const rows = await q(db, sql`
         SELECT t.id, t.date, a.name AS account, c.name AS category, c.type AS category_type,
                t.currency, t.amount, t.payee, t.note, t.tags
@@ -173,17 +204,29 @@ export function registerPgTools(server: McpServer, db: DbLike, userId: string) {
         LEFT JOIN accounts a ON t.account_id = a.id
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId}
-          ${payee ? sql`AND t.payee ILIKE ${"%" + payee + "%"}` : sql``}
           ${min_amount !== undefined ? sql`AND t.amount >= ${min_amount}` : sql``}
           ${max_amount !== undefined ? sql`AND t.amount <= ${max_amount}` : sql``}
           ${start_date ? sql`AND t.date >= ${start_date}` : sql``}
           ${end_date ? sql`AND t.date <= ${end_date}` : sql``}
           ${category ? sql`AND c.name = ${category}` : sql``}
-          ${tags ? sql`AND t.tags ILIKE ${"%" + tags + "%"}` : sql``}
         ORDER BY t.date DESC
-        LIMIT ${lim}
+        LIMIT ${fetchCap}
       `);
-      return text({ results: rows, count: rows.length });
+      let decrypted = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
+      if (payee) {
+        const q = payee.toLowerCase();
+        decrypted = decrypted.filter((r) =>
+          String(r.payee ?? "").toLowerCase().includes(q)
+        );
+      }
+      if (tags) {
+        const q = tags.toLowerCase();
+        decrypted = decrypted.filter((r) =>
+          String(r.tags ?? "").toLowerCase().includes(q)
+        );
+      }
+      decrypted = decrypted.slice(0, lim);
+      return text({ results: decrypted, count: decrypted.length });
     }
   );
 
