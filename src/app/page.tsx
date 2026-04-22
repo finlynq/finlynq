@@ -1,752 +1,851 @@
+"use client";
+
 import Link from "next/link";
-import { FinlynqLogo } from "@/components/FinlynqLogo";
-import {
-  ArrowRight,
-  Shield,
-  BarChart3,
-  Zap,
-  Bot,
-  Upload,
-  PiggyBank,
-  Check,
-  Terminal,
-  Sparkles,
-  TrendingUp,
-  Target,
-  Lock,
-  Globe,
-  Code2,
-  DollarSign,
-  Key,
-  AlertTriangle,
-  EyeOff,
-  Heart,
-  Github,
-  Coffee,
-} from "lucide-react";
-
-/* ─── Data ─────────────────────────────────────────────────────────────────── */
-
-const STATS = [
-  { value: "27+", label: "MCP tools" },
-  { value: "AES-256", label: "Encryption" },
-  { value: "6", label: "Import formats" },
-  { value: "100%", label: "Free & open source" },
-];
+import { useEffect, useRef } from "react";
+import "./landing.css";
 
 const FEATURES = [
   {
-    icon: Bot,
-    title: "AI-native from day one",
-    desc: "Connect Claude, Cursor, or any MCP client. Ask questions in plain English — no dashboards required.",
-    color: "text-violet-500",
-    bg: "bg-violet-50 dark:bg-violet-500/10",
-    border: "border-violet-100 dark:border-violet-500/20",
+    idx: "F.01 · AI NATIVE",
+    title: "Talk to your money in plain English.",
+    desc: "Connect Claude, Cursor, or any MCP client. Ask questions, get charts and structured answers — no custom exports, no BI tool needed.",
+    viz: "bars",
   },
   {
-    icon: BarChart3,
-    title: "Full financial picture",
-    desc: "Accounts, budgets, portfolio, goals, and loans in one place. CSV and OFX import with saved templates.",
-    color: "text-cyan-500",
-    bg: "bg-cyan-50 dark:bg-cyan-500/10",
-    border: "border-cyan-100 dark:border-cyan-500/20",
+    idx: "F.02 · IMPORT",
+    title: "Drop a file. Done.",
+    desc: "CSV, Excel, OFX, QFX, and PDF. Finlynq remembers every column mapping as a template — the next import is a single click.",
+    viz: "import",
   },
   {
-    icon: Upload,
-    title: "Import once, done",
-    desc: "Save column mappings as templates. Drop a file and Finlynq auto-matches your bank format.",
-    color: "text-amber-500",
-    bg: "bg-amber-50 dark:bg-amber-500/10",
-    border: "border-amber-100 dark:border-amber-500/20",
+    idx: "F.03 · BUDGETS",
+    title: "Envelope budgeting, rolled over.",
+    desc: "Month-by-month envelopes with rollover. Know exactly what's left in Groceries, Dining, or Travel — before you swipe.",
+    viz: "budgets",
   },
   {
-    icon: PiggyBank,
-    title: "Envelope budgeting",
-    desc: "Month-by-month envelope budgets with rollover. Know exactly what you have left to spend.",
-    color: "text-emerald-500",
-    bg: "bg-emerald-50 dark:bg-emerald-500/10",
-    border: "border-emerald-100 dark:border-emerald-500/20",
+    idx: "F.04 · PORTFOLIO",
+    title: "Holdings, returns, benchmarks.",
+    desc: "Live prices, XIRR, and benchmarks against SPX, QQQ, VTI. Built for people who actually track their money — not just watch it.",
+    viz: "portfolio",
   },
   {
-    icon: TrendingUp,
-    title: "Portfolio & investments",
-    desc: "Track holdings with live prices, XIRR returns, and benchmarks against major indices.",
-    color: "text-blue-500",
-    bg: "bg-blue-50 dark:bg-blue-500/10",
-    border: "border-blue-100 dark:border-blue-500/20",
+    idx: "F.05 · FIRE",
+    title: "Project your freedom number.",
+    desc: "Monte Carlo simulations, savings-rate scenarios, and a realistic FIRE target. See when you can stop — and what would move the date.",
+    viz: "fire",
   },
   {
-    icon: Shield,
-    title: "Privacy first",
-    desc: "Self-hosted option: your data never leaves your machine. AES-256 encryption via SQLCipher.",
-    color: "text-rose-500",
-    bg: "bg-rose-50 dark:bg-rose-500/10",
-    border: "border-rose-100 dark:border-rose-500/20",
+    idx: "F.06 · PRIVACY",
+    title: "Self-host. Or don't.",
+    desc: "Run it on your Mac, your homelab, or our cloud — same features either way. AES-256 via SQLCipher. Your key never leaves your device.",
+    viz: "pips",
   },
-];
+] as const;
 
-const HOW_IT_WORKS = [
+const STEPS = [
   {
-    step: "01",
-    icon: Upload,
-    title: "Import your transactions",
-    desc: "Upload CSV or OFX files from any bank. Finlynq remembers your column mappings so the next import is one click.",
-    color: "text-indigo-500",
-    bg: "bg-indigo-50 dark:bg-indigo-500/10",
+    n: "01",
+    title: "Import transactions.",
+    desc: "Upload CSV or OFX from any bank. Finlynq remembers your columns so every future import is one click.",
   },
   {
-    step: "02",
-    icon: Terminal,
-    title: "Connect your AI",
+    n: "02",
+    title: "Connect your AI.",
     desc: "Add Finlynq as an MCP server in Claude Desktop, Cursor, or any compatible client. Takes under 60 seconds.",
-    color: "text-violet-500",
-    bg: "bg-violet-50 dark:bg-violet-500/10",
   },
   {
-    step: "03",
-    icon: Sparkles,
-    title: "Ask anything",
-    desc: "\"How much did I spend on dining?\" \"Am I on track with my budget?\" \"What's my net worth?\" — just ask.",
-    color: "text-purple-500",
-    bg: "bg-purple-50 dark:bg-purple-500/10",
+    n: "03",
+    title: "Ask anything.",
+    desc: "\"Am I on track with my budget?\" \"What's my net worth?\" \"Any unusual charges?\" — just ask.",
   },
 ];
 
-const MCP_PROMPTS = [
-  { q: "How much did I spend on groceries last month?", a: "$312.40 — up 8% vs October" },
-  { q: "Am I on track with my budgets this month?", a: "3 of 8 categories within budget" },
-  { q: "What is my current net worth?", a: "$84,210 — up $1,240 this month" },
-  { q: "Show me any unusual transactions recently", a: "Found 2 anomalies in the last 30 days" },
+const MCP_TOOLS = [
+  { t: "Read-only balance & transaction queries", a: "READ" },
+  { t: "Budget creation, editing, and rollover", a: "WRITE" },
+  { t: "Portfolio holdings with live pricing", a: "READ" },
+  { t: "Transaction categorization rules", a: "WRITE" },
+  { t: "Anomaly & duplicate detection", a: "READ" },
+  { t: "Goal tracking and projections", a: "READ" },
+  { t: "Streamable HTTP + stdio transports", a: "PROTO" },
+  { t: "Responds with charts & structured data", a: "FMT" },
 ];
 
-const HIGHLIGHTS = [
+const PLAN_FEATS = [
   "27+ MCP tools — read & write",
   "AES-256 encryption (SQLCipher)",
   "CSV, Excel, OFX/QFX, PDF import",
   "Budgets, portfolio, goals, loans",
-  "AI chat with natural-language queries",
+  "Natural-language AI chat",
   "FIRE calculator & Monte Carlo sim",
-  "Transaction rules & auto-categorize",
-  "Self-host or use our cloud — same features",
+  "Rules & auto-categorize",
+  "Self-host or managed cloud",
   "REST API + MCP (HTTP & stdio)",
   "Dark mode, mobile-friendly UI",
 ];
 
-const DONATE_LINKS = [
-  { icon: Github, label: "GitHub Sponsors", href: "https://github.com/sponsors/finlynq" },
-  { icon: Coffee, label: "Ko-fi", href: "https://ko-fi.com/finlynq" },
-];
+function LogoMark() {
+  return (
+    <span className="logo-mark" aria-hidden="true">
+      <svg viewBox="0 0 22 22" width="22" height="22">
+        <rect x="1" y="1" width="20" height="20" rx="2" fill="none" stroke="#f5a623" strokeWidth="1.5" />
+        <path
+          d="M5 16 L5 9 L10 13 L10 6 L17 11"
+          fill="none"
+          stroke="#f5a623"
+          strokeWidth="1.6"
+          strokeLinejoin="miter"
+          strokeLinecap="square"
+        />
+        <circle cx="17" cy="11" r="1.6" fill="#f5a623" />
+      </svg>
+    </span>
+  );
+}
 
-const TRUST = [
-  { icon: Lock, label: "AES-256 encrypted" },
-  { icon: Globe, label: "Self-hostable" },
-  { icon: Code2, label: "Open protocol (MCP)" },
-  { icon: DollarSign, label: "No bank credentials" },
-];
-
-const FOOTER_LINKS = {
-  Product: [
-    { label: "Features", href: "#features" },
-    { label: "How it works", href: "#how-it-works" },
-    { label: "MCP Guide", href: "/mcp-guide" },
-    { label: "API Docs", href: "/api-docs" },
-    { label: "GitHub", href: "https://github.com/finlynq/finlynq" },
-  ],
-  Hosting: [
-    { label: "Cloud (free)", href: "/cloud?tab=register" },
-    { label: "Self-Hosted", href: "/self-hosted" },
-  ],
-  Community: [
-    { label: "Support Us", href: "#support" },
-    { label: "GitHub Sponsors", href: "https://github.com/sponsors/finlynq" },
-    { label: "Ko-fi", href: "https://ko-fi.com/finlynq" },
-  ],
-};
-
-/* ─── Page ──────────────────────────────────────────────────────────────────── */
+function FeatureViz({ kind }: { kind: (typeof FEATURES)[number]["viz"] }) {
+  switch (kind) {
+    case "bars":
+      return (
+        <div className="viz bars">
+          <i style={{ height: "22%" }} />
+          <i style={{ height: "38%" }} />
+          <i style={{ height: "30%" }} />
+          <i style={{ height: "58%" }} />
+          <i style={{ height: "44%" }} />
+          <i style={{ height: "70%" }} className="hl" />
+          <i style={{ height: "60%" }} />
+          <i style={{ height: "82%" }} className="hl" />
+          <i style={{ height: "50%" }} />
+          <i style={{ height: "76%" }} className="hl" />
+          <i style={{ height: "90%" }} className="hl" />
+        </div>
+      );
+    case "import":
+      return (
+        <div className="viz">
+          <svg viewBox="0 0 200 56" width="100%" height="100%" preserveAspectRatio="none">
+            <g fontFamily="var(--fl-mono)" fontSize="9" fill="#6b737d">
+              <text x="0" y="12">chase.csv</text>
+              <text x="0" y="30">amex.ofx</text>
+              <text x="0" y="48">vanguard.qfx</text>
+            </g>
+            <g stroke="#2a3139" strokeWidth="1">
+              <line x1="70" y1="9" x2="120" y2="9" />
+              <line x1="70" y1="27" x2="120" y2="27" />
+              <line x1="78" y1="45" x2="120" y2="45" />
+            </g>
+            <g fill="#f5a623" fontFamily="var(--fl-mono)" fontSize="9">
+              <text x="124" y="12">✓ mapped</text>
+              <text x="124" y="30">✓ mapped</text>
+              <text x="124" y="48">✓ mapped</text>
+            </g>
+          </svg>
+        </div>
+      );
+    case "budgets":
+      return (
+        <div className="viz">
+          <svg viewBox="0 0 200 56" width="100%" height="100%" preserveAspectRatio="none">
+            <g fontFamily="var(--fl-mono)" fontSize="9">
+              <text x="0" y="10" fill="#9aa3ad">GROCERIES</text>
+              <text x="200" y="10" textAnchor="end" fill="#e8eaed">$412 / $600</text>
+              <text x="0" y="34" fill="#9aa3ad">DINING</text>
+              <text x="200" y="34" textAnchor="end" fill="#e8eaed">$188 / $250</text>
+            </g>
+            <rect x="0" y="14" width="200" height="4" fill="#1e242b" />
+            <rect x="0" y="14" width="138" height="4" fill="#f5a623" />
+            <rect x="0" y="38" width="200" height="4" fill="#1e242b" />
+            <rect x="0" y="38" width="152" height="4" fill="#5ac8a8" />
+          </svg>
+        </div>
+      );
+    case "portfolio":
+      return (
+        <div className="viz">
+          <svg viewBox="0 0 200 56" width="100%" height="100%" preserveAspectRatio="none">
+            <polyline
+              points="0,40 20,36 40,30 60,32 80,22 100,24 120,16 140,14 160,10 180,6 200,4"
+              fill="none"
+              stroke="#f5a623"
+              strokeWidth="1.5"
+            />
+            <polyline
+              points="0,44 20,42 40,40 60,38 80,36 100,34 120,32 140,30 160,28 180,26 200,24"
+              fill="none"
+              stroke="#6b737d"
+              strokeWidth="1"
+              strokeDasharray="2 3"
+            />
+            <g fontFamily="var(--fl-mono)" fontSize="9" fill="#9aa3ad">
+              <text x="0" y="56">XIRR</text>
+              <text x="200" y="56" textAnchor="end" fill="#5ac8a8">+14.2%</text>
+            </g>
+          </svg>
+        </div>
+      );
+    case "fire":
+      return (
+        <div className="viz">
+          <svg viewBox="0 0 200 56" width="100%" height="100%" preserveAspectRatio="none">
+            <g strokeWidth="1" fill="none">
+              <path d="M0,40 C40,35 80,25 120,18 160,12 200,8" stroke="#2a3139" />
+              <path d="M0,44 C40,40 80,32 120,24 160,18 200,14" stroke="#2a3139" />
+              <path d="M0,48 C40,45 80,40 120,32 160,26 200,20" stroke="#2a3139" />
+              <path d="M0,42 C40,36 80,26 120,18 160,12 200,6" stroke="#f5a623" strokeWidth="1.8" />
+            </g>
+            <circle cx="200" cy="6" r="3" fill="#f5a623" />
+            <g fontFamily="var(--fl-mono)" fontSize="9" fill="#9aa3ad">
+              <text x="0" y="56">FI YEAR</text>
+              <text x="200" y="56" textAnchor="end" fill="#f5a623">2034</text>
+            </g>
+          </svg>
+        </div>
+      );
+    case "pips":
+      return (
+        <div className="viz pips">
+          <span>DOCKER</span>·<b>00.02.14</b>·<span>AES-256</span>·<b>✓</b>·<span>SQLCIPHER</span>
+        </div>
+      );
+  }
+}
 
 export default function LandingPage() {
+  const heroChartRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            e.target.classList.add("in");
+            io.unobserve(e.target);
+          }
+        });
+      },
+      { threshold: 0.12, rootMargin: "0px 0px -10% 0px" }
+    );
+    document.querySelectorAll(".fl-landing .reveal").forEach((el) => io.observe(el));
+
+    const hc = heroChartRef.current;
+    if (hc) {
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => hc.classList.add("in"))
+      );
+    }
+
+    return () => io.disconnect();
+  }, []);
+
   return (
-    <div className="min-h-screen bg-background text-foreground">
-
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-50 border-b border-border/50 bg-background/80 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3.5">
-          {/* Logo */}
-          <Link href="/" className="flex items-center gap-2.5 group">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl transition-all group-hover:scale-105">
-              <FinlynqLogo size={28} />
-            </div>
-            <span className="text-sm font-semibold tracking-tight">Finlynq</span>
+    <div className="fl-landing">
+      {/* NAV */}
+      <header className="fl-nav">
+        <div className="fl-container nav-inner">
+          <Link href="/" className="fl-logo" aria-label="Finlynq home">
+            <LogoMark />
+            Finlynq
           </Link>
-
-          {/* Nav links */}
-          <nav className="hidden md:flex items-center gap-1">
-            {["Features", "How it works", "MCP", "Support"].map((label) => (
-              <a
-                key={label}
-                href={`#${label.toLowerCase().replace(" ", "-")}`}
-                className="px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground rounded-md hover:bg-muted/50 transition-all"
-              >
-                {label}
-              </a>
-            ))}
+          <nav className="nav-links" aria-label="Primary">
+            <a href="#features">Features</a>
+            <a href="#flow">How it works</a>
+            <a href="#mcp">MCP</a>
+            <a href="#privacy">Privacy</a>
+            <a href="#pricing">Pricing</a>
           </nav>
-
-          {/* Auth buttons */}
-          <div className="flex items-center gap-2">
-            <Link
-              href="/cloud"
-              className="hidden sm:inline-flex px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted/50 transition-all"
-            >
-              Log In
-            </Link>
-            <Link
-              href="/cloud?tab=register"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm shadow-primary/20 hover:bg-primary/90 hover:shadow-primary/30 hover:scale-[1.02] active:scale-[0.99] transition-all"
-            >
-              Sign Up Free
-              <ArrowRight className="h-3.5 w-3.5" />
+          <div className="nav-cta">
+            <Link href="/cloud" className="btn btn-ghost">Log in</Link>
+            <Link href="/cloud?tab=register" className="btn btn-primary">
+              Sign up <span aria-hidden="true">→</span>
             </Link>
           </div>
         </div>
       </header>
 
-      {/* ── Hero ───────────────────────────────────────────────────────────── */}
-      <section className="relative overflow-hidden bg-dot-pattern">
-        {/* Gradient backdrop */}
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-primary/5 via-background to-background" />
-        <div className="pointer-events-none absolute -top-40 left-1/2 -translate-x-1/2 h-96 w-[700px] rounded-full bg-gradient-to-r from-indigo-500/10 via-violet-500/8 to-purple-500/10 blur-3xl" />
-
-        <div className="relative mx-auto max-w-5xl px-5 pt-20 pb-24 text-center">
-          {/* Badge */}
-          <div className="anim-fade-in inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/8 px-4 py-1.5 mb-7 text-xs font-medium text-primary">
-            <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
-            MCP-powered · 27 financial tools · Works with Claude, Cursor, Windsurf &amp; more
-          </div>
-
-          {/* Headline */}
-          <h1 className="anim-fade-up anim-delay-1 mb-6 text-5xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.04] text-foreground">
-            Track your money.
-            <br />
-            <span className="text-gradient">Analyze it anywhere.</span>
-          </h1>
-
-          {/* Subheadline */}
-          <p className="anim-fade-up anim-delay-2 mx-auto mb-10 max-w-2xl text-lg sm:text-xl text-muted-foreground leading-relaxed font-normal">
-            The personal finance app built for the AI era. Encrypted, private, and yours —
-            import your bank data, connect Claude or Cursor, and ask questions about your
-            money in plain English.
-          </p>
-
-          {/* CTAs */}
-          <div className="anim-fade-up anim-delay-3 flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
-            <Link
-              href="/cloud?tab=register"
-              className="flex items-center gap-2 rounded-xl bg-primary px-8 py-3.5 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90 hover:shadow-primary/35 hover:scale-[1.02] active:scale-[0.99] transition-all w-full sm:w-auto justify-center"
-            >
-              Get Started Free
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-            <Link
-              href="/self-hosted"
-              className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Self-host with Docker →
-            </Link>
-          </div>
-
-          {/* App mockup frame */}
-          <div className="anim-scale-in anim-delay-4 mx-auto max-w-4xl rounded-2xl border border-border/60 bg-card shadow-2xl shadow-black/10 dark:shadow-black/40 overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-border/50 bg-muted/30 px-4 py-3">
-              <div className="flex gap-1.5">
-                <div className="h-3 w-3 rounded-full bg-rose-400/70" />
-                <div className="h-3 w-3 rounded-full bg-amber-400/70" />
-                <div className="h-3 w-3 rounded-full bg-emerald-400/70" />
-              </div>
-              <div className="mx-auto rounded-md bg-muted/60 px-3 py-0.5">
-                <span className="text-[11px] text-muted-foreground/60 font-mono">finlynq.com/dashboard</span>
-              </div>
+      {/* HERO */}
+      <section className="hero">
+        <div className="fl-container hero-grid">
+          <div className="hero-copy reveal">
+            <div className="hero-bar">
+              <span className="tag">MCP</span>
+              <span>27 tools · Claude · Cursor · Windsurf · Cline</span>
             </div>
-            <div className="relative aspect-[16/7] bg-gradient-to-br from-muted/20 via-background to-muted/10 flex items-center justify-center">
-              <div className="text-center space-y-3">
-                <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20">
-                  <TrendingUp className="h-6 w-6 text-primary" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-foreground">Your dashboard awaits</p>
-                  <p className="text-xs text-muted-foreground mt-1">Sign up to see your financial overview</p>
-                </div>
-                <Link
-                  href="/cloud?tab=register"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-primary/10 border border-primary/20 px-4 py-2 text-xs font-medium text-primary hover:bg-primary/20 transition-all"
-                >
-                  Get started →
-                </Link>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
 
-      {/* ── Stats bar ──────────────────────────────────────────────────────── */}
-      <section className="border-y border-border/50 bg-muted/30">
-        <div className="mx-auto max-w-5xl px-5 py-6 grid grid-cols-2 sm:grid-cols-4 gap-6">
-          {STATS.map((s) => (
-            <div key={s.label} className="text-center">
-              <div className="text-2xl font-extrabold tracking-tight text-foreground hero-number">{s.value}</div>
-              <div className="text-xs text-muted-foreground mt-0.5">{s.label}</div>
-            </div>
-          ))}
-        </div>
-      </section>
+            <h1 className="display-xl">
+              Your money,<br />
+              <em>understood</em> by<br />
+              any AI you choose.
+            </h1>
 
-      {/* ── Features ───────────────────────────────────────────────────────── */}
-      <section id="features" className="mx-auto max-w-6xl px-5 py-24">
-        <div className="text-center mb-16">
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3 opacity-70">Features</p>
-          <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-foreground leading-tight">
-            Everything you need to master your finances
-          </h2>
-          <p className="mt-4 text-lg text-muted-foreground max-w-xl mx-auto leading-relaxed">
-            A complete personal finance toolkit — from budgets and portfolios
-            to AI-powered queries and FIRE planning.
-          </p>
-        </div>
-
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {FEATURES.map((f, i) => (
-            <div
-              key={f.title}
-              className={`group relative rounded-2xl border ${f.border} bg-card p-7 card-hover gradient-border transition-all`}
-              style={{ animationDelay: `${i * 0.07}s` }}
-            >
-              <div className={`mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl ${f.bg} border ${f.border} transition-transform group-hover:scale-110`}>
-                <f.icon className={`h-5 w-5 ${f.color}`} />
-              </div>
-              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">{f.title}</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">{f.desc}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* ── How it works ───────────────────────────────────────────────────── */}
-      <section id="how-it-works" className="bg-muted/30 border-y border-border/50">
-        <div className="mx-auto max-w-6xl px-5 py-24">
-          <div className="text-center mb-16">
-            <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3 opacity-70">How it works</p>
-            <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-foreground">
-              Up and running in minutes
-            </h2>
-            <p className="mt-4 text-lg text-muted-foreground max-w-xl mx-auto leading-relaxed">
-              From sign-up to asking your AI about your spending in three simple steps.
+            <p className="lede" style={{ marginTop: 28 }}>
+              Encrypted, private, and yours. Import your bank data, connect Claude or Cursor, and ask
+              questions about your finances in plain English.
             </p>
+
+            <div className="hero-cta">
+              <Link href="/cloud?tab=register" className="btn btn-primary">
+                Get started free <span aria-hidden="true">→</span>
+              </Link>
+              <Link href="/self-hosted" className="btn btn-ghost">
+                Self-host with Docker
+              </Link>
+            </div>
+
+            <div className="hero-meta">
+              <div className="cell">
+                <div className="v num">27+</div>
+                <div className="k">MCP tools</div>
+              </div>
+              <div className="cell">
+                <div className="v num">AES-256</div>
+                <div className="k">Encryption</div>
+              </div>
+              <div className="cell">
+                <div className="v num">6</div>
+                <div className="k">Import formats</div>
+              </div>
+              <div className="cell">
+                <div className="v num">100%</div>
+                <div className="k">Open source</div>
+              </div>
+            </div>
           </div>
 
-          <div className="grid gap-6 sm:grid-cols-3 relative">
-            {/* Connector lines (desktop only) */}
-            <div className="hidden sm:block absolute top-14 left-1/3 right-1/3 h-px bg-gradient-to-r from-border/0 via-border to-border/0" />
-
-            {HOW_IT_WORKS.map((step, i) => (
-              <div key={step.step} className="relative rounded-2xl border border-border/60 bg-card p-8 text-center card-hover">
-                <div className="mb-1 text-[11px] font-bold uppercase tracking-widest text-muted-foreground/40">Step {step.step}</div>
-                <div className={`mx-auto mb-5 mt-4 flex h-14 w-14 items-center justify-center rounded-2xl ${step.bg}`}>
-                  <step.icon className={`h-6 w-6 ${step.color}`} />
-                </div>
-                <h3 className="mb-3 text-base font-semibold text-foreground">{step.title}</h3>
-                <p className="text-sm text-muted-foreground leading-relaxed">{step.desc}</p>
+          {/* Hero chart card */}
+          <div className="chart-card reveal d2" ref={heroChartRef}>
+            <div className="ticker" aria-hidden="true">
+              <div className="ticker-track">
+                {Array.from({ length: 2 }).flatMap((_, i) => [
+                  <span key={`n-${i}`}>
+                    NET WORTH <span className="num">$84,210</span>{" "}
+                    <span className="up">▲ 1.48%</span>
+                  </span>,
+                  <span key={`p-${i}`}>
+                    PORTFOLIO <span className="num">$42,118</span>{" "}
+                    <span className="up">▲ 0.62%</span>
+                  </span>,
+                  <span key={`s-${i}`}>
+                    SPEND MTD <span className="num">$2,184</span>{" "}
+                    <span className="down">▼ 12.4%</span>
+                  </span>,
+                  <span key={`r-${i}`}>
+                    SAVINGS RATE <span className="num">28.4%</span>{" "}
+                    <span className="up">▲ 3.1%</span>
+                  </span>,
+                  <span key={`f-${i}`}>
+                    FIRE TARGET <span className="num">2034</span>
+                  </span>,
+                ])}
               </div>
-            ))}
+            </div>
+
+            <div className="chart-head" style={{ marginTop: 28 }}>
+              <div>
+                <div className="chart-title">Net worth · Last 12 months</div>
+                <div className="chart-val num">
+                  $84,210<span className="dim">.48</span>
+                </div>
+                <div className="chart-delta">
+                  <span>▲</span> <span className="num">+$12,460 · +17.4%</span>
+                </div>
+              </div>
+              <div className="chart-controls" role="tablist">
+                <span>1M</span>
+                <span>3M</span>
+                <span>6M</span>
+                <span className="active">1Y</span>
+                <span>ALL</span>
+              </div>
+            </div>
+
+            <svg className="chart-svg" viewBox="0 0 520 220" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="flGArea" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#f5a623" stopOpacity="0.28" />
+                  <stop offset="100%" stopColor="#f5a623" stopOpacity="0" />
+                </linearGradient>
+                <pattern id="flGridPat" x="0" y="0" width="52" height="44" patternUnits="userSpaceOnUse">
+                  <path d="M 52 0 L 0 0 0 44" fill="none" stroke="#1e242b" strokeWidth="1" />
+                </pattern>
+              </defs>
+              <rect width="520" height="220" fill="url(#flGridPat)" />
+
+              <g fontFamily="var(--fl-mono)" fontSize="9" fill="#6b737d" textAnchor="end">
+                <text x="516" y="18">$90k</text>
+                <text x="516" y="62">$75k</text>
+                <text x="516" y="106">$60k</text>
+                <text x="516" y="150">$45k</text>
+                <text x="516" y="194">$30k</text>
+              </g>
+
+              <path
+                className="chart-area"
+                d="M0,168 L40,155 L75,162 L112,140 L148,130 L185,112 L220,118 L258,95 L295,88 L330,76 L365,80 L398,58 L432,48 L465,40 L495,30 L495,220 L0,220 Z"
+                fill="url(#flGArea)"
+              />
+              <path
+                className="chart-line"
+                d="M0,168 L40,155 L75,162 L112,140 L148,130 L185,112 L220,118 L258,95 L295,88 L330,76 L365,80 L398,58 L432,48 L465,40 L495,30"
+                fill="none"
+                stroke="#f5a623"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+
+              <circle cx="495" cy="30" r="4" fill="#f5a623" />
+              <circle cx="495" cy="30" r="9" fill="none" stroke="#f5a623" strokeOpacity=".25" strokeWidth="2">
+                <animate attributeName="r" values="4;14;4" dur="2.6s" repeatCount="indefinite" />
+                <animate attributeName="stroke-opacity" values=".4;0;.4" dur="2.6s" repeatCount="indefinite" />
+              </circle>
+
+              <g fontFamily="var(--fl-mono)" fontSize="10" fill="#9aa3ad">
+                <line x1="295" y1="88" x2="295" y2="40" stroke="#2a3139" strokeDasharray="2 3" />
+                <text x="298" y="34">Paycheck · +$4,820</text>
+              </g>
+            </svg>
+
+            <div className="chart-foot">
+              <div>
+                <div className="k">Cash</div>
+                <div className="v num">$18,402</div>
+              </div>
+              <div>
+                <div className="k">Investments</div>
+                <div className="v num pos">$42,118</div>
+              </div>
+              <div>
+                <div className="k">Liabilities</div>
+                <div className="v num neg">−$3,690</div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
 
-      {/* ── MCP Differentiator ─────────────────────────────────────────────── */}
-      <section id="mcp" className="mx-auto max-w-6xl px-5 py-24">
-        <div className="rounded-3xl border border-primary/20 bg-gradient-to-br from-primary/5 via-violet-500/3 to-background p-10 sm:p-16 relative overflow-hidden">
-          <div className="pointer-events-none absolute -top-24 -right-24 h-72 w-72 rounded-full bg-violet-500/8 blur-3xl" />
-          <div className="pointer-events-none absolute -bottom-16 -left-16 h-56 w-56 rounded-full bg-indigo-500/8 blur-3xl" />
-
-          <div className="relative grid gap-12 lg:grid-cols-2 items-center">
-            {/* Left copy */}
-            <div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/8 px-3 py-1 mb-6 text-xs font-medium text-primary">
-                <Zap className="h-3 w-3" />
-                MCP Server included
-              </div>
-              <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-foreground mb-5 leading-tight">
-                Your AI assistant
-                <br />
-                <span className="text-gradient">meets your finances</span>
+      {/* FEATURES */}
+      <section className="fl-section" id="features">
+        <div className="fl-container">
+          <div className="section-head">
+            <div className="reveal">
+              <div className="tag">Features</div>
+              <h2 className="display-l">
+                Everything you need to<br />
+                <em>master</em> your finances.
               </h2>
-              <p className="text-muted-foreground leading-relaxed mb-8 text-[15px]">
-                Finlynq ships with a built-in MCP server exposing 27 financial tools.
-                Connect Claude Desktop, Cursor, or any MCP-compatible client and start
-                asking questions in plain English — no custom code, no exports.
-              </p>
-
-              <div className="space-y-3 mb-8">
-                {[
-                  "27 read + write tools",
-                  "Streamable HTTP + stdio transports",
-                  "Works with Claude, Cursor, Windsurf, Cline, and more",
-                  "Responds with charts & structured data",
-                ].map((item) => (
-                  <div key={item} className="flex items-center gap-2.5 text-sm text-muted-foreground">
-                    <Check className="h-4 w-4 text-emerald-500 shrink-0" />
-                    {item}
-                  </div>
-                ))}
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-3">
-                <Link
-                  href="/cloud?tab=register"
-                  className="inline-flex items-center gap-2 justify-center rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90 hover:scale-[1.02] active:scale-[0.99] transition-all"
-                >
-                  Get Started <ArrowRight className="h-4 w-4" />
-                </Link>
-                <Link
-                  href="/mcp-guide"
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-border px-6 py-3 text-sm font-medium text-muted-foreground hover:text-foreground hover:border-border/80 hover:bg-muted/40 transition-all"
-                >
-                  View MCP Guide
-                </Link>
-              </div>
             </div>
-
-            {/* Right: chat mockup */}
-            <div className="space-y-3">
-              {MCP_PROMPTS.map((item, i) => (
-                <div
-                  key={i}
-                  className="rounded-xl border border-border/50 bg-card/80 backdrop-blur-sm overflow-hidden"
-                >
-                  <div className="flex items-start gap-3 px-4 py-3 border-b border-border/30">
-                    <Bot className="h-4 w-4 text-violet-500 mt-0.5 shrink-0" />
-                    <span className="text-sm text-foreground">{item.q}</span>
-                  </div>
-                  <div className="flex items-center gap-3 px-4 py-2.5 bg-muted/30">
-                    <Sparkles className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-                    <span className="text-xs text-muted-foreground font-mono">{item.a}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Privacy & Security ─────────────────────────────────────────────── */}
-      <section id="security" className="bg-muted/30 border-y border-border/50">
-        <div className="mx-auto max-w-6xl px-5 py-24">
-          <div className="text-center mb-16">
-            <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3 opacity-70">Privacy First</p>
-            <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-foreground leading-tight">
-              Bank-grade encryption. Zero-knowledge.{" "}
-              <span className="text-gradient">Truly private.</span>
-            </h2>
-            <p className="mt-4 text-lg text-muted-foreground max-w-xl mx-auto leading-relaxed">
-              Your financial data is encrypted with your password before it ever touches our servers.
-              We designed the system so we mathematically cannot read it.
+            <p className="lede reveal d2">
+              A complete toolkit — budgets, portfolios, goals, loans, and AI-powered queries. No
+              dashboards required unless you want them.
             </p>
           </div>
 
-          {/* Encryption flow diagram */}
-          <div className="flex flex-wrap items-center justify-center gap-3 mb-14 text-sm font-medium">
-            {[
-              { icon: Key, label: "Your Password", color: "text-indigo-500", bg: "bg-indigo-50 dark:bg-indigo-500/10 border-indigo-100 dark:border-indigo-500/20" },
-              { icon: null, label: "→", color: "text-muted-foreground/40", bg: "" },
-              { icon: Lock, label: "Derive Key", color: "text-violet-500", bg: "bg-violet-50 dark:bg-violet-500/10 border-violet-100 dark:border-violet-500/20" },
-              { icon: null, label: "→", color: "text-muted-foreground/40", bg: "" },
-              { icon: Shield, label: "AES-256 Encrypt", color: "text-emerald-500", bg: "bg-emerald-50 dark:bg-emerald-500/10 border-emerald-100 dark:border-emerald-500/20" },
-              { icon: null, label: "→", color: "text-muted-foreground/40", bg: "" },
-              { icon: EyeOff, label: "Stored Encrypted", color: "text-rose-500", bg: "bg-rose-50 dark:bg-rose-500/10 border-rose-100 dark:border-rose-500/20" },
-            ].map((item, i) =>
-              item.icon ? (
-                <div key={i} className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 ${item.bg}`}>
-                  <item.icon className={`h-4 w-4 ${item.color}`} />
-                  <span className={`text-sm font-medium ${item.color}`}>{item.label}</span>
-                </div>
-              ) : (
-                <span key={i} className={`text-xl font-light ${item.color}`}>{item.label}</span>
-              )
-            )}
-          </div>
-
-          {/* Feature cards */}
-          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4">
-            {/* AES-256 */}
-            <div className="group relative rounded-2xl border border-indigo-100 dark:border-indigo-500/20 bg-card p-7 card-hover gradient-border transition-all">
-              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-100 dark:border-indigo-500/20 transition-transform group-hover:scale-110">
-                <Shield className="h-5 w-5 text-indigo-500" />
-              </div>
-              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">AES-256 Encryption</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                The same standard used by banks and governments. All your financial data is encrypted
-                before it touches any storage — in transit and at rest.
-              </p>
-            </div>
-
-            {/* Your password is the key */}
-            <div className="group relative rounded-2xl border border-violet-100 dark:border-violet-500/20 bg-card p-7 card-hover gradient-border transition-all">
-              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-violet-50 dark:bg-violet-500/10 border border-violet-100 dark:border-violet-500/20 transition-transform group-hover:scale-110">
-                <Key className="h-5 w-5 text-violet-500" />
-              </div>
-              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">Your Password Is The Key</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                Your encryption key is derived from your password using PBKDF2. Finlynq never sees
-                your passphrase or your plaintext data — not even in memory on our servers.
-              </p>
-            </div>
-
-            {/* Zero-knowledge */}
-            <div className="group relative rounded-2xl border border-emerald-100 dark:border-emerald-500/20 bg-card p-7 card-hover gradient-border transition-all">
-              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-100 dark:border-emerald-500/20 transition-transform group-hover:scale-110">
-                <EyeOff className="h-5 w-5 text-emerald-500" />
-              </div>
-              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">Zero-Knowledge Architecture</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                We designed the system so we <em>cannot</em> see your transactions, balances, or accounts.
-                It&apos;s mathematically impossible for Finlynq to read your data without your password.
-              </p>
-            </div>
-
-            {/* Open source / self-host */}
-            <div className="group relative rounded-2xl border border-cyan-100 dark:border-cyan-500/20 bg-card p-7 card-hover gradient-border transition-all">
-              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-50 dark:bg-cyan-500/10 border border-cyan-100 dark:border-cyan-500/20 transition-transform group-hover:scale-110">
-                <Globe className="h-5 w-5 text-cyan-500" />
-              </div>
-              <h3 className="mb-2.5 text-[15px] font-semibold text-foreground">Self-Host for Free</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                Don&apos;t trust the cloud? Run the entire app on your own server or local machine.
-                Your data never leaves your hardware. Free forever with full feature access.
-              </p>
-            </div>
-          </div>
-
-          {/* Warning box */}
-          <div className="mt-8 rounded-2xl border border-amber-300/60 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-500/8 p-6 sm:p-8 flex flex-col sm:flex-row gap-5 items-start">
-            <div className="shrink-0 flex h-11 w-11 items-center justify-center rounded-xl bg-amber-100 dark:bg-amber-500/20 border border-amber-200 dark:border-amber-500/30">
-              <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400" />
-            </div>
-            <div className="space-y-2">
-              <h3 className="text-[15px] font-semibold text-amber-900 dark:text-amber-300">
-                Password Recovery Is Impossible — By Design
-              </h3>
-              <p className="text-sm text-amber-800/80 dark:text-amber-400/80 leading-relaxed">
-                Because only you hold the encryption key, if you lose your password your data is
-                permanently inaccessible. Even Finlynq cannot recover it. This is a feature, not a bug —
-                it&apos;s what makes your data truly private.{" "}
-                <strong className="font-semibold text-amber-900 dark:text-amber-300">
-                  Write your password down and store it somewhere safe.
-                </strong>
-              </p>
-              <p className="text-sm text-amber-700/70 dark:text-amber-400/70 leading-relaxed">
-                <strong className="font-medium text-amber-900 dark:text-amber-300">Your escape hatch:</strong>{" "}
-                You can always download a full backup of your data from Settings → Privacy &amp; Backup.
-                If you ever lose your password, reset your account and restore from your backup file —
-                you never permanently lose your data as long as you have a backup.
-              </p>
-            </div>
+          <div className="features">
+            {FEATURES.map((f, i) => (
+              <article key={f.idx} className={`feature reveal ${i === 1 || i === 4 ? "d1" : i === 2 || i === 5 ? "d2" : ""}`}>
+                <div className="idx">{f.idx}</div>
+                <h3>{f.title}</h3>
+                <p>{f.desc}</p>
+                <FeatureViz kind={f.viz} />
+              </article>
+            ))}
           </div>
         </div>
       </section>
 
-      {/* ── Trust indicators ───────────────────────────────────────────────── */}
-      <section className="border-y border-border/50 bg-muted/20">
-        <div className="mx-auto max-w-5xl px-5 py-8">
-          <div className="flex flex-wrap items-center justify-center gap-8 sm:gap-12">
-            {TRUST.map((t) => (
-              <div key={t.label} className="flex items-center gap-2.5 text-sm text-muted-foreground">
-                <t.icon className="h-4 w-4 text-primary/60" />
-                {t.label}
+      {/* HOW IT WORKS */}
+      <section className="fl-section" id="flow">
+        <div className="fl-container">
+          <div className="section-head">
+            <div className="reveal">
+              <div className="tag">How it works</div>
+              <h2 className="display-l">
+                Three steps from sign-up<br />
+                to <em>asking</em> your AI.
+              </h2>
+            </div>
+            <p className="lede reveal d2">
+              From zero to &ldquo;how much did I spend on dining in Q3?&rdquo; in under five minutes. No
+              configuration, no integration headaches.
+            </p>
+          </div>
+
+          <div className="steps reveal">
+            {STEPS.map((s) => (
+              <div key={s.n} className="step">
+                <div className="step-tag">Step {s.n}</div>
+                <div className="step-n">{s.n}</div>
+                <h4>{s.title}</h4>
+                <p>{s.desc}</p>
               </div>
             ))}
           </div>
         </div>
       </section>
 
-      {/* ── Free & Open Source + Support ─────────────────────────────────── */}
-      <section id="support" className="mx-auto max-w-6xl px-5 py-24">
-        <div className="text-center mb-16">
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3 opacity-70">Open Source</p>
-          <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-foreground">
-            100% free. No paywalls. <span className="text-gradient">Ever.</span>
-          </h2>
-          <p className="mt-4 text-lg text-muted-foreground max-w-xl mx-auto leading-relaxed">
-            Finlynq is open-source (AGPL v3) and every feature is free — self-hosted or cloud.
-            If you find it useful, consider supporting development with a donation.
-          </p>
-        </div>
-
-        <div className="grid gap-8 lg:grid-cols-2 items-start">
-          {/* What you get card */}
-          <div className="rounded-2xl border border-primary/40 bg-gradient-to-b from-primary/8 to-card shadow-xl shadow-primary/8 p-8">
-            <div className="flex items-baseline gap-1 mb-2">
-              <span className="text-4xl font-extrabold tracking-tight text-foreground hero-number">Free</span>
-              <span className="text-sm text-muted-foreground">forever — all features</span>
+      {/* MCP */}
+      <section className="fl-section" id="mcp">
+        <div className="fl-container">
+          <div className="section-head">
+            <div className="reveal">
+              <div className="tag">MCP Server · Included</div>
+              <h2 className="display-l">
+                Your assistant meets<br />
+                your <em>finances</em>.
+              </h2>
             </div>
-            <p className="text-sm text-muted-foreground mb-6">Self-host with Docker or use our managed cloud. Same app, same features, zero cost.</p>
+            <p className="lede reveal d2">
+              A built-in MCP server exposes 27 financial tools to any compatible client. No custom
+              code, no brittle exports, no exporting to a spreadsheet then copying into a prompt.
+            </p>
+          </div>
 
-            <ul className="space-y-3 mb-8">
-              {HIGHLIGHTS.map((feat) => (
-                <li key={feat} className="flex items-start gap-2.5 text-sm">
-                  <Check className="h-4 w-4 text-emerald-500 mt-0.5 shrink-0" />
-                  <span className="text-muted-foreground">{feat}</span>
+          <div className="mcp-grid">
+            <div className="query-demo reveal">
+              <div className="query-head">
+                <div className="dots">
+                  <i />
+                  <i />
+                  <i />
+                </div>
+                <div>claude · finlynq-mcp · connected</div>
+              </div>
+              <div className="query-body">
+                <div className="q-item">
+                  <div className="q-ask">How much did I spend on groceries last month?</div>
+                  <div className="q-ans">
+                    <div className="text">
+                      <span className="num">$312.40</span> <span className="mute">— up</span>{" "}
+                      <span className="pos">8%</span> <span className="mute">vs October</span>
+                    </div>
+                    <svg className="sparkline" viewBox="0 0 96 28" preserveAspectRatio="none">
+                      <polyline
+                        points="0,22 14,18 28,20 42,14 56,16 70,10 84,8 96,6"
+                        fill="none"
+                        stroke="#f5a623"
+                        strokeWidth="1.5"
+                      />
+                    </svg>
+                  </div>
+                </div>
+                <div className="q-item">
+                  <div className="q-ask">Am I on track with my budgets this month?</div>
+                  <div className="q-ans">
+                    <div className="text">
+                      <span className="num">3 of 8</span>{" "}
+                      <span className="mute">categories within budget</span>
+                    </div>
+                    <svg className="sparkline" viewBox="0 0 96 28" preserveAspectRatio="none">
+                      <g>
+                        <rect x="2" y="8" width="8" height="16" fill="#5ac8a8" />
+                        <rect x="14" y="12" width="8" height="12" fill="#5ac8a8" />
+                        <rect x="26" y="4" width="8" height="20" fill="#5ac8a8" />
+                        <rect x="38" y="2" width="8" height="22" fill="#e5624b" />
+                        <rect x="50" y="6" width="8" height="18" fill="#e5624b" />
+                        <rect x="62" y="10" width="8" height="14" fill="#e5624b" />
+                        <rect x="74" y="4" width="8" height="20" fill="#e5624b" />
+                        <rect x="86" y="8" width="8" height="16" fill="#e5624b" />
+                      </g>
+                    </svg>
+                  </div>
+                </div>
+                <div className="q-item">
+                  <div className="q-ask">What&apos;s my current net worth?</div>
+                  <div className="q-ans">
+                    <div className="text">
+                      <span className="num">$84,210</span> <span className="mute">— up</span>{" "}
+                      <span className="pos">$1,240</span> <span className="mute">this month</span>
+                    </div>
+                    <svg className="sparkline" viewBox="0 0 96 28" preserveAspectRatio="none">
+                      <polyline
+                        points="0,20 14,18 28,16 42,15 56,11 70,9 84,6 96,3"
+                        fill="none"
+                        stroke="#f5a623"
+                        strokeWidth="1.5"
+                      />
+                    </svg>
+                  </div>
+                </div>
+                <div className="q-item">
+                  <div className="q-ask">Show me any unusual transactions recently.</div>
+                  <div className="q-ans">
+                    <div className="text">
+                      <span className="num">2 anomalies</span>{" "}
+                      <span className="mute">in the last 30 days</span>
+                    </div>
+                    <svg className="sparkline" viewBox="0 0 96 28" preserveAspectRatio="none">
+                      <polyline
+                        points="0,18 12,16 24,17 36,15 48,6 60,15 72,16 84,4 96,15"
+                        fill="none"
+                        stroke="#e5624b"
+                        strokeWidth="1.5"
+                      />
+                      <circle cx="48" cy="6" r="2" fill="#e5624b" />
+                      <circle cx="84" cy="4" r="2" fill="#e5624b" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="reveal d2">
+              <ul className="mcp-list">
+                {MCP_TOOLS.map((m, i) => (
+                  <li key={m.t}>
+                    <span className="n">{String(i + 1).padStart(2, "0")}</span>
+                    <span className="t">{m.t}</span>
+                    <span className="a">{m.a}</span>
+                  </li>
+                ))}
+              </ul>
+              <div style={{ marginTop: 32, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <Link href="/cloud?tab=register" className="btn btn-primary">
+                  Get started
+                </Link>
+                <Link href="/mcp-guide" className="btn btn-ghost">
+                  View MCP guide <span aria-hidden="true">→</span>
+                </Link>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* PRIVACY */}
+      <section className="fl-section" id="privacy">
+        <div className="fl-container">
+          <div className="section-head">
+            <div className="reveal">
+              <div className="tag">Privacy First</div>
+              <h2 className="display-l">
+                Zero-knowledge.<br />
+                <em>Mathematically</em> private.
+              </h2>
+            </div>
+            <p className="lede reveal d2">
+              Your financial data is encrypted with your password before it ever touches a server.
+              We designed the system so we cannot read it — not a marketing claim, a math one.
+            </p>
+          </div>
+
+          <div className="privacy-diagram reveal">
+            {[
+              { k: "Step 01", t: "Your password" },
+              { k: "Step 02", t: "Derive key (PBKDF2)" },
+              { k: "Step 03", t: "AES-256 encrypt" },
+              { k: "Step 04", t: "Stored encrypted" },
+            ].map((node, i, arr) => (
+              <div key={node.k} className="priv-node">
+                <div className="k">{node.k}</div>
+                <div className="t">{node.t}</div>
+                {i < arr.length - 1 && <div className="arrow">→</div>}
+              </div>
+            ))}
+          </div>
+
+          <div className="privacy-grid">
+            {[
+              {
+                h: "AES-256 encryption.",
+                p: "The same standard used by banks and governments. All data encrypted before it touches any storage — in transit and at rest.",
+              },
+              {
+                h: "Your password is the key.",
+                p: "Your encryption key is derived from your password via PBKDF2. Finlynq never sees your passphrase or your plaintext data.",
+              },
+              {
+                h: "Zero-knowledge architecture.",
+                p: "We cannot see your transactions, balances, or accounts. It is mathematically impossible to read your data without your password.",
+              },
+              {
+                h: "Self-host free, forever.",
+                p: "Don't trust the cloud? Run the entire app on your own hardware. Full feature parity, no license fees, no data ever leaves.",
+              },
+            ].map((tile, i) => (
+              <div key={tile.h} className={`priv-tile reveal ${i === 1 ? "d1" : i === 2 ? "d2" : i === 3 ? "d3" : ""}`}>
+                <h4>
+                  <span className="ic">◆</span> {tile.h}
+                </h4>
+                <p>{tile.p}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* PRICING */}
+      <section className="fl-section" id="pricing">
+        <div className="fl-container">
+          <div className="section-head">
+            <div className="reveal">
+              <div className="tag">Pricing</div>
+              <h2 className="display-l">
+                <em>Free.</em> Every feature.<br />
+                No paywalls. Ever.
+              </h2>
+            </div>
+            <p className="lede reveal d2">
+              Finlynq is open-source under AGPL v3. Self-hosted or cloud, you get the same app. If
+              it&apos;s useful, consider sponsoring development.
+            </p>
+          </div>
+
+          <div className="plan reveal">
+            <div className="plan-head">
+              <div>
+                <div className="eyebrow">
+                  <span className="dot" />
+                  FREE FOREVER · ALL FEATURES
+                </div>
+                <div style={{ fontSize: 26, marginTop: 12, letterSpacing: "-0.02em" }}>
+                  Everything, included.
+                </div>
+              </div>
+              <div className="plan-price">
+                $0<span className="u">/ MO</span>
+              </div>
+            </div>
+            <ul className="plan-feats">
+              {PLAN_FEATS.map((f) => (
+                <li key={f}>
+                  <span className="check">✓</span>
+                  {f}
                 </li>
               ))}
             </ul>
-
-            <div className="flex flex-col sm:flex-row gap-3">
-              <Link
-                href="/cloud?tab=register"
-                className="inline-flex items-center gap-2 justify-center rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90 hover:scale-[1.02] active:scale-[0.99] transition-all"
-              >
-                Get Started Free <ArrowRight className="h-4 w-4" />
+            <div style={{ display: "flex", gap: 12, marginTop: 32, flexWrap: "wrap" }}>
+              <Link href="/cloud?tab=register" className="btn btn-primary">
+                Get started free
               </Link>
-              <Link
-                href="/self-hosted"
-                className="inline-flex items-center justify-center gap-2 rounded-xl border border-border px-6 py-3 text-sm font-medium text-muted-foreground hover:text-foreground hover:border-border/80 hover:bg-muted/40 transition-all"
-              >
-                Self-Host Guide
+              <Link href="/self-hosted" className="btn btn-ghost">
+                Self-host guide <span aria-hidden="true">→</span>
               </Link>
             </div>
-          </div>
-
-          {/* Support / donate card */}
-          <div className="rounded-2xl border border-border/60 bg-card p-8 card-hover">
-            <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-rose-50 dark:bg-rose-500/10 border border-rose-100 dark:border-rose-500/20">
-              <Heart className="h-5 w-5 text-rose-500" />
-            </div>
-            <h3 className="text-xl font-bold text-foreground mb-2">Support Finlynq</h3>
-            <p className="text-sm text-muted-foreground leading-relaxed mb-6">
-              Finlynq is built and maintained by a small team. Donations keep the servers running,
-              fund new features, and ensure the project stays independent and ad-free.
-              Every contribution — big or small — makes a difference.
-            </p>
-
-            <div className="space-y-3 mb-8">
-              {DONATE_LINKS.map((d) => (
-                <a
-                  key={d.label}
-                  href={d.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-3 rounded-xl border border-border/60 px-5 py-3.5 text-sm font-medium text-foreground hover:bg-muted/50 hover:border-border transition-all group"
-                >
-                  <d.icon className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
-                  {d.label}
-                  <ArrowRight className="h-3.5 w-3.5 ml-auto text-muted-foreground/50 group-hover:translate-x-0.5 transition-transform" />
-                </a>
-              ))}
-            </div>
-
-            <p className="text-xs text-muted-foreground/60 leading-relaxed">
-              Finlynq is licensed under AGPL v3. Source code is available on{" "}
-              <a href="https://github.com/finlynq/finlynq" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground transition-colors">
-                GitHub
-              </a>.
-            </p>
           </div>
         </div>
       </section>
 
-      {/* ── Final CTA ──────────────────────────────────────────────────────── */}
-      <section className="mx-auto max-w-6xl px-5 pb-24">
-        <div className="rounded-3xl border border-border/60 bg-gradient-to-br from-primary/8 via-card to-card p-12 sm:p-16 text-center relative overflow-hidden">
-          <div className="pointer-events-none absolute inset-0 bg-dot-pattern opacity-40" />
-          <div className="pointer-events-none absolute -top-16 left-1/2 -translate-x-1/2 h-48 w-96 rounded-full bg-primary/8 blur-3xl" />
-
-          <div className="relative">
-            <div className="mb-5 flex justify-center">
-              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 shadow-xl shadow-indigo-500/25">
-                <Target className="h-7 w-7 text-white" />
-              </div>
+      {/* CTA */}
+      <section className="fl-cta">
+        <div className="fl-container cta-grid">
+          <div className="reveal">
+            <div className="eyebrow" style={{ marginBottom: 24 }}>
+              <span className="dot" />
+              START TODAY
             </div>
-            <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-foreground mb-4 leading-tight">
-              Start understanding your finances today
+            <h2 className="display-xl" style={{ fontSize: "clamp(40px, 5.4vw, 76px)" }}>
+              Understand your<br />
+              finances, <em>finally</em>.
             </h2>
-            <p className="text-lg text-muted-foreground max-w-lg mx-auto mb-10 leading-relaxed">
-              Open-source, free forever, and built for the AI era.
-              Cloud or self-hosted — your data, your rules.
-            </p>
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-              <Link
-                href="/cloud?tab=register"
-                className="flex items-center gap-2 justify-center rounded-xl bg-primary px-8 py-3.5 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90 hover:scale-[1.02] active:scale-[0.99] transition-all w-full sm:w-auto"
-              >
-                Get Started Free
-                <ArrowRight className="h-4 w-4" />
+            <div className="cta-actions">
+              <Link href="/cloud?tab=register" className="btn btn-primary">
+                Get started free <span aria-hidden="true">→</span>
               </Link>
               <a
                 href="https://github.com/finlynq/finlynq"
+                className="btn btn-ghost"
                 target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+                rel="noreferrer"
               >
-                <Github className="h-4 w-4" />
-                View on GitHub →
+                View on GitHub
               </a>
+            </div>
+          </div>
+          <div className="reveal d2">
+            <div className="cta-facts">
+              <div className="cta-fact">
+                <div className="eyebrow">LICENSED</div>
+                <div>AGPL v3 — open source forever</div>
+              </div>
+              <div className="cta-fact">
+                <div className="eyebrow">ENCRYPTED</div>
+                <div>AES-256 via SQLCipher. Your key, never ours.</div>
+              </div>
+              <div className="cta-fact">
+                <div className="eyebrow">PORTABLE</div>
+                <div>Export your whole account as a backup anytime.</div>
+              </div>
+              <div className="cta-fact">
+                <div className="eyebrow">NO LOCK-IN</div>
+                <div>Self-host in Docker. Same app, same features.</div>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      {/* ── Footer ─────────────────────────────────────────────────────────── */}
-      <footer className="border-t border-border/50 bg-muted/20">
-        <div className="mx-auto max-w-6xl px-5 py-14">
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-10 mb-12">
-            {/* Brand */}
-            <div className="col-span-2">
-              <Link href="/" className="flex items-center gap-2.5 mb-4 group w-fit">
-                <div className="flex h-8 w-8 items-center justify-center rounded-xl">
-                  <FinlynqLogo size={28} />
-                </div>
-                <span className="text-sm font-semibold tracking-tight">Finlynq</span>
+      {/* FOOTER */}
+      <footer className="fl-footer">
+        <div className="fl-container">
+          <div className="footer-grid">
+            <div>
+              <Link href="/" className="fl-logo" style={{ color: "var(--fl-fg)" }}>
+                <LogoMark />
+                Finlynq
               </Link>
-              <p className="text-sm text-muted-foreground leading-relaxed max-w-[220px]">
-                The personal finance app built for the AI era.
+              <p className="footer-blurb">
+                The personal finance app built for the AI era. Encrypted, private, and yours.
               </p>
             </div>
-
-            {/* Link columns */}
-            {Object.entries(FOOTER_LINKS).map(([title, links]) => (
-              <div key={title}>
-                <h4 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground/60 mb-4">{title}</h4>
-                <ul className="space-y-2.5">
-                  {links.map((link) => (
-                    <li key={link.label}>
-                      <Link
-                        href={link.href}
-                        className="text-sm text-muted-foreground hover:text-foreground transition-colors"
-                      >
-                        {link.label}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+            <div>
+              <h5>Product</h5>
+              <ul>
+                <li><a href="#features">Features</a></li>
+                <li><a href="#flow">How it works</a></li>
+                <li><Link href="/mcp-guide">MCP guide</Link></li>
+                <li><Link href="/api-docs">API docs</Link></li>
+                <li>
+                  <a href="https://github.com/finlynq/finlynq" target="_blank" rel="noreferrer">
+                    GitHub
+                  </a>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h5>Hosting</h5>
+              <ul>
+                <li><Link href="/cloud?tab=register">Cloud (free)</Link></li>
+                <li><Link href="/self-hosted">Self-hosted</Link></li>
+                <li>
+                  <a href="https://github.com/finlynq/finlynq" target="_blank" rel="noreferrer">
+                    Docker image
+                  </a>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h5>Community</h5>
+              <ul>
+                <li>
+                  <a href="https://github.com/sponsors/finlynq" target="_blank" rel="noreferrer">
+                    GitHub Sponsors
+                  </a>
+                </li>
+                <li>
+                  <a href="https://ko-fi.com/finlynq" target="_blank" rel="noreferrer">
+                    Ko-fi
+                  </a>
+                </li>
+                <li>
+                  <a href="https://github.com/finlynq/finlynq/discussions" target="_blank" rel="noreferrer">
+                    Discussions
+                  </a>
+                </li>
+              </ul>
+            </div>
           </div>
-
-          {/* Bottom bar */}
-          <div className="border-t border-border/50 pt-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-            <p className="text-xs text-muted-foreground/50">
-              &copy; {new Date().getFullYear()} Finlynq. All rights reserved.
-            </p>
-            <div className="flex items-center gap-5 text-xs text-muted-foreground/50">
+          <div className="footer-meta">
+            <div>© {new Date().getFullYear()} Finlynq · All rights reserved.</div>
+            <div className="badges">
               <span>AGPL v3</span>
-              <span>·</span>
-              <span>AES-256 Encrypted</span>
-              <span>·</span>
+              <span>AES-256</span>
               <span>MCP-powered</span>
             </div>
           </div>
         </div>
       </footer>
-
     </div>
   );
 }
