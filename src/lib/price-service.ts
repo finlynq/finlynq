@@ -4,14 +4,9 @@
 
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
-import {
-  getEtfInfoBySymbol,
-  getEtfInfoAll,
-  getEtfConstituentsBySymbol,
-  getEtfRegionsBySymbol,
-  getEtfSectorsBySymbol,
-  seedEtfFromData,
-} from "@/db/etf-db";
+
+// ETF metadata now comes from the hardcoded registry in this file; the
+// earlier SQLite-backed ETF database was removed in the open-source/PG pivot.
 
 const YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance";
 
@@ -691,85 +686,31 @@ export function getHardcodedEtfSectors(symbol: string) {
   return ETF_SECTORS[symbol] ?? null;
 }
 
-// ── DB-backed accessors (fall back to hardcoded if ETF DB empty) ────────
+// ── ETF metadata accessors (reads from the hardcoded registry above) ────
 
 export function getEtfTopHoldings(symbol: string): { fullName: string; totalHoldings: number; constituents: EtfConstituent[] } | null {
-  try {
-    const info = getEtfInfoBySymbol(symbol);
-    if (info) {
-      const rows = getEtfConstituentsBySymbol(symbol);
-      if (rows.length > 0) {
-        return {
-          fullName: info.full_name,
-          totalHoldings: info.total_holdings,
-          constituents: rows,
-        };
-      }
-    }
-  } catch { /* ETF DB not ready, fall through */ }
   return ETF_TOP_HOLDINGS[symbol] ?? null;
 }
 
 export function getAvailableEtfSymbols(): string[] {
-  try {
-    const all = getEtfInfoAll();
-    if (all.length > 0) return all.map(r => r.symbol);
-  } catch { /* fall through */ }
   return [...new Set([...Object.keys(ETF_REGIONS), ...Object.keys(ETF_SECTORS), ...Object.keys(ETF_TOP_HOLDINGS)])];
 }
 
 export function getEtfRegionBreakdown(symbol: string): Record<string, number> | null {
-  try {
-    const rows = getEtfRegionsBySymbol(symbol);
-    if (rows.length > 0) {
-      const result: Record<string, number> = {};
-      for (const r of rows) result[r.region] = r.weight;
-      return result;
-    }
-  } catch { /* fall through */ }
   return ETF_REGIONS[symbol] ?? null;
 }
 
 export function getEtfSectorBreakdown(symbol: string): Record<string, number> | null {
-  try {
-    const rows = getEtfSectorsBySymbol(symbol);
-    if (rows.length > 0) {
-      const result: Record<string, number> = {};
-      for (const r of rows) result[r.sector] = r.weight;
-      return result;
-    }
-  } catch { /* fall through */ }
   return ETF_SECTORS[symbol] ?? null;
 }
 
 /**
- * Auto-seed an ETF into the shared ETF DB if it has hardcoded data but
- * isn't in the database yet. Called automatically when the portfolio API
- * encounters an ETF symbol not in the DB.
+ * Legacy no-op. The SQLite-backed ETF database used to cache dynamically-
+ * seeded entries here; the current implementation is purely hardcoded so
+ * there's nothing to seed.
  */
-export function autoSeedEtfIfMissing(symbol: string): boolean {
-  try {
-    const existing = getEtfInfoBySymbol(symbol);
-    if (existing) return false; // already in DB
-
-    const regions = ETF_REGIONS[symbol] ?? null;
-    const sectors = ETF_SECTORS[symbol] ?? null;
-    const holdings = ETF_TOP_HOLDINGS[symbol] ?? null;
-
-    if (!regions && !sectors && !holdings) return false; // no hardcoded data
-
-    seedEtfFromData(
-      symbol,
-      holdings?.fullName ?? symbol,
-      holdings?.totalHoldings ?? 0,
-      regions,
-      sectors,
-      holdings?.constituents ?? null,
-    );
-    return true;
-  } catch {
-    return false;
-  }
+export function autoSeedEtfIfMissing(_symbol: string): boolean {
+  return false;
 }
 
 export function aggregatePortfolioExposure(

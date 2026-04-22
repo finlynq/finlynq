@@ -1,5 +1,5 @@
 import type { InferSelectModel } from "drizzle-orm";
-import type { transactionRules } from "@/db/schema";
+import type { transactionRules } from "@/db/schema-pg";
 
 export type TransactionRule = InferSelectModel<typeof transactionRules>;
 

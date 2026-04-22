@@ -1,8 +1,8 @@
 /**
- * Authentication Abstraction Layer
+ * Authentication Abstraction Layer (PostgreSQL-only mode).
  *
- * Provides a unified auth interface for both self-hosted (passphrase)
- * and managed (account-based) products.
+ * Two strategies: account (JWT session cookie) and API key.
+ * See `require-auth.ts` for the selection logic.
  */
 
 export { requireAuth } from "./require-auth";
@@ -10,7 +10,6 @@ export { requireAdmin } from "./require-admin";
 export { requireEncryption } from "./require-encryption";
 export type { EncryptionAuthResult } from "./require-encryption";
 export type { AuthContext, AuthResult, AuthStrategy } from "./strategy";
-export { PassphraseStrategy } from "./strategies/passphrase";
 export { AccountStrategy, AUTH_COOKIE } from "./strategies/account";
 export { ApiKeyStrategy } from "./strategies/api-key";
 export { createSessionToken, verifySessionToken } from "./jwt";

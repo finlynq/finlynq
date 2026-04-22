@@ -12,7 +12,7 @@
  */
 
 import { NextResponse } from "next/server";
-import { getAdapter, getDialect } from "@/db";
+import { getAdapter } from "@/db";
 
 export const dynamic = "force-dynamic";
 
@@ -27,25 +27,15 @@ export async function GET() {
 
   // ── Database health ────────────────────────────────────────────────────────
   try {
-    const dialect = getDialect();
-
-    if (dialect === "postgres") {
-      const adapter = getAdapter();
-      if (!adapter || !adapter.isConnected()) {
-        checks.db = "error";
-      } else {
-        // Run a trivial query to confirm the pool is live
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const pgDb = (adapter as any).getDb() as any;
-        const { sql } = await import("drizzle-orm");
-        await pgDb.execute(sql`SELECT 1`);
-      }
+    const adapter = getAdapter();
+    if (!adapter || !adapter.isConnected()) {
+      checks.db = "error";
     } else {
-      // SQLite: just check if the connection is open
-      const { isUnlocked } = await import("@/db");
-      // SQLite is considered healthy if the app started (unlock happens via UI)
-      // We don't fail health checks for a locked DB — the app is running fine.
-      checks.db = isUnlocked() ? "ok" : "ok";
+      // Trivial query to confirm the pool is live
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pgDb = (adapter as any).getDb() as any;
+      const { sql } = await import("drizzle-orm");
+      await pgDb.execute(sql`SELECT 1`);
     }
   } catch {
     checks.db = "error";

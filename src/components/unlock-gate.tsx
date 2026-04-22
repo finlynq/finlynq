@@ -2,69 +2,47 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { UnlockScreen } from "./unlock-screen";
-import { SetupWizard } from "./setup-wizard";
 
-type AuthState = "loading" | "needs-setup" | "locked" | "unlocked" | "managed-login";
+type AuthState = "loading" | "unauthenticated" | "authenticated";
 
+/**
+ * Gate around authenticated app pages. If the session is valid we render
+ * the children; otherwise we redirect to the login page.
+ *
+ * The previous self-hosted passphrase/unlock/setup flow was removed when
+ * the product became PostgreSQL-only (accounts are provisioned via
+ * /register and /cloud login). This component only handles the
+ * "am I signed in?" check now.
+ */
 export function UnlockGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [state, setState] = useState<AuthState>("loading");
-  const [hasExistingData, setHasExistingData] = useState(false);
 
   useEffect(() => {
-    checkAuth();
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/session");
+        const data = await res.json();
+        if (cancelled) return;
+        setState(data.authenticated ? "authenticated" : "unauthenticated");
+      } catch {
+        if (!cancelled) setState("unauthenticated");
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
-  async function checkAuth() {
-    try {
-      const res = await fetch("/api/auth/unlock");
-      const data = await res.json();
-
-      if (data.unlocked) {
-        setState("unlocked");
-      } else if (data.authMethod === "account") {
-        // Managed mode but not authenticated — redirect to Cloud login
-        setState("managed-login");
-      } else if (data.needsSetup) {
-        setHasExistingData(data.hasExistingData);
-        setState("needs-setup");
-      } else {
-        setState("locked");
-      }
-    } catch {
-      setState("locked");
-    }
-  }
-
-  if (state === "loading") {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
-      </div>
-    );
-  }
-
-  if (state === "managed-login") {
+  if (state === "unauthenticated") {
     router.replace("/cloud");
+  }
+
+  if (state !== "authenticated") {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
       </div>
     );
-  }
-
-  if (state === "needs-setup") {
-    return (
-      <SetupWizard
-        hasExistingData={hasExistingData}
-        onComplete={() => setState("unlocked")}
-      />
-    );
-  }
-
-  if (state === "locked") {
-    return <UnlockScreen onUnlocked={() => setState("unlocked")} />;
   }
 
   return <>{children}</>;

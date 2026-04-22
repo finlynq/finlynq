@@ -94,13 +94,3 @@ export const schema = pgSchema;
 export type { DatabaseAdapter, DbDialect, DrizzleDb };
 export { DEFAULT_USER_ID } from "./adapter";
 export { PostgresAdapter };
-export {
-  initializeConnection,
-  isUnlocked,
-  closeConnection,
-  getConnection,
-  getMode,
-  getDbPath,
-  isCloudReadOnly,
-  DatabaseLockedError,
-} from "./connection";
