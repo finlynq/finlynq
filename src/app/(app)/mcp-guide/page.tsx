@@ -109,6 +109,8 @@ export default function McpGuidePage() {
           command: "node",
           args: ["/path/to/pf-app/mcp-server/dist/index.js"],
           env: {
+            DATABASE_URL: "postgresql://user:pass@localhost:5432/pf",
+            PF_USER_ID: "your-user-uuid-from-users-table",
             PF_PASSPHRASE: "your-passphrase",
           },
         },

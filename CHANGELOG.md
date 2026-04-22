@@ -6,6 +6,19 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Security
+- **Full audit remediation (2026-04-22).** Addressed 3 critical, 4 high, 4 medium findings in one commit. Plan: [AUDIT_REMEDIATION_PLAN.md](../AUDIT_REMEDIATION_PLAN.md).
+  - **Critical — stdio MCP user isolation.** `mcp-server/index.ts` now requires `PF_USER_ID` at boot (exits otherwise). ~68 SQL queries across `register-core-tools.ts`, `tools-v2.ts`, `tools-import-templates.ts` now filter by `user_id`. Every UPDATE/DELETE has an ownership pre-check. INSERTs bind userId from closure, never from tool arguments. Before the fix, a stdio caller against a multi-user DB could read and destructively write across all tenants.
+  - **Critical — SQL injection in MCP `update_account`.** Replaced `sql.raw()` + manual quote escaping with parameterized `sql` fragments.
+  - **Critical — CSV import cross-user attach.** All name-based lookups in `src/lib/csv-parser.ts` now filter by userId. Before, one user's import could attach transactions to another user's account if names collided.
+  - **High — `encryptionV` bump in `wipeUserDataAndRewrap`.** Multi-tab password resets now correctly invalidate cached DEKs.
+  - **High — `PF_JWT_SECRET` fatal in prod.** `src/lib/auth/jwt.ts` throws at module load if missing in production; dev still falls back with a one-time warn.
+  - **High — OAuth DCR rate limit.** `/api/oauth/register` capped at 10 registrations/hour/IP.
+  - **High — Security headers in `next.config.ts`.** HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy enforced. CSP ships as Report-Only — flip to enforced after a week of clean console.
+  - **Medium — Input/request caps.** `/api/chat` message ≤ 2000 chars. `/api/data/import` and `/api/import/execute` reject bodies > 20 MB (413) and imports > 50 000 transactions (422).
+  - **Medium — Verified OAuth DEK envelope** end-to-end in `src/lib/oauth.ts` (authorize → token-exchange → refresh all wrap/unwrap correctly; audit's "unknown" was a wrong path).
+  - **Deferred:** `xlsx@0.18.5` has CVE-2023-30533 — fix lives only in SheetJS paid/CDN channel, not npm. `pdf-parser.ts:55` pre-existing type error.
+
 ### Changed
 - **Premium fintech dark redesign.** Landing page ([src/app/page.tsx](src/app/page.tsx)) rebuilt from the claude.ai/design handoff — sticky blur nav, animated hero chart (scrolling ticker + draw-on SVG line), 6-tile feature grid, 3-step flow, MCP query demo, 4-node zero-knowledge privacy diagram, $0 pricing. Styles scoped under `.fl-landing` in [src/app/landing.css](src/app/landing.css). Scroll reveals via `IntersectionObserver`.
 - **App-wide design system refreshed to match.** shadcn CSS tokens in [globals.css](src/app/globals.css) remapped from indigo `hue 265` to amber `#f5a623` primary + teal/coral chart semantics; ink palette `#0b0d10`/`#101317`/`#161a1f`/`#1e242b`. Light mode shares the amber accent. `.text-gradient` retuned to amber→warm-orange.
