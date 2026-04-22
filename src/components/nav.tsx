@@ -40,62 +40,66 @@ import { FinlynqLogo } from "@/components/FinlynqLogo";
 
 type NavItem = { href: string; label: string; icon: LucideIcon; color: string; mode?: "prod" | "dev" };
 
+// Single-accent system: active items glow amber (`text-primary`) to match the
+// landing's restraint. Inactive icons use the sidebar-foreground muted tones.
+const ACTIVE_ACCENT = "text-primary";
+
 const navGroups: { label: string; items: NavItem[] }[] = [
   {
     label: "",
     items: [
-      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, color: "text-blue-400", mode: "prod" },
-      { href: "/mcp-guide", label: "MCP Guide", icon: Bot, color: "text-violet-400", mode: "prod" },
-      { href: "/chat", label: "AI Chat", icon: MessageSquare, color: "text-indigo-400", mode: "dev" },
+      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/mcp-guide", label: "MCP Guide", icon: Bot, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/chat", label: "AI Chat", icon: MessageSquare, color: ACTIVE_ACCENT, mode: "dev" },
     ],
   },
   {
     label: "Tracking",
     items: [
-      { href: "/transactions", label: "Transactions", icon: ArrowLeftRight, color: "text-amber-400", mode: "prod" },
-      { href: "/budgets", label: "Budgets", icon: PiggyBank, color: "text-emerald-400", mode: "prod" },
-      { href: "/goals", label: "Goals", icon: Target, color: "text-orange-400", mode: "prod" },
-      { href: "/subscriptions", label: "Subscriptions", icon: CreditCard, color: "text-pink-400", mode: "dev" },
-      { href: "/calendar", label: "Calendar", icon: CalendarDays, color: "text-sky-400", mode: "dev" },
+      { href: "/transactions", label: "Transactions", icon: ArrowLeftRight, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/budgets", label: "Budgets", icon: PiggyBank, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/goals", label: "Goals", icon: Target, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/subscriptions", label: "Subscriptions", icon: CreditCard, color: ACTIVE_ACCENT, mode: "dev" },
+      { href: "/calendar", label: "Calendar", icon: CalendarDays, color: ACTIVE_ACCENT, mode: "dev" },
     ],
   },
   {
     label: "Wealth",
     items: [
-      { href: "/accounts", label: "Accounts", icon: Wallet, color: "text-violet-400", mode: "prod" },
-      { href: "/portfolio", label: "Portfolio", icon: TrendingUp, color: "text-cyan-400", mode: "prod" },
-      { href: "/loans", label: "Loans & Debt", icon: Landmark, color: "text-rose-400", mode: "dev" },
+      { href: "/accounts", label: "Accounts", icon: Wallet, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/portfolio", label: "Portfolio", icon: TrendingUp, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/loans", label: "Loans & Debt", icon: Landmark, color: ACTIVE_ACCENT, mode: "dev" },
     ],
   },
   {
     label: "Analysis",
     items: [
-      { href: "/reports", label: "Reports", icon: FileText, color: "text-slate-400", mode: "prod" },
-      { href: "/tax", label: "Tax", icon: Calculator, color: "text-teal-400", mode: "dev" },
+      { href: "/reports", label: "Reports", icon: FileText, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/tax", label: "Tax", icon: Calculator, color: ACTIVE_ACCENT, mode: "dev" },
     ],
   },
   {
     label: "Planning",
     items: [
-      { href: "/scenarios", label: "Scenarios", icon: GitBranch, color: "text-purple-400", mode: "dev" },
-      { href: "/fire", label: "FIRE Calculator", icon: FlameKindling, color: "text-red-400", mode: "dev" },
+      { href: "/scenarios", label: "Scenarios", icon: GitBranch, color: ACTIVE_ACCENT, mode: "dev" },
+      { href: "/fire", label: "FIRE Calculator", icon: FlameKindling, color: ACTIVE_ACCENT, mode: "dev" },
     ],
   },
 ];
 
 const toolLinks: NavItem[] = [
-  { href: "/import", label: "Import", icon: Upload, color: "text-blue-400", mode: "prod" },
-  { href: "/api-docs", label: "API Docs", icon: FileText, color: "text-slate-400", mode: "dev" },
-  { href: "/admin", label: "Admin", icon: ShieldCheck, color: "text-amber-400", mode: "prod" },
-  { href: "/settings", label: "Settings", icon: Settings, color: "text-slate-400", mode: "prod" },
+  { href: "/import", label: "Import", icon: Upload, color: ACTIVE_ACCENT, mode: "prod" },
+  { href: "/api-docs", label: "API Docs", icon: FileText, color: ACTIVE_ACCENT, mode: "dev" },
+  { href: "/admin", label: "Admin", icon: ShieldCheck, color: ACTIVE_ACCENT, mode: "prod" },
+  { href: "/settings", label: "Settings", icon: Settings, color: ACTIVE_ACCENT, mode: "prod" },
 ];
 
 // Bottom bar items for mobile (5th slot is the account icon, handled separately)
 const mobileBarItems: NavItem[] = [
-  { href: "/dashboard", label: "Home", icon: LayoutDashboard, color: "text-blue-400" },
-  { href: "/transactions", label: "Txns", icon: ArrowLeftRight, color: "text-amber-400" },
-  { href: "/import", label: "Import", icon: Upload, color: "text-indigo-400" },
-  { href: "/budgets", label: "Budgets", icon: PiggyBank, color: "text-emerald-400" },
+  { href: "/dashboard", label: "Home", icon: LayoutDashboard, color: ACTIVE_ACCENT },
+  { href: "/transactions", label: "Txns", icon: ArrowLeftRight, color: ACTIVE_ACCENT },
+  { href: "/import", label: "Import", icon: Upload, color: ACTIVE_ACCENT },
+  { href: "/budgets", label: "Budgets", icon: PiggyBank, color: ACTIVE_ACCENT },
 ];
 
 const allFlatItems = navGroups.flatMap((g) => g.items).concat(toolLinks);
@@ -369,7 +373,7 @@ export function Nav() {
             mobileAccountOpen ? "text-sidebar-primary" : "text-sidebar-foreground/50"
           )}
         >
-          <User className={cn("h-5 w-5", mobileAccountOpen && "text-violet-400")} />
+          <User className={cn("h-5 w-5", mobileAccountOpen && "text-primary")} />
           Account
         </button>
       </div>

@@ -1,13 +1,5 @@
-<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#6366F1"/>
-      <stop offset="1" stop-color="#8B5CF6"/>
-    </linearGradient>
-  </defs>
-  <rect x="4" y="3" width="6.5" height="20" rx="3.25" fill="url(#g)"/>
-  <rect x="4" y="3" width="19" height="6.5" rx="3.25" fill="url(#g)"/>
-  <rect x="4" y="12" width="13" height="5.5" rx="2.75" fill="url(#g)"/>
-  <circle cx="23.5" cy="25.5" r="4.5" stroke="url(#g)" stroke-width="2.75" fill="none"/>
-  <line x1="10.5" y1="25.5" x2="19" y2="25.5" stroke="url(#g)" stroke-width="2.75" stroke-linecap="round"/>
+<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="1" y="1" width="20" height="20" rx="2" fill="none" stroke="#f5a623" stroke-width="1.5"/>
+  <path d="M5 16 L5 9 L10 13 L10 6 L17 11" fill="none" stroke="#f5a623" stroke-width="1.6" stroke-linejoin="miter" stroke-linecap="square"/>
+  <circle cx="17" cy="11" r="1.6" fill="#f5a623"/>
 </svg>
