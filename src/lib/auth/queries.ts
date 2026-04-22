@@ -251,6 +251,77 @@ export async function updateUserPlan(userId: string, plan: string, planExpiresAt
     .where(eq(getSchema().users.id, userId));
 }
 
+/**
+ * Permanently wipe all user-owned data (transactions, splits, accounts,
+ * categories, etc.) and swap in a fresh DEK wrapped by the new password.
+ *
+ * Called from:
+ *  - POST /api/auth/wipe-account (user-initiated, password confirmed)
+ *  - POST /api/auth/password-reset/confirm (token-confirmed recovery)
+ *
+ * The user row is preserved (id, email, MFA, etc.) but `encryptionV` bumps
+ * because the DEK changed — any in-flight session cache entries holding the
+ * old DEK become invalid.
+ */
+export async function wipeUserDataAndRewrap(
+  userId: string,
+  passwordHash: string,
+  wrap: { kekSalt: string; dekWrapped: string; dekWrappedIv: string; dekWrappedTag: string }
+) {
+  const s = getSchema();
+  // Delete user-scoped rows in FK-safe order. transaction_splits has no
+  // user_id column — filter via the user's transaction IDs first.
+  const userTxns = await db
+    .select({ id: s.transactions.id })
+    .from(s.transactions)
+    .where(eq(s.transactions.userId, userId));
+  const txIds = userTxns.map((t) => t.id);
+  if (txIds.length > 0) {
+    // Use a chunked inArray delete in case there are many rows
+    const BATCH = 900;
+    const { inArray } = await import("drizzle-orm");
+    for (let i = 0; i < txIds.length; i += BATCH) {
+      const batch = txIds.slice(i, i + BATCH);
+      await db.delete(s.transactionSplits).where(inArray(s.transactionSplits.transactionId, batch));
+    }
+  }
+
+  // Per-user tables with a user_id column
+  await db.delete(s.notifications).where(eq(s.notifications.userId, userId));
+  await db.delete(s.subscriptions).where(eq(s.subscriptions.userId, userId));
+  await db.delete(s.recurringTransactions).where(eq(s.recurringTransactions.userId, userId));
+  await db.delete(s.contributionRoom).where(eq(s.contributionRoom.userId, userId));
+  await db.delete(s.priceCache).where(eq(s.priceCache.userId, userId));
+  await db.delete(s.fxRates).where(eq(s.fxRates.userId, userId));
+  await db.delete(s.targetAllocations).where(eq(s.targetAllocations.userId, userId));
+  await db.delete(s.snapshots).where(eq(s.snapshots.userId, userId));
+  await db.delete(s.goals).where(eq(s.goals.userId, userId));
+  await db.delete(s.loans).where(eq(s.loans.userId, userId));
+  await db.delete(s.budgets).where(eq(s.budgets.userId, userId));
+  await db.delete(s.budgetTemplates).where(eq(s.budgetTemplates.userId, userId));
+  await db.delete(s.transactionRules).where(eq(s.transactionRules.userId, userId));
+  await db.delete(s.importTemplates).where(eq(s.importTemplates.userId, userId));
+  await db.delete(s.transactions).where(eq(s.transactions.userId, userId));
+  await db.delete(s.portfolioHoldings).where(eq(s.portfolioHoldings.userId, userId));
+  await db.delete(s.categories).where(eq(s.categories.userId, userId));
+  await db.delete(s.accounts).where(eq(s.accounts.userId, userId));
+  await db.delete(s.settings).where(eq(s.settings.userId, userId));
+
+  // Rewrap the DEK with the new password + bump encryption version so any
+  // cached session DEK gets invalidated on next auth check.
+  const now = new Date().toISOString();
+  await db.update(s.users)
+    .set({
+      passwordHash,
+      kekSalt: wrap.kekSalt,
+      dekWrapped: wrap.dekWrapped,
+      dekWrappedIv: wrap.dekWrappedIv,
+      dekWrappedTag: wrap.dekWrappedTag,
+      updatedAt: now,
+    })
+    .where(eq(s.users.id, userId));
+}
+
 export async function getUsageStats() {
   const userRows = await db.select({ total: count() }).from(getSchema().users);
   const txRows = await db.select({ total: count() }).from(getSchema().transactions);

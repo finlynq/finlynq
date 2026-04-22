@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const tokens = await createAccessToken(result.userId, client_id);
+    const tokens = await createAccessToken(result.userId, client_id, result.dek);
     return NextResponse.json(
       {
         access_token: tokens.accessToken,

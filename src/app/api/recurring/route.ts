@@ -2,13 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { decryptField } from "@/lib/crypto/envelope";
 import { requireDevMode } from "@/lib/require-dev-mode";
 
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
-  const { userId } = auth.context;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const devGuard = await requireDevMode(request);
+  if (devGuard) return devGuard;
+  const { userId, dek } = auth;
   // Fetch last 12 months of transactions with payees
   const cutoff = new Date();
   cutoff.setFullYear(cutoff.getFullYear() - 1);
@@ -30,10 +33,12 @@ export async function GET(request: NextRequest) {
     ))
     .all();
 
+  // Decrypt payees before grouping — detector groups by normalized payee, so
+  // we must give it plaintext (ciphertext has a random IV per row).
   const detected = detectRecurringTransactions(
     txns.map((t) => ({
       ...t,
-      payee: t.payee ?? "",
+      payee: decryptField(dek, t.payee) ?? "",
       accountId: t.accountId ?? 0,
       categoryId: t.categoryId,
     }))

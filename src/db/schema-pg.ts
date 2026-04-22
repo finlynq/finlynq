@@ -322,6 +322,8 @@ export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
   expiresAt: text("expires_at").notNull(),
   used: integer("used").notNull().default(0),
   createdAt: text("created_at").notNull(),
+  // Session DEK wrapped with SHA-256(code). Null for pre-encryption auth flows.
+  dekWrapped: text("dek_wrapped"),
 });
 
 /** Long-lived access + refresh token pairs issued after code exchange */
@@ -334,4 +336,6 @@ export const oauthAccessTokens = pgTable("oauth_access_tokens", {
   expiresAt: text("expires_at").notNull(),        // 1 hour
   refreshExpiresAt: text("refresh_expires_at").notNull(), // 30 days
   createdAt: text("created_at").notNull(),
+  // Session DEK wrapped with SHA-256(token). Null for pre-encryption tokens.
+  dekWrapped: text("dek_wrapped"),
 });

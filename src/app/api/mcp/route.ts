@@ -35,7 +35,7 @@ async function authenticateMcp(request: NextRequest) {
     if (result) {
       return {
         authenticated: true as const,
-        context: { userId: result.userId, method: "oauth" as const, mfaVerified: false, dek: null as Buffer | null, sessionId: null as string | null },
+        context: { userId: result.userId, method: "oauth" as const, mfaVerified: false, dek: result.dek, sessionId: null as string | null },
       };
     }
     // Token looks like OAuth but failed validation — return 401 with WWW-Authenticate

@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
   csvToRawTransactions,
   csvToRawTransactionsWithMapping,
@@ -14,6 +14,7 @@ import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
 import { deserializeTemplate, findBestTemplate, autoDetectColumnMapping } from "@/lib/import-templates";
+import { unwrapDEKForSecret } from "@/lib/api-auth";
 
 export async function POST(request: NextRequest) {
   try {
@@ -30,6 +31,23 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = storedSecret.userId;
+
+    // Unwrap the DEK that was stored alongside the webhook secret at config
+    // time. Users who configured the webhook before this rollout won't have
+    // the wrap; imports still succeed but rows are written as plaintext.
+    let webhookDek: Buffer | null = null;
+    const dekRow = await db
+      .select({ value: schema.settings.value })
+      .from(schema.settings)
+      .where(and(eq(schema.settings.key, "email_webhook_dek"), eq(schema.settings.userId, userId)))
+      .get();
+    if (dekRow?.value) {
+      try {
+        webhookDek = unwrapDEKForSecret(dekRow.value, secret!);
+      } catch {
+        webhookDek = null;
+      }
+    }
 
     // Load user's import templates for CSV matching
     const templateRows = db
@@ -98,10 +116,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "No importable data found in attachments" });
     }
 
-    // Email webhook has no live session → no DEK available. Writes go as
-    // plaintext. See CLAUDE.md "Phase 3 remaining work" for the webhook-DEK
-    // envelope design (mirrors the API-key wrap).
-    const result = await executeImport(allRows, [], userId);
+    // Use the webhook-wrapped DEK when available so imported rows are
+    // encrypted at rest. Users who configured the webhook before this
+    // rollout won't have a wrap — their rows go plaintext until they
+    // regenerate the webhook secret.
+    const result = await executeImport(allRows, [], userId, webhookDek ?? undefined);
 
     // Create notification scoped to user
     await db.insert(schema.notifications)

@@ -19,19 +19,22 @@ import crypto from "crypto";
 const API_KEY_SETTING = "api_key";
 const API_KEY_DEK_SETTING = "api_key_dek";
 
-/** Derive a 32-byte wrap key from the raw API key string. */
-function apiKeyWrapKey(apiKey: string): Buffer {
-  // SHA-256 is deterministic and sufficient here — the API key is already
-  // 192 bits of random entropy, so we don't need extra key stretching.
-  return crypto.createHash("sha256").update(apiKey).digest();
+/** Derive a 32-byte wrap key from a random high-entropy secret (API key,
+ * OAuth access token, webhook secret, etc). SHA-256 is deterministic and
+ * sufficient because the input is already ≥192 bits of crypto-random data;
+ * no extra stretching is needed. */
+export function secretWrapKey(secret: string): Buffer {
+  return crypto.createHash("sha256").update(secret).digest();
 }
 
 /**
- * Wrap a DEK with a key derived from the API key secret.
+ * Wrap a DEK with a key derived from a high-entropy secret.
  * Stored format: base64(iv || ciphertext || tag).
+ *
+ * Works for any random secret: API key, OAuth access token, webhook secret.
  */
-export function wrapDEKForApiKey(dek: Buffer, apiKey: string): string {
-  const wrapKey = apiKeyWrapKey(apiKey);
+export function wrapDEKForSecret(dek: Buffer, secret: string): string {
+  const wrapKey = secretWrapKey(secret);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", wrapKey, iv);
   const ct = Buffer.concat([cipher.update(dek), cipher.final()]);
@@ -39,18 +42,22 @@ export function wrapDEKForApiKey(dek: Buffer, apiKey: string): string {
   return Buffer.concat([iv, ct, tag]).toString("base64");
 }
 
-/** Unwrap a DEK previously wrapped via wrapDEKForApiKey. */
-export function unwrapDEKForApiKey(wrapped: string, apiKey: string): Buffer {
+/** Unwrap a DEK previously wrapped via wrapDEKForSecret. */
+export function unwrapDEKForSecret(wrapped: string, secret: string): Buffer {
   const buf = Buffer.from(wrapped, "base64");
   if (buf.length < 12 + 16 + 32) throw new Error("Wrapped DEK too short");
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(buf.length - 16);
   const ct = buf.subarray(12, buf.length - 16);
-  const wrapKey = apiKeyWrapKey(apiKey);
+  const wrapKey = secretWrapKey(secret);
   const decipher = crypto.createDecipheriv("aes-256-gcm", wrapKey, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ct), decipher.final()]);
 }
+
+// Back-compat aliases — older call sites and the api-key path use these names.
+export const wrapDEKForApiKey = wrapDEKForSecret;
+export const unwrapDEKForApiKey = unwrapDEKForSecret;
 
 /**
  * Persist the API-key-wrapped DEK alongside the API key in settings.

@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken, AUTH_COOKIE } from "@/lib/auth";
 import { createAuthCode, isValidRedirectUri, getClient } from "@/lib/oauth";
+import { getDEK } from "@/lib/crypto/dek-cache";
 
 export async function POST(request: NextRequest) {
   // Require session cookie — user must be logged in
@@ -22,6 +23,12 @@ export async function POST(request: NextRequest) {
   if (!payload?.sub) {
     return NextResponse.json({ error: "Invalid session" }, { status: 401 });
   }
+  // Pull the active DEK so we can wrap it with the auth code — enables MCP
+  // access to encrypted data without re-prompting the user. Legacy sessions
+  // (pre-encryption) won't have one; the auth code still issues but MCP
+  // reads against encrypted rows will return ciphertext until the user
+  // re-authenticates through browser login.
+  const sessionDek = payload.jti ? getDEK(payload.jti) : null;
 
   let body: Record<string, string>;
   try {
@@ -78,6 +85,7 @@ export async function POST(request: NextRequest) {
     codeChallengeMethod: method,
     redirectUri: redirect_uri,
     clientId: client_id,
+    dek: sessionDek,
   });
 
   redirectUrl.searchParams.set("code", code);

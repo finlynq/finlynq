@@ -4,6 +4,7 @@
 import { db, schema } from "@/db";
 import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
+import { decryptField } from "@/lib/crypto/envelope";
 
 export type ChatResponse = {
   text: string;
@@ -11,6 +12,21 @@ export type ChatResponse = {
   chartType?: "bar" | "pie" | "line" | "table";
   chartData?: Record<string, unknown>[];
 };
+
+/**
+ * Safe-decrypt a payee or note for display. Returns an empty string if the
+ * value is unreadable (e.g. encrypted with a different user's DEK — the chat
+ * engine doesn't yet scope queries by user). Never throws.
+ */
+function safeDecrypt(dek: Buffer | null | undefined, v: string | null | undefined): string {
+  if (v == null || v === "") return "";
+  if (!dek) return v;
+  try {
+    return decryptField(dek, v) ?? "";
+  } catch {
+    return "";
+  }
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -82,7 +98,8 @@ async function findAccountName(msg: string): Promise<string | null> {
 
 // ─── Intent matchers ────────────────────────────────────────────────
 
-type IntentHandler = (msg: string) => Promise<ChatResponse | null>;
+type IntentCtx = { dek: Buffer | null };
+type IntentHandler = (msg: string, ctx: IntentCtx) => Promise<ChatResponse | null>;
 
 const handleNetWorth: IntentHandler = async () => {
   const balances = await db
@@ -322,7 +339,7 @@ const handleBudget: IntentHandler = async (msg) => {
   };
 };
 
-const handleTransactions: IntentHandler = async (msg) => {
+const handleTransactions: IntentHandler = async (msg, ctx) => {
   const lower = msg.toLowerCase();
 
   // "largest expense" / "biggest purchase"
@@ -350,11 +367,13 @@ const handleTransactions: IntentHandler = async (msg) => {
 
     if (result.length === 0) return { text: `No expenses found during ${range.label}.` };
 
-    const lines = result.map(
+    const decrypted = result.map((t) => ({ ...t, payee: safeDecrypt(ctx.dek, t.payee) }));
+
+    const lines = decrypted.map(
       (t) => `  ${t.date} — ${t.payee || "No payee"} — ${formatCurrency(Math.abs(t.amount), "CAD")} (${t.categoryName})`
     );
 
-    const chartData = result.map((t) => ({
+    const chartData = decrypted.map((t) => ({
       name: t.payee || "Unknown",
       value: Math.round(Math.abs(t.amount) * 100) / 100,
       date: t.date,
@@ -379,16 +398,15 @@ const handleTransactions: IntentHandler = async (msg) => {
     lte(schema.transactions.date, range.end),
   ];
 
-  if (searchTerm) {
-    conditions.push(
-      sql`(${schema.transactions.payee} LIKE ${"%" + searchTerm + "%"} OR ${schema.transactions.note} LIKE ${"%" + searchTerm + "%"})`
-    );
-  }
+  // Substring LIKE against encrypted payee/note doesn't match; fetch a wider
+  // window and filter in memory after decryption when a DEK is present.
+  const wideFetch = !!(searchTerm && ctx.dek);
 
   const txns = await db
     .select({
       date: schema.transactions.date,
       payee: schema.transactions.payee,
+      note: schema.transactions.note,
       amount: schema.transactions.amount,
       categoryName: schema.categories.name,
       accountName: schema.accounts.name,
@@ -398,14 +416,28 @@ const handleTransactions: IntentHandler = async (msg) => {
     .leftJoin(schema.accounts, eq(schema.transactions.accountId, schema.accounts.id))
     .where(and(...conditions))
     .orderBy(desc(schema.transactions.date))
-    .limit(10)
+    .limit(wideFetch ? 500 : 10)
     .all();
 
-  if (txns.length === 0) {
+  let decrypted = txns.map((t) => ({
+    ...t,
+    payee: safeDecrypt(ctx.dek, t.payee),
+    note: safeDecrypt(ctx.dek, t.note),
+  }));
+
+  if (searchTerm) {
+    const q = searchTerm.toLowerCase();
+    decrypted = decrypted.filter(
+      (t) => t.payee.toLowerCase().includes(q) || t.note.toLowerCase().includes(q)
+    );
+  }
+  decrypted = decrypted.slice(0, 10);
+
+  if (decrypted.length === 0) {
     return { text: searchTerm ? `No transactions matching "${searchTerm}" found.` : `No transactions found for ${range.label}.` };
   }
 
-  const tableData = txns.map((t) => ({
+  const tableData = decrypted.map((t) => ({
     date: t.date,
     payee: t.payee || "—",
     amount: formatCurrency(t.amount, "CAD"),
@@ -415,7 +447,7 @@ const handleTransactions: IntentHandler = async (msg) => {
 
   return {
     text: searchTerm
-      ? `Found ${txns.length} transaction(s) matching "${searchTerm}":`
+      ? `Found ${decrypted.length} transaction(s) matching "${searchTerm}":`
       : `Recent transactions for ${range.label}:`,
     chartType: "table",
     chartData: tableData,
@@ -534,7 +566,7 @@ const handleGoals: IntentHandler = async (msg) => {
   };
 };
 
-const handleForecast: IntentHandler = async (msg) => {
+const handleForecast: IntentHandler = async (msg, ctx) => {
   const lower = msg.toLowerCase();
 
   // "Can I afford [amount]?"
@@ -586,7 +618,8 @@ const handleForecast: IntentHandler = async (msg) => {
 
   const upcoming = recurring
     .filter((r) => r.nextDate && r.nextDate >= today())
-    .slice(0, 10);
+    .slice(0, 10)
+    .map((r) => ({ ...r, payee: safeDecrypt(ctx.dek, r.payee) }));
 
   const lines = upcoming.map(
     (r) => `  ${r.nextDate} — ${r.payee}: ${formatCurrency(Math.abs(r.amount), "CAD")} (${r.frequency})`
@@ -751,17 +784,19 @@ const intents: IntentPattern[] = [
   },
 ];
 
-export async function processMessage(message: string): Promise<ChatResponse> {
+export async function processMessage(message: string, dek: Buffer | null = null): Promise<ChatResponse> {
   const lower = message.toLowerCase().trim();
 
   if (!lower) {
     return { text: "Please ask me something about your finances!" };
   }
 
+  const ctx: IntentCtx = { dek };
+
   // Match intent by keyword
   for (const intent of intents) {
     if (intent.keywords.some((kw) => lower.includes(kw))) {
-      const result = await intent.handler(message);
+      const result = await intent.handler(message, ctx);
       if (result) return result;
     }
   }

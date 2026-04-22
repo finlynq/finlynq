@@ -1,13 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, inArray } from "drizzle-orm";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { decryptField } from "@/lib/crypto/envelope";
 import { safeErrorMessage } from "@/lib/validate";
 
+function decryptRowFields(dek: Buffer, row: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...row };
+  for (const f of fields) {
+    const v = out[f];
+    if (typeof v === "string") {
+      out[f] = decryptField(dek, v) ?? v;
+    }
+  }
+  return out;
+}
+
+const TX_FIELDS = ["payee", "note", "tags", "portfolioHolding"] as const;
+const SPLIT_FIELDS = ["note", "description", "tags"] as const;
+
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
 
   try {
     const [
@@ -55,6 +70,12 @@ export async function GET(request: NextRequest) {
         ? await db.select().from(schema.transactionSplits).where(inArray(schema.transactionSplits.transactionId, txIds))
         : [];
 
+    // Decrypt text fields so the backup is portable (user can restore into
+    // a fresh account with a different DEK). Backup files are downloaded to
+    // the user's device; they're responsible for securing them at rest.
+    const decryptedTransactions = transactions.map((t) => decryptRowFields(dek, t, TX_FIELDS));
+    const decryptedSplits = transactionSplits.map((s) => decryptRowFields(dek, s, SPLIT_FIELDS));
+
     const dateStr = new Date().toISOString().slice(0, 10);
     const backup = {
       version: "1.0",
@@ -63,8 +84,8 @@ export async function GET(request: NextRequest) {
       data: {
         accounts,
         categories,
-        transactions,
-        transactionSplits,
+        transactions: decryptedTransactions,
+        transactionSplits: decryptedSplits,
         portfolioHoldings,
         budgets,
         budgetTemplates,

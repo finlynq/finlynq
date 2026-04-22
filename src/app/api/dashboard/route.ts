@@ -7,12 +7,13 @@ import {
 } from "@/lib/queries";
 import { getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { logApiError } from "@/lib/validate";
 
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   const params = request.nextUrl.searchParams;
   const displayCurrency = params.get("currency") ?? "CAD";
 
@@ -30,7 +31,7 @@ export async function GET(request: NextRequest) {
     const balances = await getAccountBalances(userId);
     // Add live market value of holdings to accounts that have any — so investment
     // accounts reflect total value (cash + positions), not just cash flow.
-    const holdingsByAccount = await getHoldingsValueByAccount(userId);
+    const holdingsByAccount = await getHoldingsValueByAccount(userId, dek);
     const convertedBalances = balances.map((b: any) => {
       const holdings = holdingsByAccount.get(b.accountId);
       const totalBalance = holdings ? b.balance + holdings.value : b.balance;

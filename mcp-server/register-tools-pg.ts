@@ -157,6 +157,81 @@ function decryptTxRowFields(
   return row;
 }
 
+/**
+ * Aggregate buy/sell/dividend totals per portfolio_holding, decrypting the
+ * name in memory. Several MCP tools need this shape — we can't use SQL
+ * GROUP BY because each ciphertext row has a random IV.
+ */
+type HoldingAggRow = {
+  name: string;
+  buy_qty: number;
+  buy_amount: number;
+  sell_qty: number;
+  sell_amount: number;
+  dividends: number;
+  first_purchase: string | null;
+  purchases: number;
+};
+
+async function aggregateHoldings(
+  db: DbLike,
+  userId: string,
+  dek: Buffer | null,
+  opts?: { buysOnly?: boolean; since?: string }
+): Promise<(HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null })[]> {
+  const buysFilter = opts?.buysOnly
+    ? sql`AND amount < 0`
+    : sql``;
+  const dateFilter = opts?.since ? sql`AND date >= ${opts.since}` : sql``;
+  const raw = await q(db, sql`
+    SELECT portfolio_holding, amount, quantity, date
+    FROM transactions
+    WHERE user_id = ${userId}
+      AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
+      ${buysFilter}
+      ${dateFilter}
+  `);
+  type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null };
+  const out = new Map<string, Agg>();
+  for (const r of raw) {
+    const ph = String(r.portfolio_holding ?? "");
+    const name = dek ? (decryptField(dek, ph) ?? "") : ph;
+    if (!name) continue;
+    const qty = Number(r.quantity ?? 0);
+    const amt = Number(r.amount);
+    const d = String(r.date);
+    const row = out.get(name) ?? {
+      name,
+      buy_qty: 0,
+      buy_amount: 0,
+      sell_qty: 0,
+      sell_amount: 0,
+      dividends: 0,
+      first_purchase: null as string | null,
+      purchases: 0,
+      tx_count: 0,
+      net_quantity: 0,
+      last_activity: null as string | null,
+    };
+    row.tx_count += 1;
+    row.net_quantity += qty;
+    if (!row.last_activity || d > row.last_activity) row.last_activity = d;
+    if (amt < 0) {
+      row.buy_qty += qty;
+      row.buy_amount += Math.abs(amt);
+      row.purchases += 1;
+      if (!row.first_purchase || d < row.first_purchase) row.first_purchase = d;
+    } else if (amt > 0 && qty < 0) {
+      row.sell_qty += Math.abs(qty);
+      row.sell_amount += amt;
+    } else if (amt > 0 && (qty === 0 || r.quantity == null)) {
+      row.dividends += amt;
+    }
+    out.set(name, row);
+  }
+  return Array.from(out.values()).sort((a, b) => b.buy_amount - a.buy_amount);
+}
+
 export function registerPgTools(
   server: McpServer,
   db: DbLike,
@@ -517,15 +592,20 @@ export function registerPgTools(
       cutoff.setFullYear(cutoff.getFullYear() - 1);
       const cutoffStr = cutoff.toISOString().split("T")[0];
 
-      const txns = await q(db, sql`
+      const rawTxns = await q(db, sql`
         SELECT id, date, payee, amount FROM transactions
         WHERE user_id = ${userId} AND date >= ${cutoffStr} AND payee != ''
         ORDER BY date
       `) as { id: number; date: string; payee: string; amount: number }[];
 
+      // Decrypt payees before grouping — ciphertext has a random IV per row
+      // so SQL-side grouping on it would be wrong.
+      const txns = rawTxns.map((t) => ({ ...t, payee: (dek ? decryptField(dek, t.payee) : t.payee) ?? "" }));
+
       const groups = new Map<string, typeof txns>();
       for (const t of txns) {
         const key = t.payee.trim().toLowerCase();
+        if (!key) continue;
         groups.set(key, [...(groups.get(key) ?? []), t]);
       }
 
@@ -759,12 +839,16 @@ export function registerPgTools(
       `) as { total: number }[];
       const income = Number(incRow[0]?.total ?? 0);
 
-      const notable = await q(db, sql`
+      const notableRaw = await q(db, sql`
         SELECT t.date, t.payee, c.name AS category, ABS(t.amount) AS amt
         FROM transactions t LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId} AND c.type = 'E' AND t.date >= ${ws} AND t.date <= ${we}
         ORDER BY ABS(t.amount) DESC LIMIT 5
       `);
+      const notable = notableRaw.map((n) => ({
+        ...n,
+        payee: dek ? (decryptField(dek, String(n.payee ?? "")) ?? "") : n.payee,
+      }));
 
       return text({
         weekStart: ws, weekEnd: we,
@@ -786,15 +870,19 @@ export function registerPgTools(
       const cutoff = new Date(); cutoff.setFullYear(cutoff.getFullYear() - 1);
       const cutoffStr = cutoff.toISOString().split("T")[0];
 
-      const txns = await q(db, sql`
+      const rawTxns = await q(db, sql`
         SELECT id, date, payee, amount FROM transactions
         WHERE user_id = ${userId} AND date >= ${cutoffStr} AND payee != ''
         ORDER BY date
       `) as { id: number; date: string; payee: string; amount: number }[];
 
+      // Decrypt payee in memory before grouping.
+      const txns = rawTxns.map((t) => ({ ...t, payee: (dek ? decryptField(dek, t.payee) : t.payee) ?? "" }));
+
       const groups = new Map<string, typeof txns>();
       for (const t of txns) {
         const key = t.payee.trim().toLowerCase();
+        if (!key) continue;
         groups.set(key, [...(groups.get(key) ?? []), t]);
       }
 
@@ -957,9 +1045,10 @@ export function registerPgTools(
       const txnRows = await q(db, sql`SELECT id, payee FROM transactions WHERE user_id = ${userId} AND id = ${transaction_id}`);
       if (!txnRows.length) return err(`Transaction #${transaction_id} not found`);
       const txn = txnRows[0] as { id: number; payee: string };
+      const plainPayee = dek ? (decryptField(dek, txn.payee) ?? "") : txn.payee;
 
       await db.execute(sql`UPDATE transactions SET category_id = ${cat.id} WHERE id = ${transaction_id} AND user_id = ${userId}`);
-      return text({ success: true, transactionId: transaction_id, newCategory: cat.name, message: `Transaction #${transaction_id} (${txn.payee}) categorized as "${cat.name}"` });
+      return text({ success: true, transactionId: transaction_id, newCategory: cat.name, message: `Transaction #${transaction_id} (${plainPayee}) categorized as "${cat.name}"` });
     }
   );
 
@@ -1172,8 +1261,9 @@ export function registerPgTools(
       const existing = await q(db, sql`SELECT id, payee, amount, date FROM transactions WHERE user_id = ${userId} AND id = ${id}`);
       if (!existing.length) return err(`Transaction #${id} not found`);
       const t = existing[0];
+      const plainPayee = dek ? (decryptField(dek, String(t.payee ?? "")) ?? "") : t.payee;
       await db.execute(sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}` });
+      return text({ success: true, message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}` });
     }
   );
 
@@ -1398,18 +1488,24 @@ export function registerPgTools(
       const preview: { id: number; payee: string; categoryId: number }[] = [];
 
       for (const txn of txns) {
+        // Decrypt the payee so we can match against the plaintext rule pattern.
+        const plainPayee = dek ? (decryptField(dek, String(txn.payee ?? "")) ?? "") : String(txn.payee ?? "");
         for (const rule of rules) {
           const pattern = String(rule.match_payee ?? "").toLowerCase().replace(/%/g, "");
-          if (String(txn.payee).toLowerCase().includes(pattern)) {
+          if (plainPayee.toLowerCase().includes(pattern)) {
             if (!dry_run) {
+              // rule.rename_to / rule.assign_tags are plaintext; encrypt
+              // them before writing to the encrypted transaction columns.
+              const encRename = rule.rename_to && dek ? encryptField(dek, String(rule.rename_to)) : rule.rename_to;
+              const encTags = rule.assign_tags && dek ? encryptField(dek, String(rule.assign_tags)) : rule.assign_tags;
               await db.execute(sql`
                 UPDATE transactions SET category_id = ${rule.assign_category_id}
-                ${rule.rename_to ? sql`, payee = ${rule.rename_to}` : sql``}
-                ${rule.assign_tags ? sql`, tags = ${rule.assign_tags}` : sql``}
+                ${rule.rename_to ? sql`, payee = ${encRename}` : sql``}
+                ${rule.assign_tags ? sql`, tags = ${encTags}` : sql``}
                 WHERE id = ${txn.id} AND user_id = ${userId}
               `);
             }
-            preview.push({ id: Number(txn.id), payee: String(txn.payee), categoryId: Number(rule.assign_category_id) });
+            preview.push({ id: Number(txn.id), payee: plainPayee, categoryId: Number(rule.assign_category_id) });
             updated++;
             break;
           }
@@ -1531,19 +1627,7 @@ export function registerPgTools(
     "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio",
     {},
     async () => {
-      const metrics = await q(db, sql`
-        SELECT
-          portfolio_holding as name,
-          SUM(CASE WHEN amount < 0 THEN quantity ELSE 0 END) as buy_qty,
-          SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as buy_amount,
-          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN ABS(quantity) ELSE 0 END) as sell_qty,
-          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN amount ELSE 0 END) as sell_amount,
-          SUM(CASE WHEN amount > 0 AND (quantity = 0 OR quantity IS NULL) THEN amount ELSE 0 END) as dividends,
-          MIN(CASE WHEN amount < 0 THEN date ELSE NULL END) as first_purchase
-        FROM transactions
-        WHERE user_id = ${userId} AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
-        GROUP BY portfolio_holding
-      `);
+      const metrics = await aggregateHoldings(db, userId, dek);
 
       const ph = await q(db, sql`
         SELECT ph.name, ph.symbol, ph.currency, a.name as account_name
@@ -1640,25 +1724,7 @@ export function registerPgTools(
       const since = cutoff[period ?? "all"];
       const today = new Date();
 
-      const perf = await q(db, sql`
-        SELECT
-          portfolio_holding as holding,
-          COUNT(*) as tx_count,
-          SUM(CASE WHEN amount < 0 THEN quantity ELSE 0 END) as buy_qty,
-          SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as buy_amount,
-          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN ABS(quantity) ELSE 0 END) as sell_qty,
-          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN amount ELSE 0 END) as sell_amount,
-          SUM(CASE WHEN amount > 0 AND (quantity = 0 OR quantity IS NULL) THEN amount ELSE 0 END) as dividends,
-          SUM(quantity) as net_quantity,
-          MIN(CASE WHEN amount < 0 THEN date ELSE NULL END) as first_purchase,
-          MAX(date) as last_activity
-        FROM transactions
-        WHERE user_id = ${userId}
-          AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
-          AND date >= ${since}
-        GROUP BY portfolio_holding
-        ORDER BY buy_amount DESC
-      `);
+      const perf = await aggregateHoldings(db, userId, dek, { since });
 
       const results = perf.map(p => {
         const buyQty = Number(p.buy_qty ?? 0);
@@ -1674,7 +1740,7 @@ export function registerPgTools(
         const fpDate = p.first_purchase ?? null;
         const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
         return {
-          holding: p.holding,
+          holding: p.name,
           txCount: Number(p.tx_count),
           quantity: Math.round(remainingQty * 10000) / 10000,
           lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
@@ -1722,16 +1788,31 @@ export function registerPgTools(
       symbol: z.string().describe("Holding name or symbol (fuzzy matched)"),
     },
     async ({ symbol }) => {
-      const lo = `%${symbol.toLowerCase()}%`;
-      const txns = await q(db, sql`
+      const lo = symbol.toLowerCase();
+      // Fetch all investment-y rows for the user, then filter in memory —
+      // LIKE on ciphertext won't match (random IV per row).
+      const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags, t.portfolio_holding,
                a.name as account_name, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId}
-          AND (LOWER(t.portfolio_holding) LIKE ${lo} OR LOWER(t.payee) LIKE ${lo})
+          AND (t.portfolio_holding IS NOT NULL AND t.portfolio_holding <> '')
         ORDER BY t.date ASC
       `);
+
+      const decryptedAll: Row[] = rawTxns.map((t) => {
+        const ph = dek ? decryptField(dek, String(t.portfolio_holding ?? "")) : t.portfolio_holding;
+        const pay = dek ? decryptField(dek, String(t.payee ?? "")) : t.payee;
+        const nt = dek ? decryptField(dek, String(t.note ?? "")) : t.note;
+        const tg = dek ? decryptField(dek, String(t.tags ?? "")) : t.tags;
+        return { ...t, portfolio_holding: ph, payee: pay, note: nt, tags: tg };
+      });
+      const txns = decryptedAll.filter((t) => {
+        const ph = String(t.portfolio_holding ?? "").toLowerCase();
+        const pay = String(t.payee ?? "").toLowerCase();
+        return ph.includes(lo) || pay.includes(lo);
+      });
 
       if (!txns.length) return err(`No transactions found for holding matching "${symbol}"`);
 
@@ -1810,20 +1891,7 @@ export function registerPgTools(
       symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols (omit for all)"),
     },
     async ({ symbols }) => {
-      const metrics = await q(db, sql`
-        SELECT
-          portfolio_holding as name,
-          SUM(CASE WHEN amount < 0 THEN quantity ELSE 0 END) as buy_qty,
-          SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as buy_amount,
-          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN ABS(quantity) ELSE 0 END) as sell_qty,
-          SUM(CASE WHEN amount > 0 AND quantity < 0 THEN amount ELSE 0 END) as sell_amount,
-          SUM(CASE WHEN amount > 0 AND (quantity = 0 OR quantity IS NULL) THEN amount ELSE 0 END) as dividends,
-          MIN(CASE WHEN amount < 0 THEN date ELSE NULL END) as first_purchase
-        FROM transactions
-        WHERE user_id = ${userId} AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
-        GROUP BY portfolio_holding
-        ORDER BY buy_amount DESC
-      `);
+      const metrics = await aggregateHoldings(db, userId, dek);
 
       const ph = await q(db, sql`
         SELECT ph.name, ph.symbol, ph.currency, a.name as account_name
@@ -1912,17 +1980,8 @@ export function registerPgTools(
       })).describe("Target allocations (must sum to ~100)"),
     },
     async ({ targets }) => {
-      const holdings = await q(db, sql`
-        SELECT t.portfolio_holding as name,
-               SUM(ABS(t.amount)) as book_value,
-               a.currency
-        FROM transactions t
-        JOIN accounts a ON a.id = t.account_id
-        WHERE t.user_id = ${userId}
-          AND t.portfolio_holding IS NOT NULL AND t.portfolio_holding != ''
-          AND t.amount < 0
-        GROUP BY t.portfolio_holding, a.currency
-      `);
+      const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
+      const holdings = aggs.map((a) => ({ name: a.name, book_value: a.buy_amount }));
 
       const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
       if (totalBV === 0) return err("No portfolio holdings found");
@@ -1965,6 +2024,7 @@ export function registerPgTools(
     "Investment patterns: contribution frequency, largest positions, diversification score",
     {},
     async () => {
+      // Contributions aggregate by month, not by holding name — can stay in SQL.
       const contributions = await q(db, sql`
         SELECT DATE_TRUNC('month', date::date) as month, SUM(ABS(amount)) as invested
         FROM transactions
@@ -1973,13 +2033,13 @@ export function registerPgTools(
         ORDER BY month DESC LIMIT 12
       `);
 
-      const positions = await q(db, sql`
-        SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value, COUNT(*) as purchases
-        FROM transactions
-        WHERE user_id = ${userId} AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
-        GROUP BY portfolio_holding
-        ORDER BY book_value DESC
-      `);
+      // Positions group by portfolio_holding (encrypted) — aggregate in memory.
+      const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
+      const positions = aggs.map((a) => ({
+        name: a.name,
+        book_value: a.buy_amount,
+        purchases: a.purchases,
+      }));
 
       const totalInvested = positions.reduce((s, p) => s + Number(p.book_value), 0);
       const top3Pct = positions.slice(0, 3).reduce((s, p) => s + Number(p.book_value), 0) / (totalInvested || 1);

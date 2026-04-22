@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, sql, and, isNotNull } from "drizzle-orm";
+import { eq, and, isNotNull } from "drizzle-orm";
 import { fetchMultipleQuotes, aggregatePortfolioExposure, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, getAvailableEtfSymbols, autoSeedEtfIfMissing } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, convertCurrency } from "@/lib/fx-service";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { decryptField } from "@/lib/crypto/envelope";
 
 const CRYPTO_SYMBOLS = new Set([
   "BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AAVE", "ATOM", "AVAX",
@@ -19,8 +20,9 @@ function isCryptoSymbol(symbol: string): boolean {
 }
 
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
 
   // 1. Get all holdings with account info
   const holdings = await db
@@ -77,24 +79,59 @@ export async function GET(request: NextRequest) {
     fxRates.set(cur, await getLatestFxRate(cur, "CAD", userId));
   }
 
-  // 6. Get detailed transaction metrics per holding (average cost method)
-  const txDetails = await db
+  // 6. Get transaction rows per holding. We can't GROUP BY on
+  // `portfolio_holding` at the SQL layer when it's AES-GCM ciphertext
+  // (random IV per row), so fetch the raw rows and aggregate in memory.
+  const rawTxRows = await db
     .select({
       portfolioHolding: schema.transactions.portfolioHolding,
-      // Buys: negative amounts, positive quantity
-      totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} < 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)`,
-      totalBuyAmount: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} < 0 THEN ABS(${schema.transactions.amount}) ELSE 0 END), 0)`,
-      // Sells: positive amounts, negative quantity
-      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} > 0 AND ${schema.transactions.quantity} < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)`,
-      totalSellAmount: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} > 0 AND ${schema.transactions.quantity} < 0 THEN ${schema.transactions.amount} ELSE 0 END), 0)`,
-      // Dividends: positive amounts with zero/null quantity
-      dividendsReceived: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} > 0 AND (${schema.transactions.quantity} = 0 OR ${schema.transactions.quantity} IS NULL) THEN ${schema.transactions.amount} ELSE 0 END), 0)`,
-      // Date tracking
-      firstPurchaseDate: sql<string>`MIN(CASE WHEN ${schema.transactions.amount} < 0 THEN ${schema.transactions.date} ELSE NULL END)`,
+      amount: schema.transactions.amount,
+      quantity: schema.transactions.quantity,
+      date: schema.transactions.date,
     })
     .from(schema.transactions)
-    .where(and(isNotNull(schema.transactions.portfolioHolding), eq(schema.transactions.userId, userId)))
-    .groupBy(schema.transactions.portfolioHolding);
+    .where(and(isNotNull(schema.transactions.portfolioHolding), eq(schema.transactions.userId, userId)));
+
+  type TxAgg = {
+    portfolioHolding: string;
+    totalBuyQty: number;
+    totalBuyAmount: number;
+    totalSellQty: number;
+    totalSellAmount: number;
+    dividendsReceived: number;
+    firstPurchaseDate: string | null;
+  };
+  const aggByHolding = new Map<string, TxAgg>();
+  for (const r of rawTxRows) {
+    if (!r.portfolioHolding) continue;
+    const key = decryptField(dek, r.portfolioHolding) ?? "";
+    if (!key) continue;
+    const qty = Number(r.quantity ?? 0);
+    const amt = Number(r.amount);
+    const row = aggByHolding.get(key) ?? {
+      portfolioHolding: key,
+      totalBuyQty: 0,
+      totalBuyAmount: 0,
+      totalSellQty: 0,
+      totalSellAmount: 0,
+      dividendsReceived: 0,
+      firstPurchaseDate: null as string | null,
+    };
+    if (amt < 0) {
+      row.totalBuyQty += qty;
+      row.totalBuyAmount += Math.abs(amt);
+      if (!row.firstPurchaseDate || r.date < row.firstPurchaseDate) {
+        row.firstPurchaseDate = r.date;
+      }
+    } else if (amt > 0 && qty < 0) {
+      row.totalSellQty += Math.abs(qty);
+      row.totalSellAmount += amt;
+    } else if (amt > 0 && (qty === 0 || r.quantity == null)) {
+      row.dividendsReceived += amt;
+    }
+    aggByHolding.set(key, row);
+  }
+  const txDetails = Array.from(aggByHolding.values());
 
   type TxMetrics = {
     qty: number;

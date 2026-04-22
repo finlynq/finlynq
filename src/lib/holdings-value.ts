@@ -7,10 +7,11 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq, isNotNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { fetchMultipleQuotes } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate } from "@/lib/fx-service";
+import { decryptField } from "@/lib/crypto/envelope";
 
 const CRYPTO_SYMBOLS = new Set([
   "BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AAVE", "ATOM", "AVAX",
@@ -26,7 +27,7 @@ function isCrypto(symbol: string | null): boolean {
 
 export type AccountHoldingsValue = { accountId: number; value: number; currency: string };
 
-export async function getHoldingsValueByAccount(userId: string): Promise<Map<number, AccountHoldingsValue>> {
+export async function getHoldingsValueByAccount(userId: string, dek?: Buffer | null): Promise<Map<number, AccountHoldingsValue>> {
   const holdings = await db
     .select({
       id: schema.portfolioHoldings.id,
@@ -43,21 +44,29 @@ export async function getHoldingsValueByAccount(userId: string): Promise<Map<num
 
   if (holdings.length === 0) return new Map();
 
-  // Aggregate remaining quantity per holding name (matches transactions.portfolio_holding)
+  // Aggregate remaining quantity per holding name. `portfolio_holding` may be
+  // AES-GCM ciphertext (random IV per row), so we can't GROUP BY on it at the
+  // SQL layer — fetch raw rows and aggregate in memory after decryption.
   const txRows = await db
     .select({
       portfolioHolding: schema.transactions.portfolioHolding,
-      buyQty: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} < 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)`,
-      sellQty: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amount} > 0 AND ${schema.transactions.quantity} < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)`,
+      quantity: schema.transactions.quantity,
+      amount: schema.transactions.amount,
     })
     .from(schema.transactions)
-    .where(and(isNotNull(schema.transactions.portfolioHolding), eq(schema.transactions.userId, userId)))
-    .groupBy(schema.transactions.portfolioHolding);
+    .where(and(isNotNull(schema.transactions.portfolioHolding), eq(schema.transactions.userId, userId)));
 
   const qtyByHoldingName = new Map<string, number>();
   for (const r of txRows) {
     if (!r.portfolioHolding) continue;
-    qtyByHoldingName.set(r.portfolioHolding, Number(r.buyQty) - Number(r.sellQty));
+    const name = dek ? (decryptField(dek, r.portfolioHolding) ?? "") : r.portfolioHolding;
+    if (!name) continue;
+    const qty = Number(r.quantity ?? 0);
+    const delta =
+      r.amount < 0 ? qty :
+      r.amount > 0 && qty < 0 ? qty : // sell row: quantity is negative, delta already negative
+      0;
+    qtyByHoldingName.set(name, (qtyByHoldingName.get(name) ?? 0) + delta);
   }
 
   // Price lookups

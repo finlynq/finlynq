@@ -8,6 +8,7 @@
 import crypto from "crypto";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
+import { wrapDEKForSecret, unwrapDEKForSecret } from "@/lib/api-auth";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -38,24 +39,35 @@ export function verifyPkceS256(codeVerifier: string, codeChallenge: string): boo
 
 // ─── Authorization Codes ─────────────────────────────────────────────────────
 
-/** Generate and store an authorization code. Returns the code string. */
+/**
+ * Generate and store an authorization code. Returns the code string.
+ *
+ * If `dek` is supplied, it's wrapped with a key derived from the auth code
+ * and stored alongside. The token-exchange step will unwrap with the code
+ * and re-wrap with the access token. If the caller has no DEK (rare — only
+ * happens when the authorizing user pre-dates the encryption rollout and
+ * hasn't logged in since) the code still works but MCP reads will return
+ * ciphertext.
+ */
 export async function createAuthCode(opts: {
   userId: string;
   codeChallenge: string;
   codeChallengeMethod: string;
   redirectUri: string;
   clientId: string;
+  dek?: Buffer | null;
 }): Promise<string> {
   const code = crypto.randomBytes(32).toString("hex");
   const now = new Date();
   const expiresAt = new Date(now.getTime() + AUTH_CODE_TTL_MS).toISOString();
+  const dekWrapped = opts.dek ? wrapDEKForSecret(opts.dek, code) : null;
 
   await pgDb.execute(sql`
     INSERT INTO oauth_authorization_codes
-      (user_id, code, code_challenge, code_challenge_method, redirect_uri, client_id, expires_at, used, created_at)
+      (user_id, code, code_challenge, code_challenge_method, redirect_uri, client_id, expires_at, used, created_at, dek_wrapped)
     VALUES
       (${opts.userId}, ${code}, ${opts.codeChallenge}, ${opts.codeChallengeMethod},
-       ${opts.redirectUri}, ${opts.clientId}, ${expiresAt}, 0, ${now.toISOString()})
+       ${opts.redirectUri}, ${opts.clientId}, ${expiresAt}, 0, ${now.toISOString()}, ${dekWrapped})
   `);
 
   return code;
@@ -71,15 +83,21 @@ type AuthCodeRow = {
   client_id: string;
   expires_at: string;
   used: number;
+  dek_wrapped: string | null;
 };
 
-/** Consume an authorization code. Returns userId if valid, null otherwise. */
+/**
+ * Consume an authorization code. Returns {userId, dek} if valid, null otherwise.
+ *
+ * `dek` is the unwrapped per-user DEK (if the authorizing session had one).
+ * Caller should re-wrap under the newly-issued access token.
+ */
 export async function consumeAuthCode(opts: {
   code: string;
   redirectUri: string;
   clientId: string;
   codeVerifier: string;
-}): Promise<{ userId: string } | null> {
+}): Promise<{ userId: string; dek: Buffer | null } | null> {
   const result = await pgDb.execute(sql`
     SELECT * FROM oauth_authorization_codes WHERE code = ${opts.code} LIMIT 1
   `);
@@ -104,13 +122,30 @@ export async function consumeAuthCode(opts: {
     UPDATE oauth_authorization_codes SET used = 1 WHERE id = ${row.id}
   `);
 
-  return { userId: row.user_id };
+  let dek: Buffer | null = null;
+  if (row.dek_wrapped) {
+    try {
+      dek = unwrapDEKForSecret(row.dek_wrapped, opts.code);
+    } catch {
+      dek = null;
+    }
+  }
+
+  return { userId: row.user_id, dek };
 }
 
 // ─── Access Tokens ───────────────────────────────────────────────────────────
 
-/** Issue a new access + refresh token pair. */
-export async function createAccessToken(userId: string, clientId: string): Promise<{
+/**
+ * Issue a new access + refresh token pair. If a DEK is supplied, it's
+ * wrapped with a key derived from the new access token so MCP requests on
+ * that token can unwrap and read encrypted columns.
+ */
+export async function createAccessToken(
+  userId: string,
+  clientId: string,
+  dek?: Buffer | null
+): Promise<{
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
@@ -120,12 +155,13 @@ export async function createAccessToken(userId: string, clientId: string): Promi
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ACCESS_TOKEN_TTL_MS).toISOString();
   const refreshExpiresAt = new Date(now.getTime() + REFRESH_TOKEN_TTL_MS).toISOString();
+  const dekWrapped = dek ? wrapDEKForSecret(dek, accessToken) : null;
 
   await pgDb.execute(sql`
     INSERT INTO oauth_access_tokens
-      (user_id, token, refresh_token, client_id, expires_at, refresh_expires_at, created_at)
+      (user_id, token, refresh_token, client_id, expires_at, refresh_expires_at, created_at, dek_wrapped)
     VALUES
-      (${userId}, ${accessToken}, ${refreshToken}, ${clientId}, ${expiresAt}, ${refreshExpiresAt}, ${now.toISOString()})
+      (${userId}, ${accessToken}, ${refreshToken}, ${clientId}, ${expiresAt}, ${refreshExpiresAt}, ${now.toISOString()}, ${dekWrapped})
   `);
 
   return { accessToken, refreshToken, expiresIn: ACCESS_TOKEN_TTL_MS / 1000 };
@@ -139,17 +175,31 @@ type TokenRow = {
   client_id: string;
   expires_at: string;
   refresh_expires_at: string;
+  dek_wrapped: string | null;
 };
 
-/** Validate an OAuth access token. Returns userId if valid, null otherwise. */
-export async function validateOauthToken(token: string): Promise<{ userId: string } | null> {
+/**
+ * Validate an OAuth access token. Returns {userId, dek} if valid, null otherwise.
+ * `dek` is null for tokens issued before the encryption rollout, or if the
+ * stored wrap failed to decrypt.
+ */
+export async function validateOauthToken(token: string): Promise<{ userId: string; dek: Buffer | null } | null> {
   const result = await pgDb.execute(sql`
-    SELECT user_id, expires_at FROM oauth_access_tokens WHERE token = ${token} LIMIT 1
+    SELECT user_id, expires_at, dek_wrapped FROM oauth_access_tokens WHERE token = ${token} LIMIT 1
   `);
-  const rows: Pick<TokenRow, "user_id" | "expires_at">[] = result.rows ?? result ?? [];
+  const rows: Pick<TokenRow, "user_id" | "expires_at" | "dek_wrapped">[] = result.rows ?? result ?? [];
   if (!rows.length) return null;
   if (new Date(rows[0].expires_at) < new Date()) return null;
-  return { userId: rows[0].user_id };
+
+  let dek: Buffer | null = null;
+  if (rows[0].dek_wrapped) {
+    try {
+      dek = unwrapDEKForSecret(rows[0].dek_wrapped, token);
+    } catch {
+      dek = null;
+    }
+  }
+  return { userId: rows[0].user_id, dek };
 }
 
 /** Refresh an access token. Old pair is deleted; new pair is returned. */
@@ -167,11 +217,23 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
   if (!rows.length) return null;
   if (new Date(rows[0].refresh_expires_at) < new Date()) return null;
 
-  const { id, user_id } = rows[0];
+  const { id, user_id, token: oldAccessToken, dek_wrapped } = rows[0];
+
+  // Unwrap the DEK from the old access token so we can re-wrap it under the
+  // new one. This keeps MCP access to encrypted columns working across
+  // token rotations without re-prompting the user.
+  let dek: Buffer | null = null;
+  if (dek_wrapped) {
+    try {
+      dek = unwrapDEKForSecret(dek_wrapped, oldAccessToken);
+    } catch {
+      dek = null;
+    }
+  }
 
   await pgDb.execute(sql`DELETE FROM oauth_access_tokens WHERE id = ${id}`);
 
-  return createAccessToken(user_id, clientId);
+  return createAccessToken(user_id, clientId, dek);
 }
 
 // ─── Redirect URI validation ──────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 import { db, schema } from "@/db";
 import { eq, and, gte, lte, sql, desc } from "drizzle-orm";
+import { decryptField } from "@/lib/crypto/envelope";
 
 const { accounts, categories, transactions, budgets } = schema;
 
@@ -93,7 +94,7 @@ async function getIncomeForPeriod(userId: string, start: string, end: string): P
   return Math.round((result?.total ?? 0) * 100) / 100;
 }
 
-export async function generateWeeklyRecap(userId: string, endDate?: string): Promise<WeeklyRecap> {
+export async function generateWeeklyRecap(userId: string, endDate?: string, dek?: Buffer | null): Promise<WeeklyRecap> {
   const { weekStart, weekEnd, prevWeekStart, prevWeekEnd } = getWeekBounds(endDate);
 
   // Spending
@@ -163,7 +164,7 @@ export async function generateWeeklyRecap(userId: string, endDate?: string): Pro
 
   const notableTransactions = notable.map((t) => ({
     date: t.date,
-    payee: t.payee ?? "",
+    payee: (dek ? decryptField(dek, t.payee) : t.payee) ?? "",
     category: t.categoryName ?? "Uncategorized",
     amount: Math.round(Math.abs(t.amount) * 100) / 100,
   }));
