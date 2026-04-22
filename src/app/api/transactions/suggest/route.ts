@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, eq } from "drizzle-orm";
 import { suggestCategory } from "@/lib/auto-categorize";
-import { requireEncryption } from "@/lib/auth/require-encryption";
+import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
@@ -11,9 +12,13 @@ const { transactions, categories } = schema;
 
 // POST { payee } → suggested category
 export async function POST(req: NextRequest) {
-  const auth = await requireEncryption(req);
-  if (!auth.ok) return auth.response;
-  const { userId, dek } = auth;
+  const auth = await requireAuth(req);
+  if (!auth.authenticated) return auth.response;
+  const { userId, sessionId } = auth.context;
+  // Suggest tolerates a missing DEK — history match against encrypted
+  // payees simply won't fire (returns null suggestion). Legacy plaintext
+  // rows keep working via the passthrough in decryptField.
+  const dek = sessionId ? getDEK(sessionId) : null;
   try {
     const body = await req.json();
 
@@ -42,7 +47,7 @@ export async function POST(req: NextRequest) {
       .all();
 
     const decrypted = existing.map((r) => ({
-      payee: decryptField(dek, r.payee),
+      payee: dek ? decryptField(dek, r.payee) : r.payee,
       categoryId: r.categoryId,
     }));
 

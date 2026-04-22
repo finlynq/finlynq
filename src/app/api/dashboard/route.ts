@@ -7,13 +7,18 @@ import {
 } from "@/lib/queries";
 import { getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
-import { requireEncryption } from "@/lib/auth/require-encryption";
+import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import { logApiError } from "@/lib/validate";
 
 export async function GET(request: NextRequest) {
-  const auth = await requireEncryption(request);
-  if (!auth.ok) return auth.response;
-  const { userId, dek } = auth;
+  // Dashboard must stay accessible even when the session has no cached DEK
+  // (e.g. first request after a server restart). `getDEK` returns null in
+  // that case; downstream decryption falls through to plaintext/legacy rows.
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId, sessionId } = auth.context;
+  const dek = sessionId ? getDEK(sessionId) : null;
   const params = request.nextUrl.searchParams;
   const displayCurrency = params.get("currency") ?? "CAD";
 

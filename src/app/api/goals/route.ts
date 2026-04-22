@@ -31,7 +31,7 @@ const putSchema = z.object({
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const goals = db
+  const goals = await db
     .select({
       id: schema.goals.id,
       name: schema.goals.name,
@@ -51,10 +51,10 @@ export async function GET(request: NextRequest) {
     .all();
 
   // Calculate current amount from linked account balances
-  const withProgress = goals.map((g) => {
+  const withProgress = await Promise.all(goals.map(async (g) => {
     let currentAmount = 0;
     if (g.accountId) {
-      const result = db
+      const result = await db
         .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
         .from(schema.transactions)
         .where(and(eq(schema.transactions.accountId, g.accountId), eq(schema.transactions.userId, userId)))
@@ -83,7 +83,7 @@ export async function GET(request: NextRequest) {
       remaining: Math.round(remaining * 100) / 100,
       monthlyNeeded,
     };
-  });
+  }));
 
   return NextResponse.json(withProgress);
 }

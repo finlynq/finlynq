@@ -2,13 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, eq, and } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
-import { requireEncryption } from "@/lib/auth/require-encryption";
+import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
 
 export async function GET(request: NextRequest) {
-  const auth = await requireEncryption(request);
-  if (!auth.ok) return auth.response;
-  const { userId, dek } = auth;
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId, sessionId } = auth.context;
+  const dek = sessionId ? getDEK(sessionId) : null;
   const days = parseInt(request.nextUrl.searchParams.get("days") ?? "90");
 
   // Detect recurring transactions
@@ -35,7 +37,7 @@ export async function GET(request: NextRequest) {
   const detected = detectRecurringTransactions(
     txns.map((t) => ({
       ...t,
-      payee: decryptField(dek, t.payee) ?? "",
+      payee: (dek ? decryptField(dek, t.payee) : t.payee) ?? "",
       accountId: t.accountId ?? 0,
       categoryId: t.categoryId,
     }))

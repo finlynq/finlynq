@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, inArray } from "drizzle-orm";
-import { requireEncryption } from "@/lib/auth/require-encryption";
+import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
 import { safeErrorMessage } from "@/lib/validate";
 
-function decryptRowFields(dek: Buffer, row: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+function decryptRowFields(dek: Buffer | null, row: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+  if (!dek) return row;
   const out: Record<string, unknown> = { ...row };
   for (const f of fields) {
     const v = out[f];
@@ -20,9 +22,12 @@ const TX_FIELDS = ["payee", "note", "tags", "portfolioHolding"] as const;
 const SPLIT_FIELDS = ["note", "description", "tags"] as const;
 
 export async function GET(request: NextRequest) {
-  const auth = await requireEncryption(request);
-  if (!auth.ok) return auth.response;
-  const { userId, dek } = auth;
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId, sessionId } = auth.context;
+  // Export tolerates a missing DEK — without it, encrypted rows ship as
+  // ciphertext (still restoreable into the same account).
+  const dek = sessionId ? getDEK(sessionId) : null;
 
   try {
     const [

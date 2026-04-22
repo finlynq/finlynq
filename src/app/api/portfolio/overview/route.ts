@@ -4,7 +4,8 @@ import { eq, and, isNotNull } from "drizzle-orm";
 import { fetchMultipleQuotes, aggregatePortfolioExposure, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, getAvailableEtfSymbols, autoSeedEtfIfMissing } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, convertCurrency } from "@/lib/fx-service";
-import { requireEncryption } from "@/lib/auth/require-encryption";
+import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
 
 const CRYPTO_SYMBOLS = new Set([
@@ -20,9 +21,10 @@ function isCryptoSymbol(symbol: string): boolean {
 }
 
 export async function GET(request: NextRequest) {
-  const auth = await requireEncryption(request);
-  if (!auth.ok) return auth.response;
-  const { userId, dek } = auth;
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId, sessionId } = auth.context;
+  const dek = sessionId ? getDEK(sessionId) : null;
 
   // 1. Get all holdings with account info
   const holdings = await db
@@ -104,7 +106,7 @@ export async function GET(request: NextRequest) {
   const aggByHolding = new Map<string, TxAgg>();
   for (const r of rawTxRows) {
     if (!r.portfolioHolding) continue;
-    const key = decryptField(dek, r.portfolioHolding) ?? "";
+    const key = (dek ? decryptField(dek, r.portfolioHolding) : r.portfolioHolding) ?? "";
     if (!key) continue;
     const qty = Number(r.quantity ?? 0);
     const amt = Number(r.amount);

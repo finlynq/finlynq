@@ -2,16 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { getMonthlySpending, getTransactions } from "@/lib/queries";
 import { detectAnomalies, analyzeTrends, analyzeMerchants, spendingByDayOfWeek } from "@/lib/spending-insights";
 import { getCurrentMonth } from "@/lib/currency";
-import { requireEncryption } from "@/lib/auth/require-encryption";
+import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
 import { requireDevMode } from "@/lib/require-dev-mode";
 
 export async function GET(request: NextRequest) {
-  const auth = await requireEncryption(request);
-  if (!auth.ok) return auth.response;
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request);
   if (devGuard) return devGuard;
-  const { userId, dek } = auth;
+  const { userId, sessionId } = auth.context;
+  const dek = sessionId ? getDEK(sessionId) : null;
   const now = new Date();
   const startDate = `${now.getFullYear() - 1}-01-01`;
   const endDate = `${now.getFullYear()}-12-31`;
@@ -49,7 +51,7 @@ export async function GET(request: NextRequest) {
   // Decrypt payee in memory so merchant grouping works (ciphertext has a
   // random IV per row, so SQL-side grouping on ciphertext would be wrong).
   const merchants = analyzeMerchants(
-    recentTxns.map((t) => ({ payee: decryptField(dek, t.payee) ?? "", amount: t.amount }))
+    recentTxns.map((t) => ({ payee: (dek ? decryptField(dek, t.payee) : t.payee) ?? "", amount: t.amount }))
   );
 
   const dayOfWeek = spendingByDayOfWeek(
