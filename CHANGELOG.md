@@ -6,6 +6,13 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Changed
+- **Premium fintech dark redesign.** Landing page ([src/app/page.tsx](src/app/page.tsx)) rebuilt from the claude.ai/design handoff — sticky blur nav, animated hero chart (scrolling ticker + draw-on SVG line), 6-tile feature grid, 3-step flow, MCP query demo, 4-node zero-knowledge privacy diagram, $0 pricing. Styles scoped under `.fl-landing` in [src/app/landing.css](src/app/landing.css). Scroll reveals via `IntersectionObserver`.
+- **App-wide design system refreshed to match.** shadcn CSS tokens in [globals.css](src/app/globals.css) remapped from indigo `hue 265` to amber `#f5a623` primary + teal/coral chart semantics; ink palette `#0b0d10`/`#101317`/`#161a1f`/`#1e242b`. Light mode shares the amber accent. `.text-gradient` retuned to amber→warm-orange.
+- **Logo & favicon** updated to the new amber-stroked rounded square with ascending bar-chart path (`#f5a623`). Old indigo/violet "F + chain link" mark removed. See [FinlynqLogo.tsx](src/components/FinlynqLogo.tsx) + [public/favicon.svg](public/favicon.svg).
+- **Nav** collapsed 12 per-category icon accents (blue, violet, indigo, emerald, pink, sky, cyan, rose, slate, teal, purple, red) down to a single `text-primary` amber accent on active state. Inactive icons muted. `ACTIVE_ACCENT` constant in [nav.tsx](src/components/nav.tsx).
+- **Typography.** Added `Instrument Serif` (italic) via `next/font/google` for display accents in `<em>` on the landing; `--font-instrument-serif` available to any component that wants it.
+
 ### Added
 - **Public demo account** (`demo@finlynq.com` / `finlynq-demo`) seeded on production with 6 months of realistic sample data (253 transactions across 4 accounts, 4 investment buys, 4 budgets, 3 portfolio holdings, 2 goals) so first-time visitors can explore the app without signing up
 - `scripts/seed-demo.ts` — idempotent demo seeder; `npm run seed:demo`
