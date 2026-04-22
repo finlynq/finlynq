@@ -6,8 +6,10 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { requireDevMode } from "@/lib/require-dev-mode";
 
+const MAX_MESSAGE_LEN = 2000;
+
 const postSchema = z.object({
-  message: z.string().min(1),
+  message: z.string().min(1).max(MAX_MESSAGE_LEN, `Message exceeds ${MAX_MESSAGE_LEN} character limit`),
 });
 
 export async function POST(request: NextRequest) {

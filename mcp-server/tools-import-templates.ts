@@ -1,5 +1,11 @@
 // MCP Import Template Tools
 // Provides: get_import_templates, import_with_template
+//
+// IMPORTANT: Every query in this file must be scoped to the current userId.
+// The stdio transport has no HTTP auth, so `registerImportTemplateTools` takes
+// the userId from the environment (`PF_USER_ID`) at startup and threads it
+// into every tool via closure. Tool handlers must NEVER accept a userId from
+// tool arguments.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -25,7 +31,7 @@ function mcpText(data: unknown) {
 }
 
 function mcpError(message: string) {
-  return { content: [{ type: "text" as const, text: `Error: ${message}` }] };
+  return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true as const };
 }
 
 /** Parse a simple CSV string into rows (array of header→value maps). */
@@ -58,7 +64,17 @@ function parseAmount(raw: string, format: string, debitRaw = "", creditRaw = "")
   return format === "negate" ? -amount : amount;
 }
 
-export function registerImportTemplateTools(server: McpServer, sqlite: PgCompatDb) {
+export interface ImportTemplateToolsOptions {
+  userId: string;
+}
+
+export function registerImportTemplateTools(
+  server: McpServer,
+  sqlite: PgCompatDb,
+  opts: ImportTemplateToolsOptions
+) {
+  const userId = opts.userId;
+
   // ---- get_import_templates ----
   server.tool(
     "get_import_templates",
@@ -75,9 +91,10 @@ export function registerImportTemplateTools(server: McpServer, sqlite: PgCompatD
           `SELECT id, name, account_id, file_type, column_mapping, has_headers,
                   date_format, amount_format, is_default, created_at, updated_at
            FROM import_templates
+           WHERE user_id = ?
            ORDER BY is_default DESC, name ASC`
         )
-        .all() as TemplateRow[];
+        .all(userId) as TemplateRow[];
 
       if (!headers) {
         return mcpText(
@@ -100,10 +117,6 @@ export function registerImportTemplateTools(server: McpServer, sqlite: PgCompatD
         } catch {
           /* ignore */
         }
-
-        const mappedCols = Object.values(mapping)
-          .filter(Boolean)
-          .map((c) => c.toLowerCase());
 
         const weights: Record<string, number> = {
           date: 3,
@@ -174,11 +187,11 @@ export function registerImportTemplateTools(server: McpServer, sqlite: PgCompatD
         .prepare(
           `SELECT id, name, account_id, column_mapping, has_headers,
                   date_format, amount_format
-           FROM import_templates WHERE id = ?`
+           FROM import_templates WHERE id = ? AND user_id = ?`
         )
-        .get(template_id) as TemplateRow | undefined;
+        .get(template_id, userId) as TemplateRow | undefined;
 
-      if (!tmpl) return mcpError(`Template ${template_id} not found`);
+      if (!tmpl) return mcpError(`Template ${template_id} not found or not owned by user`);
 
       let mapping: Record<string, string> = {};
       try {
@@ -195,17 +208,20 @@ export function registerImportTemplateTools(server: McpServer, sqlite: PgCompatD
         return mcpError("No account_id provided and template has no default account");
       }
 
+      // Ownership pre-check for the target account
       const account = await sqlite
-        .prepare(`SELECT id, currency FROM accounts WHERE id = ?`)
-        .get(resolvedAccountId) as { id: number; currency: string } | undefined;
-      if (!account) return mcpError(`Account ${resolvedAccountId} not found`);
+        .prepare(`SELECT id, currency FROM accounts WHERE id = ? AND user_id = ?`)
+        .get(resolvedAccountId, userId) as { id: number; currency: string } | undefined;
+      if (!account) return mcpError(`Account ${resolvedAccountId} not found or not owned by user`);
 
-      // Build a map of existing import hashes to detect duplicates
+      // Build a map of existing import hashes to detect duplicates (scoped to user)
       const existingHashes = new Set<string>(
         (
           await sqlite
-            .prepare(`SELECT import_hash FROM transactions WHERE import_hash IS NOT NULL`)
-            .all() as { import_hash: string }[]
+            .prepare(
+              `SELECT import_hash FROM transactions WHERE user_id = ? AND import_hash IS NOT NULL`
+            )
+            .all(userId) as { import_hash: string }[]
         ).map((r) => r.import_hash)
       );
 
@@ -220,12 +236,6 @@ export function registerImportTemplateTools(server: McpServer, sqlite: PgCompatD
         `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, import_hash)
          VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`
       );
-
-      // Get first row's user_id from accounts
-      const accountRow = await sqlite
-        .prepare(`SELECT user_id FROM accounts WHERE id = ?`)
-        .get(resolvedAccountId) as { user_id: string } | undefined;
-      const userId = accountRow?.user_id ?? "default";
 
       const importBatch = async () => {
         for (let i = 0; i < rows.length; i++) {
@@ -261,6 +271,7 @@ export function registerImportTemplateTools(server: McpServer, sqlite: PgCompatD
             }
 
             if (!dry_run) {
+              // user_id is sourced from the closure — never from tool args or row data
               await insertStmt.run(userId, rawDate, resolvedAccountId, currency, amount, payee, note, tags, hash);
               existingHashes.add(hash);
             }

@@ -57,10 +57,22 @@ function strip(rows: Row[] | undefined, userId: string): Row[] {
   return (rows ?? []).map(({ id: _id, userId: _uid, ...rest }) => ({ ...rest, userId }));
 }
 
+const MAX_BODY_BYTES = 20 * 1024 * 1024; // 20 MB
+const MAX_TRANSACTIONS = 50_000;
+
 export async function POST(request: NextRequest) {
   const auth = await requireEncryption(request);
   if (!auth.ok) return auth.response;
   const { userId, dek } = auth;
+
+  // Reject oversized bodies early based on advertised Content-Length.
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && Number(contentLength) > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { error: `Request body exceeds ${MAX_BODY_BYTES} byte limit` },
+      { status: 413 }
+    );
+  }
 
   let body: { backup: BackupData; confirm?: boolean };
   try {
@@ -79,6 +91,21 @@ export async function POST(request: NextRequest) {
   }
 
   const d = backup.data;
+
+  // Cap per-import row counts on the table that grows fastest.
+  const txCount = d.transactions?.length ?? 0;
+  const splitCount = d.transactionSplits?.length ?? 0;
+  if (txCount > MAX_TRANSACTIONS || splitCount > MAX_TRANSACTIONS) {
+    return NextResponse.json(
+      {
+        error: `Import exceeds ${MAX_TRANSACTIONS} transaction limit (got ${Math.max(
+          txCount,
+          splitCount
+        )})`,
+      },
+      { status: 422 }
+    );
+  }
 
   const preview = {
     accounts: d.accounts?.length ?? 0,

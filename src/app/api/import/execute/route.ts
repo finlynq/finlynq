@@ -5,10 +5,23 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
+const MAX_BODY_BYTES = 20 * 1024 * 1024; // 20 MB
+const MAX_TRANSACTIONS = 50_000;
+
 export async function POST(request: NextRequest) {
   const auth = await requireEncryption(request);
   if (!auth.ok) return auth.response;
   const { userId, dek } = auth;
+
+  // Reject oversized bodies early based on advertised Content-Length.
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && Number(contentLength) > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { error: `Request body exceeds ${MAX_BODY_BYTES} byte limit` },
+      { status: 413 }
+    );
+  }
+
   try {
     const body = await request.json();
 
@@ -23,6 +36,13 @@ export async function POST(request: NextRequest) {
       rows: RawTransaction[];
       forceImportIndices: number[];
     };
+
+    if (rows.length > MAX_TRANSACTIONS) {
+      return NextResponse.json(
+        { error: `Import exceeds ${MAX_TRANSACTIONS} transaction limit (got ${rows.length})` },
+        { status: 422 }
+      );
+    }
 
     const result = await executeImport(rows, forceImportIndices, userId, dek);
     return NextResponse.json(result);

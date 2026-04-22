@@ -1,20 +1,22 @@
 // MCP Tools v2 — Additional read and write tools
 // Exported as registration functions to avoid conflicts with other team's changes to index.ts
+//
+// IMPORTANT: Every query in this file must be scoped to the current userId.
+// The stdio transport has no HTTP auth, so `registerV2Tools` takes the
+// userId from the environment (`PF_USER_ID`) at startup and threads it into
+// every tool via closure. Tool handlers must NEVER accept a userId from
+// tool arguments — the argument schemas explicitly don't expose one.
+//
+// Read tools: add `user_id = ?` to every WHERE clause (except global tables
+// like price_cache and fx_rates). Write tools: ownership pre-check on the
+// target row before UPDATE/DELETE; INSERTs always include user_id with the
+// closure userId.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { PgCompatDb } from "./pg-compat.js";
 
 // ============ TYPES ============
-
-type AccountRow = {
-  id: number;
-  name: string;
-  type: string;
-  group: string;
-  currency: string;
-  balance: number;
-};
 
 type TransactionRow = {
   id: number;
@@ -66,12 +68,18 @@ function mcpText(data: unknown) {
 }
 
 function mcpError(message: string) {
-  return { content: [{ type: "text" as const, text: `Error: ${message}` }] };
+  return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true as const };
 }
 
 // ============ REGISTER TOOLS ============
 
-export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
+export interface V2ToolsOptions {
+  userId: string;
+}
+
+export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2ToolsOptions) {
+  const userId = opts.userId;
+
   // ---- READ TOOLS ----
 
   server.tool(
@@ -91,10 +99,10 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       const incomeExpenses = await sqlite.prepare(
         `SELECT strftime('%Y-%m', t.date) as month, c.type as category_type, SUM(t.amount) as total
          FROM transactions t LEFT JOIN categories c ON t.category_id = c.id
-         WHERE t.date >= ? AND t.date <= ? AND c.type IN ('E','I')
+         WHERE t.user_id = ? AND t.date >= ? AND t.date <= ? AND c.type IN ('E','I')
          GROUP BY strftime('%Y-%m', t.date), c.type
          ORDER BY month`
-      ).all(fmt(twelveMonthsAgo), `${currentMonth}-31`) as { month: string; category_type: string; total: number }[];
+      ).all(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`) as { month: string; category_type: string; total: number }[];
 
       const monthIncome = new Map<string, number>();
       const monthExpenses = new Map<string, number>();
@@ -124,9 +132,10 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       // 2. Debt-to-Income (20%)
       const balances = await sqlite.prepare(
         `SELECT a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) as balance
-         FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id
+         FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ?
+         WHERE a.user_id = ?
          GROUP BY a.id`
-      ).all() as { type: string; group: string; currency: string; balance: number }[];
+      ).all(userId, userId) as { type: string; group: string; currency: string; balance: number }[];
 
       const totalLiabilities = balances.filter(b => b.type === "L").reduce((s, b) => s + Math.abs(b.balance), 0);
       const annualIncome = totalIncome > 0 ? (totalIncome / sortedMonths.length) * 12 : 0;
@@ -161,10 +170,10 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       const nwData = await sqlite.prepare(
         `SELECT strftime('%Y-%m', t.date) as month, SUM(t.amount) as total
          FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id
-         WHERE a.currency = 'CAD'
+         WHERE t.user_id = ? AND a.currency = 'CAD'
          GROUP BY strftime('%Y-%m', t.date)
          ORDER BY month`
-      ).all() as { month: string; total: number }[];
+      ).all(userId) as { month: string; total: number }[];
 
       let running = 0;
       const nwByMonth: [string, number][] = [];
@@ -186,12 +195,12 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       // 5. Budget Adherence (15%)
       const budgetsData = await sqlite.prepare(
         `SELECT b.id, c.name as category, b.amount as budget,
-         COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? THEN t.amount ELSE 0 END)), 0) as spent
+         COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? AND t.user_id = ? THEN t.amount ELSE 0 END)), 0) as spent
          FROM budgets b JOIN categories c ON b.category_id = c.id
          LEFT JOIN transactions t ON t.category_id = c.id
-         WHERE b.month = ?
+         WHERE b.user_id = ? AND b.month = ?
          GROUP BY b.id`
-      ).all(`${currentMonth}-01`, `${currentMonth}-31`, currentMonth) as BudgetRow[];
+      ).all(`${currentMonth}-01`, `${currentMonth}-31`, userId, userId, currentMonth) as BudgetRow[];
 
       let budgetScore = 50, budgetDetail = "No budgets set";
       if (budgetsData.length > 0) {
@@ -230,10 +239,10 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       const rows = await sqlite.prepare(
         `SELECT strftime('%Y-%m', t.date) as month, c.name as category, SUM(t.amount) as total
          FROM transactions t LEFT JOIN categories c ON t.category_id = c.id
-         WHERE t.date >= ? AND c.type = 'E'
+         WHERE t.user_id = ? AND t.date >= ? AND c.type = 'E'
          GROUP BY strftime('%Y-%m', t.date), c.name
          ORDER BY month`
-      ).all(startDate) as MonthlySpendRow[];
+      ).all(userId, startDate) as MonthlySpendRow[];
 
       const byCategory = new Map<string, MonthlySpendRow[]>();
       for (const row of rows) {
@@ -281,8 +290,9 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
          c.name as category_name
          FROM subscriptions s
          LEFT JOIN categories c ON s.category_id = c.id
+         WHERE s.user_id = ?
          ORDER BY s.status, s.name`
-      ).all() as SubscriptionRow[];
+      ).all(userId) as SubscriptionRow[];
 
       const active = subs.filter(s => s.status === "active");
 
@@ -346,9 +356,9 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       const txns = await sqlite.prepare(
         `SELECT id, date, payee, amount, account_id, category_id
          FROM transactions
-         WHERE date >= ? AND payee != ''
+         WHERE user_id = ? AND date >= ? AND payee != ''
          ORDER BY date`
-      ).all(cutoffStr) as { id: number; date: string; payee: string; amount: number; account_id: number; category_id: number }[];
+      ).all(userId, cutoffStr) as { id: number; date: string; payee: string; amount: number; account_id: number; category_id: number }[];
 
       // Group by payee to find recurring
       const groups = new Map<string, typeof txns>();
@@ -383,14 +393,14 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
 
       // Get current bank balance
       const bankAccounts = await sqlite.prepare(
-        `SELECT a.id FROM accounts a WHERE a."group" IN ('Banks', 'Cash Accounts')`
-      ).all() as { id: number }[];
+        `SELECT a.id FROM accounts a WHERE a.user_id = ? AND a."group" IN ('Banks', 'Cash Accounts')`
+      ).all(userId) as { id: number }[];
 
       let currentBalance = 0;
       for (const ba of bankAccounts) {
         const result = await sqlite.prepare(
-          `SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE account_id = ?`
-        ).get(ba.id) as { total: number };
+          `SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE user_id = ? AND account_id = ?`
+        ).get(userId, ba.id) as { total: number };
         currentBalance += result.total;
       }
 
@@ -453,8 +463,8 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
                    FROM transactions t
                    LEFT JOIN accounts a ON t.account_id = a.id
                    LEFT JOIN categories c ON t.category_id = c.id
-                   WHERE 1=1`;
-      const params: (string | number)[] = [];
+                   WHERE t.user_id = ?`;
+      const params: (string | number)[] = [userId];
 
       if (payee) { query += " AND t.payee LIKE ?"; params.push(`%${payee}%`); }
       if (min_amount !== undefined) { query += " AND t.amount >= ?"; params.push(min_amount); }
@@ -487,8 +497,8 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
 
       let query = `SELECT strftime('%Y-%m', t.date) as month, a.currency, SUM(t.amount) as total
                    FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id
-                   WHERE t.date >= ?`;
-      const params: string[] = [startStr];
+                   WHERE t.user_id = ? AND t.date >= ?`;
+      const params: string[] = [userId, startStr];
 
       if (currency && currency !== "all") {
         query += " AND a.currency = ?";
@@ -503,8 +513,8 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       // First, get all-time totals before the start date for a correct baseline
       let baselineQuery = `SELECT a.currency, COALESCE(SUM(t.amount), 0) as total
                            FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id
-                           WHERE t.date < ?`;
-      const baseParams: string[] = [startStr];
+                           WHERE t.user_id = ? AND t.date < ?`;
+      const baseParams: string[] = [userId, startStr];
       if (currency && currency !== "all") {
         baselineQuery += " AND a.currency = ?";
         baseParams.push(currency);
@@ -543,13 +553,19 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       category: z.string().describe("Category name to assign"),
     },
     async ({ transaction_id, category }) => {
-      const cat = await sqlite.prepare("SELECT id, name FROM categories WHERE name = ?").get(category) as { id: number; name: string } | undefined;
+      const cat = await sqlite.prepare(
+        "SELECT id, name FROM categories WHERE user_id = ? AND name = ?"
+      ).get(userId, category) as { id: number; name: string } | undefined;
       if (!cat) return mcpError(`Category "${category}" not found`);
 
-      const txn = await sqlite.prepare("SELECT id, payee FROM transactions WHERE id = ?").get(transaction_id) as { id: number; payee: string } | undefined;
-      if (!txn) return mcpError(`Transaction #${transaction_id} not found`);
+      const txn = await sqlite.prepare(
+        "SELECT id, payee FROM transactions WHERE id = ? AND user_id = ?"
+      ).get(transaction_id, userId) as { id: number; payee: string } | undefined;
+      if (!txn) return mcpError(`Transaction #${transaction_id} not found or not owned by user`);
 
-      await sqlite.prepare("UPDATE transactions SET category_id = ? WHERE id = ?").run(cat.id, transaction_id);
+      await sqlite.prepare(
+        "UPDATE transactions SET category_id = ? WHERE id = ? AND user_id = ?"
+      ).run(cat.id, transaction_id, userId);
       return mcpText({ success: true, transactionId: transaction_id, newCategory: cat.name, message: `Transaction #${transaction_id} (${txn.payee}) categorized as "${cat.name}"` });
     }
   );
@@ -565,13 +581,15 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb) {
       note: z.string().optional().describe("Optional note"),
     },
     async ({ name, type, group, currency, note }) => {
-      // Check for duplicate name
-      const existing = await sqlite.prepare("SELECT id FROM accounts WHERE name = ?").get(name) as { id: number } | undefined;
+      // Check for duplicate name (per-user)
+      const existing = await sqlite.prepare(
+        "SELECT id FROM accounts WHERE user_id = ? AND name = ?"
+      ).get(userId, name) as { id: number } | undefined;
       if (existing) return mcpError(`Account "${name}" already exists (id: ${existing.id})`);
 
       const result = await sqlite.prepare(
-        "INSERT INTO accounts (type, \"group\", name, currency, note) VALUES (?, ?, ?, ?, ?)"
-      ).run(type, group ?? "", name, currency ?? "CAD", note ?? "");
+        "INSERT INTO accounts (user_id, type, \"group\", name, currency, note) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(userId, type, group ?? "", name, currency ?? "CAD", note ?? "");
 
       return mcpText({
         success: true,

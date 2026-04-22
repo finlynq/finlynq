@@ -1304,14 +1304,24 @@ export function registerPgTools(
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found`);
 
-      const updates: string[] = [];
-      if (name !== undefined) updates.push(`name = '${name.replace(/'/g, "''")}'`);
-      if (group !== undefined) updates.push(`"group" = '${group.replace(/'/g, "''")}'`);
-      if (currency !== undefined) updates.push(`currency = '${currency}'`);
-      if (note !== undefined) updates.push(`note = '${note.replace(/'/g, "''")}'`);
+      // Build parameterized SET clauses — no sql.raw, no manual escaping.
+      const updates: ReturnType<typeof sql>[] = [];
+      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (group !== undefined) updates.push(sql`"group" = ${group}`);
+      if (currency !== undefined) updates.push(sql`currency = ${currency}`);
+      if (note !== undefined) updates.push(sql`note = ${note}`);
       if (!updates.length) return err("No fields to update");
 
-      await db.execute(sql`UPDATE accounts SET ${sql.raw(updates.join(", "))} WHERE id = ${acct.id} AND user_id = ${userId}`);
+      const result = await db.execute(
+        sql`UPDATE accounts SET ${sql.join(updates, sql`, `)} WHERE id = ${acct.id} AND user_id = ${userId}`
+      );
+      // pg returns { rowCount }; some drivers expose it differently. If the update
+      // touched 0 rows the ownership check in WHERE failed (e.g. race with delete).
+      const affected =
+        (result && typeof result === "object" && "rowCount" in result && typeof (result as { rowCount: unknown }).rowCount === "number")
+          ? (result as { rowCount: number }).rowCount
+          : null;
+      if (affected === 0) return err(`Account "${acct.name}" not found or not owned by this user`);
       return text({ success: true, message: `Account "${acct.name}" updated` });
     }
   );

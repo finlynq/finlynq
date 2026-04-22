@@ -17,15 +17,30 @@ export interface SessionPayload extends JWTPayload {
 }
 
 // Secret is generated once per process and persisted in memory.
-// In production, this should come from an environment variable.
+// In production, PF_JWT_SECRET is required — refusing to boot with an
+// ephemeral secret avoids the footgun of every session dying on restart.
+// In dev, fall back to a random ephemeral secret with a one-time warning.
 const getSecret = (() => {
   let secret: Uint8Array | null = null;
+  let devWarned = false;
   return () => {
     if (!secret) {
       const envSecret = process.env.PF_JWT_SECRET;
       if (envSecret) {
         secret = new TextEncoder().encode(envSecret);
       } else {
+        if (process.env.NODE_ENV === "production") {
+          throw new Error(
+            "PF_JWT_SECRET is required in production. Refusing to boot with an ephemeral secret — all sessions would die on restart."
+          );
+        }
+        if (!devWarned) {
+          devWarned = true;
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[auth] PF_JWT_SECRET not set — using ephemeral dev secret. Do not use in production."
+          );
+        }
         // Fallback: generate ephemeral secret (sessions won't survive restarts)
         secret = new TextEncoder().encode(
           crypto.randomBytes(32).toString("hex")

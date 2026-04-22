@@ -317,6 +317,7 @@ export async function wipeUserDataAndRewrap(
       dekWrapped: wrap.dekWrapped,
       dekWrappedIv: wrap.dekWrappedIv,
       dekWrappedTag: wrap.dekWrappedTag,
+      encryptionV: sql`${s.users.encryptionV} + 1`,
       updatedAt: now,
     })
     .where(eq(s.users.id, userId));

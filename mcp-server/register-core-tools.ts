@@ -1,4 +1,14 @@
 // MCP Core Tools — extracted for reuse across stdio and HTTP transports
+//
+// IMPORTANT: Every query in this file must be scoped to the current userId.
+// The stdio transport has no HTTP auth, so `registerCoreTools` takes the
+// userId from the environment (`PF_USER_ID`) at startup and threads it into
+// every tool via closure. Tool handlers must NEVER accept a userId from
+// tool arguments — the argument schemas explicitly don't expose one.
+//
+// Read tools: add `user_id = ?` to every WHERE clause.
+// Write tools: ownership pre-check on the target row before UPDATE/DELETE;
+// INSERTs always include `user_id = ?` with the closure userId.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -51,24 +61,24 @@ function fuzzyFind(input: string, options: SqliteRow[]): SqliteRow | null {
   );
 }
 
-/** Auto-categorize payee: rules → historical frequency */
-async function autoCategory(sqlite: PgCompatDb, payee: string): Promise<number | null> {
+/** Auto-categorize payee: rules → historical frequency (both user-scoped) */
+async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): Promise<number | null> {
   if (!payee) return null;
   const rule = await sqlite.prepare(
-    `SELECT assign_category_id FROM transaction_rules WHERE is_active = 1 AND LOWER(?) LIKE LOWER(match_payee) ORDER BY priority DESC LIMIT 1`
-  ).get(payee) as { assign_category_id: number } | undefined;
+    `SELECT assign_category_id FROM transaction_rules WHERE user_id = ? AND is_active = 1 AND LOWER(?) LIKE LOWER(match_payee) ORDER BY priority DESC LIMIT 1`
+  ).get(userId, payee) as { assign_category_id: number } | undefined;
   if (rule?.assign_category_id) return rule.assign_category_id;
   const hist = await sqlite.prepare(
-    `SELECT category_id, COUNT(*) as cnt FROM transactions WHERE LOWER(payee) = LOWER(?) AND category_id IS NOT NULL GROUP BY category_id ORDER BY cnt DESC LIMIT 1`
-  ).get(payee) as { category_id: number } | undefined;
+    `SELECT category_id, COUNT(*) as cnt FROM transactions WHERE user_id = ? AND LOWER(payee) = LOWER(?) AND category_id IS NOT NULL GROUP BY category_id ORDER BY cnt DESC LIMIT 1`
+  ).get(userId, payee) as { category_id: number } | undefined;
   return hist?.category_id ?? null;
 }
 
-/** Most-recently-used account */
-async function defaultAccount(sqlite: PgCompatDb): Promise<SqliteRow | null> {
+/** Most-recently-used account for the current user */
+async function defaultAccount(sqlite: PgCompatDb, userId: string): Promise<SqliteRow | null> {
   return await sqlite.prepare(
-    `SELECT a.id, a.name, a.currency FROM transactions t JOIN accounts a ON a.id = t.account_id ORDER BY t.date DESC, t.id DESC LIMIT 1`
-  ).get() as SqliteRow | null;
+    `SELECT a.id, a.name, a.currency FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE t.user_id = ? ORDER BY t.date DESC, t.id DESC LIMIT 1`
+  ).get(userId) as SqliteRow | null;
 }
 
 const PORTFOLIO_DISCLAIMER =
@@ -79,10 +89,19 @@ function txt(data: unknown) {
 }
 
 function sqliteErr(msg: string) {
-  return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
+  return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
 }
 
-export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
+export interface CoreToolsOptions {
+  userId: string;
+}
+
+export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: CoreToolsOptions) {
+  const userId = opts.userId;
+  if (!userId) {
+    throw new Error("registerCoreTools: opts.userId is required — every stdio tool must be scoped to a user.");
+  }
+
   // ============ READ TOOLS ============
 
   server.tool(
@@ -90,9 +109,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     "Get current balances for all accounts, grouped by type (asset/liability)",
     { currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency") },
     async ({ currency }) => {
-      let query = `SELECT a.id, a.name, a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) as balance FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id`;
-      const params: string[] = [];
-      if (currency && currency !== "all") { query += " WHERE a.currency = ?"; params.push(currency); }
+      let query = `SELECT a.id, a.name, a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) as balance FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ? WHERE a.user_id = ?`;
+      const params: (string | number)[] = [userId, userId];
+      if (currency && currency !== "all") { query += ` AND a.currency = ?`; params.push(currency); }
       query += ` GROUP BY a.id ORDER BY a.type, a."group", a.name`;
       const rows = await sqlite.prepare(query).all(...params);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
@@ -112,8 +131,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       limit: z.number().optional().describe("Max results (default 100)"),
     },
     async ({ start_date, end_date, category, account, min_amount, max_amount, limit }) => {
-      let query = `SELECT t.date, a.name as account, c.name as category, c.type as category_type, t.currency, t.amount, t.payee, t.note, t.tags FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id LEFT JOIN categories c ON t.category_id = c.id WHERE t.date >= ? AND t.date <= ?`;
-      const params: (string | number)[] = [start_date, end_date];
+      let query = `SELECT t.date, a.name as account, c.name as category, c.type as category_type, t.currency, t.amount, t.payee, t.note, t.tags FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND t.date >= ? AND t.date <= ?`;
+      const params: (string | number)[] = [userId, start_date, end_date];
       if (category) { query += " AND c.name = ?"; params.push(category); }
       if (account) { query += " AND a.name = ?"; params.push(account); }
       if (min_amount !== undefined) { query += " AND t.amount >= ?"; params.push(min_amount); }
@@ -133,7 +152,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       const [y, m] = month.split("-").map(Number);
       const startDate = `${month}-01`;
       const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
-      const rows = await sqlite.prepare(`SELECT b.id, c.name as category, c."group" as category_group, b.amount as budget, COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? THEN t.amount ELSE 0 END)), 0) as spent FROM budgets b JOIN categories c ON b.category_id = c.id LEFT JOIN transactions t ON t.category_id = c.id WHERE b.month = ? GROUP BY b.id ORDER BY c."group", c.name`).all(startDate, endDate, month);
+      const rows = await sqlite.prepare(`SELECT b.id, c.name as category, c."group" as category_group, b.amount as budget, COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? AND t.user_id = ? THEN t.amount ELSE 0 END)), 0) as spent FROM budgets b JOIN categories c ON b.category_id = c.id LEFT JOIN transactions t ON t.category_id = c.id WHERE b.user_id = ? AND b.month = ? GROUP BY b.id ORDER BY c."group", c.name`).all(startDate, endDate, userId, userId, month);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
@@ -146,13 +165,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       const lookback = months ?? 12;
       const startDate = new Date(new Date().getFullYear(), new Date().getMonth() - lookback, 1).toISOString().split("T")[0];
       const groupExpr = period === "weekly" ? "strftime('%Y-W%W', t.date)" : period === "yearly" ? "strftime('%Y', t.date)" : "strftime('%Y-%m', t.date)";
-      const rows = await sqlite.prepare(`SELECT ${groupExpr} as period, c.name as category, c."group" as category_group, SUM(t.amount) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.date >= ? AND c.type = 'E' GROUP BY ${groupExpr}, c.name ORDER BY ${groupExpr}, total`).all(startDate);
+      const rows = await sqlite.prepare(`SELECT ${groupExpr} as period, c.name as category, c."group" as category_group, SUM(t.amount) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND t.date >= ? AND c.type = 'E' GROUP BY ${groupExpr}, c.name ORDER BY ${groupExpr}, total`).all(userId, startDate);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
 
   server.tool("get_portfolio_summary", "Get all investment holdings grouped by account", {}, async () => {
-    const rows = await sqlite.prepare(`SELECT ph.name as holding, ph.symbol, ph.currency, a.name as account FROM portfolio_holdings ph LEFT JOIN accounts a ON ph.account_id = a.id ORDER BY a.name, ph.name`).all();
+    const rows = await sqlite.prepare(`SELECT ph.name as holding, ph.symbol, ph.currency, a.name as account FROM portfolio_holdings ph LEFT JOIN accounts a ON ph.account_id = a.id WHERE ph.user_id = ? ORDER BY a.name, ph.name`).all(userId);
     return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
   });
 
@@ -161,9 +180,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     "Calculate total net worth across all accounts",
     { currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency") },
     async ({ currency }) => {
-      let query = `SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) as total FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id`;
-      const params: string[] = [];
-      if (currency && currency !== "all") { query += " WHERE a.currency = ?"; params.push(currency); }
+      let query = `SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) as total FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ? WHERE a.user_id = ?`;
+      const params: (string | number)[] = [userId, userId];
+      if (currency && currency !== "all") { query += " AND a.currency = ?"; params.push(currency); }
       query += " GROUP BY a.type, a.currency";
       const rows = await sqlite.prepare(query).all(...params) as { type: string; currency: string; total: number }[];
       const summary: Record<string, { assets: number; liabilities: number; net: number }> = {};
@@ -178,17 +197,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
   );
 
   server.tool("get_categories", "List all available transaction categories", {}, async () => {
-    const rows = await sqlite.prepare(`SELECT name, type, "group" FROM categories ORDER BY type, "group", name`).all();
+    const rows = await sqlite.prepare(`SELECT name, type, "group" FROM categories WHERE user_id = ? ORDER BY type, "group", name`).all(userId);
     return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
   });
 
   server.tool("get_loans", "Get all loans with amortization summary", {}, async () => {
-    const rows = await sqlite.prepare(`SELECT id, name, type, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment FROM loans`).all();
+    const rows = await sqlite.prepare(`SELECT id, name, type, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment FROM loans WHERE user_id = ?`).all(userId);
     return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
   });
 
   server.tool("get_goals", "Get all financial goals with progress", {}, async () => {
-    const goals = await sqlite.prepare(`SELECT g.id, g.name, g.type, g.target_amount, g.deadline, g.status, g.priority, a.name as account FROM goals g LEFT JOIN accounts a ON g.account_id = a.id ORDER BY g.priority`).all();
+    const goals = await sqlite.prepare(`SELECT g.id, g.name, g.type, g.target_amount, g.deadline, g.status, g.priority, a.name as account FROM goals g LEFT JOIN accounts a ON g.account_id = a.id WHERE g.user_id = ? ORDER BY g.priority`).all(userId);
     return { content: [{ type: "text" as const, text: JSON.stringify(goals, null, 2) }] };
   });
 
@@ -199,7 +218,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     async () => {
       const cutoff = new Date();
       cutoff.setFullYear(cutoff.getFullYear() - 1);
-      const txns = await sqlite.prepare(`SELECT id, date, payee, amount, account_id, category_id FROM transactions WHERE date >= ? AND payee != '' ORDER BY date`).all(cutoff.toISOString().split("T")[0]) as { id: number; date: string; payee: string; amount: number; account_id: number; category_id: number }[];
+      const txns = await sqlite.prepare(`SELECT id, date, payee, amount, account_id, category_id FROM transactions WHERE user_id = ? AND date >= ? AND payee != '' ORDER BY date`).all(userId, cutoff.toISOString().split("T")[0]) as { id: number; date: string; payee: string; amount: number; account_id: number; category_id: number }[];
       const groups = new Map<string, typeof txns>();
       for (const t of txns) {
         const key = t.payee.trim().toLowerCase();
@@ -223,7 +242,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     "Generate income statement for a period",
     { start_date: z.string().describe("Start date"), end_date: z.string().describe("End date") },
     async ({ start_date, end_date }) => {
-      const rows = await sqlite.prepare(`SELECT c.type as category_type, c."group" as category_group, c.name as category, SUM(t.amount) as total, COUNT(*) as count FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.date >= ? AND t.date <= ? AND c.type IN ('I','E') GROUP BY c.id ORDER BY c.type, c."group"`).all(start_date, end_date);
+      const rows = await sqlite.prepare(`SELECT c.type as category_type, c."group" as category_group, c.name as category, SUM(t.amount) as total, COUNT(*) as count FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND t.date >= ? AND t.date <= ? AND c.type IN ('I','E') GROUP BY c.id, c.type, c."group", c.name ORDER BY c.type, c."group"`).all(userId, start_date, end_date);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
@@ -243,13 +262,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       tags: z.string().optional().describe("Comma-separated tags"),
     },
     async ({ date, account, category, amount, payee, note, tags }) => {
-      const acct = await sqlite.prepare("SELECT id, currency FROM accounts WHERE name = ?").get(account) as { id: number; currency: string } | undefined;
-      if (!acct) return { content: [{ type: "text" as const, text: `Error: Account "${account}" not found` }] };
+      const acct = await sqlite.prepare("SELECT id, currency FROM accounts WHERE user_id = ? AND name = ?").get(userId, account) as { id: number; currency: string } | undefined;
+      if (!acct) return sqliteErr(`Account "${account}" not found`);
 
-      const cat = await sqlite.prepare("SELECT id FROM categories WHERE name = ?").get(category) as { id: number } | undefined;
-      if (!cat) return { content: [{ type: "text" as const, text: `Error: Category "${category}" not found` }] };
+      const cat = await sqlite.prepare("SELECT id FROM categories WHERE user_id = ? AND name = ?").get(userId, category) as { id: number } | undefined;
+      if (!cat) return sqliteErr(`Category "${category}" not found`);
 
-      await sqlite.prepare("INSERT INTO transactions (date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(date, acct.id, cat.id, acct.currency, amount, payee ?? "", note ?? "", tags ?? "");
+      await sqlite.prepare("INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(userId, date, acct.id, cat.id, acct.currency, amount, payee ?? "", note ?? "", tags ?? "");
       return { content: [{ type: "text" as const, text: `Transaction added: ${amount} to ${account} (${category}) on ${date}` }] };
     }
   );
@@ -263,14 +282,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       amount: z.number().describe("Budget amount (positive number)"),
     },
     async ({ category, month, amount }) => {
-      const cat = await sqlite.prepare("SELECT id FROM categories WHERE name = ?").get(category) as { id: number } | undefined;
-      if (!cat) return { content: [{ type: "text" as const, text: `Error: Category "${category}" not found` }] };
+      const cat = await sqlite.prepare("SELECT id FROM categories WHERE user_id = ? AND name = ?").get(userId, category) as { id: number } | undefined;
+      if (!cat) return sqliteErr(`Category "${category}" not found`);
 
-      const existing = await sqlite.prepare("SELECT id FROM budgets WHERE category_id = ? AND month = ?").get(cat.id, month) as { id: number } | undefined;
+      const existing = await sqlite.prepare("SELECT id FROM budgets WHERE user_id = ? AND category_id = ? AND month = ?").get(userId, cat.id, month) as { id: number } | undefined;
       if (existing) {
-        await sqlite.prepare("UPDATE budgets SET amount = ? WHERE id = ?").run(amount, existing.id);
+        await sqlite.prepare("UPDATE budgets SET amount = ? WHERE id = ? AND user_id = ?").run(amount, existing.id, userId);
       } else {
-        await sqlite.prepare("INSERT INTO budgets (category_id, month, amount) VALUES (?, ?, ?)").run(cat.id, month, amount);
+        await sqlite.prepare("INSERT INTO budgets (user_id, category_id, month, amount) VALUES (?, ?, ?, ?)").run(userId, cat.id, month, amount);
       }
       return { content: [{ type: "text" as const, text: `Budget set: ${category} = $${amount} for ${month}` }] };
     }
@@ -287,12 +306,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       account: z.string().optional().describe("Account name to link"),
     },
     async ({ name, type, target_amount, deadline, account }) => {
-      let accountId = null;
+      let accountId: number | null = null;
       if (account) {
-        const acct = await sqlite.prepare("SELECT id FROM accounts WHERE name = ?").get(account) as { id: number } | undefined;
+        const acct = await sqlite.prepare("SELECT id FROM accounts WHERE user_id = ? AND name = ?").get(userId, account) as { id: number } | undefined;
         accountId = acct?.id ?? null;
       }
-      await sqlite.prepare("INSERT INTO goals (name, type, target_amount, deadline, account_id, status) VALUES (?, ?, ?, ?, ?, 'active')").run(name, type, target_amount, deadline ?? null, accountId);
+      await sqlite.prepare("INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").run(userId, name, type, target_amount, deadline ?? null, accountId);
       return { content: [{ type: "text" as const, text: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` }] };
     }
   );
@@ -307,10 +326,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       note: z.string().optional().describe("Optional note"),
     },
     async ({ account, value, date, note }) => {
-      const acct = await sqlite.prepare("SELECT id FROM accounts WHERE name = ?").get(account) as { id: number } | undefined;
-      if (!acct) return { content: [{ type: "text" as const, text: `Error: Account "${account}" not found` }] };
+      const acct = await sqlite.prepare("SELECT id FROM accounts WHERE user_id = ? AND name = ?").get(userId, account) as { id: number } | undefined;
+      if (!acct) return sqliteErr(`Account "${account}" not found`);
       const d = date ?? new Date().toISOString().split("T")[0];
-      await sqlite.prepare("INSERT INTO snapshots (account_id, date, value, note) VALUES (?, ?, ?, ?)").run(acct.id, d, value, note ?? "");
+      await sqlite.prepare("INSERT INTO snapshots (user_id, account_id, date, value, note) VALUES (?, ?, ?, ?, ?)").run(userId, acct.id, d, value, note ?? "");
       return { content: [{ type: "text" as const, text: `Snapshot recorded: ${account} = $${value} on ${d}` }] };
     }
   );
@@ -328,8 +347,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
                 r.assign_tags, r.rename_to, r.is_active, r.priority
          FROM transaction_rules r
          LEFT JOIN categories c ON r.assign_category_id = c.id
+         WHERE r.user_id = ?
          ORDER BY r.priority DESC`
-      ).all();
+      ).all(userId);
       return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
@@ -346,8 +366,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       const rules = await sqlite.prepare(
         `SELECT id, name, match_field, match_type, match_value,
                 assign_category_id, assign_tags, rename_to, is_active, priority
-         FROM transaction_rules WHERE is_active = 1 ORDER BY priority DESC`
-      ).all() as Array<{
+         FROM transaction_rules WHERE user_id = ? AND is_active = 1 ORDER BY priority DESC`
+      ).all(userId) as Array<{
         id: number; name: string; match_field: string; match_type: string;
         match_value: string; assign_category_id: number | null;
         assign_tags: string | null; rename_to: string | null;
@@ -360,8 +380,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
 
       const uncategorized = await sqlite.prepare(
         `SELECT id, payee, amount, tags FROM transactions
-         WHERE category_id IS NULL ORDER BY date DESC LIMIT ?`
-      ).all(maxRows) as Array<{ id: number; payee: string; amount: number; tags: string }>;
+         WHERE user_id = ? AND category_id IS NULL ORDER BY date DESC LIMIT ?`
+      ).all(userId, maxRows) as Array<{ id: number; payee: string; amount: number; tags: string }>;
 
       if (uncategorized.length === 0) {
         return { content: [{ type: "text" as const, text: "No uncategorized transactions found." }] };
@@ -370,7 +390,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       let applied = 0;
       const updateStmt = sqlite.prepare(
         `UPDATE transactions SET category_id = ?, tags = CASE WHEN ? IS NOT NULL THEN ? ELSE tags END,
-         payee = CASE WHEN ? IS NOT NULL THEN ? ELSE payee END WHERE id = ?`
+         payee = CASE WHEN ? IS NOT NULL THEN ? ELSE payee END WHERE id = ? AND user_id = ?`
       );
 
       for (const txn of uncategorized) {
@@ -381,7 +401,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
                 rule.assign_category_id,
                 rule.assign_tags, rule.assign_tags ?? txn.tags,
                 rule.rename_to, rule.rename_to ?? txn.payee,
-                txn.id
+                txn.id, userId
               );
               applied++;
             }
@@ -418,11 +438,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
 
       const budgetRows = await sqlite.prepare(`
         SELECT b.id, c.name as cat, b.amount as budget,
-          COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? THEN t.amount ELSE 0 END)), 0) as spent
+          COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? AND t.user_id = ? THEN t.amount ELSE 0 END)), 0) as spent
         FROM budgets b LEFT JOIN categories c ON b.category_id = c.id
         LEFT JOIN transactions t ON t.category_id = b.category_id
-        WHERE b.month = ? GROUP BY b.id
-      `).all(monthStart, monthEnd, month) as { id: number; cat: string; budget: number; spent: number }[];
+        WHERE b.user_id = ? AND b.month = ? GROUP BY b.id, c.name, b.amount
+      `).all(monthStart, monthEnd, userId, userId, month) as { id: number; cat: string; budget: number; spent: number }[];
       for (const r of budgetRows) {
         if (r.budget > 0 && r.spent > r.budget) {
           const pct = Math.round(((r.spent - r.budget) / r.budget) * 100);
@@ -430,14 +450,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
         }
       }
 
-      const subs = await sqlite.prepare(`SELECT * FROM subscriptions WHERE status = 'active' AND next_date >= ? AND next_date <= ?`).all(today, weekAhead) as { id: number; name: string; amount: number; next_date: string; frequency: string }[];
+      const subs = await sqlite.prepare(`SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' AND next_date >= ? AND next_date <= ?`).all(userId, today, weekAhead) as { id: number; name: string; amount: number; next_date: string; frequency: string }[];
       for (const s of subs) {
         if (Math.abs(s.amount) >= 100) {
           items.push({ type: "large_bill", severity: "warning", title: `${s.name} due soon`, description: `$${Math.abs(s.amount).toFixed(2)} ${s.frequency}`, amount: Math.abs(s.amount) });
         }
       }
 
-      const uncat = await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE date >= ? AND date <= ? AND category_id IS NULL`).get(monthStart, monthEnd) as { cnt: number };
+      const uncat = await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND date >= ? AND date <= ? AND category_id IS NULL`).get(userId, monthStart, monthEnd) as { cnt: number };
       if (uncat.cnt > 0) {
         items.push({ type: "uncategorized", severity: uncat.cnt > 10 ? "warning" : "info", title: `${uncat.cnt} uncategorized transaction(s)`, description: "Categorize for better tracking" });
       }
@@ -466,15 +486,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       const ps = prevStart.toISOString().split("T")[0];
       const pe = prevEnd.toISOString().split("T")[0];
 
-      const spending = await sqlite.prepare(`SELECT c.name, ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ? GROUP BY c.id ORDER BY total DESC`).all(ws, we) as { name: string; total: number }[];
+      const spending = await sqlite.prepare(`SELECT c.name, ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND c.type = 'E' AND t.date >= ? AND t.date <= ? GROUP BY c.id, c.name ORDER BY total DESC`).all(userId, ws, we) as { name: string; total: number }[];
       const totalSpent = spending.reduce((s, r) => s + r.total, 0);
-      const prevSpending = await sqlite.prepare(`SELECT ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ?`).get(ps, pe) as { total: number } | undefined;
+      const prevSpending = await sqlite.prepare(`SELECT ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND c.type = 'E' AND t.date >= ? AND t.date <= ?`).get(userId, ps, pe) as { total: number } | undefined;
       const prevTotal = prevSpending?.total ?? 0;
       const changePct = prevTotal > 0 ? Math.round(((totalSpent - prevTotal) / prevTotal) * 100) : 0;
 
-      const inc = await sqlite.prepare(`SELECT COALESCE(SUM(t.amount), 0) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'I' AND t.date >= ? AND t.date <= ?`).get(ws, we) as { total: number };
+      const inc = await sqlite.prepare(`SELECT COALESCE(SUM(t.amount), 0) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND c.type = 'I' AND t.date >= ? AND t.date <= ?`).get(userId, ws, we) as { total: number };
 
-      const notable = await sqlite.prepare(`SELECT t.date, t.payee, c.name as category, ABS(t.amount) as amt FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE c.type = 'E' AND t.date >= ? AND t.date <= ? ORDER BY ABS(t.amount) DESC LIMIT 5`).all(ws, we);
+      const notable = await sqlite.prepare(`SELECT t.date, t.payee, c.name as category, ABS(t.amount) as amt FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND c.type = 'E' AND t.date >= ? AND t.date <= ? ORDER BY ABS(t.amount) DESC LIMIT 5`).all(userId, ws, we);
 
       const recap = {
         weekStart: ws, weekEnd: we,
@@ -505,25 +525,25 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
-      const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts`).all() as SqliteRow[];
-      const acct = account ? fuzzyFind(account, allAccounts) : await defaultAccount(sqlite);
+      const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const acct = account ? fuzzyFind(account, allAccounts) : await defaultAccount(sqlite, userId);
       if (!acct) return sqliteErr(account ? `Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}` : "No accounts found — create an account first.");
 
       let catId: number | null = null;
       if (category) {
-        const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+        const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
         const cat = fuzzyFind(category, allCats);
         if (!cat) return sqliteErr(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
         catId = Number(cat.id);
       } else {
-        catId = await autoCategory(sqlite, payee);
+        catId = await autoCategory(sqlite, userId, payee);
       }
 
       const result = await sqlite.prepare(
-        `INSERT INTO transactions (date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
-      ).get(txDate, acct.id, catId, acct.currency, amount, payee, note ?? "", tags ?? "") as { id: number };
+        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+      ).get(userId, txDate, acct.id, catId, acct.currency, amount, payee, note ?? "", tags ?? "") as { id: number };
 
-      const catName = catId ? (await sqlite.prepare(`SELECT name FROM categories WHERE id = ?`).get(catId) as { name: string } | undefined)?.name ?? "uncategorized" : "uncategorized";
+      const catName = catId ? (await sqlite.prepare(`SELECT name FROM categories WHERE user_id = ? AND id = ?`).get(userId, catId) as { name: string } | undefined)?.name ?? "uncategorized" : "uncategorized";
       return txt({ success: true, transactionId: result?.id, message: `Recorded: ${amount > 0 ? "+" : ""}${amount} on ${txDate} — "${payee}" → ${acct.name} (${catName})` });
     }
   );
@@ -545,10 +565,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     },
     async ({ transactions }) => {
       const today = new Date().toISOString().split("T")[0];
-      const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts`).all() as SqliteRow[];
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
-      const mru = await defaultAccount(sqlite);
-      const stmt = sqlite.prepare(`INSERT INTO transactions (date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const mru = await defaultAccount(sqlite, userId);
+      const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
       const results: { index: number; success: boolean; message: string }[] = [];
       for (let i = 0; i < transactions.length; i++) {
@@ -558,8 +578,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
           if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
           let catId: number | null = null;
           if (t.category) { const cat = fuzzyFind(t.category, allCats); catId = cat ? Number(cat.id) : null; }
-          else catId = await autoCategory(sqlite, t.payee);
-          await stmt.run(t.date ?? today, acct.id, catId, acct.currency, t.amount, t.payee, t.note ?? "", t.tags ?? "");
+          else catId = await autoCategory(sqlite, userId, t.payee);
+          await stmt.run(userId, t.date ?? today, acct.id, catId, acct.currency, t.amount, t.payee, t.note ?? "", t.tags ?? "");
           results.push({ index: i, success: true, message: `${t.payee}: ${t.amount}` });
         } catch (e) {
           results.push({ index: i, success: false, message: String(e) });
@@ -584,12 +604,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       tags: z.string().optional(),
     },
     async ({ id, date, amount, payee, category, note, tags }) => {
-      const existing = await sqlite.prepare(`SELECT id FROM transactions WHERE id = ?`).get(id);
-      if (!existing) return sqliteErr(`Transaction #${id} not found`);
+      const existing = await sqlite.prepare(`SELECT id FROM transactions WHERE id = ? AND user_id = ?`).get(id, userId);
+      if (!existing) return sqliteErr(`Transaction #${id} not found or not owned by user`);
 
       let catId: number | undefined;
       if (category !== undefined) {
-        const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+        const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
         const cat = fuzzyFind(category, allCats);
         if (!cat) return sqliteErr(`Category "${category}" not found`);
         catId = Number(cat.id);
@@ -605,8 +625,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       if (tags !== undefined) { updates.push("tags = ?"); params.push(tags); }
       if (!updates.length) return sqliteErr("No fields to update");
 
-      params.push(id);
-      await sqlite.prepare(`UPDATE transactions SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      params.push(id, userId);
+      await sqlite.prepare(`UPDATE transactions SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
       return txt({ success: true, message: `Transaction #${id} updated (${updates.length} field(s))` });
     }
   );
@@ -617,9 +637,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     "Permanently delete a transaction by ID",
     { id: z.number().describe("Transaction ID to delete") },
     async ({ id }) => {
-      const t = await sqlite.prepare(`SELECT id, payee, amount, date FROM transactions WHERE id = ?`).get(id) as { id: number; payee: string; amount: number; date: string } | undefined;
-      if (!t) return sqliteErr(`Transaction #${id} not found`);
-      await sqlite.prepare(`DELETE FROM transactions WHERE id = ?`).run(id);
+      const t = await sqlite.prepare(`SELECT id, payee, amount, date FROM transactions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; payee: string; amount: number; date: string } | undefined;
+      if (!t) return sqliteErr(`Transaction #${id} not found or not owned by user`);
+      await sqlite.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).run(id, userId);
       return txt({ success: true, message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}` });
     }
   );
@@ -630,12 +650,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     "Delete a budget entry for a category/month",
     { category: z.string().describe("Category name"), month: z.string().describe("Month (YYYY-MM)") },
     async ({ category, month }) => {
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
       const cat = fuzzyFind(category, allCats);
       if (!cat) return sqliteErr(`Category "${category}" not found`);
-      const existing = await sqlite.prepare(`SELECT id FROM budgets WHERE category_id = ? AND month = ?`).get(cat.id, month) as { id: number } | undefined;
+      const existing = await sqlite.prepare(`SELECT id FROM budgets WHERE user_id = ? AND category_id = ? AND month = ?`).get(userId, cat.id, month) as { id: number } | undefined;
       if (!existing) return sqliteErr(`No budget for "${cat.name}" in ${month}`);
-      await sqlite.prepare(`DELETE FROM budgets WHERE id = ?`).run(existing.id);
+      await sqlite.prepare(`DELETE FROM budgets WHERE id = ? AND user_id = ?`).run(existing.id, userId);
       return txt({ success: true, message: `Budget deleted: ${cat.name} for ${month}` });
     }
   );
@@ -652,9 +672,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       note: z.string().optional(),
     },
     async ({ name, type, group, currency, note }) => {
-      const existing = await sqlite.prepare(`SELECT id FROM accounts WHERE name = ?`).get(name);
+      const existing = await sqlite.prepare(`SELECT id FROM accounts WHERE user_id = ? AND name = ?`).get(userId, name);
       if (existing) return sqliteErr(`Account "${name}" already exists`);
-      const result = await sqlite.prepare(`INSERT INTO accounts (type, "group", name, currency, note) VALUES (?, ?, ?, ?, ?) RETURNING id`).get(type, group ?? "", name, currency ?? "CAD", note ?? "") as { id: number };
+      const result = await sqlite.prepare(`INSERT INTO accounts (user_id, type, "group", name, currency, note) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`).get(userId, type, group ?? "", name, currency ?? "CAD", note ?? "") as { id: number };
       return txt({ success: true, accountId: result?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})` });
     }
   );
@@ -671,7 +691,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       note: z.string().optional(),
     },
     async ({ account, name, group, currency, note }) => {
-      const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts`).all() as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found`);
       const updates: string[] = []; const params: unknown[] = [];
@@ -680,8 +700,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       if (currency !== undefined) { updates.push(`currency = ?`); params.push(currency); }
       if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
       if (!updates.length) return sqliteErr("No fields to update");
-      params.push(acct.id);
-      await sqlite.prepare(`UPDATE accounts SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      params.push(acct.id, userId);
+      await sqlite.prepare(`UPDATE accounts SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
       return txt({ success: true, message: `Account "${acct.name}" updated` });
     }
   );
@@ -695,12 +715,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       force: z.boolean().optional(),
     },
     async ({ account, force }) => {
-      const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts`).all() as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found`);
-      const count = (await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE account_id = ?`).get(acct.id) as { cnt: number }).cnt;
+      const count = (await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND account_id = ?`).get(userId, acct.id) as { cnt: number }).cnt;
       if (count > 0 && !force) return sqliteErr(`Account "${acct.name}" has ${count} transaction(s). Pass force=true to delete.`);
-      await sqlite.prepare(`DELETE FROM accounts WHERE id = ?`).run(acct.id);
+      await sqlite.prepare(`DELETE FROM accounts WHERE id = ? AND user_id = ?`).run(acct.id, userId);
       return txt({ success: true, message: `Account "${acct.name}" deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` });
     }
   );
@@ -717,7 +737,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       name: z.string().optional().describe("Rename the goal"),
     },
     async ({ goal, target_amount, deadline, status, name }) => {
-      const allGoals = await sqlite.prepare(`SELECT id, name FROM goals`).all() as SqliteRow[];
+      const allGoals = await sqlite.prepare(`SELECT id, name FROM goals WHERE user_id = ?`).all(userId) as SqliteRow[];
       const g = fuzzyFind(goal, allGoals);
       if (!g) return sqliteErr(`Goal "${goal}" not found`);
       const updates: string[] = []; const params: unknown[] = [];
@@ -726,8 +746,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       if (deadline !== undefined) { updates.push(`deadline = ?`); params.push(deadline); }
       if (status !== undefined) { updates.push(`status = ?`); params.push(status); }
       if (!updates.length) return sqliteErr("No fields to update");
-      params.push(g.id);
-      await sqlite.prepare(`UPDATE goals SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      params.push(g.id, userId);
+      await sqlite.prepare(`UPDATE goals SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
       return txt({ success: true, message: `Goal "${g.name}" updated` });
     }
   );
@@ -738,10 +758,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     "Delete a financial goal by name",
     { goal: z.string().describe("Goal name (fuzzy matched)") },
     async ({ goal }) => {
-      const allGoals = await sqlite.prepare(`SELECT id, name FROM goals`).all() as SqliteRow[];
+      const allGoals = await sqlite.prepare(`SELECT id, name FROM goals WHERE user_id = ?`).all(userId) as SqliteRow[];
       const g = fuzzyFind(goal, allGoals);
       if (!g) return sqliteErr(`Goal "${goal}" not found`);
-      await sqlite.prepare(`DELETE FROM goals WHERE id = ?`).run(g.id);
+      await sqlite.prepare(`DELETE FROM goals WHERE id = ? AND user_id = ?`).run(g.id, userId);
       return txt({ success: true, message: `Goal "${g.name}" deleted` });
     }
   );
@@ -757,9 +777,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       note: z.string().optional(),
     },
     async ({ name, type, group, note }) => {
-      const existing = await sqlite.prepare(`SELECT id FROM categories WHERE name = ?`).get(name);
+      const existing = await sqlite.prepare(`SELECT id FROM categories WHERE user_id = ? AND name = ?`).get(userId, name);
       if (existing) return sqliteErr(`Category "${name}" already exists`);
-      const result = await sqlite.prepare(`INSERT INTO categories (name, type, "group", note) VALUES (?, ?, ?, ?) RETURNING id`).get(name, type, group ?? "", note ?? "") as { id: number };
+      const result = await sqlite.prepare(`INSERT INTO categories (user_id, name, type, "group", note) VALUES (?, ?, ?, ?, ?) RETURNING id`).get(userId, name, type, group ?? "", note ?? "") as { id: number };
       return txt({ success: true, categoryId: result?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` });
     }
   );
@@ -776,10 +796,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       priority: z.number().optional().describe("Default 0"),
     },
     async ({ match_payee, assign_category, rename_to, assign_tags, priority }) => {
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
       const cat = fuzzyFind(assign_category, allCats);
       if (!cat) return sqliteErr(`Category "${assign_category}" not found`);
-      await sqlite.prepare(`INSERT INTO transaction_rules (match_payee, assign_category_id, rename_to, assign_tags, priority, is_active) VALUES (?, ?, ?, ?, ?, 1)`).run(match_payee, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0);
+      await sqlite.prepare(
+        `INSERT INTO transaction_rules (user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)`
+      ).run(userId, match_payee, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0);
       return txt({ success: true, message: `Rule created: "${match_payee}" → ${cat.name}` });
     }
   );
@@ -793,12 +815,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       category: z.string().describe("Category name to assign"),
     },
     async ({ transaction_id, category }) => {
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories`).all() as SqliteRow[];
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
       const cat = fuzzyFind(category, allCats);
       if (!cat) return sqliteErr(`Category "${category}" not found`);
-      const txn = await sqlite.prepare(`SELECT id, payee FROM transactions WHERE id = ?`).get(transaction_id) as { id: number; payee: string } | undefined;
-      if (!txn) return sqliteErr(`Transaction #${transaction_id} not found`);
-      await sqlite.prepare(`UPDATE transactions SET category_id = ? WHERE id = ?`).run(cat.id, transaction_id);
+      const txn = await sqlite.prepare(`SELECT id, payee FROM transactions WHERE id = ? AND user_id = ?`).get(transaction_id, userId) as { id: number; payee: string } | undefined;
+      if (!txn) return sqliteErr(`Transaction #${transaction_id} not found or not owned by user`);
+      await sqlite.prepare(`UPDATE transactions SET category_id = ? WHERE id = ? AND user_id = ?`).run(cat.id, transaction_id, userId);
       return txt({ success: true, message: `Transaction #${transaction_id} ("${txn.payee}") categorized as "${cat.name}"` });
     }
   );
@@ -815,10 +837,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
                COALESCE(SUM(t.amount), 0) as book_value
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
-        LEFT JOIN transactions t ON t.portfolio_holding = ph.name
+        LEFT JOIN transactions t ON t.portfolio_holding = ph.name AND t.user_id = ?
+        WHERE ph.user_id = ?
         GROUP BY ph.id, ph.name, ph.symbol, ph.currency, a.name
         ORDER BY ABS(COALESCE(SUM(t.amount), 0)) DESC
-      `).all() as SqliteRow[];
+      `).all(userId, userId) as SqliteRow[];
 
       const byCurrency: Record<string, number> = {};
       const byAccount: Record<string, number> = {};
@@ -872,9 +895,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as proceeds,
                SUM(quantity) as net_quantity,
                MIN(date) as first_purchase, MAX(date) as last_activity
-        FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND date >= ?
+        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND date >= ?
         GROUP BY portfolio_holding ORDER BY cost_basis DESC
-      `).all(since) as SqliteRow[];
+      `).all(userId, since) as SqliteRow[];
 
       const results = perf.map(p => {
         const costBasis = Number(p.cost_basis ?? 0);
@@ -913,9 +936,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
       const txns = await sqlite.prepare(`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding, a.name as account_name, a.currency
         FROM transactions t JOIN accounts a ON a.id = t.account_id
-        WHERE (LOWER(t.portfolio_holding) LIKE LOWER(?) OR LOWER(t.payee) LIKE LOWER(?))
+        WHERE t.user_id = ? AND (LOWER(t.portfolio_holding) LIKE LOWER(?) OR LOWER(t.payee) LIKE LOWER(?))
         ORDER BY t.date ASC
-      `).all(`%${symbol}%`, `%${symbol}%`) as SqliteRow[];
+      `).all(userId, `%${symbol}%`, `%${symbol}%`) as SqliteRow[];
 
       if (!txns.length) return sqliteErr(`No transactions found for "${symbol}"`);
 
@@ -956,9 +979,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     async ({ targets }) => {
       const holdings = await sqlite.prepare(`
         SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value
-        FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
         GROUP BY portfolio_holding
-      `).all() as SqliteRow[];
+      `).all(userId) as SqliteRow[];
 
       const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
       if (totalBV === 0) return sqliteErr("No portfolio holdings found");
@@ -998,15 +1021,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
     async () => {
       const positions = await sqlite.prepare(`
         SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value, COUNT(*) as purchases
-        FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
         GROUP BY portfolio_holding ORDER BY book_value DESC
-      `).all() as SqliteRow[];
+      `).all(userId) as SqliteRow[];
 
       const contributions = await sqlite.prepare(`
         SELECT strftime('%Y-%m', date) as month, SUM(ABS(amount)) as invested
-        FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
         GROUP BY strftime('%Y-%m', date) ORDER BY month DESC LIMIT 12
-      `).all() as SqliteRow[];
+      `).all(userId) as SqliteRow[];
 
       const totalInvested = positions.reduce((s, p) => s + Number(p.book_value), 0);
       const top3 = positions.slice(0, 3).reduce((s, p) => s + Number(p.book_value), 0) / (totalInvested || 1);
@@ -1051,8 +1074,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb) {
 
       const row = await sqlite.prepare(`
         SELECT MIN(date) as first_date, MAX(date) as last_date, SUM(ABS(amount)) as total_invested
-        FROM transactions WHERE portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
-      `).get() as { first_date: string | null; last_date: string; total_invested: number } | undefined;
+        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+      `).get(userId) as { first_date: string | null; last_date: string; total_invested: number } | undefined;
 
       if (!row?.first_date) return txt({ disclaimer: PORTFOLIO_DISCLAIMER, message: "No investment transactions found" });
 

@@ -11,6 +11,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { registerClient } from "@/lib/oauth";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -23,6 +24,27 @@ export async function OPTIONS() {
 }
 
 export async function POST(request: NextRequest) {
+  // Rate limit: 10 registrations per hour per IP. DCR is unauthenticated by
+  // spec (RFC 7591) so this is the only thing standing between us and an
+  // attacker spraying the oauth_clients table.
+  const ip =
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const rateLimit = checkRateLimit(`oauth-register:${ip}`, 10, 60 * 60_000);
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { error: "Too many client registrations. Please try again later." },
+      {
+        status: 429,
+        headers: {
+          ...CORS_HEADERS,
+          "Retry-After": String(
+            Math.ceil((rateLimit.resetAt - Date.now()) / 1000)
+          ),
+        },
+      }
+    );
+  }
+
   let body: Record<string, unknown> = {};
   try {
     const ct = request.headers.get("content-type") ?? "";

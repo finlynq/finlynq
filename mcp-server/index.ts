@@ -14,6 +14,23 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
+const userId = process.env.PF_USER_ID?.trim();
+if (!userId) {
+  console.error("ERROR: PF_USER_ID environment variable is required.");
+  console.error("");
+  console.error("The stdio MCP server has no HTTP auth, so it must be bound to a single");
+  console.error("user at startup. Export PF_USER_ID alongside DATABASE_URL so the server");
+  console.error("can scope every query to your account.");
+  console.error("");
+  console.error("PF_USER_ID must match a row in the users table (users.id, a UUID).");
+  console.error("");
+  console.error("Example:");
+  console.error("  PF_USER_ID=00000000-0000-0000-0000-000000000001 \\");
+  console.error("  DATABASE_URL=postgresql://user:pass@localhost:5432/finlynq \\");
+  console.error("  node mcp-server/dist/index.js");
+  process.exit(1);
+}
+
 const pool = new Pool({ connectionString: databaseUrl });
 
 // Validate connection
@@ -36,14 +53,14 @@ const server = new McpServer({
   version: "3.0.0",
 });
 
-registerCoreTools(server, db);
-registerV2Tools(server, db);
-registerImportTemplateTools(server, db);
+registerCoreTools(server, db, { userId });
+registerV2Tools(server, db, { userId });
+registerImportTemplateTools(server, db, { userId });
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Finlynq MCP server v3.0 running on stdio (PostgreSQL mode)");
+  console.error(`Finlynq MCP server v3.0 running on stdio (PostgreSQL mode, user=${userId})`);
 }
 
 main().catch(console.error);
