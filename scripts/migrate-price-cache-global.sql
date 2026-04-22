@@ -18,6 +18,15 @@
 
 BEGIN;
 
+-- Existing rows may be duplicated per (symbol, date) because the old schema
+-- kept a copy per user_id. Collapse to one row per (symbol, date) — keep the
+-- highest id (most recently inserted, so freshest price).
+DELETE FROM price_cache a
+USING price_cache b
+WHERE a.id < b.id
+  AND a.symbol = b.symbol
+  AND a.date = b.date;
+
 DROP INDEX IF EXISTS idx_price_cache_user_id;
 
 ALTER TABLE price_cache DROP COLUMN IF EXISTS user_id;
