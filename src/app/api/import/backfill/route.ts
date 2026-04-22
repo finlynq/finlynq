@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, isNull } from "drizzle-orm";
 import { generateImportHash } from "@/lib/import-hash";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { decryptField } from "@/lib/crypto/envelope";
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  // Needs the DEK so we can decrypt payees before hashing — generateImportHash
+  // must see plaintext or the hash won't match future imports.
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const transactions = db
       .select()
@@ -20,11 +24,12 @@ export async function POST(request: NextRequest) {
     for (let i = 0; i < transactions.length; i += batchSize) {
       const batch = transactions.slice(i, i + batchSize);
       for (const tx of batch) {
+        const plainPayee = decryptField(dek, tx.payee) ?? "";
         const hash = generateImportHash(
           tx.date,
           tx.accountId ?? 0,
           tx.amount,
-          tx.payee ?? "",
+          plainPayee,
         );
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         db.update(schema.transactions)

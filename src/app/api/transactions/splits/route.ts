@@ -10,6 +10,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import {
+  encryptSplitWrite,
+  decryptSplitRows,
+} from "@/lib/crypto/encrypted-columns";
 import { db, schema } from "@/db";
 import { eq, and, inArray } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
@@ -41,8 +46,9 @@ async function assertTxnOwnership(transactionId: number, userId: string): Promis
 }
 
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
 
   const transactionIdParam = request.nextUrl.searchParams.get("transactionId");
 
@@ -51,7 +57,7 @@ export async function GET(request: NextRequest) {
     const userTxnIds = await db
       .select({ id: transactions.id })
       .from(transactions)
-      .where(eq(transactions.userId, auth.context.userId))
+      .where(eq(transactions.userId, userId))
       .all();
     const ids = userTxnIds.map((t) => t.id);
     if (ids.length === 0) return NextResponse.json([]);
@@ -60,7 +66,7 @@ export async function GET(request: NextRequest) {
       .from(transactionSplits)
       .where(inArray(transactionSplits.transactionId, ids))
       .all();
-    return NextResponse.json(splits);
+    return NextResponse.json(decryptSplitRows(dek, splits));
   }
 
   const transactionId = Number(transactionIdParam);
@@ -68,7 +74,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "transactionId is required" }, { status: 400 });
   }
 
-  if (!(await assertTxnOwnership(transactionId, auth.context.userId))) {
+  if (!(await assertTxnOwnership(transactionId, userId))) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
@@ -78,12 +84,13 @@ export async function GET(request: NextRequest) {
     .where(eq(transactionSplits.transactionId, transactionId))
     .all();
 
-  return NextResponse.json(splits);
+  return NextResponse.json(decryptSplitRows(dek, splits));
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
 
   try {
     const body = await request.json();
@@ -92,25 +99,32 @@ export async function POST(request: NextRequest) {
 
     const { transactionId, splits } = parsed.data;
 
-    if (!(await assertTxnOwnership(transactionId, auth.context.userId))) {
+    if (!(await assertTxnOwnership(transactionId, userId))) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
     // Replace existing splits atomically
     await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId));
 
-    const rows = splits.map((s) => ({
-      transactionId,
-      categoryId: s.categoryId ?? null,
-      accountId: s.accountId ?? null,
-      amount: s.amount,
-      note: s.note ?? "",
-      description: s.description ?? "",
-      tags: s.tags ?? "",
-    }));
+    const rows = splits.map((s) => {
+      const encrypted = encryptSplitWrite(dek, {
+        note: s.note ?? "",
+        description: s.description ?? "",
+        tags: s.tags ?? "",
+      });
+      return {
+        transactionId,
+        categoryId: s.categoryId ?? null,
+        accountId: s.accountId ?? null,
+        amount: s.amount,
+        note: encrypted.note ?? "",
+        description: encrypted.description ?? "",
+        tags: encrypted.tags ?? "",
+      };
+    });
 
     const inserted = await db.insert(transactionSplits).values(rows).returning().all();
-    return NextResponse.json(inserted, { status: 201 });
+    return NextResponse.json(decryptSplitRows(dek, inserted), { status: 201 });
   } catch (error) {
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to save splits") },

@@ -11,7 +11,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { decryptField } from "../src/lib/crypto/envelope";
+import { decryptField, encryptField } from "../src/lib/crypto/envelope";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -59,8 +59,20 @@ function fuzzyFind(input: string, options: Row[]): Row | null {
   );
 }
 
-/** Auto-categorize payee: transaction_rules → historical frequency */
-async function autoCategory(db: DbLike, userId: string, payee: string): Promise<number | null> {
+/**
+ * Auto-categorize payee: transaction_rules → historical frequency.
+ *
+ * Rule matching runs in SQL (transaction_rules.match_payee is plaintext).
+ * The historical-frequency match must run in memory when payees are
+ * encrypted — equality against ciphertext never hits. With no DEK the
+ * history match is skipped; rule matches still work.
+ */
+async function autoCategory(
+  db: DbLike,
+  userId: string,
+  payee: string,
+  dek: Buffer | null
+): Promise<number | null> {
   if (!payee) return null;
   const lo = `%${payee.toLowerCase()}%`;
   const rules = await q(db, sql`
@@ -70,12 +82,43 @@ async function autoCategory(db: DbLike, userId: string, payee: string): Promise<
     ORDER BY priority DESC LIMIT 1
   `);
   if (rules.length && rules[0].assign_category_id) return Number(rules[0].assign_category_id);
-  const hist = await q(db, sql`
-    SELECT category_id, COUNT(*) as cnt FROM transactions
-    WHERE user_id = ${userId} AND LOWER(payee) = LOWER(${payee}) AND category_id IS NOT NULL
-    GROUP BY category_id ORDER BY cnt DESC LIMIT 1
+
+  if (!dek) {
+    // Legacy plaintext-only fallback
+    const hist = await q(db, sql`
+      SELECT category_id, COUNT(*) as cnt FROM transactions
+      WHERE user_id = ${userId} AND LOWER(payee) = LOWER(${payee}) AND category_id IS NOT NULL
+      GROUP BY category_id ORDER BY cnt DESC LIMIT 1
+    `);
+    return hist.length ? Number(hist[0].category_id) : null;
+  }
+
+  // Fetch candidate rows with category, decrypt payee, then tally.
+  const rows = await q(db, sql`
+    SELECT payee, category_id FROM transactions
+    WHERE user_id = ${userId} AND category_id IS NOT NULL AND payee IS NOT NULL AND payee <> ''
+    ORDER BY date DESC, id DESC
+    LIMIT 5000
   `);
-  return hist.length ? Number(hist[0].category_id) : null;
+  const target = payee.toLowerCase();
+  const counts = new Map<number, number>();
+  for (const r of rows) {
+    const p = decryptField(dek, String(r.payee ?? ""));
+    if (!p) continue;
+    if (p.toLowerCase() === target) {
+      const cid = Number(r.category_id);
+      counts.set(cid, (counts.get(cid) ?? 0) + 1);
+    }
+  }
+  let bestId: number | null = null;
+  let bestCnt = 0;
+  for (const [id, cnt] of counts) {
+    if (cnt > bestCnt) {
+      bestCnt = cnt;
+      bestId = id;
+    }
+  }
+  return bestId;
 }
 
 /** Most-recently-used account for the user */
@@ -975,12 +1018,19 @@ export function registerPgTools(
         if (!cat) return err(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
         catId = Number(cat.id);
       } else {
-        catId = await autoCategory(db, userId, payee);
+        catId = await autoCategory(db, userId, payee, dek);
       }
+
+      // Encrypt text fields when a DEK is available. Without one (legacy API
+      // keys) we fall back to plaintext; the row will still be readable via
+      // the legacy passthrough in decryptField.
+      const encPayee = dek ? encryptField(dek, payee) : payee;
+      const encNote = dek ? encryptField(dek, note ?? "") : (note ?? "");
+      const encTags = dek ? encryptField(dek, tags ?? "") : (tags ?? "");
 
       const result = await q(db, sql`
         INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags)
-        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${acct.currency}, ${amount}, ${payee}, ${note ?? ""}, ${tags ?? ""})
+        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${acct.currency}, ${amount}, ${encPayee}, ${encNote}, ${encTags})
         RETURNING id
       `);
 
@@ -1026,12 +1076,16 @@ export function registerPgTools(
             const cat = fuzzyFind(t.category, allCats);
             catId = cat ? Number(cat.id) : null;
           } else {
-            catId = await autoCategory(db, userId, t.payee);
+            catId = await autoCategory(db, userId, t.payee, dek);
           }
+
+          const encPayee = dek ? encryptField(dek, t.payee) : t.payee;
+          const encNote = dek ? encryptField(dek, t.note ?? "") : (t.note ?? "");
+          const encTags = dek ? encryptField(dek, t.tags ?? "") : (t.tags ?? "");
 
           await db.execute(sql`
             INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags)
-            VALUES (${userId}, ${t.date ?? today}, ${acct.id}, ${catId}, ${acct.currency}, ${t.amount}, ${t.payee}, ${t.note ?? ""}, ${t.tags ?? ""})
+            VALUES (${userId}, ${t.date ?? today}, ${acct.id}, ${catId}, ${acct.currency}, ${t.amount}, ${encPayee}, ${encNote}, ${encTags})
           `);
           results.push({ index: i, success: true, message: `${t.payee}: ${t.amount}` });
         } catch (e) {
@@ -1069,19 +1123,41 @@ export function registerPgTools(
         catId = Number(cat.id);
       }
 
-      // Build SET clause dynamically
-      const updates: string[] = [];
-      if (date !== undefined) updates.push(`date = '${date}'`);
-      if (amount !== undefined) updates.push(`amount = ${amount}`);
-      if (payee !== undefined) updates.push(`payee = '${payee.replace(/'/g, "''")}'`);
-      if (catId !== undefined) updates.push(`category_id = ${catId}`);
-      if (note !== undefined) updates.push(`note = '${note.replace(/'/g, "''")}'`);
-      if (tags !== undefined) updates.push(`tags = '${tags.replace(/'/g, "''")}'`);
+      // Apply each field as its own parameterized UPDATE. Simpler and safer
+      // than a dynamic SET clause, and the per-call latency is negligible
+      // (tool is called once at a time).
+      let changed = 0;
+      if (date !== undefined) {
+        await db.execute(sql`UPDATE transactions SET date = ${date} WHERE id = ${id} AND user_id = ${userId}`);
+        changed++;
+      }
+      if (amount !== undefined) {
+        await db.execute(sql`UPDATE transactions SET amount = ${amount} WHERE id = ${id} AND user_id = ${userId}`);
+        changed++;
+      }
+      if (catId !== undefined) {
+        await db.execute(sql`UPDATE transactions SET category_id = ${catId} WHERE id = ${id} AND user_id = ${userId}`);
+        changed++;
+      }
+      if (payee !== undefined) {
+        const v = dek ? encryptField(dek, payee) : payee;
+        await db.execute(sql`UPDATE transactions SET payee = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        changed++;
+      }
+      if (note !== undefined) {
+        const v = dek ? encryptField(dek, note) : note;
+        await db.execute(sql`UPDATE transactions SET note = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        changed++;
+      }
+      if (tags !== undefined) {
+        const v = dek ? encryptField(dek, tags) : tags;
+        await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        changed++;
+      }
 
-      if (!updates.length) return err("No fields to update");
+      if (!changed) return err("No fields to update");
 
-      await db.execute(sql`UPDATE transactions SET ${sql.raw(updates.join(", "))} WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, message: `Transaction #${id} updated (${updates.length} field(s))` });
+      return text({ success: true, message: `Transaction #${id} updated (${changed} field(s))` });
     }
   );
 
