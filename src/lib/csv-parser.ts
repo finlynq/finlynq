@@ -1,5 +1,5 @@
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { generateImportHash, checkDuplicates } from "./import-hash";
 import type { RawTransaction } from "./import-pipeline";
 
@@ -349,7 +349,7 @@ export async function importAccounts(csvText: string, userId: string) {
       const existing = await db
         .select()
         .from(schema.accounts)
-        .where(eq(schema.accounts.name, row["Account"]))
+        .where(and(eq(schema.accounts.userId, userId), eq(schema.accounts.name, row["Account"])))
         .get();
       if (!existing) {
         await db.insert(schema.accounts)
@@ -387,7 +387,7 @@ export async function importCategories(csvText: string, userId: string) {
       const existing = await db
         .select()
         .from(schema.categories)
-        .where(eq(schema.categories.name, row["Category"]))
+        .where(and(eq(schema.categories.userId, userId), eq(schema.categories.name, row["Category"])))
         .get();
       if (!existing) {
         await db.insert(schema.categories)
@@ -420,7 +420,7 @@ export async function importPortfolio(csvText: string, userId: string) {
       const account = await db
         .select()
         .from(schema.accounts)
-        .where(eq(schema.accounts.name, row["Portfolio account name"]))
+        .where(and(eq(schema.accounts.userId, userId), eq(schema.accounts.name, row["Portfolio account name"])))
         .get();
       if (!account) {
         errors.push(`Account not found: "${row["Portfolio account name"]}"`);
@@ -430,7 +430,7 @@ export async function importPortfolio(csvText: string, userId: string) {
       const existing = await db
         .select()
         .from(schema.portfolioHoldings)
-        .where(eq(schema.portfolioHoldings.name, row["Portfolio holding name"]))
+        .where(and(eq(schema.portfolioHoldings.userId, userId), eq(schema.portfolioHoldings.name, row["Portfolio holding name"])))
         .get();
       if (!existing) {
         await db.insert(schema.portfolioHoldings)
@@ -470,11 +470,19 @@ export async function importTransactions(csvText: string, userId: string) {
   let skippedDuplicates = 0;
   const batchSize = 500;
 
-  const allAccounts = await db.select().from(schema.accounts).all();
-  const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
+  const userAccounts = await db
+    .select()
+    .from(schema.accounts)
+    .where(eq(schema.accounts.userId, userId))
+    .all();
+  const accountMap = new Map(userAccounts.map((a) => [a.name, a.id]));
 
-  const allCategories = await db.select().from(schema.categories).all();
-  const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
+  const userCategories = await db
+    .select()
+    .from(schema.categories)
+    .where(eq(schema.categories.userId, userId))
+    .all();
+  const categoryMap = new Map(userCategories.map((c) => [c.name, c.id]));
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
