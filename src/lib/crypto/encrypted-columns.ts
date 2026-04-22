@@ -9,7 +9,8 @@
  * Phase 1 scope:
  *   - transactions: payee, note, tags, portfolio_holding
  *
- * Phase 2 will extend the list as we migrate more tables.
+ * Phase 3 extensions:
+ *   - transaction_splits: note, description, tags
  */
 
 import { encryptField, decryptField } from "./envelope";
@@ -23,6 +24,15 @@ export const TX_ENCRYPTED_FIELDS = [
 ] as const;
 
 type TxEncryptedKey = (typeof TX_ENCRYPTED_FIELDS)[number];
+
+/** Columns on `transaction_splits` that are ciphertext-at-rest. */
+export const SPLIT_ENCRYPTED_FIELDS = [
+  "note",
+  "description",
+  "tags",
+] as const;
+
+type SplitEncryptedKey = (typeof SPLIT_ENCRYPTED_FIELDS)[number];
 
 /** Shallow-encrypt the named fields of a transaction write payload. */
 export function encryptTxWrite<T extends Partial<Record<TxEncryptedKey, string | null | undefined>>>(
@@ -77,4 +87,39 @@ export function filterDecryptedBySearch<
       (r.tags?.toLowerCase().includes(q) ?? false)
     );
   });
+}
+
+/** Shallow-encrypt the named fields of a transaction-split write payload. */
+export function encryptSplitWrite<T extends Partial<Record<SplitEncryptedKey, string | null | undefined>>>(
+  dek: Buffer,
+  data: T
+): T {
+  const out = { ...data };
+  for (const k of SPLIT_ENCRYPTED_FIELDS) {
+    if (k in data) {
+      (out as Record<string, string | null>)[k] = encryptField(dek, data[k] ?? null);
+    }
+  }
+  return out;
+}
+
+/** Shallow-decrypt the named fields of a transaction-split read row. */
+export function decryptSplitRow<T extends Partial<Record<SplitEncryptedKey, string | null | undefined>>>(
+  dek: Buffer,
+  row: T
+): T {
+  const out = { ...row };
+  for (const k of SPLIT_ENCRYPTED_FIELDS) {
+    if (k in row) {
+      (out as Record<string, string | null>)[k] = decryptField(dek, row[k] ?? null);
+    }
+  }
+  return out;
+}
+
+export function decryptSplitRows<T extends Partial<Record<SplitEncryptedKey, string | null | undefined>>>(
+  dek: Buffer,
+  rows: T[]
+): T[] {
+  return rows.map((r) => decryptSplitRow(dek, r));
 }

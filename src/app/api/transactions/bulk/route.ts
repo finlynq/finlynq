@@ -16,6 +16,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { encryptField } from "@/lib/crypto/envelope";
 import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
@@ -60,16 +62,36 @@ const bulkSchema = z.discriminatedUnion("action", [
 ]);
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
+  // Parse the body once so we can pick the right auth guard. Text-field
+  // actions need the DEK; ID/number-only actions don't.
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+  const parsed = validateBody(body, bulkSchema);
+  if (parsed.error) return parsed.error;
 
-  const { userId } = auth.context;
+  const needsDek =
+    parsed.data.action === "update_note" ||
+    parsed.data.action === "update_payee" ||
+    parsed.data.action === "update_tags";
+
+  let userId: string;
+  let dek: Buffer | null = null;
+  if (needsDek) {
+    const encAuth = await requireEncryption(request);
+    if (!encAuth.ok) return encAuth.response;
+    userId = encAuth.userId;
+    dek = encAuth.dek;
+  } else {
+    const baseAuth = await requireAuth(request);
+    if (!baseAuth.authenticated) return baseAuth.response;
+    userId = baseAuth.context.userId;
+  }
 
   try {
-    const body = await request.json();
-    const parsed = validateBody(body, bulkSchema);
-    if (parsed.error) return parsed.error;
-
     const { action, ids } = parsed.data;
 
     // All operations are scoped to the user's own transactions
@@ -108,7 +130,7 @@ export async function POST(request: NextRequest) {
       case "update_note":
         await db
           .update(transactions)
-          .set({ note: parsed.data.note })
+          .set({ note: encryptField(dek!, parsed.data.note) })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;
@@ -116,7 +138,7 @@ export async function POST(request: NextRequest) {
       case "update_payee":
         await db
           .update(transactions)
-          .set({ payee: parsed.data.payee })
+          .set({ payee: encryptField(dek!, parsed.data.payee) })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;
@@ -124,7 +146,7 @@ export async function POST(request: NextRequest) {
       case "update_tags":
         await db
           .update(transactions)
-          .set({ tags: parsed.data.tags })
+          .set({ tags: encryptField(dek!, parsed.data.tags) })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;

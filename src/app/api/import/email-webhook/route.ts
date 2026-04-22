@@ -98,6 +98,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "No importable data found in attachments" });
     }
 
+    // Email webhook has no live session → no DEK available. Writes go as
+    // plaintext. See CLAUDE.md "Phase 3 remaining work" for the webhook-DEK
+    // envelope design (mirrors the API-key wrap).
     const result = await executeImport(allRows, [], userId);
 
     // Create notification scoped to user

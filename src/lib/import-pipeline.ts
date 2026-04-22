@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { generateImportHash, checkDuplicates, checkFitIdDuplicates } from "./import-hash";
 import { applyRulesToBatch, type TransactionRule } from "./auto-categorize";
 import { normalizeDate, parseAmount as parseAmountStr } from "./csv-parser";
+import { encryptField } from "./crypto/envelope";
 
 export interface RawTransaction {
   date: string;
@@ -141,6 +142,7 @@ export async function executeImport(
   rows: RawTransaction[],
   forceImportIndices: number[] = [],
   userId?: string,
+  userDek?: Buffer,
 ): Promise<ImportResult> {
   if (rows.length === 0) {
     return { total: 0, imported: 0, skippedDuplicates: 0 };
@@ -273,10 +275,20 @@ export async function executeImport(
     // Auto-categorize is best-effort — don't fail the import
   }
 
-  // Batch insert
+  // Batch insert — encrypt text fields at the boundary (hash was computed on
+  // plaintext above, so dedup stays stable across imports).
   for (let i = 0; i < toInsert.length; i += batchSize) {
     const batch = toInsert.slice(i, i + batchSize);
-    const values = batch.map(({ rowIndex: _, ...rest }) => ({ ...rest, ...(userId ? { userId } : {}) }));
+    const values = batch.map(({ rowIndex: _, ...rest }) => {
+      const row = { ...rest, ...(userId ? { userId } : {}) };
+      if (userDek) {
+        row.payee = encryptField(userDek, row.payee) ?? "";
+        row.note = encryptField(userDek, row.note) ?? "";
+        row.tags = encryptField(userDek, row.tags) ?? "";
+        row.portfolioHolding = encryptField(userDek, row.portfolioHolding ?? null);
+      }
+      return row;
+    });
     if (values.length > 0) {
       try {
         await db.insert(schema.transactions).values(values);

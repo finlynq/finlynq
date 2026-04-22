@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const body = await request.json();
 
@@ -23,7 +24,7 @@ export async function POST(request: NextRequest) {
       forceImportIndices: number[];
     };
 
-    const result = await executeImport(rows, forceImportIndices, userId);
+    const result = await executeImport(rows, forceImportIndices, userId, dek);
     return NextResponse.json(result);
   } catch (error: unknown) {
     await logApiError("POST", "/api/import/execute", error, userId);

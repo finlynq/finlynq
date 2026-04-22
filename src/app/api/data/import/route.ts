@@ -1,10 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, inArray } from "drizzle-orm";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { encryptField, isEncrypted } from "@/lib/crypto/envelope";
 import { safeErrorMessage } from "@/lib/validate";
 
 type Row = Record<string, unknown>;
+
+/**
+ * Encrypt any plaintext on the named fields with the user's DEK. Rows that
+ * already carry `v1:` ciphertext pass through (same-account restore). A
+ * backup from a different account would be unreadable in both cases.
+ */
+function encryptRowFields(dek: Buffer, row: Row, fields: readonly string[]): Row {
+  const out = { ...row };
+  for (const f of fields) {
+    const v = out[f];
+    if (typeof v === "string" && v !== "" && !isEncrypted(v)) {
+      out[f] = encryptField(dek, v);
+    }
+  }
+  return out;
+}
+
+const TX_ENC_FIELDS = ["payee", "note", "tags", "portfolio_holding", "portfolioHolding"] as const;
+const SPLIT_ENC_FIELDS = ["note", "description", "tags"] as const;
 
 interface BackupData {
   version: string;
@@ -38,9 +58,9 @@ function strip(rows: Row[] | undefined, userId: string): Row[] {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
 
   let body: { backup: BackupData; confirm?: boolean };
   try {
@@ -153,15 +173,20 @@ export async function POST(request: NextRequest) {
         ;
     }
 
-    // Insert transactions, remapping FK references
+    // Insert transactions, remapping FK references. Plaintext text fields are
+    // encrypted at the boundary; `v1:` ciphertext from a same-account backup
+    // passes through unchanged.
     const txnIdMap = new Map<number, number>();
     if (d.transactions?.length) {
-      const remapped = d.transactions.map(({ id: _id, userId: _uid, accountId, categoryId, ...rest }) => ({
-        ...rest,
-        userId,
-        accountId: accountId != null ? (accountIdMap.get(accountId as number) ?? (accountId as number)) : null,
-        categoryId: categoryId != null ? (categoryIdMap.get(categoryId as number) ?? (categoryId as number)) : null,
-      }));
+      const remapped = d.transactions.map(({ id: _id, userId: _uid, accountId, categoryId, ...rest }) => {
+        const withFks = {
+          ...rest,
+          userId,
+          accountId: accountId != null ? (accountIdMap.get(accountId as number) ?? (accountId as number)) : null,
+          categoryId: categoryId != null ? (categoryIdMap.get(categoryId as number) ?? (categoryId as number)) : null,
+        };
+        return encryptRowFields(dek, withFks, TX_ENC_FIELDS);
+      });
       const inserted = await db
         .insert(schema.transactions)
         .values(remapped as (typeof schema.transactions.$inferInsert)[])
@@ -171,16 +196,19 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Insert transaction splits with remapped IDs
+    // Insert transaction splits with remapped IDs (also encrypting text fields)
     if (d.transactionSplits?.length && txnIdMap.size > 0) {
       const remapped = d.transactionSplits
-        .map(({ id: _id, transactionId, accountId, categoryId, ...rest }) => ({
-          ...rest,
-          transactionId: txnIdMap.get(transactionId as number) ?? (transactionId as number),
-          accountId: accountId != null ? (accountIdMap.get(accountId as number) ?? (accountId as number)) : null,
-          categoryId: categoryId != null ? (categoryIdMap.get(categoryId as number) ?? (categoryId as number)) : null,
-        }))
-        .filter((s) => s.transactionId != null);
+        .map(({ id: _id, transactionId, accountId, categoryId, ...rest }) => {
+          const withFks = {
+            ...rest,
+            transactionId: txnIdMap.get(transactionId as number) ?? (transactionId as number),
+            accountId: accountId != null ? (accountIdMap.get(accountId as number) ?? (accountId as number)) : null,
+            categoryId: categoryId != null ? (categoryIdMap.get(categoryId as number) ?? (categoryId as number)) : null,
+          };
+          return encryptRowFields(dek, withFks, SPLIT_ENC_FIELDS);
+        })
+        .filter((s) => (s as { transactionId: unknown }).transactionId != null);
       if (remapped.length) {
         await db
           .insert(schema.transactionSplits)
