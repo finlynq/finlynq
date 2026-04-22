@@ -50,13 +50,12 @@ export async function POST(request: NextRequest) {
     }
 
     // Load user's import templates for CSV matching
-    const templateRows = db
+    const templateRows = await db
       .select()
       .from(schema.importTemplates)
       .where(eq(schema.importTemplates.userId, userId))
       .all();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const templates = (templateRows as any[]).map(deserializeTemplate);
+    const templates = templateRows.map(deserializeTemplate);
 
     const formData = await request.formData() as unknown as globalThis.FormData;
     const allRows: RawTransaction[] = [];

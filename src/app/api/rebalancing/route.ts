@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 
@@ -23,8 +23,8 @@ export async function GET(request: NextRequest) {
     .where(eq(schema.portfolioHoldings.userId, userId))
     .all();
 
-  // Get latest cached prices
-  const prices = await db.select().from(schema.priceCache).where(eq(schema.priceCache.userId, userId)).all();
+  // Get latest cached prices (shared global cache, not per-user)
+  const prices = await db.select().from(schema.priceCache).all();
   const priceMap = new Map<string, number>();
   for (const p of prices) {
     const sym = String(p.symbol);

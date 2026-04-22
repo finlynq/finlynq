@@ -93,7 +93,7 @@ describe("safeErrorMessage", () => {
 
   it("formats ZodError messages", () => {
     const zodErr = new ZodError([
-      { code: "invalid_type", expected: "string", received: "number", path: ["name"], message: "Expected string" },
+      { code: "invalid_type", expected: "string", input: 0, path: ["name"], message: "Expected string" },
     ]);
     expect(safeErrorMessage(zodErr, "Fallback")).toBe("Expected string");
   });

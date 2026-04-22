@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { userId, dek } = auth;
   try {
-    const transactions = db
+    const transactions = await db
       .select()
       .from(schema.transactions)
       .where(and(isNull(schema.transactions.importHash), eq(schema.transactions.userId, userId)))

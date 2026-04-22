@@ -135,9 +135,10 @@ export const recurringTransactions = pgTable("recurring_transactions", {
   note: text("note").default(""),
 });
 
+// Global cache — market data (Yahoo Finance, CoinGecko) is identical across users,
+// so rows are shared. Not included in per-user wipe/export/import flows.
 export const priceCache = pgTable("price_cache", {
   id: serial("id").primaryKey(),
-  userId: text("user_id").notNull(),
   symbol: text("symbol").notNull(),
   date: text("date").notNull(),
   price: doublePrecision("price").notNull(),

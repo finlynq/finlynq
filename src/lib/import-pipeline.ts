@@ -141,7 +141,7 @@ export async function previewImport(rows: RawTransaction[]): Promise<PreviewResu
 export async function executeImport(
   rows: RawTransaction[],
   forceImportIndices: number[] = [],
-  userId?: string,
+  userId: string,
   userDek?: Buffer,
 ): Promise<ImportResult> {
   if (rows.length === 0) {
@@ -280,7 +280,7 @@ export async function executeImport(
   for (let i = 0; i < toInsert.length; i += batchSize) {
     const batch = toInsert.slice(i, i + batchSize);
     const values = batch.map(({ rowIndex: _, ...rest }) => {
-      const row = { ...rest, ...(userId ? { userId } : {}) };
+      const row = { ...rest, userId };
       if (userDek) {
         row.payee = encryptField(userDek, row.payee) ?? "";
         row.note = encryptField(userDek, row.note) ?? "";

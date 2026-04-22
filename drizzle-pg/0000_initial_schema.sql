@@ -121,7 +121,6 @@ CREATE TABLE IF NOT EXISTS "recurring_transactions" (
 
 CREATE TABLE IF NOT EXISTS "price_cache" (
   "id" serial PRIMARY KEY,
-  "user_id" text NOT NULL,
   "symbol" text NOT NULL,
   "date" text NOT NULL,
   "price" double precision NOT NULL,
@@ -218,7 +217,7 @@ CREATE INDEX IF NOT EXISTS "idx_recurring_transactions_user_id" ON "recurring_tr
 CREATE INDEX IF NOT EXISTS "idx_subscriptions_user_id" ON "subscriptions" ("user_id");
 CREATE INDEX IF NOT EXISTS "idx_notifications_user_id" ON "notifications" ("user_id");
 CREATE INDEX IF NOT EXISTS "idx_transaction_rules_user_id" ON "transaction_rules" ("user_id");
-CREATE INDEX IF NOT EXISTS "idx_price_cache_user_id" ON "price_cache" ("user_id");
+CREATE INDEX IF NOT EXISTS "idx_price_cache_symbol_date" ON "price_cache" ("symbol", "date");
 CREATE INDEX IF NOT EXISTS "idx_fx_rates_user_id" ON "fx_rates" ("user_id");
 CREATE INDEX IF NOT EXISTS "idx_budget_templates_user_id" ON "budget_templates" ("user_id");
 CREATE INDEX IF NOT EXISTS "idx_contribution_room_user_id" ON "contribution_room" ("user_id");
