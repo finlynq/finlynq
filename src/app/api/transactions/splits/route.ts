@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import {
   encryptSplitWrite,
   decryptSplitRows,
@@ -46,9 +47,12 @@ async function assertTxnOwnership(transactionId: number, userId: string): Promis
 }
 
 export async function GET(request: NextRequest) {
-  const auth = await requireEncryption(request);
-  if (!auth.ok) return auth.response;
-  const { userId, dek } = auth;
+  // Reads degrade gracefully — without a DEK, encrypted split rows ship
+  // as `v1:` ciphertext rather than 423-ing the transactions page.
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId, sessionId } = auth.context;
+  const dek = sessionId ? getDEK(sessionId) : null;
 
   const transactionIdParam = request.nextUrl.searchParams.get("transactionId");
 

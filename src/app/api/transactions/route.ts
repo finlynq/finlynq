@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
+import { getDEK } from "@/lib/crypto/dek-cache";
 import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch } from "@/lib/crypto/encrypted-columns";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
@@ -40,9 +41,16 @@ const putSchema = z.object({
 });
 
 export async function GET(request: NextRequest) {
-  const auth = await requireEncryption(request);
-  if (!auth.ok) return auth.response;
-  const { userId, dek } = auth;
+  // GET must stay accessible even when the session has no cached DEK
+  // (e.g. first request after a server restart). `decryptTxRows` passes
+  // rows through unchanged when dek is null — encrypted rows surface as
+  // `v1:...` ciphertext, which is ugly but recoverable (re-login
+  // repopulates the DEK cache), whereas 423-ing the whole transactions
+  // page blocks the user entirely.
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId, sessionId } = auth.context;
+  const dek = sessionId ? getDEK(sessionId) : null;
 
   const params = request.nextUrl.searchParams;
   const search = params.get("search") ?? undefined;

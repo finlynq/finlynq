@@ -48,11 +48,17 @@ export function encryptTxWrite<T extends Partial<Record<TxEncryptedKey, string |
   return out;
 }
 
-/** Shallow-decrypt the named fields of a transaction read row. */
+/**
+ * Shallow-decrypt the named fields of a transaction read row.
+ * When `dek` is null (e.g. session DEK cache missed after a deploy), rows
+ * pass through unchanged — legacy plaintext stays readable and encrypted
+ * rows ship as `v1:` ciphertext rather than 423-ing the whole page.
+ */
 export function decryptTxRow<T extends Partial<Record<TxEncryptedKey, string | null | undefined>>>(
-  dek: Buffer,
+  dek: Buffer | null,
   row: T
 ): T {
+  if (!dek) return row;
   const out = { ...row };
   for (const k of TX_ENCRYPTED_FIELDS) {
     if (k in row) {
@@ -63,9 +69,10 @@ export function decryptTxRow<T extends Partial<Record<TxEncryptedKey, string | n
 }
 
 export function decryptTxRows<T extends Partial<Record<TxEncryptedKey, string | null | undefined>>>(
-  dek: Buffer,
+  dek: Buffer | null,
   rows: T[]
 ): T[] {
+  if (!dek) return rows;
   return rows.map((r) => decryptTxRow(dek, r));
 }
 
@@ -103,11 +110,13 @@ export function encryptSplitWrite<T extends Partial<Record<SplitEncryptedKey, st
   return out;
 }
 
-/** Shallow-decrypt the named fields of a transaction-split read row. */
+/** Shallow-decrypt the named fields of a transaction-split read row.
+ *  Pass-through when `dek` is null — same rationale as decryptTxRow. */
 export function decryptSplitRow<T extends Partial<Record<SplitEncryptedKey, string | null | undefined>>>(
-  dek: Buffer,
+  dek: Buffer | null,
   row: T
 ): T {
+  if (!dek) return row;
   const out = { ...row };
   for (const k of SPLIT_ENCRYPTED_FIELDS) {
     if (k in row) {
@@ -118,8 +127,9 @@ export function decryptSplitRow<T extends Partial<Record<SplitEncryptedKey, stri
 }
 
 export function decryptSplitRows<T extends Partial<Record<SplitEncryptedKey, string | null | undefined>>>(
-  dek: Buffer,
+  dek: Buffer | null,
   rows: T[]
 ): T[] {
+  if (!dek) return rows;
   return rows.map((r) => decryptSplitRow(dek, r));
 }
