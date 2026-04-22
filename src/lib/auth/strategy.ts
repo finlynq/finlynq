@@ -20,6 +20,20 @@ export interface AuthContext {
   method: "passphrase" | "account" | "api_key" | "oauth";
   /** Whether MFA has been verified for this session */
   mfaVerified: boolean;
+  /**
+   * Session-scoped DEK for decrypting/encrypting this user's columns.
+   *
+   * Present when the session is warm (JWT login → DEK unwrapped → cached).
+   * Null when: pre-encryption user account (migration window), session DEK
+   * evicted by server restart, or auth path that doesn't carry a DEK yet
+   * (API key + OAuth MCP flows, added in Phase 2).
+   *
+   * Route handlers that need to read or write encrypted columns MUST check
+   * this and return `423 Locked` with a "please log in again" hint if absent.
+   */
+  dek: Buffer | null;
+  /** JWT `jti` (session ID) — used to invalidate the DEK cache on logout. */
+  sessionId: string | null;
 }
 
 /** Result of an authentication attempt */

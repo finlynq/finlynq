@@ -236,6 +236,15 @@ export const users = pgTable("users", {
   stripeCustomerId: text("stripe_customer_id"),
   loginCount: integer("login_count").notNull().default(0),
   lastLoginAt: text("last_login_at"),
+  // Envelope encryption: per-user DEK wrapped with a password-derived KEK.
+  // All fields are base64-encoded. See src/lib/crypto/envelope.ts.
+  // Nullable during migration — accounts created before encryption rollout
+  // have NULL here and are promoted to encrypted on next login.
+  kekSalt: text("kek_salt"),               // 16 bytes, scrypt salt for KEK derivation
+  dekWrapped: text("dek_wrapped"),         // 32 bytes, AES-GCM(KEK, DEK)
+  dekWrappedIv: text("dek_wrapped_iv"),    // 12 bytes, AES-GCM IV
+  dekWrappedTag: text("dek_wrapped_tag"),  // 16 bytes, AES-GCM auth tag
+  encryptionV: integer("encryption_v").notNull().default(1),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

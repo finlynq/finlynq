@@ -6,10 +6,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getDialect } from "@/db";
 import { hashPassword, createSessionToken, AUTH_COOKIE } from "@/lib/auth";
+import { SESSION_TTL_MS } from "@/lib/auth/jwt";
 import { createUser, getUserByEmail } from "@/lib/auth/queries";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sendEmail, emailVerificationEmail, welcomeEmail } from "@/lib/email";
+import { createWrappedDEKForPassword } from "@/lib/crypto/envelope";
+import { putDEK } from "@/lib/crypto/dek-cache";
 
 const registerSchema = z.object({
   email: z.string().email("Invalid email address"),
@@ -53,16 +56,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create user
+    // Create user: hash password AND generate the envelope-encryption DEK
     const passwordHash = await hashPassword(password);
-    const user = await createUser({ email, passwordHash, displayName });
+    const { dek, wrapped } = createWrappedDEKForPassword(password);
+
+    const user = await createUser({
+      email,
+      passwordHash,
+      displayName,
+      kekSalt: wrapped.salt.toString("base64"),
+      dekWrapped: wrapped.wrapped.toString("base64"),
+      dekWrappedIv: wrapped.iv.toString("base64"),
+      dekWrappedTag: wrapped.tag.toString("base64"),
+    });
 
     // Send verification and welcome emails (fire-and-forget)
     sendEmail(emailVerificationEmail(email, user.emailVerifyToken)).catch(() => {});
     sendEmail(welcomeEmail(email, displayName)).catch(() => {});
 
-    // Issue session token
-    const token = await createSessionToken(user.id, email, false);
+    // Issue session token, and cache the DEK under its jti so this new session
+    // can immediately read/write encrypted columns.
+    const { token, jti } = await createSessionToken(user.id, email, false);
+    putDEK(jti, dek, SESSION_TTL_MS);
 
     const response = NextResponse.json(
       { success: true, userId: user.id },

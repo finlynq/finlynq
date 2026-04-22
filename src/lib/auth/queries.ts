@@ -22,6 +22,11 @@ export interface CreateUserInput {
   email: string;
   passwordHash: string;
   displayName?: string;
+  /** Base64 envelope components. Required on new accounts; see lib/crypto/envelope.ts. */
+  kekSalt: string;
+  dekWrapped: string;
+  dekWrappedIv: string;
+  dekWrappedTag: string;
 }
 
 export async function createUser(input: CreateUserInput) {
@@ -46,6 +51,11 @@ export async function createUser(input: CreateUserInput) {
       onboardingComplete: 0,
       plan: "trial",
       planExpiresAt: trialExpiresAt,
+      kekSalt: input.kekSalt,
+      dekWrapped: input.dekWrapped,
+      dekWrappedIv: input.dekWrappedIv,
+      dekWrappedTag: input.dekWrappedTag,
+      encryptionV: 1,
       createdAt: now,
       updatedAt: now,
     });
@@ -69,10 +79,54 @@ export async function getUserById(id: string) {
   return rows[0] ?? null;
 }
 
+/**
+ * Grace migration: attach an envelope-encryption DEK to an existing account
+ * that predates the encryption rollout. Called from the login handler after
+ * password verification succeeds but the user row has no DEK columns.
+ */
+export async function promoteUserToEncryption(
+  userId: string,
+  wrap: { kekSalt: string; dekWrapped: string; dekWrappedIv: string; dekWrappedTag: string }
+) {
+  const now = new Date().toISOString();
+  await db.update(getSchema().users)
+    .set({
+      kekSalt: wrap.kekSalt,
+      dekWrapped: wrap.dekWrapped,
+      dekWrappedIv: wrap.dekWrappedIv,
+      dekWrappedTag: wrap.dekWrappedTag,
+      encryptionV: 1,
+      updatedAt: now,
+    })
+    .where(eq(getSchema().users.id, userId));
+}
+
 export async function updateUserPassword(userId: string, passwordHash: string) {
   const now = new Date().toISOString();
   await db.update(getSchema().users)
     .set({ passwordHash, updatedAt: now })
+    .where(eq(getSchema().users.id, userId));
+}
+
+/**
+ * Atomically update password hash AND the re-wrapped DEK envelope.
+ * Used for password change: the DEK stays the same, only its wrapper changes.
+ */
+export async function updateUserPasswordAndWrap(
+  userId: string,
+  passwordHash: string,
+  wrap: { kekSalt: string; dekWrapped: string; dekWrappedIv: string; dekWrappedTag: string }
+) {
+  const now = new Date().toISOString();
+  await db.update(getSchema().users)
+    .set({
+      passwordHash,
+      kekSalt: wrap.kekSalt,
+      dekWrapped: wrap.dekWrapped,
+      dekWrappedIv: wrap.dekWrappedIv,
+      dekWrappedTag: wrap.dekWrappedTag,
+      updatedAt: now,
+    })
     .where(eq(getSchema().users.id, userId));
 }
 

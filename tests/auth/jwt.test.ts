@@ -7,9 +7,10 @@ import { createSessionToken, verifySessionToken } from "@/lib/auth/jwt";
 
 describe("JWT utilities", () => {
   let token: string;
+  let jti: string;
 
   beforeAll(async () => {
-    token = await createSessionToken("user-123", "test@example.com", false);
+    ({ token, jti } = await createSessionToken("user-123", "test@example.com", false));
   });
 
   it("creates a non-empty token string", () => {
@@ -19,12 +20,18 @@ describe("JWT utilities", () => {
     expect(token.split(".")).toHaveLength(3);
   });
 
+  it("emits a non-empty jti for the DEK cache", () => {
+    expect(jti).toBeTruthy();
+    expect(typeof jti).toBe("string");
+  });
+
   it("verifies a valid token and returns payload", async () => {
     const payload = await verifySessionToken(token);
     expect(payload).not.toBeNull();
     expect(payload!.sub).toBe("user-123");
     expect(payload!.email).toBe("test@example.com");
     expect(payload!.mfa).toBe(false);
+    expect(payload!.jti).toBe(jti);
   });
 
   it("returns null for tampered tokens", async () => {
@@ -39,7 +46,7 @@ describe("JWT utilities", () => {
   });
 
   it("includes MFA flag in token", async () => {
-    const mfaToken = await createSessionToken("user-456", "mfa@test.com", true);
+    const { token: mfaToken } = await createSessionToken("user-456", "mfa@test.com", true);
     const payload = await verifySessionToken(mfaToken);
     expect(payload!.mfa).toBe(true);
   });

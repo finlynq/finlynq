@@ -73,15 +73,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Update the password and mark token used
-    const passwordHash = await hashPassword(newPassword);
-    await updateUserPassword(resetToken.userId, passwordHash);
-    await markResetTokenUsed(tokenHash);
-
-    return NextResponse.json({
-      success: true,
-      message: "Password has been reset. You can now log in with your new password.",
-    });
+    // Envelope encryption + no-recovery policy:
+    //   A password reset CANNOT succeed with just a new password, because the
+    //   user's DEK is wrapped by a KEK derived from the old password and we
+    //   don't have it. The correct flow is to wipe all user-owned data and
+    //   regenerate a fresh DEK. That wipe is implemented in Phase 2; until
+    //   then, reset is disabled to avoid leaving the account in a state
+    //   where the DEK wrapping no longer matches the stored ciphertext.
+    void markResetTokenUsed;
+    void updateUserPassword;
+    void hashPassword;
+    void newPassword;
+    return NextResponse.json(
+      {
+        error:
+          "Password reset is temporarily disabled while we roll out encryption. Please contact support if you need to regain access (your data will be wiped since we cannot recover encrypted data without your password).",
+        resetTokenUserId: resetToken.userId,
+      },
+      { status: 503 }
+    );
   } catch (error) {
     return NextResponse.json(
       { error: safeErrorMessage(error, "Password reset failed") },
