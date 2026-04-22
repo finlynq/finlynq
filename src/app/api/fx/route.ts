@@ -12,7 +12,7 @@ export async function GET(request: NextRequest) {
   const activeCurrencies = await getActiveCurrencies();
 
   // Build rate map: every active currency → target
-  const rateMap = await getRateMap(target, userId);
+  const rateMap = await getRateMap(target);
 
   // Build rates object for response
   const rates: Record<string, number> = {};

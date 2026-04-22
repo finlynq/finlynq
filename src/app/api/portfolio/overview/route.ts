@@ -78,7 +78,7 @@ export async function GET(request: NextRequest) {
   const currencies = [...new Set(holdings.map(h => h.currency))];
   const fxRates = new Map<string, number>();
   for (const cur of currencies) {
-    fxRates.set(cur, await getLatestFxRate(cur, "CAD", userId));
+    fxRates.set(cur, await getLatestFxRate(cur, "CAD"));
   }
 
   // 6. Get transaction rows per holding. We can't GROUP BY on

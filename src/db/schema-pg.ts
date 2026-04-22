@@ -147,7 +147,6 @@ export const priceCache = pgTable("price_cache", {
 
 export const fxRates = pgTable("fx_rates", {
   id: serial("id").primaryKey(),
-  userId: text("user_id").notNull(),
   date: text("date").notNull(),
   fromCurrency: text("from_currency").notNull(),
   toCurrency: text("to_currency").notNull(),

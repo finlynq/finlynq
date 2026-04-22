@@ -30,6 +30,7 @@ export async function GET(request: NextRequest) {
   const dek = sessionId ? getDEK(sessionId) : null;
 
   try {
+    // fxRates is a global shared cache — not part of per-user backup.
     const [
       accounts,
       categories,
@@ -45,7 +46,6 @@ export async function GET(request: NextRequest) {
       subscriptions,
       transactionRules,
       importTemplates,
-      fxRates,
       settingsRows,
       contributionRoom,
     ] = await Promise.all([
@@ -63,7 +63,6 @@ export async function GET(request: NextRequest) {
       db.select().from(schema.subscriptions).where(eq(schema.subscriptions.userId, userId)),
       db.select().from(schema.transactionRules).where(eq(schema.transactionRules.userId, userId)),
       db.select().from(schema.importTemplates).where(eq(schema.importTemplates.userId, userId)),
-      db.select().from(schema.fxRates).where(eq(schema.fxRates.userId, userId)),
       db.select().from(schema.settings).where(eq(schema.settings.userId, userId)),
       db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)),
     ]);
@@ -102,7 +101,6 @@ export async function GET(request: NextRequest) {
         subscriptions,
         transactionRules,
         importTemplates,
-        fxRates,
         settings: settingsRows,
         contributionRoom,
       },

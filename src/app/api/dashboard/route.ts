@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
       params.get("endDate") ??
       `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-31`;
 
-    const rateMap = await getRateMap(displayCurrency, userId);
+    const rateMap = await getRateMap(displayCurrency);
 
     const balances = await getAccountBalances(userId);
     // Add live market value of holdings to accounts that have any — so investment

@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
   const includeSpending = request.nextUrl.searchParams.get("spending") === "1";
 
   const data = await getBudgets(userId, month);
-  const rateMap = await getRateMap(displayCurrency, userId);
+  const rateMap = await getRateMap(displayCurrency);
 
   // Convert budget amounts to display currency
   let enriched = data.map((b: any) => ({

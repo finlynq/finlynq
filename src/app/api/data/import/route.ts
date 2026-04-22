@@ -96,7 +96,6 @@ export async function POST(request: NextRequest) {
     subscriptions: d.subscriptions?.length ?? 0,
     transactionRules: d.transactionRules?.length ?? 0,
     importTemplates: d.importTemplates?.length ?? 0,
-    fxRates: d.fxRates?.length ?? 0,
     settings: d.settings?.length ?? 0,
     contributionRoom: d.contributionRoom?.length ?? 0,
   };
@@ -115,8 +114,7 @@ export async function POST(request: NextRequest) {
     await db.delete(schema.subscriptions).where(eq(schema.subscriptions.userId, userId));
     await db.delete(schema.recurringTransactions).where(eq(schema.recurringTransactions.userId, userId));
     await db.delete(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId));
-    // priceCache is a global shared cache — not part of per-user backup/restore.
-    await db.delete(schema.fxRates).where(eq(schema.fxRates.userId, userId));
+    // priceCache and fxRates are global shared caches — not part of per-user backup/restore.
     await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId));
     await db.delete(schema.snapshots).where(eq(schema.snapshots.userId, userId));
     await db.delete(schema.goals).where(eq(schema.goals.userId, userId));
@@ -247,9 +245,9 @@ export async function POST(request: NextRequest) {
     if (d.importTemplates?.length) {
       await db.insert(schema.importTemplates).values(strip(d.importTemplates, userId) as (typeof schema.importTemplates.$inferInsert)[]);
     }
-    if (d.fxRates?.length) {
-      await db.insert(schema.fxRates).values(strip(d.fxRates, userId) as (typeof schema.fxRates.$inferInsert)[]);
-    }
+    // fxRates is a global shared cache — skip on restore (the cache will refill itself
+    // on the next FX lookup; old per-user backups may include rows but they're not
+    // part of the user's data).
     if (d.contributionRoom?.length) {
       await db.insert(schema.contributionRoom).values(strip(d.contributionRoom, userId) as (typeof schema.contributionRoom.$inferInsert)[]);
     }

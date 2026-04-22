@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
   const isBusiness = params.get("business") === "true";
   const displayCurrency = params.get("currency") ?? "CAD";
 
-  const rateMap = await getRateMap(displayCurrency, userId);
+  const rateMap = await getRateMap(displayCurrency);
 
   if (type === "income-statement") {
     const conditions = [

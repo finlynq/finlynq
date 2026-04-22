@@ -91,7 +91,7 @@ export async function getHoldingsValueByAccount(userId: string, dek?: Buffer | n
     if (from === to) return 1;
     const key = `${from}->${to}`;
     if (fxCache.has(key)) return fxCache.get(key)!;
-    const rate = await getLatestFxRate(from, to, userId);
+    const rate = await getLatestFxRate(from, to);
     fxCache.set(key, rate);
     return rate;
   };

@@ -306,7 +306,6 @@ async function main() {
       "transaction_rules",
       "budget_templates",
       "contribution_room",
-      "fx_rates",
       "notifications",
       "import_templates",
       "settings",

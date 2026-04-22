@@ -291,8 +291,7 @@ export async function wipeUserDataAndRewrap(
   await db.delete(s.subscriptions).where(eq(s.subscriptions.userId, userId));
   await db.delete(s.recurringTransactions).where(eq(s.recurringTransactions.userId, userId));
   await db.delete(s.contributionRoom).where(eq(s.contributionRoom.userId, userId));
-  // priceCache is a global shared cache — not per-user, nothing to wipe here.
-  await db.delete(s.fxRates).where(eq(s.fxRates.userId, userId));
+  // priceCache and fxRates are global shared caches — not per-user, nothing to wipe here.
   await db.delete(s.targetAllocations).where(eq(s.targetAllocations.userId, userId));
   await db.delete(s.snapshots).where(eq(s.snapshots.userId, userId));
   await db.delete(s.goals).where(eq(s.goals.userId, userId));
