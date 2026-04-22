@@ -42,8 +42,7 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
-# Copy migration files for both dialects
-COPY --from=builder /app/drizzle ./drizzle
+# Copy PostgreSQL migration files
 COPY --from=builder /app/drizzle-pg ./drizzle-pg
 
 # Copy and prepare the entrypoint script
