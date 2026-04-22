@@ -10,7 +10,7 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
   try {
-    const emailSetting = db
+    const emailSetting = await db
       .select()
       .from(schema.settings)
       .where(and(eq(schema.settings.key, "import_email"), eq(schema.settings.userId, userId)))

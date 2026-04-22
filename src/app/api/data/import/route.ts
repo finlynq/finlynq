@@ -115,7 +115,7 @@ export async function POST(request: NextRequest) {
     await db.delete(schema.subscriptions).where(eq(schema.subscriptions.userId, userId));
     await db.delete(schema.recurringTransactions).where(eq(schema.recurringTransactions.userId, userId));
     await db.delete(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId));
-    await db.delete(schema.priceCache).where(eq(schema.priceCache.userId, userId));
+    // priceCache is a global shared cache — not part of per-user backup/restore.
     await db.delete(schema.fxRates).where(eq(schema.fxRates.userId, userId));
     await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId));
     await db.delete(schema.snapshots).where(eq(schema.snapshots.userId, userId));

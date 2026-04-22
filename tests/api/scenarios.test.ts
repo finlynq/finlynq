@@ -4,9 +4,9 @@ vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
-const mockCalcMonthly = vi.fn(() => 500);
-const mockGenAmort = vi.fn(() => ({ schedule: [{ period: 1, balance: 99500 }] }));
-const mockDebtPayoff = vi.fn(() => ({ totalInterest: 1000, totalMonths: 12 }));
+const mockCalcMonthly = vi.fn((..._args: unknown[]) => 500);
+const mockGenAmort = vi.fn((..._args: unknown[]) => ({ schedule: [{ period: 1, balance: 99500 }] }));
+const mockDebtPayoff = vi.fn((..._args: unknown[]) => ({ totalInterest: 1000, totalMonths: 12 }));
 vi.mock("@/lib/loan-calculator", () => ({
   calculateMonthlyPayment: (...a: unknown[]) => mockCalcMonthly(...a),
   generateAmortizationSchedule: (...a: unknown[]) => mockGenAmort(...a),

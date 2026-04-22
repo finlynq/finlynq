@@ -7,7 +7,7 @@ import { safeErrorMessage } from "@/lib/validate";
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const notifications = db
+  const notifications = await db
     .select()
     .from(schema.notifications)
     .where(eq(schema.notifications.userId, userId))
@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
     .limit(50)
     .all();
 
-  const unreadCount = db
+  const unreadCount = await db
     .select({ count: sql<number>`COUNT(*)` })
     .from(schema.notifications)
     .where(and(eq(schema.notifications.userId, userId), eq(schema.notifications.read, 0)))
@@ -54,7 +54,7 @@ export async function POST(request: NextRequest) {
       const startDate = `${month}-01`;
       const endDate = `${month}-${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()}`;
 
-      const budgets = db
+      const budgets = await db
         .select({
           categoryName: schema.categories.name,
           budgetAmount: schema.budgets.amount,

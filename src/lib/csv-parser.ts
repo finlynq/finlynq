@@ -333,7 +333,7 @@ export function extractCsvHeaders(csvText: string): string[] {
   return parseCSVRow(lines[0]);
 }
 
-export async function importAccounts(csvText: string, userId?: string) {
+export async function importAccounts(csvText: string, userId: string) {
   const rows = parseCSV(csvText);
   if (rows.length === 0) return { total: 0, imported: 0, errors: ["File is empty or contains only headers"] };
 
@@ -354,12 +354,12 @@ export async function importAccounts(csvText: string, userId?: string) {
       if (!existing) {
         await db.insert(schema.accounts)
           .values({
+            userId,
             type: row["Type"] || "A",
             group: row["Group"] ?? "",
             name: row["Account"],
             currency: row["Currency"] ?? "CAD",
             note: row["Note"] ?? "",
-            ...(userId ? { userId } : {}),
           })
           ;
         imported++;
@@ -371,7 +371,7 @@ export async function importAccounts(csvText: string, userId?: string) {
   return { total: rows.length, imported, errors: errors.length > 0 ? errors : undefined };
 }
 
-export async function importCategories(csvText: string, userId?: string) {
+export async function importCategories(csvText: string, userId: string) {
   const rows = parseCSV(csvText);
   if (rows.length === 0) return { total: 0, imported: 0, errors: ["File is empty or contains only headers"] };
 
@@ -392,11 +392,11 @@ export async function importCategories(csvText: string, userId?: string) {
       if (!existing) {
         await db.insert(schema.categories)
           .values({
+            userId,
             type: row["Type"] || "E",
             group: row["Group"] ?? "",
             name: row["Category"],
             note: row["Note"] ?? "",
-            ...(userId ? { userId } : {}),
           })
           ;
         imported++;
@@ -408,7 +408,7 @@ export async function importCategories(csvText: string, userId?: string) {
   return { total: rows.length, imported, errors: errors.length > 0 ? errors : undefined };
 }
 
-export async function importPortfolio(csvText: string, userId?: string) {
+export async function importPortfolio(csvText: string, userId: string) {
   const rows = parseCSV(csvText);
   if (rows.length === 0) return { total: 0, imported: 0, errors: ["File is empty or contains only headers"] };
 
@@ -435,12 +435,12 @@ export async function importPortfolio(csvText: string, userId?: string) {
       if (!existing) {
         await db.insert(schema.portfolioHoldings)
           .values({
+            userId,
             accountId: account.id,
             name: row["Portfolio holding name"],
             symbol: row["Symbol"] || null,
             currency: row["Currency"] ?? "CAD",
             note: row["Note"] ?? "",
-            ...(userId ? { userId } : {}),
           })
           ;
         imported++;
@@ -452,7 +452,7 @@ export async function importPortfolio(csvText: string, userId?: string) {
   return { total: rows.length, imported, errors: errors.length > 0 ? errors : undefined };
 }
 
-export async function importTransactions(csvText: string, userId?: string) {
+export async function importTransactions(csvText: string, userId: string) {
   const { rows, errors: parseErrors } = csvToRawTransactions(csvText);
 
   if (rows.length === 0) {
@@ -488,6 +488,7 @@ export async function importTransactions(csvText: string, userId?: string) {
       const hash = generateImportHash(row.date, accountId, row.amount, row.payee);
 
       values.push({
+        userId,
         date: row.date,
         accountId,
         categoryId,
@@ -499,7 +500,6 @@ export async function importTransactions(csvText: string, userId?: string) {
         payee: row.payee ?? "",
         tags: row.tags ?? "",
         importHash: hash,
-        ...(userId ? { userId } : {}),
       });
     }
 
