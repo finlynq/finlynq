@@ -96,13 +96,6 @@ async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): 
   return hist?.category_id ?? null;
 }
 
-/** Most-recently-used account for the current user */
-async function defaultAccount(sqlite: PgCompatDb, userId: string): Promise<SqliteRow | null> {
-  return await sqlite.prepare(
-    `SELECT a.id, a.name, a.currency FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE t.user_id = ? ORDER BY t.date DESC, t.id DESC LIMIT 1`
-  ).get(userId) as SqliteRow | null;
-}
-
 const PORTFOLIO_DISCLAIMER =
   "⚠️ DISCLAIMER: This analysis is for informational purposes only and does not constitute financial advice. Past performance is not indicative of future results. Consult a qualified financial advisor before making investment decisions.";
 
@@ -513,12 +506,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction with smart defaults: fuzzy account/category matching, auto-categorize from payee, defaults to most-recent account.",
+    "Record a transaction. Account is required — ask the user which account to use if not specified; never guess. Category auto-detected from payee rules/history when omitted.",
     {
       amount: z.number().describe("Amount (negative=expense, positive=income/transfer-in)"),
       payee: z.string().describe("Payee or merchant name"),
+      account: z.string().describe("Account name (required — ask the user which account if unclear; fuzzy-matched against their accounts)"),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
-      account: z.string().optional().describe("Account name (default: most-recently-used)"),
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional(),
       tags: z.string().optional().describe("Comma-separated tags"),
@@ -528,8 +521,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const txDate = date ?? today;
 
       const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const acct = account ? fuzzyFind(account, allAccounts) : await defaultAccount(sqlite, userId);
-      if (!acct) return sqliteErr(account ? `Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}` : "No accounts found — create an account first.");
+      if (!allAccounts.length) return sqliteErr("No accounts found — create an account first.");
+      const acct = fuzzyFind(account, allAccounts);
+      if (!acct) return sqliteErr(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
 
       let catId: number | null = null;
       if (category) {
@@ -554,13 +548,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Same smart defaults as record_transaction.",
+    "Record multiple transactions at once. Each transaction must specify an account — ask the user if unclear; never guess. Category auto-detected when omitted.",
     {
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
+        account: z.string().describe("Account name (required — fuzzy-matched)"),
         date: z.string().optional(),
-        account: z.string().optional(),
         category: z.string().optional(),
         note: z.string().optional(),
         tags: z.string().optional(),
@@ -570,14 +564,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const today = new Date().toISOString().split("T")[0];
       const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const mru = await defaultAccount(sqlite, userId);
       const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
       const results: { index: number; success: boolean; message: string }[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
-          const acct = t.account ? fuzzyFind(t.account, allAccounts) : mru;
+          const acct = fuzzyFind(t.account, allAccounts);
           if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
           let catId: number | null = null;
           if (t.category) { const cat = fuzzyFind(t.category, allCats); catId = cat ? Number(cat.id) : null; }
@@ -1098,8 +1091,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ topic, tool_name }) => {
       if (tool_name) {
         const docs: Record<string, string> = {
-          record_transaction: "record_transaction(amount, payee, date?, account?, category?, note?, tags?) — Smart defaults: account defaults to MRU, category auto-detected from payee rules/history.",
-          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Same smart defaults. Returns per-item success/failure.",
+          record_transaction: "record_transaction(amount, payee, account, date?, category?, note?, tags?) — Account is REQUIRED: ask the user which account if unclear, never guess. Category auto-detected from payee rules/history when omitted.",
+          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Each item requires account. Returns per-item success/failure.",
           update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?)",
           delete_transaction: "delete_transaction(id) — Permanently delete.",
           set_budget: "set_budget(category, month, amount) — Upsert budget. month=YYYY-MM.",
@@ -1141,7 +1134,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       });
 
       if (t === "examples") return txt({ examples: [
-        { task: "Log a coffee", call: 'record_transaction(amount=-5.50, payee="Tim Hortons")' },
+        { task: "Log a coffee", call: 'record_transaction(amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
         { task: "Log salary", call: 'record_transaction(amount=3500, payee="Employer", category="Salary")' },
         { task: "Set budget", call: 'set_budget(category="Groceries", month="2026-04", amount=600)' },
         { task: "Fix category", call: 'update_transaction(id=42, category="Restaurants")' },

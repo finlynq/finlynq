@@ -146,17 +146,6 @@ async function autoCategory(
   return bestId;
 }
 
-/** Most-recently-used account for the user */
-async function defaultAccount(db: DbLike, userId: string): Promise<Row | null> {
-  const r = await q(db, sql`
-    SELECT a.id, a.name, a.currency FROM transactions t
-    JOIN accounts a ON a.id = t.account_id
-    WHERE t.user_id = ${userId}
-    ORDER BY t.date DESC, t.id DESC LIMIT 1
-  `);
-  return r.length ? r[0] : null;
-}
-
 const PORTFOLIO_DISCLAIMER =
   "⚠️ DISCLAIMER: This analysis is for informational purposes only and does not constitute financial advice. Past performance is not indicative of future results. Consult a qualified financial advisor before making investment decisions.";
 
@@ -996,12 +985,12 @@ export function registerPgTools(
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction with smart defaults: fuzzy account/category matching, auto-categorize from payee, defaults to most-recent account.",
+    "Record a transaction. Account is required — ask the user which account to use if not specified; never guess. Category auto-detected from payee rules/history when omitted.",
     {
       amount: z.number().describe("Amount (negative=expense, positive=income/transfer-in)"),
       payee: z.string().describe("Payee or merchant name"),
+      account: z.string().describe("Account name (required — ask the user which account if unclear; fuzzy-matched against their accounts)"),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
-      account: z.string().optional().describe("Account name (default: most-recently-used)"),
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional().describe("Optional note"),
       tags: z.string().optional().describe("Comma-separated tags"),
@@ -1010,10 +999,10 @@ export function registerPgTools(
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
-      // Resolve account (fuzzy or MRU)
       const allAccounts = await q(db, sql`SELECT id, name, currency FROM accounts WHERE user_id = ${userId}`);
-      let acct: Row | null = account ? fuzzyFind(account, allAccounts) : await defaultAccount(db, userId);
-      if (!acct) return err(account ? `Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}` : "No accounts found — create an account first.");
+      if (!allAccounts.length) return err("No accounts found — create an account first.");
+      const acct: Row | null = fuzzyFind(account, allAccounts);
+      if (!acct) return err(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
 
       // Resolve category (fuzzy or auto)
       let catId: number | null = null;
@@ -1052,13 +1041,13 @@ export function registerPgTools(
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Same smart defaults as record_transaction.",
+    "Record multiple transactions at once. Each transaction must specify an account — ask the user if unclear; never guess. Category auto-detected when omitted.",
     {
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
+        account: z.string().describe("Account name (required — fuzzy-matched)"),
         date: z.string().optional(),
-        account: z.string().optional(),
         category: z.string().optional(),
         note: z.string().optional(),
         tags: z.string().optional(),
@@ -1068,13 +1057,12 @@ export function registerPgTools(
       const today = new Date().toISOString().split("T")[0];
       const allAccounts = await q(db, sql`SELECT id, name, currency FROM accounts WHERE user_id = ${userId}`);
       const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
-      const mru = await defaultAccount(db, userId);
 
       const results: { index: number; success: boolean; message: string }[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
-          const acct = t.account ? fuzzyFind(t.account, allAccounts) : mru;
+          const acct = fuzzyFind(t.account, allAccounts);
           if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
 
           let catId: number | null = null;
@@ -1472,8 +1460,8 @@ export function registerPgTools(
     async ({ topic, tool_name }) => {
       if (tool_name) {
         const docs: Record<string, string> = {
-          record_transaction: "record_transaction(amount, payee, date?, account?, category?, note?, tags?) — Smart defaults: account defaults to MRU, category auto-detected from payee rules/history.",
-          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Same smart defaults. Returns per-item success/failure.",
+          record_transaction: "record_transaction(amount, payee, account, date?, category?, note?, tags?) — Account is REQUIRED: ask the user which account if unclear, never guess. Category auto-detected from payee rules/history when omitted.",
+          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Each item requires account. Returns per-item success/failure.",
           update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?) — Update any field by transaction ID.",
           delete_transaction: "delete_transaction(id) — Permanently delete. Cannot be undone.",
           set_budget: "set_budget(category, month, amount) — Upsert budget. month=YYYY-MM.",
@@ -1507,8 +1495,8 @@ export function registerPgTools(
 
       if (t === "write") {
         return text({
-          primary_add: "record_transaction — smart defaults, fuzzy matching",
-          bulk_add: "bulk_record_transactions — array of transactions",
+          primary_add: "record_transaction — account required, fuzzy matching on account/category names",
+          bulk_add: "bulk_record_transactions — array of transactions (account required per item)",
           edits: ["update_transaction(id, ...fields)", "delete_transaction(id)"],
           budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
           accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
@@ -1537,8 +1525,8 @@ export function registerPgTools(
       if (t === "examples") {
         return text({
           examples: [
-            { task: "Log a coffee purchase", call: 'record_transaction(amount=-5.50, payee="Tim Hortons")' },
-            { task: "Log salary deposit", call: 'record_transaction(amount=3500, payee="Employer", category="Salary")' },
+            { task: "Log a coffee purchase", call: 'record_transaction(amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
+            { task: "Log salary deposit", call: 'record_transaction(amount=3500, payee="Employer", account="RBC Chequing", category="Salary")' },
             { task: "Import bank statement rows", call: "bulk_record_transactions([{amount, payee, date, account}, ...])" },
             { task: "Set grocery budget", call: 'set_budget(category="Groceries", month="2026-04", amount=600)' },
             { task: "Fix wrong category", call: 'update_transaction(id=42, category="Restaurants")' },
