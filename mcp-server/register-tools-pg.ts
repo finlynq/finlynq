@@ -284,42 +284,6 @@ export function registerPgTools(
     }
   );
 
-  // ── get_transactions ───────────────────────────────────────────────────────
-  server.tool(
-    "get_transactions",
-    "Query transactions with filters. Returns up to 100 transactions.",
-    {
-      start_date: z.string().describe("Start date (YYYY-MM-DD)"),
-      end_date: z.string().describe("End date (YYYY-MM-DD)"),
-      category: z.string().optional().describe("Filter by category name"),
-      account: z.string().optional().describe("Filter by account name"),
-      min_amount: z.number().optional().describe("Minimum amount"),
-      max_amount: z.number().optional().describe("Maximum amount"),
-      limit: z.number().optional().describe("Max results (default 100)"),
-    },
-    async ({ start_date, end_date, category, account, min_amount, max_amount, limit }) => {
-      const lim = limit ?? 100;
-      const rows = await q(db, sql`
-        SELECT t.date, a.name AS account, c.name AS category, c.type AS category_type,
-               t.currency, t.amount, t.payee, t.note, t.tags
-        FROM transactions t
-        LEFT JOIN accounts a ON t.account_id = a.id
-        LEFT JOIN categories c ON t.category_id = c.id
-        WHERE t.user_id = ${userId}
-          AND t.date >= ${start_date}
-          AND t.date <= ${end_date}
-          ${category ? sql`AND c.name = ${category}` : sql``}
-          ${account ? sql`AND a.name = ${account}` : sql``}
-          ${min_amount !== undefined ? sql`AND t.amount >= ${min_amount}` : sql``}
-          ${max_amount !== undefined ? sql`AND t.amount <= ${max_amount}` : sql``}
-        ORDER BY t.date DESC
-        LIMIT ${lim}
-      `);
-      const decrypted = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
-      return text(decrypted);
-    }
-  );
-
   // ── search_transactions ────────────────────────────────────────────────────
   server.tool(
     "search_transactions",
@@ -458,42 +422,35 @@ export function registerPgTools(
   // ── get_net_worth ──────────────────────────────────────────────────────────
   server.tool(
     "get_net_worth",
-    "Calculate total net worth across all accounts",
-    { currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency") },
-    async ({ currency }) => {
-      const rows = await q(db, sql`
-        SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) AS total
-        FROM accounts a
-        LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
-        WHERE a.user_id = ${userId}
-          ${currency && currency !== "all" ? sql`AND a.currency = ${currency}` : sql``}
-        GROUP BY a.type, a.currency
-      `) as { type: string; currency: string; total: number }[];
-
-      const summary: Record<string, { assets: number; liabilities: number; net: number }> = {};
-      for (const row of rows) {
-        const c = row.currency ?? "CAD";
-        if (!summary[c]) summary[c] = { assets: 0, liabilities: 0, net: 0 };
-        if (row.type === "A") summary[c].assets = Number(row.total);
-        else summary[c].liabilities = Number(row.total);
-        summary[c].net = summary[c].assets + summary[c].liabilities;
-      }
-      return text(summary);
-    }
-  );
-
-  // ── get_net_worth_trend ────────────────────────────────────────────────────
-  server.tool(
-    "get_net_worth_trend",
-    "Get net worth over the last N months",
+    "Net worth across all accounts. Pass `months` > 0 to get a month-by-month trend; omit for current totals only.",
     {
-      months: z.number().optional().describe("Months to look back (default 12)"),
       currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency"),
+      months: z.number().optional().describe("If set, return a trend over the last N months. Omit or set to 0 for current totals."),
     },
-    async ({ months, currency }) => {
-      const lookback = months ?? 12;
+    async ({ currency, months }) => {
+      if (!months || months <= 0) {
+        const rows = await q(db, sql`
+          SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) AS total
+          FROM accounts a
+          LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
+          WHERE a.user_id = ${userId}
+            ${currency && currency !== "all" ? sql`AND a.currency = ${currency}` : sql``}
+          GROUP BY a.type, a.currency
+        `) as { type: string; currency: string; total: number }[];
+
+        const summary: Record<string, { assets: number; liabilities: number; net: number }> = {};
+        for (const row of rows) {
+          const c = row.currency ?? "CAD";
+          if (!summary[c]) summary[c] = { assets: 0, liabilities: 0, net: 0 };
+          if (row.type === "A") summary[c].assets = Number(row.total);
+          else summary[c].liabilities = Number(row.total);
+          summary[c].net = summary[c].assets + summary[c].liabilities;
+        }
+        return text(summary);
+      }
+
       const startDate = new Date();
-      startDate.setMonth(startDate.getMonth() - lookback);
+      startDate.setMonth(startDate.getMonth() - months);
       const startStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-01`;
 
       const rows = await q(db, sql`
@@ -526,7 +483,7 @@ export function registerPgTools(
         return { month: row.month, currency: c, monthlyChange: Math.round(Number(row.total) * 100) / 100, cumulativeNetWorth: Math.round(newTotal * 100) / 100 };
       });
 
-      return text({ months: lookback, trend });
+      return text({ months, trend });
     }
   );
 
@@ -539,18 +496,6 @@ export function registerPgTools(
       LEFT JOIN accounts a ON g.account_id = a.id
       WHERE g.user_id = ${userId}
       ORDER BY g.priority
-    `);
-    return text(rows);
-  });
-
-  // ── get_portfolio_summary ──────────────────────────────────────────────────
-  server.tool("get_portfolio_summary", "Get all investment holdings grouped by account", {}, async () => {
-    const rows = await q(db, sql`
-      SELECT ph.name AS holding, ph.symbol, ph.currency, a.name AS account
-      FROM portfolio_holdings ph
-      LEFT JOIN accounts a ON ph.account_id = a.id
-      WHERE ph.user_id = ${userId}
-      ORDER BY a.name, ph.name
     `);
     return text(rows);
   });
@@ -974,38 +919,6 @@ export function registerPgTools(
     }
   );
 
-  // ── add_transaction ────────────────────────────────────────────────────────
-  server.tool(
-    "add_transaction",
-    "Add a new transaction. Use negative amounts for expenses, positive for income.",
-    {
-      date: z.string().describe("Transaction date (YYYY-MM-DD)"),
-      account: z.string().describe("Account name"),
-      category: z.string().describe("Category name"),
-      amount: z.number().describe("Amount (negative for expense, positive for income)"),
-      payee: z.string().optional().describe("Payee/merchant name"),
-      note: z.string().optional().describe("Optional note"),
-      tags: z.string().optional().describe("Comma-separated tags"),
-    },
-    async ({ date, account, category, amount, payee, note, tags }) => {
-      const acctRows = await q(db, sql`SELECT id, currency FROM accounts WHERE user_id = ${userId} AND name = ${account}`);
-      if (!acctRows.length) return err(`Account "${account}" not found`);
-      const acct = acctRows[0] as { id: number; currency: string };
-
-      const catRows = await q(db, sql`SELECT id FROM categories WHERE user_id = ${userId} AND name = ${category}`);
-      if (!catRows.length) return err(`Category "${category}" not found`);
-      const cat = catRows[0] as { id: number };
-
-      await db.execute(sql`
-        INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags)
-        VALUES (${userId}, ${date}, ${acct.id}, ${cat.id}, ${acct.currency}, ${amount}, ${payee ?? ""}, ${note ?? ""}, ${tags ?? ""})
-      `);
-
-      invalidateUserTxCache(userId);
-      return text({ success: true, message: `Transaction added: ${amount} to ${account} (${category}) on ${date}` });
-    }
-  );
-
   // ── set_budget ─────────────────────────────────────────────────────────────
   server.tool(
     "set_budget",
@@ -1052,30 +965,6 @@ export function registerPgTools(
         VALUES (${userId}, ${name}, ${type}, ${target_amount}, ${deadline ?? null}, ${accountId}, 'active')
       `);
       return text({ success: true, message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` });
-    }
-  );
-
-  // ── categorize_transaction ─────────────────────────────────────────────────
-  server.tool(
-    "categorize_transaction",
-    "Update the category of a transaction by ID",
-    {
-      transaction_id: z.number().describe("Transaction ID"),
-      category: z.string().describe("Category name to assign"),
-    },
-    async ({ transaction_id, category }) => {
-      const catRows = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId} AND name = ${category}`);
-      if (!catRows.length) return err(`Category "${category}" not found`);
-      const cat = catRows[0] as { id: number; name: string };
-
-      const txnRows = await q(db, sql`SELECT id, payee FROM transactions WHERE user_id = ${userId} AND id = ${transaction_id}`);
-      if (!txnRows.length) return err(`Transaction #${transaction_id} not found`);
-      const txn = txnRows[0] as { id: number; payee: string };
-      const plainPayee = dek ? (decryptField(dek, txn.payee) ?? "") : txn.payee;
-
-      await db.execute(sql`UPDATE transactions SET category_id = ${cat.id} WHERE id = ${transaction_id} AND user_id = ${userId}`);
-      invalidateUserTxCache(userId);
-      return text({ success: true, transactionId: transaction_id, newCategory: cat.name, message: `Transaction #${transaction_id} (${plainPayee}) categorized as "${cat.name}"` });
     }
   );
 
@@ -1590,8 +1479,9 @@ export function registerPgTools(
           create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'T'=transfer.",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?) — match_payee supports % wildcards.",
           apply_rules_to_uncategorized: "apply_rules_to_uncategorized(dry_run?, limit?) — Batch-apply rules to uncategorized transactions.",
-          get_portfolio_analysis: "get_portfolio_analysis() — Holdings + allocation by asset class/currency. Includes disclaimer.",
-          compare_to_benchmark: "compare_to_benchmark(benchmark?) — Compare portfolio vs index. benchmark: SP500|TSX|MSCI_WORLD.",
+          get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
+          get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
+          get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
         };
         return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
       }
@@ -1600,9 +1490,9 @@ export function registerPgTools(
 
       if (t === "tools") {
         return text({
-          read_tools: ["get_account_balances", "get_transactions", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_net_worth_trend", "get_goals", "get_portfolio_summary", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
-          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "add_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized", "categorize_transaction"],
-          portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_rebalancing_suggestions", "get_investment_insights", "compare_to_benchmark"],
+          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
+          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
+          portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_investment_insights"],
           tip: "Use tool_name='record_transaction' for detailed usage of any tool",
         });
       }
@@ -1611,12 +1501,12 @@ export function registerPgTools(
         return text({
           primary_add: "record_transaction — smart defaults, fuzzy matching",
           bulk_add: "bulk_record_transactions — array of transactions",
-          edits: ["update_transaction(id, ...fields)", "delete_transaction(id)", "categorize_transaction(id, category)"],
+          edits: ["update_transaction(id, ...fields)", "delete_transaction(id)"],
           budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
           accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
           goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
           categories: ["create_category(name, type)", "create_rule(match_payee, assign_category)"],
-          note: "All name inputs use fuzzy matching — partial names work",
+          note: "All name inputs use fuzzy matching — partial names work. Set category via update_transaction(id, category=...).",
         });
       }
 
@@ -1643,17 +1533,20 @@ export function registerPgTools(
             { task: "Log salary deposit", call: 'record_transaction(amount=3500, payee="Employer", category="Salary")' },
             { task: "Import bank statement rows", call: "bulk_record_transactions([{amount, payee, date, account}, ...])" },
             { task: "Set grocery budget", call: 'set_budget(category="Groceries", month="2026-04", amount=600)' },
-            { task: "Fix wrong category", call: 'categorize_transaction(transaction_id=42, category="Restaurants")' },
+            { task: "Fix wrong category", call: 'update_transaction(id=42, category="Restaurants")' },
             { task: "Auto-categorize backlog", call: "apply_rules_to_uncategorized(dry_run=true)" },
             { task: "Create savings goal", call: 'add_goal(name="Emergency Fund", type="emergency_fund", target_amount=10000)' },
             { task: "Analyze investments", call: "get_portfolio_analysis()" },
+            { task: "Rebalance vs targets", call: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}])' },
+            { task: "Net worth trend", call: "get_net_worth(months=12)" },
           ],
         });
       }
 
       if (t === "portfolio") {
         return text({
-          tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_rebalancing_suggestions", "get_investment_insights", "compare_to_benchmark"],
+          tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_investment_insights"],
+          modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "All portfolio tools return a disclaimer field. Not financial advice.",
         });
@@ -1666,9 +1559,11 @@ export function registerPgTools(
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio",
-    {},
-    async () => {
+    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Pass `symbols` to filter to specific holdings.",
+    {
+      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols (omit for all)"),
+    },
+    async ({ symbols }) => {
       const metrics = await aggregateHoldings(db, userId, dek);
 
       const ph = await q(db, sql`
@@ -1678,6 +1573,8 @@ export function registerPgTools(
         WHERE ph.user_id = ${userId}
       `);
       const phMap = new Map(ph.map(p => [String(p.name), p]));
+
+      const symbolFilters = symbols?.length ? symbols.map(s => s.toLowerCase()) : null;
 
       const today = new Date();
       type HoldingResult = {
@@ -1690,6 +1587,12 @@ export function registerPgTools(
       const results: HoldingResult[] = [];
 
       for (const m of metrics) {
+        const info = phMap.get(String(m.name));
+        if (symbolFilters) {
+          const name = String(m.name).toLowerCase();
+          const sym = String(info?.symbol ?? "").toLowerCase();
+          if (!symbolFilters.some(s => name.includes(s) || sym.includes(s))) continue;
+        }
         const buyQty = Number(m.buy_qty ?? 0);
         const buyAmt = Number(m.buy_amount ?? 0);
         const sellQty = Number(m.sell_qty ?? 0);
@@ -1703,7 +1606,6 @@ export function registerPgTools(
         const totalReturnPct = buyAmt > 0 ? (totalReturn / buyAmt) * 100 : null;
         const fpDate = m.first_purchase ?? null;
         const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
-        const info = phMap.get(String(m.name));
 
         results.push({
           name: m.name,
@@ -1925,148 +1827,124 @@ export function registerPgTools(
     }
   );
 
-  // ── get_holding_metrics ────────────────────────────────────────────────────
-  server.tool(
-    "get_holding_metrics",
-    "Compact metrics table for all holdings (or specified symbols): quantity, avg cost, cost basis, realized P&L, dividends, total return",
-    {
-      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols (omit for all)"),
-    },
-    async ({ symbols }) => {
-      const metrics = await aggregateHoldings(db, userId, dek);
-
-      const ph = await q(db, sql`
-        SELECT ph.name, ph.symbol, ph.currency, a.name as account_name
-        FROM portfolio_holdings ph
-        JOIN accounts a ON a.id = ph.account_id
-        WHERE ph.user_id = ${userId}
-      `);
-      const phMap = new Map(ph.map(p => [String(p.name), p]));
-
-      const today = new Date();
-      const rows = [];
-      let totCostBasis = 0, totRealized = 0, totDivs = 0;
-
-      for (const m of metrics) {
-        const name = String(m.name);
-        // Filter if symbols specified
-        if (symbols?.length) {
-          const lo = symbols.map(s => s.toLowerCase());
-          const info2 = phMap.get(name);
-          const sym = String(info2?.symbol ?? "").toLowerCase();
-          if (!lo.some(s => name.toLowerCase().includes(s) || sym.includes(s))) continue;
-        }
-
-        const buyQty = Number(m.buy_qty ?? 0);
-        const buyAmt = Number(m.buy_amount ?? 0);
-        const sellQty = Number(m.sell_qty ?? 0);
-        const sellAmt = Number(m.sell_amount ?? 0);
-        const divs = Number(m.dividends ?? 0);
-        const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
-        const remainQty = buyQty - sellQty;
-        const costBasis = avgCost !== null && remainQty > 0 ? remainQty * avgCost : null;
-        const realGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
-        const totalRet = realGain + divs;
-        const fpDate = m.first_purchase ?? null;
-        const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
-        const info = phMap.get(name);
-
-        totCostBasis += costBasis ?? 0;
-        totRealized += realGain;
-        totDivs += divs;
-
-        rows.push({
-          name,
-          symbol: info?.symbol ?? null,
-          account: info?.account_name ?? null,
-          qty: Math.round(remainQty * 10000) / 10000,
-          avgCost: avgCost ? Math.round(avgCost * 100) / 100 : null,
-          costBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
-          lifetimeCost: Math.round(buyAmt * 100) / 100,
-          realizedGain: Math.round(realGain * 100) / 100,
-          dividends: Math.round(divs * 100) / 100,
-          totalReturn: Math.round(totalRet * 100) / 100,
-          returnPct: buyAmt > 0 ? Math.round((totalRet / buyAmt) * 10000) / 100 : null,
-          firstPurchase: fpDate,
-          daysHeld,
-        });
-      }
-
-      const totReturn = totRealized + totDivs;
-      const totLifetime = rows.reduce((s, r) => s + r.lifetimeCost, 0);
-
-      return text({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "currentPrice and unrealizedGain require live prices — not available in MCP.",
-        totalHoldings: rows.length,
-        summary: {
-          totalCostBasis: Math.round(totCostBasis * 100) / 100,
-          totalRealizedGain: Math.round(totRealized * 100) / 100,
-          totalDividends: Math.round(totDivs * 100) / 100,
-          totalReturn: Math.round(totReturn * 100) / 100,
-          returnPct: totLifetime > 0 ? Math.round((totReturn / totLifetime) * 10000) / 100 : null,
-        },
-        holdings: rows,
-      });
-    }
-  );
-
-  // ── get_rebalancing_suggestions ────────────────────────────────────────────
-  server.tool(
-    "get_rebalancing_suggestions",
-    "Suggest rebalancing based on target allocations vs current book-value weights",
-    {
-      targets: z.array(z.object({
-        holding: z.string().describe("Holding name or symbol"),
-        target_pct: z.number().describe("Target allocation percentage (0-100)"),
-      })).describe("Target allocations (must sum to ~100)"),
-    },
-    async ({ targets }) => {
-      const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
-      const holdings = aggs.map((a) => ({ name: a.name, book_value: a.buy_amount }));
-
-      const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
-      if (totalBV === 0) return err("No portfolio holdings found");
-
-      const currentAlloc = new Map(holdings.map(h => [
-        String(h.name).toLowerCase(),
-        { name: h.name, value: Number(h.book_value), pct: (Number(h.book_value) / totalBV) * 100 }
-      ]));
-
-      const suggestions = targets.map(t => {
-        const lo = t.holding.toLowerCase();
-        const current = [...currentAlloc.entries()].find(([k]) => k.includes(lo) || lo.includes(k))?.[1];
-        const currentPct = current?.pct ?? 0;
-        const currentValue = current?.value ?? 0;
-        const targetValue = (t.target_pct / 100) * totalBV;
-        const diff = targetValue - currentValue;
-        return {
-          holding: t.holding,
-          currentPct: Math.round(currentPct * 10) / 10,
-          targetPct: t.target_pct,
-          currentValue: Math.round(currentValue * 100) / 100,
-          targetValue: Math.round(targetValue * 100) / 100,
-          action: diff > 0 ? "BUY" : diff < 0 ? "SELL" : "HOLD",
-          amount: Math.round(Math.abs(diff) * 100) / 100,
-        };
-      });
-
-      return text({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        totalPortfolioValue: Math.round(totalBV * 100) / 100,
-        suggestions,
-        note: "Values based on book cost, not market price. Get current prices for accurate rebalancing.",
-      });
-    }
-  );
-
   // ── get_investment_insights ────────────────────────────────────────────────
   server.tool(
     "get_investment_insights",
-    "Investment patterns: contribution frequency, largest positions, diversification score",
-    {},
-    async () => {
-      // Contributions aggregate by month, not by holding name — can stay in SQL.
+    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, largest positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`. `mode: 'benchmark'` compares book-value growth vs a reference index.",
+    {
+      mode: z.enum(["patterns", "rebalancing", "benchmark"]).optional().describe("Analytics mode (default: patterns)"),
+      targets: z.array(z.object({
+        holding: z.string().describe("Holding name or symbol"),
+        target_pct: z.number().describe("Target allocation percentage (0-100)"),
+      })).optional().describe("Required when mode='rebalancing'. Target allocations (should sum to ~100)."),
+      benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional().describe("Benchmark for mode='benchmark' (default SP500)"),
+    },
+    async ({ mode, targets, benchmark }) => {
+      const m = mode ?? "patterns";
+
+      if (m === "rebalancing") {
+        if (!targets?.length) return err("targets is required when mode='rebalancing'");
+        const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
+        const holdings = aggs.map((a) => ({ name: a.name, book_value: a.buy_amount }));
+
+        const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
+        if (totalBV === 0) return err("No portfolio holdings found");
+
+        const currentAlloc = new Map(holdings.map(h => [
+          String(h.name).toLowerCase(),
+          { name: h.name, value: Number(h.book_value), pct: (Number(h.book_value) / totalBV) * 100 }
+        ]));
+
+        const suggestions = targets.map(t => {
+          const lo = t.holding.toLowerCase();
+          const current = [...currentAlloc.entries()].find(([k]) => k.includes(lo) || lo.includes(k))?.[1];
+          const currentPct = current?.pct ?? 0;
+          const currentValue = current?.value ?? 0;
+          const targetValue = (t.target_pct / 100) * totalBV;
+          const diff = targetValue - currentValue;
+          return {
+            holding: t.holding,
+            currentPct: Math.round(currentPct * 10) / 10,
+            targetPct: t.target_pct,
+            currentValue: Math.round(currentValue * 100) / 100,
+            targetValue: Math.round(targetValue * 100) / 100,
+            action: diff > 0 ? "BUY" : diff < 0 ? "SELL" : "HOLD",
+            amount: Math.round(Math.abs(diff) * 100) / 100,
+          };
+        });
+
+        return text({
+          disclaimer: PORTFOLIO_DISCLAIMER,
+          mode: "rebalancing",
+          totalPortfolioValue: Math.round(totalBV * 100) / 100,
+          suggestions,
+          note: "Values based on book cost, not market price. Get current prices for accurate rebalancing.",
+        });
+      }
+
+      if (m === "benchmark") {
+        const bm = benchmark ?? "SP500";
+        const bmReturns: Record<string, { label: string; annualizedReturn: number; description: string }> = {
+          SP500:      { label: "S&P 500",           annualizedReturn: 10.5, description: "US large-cap equities (USD)" },
+          TSX:        { label: "S&P/TSX Composite",  annualizedReturn: 8.2,  description: "Canadian equities (CAD)" },
+          MSCI_WORLD: { label: "MSCI World",          annualizedReturn: 9.4,  description: "Global developed markets (USD)" },
+          BONDS_CA:   { label: "Canadian Bonds",      annualizedReturn: 3.8,  description: "Canadian aggregate bonds (CAD)" },
+        };
+        const bmInfo = bmReturns[bm];
+
+        const firstTxn = await q(db, sql`
+          SELECT MIN(date) as first_date, MAX(date) as last_date,
+                 SUM(ABS(amount)) as total_invested,
+                 SUM(amount) as net_cashflow
+          FROM transactions
+          WHERE user_id = ${userId}
+            AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
+            AND amount < 0
+        `);
+
+        if (!firstTxn.length || !firstTxn[0].first_date) {
+          return text({ disclaimer: PORTFOLIO_DISCLAIMER, mode: "benchmark", message: "No investment transactions found" });
+        }
+
+        const info = firstTxn[0];
+        const firstDate = new Date(String(info.first_date));
+        const lastDate = new Date(String(info.last_date));
+        const yearsHeld = Math.max(0.1, (lastDate.getTime() - firstDate.getTime()) / (365.25 * 86400000));
+        const totalInvested = Number(info.total_invested);
+
+        const benchmarkFinalValue = totalInvested * Math.pow(1 + bmInfo.annualizedReturn / 100, yearsHeld);
+        const benchmarkGain = benchmarkFinalValue - totalInvested;
+
+        return text({
+          disclaimer: PORTFOLIO_DISCLAIMER,
+          mode: "benchmark",
+          note: "Comparison uses book cost (not market value) and historical average returns. This is illustrative only.",
+          yourPortfolio: {
+            totalInvested: Math.round(totalInvested * 100) / 100,
+            investingSince: info.first_date,
+            yearsInvesting: Math.round(yearsHeld * 10) / 10,
+          },
+          benchmark: {
+            name: bmInfo.label,
+            description: bmInfo.description,
+            historicalAnnualizedReturn: `${bmInfo.annualizedReturn}%`,
+            period: "10-year historical average (approximate)",
+          },
+          hypothetical: {
+            message: `If your total invested ($${Math.round(totalInvested)} over ${Math.round(yearsHeld * 10) / 10} years) had earned ${bmInfo.annualizedReturn}% annually:`,
+            finalValue: Math.round(benchmarkFinalValue * 100) / 100,
+            gain: Math.round(benchmarkGain * 100) / 100,
+            gainPct: Math.round((benchmarkGain / totalInvested) * 1000) / 10,
+          },
+          limitations: [
+            "Book cost ≠ market value — add current prices for real comparison",
+            "Dollar-cost averaging timing not accounted for precisely",
+            "Benchmark returns exclude fees, taxes, and currency conversion",
+          ],
+        });
+      }
+
+      // Default: mode === "patterns"
       const contributions = await q(db, sql`
         SELECT DATE_TRUNC('month', date::date) as month, SUM(ABS(amount)) as invested
         FROM transactions
@@ -2075,7 +1953,6 @@ export function registerPgTools(
         ORDER BY month DESC LIMIT 12
       `);
 
-      // Positions group by portfolio_holding (encrypted) — aggregate in memory.
       const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
       const positions = aggs.map((a) => ({
         name: a.name,
@@ -2093,6 +1970,7 @@ export function registerPgTools(
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
+        mode: "patterns",
         summary: {
           totalPositions: positions.length,
           totalInvested: Math.round(totalInvested * 100) / 100,
@@ -2111,77 +1989,6 @@ export function registerPgTools(
           month: c.month,
           invested: Math.round(Number(c.invested) * 100) / 100,
         })),
-      });
-    }
-  );
-
-  // ── compare_to_benchmark ───────────────────────────────────────────────────
-  server.tool(
-    "compare_to_benchmark",
-    "Compare portfolio book-value growth to a reference benchmark (informational only)",
-    {
-      benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional().describe("Benchmark to compare against (default SP500)"),
-    },
-    async ({ benchmark }) => {
-      const bm = benchmark ?? "SP500";
-      // Approximate annualized returns (10-year historical averages, informational only)
-      const bmReturns: Record<string, { label: string; annualizedReturn: number; description: string }> = {
-        SP500:      { label: "S&P 500",           annualizedReturn: 10.5, description: "US large-cap equities (USD)" },
-        TSX:        { label: "S&P/TSX Composite",  annualizedReturn: 8.2,  description: "Canadian equities (CAD)" },
-        MSCI_WORLD: { label: "MSCI World",          annualizedReturn: 9.4,  description: "Global developed markets (USD)" },
-        BONDS_CA:   { label: "Canadian Bonds",      annualizedReturn: 3.8,  description: "Canadian aggregate bonds (CAD)" },
-      };
-      const bmInfo = bmReturns[bm];
-
-      const firstTxn = await q(db, sql`
-        SELECT MIN(date) as first_date, MAX(date) as last_date,
-               SUM(ABS(amount)) as total_invested,
-               SUM(amount) as net_cashflow
-        FROM transactions
-        WHERE user_id = ${userId}
-          AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
-          AND amount < 0
-      `);
-
-      if (!firstTxn.length || !firstTxn[0].first_date) {
-        return text({ disclaimer: PORTFOLIO_DISCLAIMER, message: "No investment transactions found" });
-      }
-
-      const info = firstTxn[0];
-      const firstDate = new Date(String(info.first_date));
-      const lastDate = new Date(String(info.last_date));
-      const yearsHeld = Math.max(0.1, (lastDate.getTime() - firstDate.getTime()) / (365.25 * 86400000));
-      const totalInvested = Number(info.total_invested);
-
-      // What totalInvested would be worth today at benchmark's annualized return
-      const benchmarkFinalValue = totalInvested * Math.pow(1 + bmInfo.annualizedReturn / 100, yearsHeld);
-      const benchmarkGain = benchmarkFinalValue - totalInvested;
-
-      return text({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "Comparison uses book cost (not market value) and historical average returns. This is illustrative only.",
-        yourPortfolio: {
-          totalInvested: Math.round(totalInvested * 100) / 100,
-          investingSince: info.first_date,
-          yearsInvesting: Math.round(yearsHeld * 10) / 10,
-        },
-        benchmark: {
-          name: bmInfo.label,
-          description: bmInfo.description,
-          historicalAnnualizedReturn: `${bmInfo.annualizedReturn}%`,
-          period: "10-year historical average (approximate)",
-        },
-        hypothetical: {
-          message: `If your total invested ($${Math.round(totalInvested)} over ${Math.round(yearsHeld * 10) / 10} years) had earned ${bmInfo.annualizedReturn}% annually:`,
-          finalValue: Math.round(benchmarkFinalValue * 100) / 100,
-          gain: Math.round(benchmarkGain * 100) / 100,
-          gainPct: Math.round((benchmarkGain / totalInvested) * 1000) / 10,
-        },
-        limitations: [
-          "Book cost ≠ market value — add current prices for real comparison",
-          "Dollar-cost averaging timing not accounted for precisely",
-          "Benchmark returns exclude fees, taxes, and currency conversion",
-        ],
       });
     }
   );
@@ -2674,57 +2481,6 @@ export function registerPgTools(
 
       await db.execute(sql`UPDATE subscriptions SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
       return text({ success: true, data: { id, message: `Subscription #${id} updated (${updates.length} field(s))` } });
-    }
-  );
-
-  // ── pause_subscription ────────────────────────────────────────────────────
-  server.tool(
-    "pause_subscription",
-    "Pause a subscription. Optionally record a resume-on date.",
-    {
-      id: z.number().describe("Subscription id"),
-      resume_on: z.string().optional().describe("YYYY-MM-DD when user plans to resume (stored in cancel_reminder_date)"),
-    },
-    async ({ id, resume_on }) => {
-      const existing = await q(db, sql`SELECT id, name, status FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
-      if (!existing.length) return err(`Subscription #${id} not found`);
-      await db.execute(sql`
-        UPDATE subscriptions SET status = 'paused', cancel_reminder_date = ${resume_on ?? null}
-        WHERE id = ${id} AND user_id = ${userId}
-      `);
-      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" paused${resume_on ? ` — resume on ${resume_on}` : ""}` } });
-    }
-  );
-
-  // ── resume_subscription ───────────────────────────────────────────────────
-  server.tool(
-    "resume_subscription",
-    "Re-activate a paused or cancelled subscription",
-    { id: z.number().describe("Subscription id") },
-    async ({ id }) => {
-      const existing = await q(db, sql`SELECT id, name FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
-      if (!existing.length) return err(`Subscription #${id} not found`);
-      await db.execute(sql`UPDATE subscriptions SET status = 'active', cancel_reminder_date = NULL WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" resumed` } });
-    }
-  );
-
-  // ── cancel_subscription ───────────────────────────────────────────────────
-  server.tool(
-    "cancel_subscription",
-    "Mark a subscription as cancelled. Optionally record the effective cancel date.",
-    {
-      id: z.number().describe("Subscription id"),
-      cancel_date: z.string().optional().describe("YYYY-MM-DD effective cancel date (stored in cancel_reminder_date)"),
-    },
-    async ({ id, cancel_date }) => {
-      const existing = await q(db, sql`SELECT id, name FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
-      if (!existing.length) return err(`Subscription #${id} not found`);
-      await db.execute(sql`
-        UPDATE subscriptions SET status = 'cancelled', cancel_reminder_date = ${cancel_date ?? null}
-        WHERE id = ${id} AND user_id = ${userId}
-      `);
-      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" cancelled${cancel_date ? ` effective ${cancel_date}` : ""}` } });
     }
   );
 

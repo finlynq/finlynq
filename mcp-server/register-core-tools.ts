@@ -141,32 +141,6 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   );
 
   server.tool(
-    "get_transactions",
-    "Query transactions with filters. Returns up to 100 transactions.",
-    {
-      start_date: z.string().describe("Start date (YYYY-MM-DD)"),
-      end_date: z.string().describe("End date (YYYY-MM-DD)"),
-      category: z.string().optional().describe("Filter by category name"),
-      account: z.string().optional().describe("Filter by account name"),
-      min_amount: z.number().optional().describe("Minimum amount"),
-      max_amount: z.number().optional().describe("Maximum amount"),
-      limit: z.number().optional().describe("Max results (default 100)"),
-    },
-    async ({ start_date, end_date, category, account, min_amount, max_amount, limit }) => {
-      let query = `SELECT t.date, a.name as account, c.name as category, c.type as category_type, t.currency, t.amount, t.payee, t.note, t.tags FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND t.date >= ? AND t.date <= ?`;
-      const params: (string | number)[] = [userId, start_date, end_date];
-      if (category) { query += " AND c.name = ?"; params.push(category); }
-      if (account) { query += " AND a.name = ?"; params.push(account); }
-      if (min_amount !== undefined) { query += " AND t.amount >= ?"; params.push(min_amount); }
-      if (max_amount !== undefined) { query += " AND t.amount <= ?"; params.push(max_amount); }
-      query += ` ORDER BY t.date DESC LIMIT ?`;
-      params.push(limit ?? 100);
-      const rows = await sqlite.prepare(query).all(...params);
-      return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
-    }
-  );
-
-  server.tool(
     "get_budget_summary",
     "Get budget vs actual spending for a specific month",
     { month: z.string().describe("Month in YYYY-MM format") },
@@ -192,29 +166,58 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     }
   );
 
-  server.tool("get_portfolio_summary", "Get all investment holdings grouped by account", {}, async () => {
-    const rows = await sqlite.prepare(`SELECT ph.name as holding, ph.symbol, ph.currency, a.name as account FROM portfolio_holdings ph LEFT JOIN accounts a ON ph.account_id = a.id WHERE ph.user_id = ? ORDER BY a.name, ph.name`).all(userId);
-    return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
-  });
-
   server.tool(
     "get_net_worth",
-    "Calculate total net worth across all accounts",
-    { currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency") },
-    async ({ currency }) => {
-      let query = `SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) as total FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ? WHERE a.user_id = ?`;
-      const params: (string | number)[] = [userId, userId];
-      if (currency && currency !== "all") { query += " AND a.currency = ?"; params.push(currency); }
-      query += " GROUP BY a.type, a.currency";
-      const rows = await sqlite.prepare(query).all(...params) as { type: string; currency: string; total: number }[];
-      const summary: Record<string, { assets: number; liabilities: number; net: number }> = {};
-      for (const row of rows) {
-        if (!summary[row.currency]) summary[row.currency] = { assets: 0, liabilities: 0, net: 0 };
-        if (row.type === "A") summary[row.currency].assets = row.total;
-        else summary[row.currency].liabilities = row.total;
-        summary[row.currency].net = summary[row.currency].assets + summary[row.currency].liabilities;
+    "Net worth across all accounts. Pass `months` > 0 for a trend; omit for current totals.",
+    {
+      currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency"),
+      months: z.number().optional().describe("If set, return a trend over the last N months"),
+    },
+    async ({ currency, months }) => {
+      if (!months || months <= 0) {
+        let query = `SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) as total FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ? WHERE a.user_id = ?`;
+        const params: (string | number)[] = [userId, userId];
+        if (currency && currency !== "all") { query += " AND a.currency = ?"; params.push(currency); }
+        query += " GROUP BY a.type, a.currency";
+        const rows = await sqlite.prepare(query).all(...params) as { type: string; currency: string; total: number }[];
+        const summary: Record<string, { assets: number; liabilities: number; net: number }> = {};
+        for (const row of rows) {
+          if (!summary[row.currency]) summary[row.currency] = { assets: 0, liabilities: 0, net: 0 };
+          if (row.type === "A") summary[row.currency].assets = row.total;
+          else summary[row.currency].liabilities = row.total;
+          summary[row.currency].net = summary[row.currency].assets + summary[row.currency].liabilities;
+        }
+        return { content: [{ type: "text" as const, text: JSON.stringify(summary, null, 2) }] };
       }
-      return { content: [{ type: "text" as const, text: JSON.stringify(summary, null, 2) }] };
+
+      const startDate = new Date();
+      startDate.setMonth(startDate.getMonth() - months);
+      const startStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-01`;
+
+      let query = `SELECT strftime('%Y-%m', t.date) as month, a.currency, SUM(t.amount) as total FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id WHERE t.user_id = ? AND t.date >= ?`;
+      const params: (string | number)[] = [userId, startStr];
+      if (currency && currency !== "all") { query += " AND a.currency = ?"; params.push(currency); }
+      query += " GROUP BY strftime('%Y-%m', t.date), a.currency ORDER BY month";
+      const rows = await sqlite.prepare(query).all(...params) as { month: string; currency: string; total: number }[];
+
+      let baselineQuery = `SELECT a.currency, COALESCE(SUM(t.amount), 0) as total FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id WHERE t.user_id = ? AND t.date < ?`;
+      const baseParams: (string | number)[] = [userId, startStr];
+      if (currency && currency !== "all") { baselineQuery += " AND a.currency = ?"; baseParams.push(currency); }
+      baselineQuery += " GROUP BY a.currency";
+      const baselines = await sqlite.prepare(baselineQuery).all(...baseParams) as { currency: string; total: number }[];
+
+      const running = new Map<string, number>();
+      for (const b of baselines) running.set(b.currency, Number(b.total));
+
+      const trend = rows.map(row => {
+        const c = row.currency ?? "CAD";
+        const prev = running.get(c) ?? 0;
+        const newTotal = prev + Number(row.total);
+        running.set(c, newTotal);
+        return { month: row.month, currency: c, monthlyChange: Math.round(Number(row.total) * 100) / 100, cumulativeNetWorth: Math.round(newTotal * 100) / 100 };
+      });
+
+      return { content: [{ type: "text" as const, text: JSON.stringify({ months, trend }, null, 2) }] };
     }
   );
 
@@ -270,31 +273,6 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   );
 
   // ============ WRITE TOOLS ============
-
-  server.tool(
-    "add_transaction",
-    "Add a new transaction. Use negative amounts for expenses, positive for income.",
-    {
-      date: z.string().describe("Transaction date (YYYY-MM-DD)"),
-      account: z.string().describe("Account name"),
-      category: z.string().describe("Category name"),
-      amount: z.number().describe("Amount (negative for expense, positive for income)"),
-      payee: z.string().optional().describe("Payee/merchant name"),
-      note: z.string().optional().describe("Optional note"),
-      tags: z.string().optional().describe("Comma-separated tags"),
-    },
-    async ({ date, account, category, amount, payee, note, tags }) => {
-      const acct = await sqlite.prepare("SELECT id, currency FROM accounts WHERE user_id = ? AND name = ?").get(userId, account) as { id: number; currency: string } | undefined;
-      if (!acct) return sqliteErr(`Account "${account}" not found`);
-
-      const cat = await sqlite.prepare("SELECT id FROM categories WHERE user_id = ? AND name = ?").get(userId, category) as { id: number } | undefined;
-      if (!cat) return sqliteErr(`Category "${category}" not found`);
-
-      await sqlite.prepare("INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(userId, date, acct.id, cat.id, acct.currency, amount, payee ?? "", note ?? "", tags ?? "");
-      invalidateUserTxCache(userId);
-      return { content: [{ type: "text" as const, text: `Transaction added: ${amount} to ${account} (${category}) on ${date}` }] };
-    }
-  );
 
   server.tool(
     "set_budget",
@@ -834,26 +812,6 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     }
   );
 
-  // ── categorize_transaction ─────────────────────────────────────────────────
-  server.tool(
-    "categorize_transaction",
-    "Update the category of a transaction by ID",
-    {
-      transaction_id: z.number().describe("Transaction ID"),
-      category: z.string().describe("Category name to assign"),
-    },
-    async ({ transaction_id, category }) => {
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const cat = fuzzyFind(category, allCats);
-      if (!cat) return sqliteErr(`Category "${category}" not found`);
-      const txn = await sqlite.prepare(`SELECT id, payee FROM transactions WHERE id = ? AND user_id = ?`).get(transaction_id, userId) as { id: number; payee: string } | undefined;
-      if (!txn) return sqliteErr(`Transaction #${transaction_id} not found or not owned by user`);
-      await sqlite.prepare(`UPDATE transactions SET category_id = ? WHERE id = ? AND user_id = ?`).run(cat.id, transaction_id, userId);
-      invalidateUserTxCache(userId);
-      return txt({ success: true, message: `Transaction #${transaction_id} ("${txn.payee}") categorized as "${cat.name}"` });
-    }
-  );
-
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",
@@ -995,59 +953,101 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     }
   );
 
-  // ── get_rebalancing_suggestions ────────────────────────────────────────────
-  server.tool(
-    "get_rebalancing_suggestions",
-    "Suggest rebalancing based on target allocations vs current book-value weights",
-    {
-      targets: z.array(z.object({
-        holding: z.string(),
-        target_pct: z.number().describe("Target allocation % (0-100)"),
-      })).describe("Target allocations (should sum to ~100)"),
-    },
-    async ({ targets }) => {
-      const holdings = await sqlite.prepare(`
-        SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value
-        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
-        GROUP BY portfolio_holding
-      `).all(userId) as SqliteRow[];
-
-      const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
-      if (totalBV === 0) return sqliteErr("No portfolio holdings found");
-
-      const currentMap = new Map(holdings.map(h => [String(h.name).toLowerCase(), { name: h.name, value: Number(h.book_value) }]));
-      const suggestions = targets.map(t => {
-        const lo = t.holding.toLowerCase();
-        const current = [...currentMap.entries()].find(([k]) => k.includes(lo) || lo.includes(k))?.[1];
-        const currValue = current?.value ?? 0;
-        const targetValue = (t.target_pct / 100) * totalBV;
-        const diff = targetValue - currValue;
-        return {
-          holding: t.holding,
-          currentPct: Math.round((currValue / totalBV) * 1000) / 10,
-          targetPct: t.target_pct,
-          currentValue: Math.round(currValue * 100) / 100,
-          targetValue: Math.round(targetValue * 100) / 100,
-          action: diff > 0 ? "BUY" : diff < 0 ? "SELL" : "HOLD",
-          amount: Math.round(Math.abs(diff) * 100) / 100,
-        };
-      });
-
-      return txt({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        totalPortfolioValue: Math.round(totalBV * 100) / 100,
-        suggestions,
-        note: "Based on book cost, not market price.",
-      });
-    }
-  );
-
   // ── get_investment_insights ────────────────────────────────────────────────
   server.tool(
     "get_investment_insights",
-    "Investment patterns: contribution frequency, top positions, diversification score",
-    {},
-    async () => {
+    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, top positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`. `mode: 'benchmark'` compares growth vs a reference index.",
+    {
+      mode: z.enum(["patterns", "rebalancing", "benchmark"]).optional(),
+      targets: z.array(z.object({
+        holding: z.string(),
+        target_pct: z.number().describe("Target allocation % (0-100)"),
+      })).optional().describe("Required when mode='rebalancing'"),
+      benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional().describe("Benchmark for mode='benchmark'"),
+    },
+    async ({ mode, targets, benchmark }) => {
+      const m = mode ?? "patterns";
+
+      if (m === "rebalancing") {
+        if (!targets?.length) return sqliteErr("targets is required when mode='rebalancing'");
+        const holdings = await sqlite.prepare(`
+          SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value
+          FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+          GROUP BY portfolio_holding
+        `).all(userId) as SqliteRow[];
+
+        const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
+        if (totalBV === 0) return sqliteErr("No portfolio holdings found");
+
+        const currentMap = new Map(holdings.map(h => [String(h.name).toLowerCase(), { name: h.name, value: Number(h.book_value) }]));
+        const suggestions = targets.map(t => {
+          const lo = t.holding.toLowerCase();
+          const current = [...currentMap.entries()].find(([k]) => k.includes(lo) || lo.includes(k))?.[1];
+          const currValue = current?.value ?? 0;
+          const targetValue = (t.target_pct / 100) * totalBV;
+          const diff = targetValue - currValue;
+          return {
+            holding: t.holding,
+            currentPct: Math.round((currValue / totalBV) * 1000) / 10,
+            targetPct: t.target_pct,
+            currentValue: Math.round(currValue * 100) / 100,
+            targetValue: Math.round(targetValue * 100) / 100,
+            action: diff > 0 ? "BUY" : diff < 0 ? "SELL" : "HOLD",
+            amount: Math.round(Math.abs(diff) * 100) / 100,
+          };
+        });
+
+        return txt({
+          disclaimer: PORTFOLIO_DISCLAIMER,
+          mode: "rebalancing",
+          totalPortfolioValue: Math.round(totalBV * 100) / 100,
+          suggestions,
+          note: "Based on book cost, not market price.",
+        });
+      }
+
+      if (m === "benchmark") {
+        const bm = benchmark ?? "SP500";
+        const bmInfo: Record<string, { label: string; annualizedReturn: number; description: string }> = {
+          SP500:      { label: "S&P 500",            annualizedReturn: 10.5, description: "US large-cap equities (USD)" },
+          TSX:        { label: "S&P/TSX Composite",   annualizedReturn: 8.2,  description: "Canadian equities (CAD)" },
+          MSCI_WORLD: { label: "MSCI World",           annualizedReturn: 9.4,  description: "Global developed markets (USD)" },
+          BONDS_CA:   { label: "Canadian Bonds",       annualizedReturn: 3.8,  description: "Canadian aggregate bonds (CAD)" },
+        };
+        const info = bmInfo[bm];
+
+        const row = await sqlite.prepare(`
+          SELECT MIN(date) as first_date, MAX(date) as last_date, SUM(ABS(amount)) as total_invested
+          FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+        `).get(userId) as { first_date: string | null; last_date: string; total_invested: number } | undefined;
+
+        if (!row?.first_date) return txt({ disclaimer: PORTFOLIO_DISCLAIMER, mode: "benchmark", message: "No investment transactions found" });
+
+        const yearsHeld = Math.max(0.1, (new Date(row.last_date).getTime() - new Date(row.first_date).getTime()) / (365.25 * 86400000));
+        const benchFinal = row.total_invested * Math.pow(1 + info.annualizedReturn / 100, yearsHeld);
+        const benchGain = benchFinal - row.total_invested;
+
+        return txt({
+          disclaimer: PORTFOLIO_DISCLAIMER,
+          mode: "benchmark",
+          note: "Uses book cost, not market value. Illustrative only.",
+          yourPortfolio: { totalInvested: Math.round(row.total_invested * 100) / 100, investingSince: row.first_date, yearsInvesting: Math.round(yearsHeld * 10) / 10 },
+          benchmark: { name: info.label, description: info.description, historicalAnnualizedReturn: `${info.annualizedReturn}%`, period: "10-year historical average (approximate)" },
+          hypothetical: {
+            message: `If $${Math.round(row.total_invested)} invested over ${Math.round(yearsHeld * 10) / 10} years earned ${info.annualizedReturn}% annually:`,
+            finalValue: Math.round(benchFinal * 100) / 100,
+            gain: Math.round(benchGain * 100) / 100,
+            gainPct: Math.round((benchGain / row.total_invested) * 1000) / 10,
+          },
+          limitations: [
+            "Book cost ≠ market value — add current prices for real comparison",
+            "Dollar-cost averaging timing not accounted for precisely",
+            "Benchmark returns exclude fees, taxes, and currency conversion",
+          ],
+        });
+      }
+
+      // Default: mode === "patterns"
       const positions = await sqlite.prepare(`
         SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value, COUNT(*) as purchases
         FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
@@ -1067,6 +1067,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       return txt({
         disclaimer: PORTFOLIO_DISCLAIMER,
+        mode: "patterns",
         summary: {
           totalPositions: positions.length,
           totalInvested: Math.round(totalInvested * 100) / 100,
@@ -1082,52 +1083,6 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           purchases: Number(p.purchases),
         })),
         monthlyContributions: contributions.slice(0, 6).map(c => ({ month: c.month, invested: Math.round(Number(c.invested) * 100) / 100 })),
-      });
-    }
-  );
-
-  // ── compare_to_benchmark ───────────────────────────────────────────────────
-  server.tool(
-    "compare_to_benchmark",
-    "Compare portfolio book-value growth to a reference benchmark (informational only)",
-    { benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional() },
-    async ({ benchmark }) => {
-      const bm = benchmark ?? "SP500";
-      const bmInfo: Record<string, { label: string; annualizedReturn: number; description: string }> = {
-        SP500:      { label: "S&P 500",            annualizedReturn: 10.5, description: "US large-cap equities (USD)" },
-        TSX:        { label: "S&P/TSX Composite",   annualizedReturn: 8.2,  description: "Canadian equities (CAD)" },
-        MSCI_WORLD: { label: "MSCI World",           annualizedReturn: 9.4,  description: "Global developed markets (USD)" },
-        BONDS_CA:   { label: "Canadian Bonds",       annualizedReturn: 3.8,  description: "Canadian aggregate bonds (CAD)" },
-      };
-      const info = bmInfo[bm];
-
-      const row = await sqlite.prepare(`
-        SELECT MIN(date) as first_date, MAX(date) as last_date, SUM(ABS(amount)) as total_invested
-        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
-      `).get(userId) as { first_date: string | null; last_date: string; total_invested: number } | undefined;
-
-      if (!row?.first_date) return txt({ disclaimer: PORTFOLIO_DISCLAIMER, message: "No investment transactions found" });
-
-      const yearsHeld = Math.max(0.1, (new Date(row.last_date).getTime() - new Date(row.first_date).getTime()) / (365.25 * 86400000));
-      const benchFinal = row.total_invested * Math.pow(1 + info.annualizedReturn / 100, yearsHeld);
-      const benchGain = benchFinal - row.total_invested;
-
-      return txt({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "Uses book cost, not market value. Illustrative only.",
-        yourPortfolio: { totalInvested: Math.round(row.total_invested * 100) / 100, investingSince: row.first_date, yearsInvesting: Math.round(yearsHeld * 10) / 10 },
-        benchmark: { name: info.label, description: info.description, historicalAnnualizedReturn: `${info.annualizedReturn}%`, period: "10-year historical average (approximate)" },
-        hypothetical: {
-          message: `If $${Math.round(row.total_invested)} invested over ${Math.round(yearsHeld * 10) / 10} years earned ${info.annualizedReturn}% annually:`,
-          finalValue: Math.round(benchFinal * 100) / 100,
-          gain: Math.round(benchGain * 100) / 100,
-          gainPct: Math.round((benchGain / row.total_invested) * 1000) / 10,
-        },
-        limitations: [
-          "Book cost ≠ market value — add current prices for real comparison",
-          "Dollar-cost averaging timing not accounted for precisely",
-          "Benchmark returns exclude fees, taxes, and currency conversion",
-        ],
       });
     }
   );
@@ -1157,7 +1112,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           delete_goal: "delete_goal(goal)",
           create_category: "create_category(name, type, group?, note?) — type: E/I/T",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?)",
-          categorize_transaction: "categorize_transaction(transaction_id, category)",
+          get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark'",
+          get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
         };
         return txt({ tool: tool_name, usage: docs[tool_name] ?? "Use topic='tools' for full list." });
       }
@@ -1165,9 +1121,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const t = topic ?? "tools";
 
       if (t === "tools") return txt({
-        read_tools: ["get_account_balances", "get_transactions", "get_budget_summary", "get_spending_trends", "get_portfolio_summary", "get_net_worth", "get_categories", "get_loans", "get_goals", "get_recurring_transactions", "get_income_statement", "get_spotlight_items", "get_weekly_recap", "get_transaction_rules"],
-        write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "add_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized", "categorize_transaction"],
-        portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_rebalancing_suggestions", "get_investment_insights", "compare_to_benchmark"],
+        read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_net_worth", "get_categories", "get_loans", "get_goals", "get_recurring_transactions", "get_income_statement", "get_spotlight_items", "get_weekly_recap", "get_transaction_rules"],
+        write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
+        portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_investment_insights"],
         tip: "Use tool_name='record_transaction' for usage details.",
       });
 
@@ -1188,20 +1144,27 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         { task: "Log a coffee", call: 'record_transaction(amount=-5.50, payee="Tim Hortons")' },
         { task: "Log salary", call: 'record_transaction(amount=3500, payee="Employer", category="Salary")' },
         { task: "Set budget", call: 'set_budget(category="Groceries", month="2026-04", amount=600)' },
-        { task: "Fix category", call: 'categorize_transaction(transaction_id=42, category="Restaurants")' },
+        { task: "Fix category", call: 'update_transaction(id=42, category="Restaurants")' },
+        { task: "Net worth trend", call: "get_net_worth(months=12)" },
         { task: "Analyze portfolio", call: "get_portfolio_analysis()" },
+        { task: "Rebalance", call: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}])' },
       ]});
 
-      if (t === "portfolio") return txt({ tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_rebalancing_suggestions", "get_investment_insights", "compare_to_benchmark"], disclaimer: PORTFOLIO_DISCLAIMER });
+      if (t === "portfolio") return txt({
+        tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_investment_insights"],
+        modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
+        disclaimer: PORTFOLIO_DISCLAIMER,
+      });
 
       if (t === "write") return txt({
         primary_add: "record_transaction — smart defaults, fuzzy matching",
         bulk: "bulk_record_transactions(transactions[])",
-        edits: ["update_transaction(id, ...)", "delete_transaction(id)", "categorize_transaction(id, category)"],
+        edits: ["update_transaction(id, ...)", "delete_transaction(id)"],
         budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
         accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
         goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
         categories: ["create_category(name, type)", "create_rule(match_payee, assign_category)"],
+        note: "Set category via update_transaction(id, category=...).",
       });
 
       return txt({ error: "Unknown topic" });
@@ -1673,51 +1636,6 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       params.push(id, userId);
       await sqlite.prepare(`UPDATE subscriptions SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
       return txt({ success: true, data: { id, message: `Subscription #${id} updated (${updates.length} field(s))` } });
-    }
-  );
-
-  // ── pause_subscription ────────────────────────────────────────────────────
-  server.tool(
-    "pause_subscription",
-    "Pause a subscription. Optionally record a resume-on date.",
-    {
-      id: z.number(),
-      resume_on: z.string().optional(),
-    },
-    async ({ id, resume_on }) => {
-      const existing = await sqlite.prepare(`SELECT id, name FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
-      if (!existing) return sqliteErr(`Subscription #${id} not found`);
-      await sqlite.prepare(`UPDATE subscriptions SET status = 'paused', cancel_reminder_date = ? WHERE id = ? AND user_id = ?`).run(resume_on ?? null, id, userId);
-      return txt({ success: true, data: { id, message: `Subscription "${existing.name}" paused${resume_on ? ` — resume on ${resume_on}` : ""}` } });
-    }
-  );
-
-  // ── resume_subscription ───────────────────────────────────────────────────
-  server.tool(
-    "resume_subscription",
-    "Re-activate a paused or cancelled subscription",
-    { id: z.number() },
-    async ({ id }) => {
-      const existing = await sqlite.prepare(`SELECT id, name FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
-      if (!existing) return sqliteErr(`Subscription #${id} not found`);
-      await sqlite.prepare(`UPDATE subscriptions SET status = 'active', cancel_reminder_date = NULL WHERE id = ? AND user_id = ?`).run(id, userId);
-      return txt({ success: true, data: { id, message: `Subscription "${existing.name}" resumed` } });
-    }
-  );
-
-  // ── cancel_subscription ───────────────────────────────────────────────────
-  server.tool(
-    "cancel_subscription",
-    "Mark a subscription as cancelled",
-    {
-      id: z.number(),
-      cancel_date: z.string().optional(),
-    },
-    async ({ id, cancel_date }) => {
-      const existing = await sqlite.prepare(`SELECT id, name FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
-      if (!existing) return sqliteErr(`Subscription #${id} not found`);
-      await sqlite.prepare(`UPDATE subscriptions SET status = 'cancelled', cancel_reminder_date = ? WHERE id = ? AND user_id = ?`).run(cancel_date ?? null, id, userId);
-      return txt({ success: true, data: { id, message: `Subscription "${existing.name}" cancelled${cancel_date ? ` effective ${cancel_date}` : ""}` } });
     }
   );
 

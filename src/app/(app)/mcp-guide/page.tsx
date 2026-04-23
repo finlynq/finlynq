@@ -66,7 +66,7 @@ const toolGroups: {
     title: "Find and manage subscriptions",
     icon: Radar,
     blurb:
-      "Detect recurring charges from your transaction history, then add, pause, resume, cancel, or delete subscriptions without leaving the chat.",
+      "Detect recurring charges from your transaction history, then add, update (pause/resume/cancel via status), or delete subscriptions without leaving the chat.",
     example: "Find my subscriptions and add the ones you're confident about.",
     tools: [
       "list_subscriptions",
@@ -74,9 +74,6 @@ const toolGroups: {
       "bulk_add_subscriptions",
       "add_subscription",
       "update_subscription",
-      "pause_subscription",
-      "resume_subscription",
-      "cancel_subscription",
       "delete_subscription",
       "get_subscription_summary",
     ],
@@ -151,8 +148,6 @@ const toolGroups: {
     tools: [
       "get_account_balances",
       "get_net_worth",
-      "get_net_worth_trend",
-      "get_transactions",
       "search_transactions",
       "get_budget_summary",
       "get_spending_trends",
@@ -164,14 +159,10 @@ const toolGroups: {
       "get_weekly_recap",
       "get_spending_anomalies",
       "get_financial_health_score",
-      "get_portfolio_summary",
       "get_portfolio_analysis",
       "get_portfolio_performance",
       "analyze_holding",
-      "get_holding_metrics",
-      "get_rebalancing_suggestions",
       "get_investment_insights",
-      "compare_to_benchmark",
       "get_categories",
       "finlynq_help",
     ],
@@ -833,7 +824,7 @@ export default function McpGuidePage() {
         <section>
           <h2 className="mb-1 text-lg font-semibold text-foreground">What Claude can do</h2>
           <p className="mb-4 text-sm text-muted-foreground">
-            86 tools organized by task. Claude picks the right ones — you describe the outcome in plain English.
+            75 tools organized by task. Claude picks the right ones — you describe the outcome in plain English.
             For the full alphabetical tool list with parameters, see{" "}
             <code className="bg-muted px-1 rounded">/api-docs</code> or{" "}
             <code className="bg-muted px-1 rounded">/.well-known/mcp.json</code>.

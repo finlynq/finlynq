@@ -55,12 +55,6 @@ type SubscriptionRow = {
   category_name: string | null;
 };
 
-type NetWorthRow = {
-  month: string;
-  currency: string;
-  total: number;
-};
-
 // ============ HELPERS ============
 
 function mcpText(data: unknown) {
@@ -482,93 +476,7 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
     }
   );
 
-  server.tool(
-    "get_net_worth_trend",
-    "Get net worth over the last N months, showing monthly totals and cumulative net worth",
-    {
-      months: z.number().optional().describe("Number of months to look back (default 12)"),
-      currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency"),
-    },
-    async ({ months, currency }) => {
-      const lookback = months ?? 12;
-      const startDate = new Date();
-      startDate.setMonth(startDate.getMonth() - lookback);
-      const startStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-01`;
-
-      let query = `SELECT strftime('%Y-%m', t.date) as month, a.currency, SUM(t.amount) as total
-                   FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id
-                   WHERE t.user_id = ? AND t.date >= ?`;
-      const params: string[] = [userId, startStr];
-
-      if (currency && currency !== "all") {
-        query += " AND a.currency = ?";
-        params.push(currency);
-      }
-
-      query += " GROUP BY strftime('%Y-%m', t.date), a.currency ORDER BY month";
-
-      const rows = await sqlite.prepare(query).all(...params) as NetWorthRow[];
-
-      // Build cumulative net worth by month
-      // First, get all-time totals before the start date for a correct baseline
-      let baselineQuery = `SELECT a.currency, COALESCE(SUM(t.amount), 0) as total
-                           FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id
-                           WHERE t.user_id = ? AND t.date < ?`;
-      const baseParams: string[] = [userId, startStr];
-      if (currency && currency !== "all") {
-        baselineQuery += " AND a.currency = ?";
-        baseParams.push(currency);
-      }
-      baselineQuery += " GROUP BY a.currency";
-
-      const baselines = await sqlite.prepare(baselineQuery).all(...baseParams) as { currency: string; total: number }[];
-      const runningTotals = new Map<string, number>();
-      for (const b of baselines) { runningTotals.set(b.currency, b.total); }
-
-      const trend: { month: string; currency: string; monthlyChange: number; cumulativeNetWorth: number }[] = [];
-      for (const row of rows) {
-        const curr = row.currency ?? "CAD";
-        const prev = runningTotals.get(curr) ?? 0;
-        const newTotal = prev + row.total;
-        runningTotals.set(curr, newTotal);
-        trend.push({
-          month: row.month,
-          currency: curr,
-          monthlyChange: Math.round(row.total * 100) / 100,
-          cumulativeNetWorth: Math.round(newTotal * 100) / 100,
-        });
-      }
-
-      return mcpText({ months: lookback, trend });
-    }
-  );
-
   // ---- WRITE TOOLS ----
-
-  server.tool(
-    "categorize_transaction",
-    "Update the category of a transaction by ID",
-    {
-      transaction_id: z.number().describe("Transaction ID"),
-      category: z.string().describe("Category name to assign"),
-    },
-    async ({ transaction_id, category }) => {
-      const cat = await sqlite.prepare(
-        "SELECT id, name FROM categories WHERE user_id = ? AND name = ?"
-      ).get(userId, category) as { id: number; name: string } | undefined;
-      if (!cat) return mcpError(`Category "${category}" not found`);
-
-      const txn = await sqlite.prepare(
-        "SELECT id, payee FROM transactions WHERE id = ? AND user_id = ?"
-      ).get(transaction_id, userId) as { id: number; payee: string } | undefined;
-      if (!txn) return mcpError(`Transaction #${transaction_id} not found or not owned by user`);
-
-      await sqlite.prepare(
-        "UPDATE transactions SET category_id = ? WHERE id = ? AND user_id = ?"
-      ).run(cat.id, transaction_id, userId);
-      return mcpText({ success: true, transactionId: transaction_id, newCategory: cat.name, message: `Transaction #${transaction_id} (${txn.payee}) categorized as "${cat.name}"` });
-    }
-  );
 
   server.tool(
     "add_account",

@@ -6,7 +6,7 @@
     "type": "streamable-http",
     "url": "/api/mcp"
   },
-  "tools_count": 27,
+  "tools_count": 75,
   "tools": {
     "read": [
       {
@@ -14,12 +14,8 @@
         "description": "Returns current balances for all accounts (checking, savings, credit cards, investment accounts). Includes account type, institution, and balance."
       },
       {
-        "name": "get_transactions",
-        "description": "Retrieves transactions with optional filters: date range, account, category, amount range, or keyword. Returns paginated results."
-      },
-      {
         "name": "search_transactions",
-        "description": "Full-text search across transaction descriptions, merchant names, and notes. Use for 'find my Netflix charges' type queries."
+        "description": "Flexible transaction search with partial payee match, amount range, date range, category, and tags."
       },
       {
         "name": "get_budget_summary",
@@ -31,11 +27,7 @@
       },
       {
         "name": "get_net_worth",
-        "description": "Calculates current net worth: total assets minus total liabilities. Broken down by account type."
-      },
-      {
-        "name": "get_net_worth_trend",
-        "description": "Historical net worth snapshots over time. Shows how net worth has changed month by month."
+        "description": "Net worth across all accounts. Pass months>0 for a historical trend; omit for current totals only."
       },
       {
         "name": "get_income_statement",
@@ -62,8 +54,12 @@
         "description": "Projects upcoming income and bills over the next 30–90 days based on recurring transaction patterns."
       },
       {
-        "name": "get_portfolio_summary",
-        "description": "Investment portfolio overview: holdings, total value, unrealized gains/losses, and asset allocation breakdown."
+        "name": "get_portfolio_analysis",
+        "description": "Portfolio holdings with all investment metrics (cost basis, gains, dividends, return %). Pass `symbols` to filter to specific holdings."
+      },
+      {
+        "name": "get_investment_insights",
+        "description": "Portfolio analytics. mode='patterns' (default) returns diversification + contributions. mode='rebalancing' suggests buys/sells vs targets. mode='benchmark' compares vs SP500/TSX/MSCI_WORLD/BONDS_CA."
       },
       {
         "name": "get_financial_health_score",
@@ -86,7 +82,7 @@
         "description": "Summary of this week's spending vs. last week, top categories, and notable transactions."
       },
       {
-        "name": "get_transaction_rules",
+        "name": "list_rules",
         "description": "Lists saved auto-categorization rules (keyword → category mappings)."
       },
       {
@@ -96,12 +92,12 @@
     ],
     "write": [
       {
-        "name": "add_transaction",
-        "description": "Creates a new transaction. Requires: date, description, amount, account ID. Optional: category, notes."
+        "name": "record_transaction",
+        "description": "Record a transaction with smart defaults: fuzzy account/category matching, auto-categorize from payee."
       },
       {
-        "name": "categorize_transaction",
-        "description": "Sets or updates the category for a specific transaction by ID."
+        "name": "update_transaction",
+        "description": "Update any field of an existing transaction by ID — including category."
       },
       {
         "name": "set_budget",
@@ -119,7 +115,8 @@
         "name": "add_snapshot",
         "description": "Records a net worth snapshot for historical tracking. Useful for accounts without automatic balance updates."
       }
-    ]
+    ],
+    "note": "This card highlights the most-used read and write tools. The HTTP endpoint exposes 75 tools total including loans, FX, subscriptions CRUD, rules CRUD, splits, bulk edit (preview/execute), and file import."
   },
   "security": {
     "model": "authenticated",
