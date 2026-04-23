@@ -6,6 +6,9 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Fixed
+- **Admin nav gate restored (2026-04-23, commit [4656656](https://github.com/finlynq/finlynq/commit/4656656)).** `db9fd75` (SQLite purge) removed `/api/auth/unlock` but `src/components/nav.tsx` was still fetching it — the 404 put `isAdmin` at `false` for every user and the **Admin** link never rendered. Repointed nav at `/api/auth/session`, and taught that endpoint to emit `authMethod`, `isAdmin` (looked up from `users.role` in managed mode), plus `email` and `displayName` for future client consumers. No schema change. See [src/app/api/auth/session/route.ts](src/app/api/auth/session/route.ts).
+
 ### Security
 - **Full audit remediation (2026-04-22).** Addressed 3 critical, 4 high, 4 medium findings in one commit. Plan: [AUDIT_REMEDIATION_PLAN.md](../AUDIT_REMEDIATION_PLAN.md).
   - **Critical — stdio MCP user isolation.** `mcp-server/index.ts` now requires `PF_USER_ID` at boot (exits otherwise). ~68 SQL queries across `register-core-tools.ts`, `tools-v2.ts`, `tools-import-templates.ts` now filter by `user_id`. Every UPDATE/DELETE has an ownership pre-check. INSERTs bind userId from closure, never from tool arguments. Before the fix, a stdio caller against a multi-user DB could read and destructively write across all tenants.

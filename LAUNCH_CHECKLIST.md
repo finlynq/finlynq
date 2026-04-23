@@ -60,7 +60,7 @@ Last updated: 2026-04-08
 | Check | Status | Notes |
 |-------|--------|-------|
 | Dev mode toggle hides `mode: "dev"` items | ✅ | Controlled by `/api/settings/dev-mode` |
-| Admin nav item hidden for non-admins | ✅ | `isAdmin` flag from `/api/auth/unlock` |
+| Admin nav item hidden for non-admins | ✅ | `isAdmin` flag from `/api/auth/session` |
 | Sidebar logo updated to "Finlynq" | ✅ | "FL" initials, correct wordmark |
 | Mobile bottom bar renders | ✅ | Dashboard / Transactions / Import / Budgets |
 
