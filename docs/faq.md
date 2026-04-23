@@ -44,7 +44,7 @@ PF supports five import methods:
 | **Excel** (.xlsx/.xls) | Spreadsheets with visual column mapper |
 | **PDF** | Bank statements with automatic table extraction |
 | **OFX/QFX** | Standard bank statement format |
-| **Email** | Forward bank statements to a generated import email address |
+| **Email** | Forward bank statements to your per-user `import-<uuid>@finlynq.com` address. Rows land in a review queue at `/import/pending` — nothing is imported until you approve. See [resend-inbound-setup.md](./resend-inbound-setup.md) for the ops side. |
 
 ### Will importing the same file create duplicates?
 
