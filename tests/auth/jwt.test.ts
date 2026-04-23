@@ -1,9 +1,13 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterEach } from "vitest";
 
 // Set a stable JWT secret for tests
 process.env.PF_JWT_SECRET = "test-jwt-secret-for-vitest-32chars!!";
 
-import { createSessionToken, verifySessionToken } from "@/lib/auth/jwt";
+import {
+  createSessionToken,
+  verifySessionToken,
+  verifySessionTokenDetailed,
+} from "@/lib/auth/jwt";
 
 describe("JWT utilities", () => {
   let token: string;
@@ -49,5 +53,38 @@ describe("JWT utilities", () => {
     const { token: mfaToken } = await createSessionToken("user-456", "mfa@test.com", true);
     const payload = await verifySessionToken(mfaToken);
     expect(payload!.mfa).toBe(true);
+  });
+});
+
+describe("JWT deploy-generation force-logout", () => {
+  const originalGen = process.env.DEPLOY_GENERATION;
+  afterEach(() => {
+    if (originalGen === undefined) delete process.env.DEPLOY_GENERATION;
+    else process.env.DEPLOY_GENERATION = originalGen;
+  });
+
+  it("accepts a token minted under the current deploy generation", async () => {
+    process.env.DEPLOY_GENERATION = "deploy-1";
+    const { token } = await createSessionToken("u", "e@e.com", false);
+    const res = await verifySessionTokenDetailed(token);
+    expect(res.payload).not.toBeNull();
+    expect(res.reason).toBeUndefined();
+  });
+
+  it("rejects a token minted under a previous deploy with deploy-reauth-required", async () => {
+    process.env.DEPLOY_GENERATION = "deploy-1";
+    const { token } = await createSessionToken("u", "e@e.com", false);
+    // Simulate a redeploy
+    process.env.DEPLOY_GENERATION = "deploy-2";
+    const res = await verifySessionTokenDetailed(token);
+    expect(res.payload).toBeNull();
+    expect(res.reason).toBe("deploy-reauth-required");
+  });
+
+  it("verifySessionToken returns null (back-compat) for cross-deploy tokens", async () => {
+    process.env.DEPLOY_GENERATION = "deploy-a";
+    const { token } = await createSessionToken("u", "e@e.com", false);
+    process.env.DEPLOY_GENERATION = "deploy-b";
+    expect(await verifySessionToken(token)).toBeNull();
   });
 });

@@ -89,6 +89,18 @@ fi
 chown -R paperclip-agent:paperclip-agent .next || true
 
 # 5. Restart the service
+# Stamp a fresh DEPLOY_GENERATION so the new process issues JWTs with a new
+# `gen` claim. Existing JWTs become invalid on verify and the client gets a
+# 401 with `{ code: "deploy-reauth-required" }` so the UI can show a tailored
+# re-login prompt. Written as a drop-in so systemd picks it up on restart
+# without editing the unit file on every deploy.
+DEPLOY_GEN="$(date +%s)"
+echo "==> Stamping DEPLOY_GENERATION=$DEPLOY_GEN"
+sudo mkdir -p "/etc/systemd/system/${SERVICE_NAME}.service.d"
+echo -e "[Service]\nEnvironment=DEPLOY_GENERATION=${DEPLOY_GEN}" | \
+  sudo tee "/etc/systemd/system/${SERVICE_NAME}.service.d/deploy-generation.conf" > /dev/null
+sudo systemctl daemon-reload
+
 echo "==> Restarting $SERVICE_NAME service..."
 sudo systemctl restart "$SERVICE_NAME"
 

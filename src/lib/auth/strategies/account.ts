@@ -6,7 +6,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { verifySessionToken } from "../jwt";
+import { verifySessionTokenDetailed } from "../jwt";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import type { AuthStrategy, AuthResult } from "../strategy";
 
@@ -29,9 +29,25 @@ export class AccountStrategy implements AuthStrategy {
       };
     }
 
-    const payload = await verifySessionToken(token);
+    const { payload, reason } = await verifySessionTokenDetailed(token);
 
     if (!payload || !payload.sub) {
+      // Distinguish deploy-rotation from generic invalid — the client uses
+      // the `code` field to show a tailored "we just updated Finlynq, please
+      // sign in again" screen rather than a generic auth failure.
+      if (reason === "deploy-reauth-required") {
+        return {
+          authenticated: false,
+          response: NextResponse.json(
+            {
+              error:
+                "Your session has expired due to a deployment. Please sign in again.",
+              code: "deploy-reauth-required",
+            },
+            { status: 401 }
+          ),
+        };
+      }
       return {
         authenticated: false,
         response: NextResponse.json(

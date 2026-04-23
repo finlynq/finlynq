@@ -18,11 +18,13 @@ vi.mock("@/lib/api-auth", () => ({
 // Mock JWT verification for account strategy and passphrase session cookie
 vi.mock("@/lib/auth/jwt", () => ({
   verifySessionToken: vi.fn(async () => null),
+  verifySessionTokenDetailed: vi.fn(async () => ({ payload: null })),
   createSessionToken: vi.fn(async () => "mock-token"),
+  currentDeployGeneration: vi.fn(() => "0"),
 }));
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { verifySessionToken } from "@/lib/auth/jwt";
+import { verifySessionToken, verifySessionTokenDetailed } from "@/lib/auth/jwt";
 import { validateApiKey } from "@/lib/api-auth";
 
 function makeRequest(
@@ -51,14 +53,16 @@ describe("requireAuth", () => {
 
   describe("SQLite (self-hosted) mode", () => {
     it("uses passphrase strategy and succeeds when unlocked with valid session", async () => {
-      vi.mocked(verifySessionToken).mockResolvedValue({
+      const p = {
         sub: "default",
         jti: "test-jti",
         email: "self-hosted",
         mfa: false,
         iss: "pf-auth",
         aud: "pf-app",
-      });
+      };
+      vi.mocked(verifySessionToken).mockResolvedValue(p);
+      vi.mocked(verifySessionTokenDetailed).mockResolvedValue({ payload: p });
       const result = await requireAuth(makeRequest({}, { pf_session: "valid-token" }));
       expect(result.authenticated).toBe(true);
       if (result.authenticated) {
@@ -91,14 +95,16 @@ describe("requireAuth", () => {
     });
 
     it("uses account strategy with valid Bearer token", async () => {
-      vi.mocked(verifySessionToken).mockResolvedValue({
+      const p = {
         sub: "user-abc",
         jti: "test-jti-2",
         email: "test@test.com",
         mfa: true,
         iss: "pf-auth",
         aud: "pf-app",
-      });
+      };
+      vi.mocked(verifySessionToken).mockResolvedValue(p);
+      vi.mocked(verifySessionTokenDetailed).mockResolvedValue({ payload: p });
 
       const result = await requireAuth(
         makeRequest({ authorization: "Bearer valid-token" })
@@ -121,6 +127,10 @@ describe("requireAuth", () => {
 
     it("returns 401 with invalid token", async () => {
       vi.mocked(verifySessionToken).mockResolvedValue(null);
+      vi.mocked(verifySessionTokenDetailed).mockResolvedValue({
+        payload: null,
+        reason: "invalid-token",
+      });
       const result = await requireAuth(
         makeRequest({ authorization: "Bearer bad-token" })
       );
