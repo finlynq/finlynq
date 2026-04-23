@@ -59,23 +59,56 @@ export function findBestTemplate(
 /** Auto-detect column mapping from CSV headers using keyword matching. */
 export function autoDetectColumnMapping(headers: string[]): ColumnMapping | null {
   const lower = headers.map((h) => h.toLowerCase().trim());
-  const find = (keywords: string[]) =>
-    headers[lower.findIndex((h) => keywords.some((k) => h.includes(k)))] ?? undefined;
 
-  const date = find(["date", "posted", "transaction date", "trans date"]);
-  const amount = find(["amount", "debit", "credit", "total", "value"]);
+  // Prefer exact-match headers first (e.g. "Date" beats "Transaction Date When Posted").
+  const findExact = (keywords: string[]): string | undefined => {
+    for (const kw of keywords) {
+      const idx = lower.findIndex((h) => h === kw);
+      if (idx >= 0) return headers[idx];
+    }
+    return undefined;
+  };
+
+  const findContains = (keywords: string[]): string | undefined => {
+    for (const kw of keywords) {
+      const idx = lower.findIndex((h) => h.includes(kw));
+      if (idx >= 0) return headers[idx];
+    }
+    return undefined;
+  };
+
+  const date =
+    findExact(["date", "transaction date", "trans date", "posted date", "post date"]) ??
+    findContains(["transaction date", "trans date", "posted", "post date", "date"]);
+
+  // Amount: standard names first, then currency-suffixed columns (CAD$, USD$, $),
+  // then debit/credit/value as last resort.
+  const amount =
+    findExact(["amount", "transaction amount", "amount (cad)", "amount (usd)"]) ??
+    findContains(["amount"]) ??
+    findContains(["cad$", "usd$", "eur$", "gbp$"]) ??
+    findExact(["$", "cad", "usd", "eur", "gbp"]) ??
+    findContains(["debit", "credit", "value", "total"]);
 
   if (!date || !amount) return null;
+
+  // Account: exact-match only — "Account Type" / "Account Number" are bank metadata,
+  // not the user's account name in our DB, so don't auto-bind them.
+  const account = findExact(["account", "account name"]);
+
+  const payee =
+    findExact(["payee", "description", "merchant", "name", "memo", "narrative"]) ??
+    findContains(["description", "merchant", "payee", "narrative", "memo"]);
 
   return {
     date,
     amount,
-    account: find(["account"]),
-    payee: find(["payee", "description", "merchant", "name", "memo", "narrative"]),
-    category: find(["category", "categorization", "type", "class"]),
-    currency: find(["currency", "ccy"]),
-    note: find(["note", "reference", "ref", "memo"]),
-    tags: find(["tags", "labels", "label"]),
+    account,
+    payee,
+    category: findContains(["category", "categorization", "class"]),
+    currency: findExact(["currency", "ccy"]) ?? findContains(["currency"]),
+    note: findExact(["note", "notes", "reference", "ref"]) ?? findContains(["note", "reference"]),
+    tags: findExact(["tags", "labels", "label"]) ?? findContains(["tags", "labels"]),
   };
 }
 

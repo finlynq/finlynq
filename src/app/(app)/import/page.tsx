@@ -26,9 +26,10 @@ import { FileDropZone } from "./components/file-drop-zone";
 import { ImportPreviewDialog } from "./components/import-preview-dialog";
 import { OfxPreview } from "./components/ofx-preview";
 import { TemplateManager } from "./components/template-manager";
+import { ColumnMappingDialog } from "./components/column-mapping-dialog";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import type { OfxTransaction, OfxAccountInfo } from "@/lib/ofx-parser";
-import type { ImportTemplate } from "@/lib/import-templates";
+import type { ColumnMapping, ImportTemplate } from "@/lib/import-templates";
 
 interface PreviewRow extends RawTransaction {
   hash: string;
@@ -53,6 +54,14 @@ export default function ImportPage() {
   const [lastUploadedFile, setLastUploadedFile] = useState<File | null>(null);
 
   const [accountNames, setAccountNames] = useState<string[]>([]);
+
+  // Column mapping dialog state (shown when auto-detect fails)
+  const [mappingDialogOpen, setMappingDialogOpen] = useState(false);
+  const [mappingHeaders, setMappingHeaders] = useState<string[]>([]);
+  const [mappingSampleRows, setMappingSampleRows] = useState<Record<string, string>[]>([]);
+  const [mappingSuggested, setMappingSuggested] = useState<ColumnMapping | null>(null);
+  const [mappingFileName, setMappingFileName] = useState<string>("");
+  const [mappingSubmitting, setMappingSubmitting] = useState(false);
 
   // OFX preview state
   const [ofxPreviewOpen, setOfxPreviewOpen] = useState(false);
@@ -110,6 +119,13 @@ export default function ImportPage() {
         setOfxDateRange(data.dateRange ?? null);
         setOfxCurrency(data.currency ?? "CAD");
         setOfxPreviewOpen(true);
+      } else if (data.type === "csv-needs-mapping") {
+        // Auto-detect failed — open the column mapping dialog.
+        setMappingHeaders(data.headers ?? []);
+        setMappingSampleRows(data.sampleRows ?? []);
+        setMappingSuggested(data.suggestedMapping ?? null);
+        setMappingFileName(data.fileName ?? file.name);
+        setMappingDialogOpen(true);
       } else if (data.type === "csv" || data.valid !== undefined) {
         setCsvHeaders(data.headers ?? []);
         setAppliedTemplateId(data.appliedTemplateId ?? null);
@@ -146,6 +162,68 @@ export default function ImportPage() {
     setPreviewOpen(false);
     await previewFile(lastUploadedFile, suggestedTemplate.id);
   }, [suggestedTemplate, lastUploadedFile, previewFile]);
+
+  // Column mapping dialog confirm — parse with the user-supplied mapping,
+  // open the regular preview, and auto-save the mapping as a template.
+  const handleMappingConfirm = useCallback(
+    async (params: {
+      mapping: ColumnMapping;
+      defaultAccount: string | null;
+      templateName: string;
+    }) => {
+      if (!lastUploadedFile) return;
+      setMappingSubmitting(true);
+      try {
+        // 1. Parse rows using the user's mapping.
+        const formData = new FormData();
+        formData.append("file", lastUploadedFile);
+        formData.append("columnMapping", JSON.stringify(params.mapping));
+        if (params.defaultAccount) formData.append("defaultAccount", params.defaultAccount);
+
+        const res = await fetch("/api/import/csv-map", { method: "POST", body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+
+        // 2. Save the mapping as a template (best-effort — don't block import).
+        fetch("/api/import/templates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: params.templateName,
+            fileHeaders: data.headers ?? mappingHeaders,
+            columnMapping: params.mapping,
+            defaultAccount: params.defaultAccount ?? undefined,
+          }),
+        })
+          .then((r) => r.json())
+          .then((saved) => {
+            if (saved && saved.id) {
+              setTemplates((prev) => {
+                if (prev.find((t) => t.id === saved.id)) return prev;
+                return [...prev, saved];
+              });
+              setAppliedTemplateId(saved.id);
+            }
+          })
+          .catch(() => {});
+
+        // 3. Open the regular preview dialog with the parsed rows.
+        setCsvHeaders(data.headers ?? []);
+        setValidRows(data.valid ?? []);
+        setDuplicateRows(data.duplicates ?? []);
+        setErrorRows(data.errors ?? []);
+        setMappingDialogOpen(false);
+        setPreviewOpen(true);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Failed to parse with mapping";
+        setUploadStatus({ type: "error", message });
+        setMappingDialogOpen(false);
+      } finally {
+        setMappingSubmitting(false);
+      }
+    },
+    [lastUploadedFile, mappingHeaders],
+  );
 
   // OFX confirm callback
   const handleOfxConfirm = useCallback(async (rows: RawTransaction[]) => {
@@ -457,6 +535,18 @@ export default function ImportPage() {
         currency={ofxCurrency}
         accounts={accountNames}
         onConfirm={handleOfxConfirm}
+      />
+
+      <ColumnMappingDialog
+        open={mappingDialogOpen}
+        onOpenChange={setMappingDialogOpen}
+        fileName={mappingFileName}
+        headers={mappingHeaders}
+        sampleRows={mappingSampleRows}
+        suggestedMapping={mappingSuggested}
+        accounts={accountNames}
+        onConfirm={handleMappingConfirm}
+        submitting={mappingSubmitting}
       />
     </div>
   );
