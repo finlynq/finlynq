@@ -12,7 +12,7 @@ export function Sparkline({ data, color }: SparklineProps) {
 
   return (
     <div style={{ width: "100%", height: 30 }}>
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height={30} minWidth={0}>
         <AreaChart data={chartData} margin={{ top: 2, right: 2, bottom: 2, left: 2 }}>
           <defs>
             <linearGradient id={`spark-${color.replace("#", "")}`} x1="0" y1="0" x2="0" y2="1">

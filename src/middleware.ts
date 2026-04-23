@@ -49,16 +49,38 @@ export function middleware(request: NextRequest) {
     response.headers.set(key, value);
   }
 
+  // GA loads only on public marketing pages (/, /cloud, /self-hosted), so its
+  // hosts are added to script-src/img-src/connect-src for those routes only.
+  const pathname = request.nextUrl.pathname;
+  const isWebsite =
+    pathname === "/" ||
+    pathname === "/cloud" ||
+    pathname === "/self-hosted" ||
+    pathname.startsWith("/cloud/") ||
+    pathname.startsWith("/self-hosted/");
+
+  const scriptSrc = isWebsite
+    ? "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://www.googletagmanager.com"
+    : "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com";
+
+  const imgSrc = isWebsite
+    ? "img-src 'self' data: blob: https://coin-images.coingecko.com https://assets.coingecko.com https://www.google-analytics.com https://www.googletagmanager.com"
+    : "img-src 'self' data: blob: https://coin-images.coingecko.com https://assets.coingecko.com";
+
+  const connectSrc = isWebsite
+    ? "connect-src 'self' https://www.google-analytics.com https://*.analytics.google.com https://*.google-analytics.com https://www.googletagmanager.com"
+    : "connect-src 'self'";
+
   // Content Security Policy — restrictive default, allow self and inline styles (for Tailwind)
   response.headers.set(
     "Content-Security-Policy",
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
+      scriptSrc,
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob: https://coin-images.coingecko.com https://assets.coingecko.com",
+      imgSrc,
       "font-src 'self'",
-      "connect-src 'self'",
+      connectSrc,
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",

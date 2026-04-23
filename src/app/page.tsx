@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef } from "react";
+import { GoogleAnalytics } from "@/components/google-analytics";
 import "./landing.css";
 
 const FEATURES = [
@@ -190,10 +191,10 @@ function FeatureViz({ kind }: { kind: (typeof FEATURES)[number]["viz"] }) {
         <div className="viz">
           <svg viewBox="0 0 200 56" width="100%" height="100%" preserveAspectRatio="none">
             <g strokeWidth="1" fill="none">
-              <path d="M0,40 C40,35 80,25 120,18 160,12 200,8" stroke="#2a3139" />
-              <path d="M0,44 C40,40 80,32 120,24 160,18 200,14" stroke="#2a3139" />
-              <path d="M0,48 C40,45 80,40 120,32 160,26 200,20" stroke="#2a3139" />
-              <path d="M0,42 C40,36 80,26 120,18 160,12 200,6" stroke="#f5a623" strokeWidth="1.8" />
+              <path d="M0,40 C40,35 80,25 120,18 S160,12 200,8" stroke="#2a3139" />
+              <path d="M0,44 C40,40 80,32 120,24 S160,18 200,14" stroke="#2a3139" />
+              <path d="M0,48 C40,45 80,40 120,32 S160,26 200,20" stroke="#2a3139" />
+              <path d="M0,42 C40,36 80,26 120,18 S160,12 200,6" stroke="#f5a623" strokeWidth="1.8" />
             </g>
             <circle cx="200" cy="6" r="3" fill="#f5a623" />
             <g fontFamily="var(--fl-mono)" fontSize="9" fill="#9aa3ad">
@@ -241,6 +242,7 @@ export default function LandingPage() {
 
   return (
     <div className="fl-landing">
+      <GoogleAnalytics />
       {/* NAV */}
       <header className="fl-nav">
         <div className="fl-container nav-inner">

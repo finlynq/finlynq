@@ -22,13 +22,17 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // In managed mode, include onboarding state + admin flag
+  // In managed mode, include onboarding state + admin flag + identity fields
   let onboardingComplete = true; // default true so self-hosted never shows wizard
   let isAdmin = false;
+  let email: string | null = null;
+  let displayName: string | null = null;
   if (getDialect() === "postgres" && auth.context.userId) {
     const user = await getUserById(auth.context.userId).catch(() => null);
     onboardingComplete = Boolean(user?.onboardingComplete);
     isAdmin = user?.role === "admin";
+    email = user?.email ?? null;
+    displayName = user?.displayName ?? null;
   }
 
   return NextResponse.json({
@@ -39,5 +43,7 @@ export async function GET(request: NextRequest) {
     mfaVerified: auth.context.mfaVerified,
     onboardingComplete,
     isAdmin,
+    email,
+    displayName,
   });
 }

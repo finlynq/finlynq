@@ -1,8 +1,10 @@
 import Link from "next/link";
+import { GoogleAnalytics } from "@/components/google-analytics";
 
 export default function SelfHostedPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-dot-pattern ambient-glow">
+      <GoogleAnalytics />
       <div className="mx-auto w-full max-w-lg px-6 py-12">
         {/* Back link */}
         <Link

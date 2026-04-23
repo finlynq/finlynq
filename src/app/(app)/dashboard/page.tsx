@@ -121,11 +121,11 @@ export default function DashboardPage() {
       .then((d) => { if (d) setData(d); });
 
     // Check if onboarding is needed (managed mode only)
-    fetch("/api/billing/status")
+    fetch("/api/auth/session")
       .then((r) => r.ok ? r.json() : null)
       .then((d) => {
-        if (d && d.onboardingComplete === false) {
-          setUserInfo({ email: d.email, displayName: d.displayName });
+        if (d && d.authenticated && d.onboardingComplete === false && d.email) {
+          setUserInfo({ email: d.email, displayName: d.displayName ?? undefined });
           setShowOnboarding(true);
         }
       })

@@ -92,7 +92,7 @@ export function WeeklyRecap() {
           {chartData.length > 0 && (
             <div>
               <p className="text-[11px] font-medium text-muted-foreground mb-2">Top categories</p>
-              <ResponsiveContainer width="100%" height={110}>
+              <ResponsiveContainer width="100%" height={110} minWidth={0}>
                 <BarChart data={chartData} layout="vertical" barSize={12}>
                   <XAxis type="number" hide />
                   <YAxis

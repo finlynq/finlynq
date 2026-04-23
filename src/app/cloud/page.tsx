@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, Suspense } from "react";
+import { GoogleAnalytics } from "@/components/google-analytics";
 
 type Tab = "login" | "register";
 
@@ -256,6 +257,7 @@ function CloudAuthPageInner() {
 export default function CloudAuthPage() {
   return (
     <Suspense>
+      <GoogleAnalytics />
       <CloudAuthPageInner />
     </Suspense>
   );
