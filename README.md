@@ -179,7 +179,7 @@ The Docker Compose file starts both the app and a PostgreSQL 16 container. Data 
 | Charts | Recharts + custom Sankey SVG |
 | Animations | Framer Motion |
 | Theming | next-themes (dark/light/system) |
-| MCP | @modelcontextprotocol/sdk (27 tools, Streamable HTTP + stdio) |
+| MCP | @modelcontextprotocol/sdk (86 tools, Streamable HTTP + stdio) |
 | Auth | OAuth 2.1 + DCR (MCP), session-cookie + Bearer API key (REST) |
 | Prices | Yahoo Finance API + CoinGecko (crypto) — both free, no key needed |
 
@@ -187,7 +187,7 @@ The Docker Compose file starts both the app and a PostgreSQL 16 container. Data 
 
 ## MCP Server
 
-Finlynq includes a first-party MCP server with 27 tools for querying and managing your financial data from AI assistants.
+Finlynq includes a first-party MCP server with 86 tools for querying and managing your financial data from AI assistants — accounts, transactions, budgets, goals, loans, portfolio, subscriptions, FX rates, rules, splits, bulk edits, and CSV/OFX file imports.
 
 ### Connect via Claude Desktop (stdio)
 
@@ -278,7 +278,7 @@ pf-app/
     components/        # Nav, unlock gate, setup wizard, sparkline, sankey, shadcn/ui
     db/                # Schema (22 tables), PostgreSQL adapter, Drizzle ORM
     lib/               # Business logic (parsers, calculators, AI chat engine, MCP tools)
-  mcp-server/          # MCP server v3 (27 tools, stdio + Streamable HTTP)
+  mcp-server/          # MCP server v3 (86 tools, stdio + Streamable HTTP)
   drizzle-pg/          # PostgreSQL migration files
   mobile/              # React Native (Expo) mobile app
   docs/                # Getting started, FAQ, mobile setup guide
