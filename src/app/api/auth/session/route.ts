@@ -22,18 +22,22 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // In managed mode, include onboarding state
+  // In managed mode, include onboarding state + admin flag
   let onboardingComplete = true; // default true so self-hosted never shows wizard
+  let isAdmin = false;
   if (getDialect() === "postgres" && auth.context.userId) {
     const user = await getUserById(auth.context.userId).catch(() => null);
     onboardingComplete = Boolean(user?.onboardingComplete);
+    isAdmin = user?.role === "admin";
   }
 
   return NextResponse.json({
     authenticated: true,
     method: auth.context.method,
+    authMethod: auth.context.method,
     userId: auth.context.userId,
     mfaVerified: auth.context.mfaVerified,
     onboardingComplete,
+    isAdmin,
   });
 }
