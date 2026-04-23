@@ -78,12 +78,12 @@ export async function parseResendAttachments(
       const result = await parsePdfToTransactions(buffer);
       rows = result.rows;
     } else if (ext === "xlsx" || ext === "xls") {
-      const sheets = parseExcelSheets(buffer);
+      const sheets = await parseExcelSheets(buffer);
       if (sheets.length > 0 && sheets[0].headers.length > 0) {
         const sheet = sheets[0];
         const mapping = autoDetectColumnMapping(sheet.headers);
         if (mapping) {
-          rows = extractExcelRows(buffer, sheet.name, mapping).rows;
+          rows = (await extractExcelRows(buffer, sheet.name, mapping)).rows;
         }
       }
     }

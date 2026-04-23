@@ -24,7 +24,7 @@ export async function POST(request: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const result = extractExcelRows(buffer, sheetName, mapping, hasHeaders);
+    const result = await extractExcelRows(buffer, sheetName, mapping, hasHeaders);
 
     if (result.rows.length === 0) {
       const msg = result.errors.length > 0

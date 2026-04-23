@@ -171,7 +171,7 @@ export async function POST(request: NextRequest) {
 
     if (ext === "xlsx" || ext === "xls") {
       const buffer = Buffer.from(await file.arrayBuffer());
-      const sheets = parseExcelSheets(buffer);
+      const sheets = await parseExcelSheets(buffer);
       return NextResponse.json({ type: "excel", sheets });
     }
 
