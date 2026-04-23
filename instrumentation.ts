@@ -51,6 +51,19 @@ export async function register() {
     } catch (err) {
       console.error("[instrumentation] Failed to start mcp-upload cleanup:", err);
     }
+
+    // Same pattern for email-import staging + admin inbox trash.
+    try {
+      const { startEmailCleanupTimer, cleanupExpiredEmailArtifacts } = await import(
+        "./src/lib/email-import/cleanup"
+      );
+      cleanupExpiredEmailArtifacts().catch((err) => {
+        console.error("[instrumentation] initial email-import sweep failed:", err);
+      });
+      startEmailCleanupTimer();
+    } catch (err) {
+      console.error("[instrumentation] Failed to start email-import cleanup:", err);
+    }
   } catch (err) {
     // Log but don't crash the server — healthz will report degraded state
     console.error("[instrumentation] Failed to initialize PostgreSQL adapter:", err);

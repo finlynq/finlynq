@@ -30,6 +30,7 @@ import {
   MoreHorizontal,
   ShieldCheck,
   LogOut,
+  Inbox,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { FinlynqLogo } from "@/components/FinlynqLogo";
@@ -87,6 +88,7 @@ const toolLinks: NavItem[] = [
   { href: "/import", label: "Import", icon: Upload, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/api-docs", label: "API Docs", icon: FileText, color: ACTIVE_ACCENT, mode: "dev" },
   { href: "/admin", label: "Admin", icon: ShieldCheck, color: ACTIVE_ACCENT, mode: "prod" },
+  { href: "/admin/inbox", label: "Admin Inbox", icon: Inbox, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/settings", label: "Settings", icon: Settings, color: ACTIVE_ACCENT, mode: "prod" },
 ];
 
@@ -226,7 +228,7 @@ export function Nav() {
 
       {/* Bottom section */}
       <div className="px-2 pb-3 pt-2 border-t border-sidebar-border/50 space-y-0.5">
-        {toolLinks.filter((item) => (devMode || item.mode !== "dev") && (item.href !== "/admin" || isAdmin)).map((item) => renderLink(item, !collapsed))}
+        {toolLinks.filter((item) => (devMode || item.mode !== "dev") && (!item.href.startsWith("/admin") || isAdmin)).map((item) => renderLink(item, !collapsed))}
         <button
           onClick={handleSignOut}
           title={collapsed ? "Sign out" : undefined}
@@ -302,7 +304,7 @@ export function Nav() {
         {allFlatItems
           .filter((item) => !mobileBarItems.some((m) => m.href === item.href))
           .filter((item) => devMode || item.mode !== "dev")
-          .filter((item) => item.href !== "/admin" || isAdmin)
+          .filter((item) => !item.href.startsWith("/admin") || isAdmin)
           .map((item) => renderLink(item, true))}
         <button
           onClick={() => { setMobileOpen(false); handleSignOut(); }}

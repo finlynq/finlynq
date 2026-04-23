@@ -470,8 +470,9 @@ export default function ImportPage() {
                   <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
                     <li>Forward your bank statement email (or attach a CSV file) to the address above.</li>
                     <li>CSV attachments are matched against your saved import templates automatically.</li>
-                    <li>Duplicate transactions are detected and skipped.</li>
-                    <li>You&apos;ll receive a notification when the import completes.</li>
+                    <li>Parsed transactions wait for your review at <a href="/import/pending" className="underline hover:no-underline">/import/pending</a> — nothing is imported until you approve.</li>
+                    <li>Duplicate transactions are flagged and skipped on approve.</li>
+                    <li>Pending imports auto-expire after 14 days.</li>
                   </ol>
                 </div>
               </CardContent>
