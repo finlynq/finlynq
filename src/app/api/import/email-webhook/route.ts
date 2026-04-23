@@ -2,6 +2,40 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TODO (2026-04-23) — Wire Resend Inbound to drive this webhook.
+//
+// The UI on /import generates `import-<uuid>@finlynq.com` addresses via
+// /api/import/email-config. Those addresses will only actually receive mail
+// once the following is in place:
+//
+//   1. DNS — Point finlynq.com MX records at Resend's inbound MX
+//      (e.g. inbound-smtp.resend.com). Add SPF/DMARC so Resend can accept
+//      forwarded mail without bounces.
+//   2. Resend Inbound route — In the Resend dashboard, create an Inbound
+//      route that matches `import-*@finlynq.com` and POSTs to
+//      https://finlynq.com/api/import/email-webhook on message receipt.
+//      Store the Resend signing secret in env as RESEND_WEBHOOK_SECRET.
+//   3. Handler — Resend posts JSON (not multipart). Extend this handler to
+//      detect `Content-Type: application/json`, parse `{from, to, subject,
+//      attachments: [{filename, contentType, content(base64)}]}`, verify the
+//      `svix-*` signature headers against RESEND_WEBHOOK_SECRET, and look up
+//      the user by matching the `to` address against `settings.import_email`
+//      (instead of the current `x-webhook-secret` header path).
+//   4. Address → user lookup — Because the UI now mints per-user
+//      `import-<uuid>@finlynq.com` addresses, the webhook must find the user
+//      by that address, not by a shared webhook secret. The
+//      `email_webhook_dek` / `email_webhook_secret` settings rows stay as the
+//      envelope-encryption wrap for imported rows, but the auth path changes
+//      from "secret matches" to "signature valid AND to-address belongs to a
+//      user".
+//   5. Rate limit + size cap — 10 MB per message, 25 messages/hour/user.
+//
+// Until that's done, the endpoint below still works for self-hosters wiring
+// their own email→webhook bridge (e.g. a postfix filter or a custom SaaS
+// with multipart POST). The current path is kept for backward compat.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import {

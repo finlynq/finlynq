@@ -33,7 +33,11 @@ export async function POST(request: NextRequest) {
   const { userId, dek } = auth;
   try {
     const uuid = randomUUID().slice(0, 8);
-    const email = `import-${uuid}@pf.app`;
+    // Domain is configurable so self-hosters can point their own MX at the
+    // webhook. Managed/prod uses finlynq.com (Resend Inbound — see
+    // /api/import/email-webhook for the wiring TODO).
+    const domain = process.env.IMPORT_EMAIL_DOMAIN || "finlynq.com";
+    const email = `import-${uuid}@${domain}`;
     const webhookSecret = randomBytes(32).toString("hex");
     const wrappedDek = wrapDEKForSecret(dek, webhookSecret);
 
