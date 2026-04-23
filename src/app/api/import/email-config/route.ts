@@ -32,12 +32,16 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { userId, dek } = auth;
   try {
-    const uuid = randomUUID().slice(0, 8);
+    // 128 bits of entropy — `randomUUID().slice(0, 8)` only gave 32 bits,
+    // which is brute-forceable despite the recipient-level rate limit.
+    // Restores the H6 fix from the April 11 audit that regressed when the
+    // email-import pipeline was rebuilt for Resend Inbound.
+    const token = randomBytes(16).toString("hex");
     // Domain is configurable so self-hosters can point their own MX at the
     // webhook. Managed/prod uses finlynq.com (Resend Inbound — see
     // /api/import/email-webhook for the wiring TODO).
     const domain = process.env.IMPORT_EMAIL_DOMAIN || "finlynq.com";
-    const email = `import-${uuid}@${domain}`;
+    const email = `import-${token}@${domain}`;
     const webhookSecret = randomBytes(32).toString("hex");
     const wrappedDek = wrapDEKForSecret(dek, webhookSecret);
 

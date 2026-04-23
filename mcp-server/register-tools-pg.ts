@@ -1286,14 +1286,22 @@ export function registerPgTools(
       const g = fuzzyFind(goal, allGoals);
       if (!g) return err(`Goal "${goal}" not found`);
 
-      const updates: string[] = [];
-      if (name !== undefined) updates.push(`name = '${name.replace(/'/g, "''")}'`);
-      if (target_amount !== undefined) updates.push(`target_amount = ${target_amount}`);
-      if (deadline !== undefined) updates.push(`deadline = '${deadline}'`);
-      if (status !== undefined) updates.push(`status = '${status}'`);
+      // Build parameterized SET clauses — no sql.raw, no manual escaping.
+      const updates: ReturnType<typeof sql>[] = [];
+      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (target_amount !== undefined) updates.push(sql`target_amount = ${target_amount}`);
+      if (deadline !== undefined) updates.push(sql`deadline = ${deadline}`);
+      if (status !== undefined) updates.push(sql`status = ${status}`);
       if (!updates.length) return err("No fields to update");
 
-      await db.execute(sql`UPDATE goals SET ${sql.raw(updates.join(", "))} WHERE id = ${g.id} AND user_id = ${userId}`);
+      const result = await db.execute(
+        sql`UPDATE goals SET ${sql.join(updates, sql`, `)} WHERE id = ${g.id} AND user_id = ${userId}`
+      );
+      const affected =
+        (result && typeof result === "object" && "rowCount" in result && typeof (result as { rowCount: unknown }).rowCount === "number")
+          ? (result as { rowCount: number }).rowCount
+          : null;
+      if (affected === 0) return err(`Goal "${g.name}" not found or not owned by this user`);
       return text({ success: true, message: `Goal "${g.name}" updated` });
     }
   );

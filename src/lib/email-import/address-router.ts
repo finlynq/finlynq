@@ -3,9 +3,11 @@
  *
  * Classifies an incoming `to` address into one of three categories:
  *
- *   - `import`  — local-part matches /^import-[a-f0-9]{8}$/ AND resolves to a
- *                 user via settings.import_email. Transactions get staged for
- *                 review at /import/pending.
+ *   - `import`  — local-part matches /^import-[a-f0-9]{8,64}$/ AND resolves to
+ *                 a user via settings.import_email. Transactions get staged for
+ *                 review at /import/pending. (The regex is loose to cover both
+ *                 legacy 8-hex tokens and the current 32-hex tokens; the DB
+ *                 lookup on the full address is what actually authorizes.)
  *   - `mailbox` — reserved prefixes (info/admin/support/hello/contact/sales/
  *                 help) OR matches a user's display_name (case-insensitive,
  *                 ascii-alphanumeric). Admin triages via /admin/inbox.
@@ -30,7 +32,7 @@ export interface AddressRoute {
   address: string;
 }
 
-const IMPORT_PREFIX_RE = /^import-[a-f0-9]{8}$/;
+const IMPORT_PREFIX_RE = /^import-[a-f0-9]{8,64}$/;
 const MAILBOX_PREFIXES = new Set([
   "info",
   "admin",
