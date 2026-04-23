@@ -89,6 +89,11 @@ type AuthCodeRow = {
 /**
  * Consume an authorization code. Returns {userId, dek} if valid, null otherwise.
  *
+ * Uses `DELETE ... RETURNING` for an atomic claim so two concurrent token
+ * exchanges on the same code can't both succeed. The row (including its
+ * `dek_wrapped`) is removed from the DB the moment it's claimed — no more
+ * spent codes piling up for a future DB-read attacker to attempt offline.
+ *
  * `dek` is the unwrapped per-user DEK (if the authorizing session had one).
  * Caller should re-wrap under the newly-issued access token.
  */
@@ -98,14 +103,14 @@ export async function consumeAuthCode(opts: {
   clientId: string;
   codeVerifier: string;
 }): Promise<{ userId: string; dek: Buffer | null } | null> {
+  // Atomic claim — at most one caller gets the row; everyone else sees empty.
   const result = await pgDb.execute(sql`
-    SELECT * FROM oauth_authorization_codes WHERE code = ${opts.code} LIMIT 1
+    DELETE FROM oauth_authorization_codes WHERE code = ${opts.code} RETURNING *
   `);
   const rows: AuthCodeRow[] = result.rows ?? result ?? [];
   if (!rows.length) return null;
   const row = rows[0];
 
-  if (row.used) return null;
   if (new Date(row.expires_at) < new Date()) return null;
   if (row.client_id !== opts.clientId) return null;
   if (row.redirect_uri !== opts.redirectUri) return null;
@@ -116,11 +121,6 @@ export async function consumeAuthCode(opts: {
   } else {
     if (opts.codeVerifier !== row.code_challenge) return null;
   }
-
-  // Mark as used
-  await pgDb.execute(sql`
-    UPDATE oauth_authorization_codes SET used = 1 WHERE id = ${row.id}
-  `);
 
   let dek: Buffer | null = null;
   if (row.dek_wrapped) {
@@ -176,16 +176,20 @@ type TokenRow = {
   expires_at: string;
   refresh_expires_at: string;
   dek_wrapped: string | null;
+  revoked_at: string | null;
 };
 
 /**
  * Validate an OAuth access token. Returns {userId, dek} if valid, null otherwise.
- * `dek` is null for tokens issued before the encryption rollout, or if the
- * stored wrap failed to decrypt.
+ * Revoked tokens (rotated or killed by reuse-detection) are rejected.
  */
 export async function validateOauthToken(token: string): Promise<{ userId: string; dek: Buffer | null } | null> {
   const result = await pgDb.execute(sql`
-    SELECT user_id, expires_at, dek_wrapped FROM oauth_access_tokens WHERE token = ${token} LIMIT 1
+    SELECT user_id, expires_at, dek_wrapped
+      FROM oauth_access_tokens
+     WHERE token = ${token}
+       AND revoked_at IS NULL
+     LIMIT 1
   `);
   const rows: Pick<TokenRow, "user_id" | "expires_at" | "dek_wrapped">[] = result.rows ?? result ?? [];
   if (!rows.length) return null;
@@ -202,26 +206,68 @@ export async function validateOauthToken(token: string): Promise<{ userId: strin
   return { userId: rows[0].user_id, dek };
 }
 
-/** Refresh an access token. Old pair is deleted; new pair is returned. */
+/**
+ * Refresh an access token.
+ *
+ * Rotation + reuse detection. The old pair is marked `revoked_at = now()`
+ * atomically with the claim (UPDATE ... RETURNING) — this both prevents
+ * double-rotations on the same refresh token and leaves a forensic record.
+ *
+ * If a caller presents a refresh token that's already been revoked (i.e.
+ * the row exists but `revoked_at IS NOT NULL`), we treat that as a
+ * token-theft signal and revoke every live token for that user. Legitimate
+ * clients never replay a refresh token once they've received the new pair,
+ * so a revoked-token presentation is always suspicious.
+ */
 export async function refreshAccessToken(refreshToken: string, clientId: string): Promise<{
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
 } | null> {
-  const result = await pgDb.execute(sql`
-    SELECT * FROM oauth_access_tokens
-    WHERE refresh_token = ${refreshToken} AND client_id = ${clientId}
-    LIMIT 1
-  `);
-  const rows: TokenRow[] = result.rows ?? result ?? [];
-  if (!rows.length) return null;
-  if (new Date(rows[0].refresh_expires_at) < new Date()) return null;
+  const nowIso = new Date().toISOString();
 
-  const { id, user_id, token: oldAccessToken, dek_wrapped } = rows[0];
+  // Atomic claim: flip the live row to revoked_at = now() and return it.
+  const claim = await pgDb.execute(sql`
+    UPDATE oauth_access_tokens
+       SET revoked_at = now()
+     WHERE refresh_token = ${refreshToken}
+       AND client_id = ${clientId}
+       AND revoked_at IS NULL
+       AND refresh_expires_at > ${nowIso}
+     RETURNING *
+  `);
+  const rows: TokenRow[] = claim.rows ?? claim ?? [];
+
+  if (!rows.length) {
+    // Three reasons we'd get here: (a) unknown refresh token, (b) expired,
+    // (c) already revoked. Case (c) is the theft signal — the legit user
+    // has already rotated, so any further use of the old token is either an
+    // attacker replay or a broken client. Either way, kill all live tokens
+    // for that user to contain the blast radius.
+    const recheck = await pgDb.execute(sql`
+      SELECT user_id FROM oauth_access_tokens
+       WHERE refresh_token = ${refreshToken}
+         AND client_id = ${clientId}
+         AND revoked_at IS NOT NULL
+       LIMIT 1
+    `);
+    const revokedRows: Pick<TokenRow, "user_id">[] = recheck.rows ?? recheck ?? [];
+    if (revokedRows.length) {
+      await pgDb.execute(sql`
+        UPDATE oauth_access_tokens
+           SET revoked_at = now()
+         WHERE user_id = ${revokedRows[0].user_id}
+           AND revoked_at IS NULL
+      `);
+    }
+    return null;
+  }
+
+  const { user_id, token: oldAccessToken, dek_wrapped } = rows[0];
 
   // Unwrap the DEK from the old access token so we can re-wrap it under the
-  // new one. This keeps MCP access to encrypted columns working across
-  // token rotations without re-prompting the user.
+  // new one. Keeps MCP access to encrypted columns working across rotations
+  // without re-prompting the user.
   let dek: Buffer | null = null;
   if (dek_wrapped) {
     try {
@@ -230,8 +276,6 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
       dek = null;
     }
   }
-
-  await pgDb.execute(sql`DELETE FROM oauth_access_tokens WHERE id = ${id}`);
 
   return createAccessToken(user_id, clientId, dek);
 }

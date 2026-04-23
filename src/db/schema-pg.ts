@@ -341,6 +341,10 @@ export const oauthAccessTokens = pgTable("oauth_access_tokens", {
   createdAt: text("created_at").notNull(),
   // Session DEK wrapped with SHA-256(token). Null for pre-encryption tokens.
   dekWrapped: text("dek_wrapped"),
+  // Set when the pair has been rotated on refresh, or force-invalidated by a
+  // reuse-detection event. Live tokens have revoked_at IS NULL. See
+  // scripts/migrate-oauth-revoked-at.sql.
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
 });
 
 // ─── MCP Uploads (Wave 1 — Part 1: File upload) ────────────────────────────
