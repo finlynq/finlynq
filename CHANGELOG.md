@@ -6,6 +6,14 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Added
+- **CSV import — column-mapping fallback for non-canonical headers (2026-04-23, commit [df2143c](https://github.com/finlynq/finlynq/commit/df2143c)).** Bank exports (CIBC, RBC, etc.) use headers like `Transaction Date` / `CAD$` / `Description 1` that don't match the canonical `Date`/`Amount`/`Account`/`Payee` parser, so every row was failing as `Invalid date: ""`. [`/api/import/preview`](src/app/api/import/preview/route.ts) now:
+  1. Tries the canonical parser first (existing behavior).
+  2. **Honors `templateId`** when the user picks a saved template (was silently ignored — latent bug).
+  3. Falls back to a **saved template with ≥80% header overlap** via `findBestTemplate()`.
+  4. Returns `type: "csv-needs-mapping"` with `headers`, `sampleRows`, and an auto-detected `suggestedMapping` when nothing else works.
+  A new [ColumnMappingDialog](src/app/(app)/import/components/column-mapping-dialog.tsx) opens for case 4: user picks columns + a default account (CIBC-style CSVs have no usable account column), sees a live 3-row sample, confirms, and the client (a) parses via `/api/import/csv-map` and (b) **auto-saves the mapping as a template** so subsequent uploads hit case 3 silently. Also tightened `autoDetectColumnMapping()` in [src/lib/import-templates.ts](src/lib/import-templates.ts): currency-suffix matcher for amount (`CAD$` / `USD$` / `$`), exact-match-first pass before substring fallback, and account binds only on literal `account` / `account name` — so `Account Type` (= "MasterCard") doesn't get bound to a user account name.
+
 ### Fixed
 - **GA scoped to website routes; CSP no longer blocks gtag on app pages (2026-04-23, commit [4d36085](https://github.com/finlynq/finlynq/commit/4d36085)).** Google Analytics moved out of the root layout into a `<GoogleAnalytics />` component included only on `/`, `/cloud`, `/self-hosted`. Authenticated app routes (`(app)/*`) no longer load gtag and stop logging the `script-src` CSP violation. The middleware CSP is now route-aware: GTM/GA hosts (`https://www.googletagmanager.com`, `https://www.google-analytics.com`, `https://*.analytics.google.com`) are whitelisted in `script-src` / `img-src` / `connect-src` only on website routes. See [src/middleware.ts](src/middleware.ts) + [src/components/google-analytics.tsx](src/components/google-analytics.tsx).
 - **Removed dead `/api/billing/status` callers (commit 4d36085).** The endpoint was deleted in the OSS pivot but two callers remained — the dashboard onboarding-wizard gate and the settings Plan & Billing card. Dashboard now reads `onboardingComplete` + identity from `/api/auth/session` (which gained `email` and `displayName` in this commit). The Plan & Billing card, its `billingStatus` / `billingLoading` state, the `handleBillingUpgrade` handler, and the `CreditCard` icon import were stripped from [settings/page.tsx](src/app/(app)/settings/page.tsx).
