@@ -10,12 +10,12 @@ const CSP_DIRECTIVES = [
   "default-src 'self'",
   // Next.js needs inline + eval for its hydration runtime and dev HMR. Once
   // we wire nonces through the custom document we can tighten this.
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com",
   // Tailwind + shadcn emit inline styles at render time — unavoidable.
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://assets.coingecko.com https://coin-images.coingecko.com",
+  "img-src 'self' data: blob: https://assets.coingecko.com https://coin-images.coingecko.com https://www.google-analytics.com https://www.googletagmanager.com",
   "font-src 'self' data:",
-  "connect-src 'self' https://query1.finance.yahoo.com https://api.coingecko.com",
+  "connect-src 'self' https://query1.finance.yahoo.com https://api.coingecko.com https://www.google-analytics.com https://*.analytics.google.com https://*.google-analytics.com https://www.googletagmanager.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
