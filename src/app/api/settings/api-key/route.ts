@@ -7,11 +7,14 @@ import { getOrCreateApiKey, regenerateApiKey } from "@/lib/api-auth";
 /**
  * GET /api/settings/api-key — returns (or generates) the user's API key.
  *
- * Reading an existing key doesn't need a DEK. If the user has no key yet,
- * one is created; when a DEK is available it's wrapped so Bearer-auth MCP
- * requests can unwrap without a live session. If no DEK is available
- * (session cache missed), the key is still returned but without a DEK
- * wrap — the user can regenerate later to attach one.
+ * Keys are stored hashed, so the raw key is returned **only** on first
+ * creation (`apiKey` is a string once and only once, then `null` on every
+ * subsequent GET). The UI must prompt the user to copy it immediately and
+ * offer regeneration if they've lost it.
+ *
+ * Reading doesn't need a DEK. If a DEK is available it's wrapped on first
+ * creation so Bearer-auth MCP requests can unwrap without a live session;
+ * if not, the user can regenerate later to attach one.
  */
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -20,7 +23,11 @@ export async function GET(request: NextRequest) {
   const dek = sessionId ? getDEK(sessionId) : undefined;
 
   const apiKey = await getOrCreateApiKey(userId, dek ?? undefined);
-  return NextResponse.json({ apiKey, hasDekWrap: Boolean(dek) });
+  return NextResponse.json({
+    apiKey,                    // raw key on first creation, null thereafter
+    hasKey: true,              // getOrCreateApiKey always ensures one exists
+    hasDekWrap: Boolean(dek),
+  });
 }
 
 /**

@@ -76,8 +76,12 @@ export default function SettingsPage() {
   const [devModeLoading, setDevModeLoading] = useState(false);
   const [devModeStatus, setDevModeStatus] = useState("");
 
-  // API Key
+  // API Key — the raw key is only held in memory on first creation or
+  // after a regenerate. On subsequent page loads, `apiKey` stays null
+  // because only a hash is stored server-side; the UI shows a "regenerate
+  // to view" state in that case.
   const [apiKey, setApiKey] = useState<string | null>(null);
+  const [apiKeyLoaded, setApiKeyLoaded] = useState(false);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [apiKeyCopied, setApiKeyCopied] = useState(false);
   const [apiKeyRegenerating, setApiKeyRegenerating] = useState(false);
@@ -106,7 +110,8 @@ export default function SettingsPage() {
     fetch("/api/settings/api-key")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (data?.apiKey) setApiKey(data.apiKey); })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setApiKeyLoaded(true));
   }, []);
 
   async function handleRegenerateApiKey() {
@@ -732,9 +737,13 @@ export default function SettingsPage() {
           <div className="flex items-center gap-2">
             <Input
               readOnly
-              value={apiKey
-                ? (apiKeyVisible ? apiKey : `${apiKey.slice(0, 6)}${"•".repeat(20)}${apiKey.slice(-4)}`)
-                : "Loading…"}
+              value={
+                !apiKeyLoaded
+                  ? "Loading…"
+                  : apiKey
+                    ? (apiKeyVisible ? apiKey : `${apiKey.slice(0, 6)}${"•".repeat(20)}${apiKey.slice(-4)}`)
+                    : "•".repeat(40)
+              }
               className="font-mono text-sm flex-1"
             />
             <Button
@@ -742,6 +751,7 @@ export default function SettingsPage() {
               size="icon"
               onClick={() => setApiKeyVisible(!apiKeyVisible)}
               title={apiKeyVisible ? "Hide key" : "Show key"}
+              disabled={!apiKey}
             >
               {apiKeyVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </Button>
@@ -755,6 +765,16 @@ export default function SettingsPage() {
               {apiKeyCopied ? <Check className="h-4 w-4 text-emerald-500" /> : <FileText className="h-4 w-4" />}
             </Button>
           </div>
+          {apiKey && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              <strong>Save this key now.</strong> We store only a hash — once you leave this page we can&rsquo;t show it again.
+            </div>
+          )}
+          {apiKeyLoaded && !apiKey && (
+            <p className="text-xs text-muted-foreground">
+              A key is on file (stored as a hash). Regenerate if you don&rsquo;t have it saved.
+            </p>
+          )}
           <div className="flex items-center gap-3">
             <Button
               variant="outline"

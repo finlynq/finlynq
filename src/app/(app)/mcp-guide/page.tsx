@@ -334,12 +334,13 @@ export default function McpGuidePage() {
               <code className="flex-1 font-mono text-sm bg-background/60 border border-border rounded-lg px-3 py-2 text-foreground truncate">
                 {apiKey
                   ? (apiKeyVisible ? apiKey : `${apiKey.slice(0, 6)}${"•".repeat(20)}${apiKey.slice(-4)}`)
-                  : "Loading…"}
+                  : "Hidden — regenerate from Settings to view"}
               </code>
               <button
                 onClick={() => setApiKeyVisible(!apiKeyVisible)}
                 className="p-2 rounded-lg border border-border bg-background/60 text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
                 title={apiKeyVisible ? "Hide key" : "Show key"}
+                disabled={!apiKey}
               >
                 {apiKeyVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
@@ -357,6 +358,11 @@ export default function McpGuidePage() {
                 {apiKeyCopied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
               </button>
             </div>
+            {!apiKey && (
+              <p className="text-xs text-muted-foreground">
+                Only a hash is stored, so the raw key can&rsquo;t be re-shown. Head to <a href="/settings" className="underline underline-offset-2 hover:text-foreground">Settings → API Key</a> and click <strong>Regenerate Key</strong> to get a fresh one.
+              </p>
+            )}
           </div>
         </section>
 

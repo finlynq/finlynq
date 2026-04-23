@@ -19,6 +19,22 @@ import crypto from "crypto";
 const API_KEY_SETTING = "api_key";
 const API_KEY_DEK_SETTING = "api_key_dek";
 
+// Prefix for hashed keys stored in settings.value. Keeps old raw and new
+// hashed rows trivially distinguishable so validateApiKey can migrate on
+// access and the migration script is idempotent.
+const API_KEY_HASH_PREFIX = "sha256:";
+
+/**
+ * Deterministic hash of an API key for storage + lookup. SHA-256 is
+ * pre-image resistant; the input is ≥192 bits of crypto-random entropy so
+ * no salt is needed. The DEK-envelope path (`wrapDEKForApiKey`) still uses
+ * the raw key provided by the client per-request, so hashing the stored
+ * copy does not affect unwrap.
+ */
+function hashApiKey(rawKey: string): string {
+  return API_KEY_HASH_PREFIX + crypto.createHash("sha256").update(rawKey).digest("hex");
+}
+
 /** Derive a 32-byte wrap key from a random high-entropy secret (API key,
  * OAuth access token, webhook secret, etc). SHA-256 is deterministic and
  * sufficient because the input is already ≥192 bits of crypto-random data;
@@ -84,6 +100,12 @@ async function clearApiKeyDEK(userId: string): Promise<void> {
 
 /**
  * Get or generate an API key for the given user.
+ *
+ * Returns the raw key **only** on first creation (the one and only time it
+ * can be shown). If a key already exists, returns `null` — only the hash is
+ * stored, so the raw value is unrecoverable; the caller UI must prompt the
+ * user to regenerate if they've lost it.
+ *
  * If `dek` is provided (caller is logged in), the DEK is also wrapped for
  * Bearer auth. If not provided, the key works but MCP reads will 423 until
  * the user regenerates while logged in.
@@ -91,14 +113,14 @@ async function clearApiKeyDEK(userId: string): Promise<void> {
 export async function getOrCreateApiKey(
   userId: string = DEFAULT_USER_ID,
   dek?: Buffer
-): Promise<string> {
+): Promise<string | null> {
   const existing = await db
     .select({ value: schema.settings.value })
     .from(schema.settings)
     .where(and(eq(schema.settings.key, API_KEY_SETTING), eq(schema.settings.userId, userId)))
     .get();
 
-  if (existing) return existing.value as string;
+  if (existing) return null;
 
   const key = `pf_${crypto.randomBytes(24).toString("hex")}`;
 
@@ -106,7 +128,7 @@ export async function getOrCreateApiKey(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await (db as any).execute(sql`
     INSERT INTO settings (key, user_id, value)
-    VALUES (${API_KEY_SETTING}, ${userId}, ${key})
+    VALUES (${API_KEY_SETTING}, ${userId}, ${hashApiKey(key)})
     ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
   `);
 
@@ -121,6 +143,9 @@ export async function getOrCreateApiKey(
  * Regenerate (replace) the API key for the given user.
  * Must be called while logged in (dek required) so the new API-key DEK
  * envelope can be written atomically with the new key.
+ *
+ * The returned raw key is the caller's only chance to see it — only the
+ * hash is persisted.
  */
 export async function regenerateApiKey(userId: string, dek: Buffer): Promise<string> {
   const key = `pf_${crypto.randomBytes(24).toString("hex")}`;
@@ -129,7 +154,7 @@ export async function regenerateApiKey(userId: string, dek: Buffer): Promise<str
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await (db as any).execute(sql`
     INSERT INTO settings (key, user_id, value)
-    VALUES (${API_KEY_SETTING}, ${userId}, ${key})
+    VALUES (${API_KEY_SETTING}, ${userId}, ${hashApiKey(key)})
     ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
   `);
 
@@ -167,17 +192,43 @@ export async function validateApiKey(
     return "Missing X-API-Key or Authorization: Bearer <key> header";
   }
 
-  // Find the owning user by matching the key value.
-  const rows = await db
+  // Hashed lookup — the normal case after migration.
+  const hashed = hashApiKey(headerKey);
+  let rows = await db
     .select({ userId: schema.settings.userId })
     .from(schema.settings)
     .where(
       and(
         eq(schema.settings.key, API_KEY_SETTING),
-        eq(schema.settings.value, headerKey)
+        eq(schema.settings.value, hashed)
       )
     )
     .execute();
+
+  // Fallback: legacy row that still stores the raw key (pre-migration). If
+  // we find one, migrate it in place so future lookups hit the hashed path.
+  // Eliminates any window where the deploy-vs-migration ordering matters.
+  if (!rows.length) {
+    const legacy = await db
+      .select({ userId: schema.settings.userId })
+      .from(schema.settings)
+      .where(
+        and(
+          eq(schema.settings.key, API_KEY_SETTING),
+          eq(schema.settings.value, headerKey)
+        )
+      )
+      .execute();
+    if (legacy.length) {
+      const { sql } = await import("drizzle-orm");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (db as any).execute(sql`
+        UPDATE settings SET value = ${hashed}
+        WHERE key = ${API_KEY_SETTING} AND user_id = ${legacy[0].userId}
+      `);
+      rows = legacy;
+    }
+  }
 
   if (!rows.length) return "Invalid API key";
   const userId = rows[0].userId as string;
