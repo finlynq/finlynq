@@ -40,6 +40,14 @@ interface AdminUser {
   updatedAt: string;
 }
 
+interface LoginActivityRow {
+  id: string;
+  email: string;
+  displayName: string | null;
+  loginCount: number;
+  lastLoginAt: string | null;
+}
+
 interface UsageStats {
   totalUsers: number;
   totalTransactions: number;
@@ -49,6 +57,10 @@ interface UsageStats {
   verifiedUsers: number;
   mfaEnabledUsers: number;
   planBreakdown: Record<string, number>;
+  totalLogins: number;
+  activeUsersLast7Days: number;
+  activeUsersLast30Days: number;
+  recentLogins: LoginActivityRow[];
 }
 
 // ─── Animation ──────────────────────────────────────────────────────────────
@@ -413,7 +425,7 @@ export default function AdminPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="activity" className="mt-4">
+          <TabsContent value="activity" className="mt-4 space-y-4">
             <Card>
               <CardContent className="p-6">
                 {stats && (
@@ -437,6 +449,30 @@ export default function AdminPage() {
                     </div>
                     <div className="flex items-center justify-between py-3 border-b">
                       <span className="text-muted-foreground">
+                        Total logins
+                      </span>
+                      <span className="font-bold">
+                        {stats.totalLogins.toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between py-3 border-b">
+                      <span className="text-muted-foreground">
+                        Active users (last 7 days)
+                      </span>
+                      <span className="font-bold">
+                        {stats.activeUsersLast7Days}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between py-3 border-b">
+                      <span className="text-muted-foreground">
+                        Active users (last 30 days)
+                      </span>
+                      <span className="font-bold">
+                        {stats.activeUsersLast30Days}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between py-3 border-b">
+                      <span className="text-muted-foreground">
                         Total accounts created
                       </span>
                       <span className="font-bold">{stats.totalAccounts}</span>
@@ -451,6 +487,61 @@ export default function AdminPage() {
                     </div>
                   </div>
                 )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent className="p-0">
+                <div className="px-6 py-4 border-b">
+                  <h2 className="font-semibold">Recent logins</h2>
+                  <p className="text-sm text-muted-foreground">
+                    Last 15 users who signed in, most recent first.
+                  </p>
+                </div>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>User</TableHead>
+                      <TableHead className="text-right">Logins</TableHead>
+                      <TableHead>Last login</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {stats?.recentLogins?.map((row) => (
+                      <TableRow key={row.id}>
+                        <TableCell>
+                          <div>
+                            <p className="font-medium">
+                              {row.displayName || "—"}
+                            </p>
+                            <p className="text-sm text-muted-foreground">
+                              {row.email}
+                            </p>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {row.loginCount.toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {row.lastLoginAt
+                            ? new Date(row.lastLoginAt).toLocaleString()
+                            : "—"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {(!stats?.recentLogins ||
+                      stats.recentLogins.length === 0) && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={3}
+                          className="text-center py-8 text-muted-foreground"
+                        >
+                          No login activity yet.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
               </CardContent>
             </Card>
           </TabsContent>

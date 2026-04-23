@@ -32,6 +32,9 @@ export async function GET(request: NextRequest) {
   let last30 = 0;
   let verified = 0;
   let mfaEnabled = 0;
+  let totalLogins = 0;
+  let activeLast7 = 0;
+  let activeLast30 = 0;
   const planCounts: Record<string, number> = { free: 0, pro: 0, premium: 0 };
 
   for (const u of allUsers) {
@@ -42,7 +45,30 @@ export async function GET(request: NextRequest) {
     if (u.mfaEnabled) mfaEnabled++;
     const plan = (u.plan as string | null) ?? "free";
     planCounts[plan] = (planCounts[plan] || 0) + 1;
+
+    totalLogins += Number(u.loginCount ?? 0);
+    if (u.lastLoginAt) {
+      const l = new Date(u.lastLoginAt as string).getTime();
+      if (l >= d7) activeLast7++;
+      if (l >= d30) activeLast30++;
+    }
   }
+
+  const recentLogins = allUsers
+    .filter((u) => u.lastLoginAt)
+    .sort(
+      (a, b) =>
+        new Date(b.lastLoginAt as string).getTime() -
+        new Date(a.lastLoginAt as string).getTime()
+    )
+    .slice(0, 15)
+    .map((u) => ({
+      id: u.id,
+      email: u.email,
+      displayName: u.displayName,
+      loginCount: Number(u.loginCount ?? 0),
+      lastLoginAt: u.lastLoginAt,
+    }));
 
   return NextResponse.json({
     ...stats,
@@ -51,5 +77,9 @@ export async function GET(request: NextRequest) {
     verifiedUsers: verified,
     mfaEnabledUsers: mfaEnabled,
     planBreakdown: planCounts,
+    totalLogins,
+    activeUsersLast7Days: activeLast7,
+    activeUsersLast30Days: activeLast30,
+    recentLogins,
   });
 }

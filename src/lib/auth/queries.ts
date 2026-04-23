@@ -34,9 +34,6 @@ export async function createUser(input: CreateUserInput) {
   const now = new Date().toISOString();
   const emailVerifyToken = crypto.randomUUID();
 
-  // New managed-mode users get a 14-day trial
-  const trialExpiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
-
   await db.insert(getSchema().users)
     .values({
       id,
@@ -49,8 +46,8 @@ export async function createUser(input: CreateUserInput) {
       mfaEnabled: 0,
       mfaSecret: null,
       onboardingComplete: 0,
-      plan: "trial",
-      planExpiresAt: trialExpiresAt,
+      plan: "free",
+      planExpiresAt: null,
       kekSalt: input.kekSalt,
       dekWrapped: input.dekWrapped,
       dekWrappedIv: input.dekWrappedIv,
@@ -224,12 +221,14 @@ export async function listUsers(options: { limit?: number; offset?: number } = {
       onboardingComplete: s.users.onboardingComplete,
       plan: s.users.plan,
       planExpiresAt: s.users.planExpiresAt,
+      loginCount: s.users.loginCount,
+      lastLoginAt: s.users.lastLoginAt,
       createdAt: s.users.createdAt,
       updatedAt: s.users.updatedAt,
     })
     .from(s.users)
     .limit(limit)
-    .offset(offset) as Promise<{ id: string; email: string; displayName: string | null; role: string; emailVerified: number | boolean; mfaEnabled: number | boolean; onboardingComplete: number | boolean; plan: string; planExpiresAt: string | null; createdAt: string; updatedAt: string }[]>;
+    .offset(offset) as Promise<{ id: string; email: string; displayName: string | null; role: string; emailVerified: number | boolean; mfaEnabled: number | boolean; onboardingComplete: number | boolean; plan: string; planExpiresAt: string | null; loginCount: number; lastLoginAt: string | null; createdAt: string; updatedAt: string }[]>;
 }
 
 export async function getUserCount() {
