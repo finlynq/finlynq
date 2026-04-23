@@ -35,6 +35,7 @@ type Transaction = {
 
 type Account = { id: number; name: string; currency: string };
 type Category = { id: number; name: string; type: string; group: string };
+type Holding = { id: number; name: string; symbol: string | null; accountName: string | null };
 
 type SplitRow = {
   categoryId: string;
@@ -98,6 +99,7 @@ export default function TransactionsPage() {
   const [total, setTotal] = useState(0);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [holdings, setHoldings] = useState<Holding[]>([]);
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchInput, setSearchInput] = useState("");
@@ -180,6 +182,7 @@ export default function TransactionsPage() {
   useEffect(() => {
     fetch("/api/accounts").then((r) => r.ok ? r.json() : []).then(setAccounts);
     fetch("/api/categories").then((r) => r.ok ? r.json() : []).then(setCategories);
+    fetch("/api/portfolio").then((r) => r.ok ? r.json() : []).then(setHoldings);
   }, []);
 
   function handleSearchChange(value: string) {
@@ -434,7 +437,15 @@ export default function TransactionsPage() {
                     const acct = accounts.find((a) => String(a.id) === val);
                     setForm({ ...form, accountId: val, currency: acct?.currency ?? "CAD" });
                   }}>
-                    <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select account">
+                        {(v) => {
+                          const val = v == null ? "" : String(v);
+                          if (!val) return "Select account";
+                          return accounts.find((a) => String(a.id) === val)?.name ?? val;
+                        }}
+                      </SelectValue>
+                    </SelectTrigger>
                     <SelectContent>
                       {accounts.map((a) => (
                         <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>
@@ -445,7 +456,16 @@ export default function TransactionsPage() {
                 <div className="space-y-1.5">
                   <Label>Category</Label>
                   <Select value={form.categoryId} onValueChange={(v) => setForm({ ...form, categoryId: v ?? "" })}>
-                    <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select category">
+                        {(v) => {
+                          const val = v == null ? "" : String(v);
+                          if (!val) return "Select category";
+                          const c = categories.find((c) => String(c.id) === val);
+                          return c ? `${c.group} - ${c.name}` : val;
+                        }}
+                      </SelectValue>
+                    </SelectTrigger>
                     <SelectContent>
                       {categories.map((c) => (
                         <SelectItem key={c.id} value={String(c.id)}>{c.group} - {c.name}</SelectItem>
@@ -580,7 +600,35 @@ export default function TransactionsPage() {
                     </div>
                     <div className="space-y-1.5">
                       <Label>Portfolio Holding</Label>
-                      <Input value={form.portfolioHoldingId} onChange={(e) => setForm({ ...form, portfolioHoldingId: e.target.value })} placeholder="Holding name/ID" />
+                      <Select
+                        value={form.portfolioHoldingId || "__none__"}
+                        onValueChange={(v) => setForm({ ...form, portfolioHoldingId: v === "__none__" ? "" : (v ?? "") })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select holding">
+                            {(v) => {
+                              const val = v == null ? "" : String(v);
+                              if (!val || val === "__none__") return "None";
+                              const h = holdings.find((h) => h.name === val);
+                              if (!h) return val;
+                              return h.symbol ? `${h.name} (${h.symbol})` : h.name;
+                            }}
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__none__">None</SelectItem>
+                          {holdings.map((h) => (
+                            <SelectItem key={h.id} value={h.name}>
+                              {h.symbol ? `${h.name} (${h.symbol})` : h.name}
+                              {h.accountName ? ` — ${h.accountName}` : ""}
+                            </SelectItem>
+                          ))}
+                          {form.portfolioHoldingId &&
+                            !holdings.some((h) => h.name === form.portfolioHoldingId) && (
+                              <SelectItem value={form.portfolioHoldingId}>{form.portfolioHoldingId}</SelectItem>
+                            )}
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
