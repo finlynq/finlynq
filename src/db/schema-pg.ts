@@ -16,6 +16,7 @@ import {
   doublePrecision,
   primaryKey,
   timestamp,
+  boolean,
 } from "drizzle-orm/pg-core";
 
 export const accounts = pgTable("accounts", {
@@ -361,4 +362,71 @@ export const mcpUploads = pgTable("mcp_uploads", {
   // | 'executed' (import committed) | 'cancelled' (user cancelled)
   // | 'expired' (past expiresAt, awaiting GC)
   status: text("status").notNull().default("pending"),
+});
+
+// ─── Email Import — Staging Queue (Phase B of Resend plan) ─────────────────
+//
+// When an email lands at `import-<uuid>@finlynq.com` and the uuid resolves to
+// a user, the webhook parses attachments into rows and stores them here for
+// user review at /import/pending. On approve, rows materialize into the
+// `transactions` table encrypted with the user's logged-in DEK and the
+// staged rows are deleted. On reject/expire (14d), rows are deleted outright.
+// See Research/email-import-resend-plan.md.
+export const stagedImports = pgTable("staged_imports", {
+  id: text("id").primaryKey(), // UUID
+  userId: text("user_id").notNull().references(() => users.id),
+  source: text("source").notNull(), // 'email' | 'upload'
+  fromAddress: text("from_address"), // display only
+  subject: text("subject"),
+  svixId: text("svix_id").unique(), // null for self-hosted multipart path; idempotency key for Resend retries
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  // 'pending' | 'imported' | 'rejected' | 'expired'
+  status: text("status").notNull().default("pending"),
+  totalRowCount: integer("total_row_count").notNull().default(0),
+  duplicateCount: integer("duplicate_count").notNull().default(0),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+export const stagedTransactions = pgTable("staged_transactions", {
+  id: text("id").primaryKey(), // UUID
+  stagedImportId: text("staged_import_id").notNull().references(() => stagedImports.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => users.id),
+  // Plaintext — bounded lifetime (14 days), deleted on approve/reject/expire.
+  // Re-inserted into `transactions` with the user's DEK at approve time.
+  date: text("date").notNull(),
+  amount: doublePrecision("amount").notNull(),
+  currency: text("currency").default("CAD"),
+  payee: text("payee"),
+  category: text("category"),
+  accountName: text("account_name"),
+  note: text("note"),
+  rowIndex: integer("row_index").notNull(),
+  isDuplicate: boolean("is_duplicate").notNull().default(false),
+  importHash: text("import_hash").notNull(),
+});
+
+// ─── Email Import — Admin Inbox + Trash (Phase A) ──────────────────────────
+//
+// Catch-all for emails that don't match an `import-<uuid>` user address:
+//   - category='mailbox': info@/admin@/support@/etc. or a user-display-name
+//     match — admin triages via /admin/inbox, kept indefinitely.
+//   - category='trash': anything else (random probes, expired import-*,
+//     body-only emails) — auto-deleted after 24 hours.
+// Body content may contain attacker-controlled HTML — UI must render in a
+// sandboxed iframe. Never use dangerouslySetInnerHTML on body_html.
+export const incomingEmails = pgTable("incoming_emails", {
+  id: text("id").primaryKey(), // UUID
+  category: text("category").notNull(), // 'mailbox' | 'trash'
+  toAddress: text("to_address").notNull(),
+  fromAddress: text("from_address").notNull(),
+  subject: text("subject"),
+  bodyText: text("body_text"),
+  bodyHtml: text("body_html"),
+  attachmentCount: integer("attachment_count").notNull().default(0),
+  svixId: text("svix_id").unique(), // idempotency for Resend retries
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  // NULL for mailbox (kept indefinitely), now()+24h for trash (auto-swept)
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  triagedAt: timestamp("triaged_at", { withTimezone: true }),
+  triagedBy: text("triaged_by").references(() => users.id),
 });
