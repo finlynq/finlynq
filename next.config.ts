@@ -1,11 +1,10 @@
 import type { NextConfig } from "next";
 
-// Security headers applied to every route. CSP is shipped as Report-Only on
-// first deploy so we can watch the browser console for a week before flipping
-// to enforced — Next.js hydration + Tailwind/shadcn produce inline styles and
-// inline scripts that are hard to fully enumerate up front. To enforce, change
-// the header name below from `Content-Security-Policy-Report-Only` to
-// `Content-Security-Policy` once the console is clean.
+// Security headers applied to every route. CSP was shipped as Report-Only in
+// `50a1742` (2026-04-22) for a watch window; flipped to enforced on
+// 2026-04-23 after a clean week. Next.js hydration + Tailwind/shadcn still
+// need `'unsafe-inline'` / `'unsafe-eval'` — once we wire nonces through the
+// custom document we can drop both.
 const CSP_DIRECTIVES = [
   "default-src 'self'",
   // Next.js needs inline + eval for its hydration runtime and dev HMR. Once
@@ -34,9 +33,7 @@ const SECURITY_HEADERS = [
     key: "Permissions-Policy",
     value: "camera=(), microphone=(), geolocation=()",
   },
-  // Report-Only for the first week — flip to `Content-Security-Policy` after
-  // verifying the browser console is quiet on prod.
-  { key: "Content-Security-Policy-Report-Only", value: CSP_DIRECTIVES },
+  { key: "Content-Security-Policy", value: CSP_DIRECTIVES },
 ];
 
 const nextConfig: NextConfig = {
