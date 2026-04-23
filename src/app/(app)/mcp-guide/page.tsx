@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff, Globe, Plus, Shield } from "lucide-react";
+import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff, Globe, Plus, Shield, Upload, Wand2, Radar, Landmark, Globe2, Scissors, Scale, Lightbulb } from "lucide-react";
 
 type ClientTab = "claude-desktop" | "claude-web" | "cursor" | "cline" | "windsurf" | "custom";
 type StatusState = "checking" | "connected" | "disconnected";
@@ -21,24 +21,188 @@ const examplePrompts = [
   { category: "Cash Flow", prompt: "What bills are due in the next 30 days?" },
 ];
 
-const tools = [
-  { name: "get_account_balances", desc: "Current balance for all accounts" },
-  { name: "get_transactions", desc: "Transactions with filters and search" },
-  { name: "get_budget_summary", desc: "Budget vs actual spending by category" },
-  { name: "get_net_worth", desc: "Net worth snapshot (assets − liabilities)" },
-  { name: "get_spending_trends", desc: "Month-by-month spending by category" },
-  { name: "get_portfolio_summary", desc: "Investment holdings and performance" },
-  { name: "get_financial_health_score", desc: "Composite financial health score" },
-  { name: "search_transactions", desc: "Full-text search across transactions" },
-  { name: "get_goals", desc: "Goal progress and projected completion" },
-  { name: "get_cash_flow_forecast", desc: "Upcoming bills and cash flow" },
-  { name: "get_spending_anomalies", desc: "Unusual transactions and patterns" },
-  { name: "get_income_statement", desc: "Income vs expenses over a period" },
-  { name: "get_weekly_recap", desc: "This week's spending summary" },
-  { name: "get_spotlight_items", desc: "Actionable alerts and insights" },
-  { name: "add_transaction", desc: "Log a new transaction via AI" },
-  { name: "set_budget", desc: "Create or update a budget category" },
-  { name: "add_goal", desc: "Create a savings or debt payoff goal" },
+type ToolGroupIcon =
+  | typeof Upload
+  | typeof Wand2
+  | typeof Radar
+  | typeof Landmark
+  | typeof Globe2
+  | typeof Scissors
+  | typeof Scale
+  | typeof Lightbulb
+  | typeof Bot;
+
+const toolGroups: {
+  title: string;
+  icon: ToolGroupIcon;
+  blurb: string;
+  example: string;
+  tools: string[];
+}[] = [
+  {
+    title: "Import transactions (CSV / OFX)",
+    icon: Upload,
+    blurb:
+      "Drop a CSV or OFX into Finlynq with the Upload button, then ask Claude to take it from there. Claude lists pending uploads, shows you a preview with duplicate detection, and only commits after you confirm.",
+    example: "Preview my pending CSV import and show me the duplicates before you commit.",
+    tools: ["list_pending_uploads", "preview_import", "execute_import", "cancel_import"],
+  },
+  {
+    title: "Bulk cleanup",
+    icon: Wand2,
+    blurb:
+      "Recategorize, retag, or delete many transactions at once. Every bulk operation is two steps: a preview that returns a sample and a signed confirmation token, then an execute call that commits. Claude can't skip the confirmation — the token is scoped to the exact payload.",
+    example: "Recategorize every Starbucks transaction from the last 90 days as Coffee.",
+    tools: [
+      "preview_bulk_update",
+      "execute_bulk_update",
+      "preview_bulk_delete",
+      "execute_bulk_delete",
+      "preview_bulk_categorize",
+      "execute_bulk_categorize",
+    ],
+  },
+  {
+    title: "Find and manage subscriptions",
+    icon: Radar,
+    blurb:
+      "Detect recurring charges from your transaction history, then add, pause, resume, cancel, or delete subscriptions without leaving the chat.",
+    example: "Find my subscriptions and add the ones you're confident about.",
+    tools: [
+      "list_subscriptions",
+      "detect_subscriptions",
+      "bulk_add_subscriptions",
+      "add_subscription",
+      "update_subscription",
+      "pause_subscription",
+      "resume_subscription",
+      "cancel_subscription",
+      "delete_subscription",
+      "get_subscription_summary",
+    ],
+  },
+  {
+    title: "Manage loans and plan payoff",
+    icon: Landmark,
+    blurb:
+      "Track balances, generate amortization schedules, and compare avalanche vs. snowball payoff plans across all your loans.",
+    example: "Show me an avalanche payoff plan with an extra $300 a month.",
+    tools: [
+      "list_loans",
+      "add_loan",
+      "update_loan",
+      "delete_loan",
+      "get_loan_amortization",
+      "get_debt_payoff_plan",
+    ],
+  },
+  {
+    title: "Currency conversion",
+    icon: Globe2,
+    blurb:
+      "Ask for live or historical FX rates, convert amounts between currencies, or pin your own rate overrides for bookkeeping.",
+    example: "What's 1,200 USD in CAD on the day of my last paycheck?",
+    tools: [
+      "get_fx_rate",
+      "convert_amount",
+      "list_fx_overrides",
+      "set_fx_override",
+      "delete_fx_override",
+    ],
+  },
+  {
+    title: "Split transactions",
+    icon: Scissors,
+    blurb:
+      "Split a single transaction across multiple categories — useful for $200 grocery runs that include household goods, or Costco trips that mix food and electronics.",
+    example: "Split my last Costco run: $120 groceries, $60 household, $40 electronics.",
+    tools: ["list_splits", "add_split", "update_split", "delete_split", "replace_splits"],
+  },
+  {
+    title: "Rule management",
+    icon: Scale,
+    blurb:
+      "Create, list, reorder, test, and delete auto-categorization rules. Dry-run any rule against your history before you apply it.",
+    example: "Create a rule that categorizes anything containing 'SHELL' as Fuel, and show me what it would match first.",
+    tools: [
+      "list_rules",
+      "create_rule",
+      "update_rule",
+      "delete_rule",
+      "test_rule",
+      "reorder_rules",
+      "apply_rules_to_uncategorized",
+    ],
+  },
+  {
+    title: "Suggest payee / category",
+    icon: Lightbulb,
+    blurb:
+      "Before recording a transaction, ask Claude to guess the right category and tags based on your rules and history.",
+    example: "I'm about to enter a charge from 'TIM HORTONS #4412' for $7.40 — what category should it be?",
+    tools: ["suggest_transaction_details"],
+  },
+  {
+    title: "Reads & dashboards",
+    icon: Bot,
+    blurb:
+      "Balances, net worth, budgets, goals, spending trends, income statements, portfolio metrics, health score, spotlight alerts, weekly recap, cash flow forecast, anomalies — all the dashboards, queryable in natural language.",
+    example: "Summarize my week: spending, net worth change, and anything unusual.",
+    tools: [
+      "get_account_balances",
+      "get_net_worth",
+      "get_net_worth_trend",
+      "get_transactions",
+      "search_transactions",
+      "get_budget_summary",
+      "get_spending_trends",
+      "get_income_statement",
+      "get_goals",
+      "get_cash_flow_forecast",
+      "get_recurring_transactions",
+      "get_spotlight_items",
+      "get_weekly_recap",
+      "get_spending_anomalies",
+      "get_financial_health_score",
+      "get_portfolio_summary",
+      "get_portfolio_analysis",
+      "get_portfolio_performance",
+      "analyze_holding",
+      "get_holding_metrics",
+      "get_rebalancing_suggestions",
+      "get_investment_insights",
+      "compare_to_benchmark",
+      "get_categories",
+      "finlynq_help",
+    ],
+  },
+];
+
+const workedExamples: { title: string; prompt: string; flow: string }[] = [
+  {
+    title: "Import a month of transactions from a CSV",
+    prompt:
+      "I just uploaded my December BMO statement. Preview it, flag the duplicates, and once it looks clean go ahead and import it.",
+    flow: "list_pending_uploads → preview_import → (you confirm) → execute_import",
+  },
+  {
+    title: "Find and add subscriptions in one shot",
+    prompt:
+      "Scan my transactions for recurring charges I might be missing from my subscription list. Show me the candidates with confidence scores and add the ones you're at least 80% sure about.",
+    flow: "detect_subscriptions → (you confirm) → bulk_add_subscriptions",
+  },
+  {
+    title: "Refinance plan across every loan",
+    prompt:
+      "Pull my loans, then compare an avalanche vs. snowball payoff plan assuming I can put an extra $500 a month toward debt. Which gets me debt-free first?",
+    flow: "list_loans → get_debt_payoff_plan × 2 (one per strategy)",
+  },
+  {
+    title: "Clean up a year of Uber charges",
+    prompt:
+      "Every Uber charge before last month should be categorized as Transit instead of Dining. Preview it first and tell me how many rows would change.",
+    flow: "preview_bulk_categorize → (you confirm) → execute_bulk_categorize",
+  },
 ];
 
 function CopyButton({ text }: { text: string }) {
@@ -637,31 +801,90 @@ export default function McpGuidePage() {
           </div>
         </section>
 
-        {/* Available Tools */}
-        <section>
-          <h2 className="mb-1 text-lg font-semibold text-foreground">Available Tools</h2>
+        {/* Worked examples — copy-paste prompts that trigger multi-tool flows */}
+        <section className="mb-10">
+          <h2 className="mb-1 text-lg font-semibold text-foreground">Try a full flow</h2>
           <p className="mb-4 text-sm text-muted-foreground">
-            {tools.length} highlighted tools — 27 total (21 read + 6 write).
+            Paste any of these into Claude to see a preview / confirm / execute flow end-to-end. Claude asks
+            before it commits anything destructive.
           </p>
-          <div className="rounded-xl border border-border overflow-hidden">
-            <div className="grid divide-y divide-border/50">
-              {tools.map((tool) => (
-                <div
-                  key={tool.name}
-                  className="flex items-center gap-3 px-4 py-2.5 bg-card hover:bg-muted/30 transition-colors"
-                >
-                  <code className="text-xs font-mono text-primary shrink-0">{tool.name}</code>
-                  <span className="text-xs text-muted-foreground ml-auto text-right">{tool.desc}</span>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {workedExamples.map((ex) => (
+              <button
+                key={ex.title}
+                onClick={() => navigator.clipboard.writeText(ex.prompt)}
+                className="group flex flex-col gap-2 rounded-xl border border-border/50 bg-card p-4 text-left hover:border-primary/30 transition-colors"
+                title="Click to copy prompt"
+              >
+                <div className="flex items-center gap-2">
+                  <Copy className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0 group-hover:text-foreground transition-colors" />
+                  <p className="text-sm font-semibold text-foreground">{ex.title}</p>
                 </div>
-              ))}
-            </div>
-            <div className="px-4 py-2.5 bg-muted/30 border-t border-border/50">
-              <p className="text-xs text-muted-foreground">
-                Full tool list and parameters available at{" "}
-                <code className="bg-muted px-1 rounded">/api-docs</code> or via{" "}
-                <code className="bg-muted px-1 rounded">/.well-known/mcp.json</code>
-              </p>
-            </div>
+                <p className="text-sm text-muted-foreground group-hover:text-foreground transition-colors">
+                  {ex.prompt}
+                </p>
+                <p className="mt-auto pt-1 text-[11px] font-mono text-muted-foreground/70">{ex.flow}</p>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {/* What Claude can do — capability groups, not tool-by-tool */}
+        <section>
+          <h2 className="mb-1 text-lg font-semibold text-foreground">What Claude can do</h2>
+          <p className="mb-4 text-sm text-muted-foreground">
+            86 tools organized by task. Claude picks the right ones — you describe the outcome in plain English.
+            For the full alphabetical tool list with parameters, see{" "}
+            <code className="bg-muted px-1 rounded">/api-docs</code> or{" "}
+            <code className="bg-muted px-1 rounded">/.well-known/mcp.json</code>.
+          </p>
+          <div className="grid gap-4 md:grid-cols-2">
+            {toolGroups.map((group) => {
+              const Icon = group.icon;
+              return (
+                <div
+                  key={group.title}
+                  className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                      <Icon className="h-4 w-4 text-primary" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-sm font-semibold text-foreground">{group.title}</h3>
+                      <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{group.blurb}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(group.example)}
+                    className="flex items-start gap-2 rounded-lg border border-border/50 bg-muted/40 px-3 py-2 text-left text-xs text-muted-foreground hover:border-primary/30 hover:text-foreground transition-colors"
+                    title="Click to copy prompt"
+                  >
+                    <Copy className="mt-0.5 h-3 w-3 shrink-0 opacity-50" />
+                    <span className="italic">&quot;{group.example}&quot;</span>
+                  </button>
+                  <div className="flex flex-wrap gap-1 pt-1">
+                    {group.tools.map((t) => (
+                      <code
+                        key={t}
+                        className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground"
+                      >
+                        {t}
+                      </code>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-4 rounded-lg bg-muted/30 border border-border/50 px-4 py-3">
+            <p className="text-xs text-muted-foreground">
+              <strong className="text-foreground">How destructive ops stay safe:</strong> bulk updates,
+              deletes, imports, and subscription-detection all use a preview → confirm → execute pattern.
+              The preview returns a signed token scoped to the exact payload; the execute step rejects
+              unless the token matches. Claude can&apos;t skip the preview, and it can&apos;t mutate the
+              payload between steps without invalidating the token.
+            </p>
           </div>
         </section>
       </div>

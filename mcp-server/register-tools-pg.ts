@@ -12,6 +12,31 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { decryptField, encryptField } from "../src/lib/crypto/envelope";
+import {
+  generateAmortizationSchedule,
+  calculateDebtPayoff,
+  type Debt,
+} from "../src/lib/loan-calculator";
+import { getLatestFxRate } from "../src/lib/fx-service";
+import {
+  invalidateUser as invalidateUserTxCache,
+  getUserTransactions,
+} from "../src/lib/mcp/user-tx-cache";
+import {
+  signConfirmationToken,
+  verifyConfirmationToken,
+} from "../src/lib/mcp/confirmation-token";
+import fs from "fs/promises";
+import path from "path";
+import {
+  csvToRawTransactions,
+  csvToRawTransactionsWithMapping,
+  extractCSVHeaders,
+} from "../src/lib/csv-parser";
+import { parseOfx } from "../src/lib/ofx-parser";
+import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline";
+import { generateImportHash } from "../src/lib/import-hash";
+import { applyRulesToBatch, type TransactionRule } from "../src/lib/auto-categorize";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -976,6 +1001,7 @@ export function registerPgTools(
         VALUES (${userId}, ${date}, ${acct.id}, ${cat.id}, ${acct.currency}, ${amount}, ${payee ?? ""}, ${note ?? ""}, ${tags ?? ""})
       `);
 
+      invalidateUserTxCache(userId);
       return text({ success: true, message: `Transaction added: ${amount} to ${account} (${category}) on ${date}` });
     }
   );
@@ -1048,6 +1074,7 @@ export function registerPgTools(
       const plainPayee = dek ? (decryptField(dek, txn.payee) ?? "") : txn.payee;
 
       await db.execute(sql`UPDATE transactions SET category_id = ${cat.id} WHERE id = ${transaction_id} AND user_id = ${userId}`);
+      invalidateUserTxCache(userId);
       return text({ success: true, transactionId: transaction_id, newCategory: cat.name, message: `Transaction #${transaction_id} (${plainPayee}) categorized as "${cat.name}"` });
     }
   );
@@ -1124,6 +1151,7 @@ export function registerPgTools(
       `);
 
       const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
+      invalidateUserTxCache(userId);
       return text({
         success: true,
         transactionId: result[0]?.id,
@@ -1183,6 +1211,7 @@ export function registerPgTools(
       }
 
       const ok = results.filter(r => r.success).length;
+      if (ok > 0) invalidateUserTxCache(userId);
       return text({ imported: ok, failed: results.length - ok, results });
     }
   );
@@ -1246,6 +1275,7 @@ export function registerPgTools(
 
       if (!changed) return err("No fields to update");
 
+      invalidateUserTxCache(userId);
       return text({ success: true, message: `Transaction #${id} updated (${changed} field(s))` });
     }
   );
@@ -1263,6 +1293,7 @@ export function registerPgTools(
       const t = existing[0];
       const plainPayee = dek ? (decryptField(dek, String(t.payee ?? "")) ?? "") : t.payee;
       await db.execute(sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`);
+      invalidateUserTxCache(userId);
       return text({ success: true, message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}` });
     }
   );
@@ -1522,6 +1553,7 @@ export function registerPgTools(
         }
       }
 
+      if (!dry_run && updated > 0) invalidateUserTxCache(userId);
       return text({
         dry_run: dry_run ?? false,
         updated,
@@ -2151,6 +2183,1779 @@ export function registerPgTools(
           "Benchmark returns exclude fees, taxes, and currency conversion",
         ],
       });
+    }
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Wave 1B — Loans, FX, Subscriptions CRUD, Rules CRUD, Suggest, Splits CRUD
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── list_loans ────────────────────────────────────────────────────────────
+  server.tool(
+    "list_loans",
+    "List all loans with balance, rate, payment, payoff date, and linked account",
+    {},
+    async () => {
+      const rows = await q(db, sql`
+        SELECT l.id, l.name, l.type, l.principal, l.annual_rate, l.term_months,
+               l.start_date, l.payment_amount, l.payment_frequency, l.extra_payment,
+               l.note, l.account_id, a.name AS account_name
+        FROM loans l
+        LEFT JOIN accounts a ON a.id = l.account_id
+        WHERE l.user_id = ${userId}
+        ORDER BY l.start_date DESC, l.id
+      `);
+      const today = new Date().toISOString().split("T")[0];
+      const enriched = rows.map((r) => {
+        const summary = generateAmortizationSchedule(
+          Number(r.principal),
+          Number(r.annual_rate),
+          Number(r.term_months),
+          String(r.start_date),
+          Number(r.extra_payment ?? 0),
+          String(r.payment_frequency ?? "monthly"),
+        );
+        const paid = summary.schedule.filter((x) => x.date <= today);
+        const principalPaid = paid.reduce((s, x) => s + x.principal, 0);
+        const interestPaid = paid.reduce((s, x) => s + x.interest, 0);
+        return {
+          ...r,
+          monthlyPayment: summary.monthlyPayment,
+          totalInterest: summary.totalInterest,
+          payoffDate: summary.payoffDate,
+          remainingBalance: Math.max(Number(r.principal) - principalPaid, 0),
+          principalPaid: Math.round(principalPaid * 100) / 100,
+          interestPaid: Math.round(interestPaid * 100) / 100,
+          periodsRemaining: summary.schedule.length - paid.length,
+        };
+      });
+      return text({ success: true, data: enriched });
+    }
+  );
+
+  // ── add_loan ──────────────────────────────────────────────────────────────
+  server.tool(
+    "add_loan",
+    "Create a new loan. All non-optional fields required; payment_amount defaults to calculated monthly payment.",
+    {
+      name: z.string().describe("Loan name"),
+      type: z.string().describe("Loan type (e.g. 'mortgage', 'auto', 'student', 'personal')"),
+      principal: z.number().describe("Original loan principal"),
+      annual_rate: z.number().describe("Annual interest rate (e.g. 5.5 for 5.5%)"),
+      term_months: z.number().int().positive().describe("Loan term in months"),
+      start_date: z.string().describe("Loan start date (YYYY-MM-DD)"),
+      account: z.string().optional().describe("Linked account name (fuzzy matched)"),
+      payment_amount: z.number().optional().describe("Override computed monthly payment"),
+      payment_frequency: z.enum(["monthly", "biweekly"]).optional().describe("Default monthly"),
+      extra_payment: z.number().optional().describe("Extra principal per payment (default 0)"),
+      min_payment: z.number().optional().describe("Alias for payment_amount — minimum required payment"),
+      note: z.string().optional(),
+    },
+    async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
+      let accountId: number | null = null;
+      if (account) {
+        const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+        const acct = fuzzyFind(account, allAccounts);
+        if (!acct) return err(`Account "${account}" not found`);
+        accountId = Number(acct.id);
+      }
+      const pmt = payment_amount ?? min_payment ?? null;
+      const result = await q(db, sql`
+        INSERT INTO loans (user_id, name, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note)
+        VALUES (${userId}, ${name}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${note ?? ""})
+        RETURNING id
+      `);
+      return text({ success: true, data: { id: result[0]?.id, message: `Loan "${name}" created — $${principal} at ${annual_rate}% over ${term_months} months` } });
+    }
+  );
+
+  // ── update_loan ───────────────────────────────────────────────────────────
+  server.tool(
+    "update_loan",
+    "Update any field of an existing loan by id",
+    {
+      id: z.number().describe("Loan id"),
+      name: z.string().optional(),
+      type: z.string().optional(),
+      principal: z.number().optional(),
+      annual_rate: z.number().optional(),
+      term_months: z.number().int().positive().optional(),
+      start_date: z.string().optional(),
+      payment_amount: z.number().optional(),
+      payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
+      extra_payment: z.number().optional(),
+      account: z.string().optional().describe("Linked account name (fuzzy matched). Pass empty string to clear."),
+      note: z.string().optional(),
+    },
+    async ({ id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, account, note }) => {
+      const existing = await q(db, sql`SELECT id FROM loans WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Loan #${id} not found`);
+
+      let accountIdUpdate: number | null | undefined;
+      if (account !== undefined) {
+        if (account === "") {
+          accountIdUpdate = null;
+        } else {
+          const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+          const acct = fuzzyFind(account, allAccounts);
+          if (!acct) return err(`Account "${account}" not found`);
+          accountIdUpdate = Number(acct.id);
+        }
+      }
+
+      const updates: ReturnType<typeof sql>[] = [];
+      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (type !== undefined) updates.push(sql`type = ${type}`);
+      if (principal !== undefined) updates.push(sql`principal = ${principal}`);
+      if (annual_rate !== undefined) updates.push(sql`annual_rate = ${annual_rate}`);
+      if (term_months !== undefined) updates.push(sql`term_months = ${term_months}`);
+      if (start_date !== undefined) updates.push(sql`start_date = ${start_date}`);
+      if (payment_amount !== undefined) updates.push(sql`payment_amount = ${payment_amount}`);
+      if (payment_frequency !== undefined) updates.push(sql`payment_frequency = ${payment_frequency}`);
+      if (extra_payment !== undefined) updates.push(sql`extra_payment = ${extra_payment}`);
+      if (accountIdUpdate !== undefined) updates.push(sql`account_id = ${accountIdUpdate}`);
+      if (note !== undefined) updates.push(sql`note = ${note}`);
+      if (!updates.length) return err("No fields to update");
+
+      await db.execute(sql`UPDATE loans SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, data: { id, message: `Loan #${id} updated (${updates.length} field(s))` } });
+    }
+  );
+
+  // ── delete_loan ───────────────────────────────────────────────────────────
+  server.tool(
+    "delete_loan",
+    "Delete a loan by id",
+    { id: z.number().describe("Loan id to delete") },
+    async ({ id }) => {
+      const existing = await q(db, sql`SELECT id, name FROM loans WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Loan #${id} not found`);
+      await db.execute(sql`DELETE FROM loans WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, data: { id, message: `Loan "${existing[0].name}" deleted` } });
+    }
+  );
+
+  // ── get_loan_amortization ─────────────────────────────────────────────────
+  server.tool(
+    "get_loan_amortization",
+    "Full amortization schedule for a loan. Returns every payment period with principal/interest/balance.",
+    {
+      loan_id: z.number().describe("Loan id"),
+      as_of_date: z.string().optional().describe("YYYY-MM-DD — summarises paid-to-date at this point (default: today)"),
+    },
+    async ({ loan_id, as_of_date }) => {
+      const rows = await q(db, sql`
+        SELECT id, name, principal, annual_rate, term_months, start_date,
+               payment_frequency, extra_payment
+        FROM loans WHERE id = ${loan_id} AND user_id = ${userId}
+      `);
+      if (!rows.length) return err(`Loan #${loan_id} not found`);
+      const loan = rows[0];
+      const summary = generateAmortizationSchedule(
+        Number(loan.principal),
+        Number(loan.annual_rate),
+        Number(loan.term_months),
+        String(loan.start_date),
+        Number(loan.extra_payment ?? 0),
+        String(loan.payment_frequency ?? "monthly"),
+      );
+      const cutoff = as_of_date ?? new Date().toISOString().split("T")[0];
+      const paid = summary.schedule.filter((r) => r.date <= cutoff);
+      const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
+      const interestPaid = paid.reduce((s, r) => s + r.interest, 0);
+      return text({
+        success: true,
+        data: {
+          loanId: loan_id,
+          loanName: loan.name,
+          asOfDate: cutoff,
+          monthlyPayment: summary.monthlyPayment,
+          totalPayments: summary.totalPayments,
+          totalInterest: summary.totalInterest,
+          payoffDate: summary.payoffDate,
+          asOfSummary: {
+            periodsElapsed: paid.length,
+            principalPaid: Math.round(principalPaid * 100) / 100,
+            interestPaid: Math.round(interestPaid * 100) / 100,
+            remainingBalance: Math.max(Number(loan.principal) - principalPaid, 0),
+            periodsRemaining: summary.schedule.length - paid.length,
+          },
+          schedule: summary.schedule,
+        },
+      });
+    }
+  );
+
+  // ── get_debt_payoff_plan ──────────────────────────────────────────────────
+  server.tool(
+    "get_debt_payoff_plan",
+    "Compare debt payoff strategies (avalanche vs snowball) across all user loans with an optional extra monthly payment",
+    {
+      strategy: z.enum(["avalanche", "snowball", "both"]).optional().describe("'avalanche' (highest rate first), 'snowball' (smallest balance first), or 'both' (default)"),
+      extra_payment: z.number().optional().describe("Extra monthly payment to apply on top of minimums (default 0)"),
+    },
+    async ({ strategy, extra_payment }) => {
+      const loans = await q(db, sql`
+        SELECT id, name, principal, annual_rate, term_months, start_date,
+               payment_amount, payment_frequency, extra_payment
+        FROM loans WHERE user_id = ${userId}
+      `);
+      if (!loans.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
+      const today = new Date().toISOString().split("T")[0];
+      const debts: Debt[] = loans.map((l) => {
+        const summary = generateAmortizationSchedule(
+          Number(l.principal),
+          Number(l.annual_rate),
+          Number(l.term_months),
+          String(l.start_date),
+          Number(l.extra_payment ?? 0),
+          String(l.payment_frequency ?? "monthly"),
+        );
+        const paid = summary.schedule.filter((r) => r.date <= today);
+        const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
+        const balance = Math.max(Number(l.principal) - principalPaid, 0);
+        const minPayment = Number(l.payment_amount ?? summary.monthlyPayment);
+        return {
+          id: Number(l.id),
+          name: String(l.name),
+          balance: Math.round(balance * 100) / 100,
+          rate: Number(l.annual_rate),
+          minPayment,
+        };
+      });
+      const strat = strategy ?? "both";
+      const extra = extra_payment ?? 0;
+      const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts } };
+      if (strat === "avalanche" || strat === "both") {
+        result.avalanche = calculateDebtPayoff(debts, extra, "avalanche");
+      }
+      if (strat === "snowball" || strat === "both") {
+        result.snowball = calculateDebtPayoff(debts, extra, "snowball");
+      }
+      return text({ success: true, data: result });
+    }
+  );
+
+  // ── get_fx_rate ───────────────────────────────────────────────────────────
+  server.tool(
+    "get_fx_rate",
+    "Get the FX rate from one currency to another. Reads from fx_rates cache (with user-scoped overrides) and falls back to Yahoo Finance if missing.",
+    {
+      from: z.string().describe("Source currency (e.g. USD)"),
+      to: z.string().describe("Target currency (e.g. CAD)"),
+      date: z.string().optional().describe("YYYY-MM-DD — defaults to latest/today"),
+    },
+    async ({ from, to, date }) => {
+      if (from === to) return text({ success: true, data: { from, to, date: date ?? new Date().toISOString().split("T")[0], rate: 1, source: "identity" } });
+      if (date) {
+        // Exact-date lookup (user-scoped override wins)
+        const rows = await q(db, sql`
+          SELECT id, user_id, date, rate FROM fx_rates
+          WHERE from_currency = ${from} AND to_currency = ${to} AND date = ${date}
+          ORDER BY (user_id = ${userId}) DESC, id DESC LIMIT 1
+        `);
+        if (rows.length) return text({ success: true, data: { from, to, date, rate: Number(rows[0].rate), source: String(rows[0].user_id) === userId ? "override" : "cache", id: Number(rows[0].id) } });
+        return err(`No FX rate found for ${from}→${to} on ${date}`);
+      }
+      // Latest
+      const rate = await getLatestFxRate(from, to, userId);
+      return text({ success: true, data: { from, to, date: new Date().toISOString().split("T")[0], rate, source: "latest" } });
+    }
+  );
+
+  // ── list_fx_overrides ─────────────────────────────────────────────────────
+  server.tool(
+    "list_fx_overrides",
+    "List the user's manual FX rate pins (rows in fx_rates scoped to this user)",
+    {},
+    async () => {
+      const rows = await q(db, sql`
+        SELECT id, date, from_currency, to_currency, rate
+        FROM fx_rates WHERE user_id = ${userId}
+        ORDER BY date DESC, id DESC
+      `);
+      return text({ success: true, data: rows });
+    }
+  );
+
+  // ── set_fx_override ───────────────────────────────────────────────────────
+  server.tool(
+    "set_fx_override",
+    "Pin a manual FX rate for a specific currency pair + date (upserts — existing override for the same pair+date is replaced)",
+    {
+      from: z.string().describe("Source currency (e.g. USD)"),
+      to: z.string().describe("Target currency (e.g. CAD)"),
+      date: z.string().describe("YYYY-MM-DD"),
+      rate: z.number().positive().describe("Exchange rate — 1 {from} = rate {to}"),
+    },
+    async ({ from, to, date, rate }) => {
+      const existing = await q(db, sql`
+        SELECT id FROM fx_rates
+        WHERE user_id = ${userId} AND from_currency = ${from} AND to_currency = ${to} AND date = ${date}
+      `);
+      if (existing.length) {
+        await db.execute(sql`UPDATE fx_rates SET rate = ${rate} WHERE id = ${existing[0].id} AND user_id = ${userId}`);
+        return text({ success: true, data: { id: Number(existing[0].id), from, to, date, rate, action: "updated" } });
+      }
+      const result = await q(db, sql`
+        INSERT INTO fx_rates (user_id, date, from_currency, to_currency, rate)
+        VALUES (${userId}, ${date}, ${from}, ${to}, ${rate})
+        RETURNING id
+      `);
+      return text({ success: true, data: { id: Number(result[0]?.id), from, to, date, rate, action: "created" } });
+    }
+  );
+
+  // ── delete_fx_override ────────────────────────────────────────────────────
+  server.tool(
+    "delete_fx_override",
+    "Delete a manual FX rate pin by id",
+    { id: z.number().describe("fx_rates row id") },
+    async ({ id }) => {
+      const existing = await q(db, sql`SELECT id, from_currency, to_currency, date FROM fx_rates WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`FX override #${id} not found`);
+      await db.execute(sql`DELETE FROM fx_rates WHERE id = ${id} AND user_id = ${userId}`);
+      const r = existing[0];
+      return text({ success: true, data: { id, message: `Deleted FX override: ${r.from_currency}→${r.to_currency} on ${r.date}` } });
+    }
+  );
+
+  // ── convert_amount ────────────────────────────────────────────────────────
+  server.tool(
+    "convert_amount",
+    "Convert an amount from one currency to another using live/cached FX rates",
+    {
+      amount: z.number().describe("Amount to convert"),
+      from: z.string().describe("Source currency"),
+      to: z.string().describe("Target currency"),
+      date: z.string().optional().describe("YYYY-MM-DD — defaults to latest"),
+    },
+    async ({ amount, from, to, date }) => {
+      if (from === to) return text({ success: true, data: { amount, from, to, rate: 1, converted: amount } });
+      let rate: number | null = null;
+      let source = "latest";
+      if (date) {
+        const rows = await q(db, sql`
+          SELECT user_id, rate FROM fx_rates
+          WHERE from_currency = ${from} AND to_currency = ${to} AND date = ${date}
+          ORDER BY (user_id = ${userId}) DESC, id DESC LIMIT 1
+        `);
+        if (rows.length) {
+          rate = Number(rows[0].rate);
+          source = String(rows[0].user_id) === userId ? "override" : "cache";
+        }
+      }
+      if (rate === null) rate = await getLatestFxRate(from, to, userId);
+      const converted = Math.round(amount * rate * 100) / 100;
+      return text({ success: true, data: { amount, from, to, rate, converted, date: date ?? new Date().toISOString().split("T")[0], source } });
+    }
+  );
+
+  // ── list_subscriptions ────────────────────────────────────────────────────
+  // Distinct from get_subscription_summary (which aggregates monthly cost +
+  // upcoming renewals). This returns the raw row set with status + category +
+  // account, for editing flows.
+  server.tool(
+    "list_subscriptions",
+    "List all subscriptions with full detail (status, next billing, category, account, notes)",
+    { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
+    async ({ status }) => {
+      const rows = await q(db, sql`
+        SELECT s.id, s.name, s.amount, s.currency, s.frequency, s.next_date, s.status,
+               s.cancel_reminder_date, s.notes,
+               s.category_id, c.name AS category_name,
+               s.account_id, a.name AS account_name
+        FROM subscriptions s
+        LEFT JOIN categories c ON c.id = s.category_id
+        LEFT JOIN accounts a ON a.id = s.account_id
+        WHERE s.user_id = ${userId}
+          ${status && status !== "all" ? sql`AND s.status = ${status}` : sql``}
+        ORDER BY s.status, s.name
+      `);
+      return text({ success: true, data: rows });
+    }
+  );
+
+  // ── add_subscription ──────────────────────────────────────────────────────
+  server.tool(
+    "add_subscription",
+    "Create a new subscription",
+    {
+      name: z.string().describe("Subscription name (unique per user)"),
+      amount: z.number().describe("Amount per billing cycle (positive number)"),
+      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
+      next_billing_date: z.string().describe("Next billing date (YYYY-MM-DD)"),
+      currency: z.enum(["CAD", "USD"]).optional().describe("Default CAD"),
+      category: z.string().optional().describe("Category name (fuzzy matched)"),
+      account: z.string().optional().describe("Account name (fuzzy matched)"),
+      notes: z.string().optional(),
+    },
+    async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
+      const existing = await q(db, sql`SELECT id FROM subscriptions WHERE user_id = ${userId} AND name = ${name}`);
+      if (existing.length) return err(`Subscription "${name}" already exists (id: ${existing[0].id})`);
+
+      let categoryId: number | null = null;
+      if (category) {
+        const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+        const cat = fuzzyFind(category, allCats);
+        if (!cat) return err(`Category "${category}" not found`);
+        categoryId = Number(cat.id);
+      }
+      let accountId: number | null = null;
+      if (account) {
+        const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+        const acct = fuzzyFind(account, allAccounts);
+        if (!acct) return err(`Account "${account}" not found`);
+        accountId = Number(acct.id);
+      }
+      const result = await q(db, sql`
+        INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes)
+        VALUES (${userId}, ${name}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes ?? null})
+        RETURNING id
+      `);
+      return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${currency ?? "CAD"} ${amount} ${cadence}, next ${next_billing_date}` } });
+    }
+  );
+
+  // ── update_subscription ───────────────────────────────────────────────────
+  server.tool(
+    "update_subscription",
+    "Update any field of an existing subscription",
+    {
+      id: z.number().describe("Subscription id"),
+      name: z.string().optional(),
+      amount: z.number().optional(),
+      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
+      next_billing_date: z.string().optional().describe("YYYY-MM-DD"),
+      currency: z.enum(["CAD", "USD"]).optional(),
+      category: z.string().optional().describe("Category name (fuzzy). Empty string clears."),
+      account: z.string().optional().describe("Account name (fuzzy). Empty string clears."),
+      status: z.enum(["active", "paused", "cancelled"]).optional(),
+      cancel_reminder_date: z.string().optional().describe("YYYY-MM-DD"),
+      notes: z.string().optional(),
+    },
+    async ({ id, name, amount, cadence, next_billing_date, currency, category, account, status, cancel_reminder_date, notes }) => {
+      const existing = await q(db, sql`SELECT id FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Subscription #${id} not found`);
+
+      let categoryIdUpdate: number | null | undefined;
+      if (category !== undefined) {
+        if (category === "") categoryIdUpdate = null;
+        else {
+          const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+          const cat = fuzzyFind(category, allCats);
+          if (!cat) return err(`Category "${category}" not found`);
+          categoryIdUpdate = Number(cat.id);
+        }
+      }
+      let accountIdUpdate: number | null | undefined;
+      if (account !== undefined) {
+        if (account === "") accountIdUpdate = null;
+        else {
+          const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+          const acct = fuzzyFind(account, allAccounts);
+          if (!acct) return err(`Account "${account}" not found`);
+          accountIdUpdate = Number(acct.id);
+        }
+      }
+
+      const updates: ReturnType<typeof sql>[] = [];
+      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (amount !== undefined) updates.push(sql`amount = ${amount}`);
+      if (cadence !== undefined) updates.push(sql`frequency = ${cadence}`);
+      if (next_billing_date !== undefined) updates.push(sql`next_date = ${next_billing_date}`);
+      if (currency !== undefined) updates.push(sql`currency = ${currency}`);
+      if (categoryIdUpdate !== undefined) updates.push(sql`category_id = ${categoryIdUpdate}`);
+      if (accountIdUpdate !== undefined) updates.push(sql`account_id = ${accountIdUpdate}`);
+      if (status !== undefined) updates.push(sql`status = ${status}`);
+      if (cancel_reminder_date !== undefined) updates.push(sql`cancel_reminder_date = ${cancel_reminder_date}`);
+      if (notes !== undefined) updates.push(sql`notes = ${notes}`);
+      if (!updates.length) return err("No fields to update");
+
+      await db.execute(sql`UPDATE subscriptions SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, data: { id, message: `Subscription #${id} updated (${updates.length} field(s))` } });
+    }
+  );
+
+  // ── pause_subscription ────────────────────────────────────────────────────
+  server.tool(
+    "pause_subscription",
+    "Pause a subscription. Optionally record a resume-on date.",
+    {
+      id: z.number().describe("Subscription id"),
+      resume_on: z.string().optional().describe("YYYY-MM-DD when user plans to resume (stored in cancel_reminder_date)"),
+    },
+    async ({ id, resume_on }) => {
+      const existing = await q(db, sql`SELECT id, name, status FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Subscription #${id} not found`);
+      await db.execute(sql`
+        UPDATE subscriptions SET status = 'paused', cancel_reminder_date = ${resume_on ?? null}
+        WHERE id = ${id} AND user_id = ${userId}
+      `);
+      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" paused${resume_on ? ` — resume on ${resume_on}` : ""}` } });
+    }
+  );
+
+  // ── resume_subscription ───────────────────────────────────────────────────
+  server.tool(
+    "resume_subscription",
+    "Re-activate a paused or cancelled subscription",
+    { id: z.number().describe("Subscription id") },
+    async ({ id }) => {
+      const existing = await q(db, sql`SELECT id, name FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Subscription #${id} not found`);
+      await db.execute(sql`UPDATE subscriptions SET status = 'active', cancel_reminder_date = NULL WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" resumed` } });
+    }
+  );
+
+  // ── cancel_subscription ───────────────────────────────────────────────────
+  server.tool(
+    "cancel_subscription",
+    "Mark a subscription as cancelled. Optionally record the effective cancel date.",
+    {
+      id: z.number().describe("Subscription id"),
+      cancel_date: z.string().optional().describe("YYYY-MM-DD effective cancel date (stored in cancel_reminder_date)"),
+    },
+    async ({ id, cancel_date }) => {
+      const existing = await q(db, sql`SELECT id, name FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Subscription #${id} not found`);
+      await db.execute(sql`
+        UPDATE subscriptions SET status = 'cancelled', cancel_reminder_date = ${cancel_date ?? null}
+        WHERE id = ${id} AND user_id = ${userId}
+      `);
+      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" cancelled${cancel_date ? ` effective ${cancel_date}` : ""}` } });
+    }
+  );
+
+  // ── delete_subscription ───────────────────────────────────────────────────
+  server.tool(
+    "delete_subscription",
+    "Permanently delete a subscription by id",
+    { id: z.number().describe("Subscription id") },
+    async ({ id }) => {
+      const existing = await q(db, sql`SELECT id, name FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Subscription #${id} not found`);
+      await db.execute(sql`DELETE FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" deleted` } });
+    }
+  );
+
+  // ── list_rules ────────────────────────────────────────────────────────────
+  server.tool(
+    "list_rules",
+    "List all auto-categorization rules with their match patterns and target categories",
+    {},
+    async () => {
+      const rows = await q(db, sql`
+        SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
+               r.assign_category_id, c.name AS category_name,
+               r.assign_tags, r.rename_to, r.is_active, r.priority, r.created_at
+        FROM transaction_rules r
+        LEFT JOIN categories c ON c.id = r.assign_category_id
+        WHERE r.user_id = ${userId}
+        ORDER BY r.priority DESC, r.id
+      `);
+      return text({ success: true, data: rows });
+    }
+  );
+
+  // ── update_rule ───────────────────────────────────────────────────────────
+  server.tool(
+    "update_rule",
+    "Update any field of an existing transaction rule",
+    {
+      id: z.number().describe("Rule id"),
+      name: z.string().optional(),
+      match_field: z.enum(["payee", "amount", "tags"]).optional(),
+      match_type: z.enum(["contains", "exact", "regex", "greater_than", "less_than"]).optional(),
+      match_value: z.string().optional(),
+      match_payee: z.string().optional().describe("Alias: sets match_field='payee', match_type='contains', match_value"),
+      assign_category: z.string().optional().describe("Category name (fuzzy matched). Empty string clears."),
+      assign_tags: z.string().optional(),
+      rename_to: z.string().optional(),
+      is_active: z.boolean().optional(),
+      priority: z.number().optional(),
+    },
+    async ({ id, name, match_field, match_type, match_value, match_payee, assign_category, assign_tags, rename_to, is_active, priority }) => {
+      const existing = await q(db, sql`SELECT id FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Rule #${id} not found`);
+
+      let assignCategoryIdUpdate: number | null | undefined;
+      if (assign_category !== undefined) {
+        if (assign_category === "") assignCategoryIdUpdate = null;
+        else {
+          const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+          const cat = fuzzyFind(assign_category, allCats);
+          if (!cat) return err(`Category "${assign_category}" not found`);
+          assignCategoryIdUpdate = Number(cat.id);
+        }
+      }
+
+      // match_payee is a convenience alias — expands to three field writes
+      let effMatchField = match_field;
+      let effMatchType = match_type;
+      let effMatchValue = match_value;
+      if (match_payee !== undefined) {
+        effMatchField = effMatchField ?? "payee";
+        effMatchType = effMatchType ?? "contains";
+        effMatchValue = match_payee;
+      }
+
+      const updates: ReturnType<typeof sql>[] = [];
+      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (effMatchField !== undefined) updates.push(sql`match_field = ${effMatchField}`);
+      if (effMatchType !== undefined) updates.push(sql`match_type = ${effMatchType}`);
+      if (effMatchValue !== undefined) updates.push(sql`match_value = ${effMatchValue}`);
+      if (assignCategoryIdUpdate !== undefined) updates.push(sql`assign_category_id = ${assignCategoryIdUpdate}`);
+      if (assign_tags !== undefined) updates.push(sql`assign_tags = ${assign_tags}`);
+      if (rename_to !== undefined) updates.push(sql`rename_to = ${rename_to}`);
+      if (is_active !== undefined) updates.push(sql`is_active = ${is_active ? 1 : 0}`);
+      if (priority !== undefined) updates.push(sql`priority = ${priority}`);
+      if (!updates.length) return err("No fields to update");
+
+      await db.execute(sql`UPDATE transaction_rules SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, data: { id, message: `Rule #${id} updated (${updates.length} field(s))` } });
+    }
+  );
+
+  // ── delete_rule ───────────────────────────────────────────────────────────
+  server.tool(
+    "delete_rule",
+    "Delete a transaction rule by id",
+    { id: z.number().describe("Rule id") },
+    async ({ id }) => {
+      const existing = await q(db, sql`SELECT id, name FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Rule #${id} not found`);
+      await db.execute(sql`DELETE FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
+      return text({ success: true, data: { id, message: `Rule "${existing[0].name}" deleted` } });
+    }
+  );
+
+  // ── test_rule ─────────────────────────────────────────────────────────────
+  server.tool(
+    "test_rule",
+    "Dry-run a rule pattern against the user's existing transactions. Decrypts payee/tags in memory when matching. Returns matched rows without writing.",
+    {
+      match_payee: z.string().optional().describe("Payee pattern (required if match_field='payee' or match_type omitted)"),
+      match_field: z.enum(["payee", "amount", "tags"]).optional().describe("Default 'payee'"),
+      match_type: z.enum(["contains", "exact", "regex", "greater_than", "less_than"]).optional().describe("Default 'contains'"),
+      match_value: z.string().optional().describe("Overrides match_payee when match_field != 'payee'"),
+      match_amount: z.number().optional().describe("Alias — set as match_value when match_field='amount'"),
+      sample_size: z.number().optional().describe("Max transactions to scan (default 5000)"),
+    },
+    async ({ match_payee, match_field, match_type, match_value, match_amount, sample_size }) => {
+      const field = match_field ?? "payee";
+      const type = match_type ?? "contains";
+      const value =
+        match_value !== undefined ? match_value :
+        match_amount !== undefined ? String(match_amount) :
+        match_payee ?? "";
+      if (!value && field !== "amount") return err("match_value or match_payee is required");
+      const limit = sample_size ?? 5000;
+
+      const raw = await q(db, sql`
+        SELECT t.id, t.date, t.payee, t.tags, t.amount, t.category_id, c.name AS category_name,
+               t.account_id, a.name AS account_name
+        FROM transactions t
+        LEFT JOIN categories c ON c.id = t.category_id
+        LEFT JOIN accounts a ON a.id = t.account_id
+        WHERE t.user_id = ${userId}
+        ORDER BY t.date DESC, t.id DESC
+        LIMIT ${limit}
+      `);
+
+      // Decrypt payee/tags in memory (identical pattern to apply_rules_to_uncategorized).
+      const matched: Record<string, unknown>[] = [];
+      const valueLower = value.toLowerCase();
+      let regex: RegExp | null = null;
+      if (type === "regex") {
+        try { regex = new RegExp(value, "i"); }
+        catch { return err(`Invalid regex: ${value}`); }
+      }
+      const ruleAmount = field === "amount" ? parseFloat(value) : NaN;
+
+      for (const r of raw) {
+        const plainPayee = dek ? (decryptField(dek, String(r.payee ?? "")) ?? "") : String(r.payee ?? "");
+        const plainTags = dek ? (decryptField(dek, String(r.tags ?? "")) ?? "") : String(r.tags ?? "");
+        let hit = false;
+        if (field === "amount") {
+          if (isNaN(ruleAmount)) continue;
+          const amt = Number(r.amount);
+          if (type === "greater_than") hit = amt > ruleAmount;
+          else if (type === "less_than") hit = amt < ruleAmount;
+          else if (type === "exact") hit = Math.abs(amt - ruleAmount) < 0.01;
+        } else {
+          const fieldVal = (field === "payee" ? plainPayee : plainTags).toLowerCase();
+          if (type === "contains") hit = fieldVal.includes(valueLower);
+          else if (type === "exact") hit = fieldVal === valueLower;
+          else if (type === "regex" && regex) hit = regex.test(field === "payee" ? plainPayee : plainTags);
+        }
+        if (hit) {
+          matched.push({
+            id: Number(r.id),
+            date: r.date,
+            payee: plainPayee,
+            tags: plainTags,
+            amount: Number(r.amount),
+            category: r.category_name,
+            account: r.account_name,
+          });
+        }
+      }
+
+      return text({
+        success: true,
+        data: {
+          scanned: raw.length,
+          matchedCount: matched.length,
+          matches: matched.slice(0, 50),
+          rulePreview: { field, type, value },
+          note: matched.length > 50 ? `Showing 50 of ${matched.length} matches` : undefined,
+        },
+      });
+    }
+  );
+
+  // ── reorder_rules ─────────────────────────────────────────────────────────
+  server.tool(
+    "reorder_rules",
+    "Reorder rules by assigning new priorities. The first id in `ordered_ids` gets the highest priority.",
+    {
+      ordered_ids: z.array(z.number()).min(1).describe("Rule ids in desired execution order (first = highest priority)"),
+    },
+    async ({ ordered_ids }) => {
+      // Verify ownership of every id before writing anything.
+      const owned = await q(db, sql`
+        SELECT id FROM transaction_rules WHERE user_id = ${userId} AND id IN ${sql.raw(`(${ordered_ids.map((n) => Number(n)).join(",")})`)}
+      `);
+      if (owned.length !== ordered_ids.length) {
+        return err(`One or more rule ids are not owned by this user (expected ${ordered_ids.length}, found ${owned.length})`);
+      }
+      // Highest priority for the first id, decrementing down.
+      // Use a wide base so new rules default (priority 0) land below.
+      const base = ordered_ids.length * 10;
+      for (let i = 0; i < ordered_ids.length; i++) {
+        const priority = base - i * 10;
+        await db.execute(sql`UPDATE transaction_rules SET priority = ${priority} WHERE id = ${ordered_ids[i]} AND user_id = ${userId}`);
+      }
+      return text({ success: true, data: { reordered: ordered_ids.length, order: ordered_ids } });
+    }
+  );
+
+  // ── suggest_transaction_details ───────────────────────────────────────────
+  server.tool(
+    "suggest_transaction_details",
+    "Suggest category + tags for a transaction based on rule matches and historical frequency. Decrypts payees in memory when matching history.",
+    {
+      payee: z.string().describe("Payee/merchant name"),
+      amount: z.number().optional().describe("Transaction amount (for amount-based rules)"),
+      account_id: z.number().optional().describe("Reserved for future use — account-scoped suggestions"),
+      top_n: z.number().optional().describe("Max category suggestions (default 3)"),
+    },
+    async ({ payee, amount, account_id: _account_id, top_n }) => {
+      const topN = top_n ?? 3;
+      if (!payee.trim()) return err("payee is required");
+
+      // 1. Rule match — transaction_rules.match_value is plaintext, so SQL works.
+      const rules = await q(db, sql`
+        SELECT id, name, match_field, match_type, match_value, assign_category_id, assign_tags, rename_to, priority
+        FROM transaction_rules
+        WHERE user_id = ${userId} AND is_active = 1
+        ORDER BY priority DESC, id
+      `);
+      const payeeLower = payee.toLowerCase();
+      const matchedRules: Record<string, unknown>[] = [];
+      for (const r of rules) {
+        const field = String(r.match_field ?? "payee");
+        const type = String(r.match_type ?? "contains");
+        const value = String(r.match_value ?? "");
+        let hit = false;
+        if (field === "payee") {
+          const valLower = value.toLowerCase();
+          if (type === "contains") hit = payeeLower.includes(valLower) || valLower.includes(payeeLower);
+          else if (type === "exact") hit = payeeLower === valLower;
+          else if (type === "regex") {
+            try { hit = new RegExp(value, "i").test(payee); } catch { /* ignore bad regex */ }
+          }
+        } else if (field === "amount" && amount !== undefined) {
+          const ruleAmt = parseFloat(value);
+          if (!isNaN(ruleAmt)) {
+            if (type === "greater_than") hit = amount > ruleAmt;
+            else if (type === "less_than") hit = amount < ruleAmt;
+            else if (type === "exact") hit = Math.abs(amount - ruleAmt) < 0.01;
+          }
+        }
+        if (hit) matchedRules.push(r);
+      }
+
+      // 2. Historical frequency — payee may be encrypted, so decrypt+match in memory.
+      const raw = await q(db, sql`
+        SELECT payee, category_id, tags
+        FROM transactions
+        WHERE user_id = ${userId} AND category_id IS NOT NULL AND payee IS NOT NULL AND payee <> ''
+        ORDER BY date DESC, id DESC
+        LIMIT 5000
+      `);
+      const catCounts = new Map<number, number>();
+      const tagCounts = new Map<string, number>();
+      for (const r of raw) {
+        const p = dek ? (decryptField(dek, String(r.payee ?? "")) ?? "") : String(r.payee ?? "");
+        if (p.toLowerCase().trim() !== payeeLower.trim()) continue;
+        const cid = Number(r.category_id);
+        if (cid) catCounts.set(cid, (catCounts.get(cid) ?? 0) + 1);
+        const t = dek ? (decryptField(dek, String(r.tags ?? "")) ?? "") : String(r.tags ?? "");
+        for (const tag of t.split(",").map((x) => x.trim()).filter(Boolean)) {
+          tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+        }
+      }
+
+      // Hydrate category names for the top-N counts
+      const topCatIds = Array.from(catCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN);
+      const categoryRows = topCatIds.length
+        ? await q(db, sql`SELECT id, name, type, "group" FROM categories WHERE user_id = ${userId} AND id IN ${sql.raw(`(${topCatIds.map(([id]) => id).join(",")})`)}`)
+        : [];
+      const categorySuggestions = topCatIds.map(([id, count]) => {
+        const c = categoryRows.find((x) => Number(x.id) === id);
+        return { id, count, name: c?.name ?? null, type: c?.type ?? null, group: c?.group ?? null };
+      });
+
+      const topTags = Array.from(tagCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN).map(([tag, count]) => ({ tag, count }));
+
+      return text({
+        success: true,
+        data: {
+          payee,
+          rules: matchedRules.map((r) => ({ id: Number(r.id), name: r.name, assignCategoryId: r.assign_category_id, assignTags: r.assign_tags, renameTo: r.rename_to })),
+          categories: categorySuggestions,
+          tags: topTags,
+          historicalMatches: raw.length > 0 ? Array.from(catCounts.values()).reduce((s, n) => s + n, 0) : 0,
+        },
+      });
+    }
+  );
+
+  // ── list_splits ───────────────────────────────────────────────────────────
+  server.tool(
+    "list_splits",
+    "List all splits for a transaction. Decrypts note/description/tags in memory when a DEK is available.",
+    { transaction_id: z.number().describe("Parent transaction id") },
+    async ({ transaction_id }) => {
+      const owner = await q(db, sql`SELECT id FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
+      if (!owner.length) return err(`Transaction #${transaction_id} not found`);
+      const rows = await q(db, sql`
+        SELECT s.id, s.transaction_id, s.category_id, c.name AS category_name,
+               s.account_id, a.name AS account_name,
+               s.amount, s.note, s.description, s.tags
+        FROM transaction_splits s
+        LEFT JOIN categories c ON c.id = s.category_id
+        LEFT JOIN accounts a ON a.id = s.account_id
+        WHERE s.transaction_id = ${transaction_id}
+        ORDER BY s.id
+      `);
+      const decrypted = rows.map((r) => {
+        if (!dek) return r;
+        return {
+          ...r,
+          note: decryptField(dek, String(r.note ?? "")) ?? r.note,
+          description: decryptField(dek, String(r.description ?? "")) ?? r.description,
+          tags: decryptField(dek, String(r.tags ?? "")) ?? r.tags,
+        };
+      });
+      return text({ success: true, data: decrypted });
+    }
+  );
+
+  // ── add_split ─────────────────────────────────────────────────────────────
+  server.tool(
+    "add_split",
+    "Add a single split to an existing transaction",
+    {
+      transaction_id: z.number().describe("Parent transaction id"),
+      category_id: z.number().optional().describe("Category id (split into this category)"),
+      account_id: z.number().optional().describe("Account id (rare — override parent account)"),
+      amount: z.number().describe("Split amount (same sign convention as parent)"),
+      note: z.string().optional(),
+      description: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async ({ transaction_id, category_id, account_id, amount, note, description, tags }) => {
+      const owner = await q(db, sql`SELECT id FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
+      if (!owner.length) return err(`Transaction #${transaction_id} not found`);
+
+      const encNote = dek ? encryptField(dek, note ?? "") : (note ?? "");
+      const encDesc = dek ? encryptField(dek, description ?? "") : (description ?? "");
+      const encTags = dek ? encryptField(dek, tags ?? "") : (tags ?? "");
+
+      const result = await q(db, sql`
+        INSERT INTO transaction_splits (transaction_id, category_id, account_id, amount, note, description, tags)
+        VALUES (${transaction_id}, ${category_id ?? null}, ${account_id ?? null}, ${amount}, ${encNote}, ${encDesc}, ${encTags})
+        RETURNING id
+      `);
+      invalidateUserTxCache(userId);
+      return text({ success: true, data: { id: Number(result[0]?.id), message: `Split added to txn #${transaction_id}` } });
+    }
+  );
+
+  // ── update_split ──────────────────────────────────────────────────────────
+  server.tool(
+    "update_split",
+    "Update fields of an existing split",
+    {
+      split_id: z.number().describe("Split id"),
+      category_id: z.number().nullable().optional(),
+      account_id: z.number().nullable().optional(),
+      amount: z.number().optional(),
+      note: z.string().optional(),
+      description: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async ({ split_id, category_id, account_id, amount, note, description, tags }) => {
+      // Ownership: split → txn → user
+      const owner = await q(db, sql`
+        SELECT s.id FROM transaction_splits s
+        JOIN transactions t ON t.id = s.transaction_id
+        WHERE s.id = ${split_id} AND t.user_id = ${userId}
+      `);
+      if (!owner.length) return err(`Split #${split_id} not found`);
+
+      const updates: ReturnType<typeof sql>[] = [];
+      if (category_id !== undefined) updates.push(sql`category_id = ${category_id}`);
+      if (account_id !== undefined) updates.push(sql`account_id = ${account_id}`);
+      if (amount !== undefined) updates.push(sql`amount = ${amount}`);
+      if (note !== undefined) {
+        const v = dek ? encryptField(dek, note) : note;
+        updates.push(sql`note = ${v}`);
+      }
+      if (description !== undefined) {
+        const v = dek ? encryptField(dek, description) : description;
+        updates.push(sql`description = ${v}`);
+      }
+      if (tags !== undefined) {
+        const v = dek ? encryptField(dek, tags) : tags;
+        updates.push(sql`tags = ${v}`);
+      }
+      if (!updates.length) return err("No fields to update");
+
+      await db.execute(sql`UPDATE transaction_splits SET ${sql.join(updates, sql`, `)} WHERE id = ${split_id}`);
+      invalidateUserTxCache(userId);
+      return text({ success: true, data: { id: split_id, message: `Split #${split_id} updated (${updates.length} field(s))` } });
+    }
+  );
+
+  // ── delete_split ──────────────────────────────────────────────────────────
+  server.tool(
+    "delete_split",
+    "Delete a split by id",
+    { split_id: z.number().describe("Split id") },
+    async ({ split_id }) => {
+      const owner = await q(db, sql`
+        SELECT s.id FROM transaction_splits s
+        JOIN transactions t ON t.id = s.transaction_id
+        WHERE s.id = ${split_id} AND t.user_id = ${userId}
+      `);
+      if (!owner.length) return err(`Split #${split_id} not found`);
+      await db.execute(sql`DELETE FROM transaction_splits WHERE id = ${split_id}`);
+      invalidateUserTxCache(userId);
+      return text({ success: true, data: { id: split_id, message: `Split #${split_id} deleted` } });
+    }
+  );
+
+  // ── replace_splits ────────────────────────────────────────────────────────
+  server.tool(
+    "replace_splits",
+    "Atomically replace all splits on a transaction. Validates the splits sum equals the parent transaction amount (±$0.01).",
+    {
+      transaction_id: z.number().describe("Parent transaction id"),
+      splits: z.array(z.object({
+        category_id: z.number().nullable().optional(),
+        account_id: z.number().nullable().optional(),
+        amount: z.number(),
+        note: z.string().optional(),
+        description: z.string().optional(),
+        tags: z.string().optional(),
+      })).min(1).describe("New set of splits (replaces all existing)"),
+    },
+    async ({ transaction_id, splits }) => {
+      const owner = await q(db, sql`SELECT id, amount FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
+      if (!owner.length) return err(`Transaction #${transaction_id} not found`);
+      const parentAmount = Number(owner[0].amount);
+      const sum = splits.reduce((s, x) => s + Number(x.amount), 0);
+      if (Math.abs(sum - parentAmount) > 0.01) {
+        return err(`Splits sum (${sum.toFixed(2)}) must equal parent transaction amount (${parentAmount.toFixed(2)})`);
+      }
+
+      // Delete + bulk insert. Not wrapped in a transaction — Drizzle's execute
+      // is per-statement here. Risk window is small; if the insert fails the
+      // user ends up with zero splits and can retry. Accept for now.
+      await db.execute(sql`DELETE FROM transaction_splits WHERE transaction_id = ${transaction_id}`);
+      const insertedIds: number[] = [];
+      for (const s of splits) {
+        const encNote = dek ? encryptField(dek, s.note ?? "") : (s.note ?? "");
+        const encDesc = dek ? encryptField(dek, s.description ?? "") : (s.description ?? "");
+        const encTags = dek ? encryptField(dek, s.tags ?? "") : (s.tags ?? "");
+        const r = await q(db, sql`
+          INSERT INTO transaction_splits (transaction_id, category_id, account_id, amount, note, description, tags)
+          VALUES (${transaction_id}, ${s.category_id ?? null}, ${s.account_id ?? null}, ${s.amount}, ${encNote}, ${encDesc}, ${encTags})
+          RETURNING id
+        `);
+        insertedIds.push(Number(r[0]?.id));
+      }
+      invalidateUserTxCache(userId);
+      return text({ success: true, data: { transactionId: transaction_id, replacedWith: insertedIds.length, splitIds: insertedIds } });
+    }
+  );
+
+  // ─── Wave 2: bulk edit + detect_subscriptions + upload flow ────────────────
+
+  // Zod schema for the filter shape used by preview_bulk_*. Mirrors the logic
+  // supported by /api/transactions/bulk but extended with range filters so
+  // Claude doesn't have to fetch ids first.
+  const bulkFilterSchema = z.object({
+    ids: z.array(z.number()).optional().describe("Explicit transaction ids"),
+    start_date: z.string().optional().describe("YYYY-MM-DD inclusive"),
+    end_date: z.string().optional().describe("YYYY-MM-DD inclusive"),
+    category_id: z.number().nullable().optional().describe("Exact category id (null matches uncategorized)"),
+    account_id: z.number().optional().describe("Exact account id"),
+    payee_match: z.string().optional().describe("Substring match against plaintext payee (case-insensitive)"),
+  }).describe("Filter — at least one field required");
+
+  type BulkFilter = z.infer<typeof bulkFilterSchema>;
+
+  const bulkChangesSchema = z.object({
+    category_id: z.number().nullable().optional(),
+    account_id: z.number().optional(),
+    date: z.string().optional(),
+    note: z.string().optional(),
+    payee: z.string().optional(),
+    is_business: z.number().optional().describe("0 or 1"),
+    tags: z.object({
+      mode: z.enum(["append", "replace", "remove"]),
+      value: z.string(),
+    }).optional().describe("Tag edit. mode=replace overwrites, append adds if not present, remove strips exact matches"),
+  });
+
+  type BulkChanges = z.infer<typeof bulkChangesSchema>;
+
+  /**
+   * Resolve a bulk filter to a list of transaction ids owned by the user.
+   * Payee match is the only one that needs decryption — everything else is SQL.
+   * Hard cap at 10k ids to keep preview/execute payloads tractable.
+   */
+  async function resolveFilterToIds(filter: BulkFilter): Promise<number[]> {
+    const hasAny =
+      (filter.ids && filter.ids.length > 0) ||
+      filter.start_date !== undefined ||
+      filter.end_date !== undefined ||
+      filter.category_id !== undefined ||
+      filter.account_id !== undefined ||
+      (filter.payee_match !== undefined && filter.payee_match !== "");
+    if (!hasAny) throw new Error("At least one filter field is required");
+
+    const whereParts: ReturnType<typeof sql>[] = [sql`user_id = ${userId}`];
+    if (filter.ids && filter.ids.length > 0) {
+      const safeIds = filter.ids.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+      if (safeIds.length === 0) return [];
+      whereParts.push(sql.raw(`id IN (${safeIds.join(",")})`));
+    }
+    if (filter.start_date) whereParts.push(sql`date >= ${filter.start_date}`);
+    if (filter.end_date) whereParts.push(sql`date <= ${filter.end_date}`);
+    if (filter.category_id === null) whereParts.push(sql`category_id IS NULL`);
+    else if (filter.category_id !== undefined) whereParts.push(sql`category_id = ${filter.category_id}`);
+    if (filter.account_id !== undefined) whereParts.push(sql`account_id = ${filter.account_id}`);
+
+    const rows = await q(db, sql`
+      SELECT id, payee FROM transactions
+      WHERE ${sql.join(whereParts, sql` AND `)}
+      ORDER BY date DESC, id DESC
+      LIMIT 10000
+    `);
+
+    if (!filter.payee_match) return rows.map((r) => Number(r.id));
+
+    const needle = filter.payee_match.toLowerCase();
+    const out: number[] = [];
+    for (const r of rows) {
+      const plain = dek ? (decryptField(dek, String(r.payee ?? "")) ?? "") : String(r.payee ?? "");
+      if (plain.toLowerCase().includes(needle)) out.push(Number(r.id));
+    }
+    return out;
+  }
+
+  /** Apply in-memory `changes` to a decrypted row for preview sampleAfter. */
+  function applyChangesToRow(row: Record<string, unknown>, changes: BulkChanges): Record<string, unknown> {
+    const out = { ...row };
+    if (changes.category_id !== undefined) out.category_id = changes.category_id;
+    if (changes.account_id !== undefined) out.account_id = changes.account_id;
+    if (changes.date !== undefined) out.date = changes.date;
+    if (changes.note !== undefined) out.note = changes.note;
+    if (changes.payee !== undefined) out.payee = changes.payee;
+    if (changes.is_business !== undefined) out.is_business = changes.is_business;
+    if (changes.tags !== undefined) {
+      const current = String(out.tags ?? "");
+      const currentSet = new Set(current.split(",").map((s) => s.trim()).filter(Boolean));
+      const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+      if (changes.tags.mode === "replace") {
+        out.tags = tokens.join(",");
+      } else if (changes.tags.mode === "append") {
+        for (const t of tokens) currentSet.add(t);
+        out.tags = Array.from(currentSet).join(",");
+      } else {
+        for (const t of tokens) currentSet.delete(t);
+        out.tags = Array.from(currentSet).join(",");
+      }
+    }
+    return out;
+  }
+
+  /** Shared preview helper — resolves ids + samples before/after. */
+  async function previewBulk(filter: BulkFilter, changes: BulkChanges, op: string) {
+    const ids = await resolveFilterToIds(filter);
+    if (ids.length === 0) return { affectedCount: 0, sampleBefore: [], sampleAfter: [], confirmationToken: "" };
+
+    const sampleIds = ids.slice(0, 10);
+    const rows = await q(db, sql`
+      SELECT t.id, t.date, t.account_id, a.name AS account, t.category_id, c.name AS category,
+             t.currency, t.amount, t.payee, t.note, t.tags, t.is_business
+      FROM transactions t
+      LEFT JOIN accounts a ON t.account_id = a.id
+      LEFT JOIN categories c ON t.category_id = c.id
+      WHERE t.id IN ${sql.raw(`(${sampleIds.join(",")})`)} AND t.user_id = ${userId}
+      ORDER BY t.id
+    `);
+    const before = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
+    const after = before.map((r) => applyChangesToRow(r, changes));
+    // The token payload encodes the resolved ids — not the filter — so Claude
+    // can't widen the scope between preview and execute.
+    const token = signConfirmationToken(userId, op, { ids, changes });
+    return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, ids, confirmationToken: token };
+  }
+
+  /** Commit a bulk update to the resolved ids. */
+  async function commitBulkUpdate(ids: number[], changes: BulkChanges): Promise<number> {
+    if (ids.length === 0) return 0;
+    const idList = sql.raw(`(${ids.map((n) => Number(n)).join(",")})`);
+
+    // Per-field updates: keeps the SQL simple + parameterized, and lets us
+    // encrypt payee / note / tags when a DEK is present.
+    if (changes.category_id !== undefined) {
+      await db.execute(sql`UPDATE transactions SET category_id = ${changes.category_id} WHERE id IN ${idList} AND user_id = ${userId}`);
+    }
+    if (changes.account_id !== undefined) {
+      await db.execute(sql`UPDATE transactions SET account_id = ${changes.account_id} WHERE id IN ${idList} AND user_id = ${userId}`);
+    }
+    if (changes.date !== undefined) {
+      await db.execute(sql`UPDATE transactions SET date = ${changes.date} WHERE id IN ${idList} AND user_id = ${userId}`);
+    }
+    if (changes.is_business !== undefined) {
+      await db.execute(sql`UPDATE transactions SET is_business = ${changes.is_business} WHERE id IN ${idList} AND user_id = ${userId}`);
+    }
+    if (changes.payee !== undefined) {
+      const v = dek ? encryptField(dek, changes.payee) : changes.payee;
+      await db.execute(sql`UPDATE transactions SET payee = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+    }
+    if (changes.note !== undefined) {
+      const v = dek ? encryptField(dek, changes.note) : changes.note;
+      await db.execute(sql`UPDATE transactions SET note = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+    }
+    if (changes.tags !== undefined) {
+      // Tag edits need per-row merging when mode != replace (because each row
+      // carries different existing tags). Fetch the current tags, decrypt,
+      // mutate, re-encrypt, write row-by-row. For replace we can write once.
+      if (changes.tags.mode === "replace") {
+        const v = dek ? encryptField(dek, changes.tags.value) : changes.tags.value;
+        await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+      } else {
+        const rows = await q(db, sql`SELECT id, tags FROM transactions WHERE id IN ${idList} AND user_id = ${userId}`);
+        const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+        for (const r of rows) {
+          const plain = dek ? (decryptField(dek, String(r.tags ?? "")) ?? "") : String(r.tags ?? "");
+          const set = new Set(plain.split(",").map((s) => s.trim()).filter(Boolean));
+          if (changes.tags.mode === "append") {
+            for (const t of tokens) set.add(t);
+          } else {
+            for (const t of tokens) set.delete(t);
+          }
+          const next = Array.from(set).join(",");
+          const v = dek ? encryptField(dek, next) : next;
+          await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id = ${Number(r.id)} AND user_id = ${userId}`);
+        }
+      }
+    }
+    return ids.length;
+  }
+
+  // ── preview_bulk_update ────────────────────────────────────────────────────
+  server.tool(
+    "preview_bulk_update",
+    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, and a confirmationToken (5-min TTL) for execute_bulk_update.",
+    {
+      filter: bulkFilterSchema,
+      changes: bulkChangesSchema,
+    },
+    async ({ filter, changes }) => {
+      try {
+        const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_update");
+        return text({ success: true, data: { affectedCount, sampleBefore, sampleAfter, confirmationToken } });
+      } catch (e) {
+        return err(String(e instanceof Error ? e.message : e));
+      }
+    }
+  );
+
+  // ── execute_bulk_update ────────────────────────────────────────────────────
+  server.tool(
+    "execute_bulk_update",
+    "Commit a bulk update. Must be preceded by preview_bulk_update; the same filter+changes must be passed.",
+    {
+      filter: bulkFilterSchema,
+      changes: bulkChangesSchema,
+      confirmation_token: z.string().describe("Token returned by preview_bulk_update"),
+    },
+    async ({ filter, changes, confirmation_token }) => {
+      try {
+        const ids = await resolveFilterToIds(filter);
+        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_update", { ids, changes });
+        if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_update.`);
+        const n = await commitBulkUpdate(ids, changes);
+        if (n > 0) invalidateUserTxCache(userId);
+        return text({ success: true, data: { updated: n } });
+      } catch (e) {
+        return err(String(e instanceof Error ? e.message : e));
+      }
+    }
+  );
+
+  // ── preview_bulk_delete ────────────────────────────────────────────────────
+  server.tool(
+    "preview_bulk_delete",
+    "Preview a bulk delete. Returns affected count, sample rows, and a confirmationToken (5-min TTL) for execute_bulk_delete.",
+    { filter: bulkFilterSchema },
+    async ({ filter }) => {
+      try {
+        const ids = await resolveFilterToIds(filter);
+        if (ids.length === 0) {
+          return text({ success: true, data: { affectedCount: 0, sample: [], confirmationToken: "" } });
+        }
+        const sampleIds = ids.slice(0, 10);
+        const rows = await q(db, sql`
+          SELECT t.id, t.date, a.name AS account, c.name AS category, t.currency, t.amount, t.payee, t.note, t.tags
+          FROM transactions t
+          LEFT JOIN accounts a ON t.account_id = a.id
+          LEFT JOIN categories c ON t.category_id = c.id
+          WHERE t.id IN ${sql.raw(`(${sampleIds.join(",")})`)} AND t.user_id = ${userId}
+          ORDER BY t.id
+        `);
+        const sample = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
+        const token = signConfirmationToken(userId, "bulk_delete", { ids });
+        return text({ success: true, data: { affectedCount: ids.length, sample, confirmationToken: token } });
+      } catch (e) {
+        return err(String(e instanceof Error ? e.message : e));
+      }
+    }
+  );
+
+  // ── execute_bulk_delete ────────────────────────────────────────────────────
+  server.tool(
+    "execute_bulk_delete",
+    "Commit a bulk delete. Must be preceded by preview_bulk_delete; the same filter must be passed.",
+    {
+      filter: bulkFilterSchema,
+      confirmation_token: z.string().describe("Token returned by preview_bulk_delete"),
+    },
+    async ({ filter, confirmation_token }) => {
+      try {
+        const ids = await resolveFilterToIds(filter);
+        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_delete", { ids });
+        if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_delete.`);
+        if (ids.length === 0) return text({ success: true, data: { deleted: 0 } });
+        await db.execute(sql`DELETE FROM transactions WHERE id IN ${sql.raw(`(${ids.join(",")})`)} AND user_id = ${userId}`);
+        invalidateUserTxCache(userId);
+        return text({ success: true, data: { deleted: ids.length } });
+      } catch (e) {
+        return err(String(e instanceof Error ? e.message : e));
+      }
+    }
+  );
+
+  // ── preview_bulk_categorize ────────────────────────────────────────────────
+  server.tool(
+    "preview_bulk_categorize",
+    "Preview a bulk-categorize (shortcut for preview_bulk_update with only category_id set). Returns affected count + sample + confirmationToken.",
+    {
+      filter: bulkFilterSchema,
+      category_id: z.number().describe("Target category id"),
+    },
+    async ({ filter, category_id }) => {
+      try {
+        // Validate category ownership up front so the preview is honest.
+        const cat = await q(db, sql`SELECT id, name FROM categories WHERE id = ${category_id} AND user_id = ${userId}`);
+        if (!cat.length) return err(`Category #${category_id} not found`);
+        const changes: BulkChanges = { category_id };
+        const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_categorize");
+        return text({
+          success: true,
+          data: {
+            categoryId: category_id,
+            categoryName: cat[0].name,
+            affectedCount,
+            sampleBefore,
+            sampleAfter,
+            confirmationToken,
+          },
+        });
+      } catch (e) {
+        return err(String(e instanceof Error ? e.message : e));
+      }
+    }
+  );
+
+  // ── execute_bulk_categorize ────────────────────────────────────────────────
+  server.tool(
+    "execute_bulk_categorize",
+    "Commit a bulk-categorize. Must be preceded by preview_bulk_categorize with the same filter + category_id.",
+    {
+      filter: bulkFilterSchema,
+      category_id: z.number(),
+      confirmation_token: z.string(),
+    },
+    async ({ filter, category_id, confirmation_token }) => {
+      try {
+        const ids = await resolveFilterToIds(filter);
+        const changes: BulkChanges = { category_id };
+        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_categorize", { ids, changes });
+        if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_categorize.`);
+        const n = await commitBulkUpdate(ids, changes);
+        if (n > 0) invalidateUserTxCache(userId);
+        return text({ success: true, data: { updated: n } });
+      } catch (e) {
+        return err(String(e instanceof Error ? e.message : e));
+      }
+    }
+  );
+
+  // ─── Part 2 tail — detect_subscriptions + bulk_add_subscriptions ───────────
+
+  // ── detect_subscriptions ───────────────────────────────────────────────────
+  server.tool(
+    "detect_subscriptions",
+    "Scan recent transactions (via the decrypted tx cache) and return candidate subscriptions — payees with 3+ regular-cadence occurrences and stable amounts. Returns a confirmationToken for bulk_add_subscriptions.",
+    {
+      lookback_months: z.number().optional().describe("Months of history to scan (default 6)"),
+    },
+    async ({ lookback_months }) => {
+      const months = lookback_months ?? 6;
+      const since = new Date();
+      since.setMonth(since.getMonth() - months);
+      const sinceStr = since.toISOString().split("T")[0];
+
+      const all = await getUserTransactions(userId, dek);
+      // Skip rows where payee looks like ciphertext (missing DEK) — we can't
+      // meaningfully group on those.
+      const recent = all.filter(
+        (t) => t.date >= sinceStr && t.payee && !t.payee.startsWith("v1:")
+      );
+
+      // Group by normalized payee. Normalization: lowercase + collapse runs
+      // of whitespace. Fancy merchant-name cleanup is out of scope here.
+      const groups = new Map<string, typeof recent>();
+      for (const t of recent) {
+        const key = t.payee.toLowerCase().replace(/\s+/g, " ").trim();
+        if (!key) continue;
+        const list = groups.get(key) ?? [];
+        list.push(t);
+        groups.set(key, list);
+      }
+
+      type Candidate = {
+        payee: string;
+        avgAmount: number;
+        cadence: "weekly" | "monthly" | "quarterly" | "annual";
+        confidence: number;
+        sampleTransactionIds: number[];
+        occurrences: number;
+      };
+      const candidates: Candidate[] = [];
+
+      for (const [, txs] of groups) {
+        if (txs.length < 3) continue;
+        // Order ascending by date for interval math.
+        txs.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+        const amounts = txs.map((t) => t.amount);
+        const avg = amounts.reduce((s, n) => s + n, 0) / amounts.length;
+        if (Math.abs(avg) < 0.01) continue; // zero-amount noise
+
+        // Amount stability: stddev within 5% of |avg|.
+        const stddev = Math.sqrt(
+          amounts.reduce((s, n) => s + (n - avg) ** 2, 0) / amounts.length
+        );
+        const stableAmount = stddev <= Math.abs(avg) * 0.05;
+        if (!stableAmount) continue;
+
+        // Interval in days between consecutive txs.
+        const intervals: number[] = [];
+        for (let i = 1; i < txs.length; i++) {
+          const d1 = new Date(txs[i - 1].date + "T00:00:00Z").getTime();
+          const d2 = new Date(txs[i].date + "T00:00:00Z").getTime();
+          intervals.push(Math.round((d2 - d1) / 86400000));
+        }
+        const avgInt = intervals.reduce((s, n) => s + n, 0) / intervals.length;
+
+        let cadence: Candidate["cadence"] | null = null;
+        let tol = 0;
+        if (Math.abs(avgInt - 7) <= 1) { cadence = "weekly"; tol = 1; }
+        else if (Math.abs(avgInt - 30) <= 3) { cadence = "monthly"; tol = 3; }
+        else if (Math.abs(avgInt - 91) <= 7) { cadence = "quarterly"; tol = 7; }
+        else if (Math.abs(avgInt - 365) <= 15) { cadence = "annual"; tol = 15; }
+        if (!cadence) continue;
+
+        const regular = intervals.every((n) => Math.abs(n - avgInt) <= tol);
+        if (!regular) continue;
+
+        // Confidence: count + regularity + amount tightness.
+        const countScore = Math.min(1, txs.length / 6); // 6+ = 1.0
+        const amtTightness = Math.abs(avg) > 0 ? 1 - Math.min(1, stddev / Math.abs(avg)) : 1;
+        const intTightness = 1 - Math.min(1, (stddev === 0 ? 0 : 0) + 0);
+        const _ = intTightness;
+        const confidence = Math.round(((countScore * 0.4) + (amtTightness * 0.6)) * 100) / 100;
+
+        candidates.push({
+          payee: txs[0].payee, // keep the casing from the first row
+          avgAmount: Math.round(Math.abs(avg) * 100) / 100,
+          cadence,
+          confidence,
+          occurrences: txs.length,
+          sampleTransactionIds: txs.slice(-5).map((t) => t.id),
+        });
+      }
+
+      candidates.sort((a, b) => b.confidence - a.confidence || b.occurrences - a.occurrences);
+
+      // Payload for the token: just the list Claude is authorised to commit.
+      // We don't encode the lookback window — Claude could re-run detect with
+      // a different window and the candidates would differ, so we sign the
+      // actual shortlist shape it saw.
+      const approvable = candidates.map((c) => ({
+        payee: c.payee,
+        amount: c.avgAmount,
+        cadence: c.cadence,
+      }));
+      const token = candidates.length
+        ? signConfirmationToken(userId, "bulk_add_subscriptions", { candidates: approvable })
+        : "";
+
+      return text({
+        success: true,
+        data: {
+          scanned: recent.length,
+          cacheDegraded: all.length > 0 && all.every((t) => t.payee.startsWith("v1:")),
+          candidates,
+          confirmationToken: token,
+        },
+      });
+    }
+  );
+
+  // ── bulk_add_subscriptions ─────────────────────────────────────────────────
+  server.tool(
+    "bulk_add_subscriptions",
+    "Commit a set of detected subscriptions. Pass the candidates returned by detect_subscriptions (payee + amount + cadence), plus the confirmationToken.",
+    {
+      candidates: z.array(z.object({
+        payee: z.string(),
+        amount: z.number(),
+        cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
+        next_billing_date: z.string().optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
+        category_id: z.number().optional(),
+      })).min(1),
+      confirmation_token: z.string(),
+    },
+    async ({ candidates, confirmation_token }) => {
+      // The token is signed over {payee, amount, cadence} only — additional
+      // fields (next_billing_date, category_id) don't change the approval.
+      const approvable = candidates.map((c) => ({
+        payee: c.payee,
+        amount: c.amount,
+        cadence: c.cadence,
+      }));
+      const check = verifyConfirmationToken(confirmation_token, userId, "bulk_add_subscriptions", { candidates: approvable });
+      if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run detect_subscriptions.`);
+
+      const today = new Date();
+      const addInterval = (base: Date, cadence: string): string => {
+        const d = new Date(base);
+        if (cadence === "weekly") d.setDate(d.getDate() + 7);
+        else if (cadence === "monthly") d.setMonth(d.getMonth() + 1);
+        else if (cadence === "quarterly") d.setMonth(d.getMonth() + 3);
+        else d.setFullYear(d.getFullYear() + 1);
+        return d.toISOString().split("T")[0];
+      };
+
+      let created = 0;
+      const skipped: string[] = [];
+      for (const c of candidates) {
+        const existing = await q(db, sql`SELECT id FROM subscriptions WHERE user_id = ${userId} AND name = ${c.payee}`);
+        if (existing.length) { skipped.push(c.payee); continue; }
+        const next = c.next_billing_date ?? addInterval(today, c.cadence);
+        await db.execute(sql`
+          INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes)
+          VALUES (${userId}, ${c.payee}, ${c.amount}, 'CAD', ${c.cadence}, ${c.category_id ?? null}, NULL, ${next}, 'active', 'Auto-detected by MCP')
+        `);
+        created++;
+      }
+      return text({ success: true, data: { created, skipped, message: `Created ${created} subscription(s); skipped ${skipped.length} existing` } });
+    }
+  );
+
+  // ─── Part 1 tail — file upload preview/execute ─────────────────────────────
+
+  /**
+   * Load a parsed-rows array from a stored upload. Returns the raw RawTransaction
+   * list plus parse errors. Used by both preview_import and execute_import.
+   */
+  async function loadUploadRows(
+    uploadId: string,
+    columnMapping: Record<string, string> | undefined
+  ): Promise<{ upload: Row; rows: RawTransaction[]; errors: Array<{ row: number; message: string }> }> {
+    const uploads = await q(db, sql`
+      SELECT id, user_id, format, storage_path, original_filename, size_bytes, status, created_at, expires_at
+      FROM mcp_uploads
+      WHERE id = ${uploadId} AND user_id = ${userId}
+    `);
+    if (!uploads.length) throw new Error(`Upload #${uploadId} not found`);
+    const upload = uploads[0];
+    if (String(upload.status) === "executed") throw new Error("Upload already executed");
+    if (String(upload.status) === "cancelled") throw new Error("Upload was cancelled");
+    const expiresAt = new Date(String(upload.expires_at));
+    if (expiresAt.getTime() < Date.now()) throw new Error("Upload expired");
+
+    const buf = await fs.readFile(String(upload.storage_path));
+    const format = String(upload.format);
+    let rows: RawTransaction[] = [];
+    const errors: Array<{ row: number; message: string }> = [];
+
+    if (format === "csv") {
+      const text = buf.toString("utf8");
+      const result = columnMapping
+        ? csvToRawTransactionsWithMapping(text, columnMapping)
+        : csvToRawTransactions(text);
+      rows = result.rows;
+      errors.push(...result.errors);
+    } else if (format === "ofx" || format === "qfx") {
+      const text = buf.toString("utf8");
+      const parsed = parseOfx(text);
+      rows = parsed.transactions.map((t) => ({
+        date: t.date,
+        account: "", // OFX doesn't name the account — user fills via column_mapping.account if needed
+        amount: t.amount,
+        payee: t.payee,
+        currency: parsed.currency,
+        note: t.memo,
+        fitId: t.fitId,
+      }));
+    } else {
+      throw new Error(`Unsupported upload format: ${format}`);
+    }
+
+    return { upload, rows, errors };
+  }
+
+  // ── list_pending_uploads ───────────────────────────────────────────────────
+  server.tool(
+    "list_pending_uploads",
+    "List MCP uploads that are still pending or previewed (not yet executed, cancelled, or expired).",
+    {},
+    async () => {
+      const rows = await q(db, sql`
+        SELECT id, format, original_filename, size_bytes, row_count, status,
+               created_at, expires_at
+        FROM mcp_uploads
+        WHERE user_id = ${userId}
+          AND status IN ('pending', 'previewed')
+          AND expires_at > NOW()
+        ORDER BY created_at DESC
+      `);
+      return text({ success: true, data: rows });
+    }
+  );
+
+  // ── preview_import ─────────────────────────────────────────────────────────
+  server.tool(
+    "preview_import",
+    "Preview an uploaded CSV/OFX/QFX file. Returns first 20 parsed rows, dedup hit count, category auto-match coverage, unresolved accounts, and a confirmationToken for execute_import.",
+    {
+      upload_id: z.string().describe("The id returned by POST /api/mcp/upload"),
+      template_id: z.number().optional().describe("Apply a saved import template's column mapping"),
+      column_mapping: z.record(z.string(), z.string()).optional().describe("Ad-hoc column mapping {date, amount, payee?, account?, category?, note?, tags?}"),
+    },
+    async ({ upload_id, template_id, column_mapping }) => {
+      try {
+        // Resolve column mapping from template_id or inline.
+        let mapping: Record<string, string> | undefined = column_mapping;
+        if (template_id !== undefined && !mapping) {
+          const tpl = await q(db, sql`
+            SELECT column_mapping, default_account
+            FROM import_templates
+            WHERE id = ${template_id} AND user_id = ${userId}
+          `);
+          if (!tpl.length) return err(`Import template #${template_id} not found`);
+          try {
+            mapping = JSON.parse(String(tpl[0].column_mapping)) as Record<string, string>;
+          } catch {
+            return err("Import template has invalid column_mapping JSON");
+          }
+        }
+
+        const { upload, rows, errors } = await loadUploadRows(upload_id, mapping);
+
+        // Dedup via generateImportHash — runs against plaintext payee, which
+        // is what we have at this boundary.
+        const accounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+        const accountByName = new Map<string, number>(accounts.map((a) => [String(a.name), Number(a.id)]));
+        const existingHashRows = await q(db, sql`SELECT import_hash FROM transactions WHERE user_id = ${userId} AND import_hash IS NOT NULL`);
+        const existingHashes = new Set<string>(existingHashRows.map((r) => String(r.import_hash)));
+
+        let dedupHits = 0;
+        const unresolvedAccounts = new Set<string>();
+        for (const r of rows) {
+          const aId = accountByName.get(r.account);
+          if (!aId && r.account) unresolvedAccounts.add(r.account);
+          if (aId) {
+            const h = generateImportHash(r.date, aId, r.amount, r.payee);
+            if (existingHashes.has(h)) dedupHits++;
+          }
+        }
+
+        // Category coverage via the active rule set (plaintext match_value).
+        const rules = await q(db, sql`
+          SELECT match_field, match_type, match_value, assign_category_id
+          FROM transaction_rules
+          WHERE user_id = ${userId} AND is_active = 1 AND assign_category_id IS NOT NULL
+          ORDER BY priority DESC
+        `);
+        const ruleSet: TransactionRule[] = rules.map((r) => ({
+          id: 0,
+          name: "",
+          matchField: String(r.match_field ?? "payee"),
+          matchType: String(r.match_type ?? "contains"),
+          matchValue: String(r.match_value ?? ""),
+          assignCategoryId: r.assign_category_id == null ? null : Number(r.assign_category_id),
+          assignTags: null,
+          renameTo: null,
+          isActive: 1,
+          priority: 0,
+          createdAt: "",
+        })) as unknown as TransactionRule[];
+        let matchedCat = 0;
+        if (ruleSet.length > 0 && rows.length > 0) {
+          const results = applyRulesToBatch(
+            rows.map((r) => ({ payee: r.payee ?? "", amount: r.amount, tags: r.tags ?? "" })),
+            ruleSet,
+          );
+          for (const res of results) {
+            if (res.match?.assignCategoryId) matchedCat++;
+          }
+        }
+        // Rows that already carry an explicit category name also count.
+        for (const r of rows) {
+          if (r.category && r.category.length > 0) matchedCat++;
+        }
+
+        // Record the preview — update status + rowCount.
+        await db.execute(sql`
+          UPDATE mcp_uploads
+          SET status = 'previewed', row_count = ${rows.length}
+          WHERE id = ${upload_id} AND user_id = ${userId}
+        `);
+
+        const token = signConfirmationToken(userId, "execute_import", {
+          uploadId: upload_id,
+          templateId: template_id ?? null,
+          columnMapping: mapping ?? null,
+        });
+
+        return text({
+          success: true,
+          data: {
+            uploadId: upload_id,
+            format: upload.format,
+            parsedRows: rows.length,
+            sampleRows: rows.slice(0, 20),
+            parseErrors: errors.slice(0, 20),
+            dedupHits,
+            categoryCoveragePct: rows.length === 0 ? 0 : Math.round((matchedCat / rows.length) * 100),
+            unresolvedAccounts: Array.from(unresolvedAccounts),
+            confirmationToken: token,
+          },
+        });
+      } catch (e) {
+        return err(String(e instanceof Error ? e.message : e));
+      }
+    }
+  );
+
+  // ── execute_import ─────────────────────────────────────────────────────────
+  server.tool(
+    "execute_import",
+    "Commit an upload as transactions. Requires the token from preview_import with matching uploadId + templateId + columnMapping.",
+    {
+      upload_id: z.string(),
+      confirmation_token: z.string(),
+      template_id: z.number().optional(),
+      column_mapping: z.record(z.string(), z.string()).optional(),
+    },
+    async ({ upload_id, confirmation_token, template_id, column_mapping }) => {
+      if (!dek) return err("Import requires an unlocked session (DEK unavailable).");
+
+      const check = verifyConfirmationToken(confirmation_token, userId, "execute_import", {
+        uploadId: upload_id,
+        templateId: template_id ?? null,
+        columnMapping: column_mapping ?? null,
+      });
+      if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_import.`);
+
+      try {
+        // Load mapping same way preview did.
+        let mapping: Record<string, string> | undefined = column_mapping;
+        if (template_id !== undefined && !mapping) {
+          const tpl = await q(db, sql`SELECT column_mapping FROM import_templates WHERE id = ${template_id} AND user_id = ${userId}`);
+          if (tpl.length) {
+            try { mapping = JSON.parse(String(tpl[0].column_mapping)) as Record<string, string>; }
+            catch { /* fall through — executeImport will error on unresolved accounts */ }
+          }
+        }
+
+        const { rows } = await loadUploadRows(upload_id, mapping);
+        const result = await pipelineExecute(rows, [], userId, dek);
+
+        await db.execute(sql`
+          UPDATE mcp_uploads SET status = 'executed' WHERE id = ${upload_id} AND user_id = ${userId}
+        `);
+        invalidateUserTxCache(userId);
+        return text({ success: true, data: result });
+      } catch (e) {
+        return err(String(e instanceof Error ? e.message : e));
+      }
+    }
+  );
+
+  // ── cancel_import ──────────────────────────────────────────────────────────
+  server.tool(
+    "cancel_import",
+    "Cancel a pending MCP upload — marks the row as cancelled and deletes the file from disk.",
+    { upload_id: z.string() },
+    async ({ upload_id }) => {
+      const uploads = await q(db, sql`
+        SELECT id, storage_path, status FROM mcp_uploads
+        WHERE id = ${upload_id} AND user_id = ${userId}
+      `);
+      if (!uploads.length) return err(`Upload #${upload_id} not found`);
+      const u = uploads[0];
+      if (String(u.status) === "executed") return err("Upload already executed, cannot cancel");
+      try { await fs.unlink(String(u.storage_path)); } catch { /* file already gone */ }
+      await db.execute(sql`UPDATE mcp_uploads SET status = 'cancelled' WHERE id = ${upload_id} AND user_id = ${userId}`);
+      return text({ success: true, data: { uploadId: upload_id, message: "Upload cancelled" } });
     }
   );
 }

@@ -3,6 +3,7 @@ import { db, schema } from "@/db";
 import { eq, inArray } from "drizzle-orm";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptField, isEncrypted } from "@/lib/crypto/envelope";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { safeErrorMessage } from "@/lib/validate";
 
 type Row = Record<string, unknown>;
@@ -296,6 +297,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    invalidateUserTxCache(userId);
     return NextResponse.json({ success: true, preview });
   } catch (error: unknown) {
     const message = safeErrorMessage(error, "Restore failed");

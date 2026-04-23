@@ -15,6 +15,7 @@ import {
   wipeUserDataAndRewrap,
 } from "@/lib/auth/queries";
 import { createWrappedDEKForPassword } from "@/lib/crypto/envelope";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 
@@ -90,6 +91,7 @@ export async function POST(request: NextRequest) {
       dekWrappedTag: wrapped.tag.toString("base64"),
     });
     await markResetTokenUsed(tokenHash);
+    invalidateUserTxCache(resetToken.userId);
 
     return NextResponse.json({
       success: true,

@@ -4,6 +4,7 @@ import { eq, and, isNull } from "drizzle-orm";
 import { generateImportHash } from "@/lib/import-hash";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptField } from "@/lib/crypto/envelope";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 
 export async function POST(request: NextRequest) {
   // Needs the DEK so we can decrypt payees before hashing — generateImportHash
@@ -40,6 +41,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    if (updated > 0) invalidateUserTxCache(userId);
     return NextResponse.json({ updated, total: transactions.length });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Backfill failed";

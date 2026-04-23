@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { safeErrorMessage } from "@/lib/validate";
 
 export async function DELETE(request: NextRequest) {
@@ -25,6 +26,7 @@ export async function DELETE(request: NextRequest) {
     await db.delete(schema.categories).where(eq(schema.categories.userId, userId));
     await db.delete(schema.accounts).where(eq(schema.accounts.userId, userId));
 
+    invalidateUserTxCache(userId);
     return NextResponse.json({ success: true });
   } catch (error: unknown) {
     const message = safeErrorMessage(error, "Failed to clear data");

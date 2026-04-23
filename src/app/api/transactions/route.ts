@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch } from "@/lib/crypto/encrypted-columns";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
@@ -88,6 +89,7 @@ export async function POST(request: NextRequest) {
     if (parsed.error) return parsed.error;
     const encrypted = encryptTxWrite(auth.dek, parsed.data);
     const tx = await createTransaction(auth.userId, encrypted);
+    invalidateUserTxCache(auth.userId);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {
     await logApiError("POST", "/api/transactions", error, auth.userId);
@@ -105,6 +107,7 @@ export async function PUT(request: NextRequest) {
     const { id, ...data } = parsed.data;
     const encrypted = encryptTxWrite(auth.dek, data);
     const tx = await updateTransaction(id, auth.userId, encrypted);
+    invalidateUserTxCache(auth.userId);
     return NextResponse.json(tx);
   } catch (error: unknown) {
     await logApiError("PUT", "/api/transactions", error, auth.userId);
@@ -120,5 +123,6 @@ export async function DELETE(request: NextRequest) {
   const id = parseInt(params.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
   await deleteTransaction(id, auth.context.userId);
+  invalidateUserTxCache(auth.context.userId);
   return NextResponse.json({ success: true });
 }

@@ -19,6 +19,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { getUserById, wipeUserDataAndRewrap } from "@/lib/auth/queries";
 import { createWrappedDEKForPassword } from "@/lib/crypto/envelope";
 import { deleteDEK } from "@/lib/crypto/dek-cache";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 
@@ -81,6 +82,7 @@ export async function POST(request: NextRequest) {
       dekWrappedTag: wrapped.tag.toString("base64"),
     });
     if (sessionId) deleteDEK(sessionId);
+    invalidateUserTxCache(userId);
 
     return NextResponse.json({ success: true, message: "Account data wiped." });
   } catch (error) {

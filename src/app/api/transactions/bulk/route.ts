@@ -18,6 +18,7 @@ import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptField } from "@/lib/crypto/envelope";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
@@ -152,6 +153,7 @@ export async function POST(request: NextRequest) {
         break;
     }
 
+    invalidateUserTxCache(userId);
     return NextResponse.json({ success: true, affected: ids.length });
   } catch (error) {
     return NextResponse.json(

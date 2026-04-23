@@ -13,6 +13,28 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { PgCompatDb } from "./pg-compat.js";
+import {
+  generateAmortizationSchedule,
+  calculateDebtPayoff,
+  type Debt,
+} from "../src/lib/loan-calculator.js";
+import { getLatestFxRate } from "../src/lib/fx-service.js";
+import {
+  invalidateUser as invalidateUserTxCache,
+  getUserTransactions,
+} from "../src/lib/mcp/user-tx-cache.js";
+import {
+  signConfirmationToken,
+  verifyConfirmationToken,
+} from "../src/lib/mcp/confirmation-token.js";
+import fs from "fs/promises";
+import {
+  csvToRawTransactions,
+  csvToRawTransactionsWithMapping,
+} from "../src/lib/csv-parser.js";
+import { parseOfx } from "../src/lib/ofx-parser.js";
+import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline.js";
+import { generateImportHash } from "../src/lib/import-hash.js";
 
 // Helper for MCP rule matching
 function matchesRule(
@@ -269,6 +291,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!cat) return sqliteErr(`Category "${category}" not found`);
 
       await sqlite.prepare("INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(userId, date, acct.id, cat.id, acct.currency, amount, payee ?? "", note ?? "", tags ?? "");
+      invalidateUserTxCache(userId);
       return { content: [{ type: "text" as const, text: `Transaction added: ${amount} to ${account} (${category}) on ${date}` }] };
     }
   );
@@ -410,6 +433,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         }
       }
 
+      if (applied > 0) invalidateUserTxCache(userId);
       return {
         content: [{
           type: "text" as const,
@@ -544,6 +568,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       ).get(userId, txDate, acct.id, catId, acct.currency, amount, payee, note ?? "", tags ?? "") as { id: number };
 
       const catName = catId ? (await sqlite.prepare(`SELECT name FROM categories WHERE user_id = ? AND id = ?`).get(userId, catId) as { name: string } | undefined)?.name ?? "uncategorized" : "uncategorized";
+      invalidateUserTxCache(userId);
       return txt({ success: true, transactionId: result?.id, message: `Recorded: ${amount > 0 ? "+" : ""}${amount} on ${txDate} — "${payee}" → ${acct.name} (${catName})` });
     }
   );
@@ -586,6 +611,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         }
       }
       const ok = results.filter(r => r.success).length;
+      if (ok > 0) invalidateUserTxCache(userId);
       return txt({ imported: ok, failed: results.length - ok, results });
     }
   );
@@ -627,6 +653,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       params.push(id, userId);
       await sqlite.prepare(`UPDATE transactions SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
+      invalidateUserTxCache(userId);
       return txt({ success: true, message: `Transaction #${id} updated (${updates.length} field(s))` });
     }
   );
@@ -640,6 +667,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const t = await sqlite.prepare(`SELECT id, payee, amount, date FROM transactions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; payee: string; amount: number; date: string } | undefined;
       if (!t) return sqliteErr(`Transaction #${id} not found or not owned by user`);
       await sqlite.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).run(id, userId);
+      invalidateUserTxCache(userId);
       return txt({ success: true, message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}` });
     }
   );
@@ -821,6 +849,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const txn = await sqlite.prepare(`SELECT id, payee FROM transactions WHERE id = ? AND user_id = ?`).get(transaction_id, userId) as { id: number; payee: string } | undefined;
       if (!txn) return sqliteErr(`Transaction #${transaction_id} not found or not owned by user`);
       await sqlite.prepare(`UPDATE transactions SET category_id = ? WHERE id = ? AND user_id = ?`).run(cat.id, transaction_id, userId);
+      invalidateUserTxCache(userId);
       return txt({ success: true, message: `Transaction #${transaction_id} ("${txn.payee}") categorized as "${cat.name}"` });
     }
   );
@@ -1176,6 +1205,1567 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       });
 
       return txt({ error: "Unknown topic" });
+    }
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Wave 1B — Loans, FX, Subscriptions CRUD, Rules CRUD, Suggest, Splits CRUD
+  //
+  // NOTE: stdio transport stores text fields (payee/note/tags/split note) as
+  // plaintext by design. Self-host users rely on OS-level disk encryption.
+  // The HTTP equivalents in register-tools-pg.ts encrypt using the session DEK.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── list_loans ────────────────────────────────────────────────────────────
+  server.tool(
+    "list_loans",
+    "List all loans with balance, rate, payment, payoff date, and linked account",
+    {},
+    async () => {
+      const rows = await sqlite.prepare(`
+        SELECT l.id, l.name, l.type, l.principal, l.annual_rate, l.term_months,
+               l.start_date, l.payment_amount, l.payment_frequency, l.extra_payment,
+               l.note, l.account_id, a.name AS account_name
+        FROM loans l LEFT JOIN accounts a ON a.id = l.account_id
+        WHERE l.user_id = ? ORDER BY l.start_date DESC, l.id
+      `).all(userId) as SqliteRow[];
+      const today = new Date().toISOString().split("T")[0];
+      const enriched = rows.map((r) => {
+        const summary = generateAmortizationSchedule(
+          Number(r.principal),
+          Number(r.annual_rate),
+          Number(r.term_months),
+          String(r.start_date),
+          Number(r.extra_payment ?? 0),
+          String(r.payment_frequency ?? "monthly"),
+        );
+        const paid = summary.schedule.filter((x) => x.date <= today);
+        const principalPaid = paid.reduce((s, x) => s + x.principal, 0);
+        const interestPaid = paid.reduce((s, x) => s + x.interest, 0);
+        return {
+          ...r,
+          monthlyPayment: summary.monthlyPayment,
+          totalInterest: summary.totalInterest,
+          payoffDate: summary.payoffDate,
+          remainingBalance: Math.max(Number(r.principal) - principalPaid, 0),
+          principalPaid: Math.round(principalPaid * 100) / 100,
+          interestPaid: Math.round(interestPaid * 100) / 100,
+          periodsRemaining: summary.schedule.length - paid.length,
+        };
+      });
+      return txt({ success: true, data: enriched });
+    }
+  );
+
+  // ── add_loan ──────────────────────────────────────────────────────────────
+  server.tool(
+    "add_loan",
+    "Create a new loan",
+    {
+      name: z.string(),
+      type: z.string(),
+      principal: z.number(),
+      annual_rate: z.number(),
+      term_months: z.number().int().positive(),
+      start_date: z.string(),
+      account: z.string().optional(),
+      payment_amount: z.number().optional(),
+      payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
+      extra_payment: z.number().optional(),
+      min_payment: z.number().optional(),
+      note: z.string().optional(),
+    },
+    async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
+      let accountId: number | null = null;
+      if (account) {
+        const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+        const acct = fuzzyFind(account, allAccounts);
+        if (!acct) return sqliteErr(`Account "${account}" not found`);
+        accountId = Number(acct.id);
+      }
+      const pmt = payment_amount ?? min_payment ?? null;
+      const result = await sqlite.prepare(
+        `INSERT INTO loans (user_id, name, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+      ).get(userId, name, type, accountId, principal, annual_rate, term_months, start_date, pmt, payment_frequency ?? "monthly", extra_payment ?? 0, note ?? "") as { id: number } | undefined;
+      return txt({ success: true, data: { id: result?.id, message: `Loan "${name}" created` } });
+    }
+  );
+
+  // ── update_loan ───────────────────────────────────────────────────────────
+  server.tool(
+    "update_loan",
+    "Update any field of an existing loan by id",
+    {
+      id: z.number(),
+      name: z.string().optional(),
+      type: z.string().optional(),
+      principal: z.number().optional(),
+      annual_rate: z.number().optional(),
+      term_months: z.number().int().positive().optional(),
+      start_date: z.string().optional(),
+      payment_amount: z.number().optional(),
+      payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
+      extra_payment: z.number().optional(),
+      account: z.string().optional().describe("Account name. Empty string clears the link."),
+      note: z.string().optional(),
+    },
+    async ({ id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, account, note }) => {
+      const existing = await sqlite.prepare(`SELECT id FROM loans WHERE id = ? AND user_id = ?`).get(id, userId);
+      if (!existing) return sqliteErr(`Loan #${id} not found`);
+
+      let accountIdUpdate: number | null | undefined;
+      if (account !== undefined) {
+        if (account === "") accountIdUpdate = null;
+        else {
+          const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+          const acct = fuzzyFind(account, allAccounts);
+          if (!acct) return sqliteErr(`Account "${account}" not found`);
+          accountIdUpdate = Number(acct.id);
+        }
+      }
+
+      const updates: string[] = [];
+      const params: unknown[] = [];
+      if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
+      if (type !== undefined) { updates.push(`type = ?`); params.push(type); }
+      if (principal !== undefined) { updates.push(`principal = ?`); params.push(principal); }
+      if (annual_rate !== undefined) { updates.push(`annual_rate = ?`); params.push(annual_rate); }
+      if (term_months !== undefined) { updates.push(`term_months = ?`); params.push(term_months); }
+      if (start_date !== undefined) { updates.push(`start_date = ?`); params.push(start_date); }
+      if (payment_amount !== undefined) { updates.push(`payment_amount = ?`); params.push(payment_amount); }
+      if (payment_frequency !== undefined) { updates.push(`payment_frequency = ?`); params.push(payment_frequency); }
+      if (extra_payment !== undefined) { updates.push(`extra_payment = ?`); params.push(extra_payment); }
+      if (accountIdUpdate !== undefined) { updates.push(`account_id = ?`); params.push(accountIdUpdate); }
+      if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
+      if (!updates.length) return sqliteErr("No fields to update");
+      params.push(id, userId);
+      await sqlite.prepare(`UPDATE loans SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
+      return txt({ success: true, data: { id, message: `Loan #${id} updated (${updates.length} field(s))` } });
+    }
+  );
+
+  // ── delete_loan ───────────────────────────────────────────────────────────
+  server.tool(
+    "delete_loan",
+    "Delete a loan by id",
+    { id: z.number() },
+    async ({ id }) => {
+      const existing = await sqlite.prepare(`SELECT id, name FROM loans WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
+      if (!existing) return sqliteErr(`Loan #${id} not found`);
+      await sqlite.prepare(`DELETE FROM loans WHERE id = ? AND user_id = ?`).run(id, userId);
+      return txt({ success: true, data: { id, message: `Loan "${existing.name}" deleted` } });
+    }
+  );
+
+  // ── get_loan_amortization ─────────────────────────────────────────────────
+  server.tool(
+    "get_loan_amortization",
+    "Full amortization schedule for a loan",
+    {
+      loan_id: z.number(),
+      as_of_date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+    },
+    async ({ loan_id, as_of_date }) => {
+      const loan = await sqlite.prepare(
+        `SELECT id, name, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment FROM loans WHERE id = ? AND user_id = ?`
+      ).get(loan_id, userId) as SqliteRow | undefined;
+      if (!loan) return sqliteErr(`Loan #${loan_id} not found`);
+      const summary = generateAmortizationSchedule(
+        Number(loan.principal),
+        Number(loan.annual_rate),
+        Number(loan.term_months),
+        String(loan.start_date),
+        Number(loan.extra_payment ?? 0),
+        String(loan.payment_frequency ?? "monthly"),
+      );
+      const cutoff = as_of_date ?? new Date().toISOString().split("T")[0];
+      const paid = summary.schedule.filter((r) => r.date <= cutoff);
+      const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
+      const interestPaid = paid.reduce((s, r) => s + r.interest, 0);
+      return txt({
+        success: true,
+        data: {
+          loanId: loan_id,
+          loanName: loan.name,
+          asOfDate: cutoff,
+          monthlyPayment: summary.monthlyPayment,
+          totalPayments: summary.totalPayments,
+          totalInterest: summary.totalInterest,
+          payoffDate: summary.payoffDate,
+          asOfSummary: {
+            periodsElapsed: paid.length,
+            principalPaid: Math.round(principalPaid * 100) / 100,
+            interestPaid: Math.round(interestPaid * 100) / 100,
+            remainingBalance: Math.max(Number(loan.principal) - principalPaid, 0),
+            periodsRemaining: summary.schedule.length - paid.length,
+          },
+          schedule: summary.schedule,
+        },
+      });
+    }
+  );
+
+  // ── get_debt_payoff_plan ──────────────────────────────────────────────────
+  server.tool(
+    "get_debt_payoff_plan",
+    "Compare avalanche vs snowball payoff across all user loans",
+    {
+      strategy: z.enum(["avalanche", "snowball", "both"]).optional(),
+      extra_payment: z.number().optional(),
+    },
+    async ({ strategy, extra_payment }) => {
+      const loans = await sqlite.prepare(
+        `SELECT id, name, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment FROM loans WHERE user_id = ?`
+      ).all(userId) as SqliteRow[];
+      if (!loans.length) return txt({ success: true, data: { message: "No loans found", strategies: {} } });
+      const today = new Date().toISOString().split("T")[0];
+      const debts: Debt[] = loans.map((l) => {
+        const summary = generateAmortizationSchedule(
+          Number(l.principal),
+          Number(l.annual_rate),
+          Number(l.term_months),
+          String(l.start_date),
+          Number(l.extra_payment ?? 0),
+          String(l.payment_frequency ?? "monthly"),
+        );
+        const paid = summary.schedule.filter((r) => r.date <= today);
+        const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
+        const balance = Math.max(Number(l.principal) - principalPaid, 0);
+        const minPayment = Number(l.payment_amount ?? summary.monthlyPayment);
+        return {
+          id: Number(l.id),
+          name: String(l.name),
+          balance: Math.round(balance * 100) / 100,
+          rate: Number(l.annual_rate),
+          minPayment,
+        };
+      });
+      const strat = strategy ?? "both";
+      const extra = extra_payment ?? 0;
+      const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts } };
+      if (strat === "avalanche" || strat === "both") result.avalanche = calculateDebtPayoff(debts, extra, "avalanche");
+      if (strat === "snowball" || strat === "both") result.snowball = calculateDebtPayoff(debts, extra, "snowball");
+      return txt({ success: true, data: result });
+    }
+  );
+
+  // ── get_fx_rate ───────────────────────────────────────────────────────────
+  server.tool(
+    "get_fx_rate",
+    "Get the FX rate from one currency to another",
+    {
+      from: z.string(),
+      to: z.string(),
+      date: z.string().optional(),
+    },
+    async ({ from, to, date }) => {
+      if (from === to) return txt({ success: true, data: { from, to, date: date ?? new Date().toISOString().split("T")[0], rate: 1, source: "identity" } });
+      if (date) {
+        // User override wins over any cached rate for the same date
+        const rows = await sqlite.prepare(
+          `SELECT id, user_id, date, rate FROM fx_rates WHERE from_currency = ? AND to_currency = ? AND date = ? ORDER BY (user_id = ?) DESC, id DESC LIMIT 1`
+        ).all(from, to, date, userId) as SqliteRow[];
+        if (rows.length) return txt({ success: true, data: { from, to, date, rate: Number(rows[0].rate), source: String(rows[0].user_id) === userId ? "override" : "cache", id: Number(rows[0].id) } });
+        return sqliteErr(`No FX rate found for ${from}→${to} on ${date}`);
+      }
+      const rate = await getLatestFxRate(from, to, userId);
+      return txt({ success: true, data: { from, to, date: new Date().toISOString().split("T")[0], rate, source: "latest" } });
+    }
+  );
+
+  // ── list_fx_overrides ─────────────────────────────────────────────────────
+  server.tool(
+    "list_fx_overrides",
+    "List the user's manual FX rate pins",
+    {},
+    async () => {
+      const rows = await sqlite.prepare(
+        `SELECT id, date, from_currency, to_currency, rate FROM fx_rates WHERE user_id = ? ORDER BY date DESC, id DESC`
+      ).all(userId);
+      return txt({ success: true, data: rows });
+    }
+  );
+
+  // ── set_fx_override ───────────────────────────────────────────────────────
+  server.tool(
+    "set_fx_override",
+    "Pin a manual FX rate (upserts by from+to+date)",
+    {
+      from: z.string(),
+      to: z.string(),
+      date: z.string(),
+      rate: z.number().positive(),
+    },
+    async ({ from, to, date, rate }) => {
+      const existing = await sqlite.prepare(
+        `SELECT id FROM fx_rates WHERE user_id = ? AND from_currency = ? AND to_currency = ? AND date = ?`
+      ).get(userId, from, to, date) as { id: number } | undefined;
+      if (existing) {
+        await sqlite.prepare(`UPDATE fx_rates SET rate = ? WHERE id = ? AND user_id = ?`).run(rate, existing.id, userId);
+        return txt({ success: true, data: { id: existing.id, from, to, date, rate, action: "updated" } });
+      }
+      const result = await sqlite.prepare(
+        `INSERT INTO fx_rates (user_id, date, from_currency, to_currency, rate) VALUES (?, ?, ?, ?, ?) RETURNING id`
+      ).get(userId, date, from, to, rate) as { id: number } | undefined;
+      return txt({ success: true, data: { id: result?.id, from, to, date, rate, action: "created" } });
+    }
+  );
+
+  // ── delete_fx_override ────────────────────────────────────────────────────
+  server.tool(
+    "delete_fx_override",
+    "Delete a manual FX rate pin by id",
+    { id: z.number() },
+    async ({ id }) => {
+      const existing = await sqlite.prepare(
+        `SELECT id, from_currency, to_currency, date FROM fx_rates WHERE id = ? AND user_id = ?`
+      ).get(id, userId) as SqliteRow | undefined;
+      if (!existing) return sqliteErr(`FX override #${id} not found`);
+      await sqlite.prepare(`DELETE FROM fx_rates WHERE id = ? AND user_id = ?`).run(id, userId);
+      return txt({ success: true, data: { id, message: `Deleted FX override: ${existing.from_currency}→${existing.to_currency} on ${existing.date}` } });
+    }
+  );
+
+  // ── convert_amount ────────────────────────────────────────────────────────
+  server.tool(
+    "convert_amount",
+    "Convert an amount from one currency to another",
+    {
+      amount: z.number(),
+      from: z.string(),
+      to: z.string(),
+      date: z.string().optional(),
+    },
+    async ({ amount, from, to, date }) => {
+      if (from === to) return txt({ success: true, data: { amount, from, to, rate: 1, converted: amount } });
+      let rate: number | null = null;
+      let source = "latest";
+      if (date) {
+        const rows = await sqlite.prepare(
+          `SELECT user_id, rate FROM fx_rates WHERE from_currency = ? AND to_currency = ? AND date = ? ORDER BY (user_id = ?) DESC, id DESC LIMIT 1`
+        ).all(from, to, date, userId) as SqliteRow[];
+        if (rows.length) {
+          rate = Number(rows[0].rate);
+          source = String(rows[0].user_id) === userId ? "override" : "cache";
+        }
+      }
+      if (rate === null) rate = await getLatestFxRate(from, to, userId);
+      const converted = Math.round(amount * rate * 100) / 100;
+      return txt({ success: true, data: { amount, from, to, rate, converted, date: date ?? new Date().toISOString().split("T")[0], source } });
+    }
+  );
+
+  // ── list_subscriptions ────────────────────────────────────────────────────
+  server.tool(
+    "list_subscriptions",
+    "List all subscriptions with status, next billing, category, account, notes",
+    { status: z.enum(["active", "paused", "cancelled", "all"]).optional() },
+    async ({ status }) => {
+      let query = `SELECT s.id, s.name, s.amount, s.currency, s.frequency, s.next_date, s.status,
+                          s.cancel_reminder_date, s.notes, s.category_id, c.name AS category_name,
+                          s.account_id, a.name AS account_name
+                   FROM subscriptions s
+                   LEFT JOIN categories c ON c.id = s.category_id
+                   LEFT JOIN accounts a ON a.id = s.account_id
+                   WHERE s.user_id = ?`;
+      const params: unknown[] = [userId];
+      if (status && status !== "all") { query += ` AND s.status = ?`; params.push(status); }
+      query += ` ORDER BY s.status, s.name`;
+      const rows = await sqlite.prepare(query).all(...params);
+      return txt({ success: true, data: rows });
+    }
+  );
+
+  // ── add_subscription ──────────────────────────────────────────────────────
+  server.tool(
+    "add_subscription",
+    "Create a new subscription",
+    {
+      name: z.string(),
+      amount: z.number(),
+      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]),
+      next_billing_date: z.string(),
+      currency: z.enum(["CAD", "USD"]).optional(),
+      category: z.string().optional(),
+      account: z.string().optional(),
+      notes: z.string().optional(),
+    },
+    async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
+      const existing = await sqlite.prepare(`SELECT id FROM subscriptions WHERE user_id = ? AND name = ?`).get(userId, name);
+      if (existing) return sqliteErr(`Subscription "${name}" already exists`);
+
+      let categoryId: number | null = null;
+      if (category) {
+        const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
+        const cat = fuzzyFind(category, allCats);
+        if (!cat) return sqliteErr(`Category "${category}" not found`);
+        categoryId = Number(cat.id);
+      }
+      let accountId: number | null = null;
+      if (account) {
+        const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+        const acct = fuzzyFind(account, allAccounts);
+        if (!acct) return sqliteErr(`Account "${account}" not found`);
+        accountId = Number(acct.id);
+      }
+      const result = await sqlite.prepare(
+        `INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?) RETURNING id`
+      ).get(userId, name, amount, currency ?? "CAD", cadence, categoryId, accountId, next_billing_date, notes ?? null) as { id: number } | undefined;
+      return txt({ success: true, data: { id: result?.id, message: `Subscription "${name}" created` } });
+    }
+  );
+
+  // ── update_subscription ───────────────────────────────────────────────────
+  server.tool(
+    "update_subscription",
+    "Update any field of an existing subscription",
+    {
+      id: z.number(),
+      name: z.string().optional(),
+      amount: z.number().optional(),
+      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
+      next_billing_date: z.string().optional(),
+      currency: z.enum(["CAD", "USD"]).optional(),
+      category: z.string().optional().describe("Empty string clears"),
+      account: z.string().optional().describe("Empty string clears"),
+      status: z.enum(["active", "paused", "cancelled"]).optional(),
+      cancel_reminder_date: z.string().optional(),
+      notes: z.string().optional(),
+    },
+    async ({ id, name, amount, cadence, next_billing_date, currency, category, account, status, cancel_reminder_date, notes }) => {
+      const existing = await sqlite.prepare(`SELECT id FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId);
+      if (!existing) return sqliteErr(`Subscription #${id} not found`);
+
+      let categoryIdUpdate: number | null | undefined;
+      if (category !== undefined) {
+        if (category === "") categoryIdUpdate = null;
+        else {
+          const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
+          const cat = fuzzyFind(category, allCats);
+          if (!cat) return sqliteErr(`Category "${category}" not found`);
+          categoryIdUpdate = Number(cat.id);
+        }
+      }
+      let accountIdUpdate: number | null | undefined;
+      if (account !== undefined) {
+        if (account === "") accountIdUpdate = null;
+        else {
+          const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+          const acct = fuzzyFind(account, allAccounts);
+          if (!acct) return sqliteErr(`Account "${account}" not found`);
+          accountIdUpdate = Number(acct.id);
+        }
+      }
+
+      const updates: string[] = [];
+      const params: unknown[] = [];
+      if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
+      if (amount !== undefined) { updates.push(`amount = ?`); params.push(amount); }
+      if (cadence !== undefined) { updates.push(`frequency = ?`); params.push(cadence); }
+      if (next_billing_date !== undefined) { updates.push(`next_date = ?`); params.push(next_billing_date); }
+      if (currency !== undefined) { updates.push(`currency = ?`); params.push(currency); }
+      if (categoryIdUpdate !== undefined) { updates.push(`category_id = ?`); params.push(categoryIdUpdate); }
+      if (accountIdUpdate !== undefined) { updates.push(`account_id = ?`); params.push(accountIdUpdate); }
+      if (status !== undefined) { updates.push(`status = ?`); params.push(status); }
+      if (cancel_reminder_date !== undefined) { updates.push(`cancel_reminder_date = ?`); params.push(cancel_reminder_date); }
+      if (notes !== undefined) { updates.push(`notes = ?`); params.push(notes); }
+      if (!updates.length) return sqliteErr("No fields to update");
+      params.push(id, userId);
+      await sqlite.prepare(`UPDATE subscriptions SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
+      return txt({ success: true, data: { id, message: `Subscription #${id} updated (${updates.length} field(s))` } });
+    }
+  );
+
+  // ── pause_subscription ────────────────────────────────────────────────────
+  server.tool(
+    "pause_subscription",
+    "Pause a subscription. Optionally record a resume-on date.",
+    {
+      id: z.number(),
+      resume_on: z.string().optional(),
+    },
+    async ({ id, resume_on }) => {
+      const existing = await sqlite.prepare(`SELECT id, name FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
+      if (!existing) return sqliteErr(`Subscription #${id} not found`);
+      await sqlite.prepare(`UPDATE subscriptions SET status = 'paused', cancel_reminder_date = ? WHERE id = ? AND user_id = ?`).run(resume_on ?? null, id, userId);
+      return txt({ success: true, data: { id, message: `Subscription "${existing.name}" paused${resume_on ? ` — resume on ${resume_on}` : ""}` } });
+    }
+  );
+
+  // ── resume_subscription ───────────────────────────────────────────────────
+  server.tool(
+    "resume_subscription",
+    "Re-activate a paused or cancelled subscription",
+    { id: z.number() },
+    async ({ id }) => {
+      const existing = await sqlite.prepare(`SELECT id, name FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
+      if (!existing) return sqliteErr(`Subscription #${id} not found`);
+      await sqlite.prepare(`UPDATE subscriptions SET status = 'active', cancel_reminder_date = NULL WHERE id = ? AND user_id = ?`).run(id, userId);
+      return txt({ success: true, data: { id, message: `Subscription "${existing.name}" resumed` } });
+    }
+  );
+
+  // ── cancel_subscription ───────────────────────────────────────────────────
+  server.tool(
+    "cancel_subscription",
+    "Mark a subscription as cancelled",
+    {
+      id: z.number(),
+      cancel_date: z.string().optional(),
+    },
+    async ({ id, cancel_date }) => {
+      const existing = await sqlite.prepare(`SELECT id, name FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
+      if (!existing) return sqliteErr(`Subscription #${id} not found`);
+      await sqlite.prepare(`UPDATE subscriptions SET status = 'cancelled', cancel_reminder_date = ? WHERE id = ? AND user_id = ?`).run(cancel_date ?? null, id, userId);
+      return txt({ success: true, data: { id, message: `Subscription "${existing.name}" cancelled${cancel_date ? ` effective ${cancel_date}` : ""}` } });
+    }
+  );
+
+  // ── delete_subscription ───────────────────────────────────────────────────
+  server.tool(
+    "delete_subscription",
+    "Permanently delete a subscription by id",
+    { id: z.number() },
+    async ({ id }) => {
+      const existing = await sqlite.prepare(`SELECT id, name FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
+      if (!existing) return sqliteErr(`Subscription #${id} not found`);
+      await sqlite.prepare(`DELETE FROM subscriptions WHERE id = ? AND user_id = ?`).run(id, userId);
+      return txt({ success: true, data: { id, message: `Subscription "${existing.name}" deleted` } });
+    }
+  );
+
+  // ── list_rules ────────────────────────────────────────────────────────────
+  server.tool(
+    "list_rules",
+    "List all auto-categorization rules",
+    {},
+    async () => {
+      const rows = await sqlite.prepare(
+        `SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
+                r.assign_category_id, c.name AS category_name,
+                r.assign_tags, r.rename_to, r.is_active, r.priority, r.created_at
+         FROM transaction_rules r LEFT JOIN categories c ON c.id = r.assign_category_id
+         WHERE r.user_id = ? ORDER BY r.priority DESC, r.id`
+      ).all(userId);
+      return txt({ success: true, data: rows });
+    }
+  );
+
+  // ── update_rule ───────────────────────────────────────────────────────────
+  server.tool(
+    "update_rule",
+    "Update any field of an existing transaction rule",
+    {
+      id: z.number(),
+      name: z.string().optional(),
+      match_field: z.enum(["payee", "amount", "tags"]).optional(),
+      match_type: z.enum(["contains", "exact", "regex", "greater_than", "less_than"]).optional(),
+      match_value: z.string().optional(),
+      match_payee: z.string().optional(),
+      assign_category: z.string().optional(),
+      assign_tags: z.string().optional(),
+      rename_to: z.string().optional(),
+      is_active: z.boolean().optional(),
+      priority: z.number().optional(),
+    },
+    async ({ id, name, match_field, match_type, match_value, match_payee, assign_category, assign_tags, rename_to, is_active, priority }) => {
+      const existing = await sqlite.prepare(`SELECT id FROM transaction_rules WHERE id = ? AND user_id = ?`).get(id, userId);
+      if (!existing) return sqliteErr(`Rule #${id} not found`);
+
+      let assignCategoryIdUpdate: number | null | undefined;
+      if (assign_category !== undefined) {
+        if (assign_category === "") assignCategoryIdUpdate = null;
+        else {
+          const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
+          const cat = fuzzyFind(assign_category, allCats);
+          if (!cat) return sqliteErr(`Category "${assign_category}" not found`);
+          assignCategoryIdUpdate = Number(cat.id);
+        }
+      }
+
+      let effMatchField = match_field;
+      let effMatchType = match_type;
+      let effMatchValue = match_value;
+      if (match_payee !== undefined) {
+        effMatchField = effMatchField ?? "payee";
+        effMatchType = effMatchType ?? "contains";
+        effMatchValue = match_payee;
+      }
+
+      const updates: string[] = [];
+      const params: unknown[] = [];
+      if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
+      if (effMatchField !== undefined) { updates.push(`match_field = ?`); params.push(effMatchField); }
+      if (effMatchType !== undefined) { updates.push(`match_type = ?`); params.push(effMatchType); }
+      if (effMatchValue !== undefined) { updates.push(`match_value = ?`); params.push(effMatchValue); }
+      if (assignCategoryIdUpdate !== undefined) { updates.push(`assign_category_id = ?`); params.push(assignCategoryIdUpdate); }
+      if (assign_tags !== undefined) { updates.push(`assign_tags = ?`); params.push(assign_tags); }
+      if (rename_to !== undefined) { updates.push(`rename_to = ?`); params.push(rename_to); }
+      if (is_active !== undefined) { updates.push(`is_active = ?`); params.push(is_active ? 1 : 0); }
+      if (priority !== undefined) { updates.push(`priority = ?`); params.push(priority); }
+      if (!updates.length) return sqliteErr("No fields to update");
+      params.push(id, userId);
+      await sqlite.prepare(`UPDATE transaction_rules SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
+      return txt({ success: true, data: { id, message: `Rule #${id} updated (${updates.length} field(s))` } });
+    }
+  );
+
+  // ── delete_rule ───────────────────────────────────────────────────────────
+  server.tool(
+    "delete_rule",
+    "Delete a transaction rule by id",
+    { id: z.number() },
+    async ({ id }) => {
+      const existing = await sqlite.prepare(`SELECT id, name FROM transaction_rules WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
+      if (!existing) return sqliteErr(`Rule #${id} not found`);
+      await sqlite.prepare(`DELETE FROM transaction_rules WHERE id = ? AND user_id = ?`).run(id, userId);
+      return txt({ success: true, data: { id, message: `Rule "${existing.name}" deleted` } });
+    }
+  );
+
+  // ── test_rule ─────────────────────────────────────────────────────────────
+  // stdio transport reads plaintext payee/tags (no DEK), so matching is
+  // straight SQL+memory against plaintext columns.
+  server.tool(
+    "test_rule",
+    "Dry-run a rule pattern against the user's existing transactions. Returns matched rows without writing.",
+    {
+      match_payee: z.string().optional(),
+      match_field: z.enum(["payee", "amount", "tags"]).optional(),
+      match_type: z.enum(["contains", "exact", "regex", "greater_than", "less_than"]).optional(),
+      match_value: z.string().optional(),
+      match_amount: z.number().optional(),
+      sample_size: z.number().optional(),
+    },
+    async ({ match_payee, match_field, match_type, match_value, match_amount, sample_size }) => {
+      const field = match_field ?? "payee";
+      const type = match_type ?? "contains";
+      const value =
+        match_value !== undefined ? match_value :
+        match_amount !== undefined ? String(match_amount) :
+        match_payee ?? "";
+      if (!value && field !== "amount") return sqliteErr("match_value or match_payee is required");
+      const limit = sample_size ?? 5000;
+      const raw = await sqlite.prepare(
+        `SELECT t.id, t.date, t.payee, t.tags, t.amount, t.category_id, c.name AS category_name,
+                t.account_id, a.name AS account_name
+         FROM transactions t
+         LEFT JOIN categories c ON c.id = t.category_id
+         LEFT JOIN accounts a ON a.id = t.account_id
+         WHERE t.user_id = ? ORDER BY t.date DESC, t.id DESC LIMIT ?`
+      ).all(userId, limit) as SqliteRow[];
+
+      let regex: RegExp | null = null;
+      if (type === "regex") {
+        try { regex = new RegExp(value, "i"); }
+        catch { return sqliteErr(`Invalid regex: ${value}`); }
+      }
+      const ruleAmount = field === "amount" ? parseFloat(value) : NaN;
+      const valueLower = value.toLowerCase();
+      const matched: Record<string, unknown>[] = [];
+      for (const r of raw) {
+        const payee = String(r.payee ?? "");
+        const tags = String(r.tags ?? "");
+        let hit = false;
+        if (field === "amount") {
+          if (isNaN(ruleAmount)) continue;
+          const amt = Number(r.amount);
+          if (type === "greater_than") hit = amt > ruleAmount;
+          else if (type === "less_than") hit = amt < ruleAmount;
+          else if (type === "exact") hit = Math.abs(amt - ruleAmount) < 0.01;
+        } else {
+          const fieldVal = (field === "payee" ? payee : tags).toLowerCase();
+          if (type === "contains") hit = fieldVal.includes(valueLower);
+          else if (type === "exact") hit = fieldVal === valueLower;
+          else if (type === "regex" && regex) hit = regex.test(field === "payee" ? payee : tags);
+        }
+        if (hit) {
+          matched.push({
+            id: Number(r.id),
+            date: r.date,
+            payee,
+            tags,
+            amount: Number(r.amount),
+            category: r.category_name,
+            account: r.account_name,
+          });
+        }
+      }
+      return txt({
+        success: true,
+        data: {
+          scanned: raw.length,
+          matchedCount: matched.length,
+          matches: matched.slice(0, 50),
+          rulePreview: { field, type, value },
+          note: matched.length > 50 ? `Showing 50 of ${matched.length} matches` : undefined,
+        },
+      });
+    }
+  );
+
+  // ── reorder_rules ─────────────────────────────────────────────────────────
+  server.tool(
+    "reorder_rules",
+    "Reorder rules — first id in `ordered_ids` becomes highest priority",
+    { ordered_ids: z.array(z.number()).min(1) },
+    async ({ ordered_ids }) => {
+      const placeholders = ordered_ids.map(() => "?").join(",");
+      const ownedRows = await sqlite.prepare(
+        `SELECT id FROM transaction_rules WHERE user_id = ? AND id IN (${placeholders})`
+      ).all(userId, ...ordered_ids) as SqliteRow[];
+      if (ownedRows.length !== ordered_ids.length) {
+        return sqliteErr(`One or more rule ids are not owned by this user (expected ${ordered_ids.length}, found ${ownedRows.length})`);
+      }
+      const base = ordered_ids.length * 10;
+      for (let i = 0; i < ordered_ids.length; i++) {
+        const priority = base - i * 10;
+        await sqlite.prepare(`UPDATE transaction_rules SET priority = ? WHERE id = ? AND user_id = ?`).run(priority, ordered_ids[i], userId);
+      }
+      return txt({ success: true, data: { reordered: ordered_ids.length, order: ordered_ids } });
+    }
+  );
+
+  // ── suggest_transaction_details ───────────────────────────────────────────
+  // stdio plaintext: straightforward SQL match against plaintext payee/tags.
+  server.tool(
+    "suggest_transaction_details",
+    "Suggest category + tags for a transaction based on rule matches and historical frequency",
+    {
+      payee: z.string(),
+      amount: z.number().optional(),
+      account_id: z.number().optional(),
+      top_n: z.number().optional(),
+    },
+    async ({ payee, amount, top_n }) => {
+      const topN = top_n ?? 3;
+      if (!payee.trim()) return sqliteErr("payee is required");
+
+      const rules = await sqlite.prepare(
+        `SELECT id, name, match_field, match_type, match_value, assign_category_id, assign_tags, rename_to, priority
+         FROM transaction_rules WHERE user_id = ? AND is_active = 1 ORDER BY priority DESC, id`
+      ).all(userId) as SqliteRow[];
+      const payeeLower = payee.toLowerCase();
+      const matchedRules: Record<string, unknown>[] = [];
+      for (const r of rules) {
+        const field = String(r.match_field ?? "payee");
+        const type = String(r.match_type ?? "contains");
+        const value = String(r.match_value ?? "");
+        let hit = false;
+        if (field === "payee") {
+          const valLower = value.toLowerCase();
+          if (type === "contains") hit = payeeLower.includes(valLower) || valLower.includes(payeeLower);
+          else if (type === "exact") hit = payeeLower === valLower;
+          else if (type === "regex") {
+            try { hit = new RegExp(value, "i").test(payee); } catch { /* ignore */ }
+          }
+        } else if (field === "amount" && amount !== undefined) {
+          const ruleAmt = parseFloat(value);
+          if (!isNaN(ruleAmt)) {
+            if (type === "greater_than") hit = amount > ruleAmt;
+            else if (type === "less_than") hit = amount < ruleAmt;
+            else if (type === "exact") hit = Math.abs(amount - ruleAmt) < 0.01;
+          }
+        }
+        if (hit) matchedRules.push(r);
+      }
+
+      const historyRows = await sqlite.prepare(
+        `SELECT category_id, tags, COUNT(*) AS cnt
+         FROM transactions
+         WHERE user_id = ? AND LOWER(payee) = LOWER(?) AND category_id IS NOT NULL
+         GROUP BY category_id, tags
+         ORDER BY cnt DESC LIMIT 20`
+      ).all(userId, payee) as SqliteRow[];
+
+      const catCounts = new Map<number, number>();
+      const tagCounts = new Map<string, number>();
+      let historicalMatches = 0;
+      for (const r of historyRows) {
+        const cnt = Number(r.cnt);
+        historicalMatches += cnt;
+        if (r.category_id) catCounts.set(Number(r.category_id), (catCounts.get(Number(r.category_id)) ?? 0) + cnt);
+        const t = String(r.tags ?? "");
+        for (const tag of t.split(",").map((x) => x.trim()).filter(Boolean)) {
+          tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + cnt);
+        }
+      }
+
+      const topCatIds = Array.from(catCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN);
+      let categoryRows: SqliteRow[] = [];
+      if (topCatIds.length) {
+        const ph = topCatIds.map(() => "?").join(",");
+        categoryRows = await sqlite.prepare(
+          `SELECT id, name, type, "group" FROM categories WHERE user_id = ? AND id IN (${ph})`
+        ).all(userId, ...topCatIds.map(([id]) => id)) as SqliteRow[];
+      }
+      const categorySuggestions = topCatIds.map(([id, count]) => {
+        const c = categoryRows.find((x) => Number(x.id) === id);
+        return { id, count, name: c?.name ?? null, type: c?.type ?? null, group: c?.group ?? null };
+      });
+      const topTags = Array.from(tagCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN).map(([tag, count]) => ({ tag, count }));
+
+      return txt({
+        success: true,
+        data: {
+          payee,
+          rules: matchedRules.map((r) => ({ id: Number(r.id), name: r.name, assignCategoryId: r.assign_category_id, assignTags: r.assign_tags, renameTo: r.rename_to })),
+          categories: categorySuggestions,
+          tags: topTags,
+          historicalMatches,
+        },
+      });
+    }
+  );
+
+  // ── list_splits ───────────────────────────────────────────────────────────
+  server.tool(
+    "list_splits",
+    "List all splits for a transaction",
+    { transaction_id: z.number() },
+    async ({ transaction_id }) => {
+      const owner = await sqlite.prepare(`SELECT id FROM transactions WHERE id = ? AND user_id = ?`).get(transaction_id, userId);
+      if (!owner) return sqliteErr(`Transaction #${transaction_id} not found`);
+      const rows = await sqlite.prepare(
+        `SELECT s.id, s.transaction_id, s.category_id, c.name AS category_name,
+                s.account_id, a.name AS account_name,
+                s.amount, s.note, s.description, s.tags
+         FROM transaction_splits s
+         LEFT JOIN categories c ON c.id = s.category_id
+         LEFT JOIN accounts a ON a.id = s.account_id
+         WHERE s.transaction_id = ? ORDER BY s.id`
+      ).all(transaction_id);
+      return txt({ success: true, data: rows });
+    }
+  );
+
+  // ── add_split ─────────────────────────────────────────────────────────────
+  server.tool(
+    "add_split",
+    "Add a single split to an existing transaction",
+    {
+      transaction_id: z.number(),
+      category_id: z.number().optional(),
+      account_id: z.number().optional(),
+      amount: z.number(),
+      note: z.string().optional(),
+      description: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async ({ transaction_id, category_id, account_id, amount, note, description, tags }) => {
+      const owner = await sqlite.prepare(`SELECT id FROM transactions WHERE id = ? AND user_id = ?`).get(transaction_id, userId);
+      if (!owner) return sqliteErr(`Transaction #${transaction_id} not found`);
+      const result = await sqlite.prepare(
+        `INSERT INTO transaction_splits (transaction_id, category_id, account_id, amount, note, description, tags) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
+      ).get(transaction_id, category_id ?? null, account_id ?? null, amount, note ?? "", description ?? "", tags ?? "") as { id: number } | undefined;
+      invalidateUserTxCache(userId);
+      return txt({ success: true, data: { id: result?.id, message: `Split added to txn #${transaction_id}` } });
+    }
+  );
+
+  // ── update_split ──────────────────────────────────────────────────────────
+  server.tool(
+    "update_split",
+    "Update fields of an existing split",
+    {
+      split_id: z.number(),
+      category_id: z.number().nullable().optional(),
+      account_id: z.number().nullable().optional(),
+      amount: z.number().optional(),
+      note: z.string().optional(),
+      description: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async ({ split_id, category_id, account_id, amount, note, description, tags }) => {
+      const owner = await sqlite.prepare(
+        `SELECT s.id FROM transaction_splits s JOIN transactions t ON t.id = s.transaction_id WHERE s.id = ? AND t.user_id = ?`
+      ).get(split_id, userId);
+      if (!owner) return sqliteErr(`Split #${split_id} not found`);
+
+      const updates: string[] = [];
+      const params: unknown[] = [];
+      if (category_id !== undefined) { updates.push(`category_id = ?`); params.push(category_id); }
+      if (account_id !== undefined) { updates.push(`account_id = ?`); params.push(account_id); }
+      if (amount !== undefined) { updates.push(`amount = ?`); params.push(amount); }
+      if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
+      if (description !== undefined) { updates.push(`description = ?`); params.push(description); }
+      if (tags !== undefined) { updates.push(`tags = ?`); params.push(tags); }
+      if (!updates.length) return sqliteErr("No fields to update");
+      params.push(split_id);
+      await sqlite.prepare(`UPDATE transaction_splits SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      invalidateUserTxCache(userId);
+      return txt({ success: true, data: { id: split_id, message: `Split #${split_id} updated (${updates.length} field(s))` } });
+    }
+  );
+
+  // ── delete_split ──────────────────────────────────────────────────────────
+  server.tool(
+    "delete_split",
+    "Delete a split by id",
+    { split_id: z.number() },
+    async ({ split_id }) => {
+      const owner = await sqlite.prepare(
+        `SELECT s.id FROM transaction_splits s JOIN transactions t ON t.id = s.transaction_id WHERE s.id = ? AND t.user_id = ?`
+      ).get(split_id, userId);
+      if (!owner) return sqliteErr(`Split #${split_id} not found`);
+      await sqlite.prepare(`DELETE FROM transaction_splits WHERE id = ?`).run(split_id);
+      invalidateUserTxCache(userId);
+      return txt({ success: true, data: { id: split_id, message: `Split #${split_id} deleted` } });
+    }
+  );
+
+  // ── replace_splits ────────────────────────────────────────────────────────
+  server.tool(
+    "replace_splits",
+    "Atomically replace all splits on a transaction. Validates sum equals parent amount (±$0.01).",
+    {
+      transaction_id: z.number(),
+      splits: z.array(z.object({
+        category_id: z.number().nullable().optional(),
+        account_id: z.number().nullable().optional(),
+        amount: z.number(),
+        note: z.string().optional(),
+        description: z.string().optional(),
+        tags: z.string().optional(),
+      })).min(1),
+    },
+    async ({ transaction_id, splits }) => {
+      const owner = await sqlite.prepare(`SELECT id, amount FROM transactions WHERE id = ? AND user_id = ?`).get(transaction_id, userId) as { id: number; amount: number } | undefined;
+      if (!owner) return sqliteErr(`Transaction #${transaction_id} not found`);
+      const sum = splits.reduce((s, x) => s + Number(x.amount), 0);
+      if (Math.abs(sum - Number(owner.amount)) > 0.01) {
+        return sqliteErr(`Splits sum (${sum.toFixed(2)}) must equal parent transaction amount (${Number(owner.amount).toFixed(2)})`);
+      }
+      await sqlite.prepare(`DELETE FROM transaction_splits WHERE transaction_id = ?`).run(transaction_id);
+      const insertedIds: number[] = [];
+      for (const s of splits) {
+        const r = await sqlite.prepare(
+          `INSERT INTO transaction_splits (transaction_id, category_id, account_id, amount, note, description, tags) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        ).get(transaction_id, s.category_id ?? null, s.account_id ?? null, s.amount, s.note ?? "", s.description ?? "", s.tags ?? "") as { id: number } | undefined;
+        if (r?.id) insertedIds.push(Number(r.id));
+      }
+      invalidateUserTxCache(userId);
+      return txt({ success: true, data: { transactionId: transaction_id, replacedWith: insertedIds.length, splitIds: insertedIds } });
+    }
+  );
+
+  // ─── Wave 2: bulk edit + detect_subscriptions + upload flow ────────────────
+  //
+  // stdio runs without envelope encryption (architectural decision #1) so
+  // there's no DEK plumbing here — payee/note/tags live in the DB as
+  // plaintext. Logic mirrors register-tools-pg.ts but drops the encrypt+
+  // decrypt passes.
+
+  const bulkFilterSchema = z.object({
+    ids: z.array(z.number()).optional(),
+    start_date: z.string().optional(),
+    end_date: z.string().optional(),
+    category_id: z.number().nullable().optional(),
+    account_id: z.number().optional(),
+    payee_match: z.string().optional(),
+  });
+  type BulkFilter = z.infer<typeof bulkFilterSchema>;
+
+  const bulkChangesSchema = z.object({
+    category_id: z.number().nullable().optional(),
+    account_id: z.number().optional(),
+    date: z.string().optional(),
+    note: z.string().optional(),
+    payee: z.string().optional(),
+    is_business: z.number().optional(),
+    tags: z.object({
+      mode: z.enum(["append", "replace", "remove"]),
+      value: z.string(),
+    }).optional(),
+  });
+  type BulkChanges = z.infer<typeof bulkChangesSchema>;
+
+  async function resolveFilterToIds(filter: BulkFilter): Promise<number[]> {
+    const hasAny =
+      (filter.ids && filter.ids.length > 0) ||
+      filter.start_date !== undefined ||
+      filter.end_date !== undefined ||
+      filter.category_id !== undefined ||
+      filter.account_id !== undefined ||
+      (filter.payee_match !== undefined && filter.payee_match !== "");
+    if (!hasAny) throw new Error("At least one filter field is required");
+
+    const clauses: string[] = [`user_id = ?`];
+    const params: unknown[] = [userId];
+    if (filter.ids && filter.ids.length > 0) {
+      const safeIds = filter.ids.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+      if (safeIds.length === 0) return [];
+      clauses.push(`id IN (${safeIds.map(() => "?").join(",")})`);
+      params.push(...safeIds);
+    }
+    if (filter.start_date) { clauses.push(`date >= ?`); params.push(filter.start_date); }
+    if (filter.end_date) { clauses.push(`date <= ?`); params.push(filter.end_date); }
+    if (filter.category_id === null) clauses.push(`category_id IS NULL`);
+    else if (filter.category_id !== undefined) { clauses.push(`category_id = ?`); params.push(filter.category_id); }
+    if (filter.account_id !== undefined) { clauses.push(`account_id = ?`); params.push(filter.account_id); }
+    if (filter.payee_match) { clauses.push(`LOWER(payee) LIKE ?`); params.push(`%${filter.payee_match.toLowerCase()}%`); }
+
+    const rows = await sqlite.prepare(
+      `SELECT id FROM transactions WHERE ${clauses.join(" AND ")} ORDER BY date DESC, id DESC LIMIT 10000`
+    ).all(...params) as Array<{ id: number }>;
+    return rows.map((r) => Number(r.id));
+  }
+
+  function applyChangesToRow(row: Record<string, unknown>, changes: BulkChanges): Record<string, unknown> {
+    const out = { ...row };
+    if (changes.category_id !== undefined) out.category_id = changes.category_id;
+    if (changes.account_id !== undefined) out.account_id = changes.account_id;
+    if (changes.date !== undefined) out.date = changes.date;
+    if (changes.note !== undefined) out.note = changes.note;
+    if (changes.payee !== undefined) out.payee = changes.payee;
+    if (changes.is_business !== undefined) out.is_business = changes.is_business;
+    if (changes.tags !== undefined) {
+      const currentSet = new Set(String(out.tags ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+      const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+      if (changes.tags.mode === "replace") out.tags = tokens.join(",");
+      else if (changes.tags.mode === "append") { for (const t of tokens) currentSet.add(t); out.tags = Array.from(currentSet).join(","); }
+      else { for (const t of tokens) currentSet.delete(t); out.tags = Array.from(currentSet).join(","); }
+    }
+    return out;
+  }
+
+  async function commitBulkUpdate(ids: number[], changes: BulkChanges): Promise<number> {
+    if (ids.length === 0) return 0;
+    const inList = `(${ids.map(() => "?").join(",")})`;
+
+    if (changes.category_id !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET category_id = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.category_id, ...ids, userId);
+    }
+    if (changes.account_id !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET account_id = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.account_id, ...ids, userId);
+    }
+    if (changes.date !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET date = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.date, ...ids, userId);
+    }
+    if (changes.is_business !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET is_business = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.is_business, ...ids, userId);
+    }
+    if (changes.payee !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET payee = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.payee, ...ids, userId);
+    }
+    if (changes.note !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET note = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.note, ...ids, userId);
+    }
+    if (changes.tags !== undefined) {
+      if (changes.tags.mode === "replace") {
+        await sqlite.prepare(`UPDATE transactions SET tags = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.tags.value, ...ids, userId);
+      } else {
+        const rows = await sqlite.prepare(`SELECT id, tags FROM transactions WHERE id IN ${inList} AND user_id = ?`).all(...ids, userId) as Array<{ id: number; tags: string }>;
+        const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+        for (const r of rows) {
+          const set = new Set(String(r.tags ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+          if (changes.tags.mode === "append") { for (const t of tokens) set.add(t); }
+          else { for (const t of tokens) set.delete(t); }
+          const next = Array.from(set).join(",");
+          await sqlite.prepare(`UPDATE transactions SET tags = ? WHERE id = ? AND user_id = ?`).run(next, Number(r.id), userId);
+        }
+      }
+    }
+    return ids.length;
+  }
+
+  async function previewBulk(filter: BulkFilter, changes: BulkChanges, op: string) {
+    const ids = await resolveFilterToIds(filter);
+    if (ids.length === 0) return { affectedCount: 0, sampleBefore: [], sampleAfter: [], ids, confirmationToken: "" };
+    const sampleIds = ids.slice(0, 10);
+    const placeholders = sampleIds.map(() => "?").join(",");
+    const before = await sqlite.prepare(
+      `SELECT t.id, t.date, t.account_id, a.name AS account, t.category_id, c.name AS category,
+              t.currency, t.amount, t.payee, t.note, t.tags, t.is_business
+       FROM transactions t
+       LEFT JOIN accounts a ON t.account_id = a.id
+       LEFT JOIN categories c ON t.category_id = c.id
+       WHERE t.id IN (${placeholders}) AND t.user_id = ?
+       ORDER BY t.id`
+    ).all(...sampleIds, userId) as Record<string, unknown>[];
+    const after = before.map((r) => applyChangesToRow(r, changes));
+    const token = signConfirmationToken(userId, op, { ids, changes });
+    return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, ids, confirmationToken: token };
+  }
+
+  // ── preview_bulk_update ────────────────────────────────────────────────────
+  server.tool(
+    "preview_bulk_update",
+    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, and a confirmationToken (5-min TTL).",
+    { filter: bulkFilterSchema, changes: bulkChangesSchema },
+    async ({ filter, changes }) => {
+      try {
+        const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_update");
+        return txt({ success: true, data: { affectedCount, sampleBefore, sampleAfter, confirmationToken } });
+      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+    }
+  );
+
+  // ── execute_bulk_update ────────────────────────────────────────────────────
+  server.tool(
+    "execute_bulk_update",
+    "Commit a bulk update. Must be preceded by preview_bulk_update with the same filter+changes.",
+    { filter: bulkFilterSchema, changes: bulkChangesSchema, confirmation_token: z.string() },
+    async ({ filter, changes, confirmation_token }) => {
+      try {
+        const ids = await resolveFilterToIds(filter);
+        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_update", { ids, changes });
+        if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_update.`);
+        const n = await commitBulkUpdate(ids, changes);
+        if (n > 0) invalidateUserTxCache(userId);
+        return txt({ success: true, data: { updated: n } });
+      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+    }
+  );
+
+  // ── preview_bulk_delete ────────────────────────────────────────────────────
+  server.tool(
+    "preview_bulk_delete",
+    "Preview a bulk delete. Returns affected count, sample rows, and a confirmationToken (5-min TTL).",
+    { filter: bulkFilterSchema },
+    async ({ filter }) => {
+      try {
+        const ids = await resolveFilterToIds(filter);
+        if (ids.length === 0) return txt({ success: true, data: { affectedCount: 0, sample: [], confirmationToken: "" } });
+        const sampleIds = ids.slice(0, 10);
+        const placeholders = sampleIds.map(() => "?").join(",");
+        const sample = await sqlite.prepare(
+          `SELECT t.id, t.date, a.name AS account, c.name AS category, t.currency, t.amount, t.payee, t.note, t.tags
+           FROM transactions t
+           LEFT JOIN accounts a ON t.account_id = a.id
+           LEFT JOIN categories c ON t.category_id = c.id
+           WHERE t.id IN (${placeholders}) AND t.user_id = ?
+           ORDER BY t.id`
+        ).all(...sampleIds, userId);
+        const token = signConfirmationToken(userId, "bulk_delete", { ids });
+        return txt({ success: true, data: { affectedCount: ids.length, sample, confirmationToken: token } });
+      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+    }
+  );
+
+  // ── execute_bulk_delete ────────────────────────────────────────────────────
+  server.tool(
+    "execute_bulk_delete",
+    "Commit a bulk delete. Must be preceded by preview_bulk_delete.",
+    { filter: bulkFilterSchema, confirmation_token: z.string() },
+    async ({ filter, confirmation_token }) => {
+      try {
+        const ids = await resolveFilterToIds(filter);
+        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_delete", { ids });
+        if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_delete.`);
+        if (ids.length === 0) return txt({ success: true, data: { deleted: 0 } });
+        const placeholders = ids.map(() => "?").join(",");
+        await sqlite.prepare(`DELETE FROM transactions WHERE id IN (${placeholders}) AND user_id = ?`).run(...ids, userId);
+        invalidateUserTxCache(userId);
+        return txt({ success: true, data: { deleted: ids.length } });
+      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+    }
+  );
+
+  // ── preview_bulk_categorize ────────────────────────────────────────────────
+  server.tool(
+    "preview_bulk_categorize",
+    "Preview a bulk-categorize (shortcut for preview_bulk_update with only category_id).",
+    { filter: bulkFilterSchema, category_id: z.number() },
+    async ({ filter, category_id }) => {
+      try {
+        const cat = await sqlite.prepare(`SELECT id, name FROM categories WHERE id = ? AND user_id = ?`).get(category_id, userId) as { id: number; name: string } | undefined;
+        if (!cat) return sqliteErr(`Category #${category_id} not found`);
+        const changes: BulkChanges = { category_id };
+        const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_categorize");
+        return txt({ success: true, data: { categoryId: category_id, categoryName: cat.name, affectedCount, sampleBefore, sampleAfter, confirmationToken } });
+      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+    }
+  );
+
+  // ── execute_bulk_categorize ────────────────────────────────────────────────
+  server.tool(
+    "execute_bulk_categorize",
+    "Commit a bulk-categorize. Must be preceded by preview_bulk_categorize.",
+    { filter: bulkFilterSchema, category_id: z.number(), confirmation_token: z.string() },
+    async ({ filter, category_id, confirmation_token }) => {
+      try {
+        const ids = await resolveFilterToIds(filter);
+        const changes: BulkChanges = { category_id };
+        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_categorize", { ids, changes });
+        if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_categorize.`);
+        const n = await commitBulkUpdate(ids, changes);
+        if (n > 0) invalidateUserTxCache(userId);
+        return txt({ success: true, data: { updated: n } });
+      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+    }
+  );
+
+  // ── detect_subscriptions ───────────────────────────────────────────────────
+  server.tool(
+    "detect_subscriptions",
+    "Scan recent transactions and return candidate subscriptions with regular cadence + stable amount. Returns a confirmationToken for bulk_add_subscriptions.",
+    { lookback_months: z.number().optional() },
+    async ({ lookback_months }) => {
+      const months = lookback_months ?? 6;
+      const since = new Date();
+      since.setMonth(since.getMonth() - months);
+      const sinceStr = since.toISOString().split("T")[0];
+
+      // stdio has plaintext payees — read straight from SQL (no cache needed,
+      // but using the cache for consistency with the HTTP transport).
+      const all = await getUserTransactions(userId, null);
+      const recent = all.filter(
+        (t) => t.date >= sinceStr && t.payee && !t.payee.startsWith("v1:")
+      );
+
+      const groups = new Map<string, typeof recent>();
+      for (const t of recent) {
+        const key = t.payee.toLowerCase().replace(/\s+/g, " ").trim();
+        if (!key) continue;
+        const list = groups.get(key) ?? [];
+        list.push(t);
+        groups.set(key, list);
+      }
+
+      type Candidate = {
+        payee: string; avgAmount: number;
+        cadence: "weekly" | "monthly" | "quarterly" | "annual";
+        confidence: number; occurrences: number;
+        sampleTransactionIds: number[];
+      };
+      const candidates: Candidate[] = [];
+
+      for (const [, txs] of groups) {
+        if (txs.length < 3) continue;
+        txs.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        const amounts = txs.map((t) => t.amount);
+        const avg = amounts.reduce((s, n) => s + n, 0) / amounts.length;
+        if (Math.abs(avg) < 0.01) continue;
+        const stddev = Math.sqrt(amounts.reduce((s, n) => s + (n - avg) ** 2, 0) / amounts.length);
+        if (stddev > Math.abs(avg) * 0.05) continue;
+
+        const intervals: number[] = [];
+        for (let i = 1; i < txs.length; i++) {
+          const d1 = new Date(txs[i - 1].date + "T00:00:00Z").getTime();
+          const d2 = new Date(txs[i].date + "T00:00:00Z").getTime();
+          intervals.push(Math.round((d2 - d1) / 86400000));
+        }
+        const avgInt = intervals.reduce((s, n) => s + n, 0) / intervals.length;
+
+        let cadence: Candidate["cadence"] | null = null;
+        let tol = 0;
+        if (Math.abs(avgInt - 7) <= 1) { cadence = "weekly"; tol = 1; }
+        else if (Math.abs(avgInt - 30) <= 3) { cadence = "monthly"; tol = 3; }
+        else if (Math.abs(avgInt - 91) <= 7) { cadence = "quarterly"; tol = 7; }
+        else if (Math.abs(avgInt - 365) <= 15) { cadence = "annual"; tol = 15; }
+        if (!cadence) continue;
+        const regular = intervals.every((n) => Math.abs(n - avgInt) <= tol);
+        if (!regular) continue;
+
+        const countScore = Math.min(1, txs.length / 6);
+        const amtTightness = Math.abs(avg) > 0 ? 1 - Math.min(1, stddev / Math.abs(avg)) : 1;
+        const confidence = Math.round(((countScore * 0.4) + (amtTightness * 0.6)) * 100) / 100;
+
+        candidates.push({
+          payee: txs[0].payee,
+          avgAmount: Math.round(Math.abs(avg) * 100) / 100,
+          cadence, confidence,
+          occurrences: txs.length,
+          sampleTransactionIds: txs.slice(-5).map((t) => t.id),
+        });
+      }
+      candidates.sort((a, b) => b.confidence - a.confidence || b.occurrences - a.occurrences);
+
+      const approvable = candidates.map((c) => ({ payee: c.payee, amount: c.avgAmount, cadence: c.cadence }));
+      const token = candidates.length
+        ? signConfirmationToken(userId, "bulk_add_subscriptions", { candidates: approvable })
+        : "";
+
+      return txt({
+        success: true,
+        data: {
+          scanned: recent.length,
+          candidates,
+          confirmationToken: token,
+        },
+      });
+    }
+  );
+
+  // ── bulk_add_subscriptions ─────────────────────────────────────────────────
+  server.tool(
+    "bulk_add_subscriptions",
+    "Commit a set of detected subscriptions. Pass the candidates from detect_subscriptions + the confirmationToken.",
+    {
+      candidates: z.array(z.object({
+        payee: z.string(), amount: z.number(),
+        cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
+        next_billing_date: z.string().optional(),
+        category_id: z.number().optional(),
+      })).min(1),
+      confirmation_token: z.string(),
+    },
+    async ({ candidates, confirmation_token }) => {
+      const approvable = candidates.map((c) => ({ payee: c.payee, amount: c.amount, cadence: c.cadence }));
+      const check = verifyConfirmationToken(confirmation_token, userId, "bulk_add_subscriptions", { candidates: approvable });
+      if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run detect_subscriptions.`);
+
+      const today = new Date();
+      const addInterval = (base: Date, cadence: string): string => {
+        const d = new Date(base);
+        if (cadence === "weekly") d.setDate(d.getDate() + 7);
+        else if (cadence === "monthly") d.setMonth(d.getMonth() + 1);
+        else if (cadence === "quarterly") d.setMonth(d.getMonth() + 3);
+        else d.setFullYear(d.getFullYear() + 1);
+        return d.toISOString().split("T")[0];
+      };
+
+      let created = 0;
+      const skipped: string[] = [];
+      for (const c of candidates) {
+        const existing = await sqlite.prepare(`SELECT id FROM subscriptions WHERE user_id = ? AND name = ?`).get(userId, c.payee);
+        if (existing) { skipped.push(c.payee); continue; }
+        const next = c.next_billing_date ?? addInterval(today, c.cadence);
+        await sqlite.prepare(
+          `INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes)
+           VALUES (?, ?, ?, 'CAD', ?, ?, NULL, ?, 'active', 'Auto-detected by MCP')`
+        ).run(userId, c.payee, c.amount, c.cadence, c.category_id ?? null, next);
+        created++;
+      }
+      return txt({ success: true, data: { created, skipped, message: `Created ${created} subscription(s); skipped ${skipped.length} existing` } });
+    }
+  );
+
+  // ─── Part 1 tail — upload preview/execute (stdio) ──────────────────────────
+  //
+  // stdio transport has two paths:
+  //   upload_id  — reads from the mcp_uploads table (works when stdio is
+  //                pointed at the same DB the HTTP transport writes to, e.g.
+  //                managed-cloud self-host connecting locally)
+  //   file_path  — direct local-file import, gated by ALLOW_LOCAL_FILE_IMPORT=1
+  //                so hosted users can't get here even if they try
+
+  const allowLocalFile = process.env.ALLOW_LOCAL_FILE_IMPORT === "1";
+
+  async function loadRowsFromPath(filePath: string): Promise<{ format: string; rows: RawTransaction[]; errors: Array<{ row: number; message: string }> }> {
+    const buf = await fs.readFile(filePath);
+    const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+    if (ext === "csv") {
+      const txt = buf.toString("utf8");
+      const { rows, errors } = csvToRawTransactions(txt);
+      return { format: "csv", rows, errors };
+    }
+    if (ext === "ofx" || ext === "qfx") {
+      const txt = buf.toString("utf8");
+      const parsed = parseOfx(txt);
+      return {
+        format: ext,
+        rows: parsed.transactions.map((t) => ({
+          date: t.date, account: "", amount: t.amount,
+          payee: t.payee, currency: parsed.currency,
+          note: t.memo, fitId: t.fitId,
+        })),
+        errors: [],
+      };
+    }
+    throw new Error(`Unsupported file extension: ${ext}`);
+  }
+
+  async function loadRowsFromUpload(uploadId: string, columnMapping: Record<string, string> | undefined): Promise<{ upload: Record<string, unknown>; rows: RawTransaction[]; errors: Array<{ row: number; message: string }> }> {
+    const upload = await sqlite.prepare(
+      `SELECT id, user_id, format, storage_path, status, expires_at FROM mcp_uploads WHERE id = ? AND user_id = ?`
+    ).get(uploadId, userId) as Record<string, unknown> | undefined;
+    if (!upload) throw new Error(`Upload #${uploadId} not found`);
+    if (String(upload.status) === "executed") throw new Error("Upload already executed");
+    if (String(upload.status) === "cancelled") throw new Error("Upload was cancelled");
+    const expiresAt = new Date(String(upload.expires_at));
+    if (expiresAt.getTime() < Date.now()) throw new Error("Upload expired");
+
+    const buf = await fs.readFile(String(upload.storage_path));
+    const format = String(upload.format);
+    let rows: RawTransaction[] = [];
+    const errors: Array<{ row: number; message: string }> = [];
+    if (format === "csv") {
+      const txtContent = buf.toString("utf8");
+      const res = columnMapping
+        ? csvToRawTransactionsWithMapping(txtContent, columnMapping)
+        : csvToRawTransactions(txtContent);
+      rows = res.rows; errors.push(...res.errors);
+    } else if (format === "ofx" || format === "qfx") {
+      const txtContent = buf.toString("utf8");
+      const parsed = parseOfx(txtContent);
+      rows = parsed.transactions.map((t) => ({
+        date: t.date, account: "", amount: t.amount,
+        payee: t.payee, currency: parsed.currency,
+        note: t.memo, fitId: t.fitId,
+      }));
+    } else {
+      throw new Error(`Unsupported upload format: ${format}`);
+    }
+    return { upload, rows, errors };
+  }
+
+  // ── list_pending_uploads ───────────────────────────────────────────────────
+  server.tool(
+    "list_pending_uploads",
+    "List uploaded files that are pending or previewed (not yet executed or cancelled).",
+    {},
+    async () => {
+      const rows = await sqlite.prepare(
+        `SELECT id, format, original_filename, size_bytes, row_count, status, created_at, expires_at
+         FROM mcp_uploads
+         WHERE user_id = ? AND status IN ('pending', 'previewed') AND expires_at > NOW()
+         ORDER BY created_at DESC`
+      ).all(userId);
+      return txt({ success: true, data: rows });
+    }
+  );
+
+  // ── preview_import ─────────────────────────────────────────────────────────
+  server.tool(
+    "preview_import",
+    "Preview an uploaded CSV/OFX/QFX file (or a local file path if ALLOW_LOCAL_FILE_IMPORT=1). Returns parsed rows + confirmationToken.",
+    {
+      upload_id: z.string().optional(),
+      file_path: z.string().optional().describe("Local absolute path (stdio only, ALLOW_LOCAL_FILE_IMPORT=1)"),
+      template_id: z.number().optional(),
+      column_mapping: z.record(z.string(), z.string()).optional(),
+    },
+    async ({ upload_id, file_path, template_id, column_mapping }) => {
+      try {
+        if (!upload_id && !file_path) return sqliteErr("Provide upload_id or file_path");
+        if (file_path && !allowLocalFile) return sqliteErr("Local-file import disabled — set ALLOW_LOCAL_FILE_IMPORT=1");
+
+        let mapping: Record<string, string> | undefined = column_mapping;
+        if (template_id !== undefined && !mapping) {
+          const tpl = await sqlite.prepare(`SELECT column_mapping FROM import_templates WHERE id = ? AND user_id = ?`).get(template_id, userId) as { column_mapping: string } | undefined;
+          if (!tpl) return sqliteErr(`Import template #${template_id} not found`);
+          try { mapping = JSON.parse(tpl.column_mapping) as Record<string, string>; }
+          catch { return sqliteErr("Import template has invalid column_mapping JSON"); }
+        }
+
+        let rows: RawTransaction[] = [];
+        let errors: Array<{ row: number; message: string }> = [];
+        let format = "csv";
+
+        if (upload_id) {
+          const loaded = await loadRowsFromUpload(upload_id, mapping);
+          rows = loaded.rows; errors = loaded.errors;
+          format = String(loaded.upload.format);
+        } else if (file_path) {
+          const loaded = await loadRowsFromPath(file_path);
+          rows = loaded.rows; errors = loaded.errors;
+          format = loaded.format;
+        }
+
+        const accounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as Array<{ id: number; name: string }>;
+        const accountByName = new Map<string, number>(accounts.map((a) => [a.name, a.id]));
+        const existingHashRows = await sqlite.prepare(`SELECT import_hash FROM transactions WHERE user_id = ? AND import_hash IS NOT NULL`).all(userId) as Array<{ import_hash: string }>;
+        const existingHashes = new Set<string>(existingHashRows.map((r) => r.import_hash));
+
+        let dedupHits = 0;
+        const unresolvedAccounts = new Set<string>();
+        for (const r of rows) {
+          const aId = accountByName.get(r.account);
+          if (!aId && r.account) unresolvedAccounts.add(r.account);
+          if (aId) {
+            const h = generateImportHash(r.date, aId, r.amount, r.payee);
+            if (existingHashes.has(h)) dedupHits++;
+          }
+        }
+
+        let categorizedRows = 0;
+        for (const r of rows) if (r.category) categorizedRows++;
+        // A deeper rules-based pass costs an extra DB read; stdio is hot-path,
+        // keep this lightweight.
+
+        if (upload_id) {
+          await sqlite.prepare(
+            `UPDATE mcp_uploads SET status = 'previewed', row_count = ? WHERE id = ? AND user_id = ?`
+          ).run(rows.length, upload_id, userId);
+        }
+
+        const tokenPayload = {
+          uploadId: upload_id ?? null,
+          filePath: file_path ?? null,
+          templateId: template_id ?? null,
+          columnMapping: mapping ?? null,
+        };
+        const token = signConfirmationToken(userId, "execute_import", tokenPayload);
+
+        return txt({
+          success: true,
+          data: {
+            uploadId: upload_id ?? null,
+            filePath: file_path ?? null,
+            format,
+            parsedRows: rows.length,
+            sampleRows: rows.slice(0, 20),
+            parseErrors: errors.slice(0, 20),
+            dedupHits,
+            categoryCoveragePct: rows.length === 0 ? 0 : Math.round((categorizedRows / rows.length) * 100),
+            unresolvedAccounts: Array.from(unresolvedAccounts),
+            confirmationToken: token,
+          },
+        });
+      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+    }
+  );
+
+  // ── execute_import ─────────────────────────────────────────────────────────
+  server.tool(
+    "execute_import",
+    "Commit an uploaded file (or local file if ALLOW_LOCAL_FILE_IMPORT=1). Requires the token from preview_import.",
+    {
+      upload_id: z.string().optional(),
+      file_path: z.string().optional(),
+      confirmation_token: z.string(),
+      template_id: z.number().optional(),
+      column_mapping: z.record(z.string(), z.string()).optional(),
+    },
+    async ({ upload_id, file_path, confirmation_token, template_id, column_mapping }) => {
+      if (!upload_id && !file_path) return sqliteErr("Provide upload_id or file_path");
+      if (file_path && !allowLocalFile) return sqliteErr("Local-file import disabled — set ALLOW_LOCAL_FILE_IMPORT=1");
+
+      const check = verifyConfirmationToken(confirmation_token, userId, "execute_import", {
+        uploadId: upload_id ?? null,
+        filePath: file_path ?? null,
+        templateId: template_id ?? null,
+        columnMapping: column_mapping ?? null,
+      });
+      if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_import.`);
+
+      try {
+        let mapping: Record<string, string> | undefined = column_mapping;
+        if (template_id !== undefined && !mapping) {
+          const tpl = await sqlite.prepare(`SELECT column_mapping FROM import_templates WHERE id = ? AND user_id = ?`).get(template_id, userId) as { column_mapping: string } | undefined;
+          if (tpl) { try { mapping = JSON.parse(tpl.column_mapping) as Record<string, string>; } catch { /* ignore */ } }
+        }
+
+        let rows: RawTransaction[] = [];
+        if (upload_id) rows = (await loadRowsFromUpload(upload_id, mapping)).rows;
+        else if (file_path) rows = (await loadRowsFromPath(file_path)).rows;
+
+        // stdio has no DEK — pipelineExecute will store plaintext.
+        const result = await pipelineExecute(rows, [], userId);
+
+        if (upload_id) {
+          await sqlite.prepare(`UPDATE mcp_uploads SET status = 'executed' WHERE id = ? AND user_id = ?`).run(upload_id, userId);
+        }
+        invalidateUserTxCache(userId);
+        return txt({ success: true, data: result });
+      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+    }
+  );
+
+  // ── cancel_import ──────────────────────────────────────────────────────────
+  server.tool(
+    "cancel_import",
+    "Cancel a pending MCP upload — marks the row as cancelled and deletes the file.",
+    { upload_id: z.string() },
+    async ({ upload_id }) => {
+      const u = await sqlite.prepare(`SELECT id, storage_path, status FROM mcp_uploads WHERE id = ? AND user_id = ?`).get(upload_id, userId) as { id: string; storage_path: string; status: string } | undefined;
+      if (!u) return sqliteErr(`Upload #${upload_id} not found`);
+      if (u.status === "executed") return sqliteErr("Upload already executed, cannot cancel");
+      try { await fs.unlink(u.storage_path); } catch { /* file already gone */ }
+      await sqlite.prepare(`UPDATE mcp_uploads SET status = 'cancelled' WHERE id = ? AND user_id = ?`).run(upload_id, userId);
+      return txt({ success: true, data: { uploadId: upload_id, message: "Upload cancelled" } });
     }
   );
 }

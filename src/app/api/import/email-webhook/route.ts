@@ -15,6 +15,7 @@ import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
 import { deserializeTemplate, findBestTemplate, autoDetectColumnMapping } from "@/lib/import-templates";
 import { unwrapDEKForSecret } from "@/lib/api-auth";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 
 export async function POST(request: NextRequest) {
   try {
@@ -120,6 +121,7 @@ export async function POST(request: NextRequest) {
     // rollout won't have a wrap — their rows go plaintext until they
     // regenerate the webhook secret.
     const result = await executeImport(allRows, [], userId, webhookDek ?? undefined);
+    if ((result.imported ?? 0) > 0) invalidateUserTxCache(userId);
 
     // Create notification scoped to user
     await db.insert(schema.notifications)

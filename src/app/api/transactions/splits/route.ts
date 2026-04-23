@@ -16,6 +16,7 @@ import {
   encryptSplitWrite,
   decryptSplitRows,
 } from "@/lib/crypto/encrypted-columns";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { db, schema } from "@/db";
 import { eq, and, inArray } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
@@ -128,6 +129,7 @@ export async function POST(request: NextRequest) {
     });
 
     const inserted = await db.insert(transactionSplits).values(rows).returning().all();
+    invalidateUserTxCache(userId);
     return NextResponse.json(decryptSplitRows(dek, inserted), { status: 201 });
   } catch (error) {
     return NextResponse.json(
@@ -151,5 +153,6 @@ export async function DELETE(request: NextRequest) {
   }
 
   await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId));
+  invalidateUserTxCache(auth.context.userId);
   return NextResponse.json({ success: true });
 }

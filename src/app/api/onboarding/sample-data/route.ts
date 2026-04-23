@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { createCategory, createAccount, getAccounts, getCategories } from "@/lib/queries";
 import { db, schema } from "@/db";
+import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 
 const SAMPLE_CATEGORIES = [
   { type: "E", group: "Food", name: "Groceries" },
@@ -186,6 +187,7 @@ export async function POST(request: NextRequest) {
     // Bulk insert transactions
     if (sampleTransactions.length > 0) {
       await db.insert(schema.transactions).values(sampleTransactions);
+      invalidateUserTxCache(userId);
     }
 
     return NextResponse.json({ success: true, transactionsCreated: sampleTransactions.length });
