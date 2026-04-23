@@ -27,6 +27,20 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - **Typography.** Added `Instrument Serif` (italic) via `next/font/google` for display accents in `<em>` on the landing; `--font-instrument-serif` available to any component that wants it.
 
 ### Added
+- **MCP parity expansion — 41 new tools bringing the surface to 86 HTTP / 80 stdio (2026-04-23).** Plan: [Research/mcp-parity-plan.md](../Research/mcp-parity-plan.md).
+  - **Loans (6):** `list_loans`, `add_loan`, `update_loan`, `delete_loan`, `get_loan_amortization`, `get_debt_payoff_plan` (avalanche / snowball comparison)
+  - **FX rates (5):** `get_fx_rate`, `list_fx_overrides`, `set_fx_override`, `delete_fx_override`, `convert_amount`
+  - **Subscriptions (9):** `list_subscriptions`, `add_subscription`, `update_subscription`, `pause_subscription`, `resume_subscription`, `cancel_subscription`, `delete_subscription`, plus `detect_subscriptions` + `bulk_add_subscriptions` (payee-grouping runs against the per-user in-memory tx cache since SQL GROUP BY on encrypted ciphertext is broken)
+  - **Rules (5):** `list_rules`, `update_rule`, `delete_rule`, `reorder_rules`, `test_rule` (dry-run against user's transactions before committing)
+  - **Transaction splits (5):** `list_splits`, `add_split`, `update_split`, `delete_split`, `replace_splits` (atomic, validates sum equals parent amount)
+  - **Bulk edit (6):** `preview_bulk_update`/`execute_bulk_update`, `preview_bulk_delete`/`execute_bulk_delete`, `preview_bulk_categorize`/`execute_bulk_categorize` — all preview/execute pairs gated by a confirmation token so Claude cannot widen scope between steps
+  - **Suggest (1):** `suggest_transaction_details` returns top-N category + tag suggestions using rule matches + historical frequency
+  - **File import (4) + upload endpoint:** `POST /api/mcp/upload` (CSV/OFX/QFX, 5 MB cap) → `list_pending_uploads` → `preview_import` → `execute_import` / `cancel_import`. Uploads expire after 24 h; a 30-min cleanup sweep runs from [instrumentation.ts](instrumentation.ts)
+- **Foundation primitives supporting the MCP expansion:**
+  - [src/lib/mcp/confirmation-token.ts](src/lib/mcp/confirmation-token.ts) — HMAC-SHA256 signed, 5-min TTL, canonical-JSON payload hash; distinct rejection reasons (`payload-mismatch`, `expired`, `user-mismatch`, `operation-mismatch`, `bad-signature`, `malformed`) so tool errors are actionable
+  - [src/lib/mcp/user-tx-cache.ts](src/lib/mcp/user-tx-cache.ts) — per-user LRU (10 users × 50k rows) of decrypted transactions; `invalidateUser(userId)` wired into 11 API routes + 6 existing MCP write tools
+  - Deploy-generation force-logout: JWT `gen` claim rotates on every deploy, 401s carry `{code: "deploy-reauth-required"}`; [deploy.sh](deploy.sh) installs a systemd drop-in stamping `DEPLOY_GENERATION` before restart
+- **Schema:** [drizzle-pg/0003_add_mcp_uploads.sql](drizzle-pg/0003_add_mcp_uploads.sql) adds the `mcp_uploads` table tracking upload lifecycle (pending → previewed → executed / cancelled / expired). Apply per environment with `psql -f` before deploying (same pattern as prior migrations).
 - **Public demo account** (`demo@finlynq.com` / `finlynq-demo`) seeded on production with 6 months of realistic sample data (253 transactions across 4 accounts, 4 investment buys, 4 budgets, 3 portfolio holdings, 2 goals) so first-time visitors can explore the app without signing up
 - `scripts/seed-demo.ts` — idempotent demo seeder; `npm run seed:demo`
 - `deploy/finlynq-demo-reset.{service,timer}` — systemd unit + timer that reseeds the demo account nightly at 03:00 UTC; install script at `deploy/install-demo-reset.sh`
