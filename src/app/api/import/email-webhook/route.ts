@@ -48,6 +48,7 @@ import {
   storeIncomingEmail,
   notifyAdminsOfIncoming,
 } from "@/lib/email-import/store-incoming-email";
+import { sendBounceIfAuthenticated } from "@/lib/email-import/bounce";
 
 // 10 MB request-body cap on the Resend path.
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -203,6 +204,16 @@ async function handleResendInbound(request: NextRequest): Promise<NextResponse> 
         route.category as "mailbox" | "trash",
         route.address,
       );
+      // Fire-and-forget bounce for trash. Silently no-ops if RESEND_API_KEY
+      // isn't set OR SPF/DKIM didn't pass — no backscatter to spoofed senders.
+      if (route.category === "trash") {
+        sendBounceIfAuthenticated({
+          toAddress: route.address,
+          fromAddress: parsed.from,
+          subject: parsed.subject,
+          authVerdict: parsed.authVerdict,
+        }).catch((e) => console.warn("[email-webhook] bounce failed", e));
+      }
       results.push({ to: route.address, category: route.category });
     }
   }
@@ -219,6 +230,11 @@ interface ParsedResendPayload {
   text: string | null;
   html: string | null;
   attachments: ResendAttachment[];
+  authVerdict: {
+    spf?: string | null;
+    dkim?: string | null;
+    dmarc?: string | null;
+  };
 }
 
 /**
@@ -276,7 +292,21 @@ function extractResendPayload(raw: unknown): ParsedResendPayload | null {
     }
   }
 
-  return { from, to, subject, text, html, attachments };
+  // Resend exposes auth verdicts as top-level strings on data. Names aren't
+  // fully pinned — accept a few variants.
+  const authVerdict = {
+    spf: typeof data.spf_verdict === "string" ? data.spf_verdict
+      : typeof data.spf === "string" ? data.spf
+      : null,
+    dkim: typeof data.dkim_verdict === "string" ? data.dkim_verdict
+      : typeof data.dkim === "string" ? data.dkim
+      : null,
+    dmarc: typeof data.dmarc_verdict === "string" ? data.dmarc_verdict
+      : typeof data.dmarc === "string" ? data.dmarc
+      : null,
+  };
+
+  return { from, to, subject, text, html, attachments, authVerdict };
 }
 
 function extractEmail(raw: unknown): string | null {
