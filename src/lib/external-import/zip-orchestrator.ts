@@ -125,7 +125,13 @@ async function materializeZipMapping(
 
   const externalAccountById = new Map(parsed.accounts.map((a) => [a.id, a]));
   const existingAccounts = await getAccounts(userId, { includeArchived: false });
-  const accountByName = new Map(existingAccounts.map((a) => [a.name, a]));
+  // Dedup key matches Stream D's name_lookup (HMAC of lowercased-trimmed
+  // name). If this map was case-sensitive, auto-creating "Entertainment"
+  // when the user already has "entertainment" would collide at the DB's
+  // UNIQUE (user_id, name_lookup) partial index — the orchestrator wouldn't
+  // catch it and the INSERT would fail mid-batch.
+  const nameKey = (n: string) => n.trim().toLowerCase();
+  const accountByName = new Map(existingAccounts.map((a) => [nameKey(a.name), a]));
   // Only carry over prior-mapping entries whose Finlynq account still exists.
   // Accounts can be deleted outside this flow (manual cleanup in /accounts,
   // wipe-account, schema rebuild on dev) which leaves us with a stale
@@ -148,7 +154,7 @@ async function materializeZipMapping(
     if (row.autoCreate) {
       const ext = externalAccountById.get(row.externalId);
       const desiredName = row.autoCreate.name || ext?.name || row.externalId;
-      const existing = accountByName.get(desiredName);
+      const existing = accountByName.get(nameKey(desiredName));
       if (existing) {
         accountMap[row.externalId] = existing.id;
         continue;
@@ -163,14 +169,14 @@ async function materializeZipMapping(
       });
       if (created) {
         accountMap[row.externalId] = created.id;
-        accountByName.set(desiredName, created);
+        accountByName.set(nameKey(desiredName), created);
       }
     }
   }
 
   const externalCategoryById = new Map(parsed.categories.map((c) => [c.id, c]));
   const existingCats = await getCategories(userId);
-  const catByName = new Map(existingCats.map((c) => [c.name, c]));
+  const catByName = new Map(existingCats.map((c) => [nameKey(c.name), c]));
   const existingCatIds = new Set(existingCats.map((c) => c.id));
   for (const [extId, pfId] of Object.entries(existing.categoryMap)) {
     if (pfId === null || existingCatIds.has(pfId)) categoryMap[extId] = pfId;
@@ -191,7 +197,7 @@ async function materializeZipMapping(
     if (row.autoCreate) {
       const ext = externalCategoryById.get(row.externalId);
       const desiredName = row.autoCreate.name || ext?.name || row.externalId;
-      const existing = catByName.get(desiredName);
+      const existing = catByName.get(nameKey(desiredName));
       if (existing) {
         categoryMap[row.externalId] = existing.id;
         continue;
@@ -205,7 +211,7 @@ async function materializeZipMapping(
       });
       if (created) {
         categoryMap[row.externalId] = created.id;
-        catByName.set(desiredName, created);
+        catByName.set(nameKey(desiredName), created);
       }
     }
   }
@@ -215,7 +221,7 @@ async function materializeZipMapping(
       ? input.transferCategoryId
       : null;
   if (transferCategoryId === null && input.transferCategoryAutoCreate) {
-    const existingByName = catByName.get(input.transferCategoryAutoCreate.name);
+    const existingByName = catByName.get(nameKey(input.transferCategoryAutoCreate.name));
     if (existingByName) {
       transferCategoryId = existingByName.id;
     } else {
@@ -228,7 +234,7 @@ async function materializeZipMapping(
       });
       if (created) {
         transferCategoryId = created.id;
-        catByName.set(created.name, created);
+        catByName.set(nameKey(created.name), created);
       }
     }
   }
@@ -237,7 +243,7 @@ async function materializeZipMapping(
       ? input.openingBalanceCategoryId
       : null;
   if (openingBalanceCategoryId === null && input.openingBalanceCategoryAutoCreate) {
-    const existingByName = catByName.get(input.openingBalanceCategoryAutoCreate.name);
+    const existingByName = catByName.get(nameKey(input.openingBalanceCategoryAutoCreate.name));
     if (existingByName) {
       openingBalanceCategoryId = existingByName.id;
     } else {
@@ -250,7 +256,7 @@ async function materializeZipMapping(
       });
       if (created) {
         openingBalanceCategoryId = created.id;
-        catByName.set(created.name, created);
+        catByName.set(nameKey(created.name), created);
       }
     }
   }

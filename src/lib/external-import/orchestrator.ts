@@ -122,7 +122,13 @@ export async function materializeMapping(
 
   const externalAccountById = new Map(externalAccounts.map((a) => [a.id, a] as const));
   const existingAccounts = await getAccounts(userId, { includeArchived: false });
-  const accountByName = new Map(existingAccounts.map((a) => [a.name, a]));
+  // Dedup key matches Stream D's name_lookup (HMAC of lowercased-trimmed
+  // name). Case-sensitive Map lookup here would miss when the user already
+  // has "entertainment" and the importer tries to auto-create "Entertainment",
+  // and the INSERT would then fail on the UNIQUE (user_id, name_lookup)
+  // partial index.
+  const nameKey = (n: string) => n.trim().toLowerCase();
+  const accountByName = new Map(existingAccounts.map((a) => [nameKey(a.name), a]));
 
   for (const row of input.accounts) {
     if (row.finlynqId !== undefined) {
@@ -133,7 +139,7 @@ export async function materializeMapping(
       const ext = externalAccountById.get(row.externalId);
       const desiredName = row.autoCreate.name || ext?.name || row.externalId;
       // Avoid duplicate auto-creates if the user runs the dialog twice.
-      const existing = accountByName.get(desiredName);
+      const existing = accountByName.get(nameKey(desiredName));
       if (existing) {
         accountMap[row.externalId] = existing.id;
         continue;
@@ -148,14 +154,14 @@ export async function materializeMapping(
       });
       if (created) {
         accountMap[row.externalId] = created.id;
-        accountByName.set(desiredName, created);
+        accountByName.set(nameKey(desiredName), created);
       }
     }
   }
 
   const externalCategoryById = new Map(externalCategories.map((c) => [c.id, c] as const));
   const existingCategories = await getCategories(userId);
-  const categoryByName = new Map(existingCategories.map((c) => [c.name, c]));
+  const categoryByName = new Map(existingCategories.map((c) => [nameKey(c.name), c]));
 
   for (const row of input.categories) {
     if (row.uncategorized) {
@@ -169,7 +175,7 @@ export async function materializeMapping(
     if (row.autoCreate) {
       const ext = externalCategoryById.get(row.externalId);
       const desiredName = row.autoCreate.name || ext?.name || row.externalId;
-      const existing = categoryByName.get(desiredName);
+      const existing = categoryByName.get(nameKey(desiredName));
       if (existing) {
         categoryMap[row.externalId] = existing.id;
         continue;
@@ -183,7 +189,7 @@ export async function materializeMapping(
       });
       if (created) {
         categoryMap[row.externalId] = created.id;
-        categoryByName.set(desiredName, created);
+        categoryByName.set(nameKey(desiredName), created);
       }
     }
   }
