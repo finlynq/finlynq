@@ -13,6 +13,7 @@ import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { decryptField, encryptField } from "../src/lib/crypto/envelope";
 import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
+import { encryptName, nameLookup } from "../src/lib/crypto/encrypted-columns";
 import {
   generateAmortizationSchedule,
   calculateDebtPayoff,
@@ -92,6 +93,53 @@ function fuzzyFind(input: string, options: Row[]): Row | null {
     options.find(o => lo.includes(String(o.name ?? "").toLowerCase())) ??
     null
   );
+}
+
+/**
+ * Stream D: decrypt name + alias + symbol columns on a row set before
+ * handing them to {@link fuzzyFind} or display code. Pre-Phase-3, rows may
+ * have plaintext populated and `name_ct` null — in that case plaintext
+ * passes through. Post-Phase-3, only `name_ct` is populated and we need
+ * the DEK to read it. With `dek === null` (stdio MCP) and only ct present,
+ * rows ship with `v1:...` as their `name` — the caller handles that case.
+ */
+function decryptNameish(rows: Row[], dek: Buffer | null): Row[] {
+  if (!rows.length) return rows;
+  return rows.map((r) => {
+    const out: Row = { ...r };
+    const nameCt = (r.name_ct ?? r.nameCt) as string | null | undefined;
+    const aliasCt = (r.alias_ct ?? r.aliasCt) as string | null | undefined;
+    const symbolCt = (r.symbol_ct ?? r.symbolCt) as string | null | undefined;
+    if (nameCt && nameCt !== "") {
+      out.name = dek ? decryptField(dek, nameCt) : nameCt;
+    }
+    if (aliasCt !== undefined && aliasCt !== null && aliasCt !== "") {
+      out.alias = dek ? decryptField(dek, aliasCt) : aliasCt;
+    }
+    if (symbolCt !== undefined && symbolCt !== null && symbolCt !== "") {
+      out.symbol = dek ? decryptField(dek, symbolCt) : symbolCt;
+    }
+    return out;
+  });
+}
+
+/**
+ * Stream D write-side helper: produce `{ nameCt, nameLookup }` etc. from a
+ * field map. Returns an empty object when `dek` is null (no DEK, stdio MCP)
+ * — callers still write plaintext, backfill encrypts on next login.
+ */
+function buildCtLookup(
+  dek: Buffer | null,
+  fields: Record<string, string | null | undefined>,
+): Record<string, string | null> {
+  if (!dek) return {};
+  const out: Record<string, string | null> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    const { ct, lookup } = encryptName(dek, value);
+    out[key + "Ct"] = ct;
+    out[key + "Lookup"] = lookup;
+  }
+  return out;
 }
 
 /**
@@ -269,16 +317,23 @@ export function registerPgTools(
     "Get current balances for all accounts, grouped by type (asset/liability)",
     { currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency") },
     async ({ currency }) => {
-      const rows = await q(db, sql`
-        SELECT a.id, a.name, a.alias, a.type, a."group", a.currency,
+      const raw = await q(db, sql`
+        SELECT a.id, a.name, a.name_ct, a.alias, a.alias_ct, a.type, a."group", a.currency,
                COALESCE(SUM(t.amount), 0) AS balance
         FROM accounts a
         LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
         WHERE a.user_id = ${userId}
           ${currency && currency !== "all" ? sql`AND a.currency = ${currency}` : sql``}
-        GROUP BY a.id, a.name, a.alias, a.type, a."group", a.currency
-        ORDER BY a.type, a."group", a.name
+        GROUP BY a.id, a.name, a.name_ct, a.alias, a.alias_ct, a.type, a."group", a.currency
+        ORDER BY a.type, a."group"
       `);
+      // Stream D: decrypt name + alias before returning. Drop the internal
+      // _ct columns from the response so Claude doesn't see them.
+      const rows = decryptNameish(raw, dek).map((r) => {
+        const { name_ct, alias_ct, ...rest } = r;
+        void name_ct; void alias_ct;
+        return rest;
+      });
       return text(rows);
     }
   );
@@ -488,36 +543,55 @@ export function registerPgTools(
 
   // ── get_goals ─────────────────────────────────────────────────────────────
   server.tool("get_goals", "Get all financial goals with progress", {}, async () => {
-    const rows = await q(db, sql`
-      SELECT g.id, g.name, g.type, g.target_amount, g.deadline, g.status, g.priority,
-             a.name AS account
+    const raw = await q(db, sql`
+      SELECT g.id, g.name, g.name_ct, g.type, g.target_amount, g.deadline, g.status, g.priority,
+             a.name AS account, a.name_ct AS account_name_ct
       FROM goals g
       LEFT JOIN accounts a ON g.account_id = a.id
       WHERE g.user_id = ${userId}
       ORDER BY g.priority
     `);
+    const rows = raw.map((r) => {
+      const { name_ct, account_name_ct, ...rest } = r;
+      return {
+        ...rest,
+        name: name_ct && dek ? decryptField(dek, name_ct) : rest.name,
+        account: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account,
+      };
+    });
     return text(rows);
   });
 
   // ── get_categories ─────────────────────────────────────────────────────────
   server.tool("get_categories", "List all available transaction categories", {}, async () => {
-    const rows = await q(db, sql`
-      SELECT name, type, "group"
+    const raw = await q(db, sql`
+      SELECT name, name_ct, type, "group"
       FROM categories
       WHERE user_id = ${userId}
-      ORDER BY type, "group", name
+      ORDER BY type, "group"
     `);
+    // Stream D: decrypt name; drop internal _ct column from output.
+    const rows = decryptNameish(raw, dek).map((r) => {
+      const { name_ct, ...rest } = r;
+      void name_ct;
+      return rest;
+    });
     return text(rows);
   });
 
   // ── get_loans ─────────────────────────────────────────────────────────────
   server.tool("get_loans", "Get all loans with amortization summary", {}, async () => {
-    const rows = await q(db, sql`
-      SELECT id, name, type, principal, annual_rate, term_months, start_date,
+    const raw = await q(db, sql`
+      SELECT id, name, name_ct, type, principal, annual_rate, term_months, start_date,
              payment_frequency, extra_payment
       FROM loans
       WHERE user_id = ${userId}
     `);
+    const rows = decryptNameish(raw, dek).map((r) => {
+      const { name_ct, ...rest } = r;
+      void name_ct;
+      return rest;
+    });
     return text(rows);
   });
 
@@ -527,14 +601,19 @@ export function registerPgTools(
     "Get all tracked subscriptions with total monthly cost and upcoming renewals",
     {},
     async () => {
-      const subs = await q(db, sql`
-        SELECT s.id, s.name, s.amount, s.currency, s.frequency, s.next_date, s.status,
-               c.name AS category_name
+      const rawSubs = await q(db, sql`
+        SELECT s.id, s.name, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
+               c.name AS category_name, c.name_ct AS category_name_ct
         FROM subscriptions s
         LEFT JOIN categories c ON s.category_id = c.id
         WHERE s.user_id = ${userId}
-        ORDER BY s.status, s.name
+        ORDER BY s.status
       `);
+      const subs: Row[] = rawSubs.map((r) => ({
+        ...r,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
+        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : r.category_name,
+      }));
 
       const active = subs.filter(s => s.status === "active");
       const freqMult: Record<string, number> = { weekly: 4.33, monthly: 1, quarterly: 1/3, annual: 1/12, yearly: 1/12 };
@@ -956,13 +1035,17 @@ export function registerPgTools(
     async ({ name, type, target_amount, deadline, account }) => {
       let accountId: number | null = null;
       if (account) {
-        const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+        const rawAccounts = await q(db, sql`
+          SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
         const acct = fuzzyFind(account, allAccounts);
         accountId = acct ? Number(acct.id) : null;
       }
+      const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       await db.execute(sql`
-        INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, status)
-        VALUES (${userId}, ${name}, ${type}, ${target_amount}, ${deadline ?? null}, ${accountId}, 'active')
+        INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, status, name_ct, name_lookup)
+        VALUES (${userId}, ${name}, ${type}, ${target_amount}, ${deadline ?? null}, ${accountId}, 'active', ${n.ct}, ${n.lookup})
       `);
       return text({ success: true, message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` });
     }
@@ -981,13 +1064,27 @@ export function registerPgTools(
       alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },
     async ({ name, type, group, currency, note, alias }) => {
-      const existing = await q(db, sql`SELECT id FROM accounts WHERE user_id = ${userId} AND name = ${name}`);
+      // Stream D: check against both plaintext AND name_lookup for collision.
+      const lookup = dek ? nameLookup(dek, name) : null;
+      const existing = await q(db, sql`
+        SELECT id FROM accounts
+        WHERE user_id = ${userId}
+          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
+      `);
       if (existing.length) return err(`Account "${name}" already exists (id: ${existing[0].id})`);
 
       const aliasValue = alias && alias.trim() ? alias.trim() : null;
+      const nameEnc = dek ? encryptName(dek, name) : { ct: null, lookup: null };
+      const aliasEnc = dek ? encryptName(dek, aliasValue) : { ct: null, lookup: null };
       const result = await q(db, sql`
-        INSERT INTO accounts (user_id, type, "group", name, currency, note, alias)
-        VALUES (${userId}, ${type}, ${group ?? ""}, ${name}, ${currency ?? "CAD"}, ${note ?? ""}, ${aliasValue})
+        INSERT INTO accounts (
+          user_id, type, "group", name, currency, note, alias,
+          name_ct, name_lookup, alias_ct, alias_lookup
+        )
+        VALUES (
+          ${userId}, ${type}, ${group ?? ""}, ${name}, ${currency ?? "CAD"}, ${note ?? ""}, ${aliasValue},
+          ${nameEnc.ct}, ${nameEnc.lookup}, ${aliasEnc.ct}, ${aliasEnc.lookup}
+        )
         RETURNING id
       `);
 
@@ -1012,15 +1109,19 @@ export function registerPgTools(
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
-      const allAccounts = await q(db, sql`SELECT id, name, alias, currency FROM accounts WHERE user_id = ${userId}`);
-      if (!allAccounts.length) return err("No accounts found — create an account first.");
+      const rawAccounts = await q(db, sql`
+        SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+      `);
+      if (!rawAccounts.length) return err("No accounts found — create an account first.");
+      const allAccounts = decryptNameish(rawAccounts, dek);
       const acct: Row | null = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
 
       // Resolve category (fuzzy or auto)
       let catId: number | null = null;
       if (category) {
-        const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+        const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+        const allCats = decryptNameish(rawCats, dek);
         const cat = fuzzyFind(category, allCats);
         if (!cat) return err(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
         catId = Number(cat.id);
@@ -1222,19 +1323,34 @@ export function registerPgTools(
       alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports (e.g. last 4 digits of a card). Pass an empty string to clear."),
     },
     async ({ account, name, group, currency, note, alias }) => {
-      const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+      const rawAccounts = await q(db, sql`
+        SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+      `);
+      const allAccounts = decryptNameish(rawAccounts, dek);
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found`);
 
       // Build parameterized SET clauses — no sql.raw, no manual escaping.
+      // Stream D: dual-write name_ct/name_lookup/alias_ct/alias_lookup when DEK.
       const updates: ReturnType<typeof sql>[] = [];
-      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (name !== undefined) {
+        updates.push(sql`name = ${name}`);
+        if (dek) {
+          const n = encryptName(dek, name);
+          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
+        }
+      }
       if (group !== undefined) updates.push(sql`"group" = ${group}`);
       if (currency !== undefined) updates.push(sql`currency = ${currency}`);
       if (note !== undefined) updates.push(sql`note = ${note}`);
       if (alias !== undefined) {
         const trimmed = alias.trim();
-        updates.push(trimmed ? sql`alias = ${trimmed}` : sql`alias = NULL`);
+        const aliasValue = trimmed ? trimmed : null;
+        updates.push(aliasValue === null ? sql`alias = NULL` : sql`alias = ${aliasValue}`);
+        if (dek) {
+          const a = encryptName(dek, aliasValue);
+          updates.push(sql`alias_ct = ${a.ct}`, sql`alias_lookup = ${a.lookup}`);
+        }
       }
       if (!updates.length) return err("No fields to update");
 
@@ -1288,13 +1404,20 @@ export function registerPgTools(
       name: z.string().optional().describe("Rename the goal"),
     },
     async ({ goal, target_amount, deadline, status, name }) => {
-      const allGoals = await q(db, sql`SELECT id, name FROM goals WHERE user_id = ${userId}`);
+      const rawGoals = await q(db, sql`SELECT id, name, name_ct FROM goals WHERE user_id = ${userId}`);
+      const allGoals = decryptNameish(rawGoals, dek);
       const g = fuzzyFind(goal, allGoals);
       if (!g) return err(`Goal "${goal}" not found`);
 
       // Build parameterized SET clauses — no sql.raw, no manual escaping.
       const updates: ReturnType<typeof sql>[] = [];
-      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (name !== undefined) {
+        updates.push(sql`name = ${name}`);
+        if (dek) {
+          const n = encryptName(dek, name);
+          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
+        }
+      }
       if (target_amount !== undefined) updates.push(sql`target_amount = ${target_amount}`);
       if (deadline !== undefined) updates.push(sql`deadline = ${deadline}`);
       if (status !== undefined) updates.push(sql`status = ${status}`);
@@ -1320,7 +1443,8 @@ export function registerPgTools(
       goal: z.string().describe("Goal name (fuzzy matched)"),
     },
     async ({ goal }) => {
-      const allGoals = await q(db, sql`SELECT id, name FROM goals WHERE user_id = ${userId}`);
+      const rawGoals = await q(db, sql`SELECT id, name, name_ct FROM goals WHERE user_id = ${userId}`);
+      const allGoals = decryptNameish(rawGoals, dek);
       const g = fuzzyFind(goal, allGoals);
       if (!g) return err(`Goal "${goal}" not found`);
 
@@ -1340,12 +1464,18 @@ export function registerPgTools(
       note: z.string().optional(),
     },
     async ({ name, type, group, note }) => {
-      const existing = await q(db, sql`SELECT id FROM categories WHERE user_id = ${userId} AND name = ${name}`);
+      const lookup = dek ? nameLookup(dek, name) : null;
+      const existing = await q(db, sql`
+        SELECT id FROM categories
+        WHERE user_id = ${userId}
+          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
+      `);
       if (existing.length) return err(`Category "${name}" already exists`);
 
+      const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const result = await q(db, sql`
-        INSERT INTO categories (user_id, name, type, "group", note)
-        VALUES (${userId}, ${name}, ${type}, ${group ?? ""}, ${note ?? ""})
+        INSERT INTO categories (user_id, name, type, "group", note, name_ct, name_lookup)
+        VALUES (${userId}, ${name}, ${type}, ${group ?? ""}, ${note ?? ""}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` });
@@ -2075,15 +2205,19 @@ export function registerPgTools(
     async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
       let accountId: number | null = null;
       if (account) {
-        const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+        const rawAccounts = await q(db, sql`
+          SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
         const acct = fuzzyFind(account, allAccounts);
         if (!acct) return err(`Account "${account}" not found`);
         accountId = Number(acct.id);
       }
       const pmt = payment_amount ?? min_payment ?? null;
+      const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const result = await q(db, sql`
-        INSERT INTO loans (user_id, name, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note)
-        VALUES (${userId}, ${name}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${note ?? ""})
+        INSERT INTO loans (user_id, name, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note, name_ct, name_lookup)
+        VALUES (${userId}, ${name}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${note ?? ""}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, data: { id: result[0]?.id, message: `Loan "${name}" created — $${principal} at ${annual_rate}% over ${term_months} months` } });
@@ -2117,7 +2251,10 @@ export function registerPgTools(
         if (account === "") {
           accountIdUpdate = null;
         } else {
-          const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+          const rawAccounts = await q(db, sql`
+            SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+          `);
+          const allAccounts = decryptNameish(rawAccounts, dek);
           const acct = fuzzyFind(account, allAccounts);
           if (!acct) return err(`Account "${account}" not found`);
           accountIdUpdate = Number(acct.id);
@@ -2125,7 +2262,13 @@ export function registerPgTools(
       }
 
       const updates: ReturnType<typeof sql>[] = [];
-      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (name !== undefined) {
+        updates.push(sql`name = ${name}`);
+        if (dek) {
+          const n = encryptName(dek, name);
+          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
+        }
+      }
       if (type !== undefined) updates.push(sql`type = ${type}`);
       if (principal !== undefined) updates.push(sql`principal = ${principal}`);
       if (annual_rate !== undefined) updates.push(sql`annual_rate = ${annual_rate}`);
@@ -2381,18 +2524,25 @@ export function registerPgTools(
     "List all subscriptions with full detail (status, next billing, category, account, notes)",
     { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
     async ({ status }) => {
-      const rows = await q(db, sql`
-        SELECT s.id, s.name, s.amount, s.currency, s.frequency, s.next_date, s.status,
+      const raw = await q(db, sql`
+        SELECT s.id, s.name, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
                s.cancel_reminder_date, s.notes,
-               s.category_id, c.name AS category_name,
-               s.account_id, a.name AS account_name
+               s.category_id, c.name AS category_name, c.name_ct AS category_name_ct,
+               s.account_id, a.name AS account_name, a.name_ct AS account_name_ct
         FROM subscriptions s
         LEFT JOIN categories c ON c.id = s.category_id
         LEFT JOIN accounts a ON a.id = s.account_id
         WHERE s.user_id = ${userId}
           ${status && status !== "all" ? sql`AND s.status = ${status}` : sql``}
-        ORDER BY s.status, s.name
+        ORDER BY s.status
       `);
+      // Stream D: decrypt name + joined category_name + account_name.
+      const rows = raw.map((r) => ({
+        ...r,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
+        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : r.category_name,
+        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : r.account_name,
+      }));
       return text({ success: true, data: rows });
     }
   );
@@ -2412,26 +2562,36 @@ export function registerPgTools(
       notes: z.string().optional(),
     },
     async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
-      const existing = await q(db, sql`SELECT id FROM subscriptions WHERE user_id = ${userId} AND name = ${name}`);
+      const lookup = dek ? nameLookup(dek, name) : null;
+      const existing = await q(db, sql`
+        SELECT id FROM subscriptions
+        WHERE user_id = ${userId}
+          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
+      `);
       if (existing.length) return err(`Subscription "${name}" already exists (id: ${existing[0].id})`);
 
       let categoryId: number | null = null;
       if (category) {
-        const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+        const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+        const allCats = decryptNameish(rawCats, dek);
         const cat = fuzzyFind(category, allCats);
         if (!cat) return err(`Category "${category}" not found`);
         categoryId = Number(cat.id);
       }
       let accountId: number | null = null;
       if (account) {
-        const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+        const rawAccounts = await q(db, sql`
+          SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
         const acct = fuzzyFind(account, allAccounts);
         if (!acct) return err(`Account "${account}" not found`);
         accountId = Number(acct.id);
       }
+      const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const result = await q(db, sql`
-        INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes)
-        VALUES (${userId}, ${name}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes ?? null})
+        INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
+        VALUES (${userId}, ${name}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes ?? null}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${currency ?? "CAD"} ${amount} ${cadence}, next ${next_billing_date}` } });
@@ -2463,7 +2623,8 @@ export function registerPgTools(
       if (category !== undefined) {
         if (category === "") categoryIdUpdate = null;
         else {
-          const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+          const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+          const allCats = decryptNameish(rawCats, dek);
           const cat = fuzzyFind(category, allCats);
           if (!cat) return err(`Category "${category}" not found`);
           categoryIdUpdate = Number(cat.id);
@@ -2473,7 +2634,10 @@ export function registerPgTools(
       if (account !== undefined) {
         if (account === "") accountIdUpdate = null;
         else {
-          const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+          const rawAccounts = await q(db, sql`
+            SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+          `);
+          const allAccounts = decryptNameish(rawAccounts, dek);
           const acct = fuzzyFind(account, allAccounts);
           if (!acct) return err(`Account "${account}" not found`);
           accountIdUpdate = Number(acct.id);
@@ -2481,7 +2645,13 @@ export function registerPgTools(
       }
 
       const updates: ReturnType<typeof sql>[] = [];
-      if (name !== undefined) updates.push(sql`name = ${name}`);
+      if (name !== undefined) {
+        updates.push(sql`name = ${name}`);
+        if (dek) {
+          const n = encryptName(dek, name);
+          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
+        }
+      }
       if (amount !== undefined) updates.push(sql`amount = ${amount}`);
       if (cadence !== undefined) updates.push(sql`frequency = ${cadence}`);
       if (next_billing_date !== undefined) updates.push(sql`next_date = ${next_billing_date}`);

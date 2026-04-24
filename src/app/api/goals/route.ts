@@ -4,6 +4,7 @@ import { eq, and, sql } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 const postSchema = z.object({
   name: z.string(),
@@ -31,15 +32,17 @@ const putSchema = z.object({
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const goals = await db
+  const rawGoals = await db
     .select({
       id: schema.goals.id,
       name: schema.goals.name,
+      nameCt: schema.goals.nameCt,
       type: schema.goals.type,
       targetAmount: schema.goals.targetAmount,
       deadline: schema.goals.deadline,
       accountId: schema.goals.accountId,
       accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
       priority: schema.goals.priority,
       status: schema.goals.status,
       note: schema.goals.note,
@@ -47,8 +50,20 @@ export async function GET(request: NextRequest) {
     .from(schema.goals)
     .leftJoin(schema.accounts, eq(schema.goals.accountId, schema.accounts.id))
     .where(eq(schema.goals.userId, userId))
-    .orderBy(schema.goals.priority, schema.goals.name)
+    .orderBy(schema.goals.priority)
     .all();
+  // Stream D: decrypt name + accountName. SQL `ORDER BY name` was dropped —
+  // sorting happens in-memory below after decrypt.
+  const goalsDecrypted = decryptNamedRows(rawGoals, auth.context.dek, {
+    nameCt: "name",
+    accountNameCt: "accountName",
+  });
+  const goals = goalsDecrypted.sort((a, b) => {
+    const pa = a.priority ?? 1;
+    const pb = b.priority ?? 1;
+    if (pa !== pb) return pa - pb;
+    return (a.name ?? "").localeCompare(b.name ?? "");
+  });
 
   // Calculate current amount from linked account balances
   const withProgress = await Promise.all(goals.map(async (g) => {
@@ -95,6 +110,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
+    const enc = buildNameFields(auth.context.dek, { name: d.name });
     const goal = db.insert(schema.goals).values({
       userId: auth.context.userId,
       name: d.name,
@@ -105,6 +121,7 @@ export async function POST(request: NextRequest) {
       priority: d.priority ?? 1,
       status: d.status ?? "active",
       note: d.note ?? "",
+      ...enc,
     }).returning().get();
     return NextResponse.json(goal, { status: 201 });
   } catch (error: unknown) {
@@ -119,8 +136,11 @@ export async function PUT(request: NextRequest) {
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
+    const toEncrypt: Record<string, string | null | undefined> = {};
+    if ("name" in data && data.name !== undefined) toEncrypt.name = data.name;
+    const enc = buildNameFields(auth.context.dek, toEncrypt);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const goal = db.update(schema.goals).set(data as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).returning().get();
+    const goal = db.update(schema.goals).set({ ...data, ...enc } as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).returning().get();
     return NextResponse.json(goal);
   } catch (error: unknown) {
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });

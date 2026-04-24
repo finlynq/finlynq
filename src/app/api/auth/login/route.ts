@@ -19,6 +19,7 @@ import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { deriveKEK, unwrapDEK, createWrappedDEKForPassword } from "@/lib/crypto/envelope";
 import { putDEK } from "@/lib/crypto/dek-cache";
+import { enqueueStreamDBackfill } from "@/lib/crypto/stream-d-backfill";
 
 const loginSchema = z.object({
   email: z.string().email("Invalid email address"),
@@ -156,7 +157,13 @@ export async function POST(request: NextRequest) {
     // No MFA — issue full session and cache the DEK under this session's jti.
     await recordSuccessfulLogin(user.id);
     const { token, jti } = await createSessionToken(user.id, email, false);
-    if (dek) putDEK(jti, dek, SESSION_TTL_MS);
+    if (dek) {
+      putDEK(jti, dek, SESSION_TTL_MS);
+      // Stream D: kick off a fire-and-forget pass over any un-encrypted
+      // display names for this user. Typical user = <200 rows = a few ms.
+      // Do NOT await — login path stays fast; backfill errors are swallowed.
+      enqueueStreamDBackfill(user.id, dek);
+    }
 
     const response = NextResponse.json({ success: true });
 

@@ -3,6 +3,7 @@ import { getAccounts, createAccount, updateAccount, deleteAccount } from "@/lib/
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
+import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 const postSchema = z.object({
   name: z.string(),
@@ -28,7 +29,13 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   try {
     const includeArchived = request.nextUrl.searchParams.get("includeArchived") === "1";
-    const data = await getAccounts(auth.context.userId, { includeArchived });
+    const rows = await getAccounts(auth.context.userId, { includeArchived });
+    // Stream D: decrypt name + alias from *_ct columns when a DEK is in cache,
+    // else fall back to plaintext columns (pre-backfill or degraded session).
+    const data = decryptNamedRows(rows, auth.context.dek, {
+      nameCt: "name",
+      aliasCt: "alias",
+    });
     return NextResponse.json(data);
   } catch (error: unknown) {
     await logApiError("GET", "/api/accounts", error, auth.context.userId);
@@ -43,7 +50,9 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
     const { alias, ...rest } = parsed.data;
-    const account = await createAccount(auth.context.userId, { ...rest, alias: alias ? alias : null });
+    const normalizedAlias = alias ? alias : null;
+    const enc = buildNameFields(auth.context.dek, { name: rest.name, alias: normalizedAlias });
+    const account = await createAccount(auth.context.userId, { ...rest, alias: normalizedAlias, ...enc });
     return NextResponse.json(account, { status: 201 });
   } catch (error: unknown) {
     await logApiError("POST", "/api/accounts", error, auth.context.userId);
@@ -59,7 +68,12 @@ export async function PUT(request: NextRequest) {
     if (parsed.error) return parsed.error;
     const { id, alias, ...data } = parsed.data;
     const normalized = alias === undefined ? data : { ...data, alias: alias ? alias : null };
-    const account = await updateAccount(id, auth.context.userId, normalized);
+    // Only encrypt fields that were actually supplied on the PATCH.
+    const toEncrypt: Record<string, string | null | undefined> = {};
+    if ("name" in normalized && normalized.name !== undefined) toEncrypt.name = normalized.name;
+    if ("alias" in normalized) toEncrypt.alias = normalized.alias ?? null;
+    const enc = buildNameFields(auth.context.dek, toEncrypt);
+    const account = await updateAccount(id, auth.context.userId, { ...normalized, ...enc });
     if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 });
     return NextResponse.json(account);
   } catch (error: unknown) {

@@ -1,9 +1,10 @@
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { generateImportHash, checkDuplicates, checkFitIdDuplicates } from "./import-hash";
 import { applyRulesToBatch, type TransactionRule } from "./auto-categorize";
 import { normalizeDate, parseAmount as parseAmountStr } from "./csv-parser";
-import { encryptField } from "./crypto/envelope";
+import { encryptField, decryptField } from "./crypto/envelope";
+import { nameLookup } from "./crypto/encrypted-columns";
 
 export interface RawTransaction {
   date: string;
@@ -39,33 +40,58 @@ export interface ImportResult {
 /** Max rows per import to prevent memory issues */
 const MAX_IMPORT_ROWS = 50_000;
 
-async function buildLookups() {
-  const allAccounts = await db.select().from(schema.accounts).all();
-  // Keyed by lowercase-trimmed name OR alias so an import row like "1234" resolves
-  // to the account that lists "1234" as its alias. Names always win on collision —
-  // a row that happens to match one account's name and a different account's alias
-  // lands on the name match, preserving behavior for users who haven't set aliases.
+/**
+ * Build in-memory maps from import-row keys → account/category ids. User-scoped
+ * (the cross-user select was a pre-Stream-D security bug — fixed here).
+ *
+ * Stream D: when `dek` is provided, plaintext name/alias may be encrypted post
+ * Phase-3-cutover. We decrypt on read so the map still works. We also populate
+ * keys by name_lookup(HMAC) when available so exact-match resolves even for
+ * rows with plaintext stripped.
+ */
+async function buildLookups(userId: string, dek?: Buffer) {
+  const allAccounts = await db
+    .select()
+    .from(schema.accounts)
+    .where(eq(schema.accounts.userId, userId))
+    .all();
   const accountMap = new Map<string, number>();
   const accountCurrencyMap = new Map<string, string>();
   for (const a of allAccounts) {
-    const nameKey = a.name.toLowerCase().trim();
-    accountMap.set(nameKey, a.id);
-    accountCurrencyMap.set(nameKey, a.currency);
-    if (a.alias) {
-      const aliasKey = a.alias.toLowerCase().trim();
+    const plainName = a.nameCt && dek ? decryptField(dek, a.nameCt) : a.name;
+    const plainAlias = a.aliasCt && dek ? decryptField(dek, a.aliasCt) : a.alias;
+    if (plainName) {
+      const nameKey = plainName.toLowerCase().trim();
+      accountMap.set(nameKey, a.id);
+      accountCurrencyMap.set(nameKey, a.currency);
+    }
+    if (plainAlias) {
+      const aliasKey = plainAlias.toLowerCase().trim();
       if (aliasKey && !accountMap.has(aliasKey)) {
         accountMap.set(aliasKey, a.id);
         accountCurrencyMap.set(aliasKey, a.currency);
       }
     }
   }
-  const allCategories = await db.select().from(schema.categories).all();
-  const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
+  const allCategories = await db
+    .select()
+    .from(schema.categories)
+    .where(eq(schema.categories.userId, userId))
+    .all();
+  const categoryMap = new Map<string, number>();
+  for (const c of allCategories) {
+    const plainName = c.nameCt && dek ? decryptField(dek, c.nameCt) : c.name;
+    if (plainName) categoryMap.set(plainName, c.id);
+  }
   return { accountMap, accountCurrencyMap, categoryMap };
 }
 
-export async function previewImport(rows: RawTransaction[]): Promise<PreviewResult> {
-  const { accountMap } = await buildLookups();
+export async function previewImport(
+  rows: RawTransaction[],
+  userId: string,
+  dek?: Buffer,
+): Promise<PreviewResult> {
+  const { accountMap } = await buildLookups(userId, dek);
   const valid: PreviewResult["valid"] = [];
   const errors: PreviewResult["errors"] = [];
 
@@ -177,7 +203,7 @@ export async function executeImport(
     };
   }
 
-  const { accountMap, accountCurrencyMap, categoryMap } = await buildLookups();
+  const { accountMap, accountCurrencyMap, categoryMap } = await buildLookups(userId, userDek);
   const forceSet = new Set(forceImportIndices);
   const batchSize = 500;
   let imported = 0;

@@ -3,6 +3,7 @@ import { getCategories, createCategory, updateCategory, deleteCategory, getTrans
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
+import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 const postSchema = z.object({
   name: z.string(),
@@ -21,7 +22,8 @@ const putSchema = z.object({
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const data = await getCategories(auth.context.userId);
+  const rows = await getCategories(auth.context.userId);
+  const data = decryptNamedRows(rows, auth.context.dek, { nameCt: "name" });
   return NextResponse.json(data);
 }
 
@@ -31,7 +33,8 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
-    const category = await createCategory(auth.context.userId, parsed.data);
+    const enc = buildNameFields(auth.context.dek, { name: parsed.data.name });
+    const category = await createCategory(auth.context.userId, { ...parsed.data, ...enc });
     return NextResponse.json(category, { status: 201 });
   } catch (error: unknown) {
     await logApiError("POST", "/api/categories", error, auth.context.userId);
@@ -46,7 +49,10 @@ export async function PUT(request: NextRequest) {
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
-    const category = await updateCategory(id, auth.context.userId, data);
+    const toEncrypt: Record<string, string | null | undefined> = {};
+    if ("name" in data && data.name !== undefined) toEncrypt.name = data.name;
+    const enc = buildNameFields(auth.context.dek, toEncrypt);
+    const category = await updateCategory(id, auth.context.userId, { ...data, ...enc });
     return NextResponse.json(category);
   } catch (error: unknown) {
     await logApiError("PUT", "/api/categories", error, auth.context.userId);

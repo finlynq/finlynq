@@ -10,6 +10,7 @@ import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { logApiError } from "@/lib/validate";
+import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 export async function GET(request: NextRequest) {
   // Dashboard must stay accessible even when the session has no cached DEK
@@ -34,7 +35,12 @@ export async function GET(request: NextRequest) {
 
     const rateMap = await getRateMap(displayCurrency, userId);
 
-    const balances = await getAccountBalances(userId, { includeArchived });
+    const rawBalances = await getAccountBalances(userId, { includeArchived });
+    // Stream D: decrypt accountName + alias before display / currency conversion.
+    const balances = decryptNamedRows(rawBalances, dek, {
+      accountNameCt: "accountName",
+      aliasCt: "alias",
+    });
     // Add live market value of holdings to accounts that have any — so investment
     // accounts reflect total value (cash + positions), not just cash flow.
     const holdingsByAccount = await getHoldingsValueByAccount(userId, dek);

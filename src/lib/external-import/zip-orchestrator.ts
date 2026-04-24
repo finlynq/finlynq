@@ -11,6 +11,7 @@ import JSZip from "jszip";
 import { and, eq, inArray } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { getAccounts, createAccount, getCategories, createCategory } from "@/lib/queries";
+import { buildNameFields } from "@/lib/crypto/encrypted-columns";
 import {
   parseWealthPositionExport,
   transformWealthPositionExport,
@@ -116,6 +117,7 @@ async function materializeZipMapping(
   userId: string,
   input: MappingInput,
   parsed: ParsedExport,
+  dek?: Buffer,
 ): Promise<ConnectorMapping> {
   const existing = await loadConnectorMapping(userId, WEALTHPOSITION_CONNECTOR_ID);
   const accountMap: Record<string, number> = {};
@@ -151,11 +153,13 @@ async function materializeZipMapping(
         accountMap[row.externalId] = existing.id;
         continue;
       }
+      const encAcc = buildNameFields(dek ?? null, { name: desiredName });
       const created = await createAccount(userId, {
         type: row.autoCreate.type,
         group: row.autoCreate.group,
         name: desiredName,
         currency: row.autoCreate.currency,
+        ...encAcc,
       });
       if (created) {
         accountMap[row.externalId] = created.id;
@@ -192,10 +196,12 @@ async function materializeZipMapping(
         categoryMap[row.externalId] = existing.id;
         continue;
       }
+      const encCat = buildNameFields(dek ?? null, { name: desiredName });
       const created = await createCategory(userId, {
         type: row.autoCreate.type,
         group: row.autoCreate.group,
         name: desiredName,
+        ...encCat,
       });
       if (created) {
         categoryMap[row.externalId] = created.id;
@@ -213,10 +219,12 @@ async function materializeZipMapping(
     if (existingByName) {
       transferCategoryId = existingByName.id;
     } else {
+      const encT = buildNameFields(dek ?? null, { name: input.transferCategoryAutoCreate.name });
       const created = await createCategory(userId, {
         type: "R",
         group: input.transferCategoryAutoCreate.group,
         name: input.transferCategoryAutoCreate.name,
+        ...encT,
       });
       if (created) {
         transferCategoryId = created.id;
@@ -233,10 +241,12 @@ async function materializeZipMapping(
     if (existingByName) {
       openingBalanceCategoryId = existingByName.id;
     } else {
+      const encO = buildNameFields(dek ?? null, { name: input.openingBalanceCategoryAutoCreate.name });
       const created = await createCategory(userId, {
         type: "R",
         group: input.openingBalanceCategoryAutoCreate.group,
         name: input.openingBalanceCategoryAutoCreate.name,
+        ...encO,
       });
       if (created) {
         openingBalanceCategoryId = created.id;
@@ -268,6 +278,7 @@ async function syncPortfolioHoldings(
   userId: string,
   parsed: ParsedExport,
   mapping: ConnectorMapping,
+  dek?: Buffer,
 ): Promise<{ inserted: number }> {
   const accountsByName = new Map(parsed.accounts.map((a) => [a.name, a]));
 
@@ -283,7 +294,7 @@ async function syncPortfolioHoldings(
     .all();
   const existingKeys = new Set(existing.map((e) => `${e.accountId}|${e.name}`));
 
-  const toInsert: Array<{
+  type HoldingInsert = {
     userId: string;
     accountId: number;
     name: string;
@@ -291,7 +302,12 @@ async function syncPortfolioHoldings(
     currency: string;
     isCrypto: number;
     note: string;
-  }> = [];
+    nameCt?: string | null;
+    nameLookup?: string | null;
+    symbolCt?: string | null;
+    symbolLookup?: string | null;
+  };
+  const toInsert: HoldingInsert[] = [];
 
   for (const [holdingName, info] of parsed.portfolioByHolding) {
     const brokerageExt = accountsByName.get(info.brokerageAccount);
@@ -300,6 +316,10 @@ async function syncPortfolioHoldings(
     if (!finlynqAccountId) continue;
     const key = `${finlynqAccountId}|${holdingName}`;
     if (existingKeys.has(key)) continue;
+    const enc = buildNameFields(dek ?? null, {
+      name: holdingName,
+      symbol: info.symbol || null,
+    });
     toInsert.push({
       userId,
       accountId: finlynqAccountId,
@@ -308,6 +328,7 @@ async function syncPortfolioHoldings(
       currency: info.currency || "CAD",
       isCrypto: 0,
       note: "",
+      ...enc,
     });
     existingKeys.add(key);
   }
@@ -366,10 +387,11 @@ export async function runZipPreview(
   userId: string,
   buffer: Buffer,
   input: MappingInput,
+  dek?: Buffer,
 ): Promise<ZipPreviewResult> {
   const contents = await extractZipContents(buffer);
   const parsed = parseWealthPositionExport(contents);
-  const mapping = await materializeZipMapping(userId, input, parsed);
+  const mapping = await materializeZipMapping(userId, input, parsed, dek);
   const pfAccounts = await getAccounts(userId, { includeArchived: false });
   const pfCategories = await getCategories(userId);
   const resolved = buildResolvedMapping(mapping, parsed, pfAccounts, pfCategories);
@@ -379,7 +401,7 @@ export async function runZipPreview(
     ...transformed.flat,
     ...transformed.splits.map((s) => s.parent),
   ];
-  const preview = await previewImport(rowsForImport);
+  const preview = await previewImport(rowsForImport, userId, dek);
   const confirmationToken = signConfirmationToken(
     userId,
     ZIP_SYNC_OPERATION,
@@ -427,7 +449,7 @@ export async function runZipExecute(
 
   const contents = await extractZipContents(buffer);
   const parsed = parseWealthPositionExport(contents);
-  const mapping = await materializeZipMapping(userId, input, parsed);
+  const mapping = await materializeZipMapping(userId, input, parsed, dek);
   // Portfolio.csv → portfolio_holdings rows on the mapped brokerage accounts.
   // Runs before executeImport so holdings exist when the /portfolio page
   // first loads the freshly-imported data.
@@ -435,6 +457,7 @@ export async function runZipExecute(
     userId,
     parsed,
     mapping,
+    dek,
   );
   const pfAccounts = await getAccounts(userId, { includeArchived: false });
   const pfCategories = await getCategories(userId);

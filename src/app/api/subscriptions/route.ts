@@ -6,6 +6,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
+import { buildNameFields, decryptNamedRows, decryptTxRows } from "@/lib/crypto/encrypted-columns";
 
 const createSchema = z.object({
   name: z.string(),
@@ -28,17 +29,20 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
-  const subs = await db
+  const rawSubs = await db
     .select({
       id: schema.subscriptions.id,
       name: schema.subscriptions.name,
+      nameCt: schema.subscriptions.nameCt,
       amount: schema.subscriptions.amount,
       currency: schema.subscriptions.currency,
       frequency: schema.subscriptions.frequency,
       categoryId: schema.subscriptions.categoryId,
       categoryName: schema.categories.name,
+      categoryNameCt: schema.categories.nameCt,
       accountId: schema.subscriptions.accountId,
       accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
       nextDate: schema.subscriptions.nextDate,
       status: schema.subscriptions.status,
       cancelReminderDate: schema.subscriptions.cancelReminderDate,
@@ -48,8 +52,22 @@ export async function GET(request: NextRequest) {
     .leftJoin(schema.categories, eq(schema.subscriptions.categoryId, schema.categories.id))
     .leftJoin(schema.accounts, eq(schema.subscriptions.accountId, schema.accounts.id))
     .where(eq(schema.subscriptions.userId, userId))
-    .orderBy(schema.subscriptions.status, schema.subscriptions.name)
+    .orderBy(schema.subscriptions.status)
     .all();
+
+  // Stream D: decrypt joined name columns. Sort then happens in memory by
+  // (status, name) since `ORDER BY name` on the SQL side won't sort encrypted
+  // rows correctly.
+  const decrypted = decryptNamedRows(rawSubs, auth.context.dek, {
+    nameCt: "name",
+    categoryNameCt: "categoryName",
+    accountNameCt: "accountName",
+  });
+  const subs = decrypted.sort((a, b) => {
+    const s = (a.status ?? "").localeCompare(b.status ?? "");
+    if (s !== 0) return s;
+    return (a.name ?? "").localeCompare(b.name ?? "");
+  });
 
   return NextResponse.json(subs);
 }
@@ -67,7 +85,7 @@ export async function POST(request: NextRequest) {
       cutoff.setFullYear(cutoff.getFullYear() - 1);
       const cutoffStr = cutoff.toISOString().split("T")[0];
 
-      const txns = await db
+      const rawTxns = await db
         .select({
           id: schema.transactions.id,
           date: schema.transactions.date,
@@ -82,6 +100,9 @@ export async function POST(request: NextRequest) {
           sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
         ))
         .all();
+      // Payee is encrypted at rest — decrypt before running the recurring
+      // detector (which needs plaintext to group by payee).
+      const txns = decryptTxRows(auth.context.dek, rawTxns);
 
       const detected = detectRecurringTransactions(
         txns.map((t) => ({
@@ -119,6 +140,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, createSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
+    const enc = buildNameFields(auth.context.dek, { name: d.name });
     const sub = await db
       .insert(schema.subscriptions)
       .values({
@@ -133,6 +155,7 @@ export async function POST(request: NextRequest) {
         status: d.status ?? "active",
         cancelReminderDate: d.cancelReminderDate || null,
         notes: d.notes || null,
+        ...enc,
       })
       .returning()
       .get();
@@ -152,9 +175,14 @@ export async function PUT(request: NextRequest) {
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
+    // `data` is loose from `.passthrough()`; encrypt name if supplied.
+    const rawName = (data as Record<string, unknown>).name;
+    const enc = typeof rawName === "string"
+      ? buildNameFields(auth.context.dek, { name: rawName })
+      : {};
     const sub = await db
       .update(schema.subscriptions)
-      .set(data)
+      .set({ ...data, ...enc })
       .where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, auth.context.userId)))
       .returning()
       .get();

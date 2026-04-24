@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
         if (tplRow) {
           const tpl = deserializeTemplate(tplRow);
           const mapped = parseWithMapping(text, tpl.columnMapping, tpl.defaultAccount ?? null);
-          const preview = await previewImport(mapped.rows);
+          const preview = await previewImport(mapped.rows, userId, auth.context.dek ?? undefined);
           if (mapped.errors.length > 0) {
             preview.errors.push(
               ...mapped.errors.map((e) => ({ rowIndex: e.row - 2, message: e.message })),
@@ -75,7 +75,7 @@ export async function POST(request: NextRequest) {
 
       // 2. Try canonical headers (Date / Amount / Account / Payee).
       const canonical = csvToRawTransactions(text);
-      let canonicalPreview = await previewImport(canonical.rows);
+      let canonicalPreview = await previewImport(canonical.rows, userId, auth.context.dek ?? undefined);
       if (canonical.errors.length > 0) {
         canonicalPreview.errors.push(
           ...canonical.errors.map((e) => ({ rowIndex: e.row - 2, message: e.message })),
@@ -99,7 +99,7 @@ export async function POST(request: NextRequest) {
           best.template.columnMapping,
           best.template.defaultAccount ?? null,
         );
-        const preview = await previewImport(mapped.rows);
+        const preview = await previewImport(mapped.rows, userId, auth.context.dek ?? undefined);
         if (mapped.errors.length > 0) {
           preview.errors.push(
             ...mapped.errors.map((e) => ({ rowIndex: e.row - 2, message: e.message })),
@@ -159,7 +159,7 @@ export async function POST(request: NextRequest) {
       if (result.errors.length > 0 && result.rows.length === 0) {
         return NextResponse.json({ error: result.errors.join(". ") }, { status: 400 });
       }
-      const preview = await previewImport(result.rows);
+      const preview = await previewImport(result.rows, userId, auth.context.dek ?? undefined);
       return NextResponse.json({
         type: "pdf",
         confidence: result.confidence,

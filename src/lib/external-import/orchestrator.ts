@@ -4,6 +4,7 @@
 // existing Finlynq import pipeline.
 
 import { getAccounts, createAccount, getCategories, createCategory } from "@/lib/queries";
+import { buildNameFields } from "@/lib/crypto/encrypted-columns";
 import {
   wealthposition,
   WealthPositionApiError,
@@ -113,6 +114,7 @@ export async function materializeMapping(
   input: MappingInput,
   externalAccounts: ExternalAccount[],
   externalCategories: ExternalCategory[],
+  dek?: Buffer,
 ): Promise<ConnectorMapping> {
   const existingMapping = await loadConnectorMapping(userId, WEALTHPOSITION_CONNECTOR_ID);
   const accountMap: Record<string, number> = { ...existingMapping.accountMap };
@@ -136,11 +138,13 @@ export async function materializeMapping(
         accountMap[row.externalId] = existing.id;
         continue;
       }
+      const encAcc = buildNameFields(dek ?? null, { name: desiredName });
       const created = await createAccount(userId, {
         type: row.autoCreate.type,
         group: row.autoCreate.group,
         name: desiredName,
         currency: row.autoCreate.currency,
+        ...encAcc,
       });
       if (created) {
         accountMap[row.externalId] = created.id;
@@ -170,10 +174,12 @@ export async function materializeMapping(
         categoryMap[row.externalId] = existing.id;
         continue;
       }
+      const encCat = buildNameFields(dek ?? null, { name: desiredName });
       const created = await createCategory(userId, {
         type: row.autoCreate.type,
         group: row.autoCreate.group,
         name: desiredName,
+        ...encCat,
       });
       if (created) {
         categoryMap[row.externalId] = created.id;
@@ -184,20 +190,24 @@ export async function materializeMapping(
 
   let transferCategoryId = input.transferCategoryId;
   if (transferCategoryId === null && input.transferCategoryAutoCreate) {
+    const encT = buildNameFields(dek ?? null, { name: input.transferCategoryAutoCreate.name });
     const created = await createCategory(userId, {
       type: "R", // revaluation/transfer — matches WP's R type
       group: input.transferCategoryAutoCreate.group,
       name: input.transferCategoryAutoCreate.name,
+      ...encT,
     });
     if (created) transferCategoryId = created.id;
   }
 
   let openingBalanceCategoryId = input.openingBalanceCategoryId;
   if (openingBalanceCategoryId === null && input.openingBalanceCategoryAutoCreate) {
+    const encO = buildNameFields(dek ?? null, { name: input.openingBalanceCategoryAutoCreate.name });
     const created = await createCategory(userId, {
       type: "R",
       group: input.openingBalanceCategoryAutoCreate.group,
       name: input.openingBalanceCategoryAutoCreate.name,
+      ...encO,
     });
     if (created) openingBalanceCategoryId = created.id;
   }
@@ -330,6 +340,7 @@ async function runPipeline(
     input,
     externalAccounts,
     externalCategories,
+    dek,
   );
 
   const startDate = input.startDate ?? mapping.lastSyncedAt ?? undefined;
@@ -374,7 +385,7 @@ export async function runWealthPositionPreview(
   input: MappingInput,
 ): Promise<PreviewSyncResult> {
   const pipeline = await runPipeline(userId, dek, input);
-  const preview = await previewImport(pipeline.rowsForImport);
+  const preview = await previewImport(pipeline.rowsForImport, userId, dek);
 
   const syncWatermark = new Date().toISOString();
   // Token scope covers the mapping input — the user's approval is bound to

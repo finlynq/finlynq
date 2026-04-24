@@ -10,6 +10,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
+import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 const createLoanSchema = z.object({
   name: z.string(),
@@ -29,13 +30,15 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
-  const loans = await db
+  const rawLoans = await db
     .select({
       id: schema.loans.id,
       name: schema.loans.name,
+      nameCt: schema.loans.nameCt,
       type: schema.loans.type,
       accountId: schema.loans.accountId,
       accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
       principal: schema.loans.principal,
       annualRate: schema.loans.annualRate,
       termMonths: schema.loans.termMonths,
@@ -49,6 +52,10 @@ export async function GET(request: NextRequest) {
     .leftJoin(schema.accounts, eq(schema.loans.accountId, schema.accounts.id))
     .where(eq(schema.loans.userId, userId))
     .all();
+  const loans = decryptNamedRows(rawLoans, auth.context.dek, {
+    nameCt: "name",
+    accountNameCt: "accountName",
+  });
 
   // Add amortization summary for each loan
   const withSummary = loans.map((loan) => {
@@ -112,6 +119,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, createLoanSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
+    const enc = buildNameFields(auth.context.dek, { name: d.name });
     const loan = await db.insert(schema.loans).values({
       userId: auth.context.userId,
       name: d.name,
@@ -125,6 +133,7 @@ export async function POST(request: NextRequest) {
       paymentFrequency: d.paymentFrequency ?? "monthly",
       extraPayment: d.extraPayment ?? 0,
       note: d.note ?? "",
+      ...enc,
     }).returning().get();
 
     return NextResponse.json(loan, { status: 201 });

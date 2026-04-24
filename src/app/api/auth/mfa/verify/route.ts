@@ -19,6 +19,7 @@ import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { getDEK, putDEK, deleteDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
+import { enqueueStreamDBackfill } from "@/lib/crypto/stream-d-backfill";
 
 const verifySchema = z.object({
   mfaPendingToken: z.string().min(1, "Pending token is required"),
@@ -97,6 +98,8 @@ export async function POST(request: NextRequest) {
     if (pendingDek) {
       putDEK(jti, pendingDek, SESSION_TTL_MS);
       if (pendingJti) deleteDEK(pendingJti);
+      // Stream D lazy backfill — same pattern as the non-MFA login path.
+      enqueueStreamDBackfill(user.id, pendingDek);
     }
 
     const response = NextResponse.json({ success: true });

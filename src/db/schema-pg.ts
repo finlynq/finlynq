@@ -29,6 +29,11 @@ export const accounts = pgTable("accounts", {
   note: text("note").default(""),
   archived: boolean("archived").notNull().default(false),
   alias: text("alias"),
+  // Stream D (2026-04-24) — dual-write: plaintext columns stay until Phase 3 cutover.
+  nameCt: text("name_ct"),
+  nameLookup: text("name_lookup"),
+  aliasCt: text("alias_ct"),
+  aliasLookup: text("alias_lookup"),
 });
 
 export const categories = pgTable("categories", {
@@ -38,6 +43,9 @@ export const categories = pgTable("categories", {
   group: text("group").notNull().default(""),
   name: text("name").notNull(),
   note: text("note").default(""),
+  // Stream D (2026-04-24) — dual-write.
+  nameCt: text("name_ct"),
+  nameLookup: text("name_lookup"),
 });
 
 export const transactions = pgTable("transactions", {
@@ -68,6 +76,11 @@ export const portfolioHoldings = pgTable("portfolio_holdings", {
   currency: text("currency").notNull().default("CAD"),
   isCrypto: integer("is_crypto").default(0),
   note: text("note").default(""),
+  // Stream D (2026-04-24) — dual-write. Symbol encrypted too (VGRO.TO leaks broker + region).
+  nameCt: text("name_ct"),
+  nameLookup: text("name_lookup"),
+  symbolCt: text("symbol_ct"),
+  symbolLookup: text("symbol_lookup"),
 });
 
 export const budgets = pgTable("budgets", {
@@ -95,6 +108,9 @@ export const loans = pgTable("loans", {
   paymentFrequency: text("payment_frequency").notNull().default("monthly"),
   extraPayment: doublePrecision("extra_payment").default(0),
   note: text("note").default(""),
+  // Stream D (2026-04-24) — dual-write.
+  nameCt: text("name_ct"),
+  nameLookup: text("name_lookup"),
 });
 
 export const snapshots = pgTable("snapshots", {
@@ -117,6 +133,9 @@ export const goals = pgTable("goals", {
   priority: integer("priority").default(1),
   status: text("status").notNull().default("active"),
   note: text("note").default(""),
+  // Stream D (2026-04-24) — dual-write.
+  nameCt: text("name_ct"),
+  nameLookup: text("name_lookup"),
 });
 
 export const targetAllocations = pgTable("target_allocations", {
@@ -183,6 +202,9 @@ export const subscriptions = pgTable("subscriptions", {
   status: text("status").notNull().default("active"),
   cancelReminderDate: text("cancel_reminder_date"),
   notes: text("notes"),
+  // Stream D (2026-04-24) — dual-write.
+  nameCt: text("name_ct"),
+  nameLookup: text("name_lookup"),
 });
 
 export const settings = pgTable(

@@ -12,6 +12,11 @@ function monthExpr(dateCol: typeof transactions.date | typeof transactions.date)
 }
 
 // Accounts
+//
+// Stream D: getAccounts still ORDER BY plaintext `name` — it's the fallback
+// column during the dual-write window. Once Phase 3 nulls plaintext out, the
+// route handler must sort in memory by decrypted name (the plan calls this
+// out; see src/app/api/... handlers that already paginate after decrypt).
 export async function getAccounts(userId: string, opts?: { includeArchived?: boolean }) {
   const conditions = [eq(accounts.userId, userId)];
   if (!opts?.includeArchived) conditions.push(eq(accounts.archived, false));
@@ -22,11 +27,30 @@ export async function getAccountById(id: number, userId: string) {
   return db.select().from(accounts).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).get();
 }
 
-export async function createAccount(userId: string, data: { type: string; group: string; name: string; currency: string; note?: string; alias?: string | null }) {
+/** CRUD write payload. `nameCt`/`nameLookup`/`aliasCt`/`aliasLookup` are set by the
+ * route handler via {@link buildNameFields} when a DEK is available. */
+type AccountWrite = {
+  type: string;
+  group: string;
+  name: string;
+  currency: string;
+  note?: string;
+  alias?: string | null;
+  nameCt?: string | null;
+  nameLookup?: string | null;
+  aliasCt?: string | null;
+  aliasLookup?: string | null;
+};
+
+export async function createAccount(userId: string, data: AccountWrite) {
   return db.insert(accounts).values({ ...data, userId }).returning().get();
 }
 
-export async function updateAccount(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; currency: string; note: string; archived: boolean; alias: string | null }>) {
+export async function updateAccount(
+  id: number,
+  userId: string,
+  data: Partial<AccountWrite & { archived: boolean }>,
+) {
   return db.update(accounts).set(data).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).returning().get();
 }
 
@@ -43,11 +67,20 @@ export async function getCategoryById(id: number, userId: string) {
   return db.select().from(categories).where(and(eq(categories.id, id), eq(categories.userId, userId))).get();
 }
 
-export async function createCategory(userId: string, data: { type: string; group: string; name: string; note?: string }) {
+type CategoryWrite = {
+  type: string;
+  group: string;
+  name: string;
+  note?: string;
+  nameCt?: string | null;
+  nameLookup?: string | null;
+};
+
+export async function createCategory(userId: string, data: CategoryWrite) {
   return db.insert(categories).values({ ...data, userId }).returning().get();
 }
 
-export async function updateCategory(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; note: string }>) {
+export async function updateCategory(id: number, userId: string, data: Partial<CategoryWrite>) {
   return db.update(categories).set(data).where(and(eq(categories.id, id), eq(categories.userId, userId))).returning().get();
 }
 
@@ -178,21 +211,28 @@ export async function deleteTransaction(id: number, userId: string) {
 }
 
 // Portfolio
+//
+// Stream D: include *_ct columns alongside plaintext. Callers decrypt via
+// decryptNamedRows() — queries.ts stays dialect-pure. ORDER BY dropped because
+// sorting by ciphertext produces meaningless order; callers that need sorted
+// output should sort by decrypted name in memory.
 export async function getPortfolioHoldings(userId: string) {
   return db
     .select({
       id: portfolioHoldings.id,
       accountId: portfolioHoldings.accountId,
       accountName: accounts.name,
+      accountNameCt: accounts.nameCt,
       name: portfolioHoldings.name,
+      nameCt: portfolioHoldings.nameCt,
       symbol: portfolioHoldings.symbol,
+      symbolCt: portfolioHoldings.symbolCt,
       currency: portfolioHoldings.currency,
       note: portfolioHoldings.note,
     })
     .from(portfolioHoldings)
     .leftJoin(accounts, eq(portfolioHoldings.accountId, accounts.id))
     .where(eq(portfolioHoldings.userId, userId))
-    .orderBy(accounts.name, portfolioHoldings.name)
     .all();
 }
 
@@ -304,6 +344,13 @@ export async function getBudgetRollover(userId: string, currentMonth: string) {
 }
 
 // Dashboard aggregations
+//
+// Stream D: GROUP BY `accounts.name` + `alias` works only while plaintext
+// columns are still populated (Phase 1 + 2). Post-Phase 3 this will need to
+// GROUP BY accounts.id only and pull encrypted names via a separate lookup.
+// Until then, we keep plaintext in the GROUP BY so result shape is unchanged.
+// The returned rows carry both plaintext and *_ct columns so callers can
+// pass them through decryptNamedRows().
 export async function getAccountBalances(userId: string, opts?: { includeArchived?: boolean }) {
   const conditions = [eq(accounts.userId, userId)];
   if (!opts?.includeArchived) conditions.push(eq(accounts.archived, false));
@@ -311,17 +358,29 @@ export async function getAccountBalances(userId: string, opts?: { includeArchive
     .select({
       accountId: accounts.id,
       accountName: accounts.name,
+      accountNameCt: accounts.nameCt,
       accountType: accounts.type,
       accountGroup: accounts.group,
       currency: accounts.currency,
       archived: accounts.archived,
       alias: accounts.alias,
+      aliasCt: accounts.aliasCt,
       balance: sql<number>`COALESCE(SUM(${transactions.amount}), 0)`,
     })
     .from(accounts)
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
     .where(and(...conditions))
-    .groupBy(accounts.id, accounts.name, accounts.type, accounts.group, accounts.currency, accounts.archived, accounts.alias)
+    .groupBy(
+      accounts.id,
+      accounts.name,
+      accounts.nameCt,
+      accounts.type,
+      accounts.group,
+      accounts.currency,
+      accounts.archived,
+      accounts.alias,
+      accounts.aliasCt,
+    )
     .orderBy(accounts.type, accounts.group, accounts.name)
     .all();
 }

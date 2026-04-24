@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
 
   const buffer = Buffer.from(await file.arrayBuffer());
   try {
-    const result = await runZipPreview(auth.userId, buffer, parsed.data as MappingInput);
+    const result = await runZipPreview(auth.userId, buffer, parsed.data as MappingInput, auth.dek);
     return NextResponse.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Preview failed";

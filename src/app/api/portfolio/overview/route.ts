@@ -7,6 +7,7 @@ import { getLatestFxRate, convertCurrency } from "@/lib/fx-service";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
+import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 const CRYPTO_SYMBOLS = new Set([
   "BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AAVE", "ATOM", "AVAX",
@@ -26,22 +27,30 @@ export async function GET(request: NextRequest) {
   const { userId, sessionId } = auth.context;
   const dek = sessionId ? getDEK(sessionId) : null;
 
-  // 1. Get all holdings with account info
-  const holdings = await db
+  // 1. Get all holdings with account info. Stream D: pull the *_ct columns
+  // alongside plaintext; decrypt in-memory before any name/symbol lookup.
+  const rawHoldings = await db
     .select({
       id: schema.portfolioHoldings.id,
       accountId: schema.portfolioHoldings.accountId,
       accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
       name: schema.portfolioHoldings.name,
+      nameCt: schema.portfolioHoldings.nameCt,
       symbol: schema.portfolioHoldings.symbol,
+      symbolCt: schema.portfolioHoldings.symbolCt,
       currency: schema.portfolioHoldings.currency,
       isCrypto: schema.portfolioHoldings.isCrypto,
       note: schema.portfolioHoldings.note,
     })
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
-    .where(eq(schema.portfolioHoldings.userId, userId))
-    .orderBy(schema.accounts.name, schema.portfolioHoldings.name);
+    .where(eq(schema.portfolioHoldings.userId, userId));
+  const holdings = decryptNamedRows(rawHoldings, dek, {
+    nameCt: "name",
+    symbolCt: "symbol",
+    accountNameCt: "accountName",
+  });
 
   // 2. Classify holdings
   const cryptoHoldings = holdings.filter(h => {
@@ -107,7 +116,7 @@ export async function GET(request: NextRequest) {
   let undecryptedSkipped = 0;
   for (const r of rawTxRows) {
     if (!r.portfolioHolding) continue;
-    // decryptField throws on DEK mismatch; try/catch so a single bad row
+    // decryptField throws on a DEK mismatch; try/catch so a single bad row
     // (e.g. from a previous encryption generation) doesn't 500 the whole page.
     let key = "";
     try {
