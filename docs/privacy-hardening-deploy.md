@@ -1,6 +1,6 @@
 # Privacy Hardening — Deploy Notes
 
-This document captures what needs to happen to deploy the `feat/privacy-phase-1` branch. All Phase 1, 2, and 4 findings from `PF/i-want-to-check-mossy-muffin.md` are implemented; Stream D (Phase 3) is deferred — tracked separately.
+This document captures what needs to happen to deploy the privacy-hardening stack. All Phase 1, 2, and 4 findings from the original plan are live on prod, plus **Stream D (display-name encryption) all three phases**. See the "Stream D" section at the bottom for its migration sequence.
 
 ## What shipped
 
@@ -78,9 +78,49 @@ The migration:
 - **`PF_PEPPER` / `PF_STAGING_KEY` misconfiguration**: startup throws in prod. A missing key gives a clear error; a too-short key (<32 chars) also throws. No silent fallback.
 - **Rollback**: the schema migration is additive; reverting the code works as long as the new `dek_wrapped_refresh` column is NULL (which it will be for tokens minted after the rollback). The `admin_audit` table is orthogonal. The `staged_transactions.payee` column stores `sv1:...` ciphertexts post-deploy; rolling back the code would surface those as "unreadable plaintext" to the user. No expected blocker since no users.
 
-## Follow-ups (not in this deploy)
+## Stream D — Display-name encryption (ALL PHASES LIVE on prod, 2026-04-24)
 
-- **Stream D** — encrypt account/category/loan/goal/subscription names and portfolio symbols. ~30 call sites. Tracked as Phase 3 of the original plan.
+Encrypts `accounts.name`/`alias`, `categories.name`, `goals.name`, `loans.name`, `subscriptions.name`, and `portfolio_holdings.name`/`symbol` against a DB-dump attacker. Full design + phase-by-phase detail is in `PF/STREAM_D.md` (parent-repo doc, not shipped with the pf-app package).
+
+**Architecture**: each plaintext column gets two siblings — `{col}_ct` (AES-GCM ciphertext under user DEK) + `{col}_lookup` (HMAC-SHA256 blind index for exact-match queries). Partial unique index on `(user_id, name_lookup) WHERE name_lookup IS NOT NULL` replaces the old `(user_id, name)` constraint.
+
+**Migration sequence** (run in this order, per env):
+
+```bash
+# Phase 1 — add *_ct + *_lookup columns (idempotent, nullable)
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_<env> -d pf_<env> -f scripts/migrate-stream-d.sql
+
+# Phase 2 — code deploy (lazy backfill on every user's next login)
+# Ship the code via GHA / systemctl restart. Verify convergence with:
+# GET /api/admin/stream-d-progress  →  { complete: true, totalRemaining: 0 }
+
+# Phase 3 — cutover (NULL plaintext on encrypted rows). Preconditions:
+#   - every user has logged in at least once since Phase 2 (backfill run)
+#   - admin endpoint reports complete: true
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_<env> -d pf_<env> -f scripts/migrate-stream-d-phase3-null.sql
+```
+
+**Prod state (post-cutover)**:
+
+```
+         t          | total | plaintext | encrypted
+--------------------+-------+-----------+-----------
+ accounts           |     5 |         0 |         5
+ categories         |    20 |         0 |        20
+ goals              |     2 |         0 |         2
+ loans              |     0 |         0 |         0
+ portfolio_holdings |     3 |         0 |         3
+ subscriptions      |     0 |         0 |         0
+```
+
+**Staging + dev**: Phase 1 and Phase 3 migrations are NOT applied (user directed prod-only deploy). Run both SQL files above in sequence when bringing those envs in sync. No code changes needed — the Phase 1+2+3 code is already on main.
+
+**Why NULL-plaintext, not DROP COLUMN**: keeps Drizzle types stable, lets stdio MCP (no DEK) keep creating rows with plaintext when needed, same privacy benefit vs DB dump. The DROP variant is preserved at `scripts/migrate-stream-d-phase3.sql` for reference but should NOT be applied.
+
+## Follow-ups (not yet done)
+
+- **Stdio MCP Phase-3 compatibility** — `mcp-server/register-core-tools.ts` has no DEK. Post-cutover, stdio reads return NULL for names, and stdio writes create rows with `name_ct = NULL`. Two options open: (a) mark stdio read-only, (b) add a `PF_USER_DEK` env var so self-hosted single-user stdio can encrypt.
+- **Web display routes still reading plaintext** — `/api/snapshots`, `/api/rebalancing`, `/api/reports/*`, `/api/rules`, parts of the chat engine still reference `categories.name` / `accounts.name` directly. Post-cutover these render NULL (cosmetic, not crashing). Needs a sweep to apply `decryptNamedRows`.
 - **CSP nonce hardening** (Finding #14) — Next.js 15+ supports nonces in middleware.
 - **HSM / secure-enclave DEK cache** — architectural.
 - **HaveIBeenPwned k-anonymity** on password set.
@@ -100,3 +140,13 @@ For each env:
 8. Email-send through the webhook → inspect `staged_transactions`, confirm payee starts with `sv1:`.
 9. Wait 2h+ idle → next authenticated request that decrypts should 423 on encrypted column reads.
 10. Run the scrubber unit test: `npm run test -- server-logger`.
+
+### Stream D specific verification (post-Phase-3)
+
+11. Log in → confirm backfill ran via `journalctl -u pf.service | grep stream-d` (logs `[stream-d] user=<uuid> encrypted N rows:`).
+12. `GET /api/admin/stream-d-progress` → expect `{ complete: true, totalRemaining: 0 }`.
+13. DB check: `SELECT COUNT(*) FROM accounts WHERE name IS NOT NULL` → 0 for envs where Phase 3 has been applied.
+14. DB check: `SELECT name_ct FROM accounts LIMIT 1` → should start with `v1:`.
+15. Web UI → dashboard/accounts/categories/goals all still render names correctly (decrypt happens at the route boundary).
+16. MCP HTTP `get_account_balances` → returns decrypted names to Claude.
+17. Create two accounts with the same name via `POST /api/accounts` → second should 409 (unique constraint on `(user_id, name_lookup)`).
