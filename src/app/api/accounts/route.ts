@@ -10,6 +10,7 @@ const postSchema = z.object({
   group: z.string(),
   currency: z.string(),
   note: z.string().optional(),
+  alias: z.string().max(64).trim().optional(),
 });
 
 const putSchema = z.object({
@@ -20,6 +21,7 @@ const putSchema = z.object({
   currency: z.string().optional(),
   note: z.string().optional(),
   archived: z.boolean().optional(),
+  alias: z.string().max(64).trim().nullable().optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -40,7 +42,8 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
-    const account = await createAccount(auth.context.userId, parsed.data);
+    const { alias, ...rest } = parsed.data;
+    const account = await createAccount(auth.context.userId, { ...rest, alias: alias ? alias : null });
     return NextResponse.json(account, { status: 201 });
   } catch (error: unknown) {
     await logApiError("POST", "/api/accounts", error, auth.context.userId);
@@ -54,8 +57,9 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
-    const { id, ...data } = parsed.data;
-    const account = await updateAccount(id, auth.context.userId, data);
+    const { id, alias, ...data } = parsed.data;
+    const normalized = alias === undefined ? data : { ...data, alias: alias ? alias : null };
+    const account = await updateAccount(id, auth.context.userId, normalized);
     if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 });
     return NextResponse.json(account);
   } catch (error: unknown) {

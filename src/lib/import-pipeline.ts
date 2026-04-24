@@ -37,8 +37,24 @@ const MAX_IMPORT_ROWS = 50_000;
 
 async function buildLookups() {
   const allAccounts = await db.select().from(schema.accounts).all();
-  const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
-  const accountCurrencyMap = new Map(allAccounts.map((a) => [a.name, a.currency]));
+  // Keyed by lowercase-trimmed name OR alias so an import row like "1234" resolves
+  // to the account that lists "1234" as its alias. Names always win on collision —
+  // a row that happens to match one account's name and a different account's alias
+  // lands on the name match, preserving behavior for users who haven't set aliases.
+  const accountMap = new Map<string, number>();
+  const accountCurrencyMap = new Map<string, string>();
+  for (const a of allAccounts) {
+    const nameKey = a.name.toLowerCase().trim();
+    accountMap.set(nameKey, a.id);
+    accountCurrencyMap.set(nameKey, a.currency);
+    if (a.alias) {
+      const aliasKey = a.alias.toLowerCase().trim();
+      if (aliasKey && !accountMap.has(aliasKey)) {
+        accountMap.set(aliasKey, a.id);
+        accountCurrencyMap.set(aliasKey, a.currency);
+      }
+    }
+  }
   const allCategories = await db.select().from(schema.categories).all();
   const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
   return { accountMap, accountCurrencyMap, categoryMap };
@@ -66,13 +82,13 @@ export async function previewImport(rows: RawTransaction[]): Promise<PreviewResu
     const row = rows[i];
 
     // Validate account
-    const accountId = accountMap.get(row.account);
     if (!row.account) {
       errors.push({ rowIndex: i, message: "Missing account name" });
       continue;
     }
+    const accountId = accountMap.get(row.account.toLowerCase().trim());
     if (!accountId) {
-      errors.push({ rowIndex: i, message: `Unknown account: "${row.account}". Create it first or check the spelling.` });
+      errors.push({ rowIndex: i, message: `Unknown account: "${row.account}". No matching name or alias — create the account first, or add "${row.account}" as an alias on an existing account.` });
       continue;
     }
 
@@ -183,7 +199,8 @@ export async function executeImport(
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const accountId = accountMap.get(row.account);
+    const accountKey = row.account ? row.account.toLowerCase().trim() : "";
+    const accountId = accountMap.get(accountKey);
     if (!accountId) {
       importErrors.push(`Row ${i + 1}: Unknown account "${row.account}"`);
       continue;
@@ -206,7 +223,7 @@ export async function executeImport(
     const hash = generateImportHash(normalizedDate, accountId, row.amount, row.payee);
 
     // Inherit currency from account when not specified in import data
-    const currency = row.currency || accountCurrencyMap.get(row.account) || "CAD";
+    const currency = row.currency || accountCurrencyMap.get(accountKey) || "CAD";
 
     insertable.push({
       date: normalizedDate,

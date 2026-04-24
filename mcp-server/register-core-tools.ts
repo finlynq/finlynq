@@ -70,14 +70,21 @@ function matchesRule(
 
 type SqliteRow = Record<string, unknown>;
 
-/** Fuzzy name → row match: exact → startsWith → contains → reverse-contains */
+/**
+ * Fuzzy match against a row list: exact-name → exact-alias → startsWith-name →
+ * contains-name → reverse-contains-name.
+ *
+ * Alias match is exact-only (case-insensitive, trimmed). Only account rows
+ * carry `alias`; for other shapes the alias branch is a no-op.
+ */
 function fuzzyFind(input: string, options: SqliteRow[]): SqliteRow | null {
   if (!input || !options.length) return null;
   const lo = input.toLowerCase().trim();
   return (
-    options.find(o => String(o.name ?? "").toLowerCase() === lo) ??
-    options.find(o => String(o.name ?? "").toLowerCase().startsWith(lo)) ??
-    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => String(o.name  ?? "").toLowerCase() === lo) ??
+    options.find(o => String(o.alias ?? "").toLowerCase() === lo) ??
+    options.find(o => String(o.name  ?? "").toLowerCase().startsWith(lo)) ??
+    options.find(o => String(o.name  ?? "").toLowerCase().includes(lo)) ??
     options.find(o => lo.includes(String(o.name ?? "").toLowerCase())) ??
     null
   );
@@ -124,7 +131,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "Get current balances for all accounts, grouped by type (asset/liability)",
     { currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency") },
     async ({ currency }) => {
-      let query = `SELECT a.id, a.name, a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) as balance FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ? WHERE a.user_id = ?`;
+      let query = `SELECT a.id, a.name, a.alias, a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) as balance FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ? WHERE a.user_id = ?`;
       const params: (string | number)[] = [userId, userId];
       if (currency && currency !== "all") { query += ` AND a.currency = ?`; params.push(currency); }
       query += ` GROUP BY a.id ORDER BY a.type, a."group", a.name`;
@@ -297,13 +304,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
       target_amount: z.number().describe("Target amount"),
       deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Account name to link"),
+      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
     },
     async ({ name, type, target_amount, deadline, account }) => {
       let accountId: number | null = null;
       if (account) {
-        const acct = await sqlite.prepare("SELECT id FROM accounts WHERE user_id = ? AND name = ?").get(userId, account) as { id: number } | undefined;
-        accountId = acct?.id ?? null;
+        const allAccounts = await sqlite.prepare("SELECT id, name, alias FROM accounts WHERE user_id = ?").all(userId) as SqliteRow[];
+        const acct = fuzzyFind(account, allAccounts);
+        accountId = acct ? Number(acct.id) : null;
       }
       await sqlite.prepare("INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").run(userId, name, type, target_amount, deadline ?? null, accountId);
       return { content: [{ type: "text" as const, text: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` }] };
@@ -314,13 +322,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "add_snapshot",
     "Record a net worth snapshot for an asset (e.g. house value, car value)",
     {
-      account: z.string().describe("Account name"),
+      account: z.string().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
       value: z.number().describe("Current value"),
       date: z.string().optional().describe("Snapshot date (defaults to today)"),
       note: z.string().optional().describe("Optional note"),
     },
     async ({ account, value, date, note }) => {
-      const acct = await sqlite.prepare("SELECT id FROM accounts WHERE user_id = ? AND name = ?").get(userId, account) as { id: number } | undefined;
+      const allAccounts = await sqlite.prepare("SELECT id, name, alias FROM accounts WHERE user_id = ?").all(userId) as SqliteRow[];
+      const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found`);
       const d = date ?? new Date().toISOString().split("T")[0];
       await sqlite.prepare("INSERT INTO snapshots (user_id, account_id, date, value, note) VALUES (?, ?, ?, ?, ?)").run(userId, acct.id, d, value, note ?? "");
@@ -510,7 +519,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     {
       amount: z.number().describe("Amount (negative=expense, positive=income/transfer-in)"),
       payee: z.string().describe("Payee or merchant name"),
-      account: z.string().describe("Account name (required — ask the user which account if unclear; fuzzy-matched against their accounts)"),
+      account: z.string().describe("Account name or alias (required — ask the user which account if unclear; fuzzy matched against name, exact match on alias)"),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional(),
@@ -520,7 +529,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
-      const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       if (!allAccounts.length) return sqliteErr("No accounts found — create an account first.");
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
@@ -553,7 +562,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
-        account: z.string().describe("Account name (required — fuzzy-matched)"),
+        account: z.string().describe("Account name or alias (required — fuzzy matched against name, exact match on alias)"),
         date: z.string().optional(),
         category: z.string().optional(),
         note: z.string().optional(),
@@ -562,7 +571,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     },
     async ({ transactions }) => {
       const today = new Date().toISOString().split("T")[0];
-      const allAccounts = await sqlite.prepare(`SELECT id, name, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
       const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
@@ -669,28 +678,31 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       group: z.string().optional().describe("Account group"),
       currency: z.enum(["CAD", "USD"]).optional().describe("Currency (default CAD)"),
       note: z.string().optional(),
+      alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },
-    async ({ name, type, group, currency, note }) => {
+    async ({ name, type, group, currency, note, alias }) => {
       const existing = await sqlite.prepare(`SELECT id FROM accounts WHERE user_id = ? AND name = ?`).get(userId, name);
       if (existing) return sqliteErr(`Account "${name}" already exists`);
-      const result = await sqlite.prepare(`INSERT INTO accounts (user_id, type, "group", name, currency, note) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`).get(userId, type, group ?? "", name, currency ?? "CAD", note ?? "") as { id: number };
-      return txt({ success: true, accountId: result?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})` });
+      const aliasValue = alias && alias.trim() ? alias.trim() : null;
+      const result = await sqlite.prepare(`INSERT INTO accounts (user_id, type, "group", name, currency, note, alias) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`).get(userId, type, group ?? "", name, currency ?? "CAD", note ?? "", aliasValue) as { id: number };
+      return txt({ success: true, accountId: result?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})${aliasValue ? `, alias "${aliasValue}"` : ""}` });
     }
   );
 
   // ── update_account ─────────────────────────────────────────────────────────
   server.tool(
     "update_account",
-    "Update name, group, currency, or note of an account",
+    "Update name, group, currency, note, or alias of an account",
     {
-      account: z.string().describe("Account name (fuzzy matched)"),
+      account: z.string().describe("Current account name or alias (fuzzy matched against name; exact match on alias)"),
       name: z.string().optional(),
       group: z.string().optional(),
       currency: z.enum(["CAD", "USD"]).optional(),
       note: z.string().optional(),
+      alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports. Pass an empty string to clear."),
     },
-    async ({ account, name, group, currency, note }) => {
-      const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+    async ({ account, name, group, currency, note, alias }) => {
+      const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found`);
       const updates: string[] = []; const params: unknown[] = [];
@@ -698,6 +710,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (group !== undefined) { updates.push(`"group" = ?`); params.push(group); }
       if (currency !== undefined) { updates.push(`currency = ?`); params.push(currency); }
       if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
+      if (alias !== undefined) {
+        const trimmed = alias.trim();
+        if (trimmed) { updates.push(`alias = ?`); params.push(trimmed); }
+        else { updates.push(`alias = NULL`); }
+      }
       if (!updates.length) return sqliteErr("No fields to update");
       params.push(acct.id, userId);
       await sqlite.prepare(`UPDATE accounts SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
@@ -710,11 +727,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "delete_account",
     "Delete an account (only if it has no transactions, unless force=true)",
     {
-      account: z.string().describe("Account name (fuzzy matched)"),
+      account: z.string().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
       force: z.boolean().optional(),
     },
     async ({ account, force }) => {
-      const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found`);
       const count = (await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND account_id = ?`).get(userId, acct.id) as { cnt: number }).cnt;
@@ -1224,7 +1241,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       annual_rate: z.number(),
       term_months: z.number().int().positive(),
       start_date: z.string(),
-      account: z.string().optional(),
+      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
       payment_amount: z.number().optional(),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
       extra_payment: z.number().optional(),
@@ -1234,7 +1251,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
       let accountId: number | null = null;
       if (account) {
-        const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+        const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
         const acct = fuzzyFind(account, allAccounts);
         if (!acct) return sqliteErr(`Account "${account}" not found`);
         accountId = Number(acct.id);
@@ -1262,7 +1279,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       payment_amount: z.number().optional(),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
       extra_payment: z.number().optional(),
-      account: z.string().optional().describe("Account name. Empty string clears the link."),
+      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias). Empty string clears the link."),
       note: z.string().optional(),
     },
     async ({ id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, account, note }) => {
@@ -1273,7 +1290,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (account !== undefined) {
         if (account === "") accountIdUpdate = null;
         else {
-          const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+          const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
           const acct = fuzzyFind(account, allAccounts);
           if (!acct) return sqliteErr(`Account "${account}" not found`);
           accountIdUpdate = Number(acct.id);
@@ -1543,7 +1560,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       next_billing_date: z.string(),
       currency: z.enum(["CAD", "USD"]).optional(),
       category: z.string().optional(),
-      account: z.string().optional(),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
       notes: z.string().optional(),
     },
     async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
@@ -1559,7 +1576,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }
       let accountId: number | null = null;
       if (account) {
-        const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+        const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
         const acct = fuzzyFind(account, allAccounts);
         if (!acct) return sqliteErr(`Account "${account}" not found`);
         accountId = Number(acct.id);
@@ -1583,7 +1600,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       next_billing_date: z.string().optional(),
       currency: z.enum(["CAD", "USD"]).optional(),
       category: z.string().optional().describe("Empty string clears"),
-      account: z.string().optional().describe("Empty string clears"),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
       status: z.enum(["active", "paused", "cancelled"]).optional(),
       cancel_reminder_date: z.string().optional(),
       notes: z.string().optional(),
@@ -1606,7 +1623,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (account !== undefined) {
         if (account === "") accountIdUpdate = null;
         else {
-          const allAccounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+          const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
           const acct = fuzzyFind(account, allAccounts);
           if (!acct) return sqliteErr(`Account "${account}" not found`);
           accountIdUpdate = Number(acct.id);
@@ -2565,15 +2582,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           format = loaded.format;
         }
 
-        const accounts = await sqlite.prepare(`SELECT id, name FROM accounts WHERE user_id = ?`).all(userId) as Array<{ id: number; name: string }>;
-        const accountByName = new Map<string, number>(accounts.map((a) => [a.name, a.id]));
+        const accounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as Array<{ id: number; name: string; alias: string | null }>;
+        const accountByName = new Map<string, number>();
+        for (const a of accounts) {
+          const nameKey = a.name.toLowerCase().trim();
+          accountByName.set(nameKey, a.id);
+          if (a.alias) {
+            const aliasKey = a.alias.toLowerCase().trim();
+            // name wins on collision — don't overwrite.
+            if (!accountByName.has(aliasKey)) accountByName.set(aliasKey, a.id);
+          }
+        }
         const existingHashRows = await sqlite.prepare(`SELECT import_hash FROM transactions WHERE user_id = ? AND import_hash IS NOT NULL`).all(userId) as Array<{ import_hash: string }>;
         const existingHashes = new Set<string>(existingHashRows.map((r) => r.import_hash));
 
         let dedupHits = 0;
         const unresolvedAccounts = new Set<string>();
         for (const r of rows) {
-          const aId = accountByName.get(r.account);
+          const aId = r.account ? accountByName.get(r.account.toLowerCase().trim()) : undefined;
           if (!aId && r.account) unresolvedAccounts.add(r.account);
           if (aId) {
             const h = generateImportHash(r.date, aId, r.amount, r.payee);

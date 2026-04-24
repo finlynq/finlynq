@@ -22,11 +22,11 @@ export async function getAccountById(id: number, userId: string) {
   return db.select().from(accounts).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).get();
 }
 
-export async function createAccount(userId: string, data: { type: string; group: string; name: string; currency: string; note?: string }) {
+export async function createAccount(userId: string, data: { type: string; group: string; name: string; currency: string; note?: string; alias?: string | null }) {
   return db.insert(accounts).values({ ...data, userId }).returning().get();
 }
 
-export async function updateAccount(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; currency: string; note: string; archived: boolean }>) {
+export async function updateAccount(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; currency: string; note: string; archived: boolean; alias: string | null }>) {
   return db.update(accounts).set(data).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).returning().get();
 }
 
@@ -314,12 +314,13 @@ export async function getAccountBalances(userId: string, opts?: { includeArchive
       accountGroup: accounts.group,
       currency: accounts.currency,
       archived: accounts.archived,
+      alias: accounts.alias,
       balance: sql<number>`COALESCE(SUM(${transactions.amount}), 0)`,
     })
     .from(accounts)
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
     .where(and(...conditions))
-    .groupBy(accounts.id, accounts.name, accounts.type, accounts.group, accounts.currency, accounts.archived)
+    .groupBy(accounts.id, accounts.name, accounts.type, accounts.group, accounts.currency, accounts.archived, accounts.alias)
     .orderBy(accounts.type, accounts.group, accounts.name)
     .all();
 }

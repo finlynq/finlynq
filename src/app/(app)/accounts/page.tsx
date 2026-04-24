@@ -34,6 +34,7 @@ type AccountBalance = {
   currency: string;
   balance: number;
   archived?: boolean;
+  alias?: string | null;
 };
 
 const ACCOUNT_TYPES = [
@@ -45,6 +46,20 @@ const ACCOUNT_GROUPS: Record<string, string[]> = {
   A: ["Cash", "Checking", "Savings", "Investment", "Property", "Other"],
   L: ["Credit Card", "Loan", "Mortgage", "Other"],
 };
+
+function aliasWarning(list: AccountBalance[], alias: string, excludeId: number | null): string {
+  const a = alias.trim().toLowerCase();
+  if (!a) return "";
+  const clash = list.find((acc) => {
+    if (acc.accountId === excludeId) return false;
+    const otherAlias = (acc.alias ?? "").trim().toLowerCase();
+    const otherName = acc.accountName.trim().toLowerCase();
+    return otherAlias === a || otherName === a;
+  });
+  return clash
+    ? `Another account ("${clash.accountName}") already uses this name or alias — matches may be ambiguous.`
+    : "";
+}
 
 function SummarySkeleton() {
   return (
@@ -102,6 +117,7 @@ const emptyForm = {
   currency: "CAD",
   initialBalance: "0",
   note: "",
+  alias: "",
 };
 
 export default function AccountsPage() {
@@ -120,7 +136,7 @@ export default function AccountsPage() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editAccountId, setEditAccountId] = useState<number | null>(null);
   const [editAccountArchived, setEditAccountArchived] = useState(false);
-  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "CAD", note: "" });
+  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "CAD", note: "", alias: "" });
   const [editFormErrors, setEditFormErrors] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
   const [editSaveError, setEditSaveError] = useState("");
@@ -173,6 +189,7 @@ export default function AccountsPage() {
           group: form.group.trim(),
           currency: form.currency,
           note: form.note.trim(),
+          alias: form.alias.trim() || undefined,
         }),
       });
       if (!res.ok) {
@@ -214,7 +231,7 @@ export default function AccountsPage() {
   function openEditDialog(a: AccountBalance) {
     setEditAccountId(a.accountId);
     setEditAccountArchived(Boolean(a.archived));
-    setEditForm({ name: a.accountName, type: a.accountType, group: a.accountGroup || "", currency: a.currency, note: "" });
+    setEditForm({ name: a.accountName, type: a.accountType, group: a.accountGroup || "", currency: a.currency, note: "", alias: a.alias ?? "" });
     setEditFormErrors({});
     setEditSaveError("");
     setConfirmDelete(false);
@@ -280,7 +297,7 @@ export default function AccountsPage() {
       const res = await fetch("/api/accounts", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: editAccountId, name: editForm.name.trim(), type: editForm.type, group: editForm.group.trim(), currency: editForm.currency, note: editForm.note.trim() }),
+        body: JSON.stringify({ id: editAccountId, name: editForm.name.trim(), type: editForm.type, group: editForm.group.trim(), currency: editForm.currency, note: editForm.note.trim(), alias: editForm.alias.trim() || null }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -345,7 +362,10 @@ export default function AccountsPage() {
                       {a.accountName.charAt(0).toUpperCase()}
                     </div>
                     <div className="min-w-0">
-                      <p className="font-medium text-sm truncate">{a.accountName}</p>
+                      <p className="font-medium text-sm truncate">
+                        {a.accountName}
+                        {a.alias && <span className="ml-1.5 text-xs text-muted-foreground font-normal">({a.alias})</span>}
+                      </p>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <Badge variant="outline" className="text-[10px]">{a.currency}</Badge>
                         {a.archived && <Badge variant="secondary" className="text-[10px]">Archived</Badge>}
@@ -397,6 +417,20 @@ export default function AccountsPage() {
               autoFocus
             />
             {formErrors.name && <p className="text-xs text-destructive">{formErrors.name}</p>}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Alias <span className="text-muted-foreground text-xs">(optional)</span></Label>
+            <Input
+              value={form.alias}
+              onChange={(e) => setForm({ ...form, alias: e.target.value })}
+              placeholder="e.g. 1234 or Visa4242"
+              maxLength={64}
+            />
+            <p className="text-xs text-muted-foreground">Short nickname used when matching transactions — e.g. last 4 digits of a card, or a receipt label.</p>
+            {aliasWarning(accounts, form.alias, null) && (
+              <p className="text-xs text-amber-600">{aliasWarning(accounts, form.alias, null)}</p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -577,6 +611,19 @@ export default function AccountsPage() {
                 autoFocus
               />
               {editFormErrors.name && <p className="text-xs text-destructive">{editFormErrors.name}</p>}
+            </div>
+            <div className="space-y-1.5">
+              <Label>Alias <span className="text-muted-foreground text-xs">(optional)</span></Label>
+              <Input
+                value={editForm.alias}
+                onChange={(e) => setEditForm({ ...editForm, alias: e.target.value })}
+                placeholder="e.g. 1234 or Visa4242"
+                maxLength={64}
+              />
+              <p className="text-xs text-muted-foreground">Short nickname used when matching transactions — e.g. last 4 digits of a card, or a receipt label.</p>
+              {aliasWarning(accounts, editForm.alias, editAccountId) && (
+                <p className="text-xs text-amber-600">{aliasWarning(accounts, editForm.alias, editAccountId)}</p>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">

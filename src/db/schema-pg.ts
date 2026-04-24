@@ -28,6 +28,7 @@ export const accounts = pgTable("accounts", {
   currency: text("currency").notNull().default("CAD"),
   note: text("note").default(""),
   archived: boolean("archived").notNull().default(false),
+  alias: text("alias"),
 });
 
 export const categories = pgTable("categories", {

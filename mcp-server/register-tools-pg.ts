@@ -71,14 +71,23 @@ function err(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
 }
 
-/** Fuzzy name → row match: exact → startsWith → contains → reverse-contains */
+/**
+ * Fuzzy match against a row list: exact-name → exact-alias → startsWith-name →
+ * contains-name → reverse-contains-name.
+ *
+ * Alias match is exact-only (case-insensitive, trimmed). Aliases are meant to
+ * be precise shorthands like "1234" or "Visa4242"; loose matching on a short
+ * alias would false-match too often. Only rows carrying an `alias` column
+ * (accounts) exercise the alias branch — for other row shapes it's a no-op.
+ */
 function fuzzyFind(input: string, options: Row[]): Row | null {
   if (!input || !options.length) return null;
   const lo = input.toLowerCase().trim();
   return (
-    options.find(o => String(o.name ?? "").toLowerCase() === lo) ??
-    options.find(o => String(o.name ?? "").toLowerCase().startsWith(lo)) ??
-    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => String(o.name  ?? "").toLowerCase() === lo) ??
+    options.find(o => String(o.alias ?? "").toLowerCase() === lo) ??
+    options.find(o => String(o.name  ?? "").toLowerCase().startsWith(lo)) ??
+    options.find(o => String(o.name  ?? "").toLowerCase().includes(lo)) ??
     options.find(o => lo.includes(String(o.name ?? "").toLowerCase())) ??
     null
   );
@@ -260,13 +269,13 @@ export function registerPgTools(
     { currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency") },
     async ({ currency }) => {
       const rows = await q(db, sql`
-        SELECT a.id, a.name, a.type, a."group", a.currency,
+        SELECT a.id, a.name, a.alias, a.type, a."group", a.currency,
                COALESCE(SUM(t.amount), 0) AS balance
         FROM accounts a
         LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
         WHERE a.user_id = ${userId}
           ${currency && currency !== "all" ? sql`AND a.currency = ${currency}` : sql``}
-        GROUP BY a.id, a.name, a.type, a."group", a.currency
+        GROUP BY a.id, a.name, a.alias, a.type, a."group", a.currency
         ORDER BY a.type, a."group", a.name
       `);
       return text(rows);
@@ -941,13 +950,14 @@ export function registerPgTools(
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
       target_amount: z.number().describe("Target amount"),
       deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Account name to link"),
+      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
     },
     async ({ name, type, target_amount, deadline, account }) => {
       let accountId: number | null = null;
       if (account) {
-        const acctRows = await q(db, sql`SELECT id FROM accounts WHERE user_id = ${userId} AND name = ${account}`);
-        accountId = acctRows.length ? Number((acctRows[0] as { id: number }).id) : null;
+        const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+        const acct = fuzzyFind(account, allAccounts);
+        accountId = acct ? Number(acct.id) : null;
       }
       await db.execute(sql`
         INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, status)
@@ -967,18 +977,20 @@ export function registerPgTools(
       group: z.string().optional().describe("Account group (e.g. 'Banks', 'Credit Cards', 'Investment')"),
       currency: z.enum(["CAD", "USD"]).optional().describe("Currency (default CAD)"),
       note: z.string().optional().describe("Optional note"),
+      alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },
-    async ({ name, type, group, currency, note }) => {
+    async ({ name, type, group, currency, note, alias }) => {
       const existing = await q(db, sql`SELECT id FROM accounts WHERE user_id = ${userId} AND name = ${name}`);
       if (existing.length) return err(`Account "${name}" already exists (id: ${existing[0].id})`);
 
+      const aliasValue = alias && alias.trim() ? alias.trim() : null;
       const result = await q(db, sql`
-        INSERT INTO accounts (user_id, type, "group", name, currency, note)
-        VALUES (${userId}, ${type}, ${group ?? ""}, ${name}, ${currency ?? "CAD"}, ${note ?? ""})
+        INSERT INTO accounts (user_id, type, "group", name, currency, note, alias)
+        VALUES (${userId}, ${type}, ${group ?? ""}, ${name}, ${currency ?? "CAD"}, ${note ?? ""}, ${aliasValue})
         RETURNING id
       `);
 
-      return text({ success: true, accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})` });
+      return text({ success: true, accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})${aliasValue ? `, alias "${aliasValue}"` : ""}` });
     }
   );
 
@@ -989,7 +1001,7 @@ export function registerPgTools(
     {
       amount: z.number().describe("Amount (negative=expense, positive=income/transfer-in)"),
       payee: z.string().describe("Payee or merchant name"),
-      account: z.string().describe("Account name (required — ask the user which account if unclear; fuzzy-matched against their accounts)"),
+      account: z.string().describe("Account name or alias (required — ask the user which account if unclear; fuzzy matched against name, exact match on alias)"),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional().describe("Optional note"),
@@ -999,7 +1011,7 @@ export function registerPgTools(
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
-      const allAccounts = await q(db, sql`SELECT id, name, currency FROM accounts WHERE user_id = ${userId}`);
+      const allAccounts = await q(db, sql`SELECT id, name, alias, currency FROM accounts WHERE user_id = ${userId}`);
       if (!allAccounts.length) return err("No accounts found — create an account first.");
       const acct: Row | null = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
@@ -1046,7 +1058,7 @@ export function registerPgTools(
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
-        account: z.string().describe("Account name (required — fuzzy-matched)"),
+        account: z.string().describe("Account name or alias (required — fuzzy matched against name, exact match on alias)"),
         date: z.string().optional(),
         category: z.string().optional(),
         note: z.string().optional(),
@@ -1055,7 +1067,7 @@ export function registerPgTools(
     },
     async ({ transactions }) => {
       const today = new Date().toISOString().split("T")[0];
-      const allAccounts = await q(db, sql`SELECT id, name, currency FROM accounts WHERE user_id = ${userId}`);
+      const allAccounts = await q(db, sql`SELECT id, name, alias, currency FROM accounts WHERE user_id = ${userId}`);
       const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
 
       const results: { index: number; success: boolean; message: string }[] = [];
@@ -1199,16 +1211,17 @@ export function registerPgTools(
   // ── update_account ─────────────────────────────────────────────────────────
   server.tool(
     "update_account",
-    "Update name, group, currency, or note of an account",
+    "Update name, group, currency, note, or alias of an account",
     {
-      account: z.string().describe("Current account name (fuzzy matched)"),
+      account: z.string().describe("Current account name or alias (fuzzy matched against name; exact match on alias)"),
       name: z.string().optional().describe("New name"),
       group: z.string().optional().describe("New group"),
       currency: z.enum(["CAD", "USD"]).optional().describe("New currency"),
       note: z.string().optional().describe("New note"),
+      alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports (e.g. last 4 digits of a card). Pass an empty string to clear."),
     },
-    async ({ account, name, group, currency, note }) => {
-      const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+    async ({ account, name, group, currency, note, alias }) => {
+      const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found`);
 
@@ -1218,6 +1231,10 @@ export function registerPgTools(
       if (group !== undefined) updates.push(sql`"group" = ${group}`);
       if (currency !== undefined) updates.push(sql`currency = ${currency}`);
       if (note !== undefined) updates.push(sql`note = ${note}`);
+      if (alias !== undefined) {
+        const trimmed = alias.trim();
+        updates.push(trimmed ? sql`alias = ${trimmed}` : sql`alias = NULL`);
+      }
       if (!updates.length) return err("No fields to update");
 
       const result = await db.execute(
@@ -1239,11 +1256,11 @@ export function registerPgTools(
     "delete_account",
     "Delete an account (only if it has no transactions)",
     {
-      account: z.string().describe("Account name (fuzzy matched)"),
+      account: z.string().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
       force: z.boolean().optional().describe("Delete even if transactions exist (moves them to uncategorized)"),
     },
     async ({ account, force }) => {
-      const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+      const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found`);
 
@@ -1466,8 +1483,8 @@ export function registerPgTools(
           delete_transaction: "delete_transaction(id) — Permanently delete. Cannot be undone.",
           set_budget: "set_budget(category, month, amount) — Upsert budget. month=YYYY-MM.",
           delete_budget: "delete_budget(category, month) — Remove budget entry.",
-          add_account: "add_account(name, type, group?, currency?, note?) — type: 'A'=asset, 'L'=liability.",
-          update_account: "update_account(account, name?, group?, currency?, note?) — Fuzzy account name.",
+          add_account: "add_account(name, type, group?, currency?, note?, alias?) — type: 'A'=asset, 'L'=liability. alias is a short shorthand (e.g. last 4 digits of a card) used when receipts/imports reference the account by a non-canonical name.",
+          update_account: "update_account(account, name?, group?, currency?, note?, alias?) — Fuzzy account name or alias. Pass empty alias to clear.",
           delete_account: "delete_account(account, force?) — force=true to delete with transactions.",
           add_goal: "add_goal(name, type, target_amount, deadline?, account?) — type: savings|debt_payoff|investment|emergency_fund.",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?) — status: active|completed|paused.",
@@ -1502,7 +1519,7 @@ export function registerPgTools(
           accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
           goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
           categories: ["create_category(name, type)", "create_rule(match_payee, assign_category)"],
-          note: "All name inputs use fuzzy matching — partial names work. Set category via update_transaction(id, category=...).",
+          note: "All name inputs use fuzzy matching — partial names work. Each account can also have an `alias` (e.g. last 4 digits of a card); account lookups exact-match on alias in addition to fuzzy-matching on name, so you can pass either. Set category via update_transaction(id, category=...).",
         });
       }
 
@@ -1510,7 +1527,7 @@ export function registerPgTools(
         return text({
           key_tables: {
             transactions: "id, user_id, date, account_id, category_id, currency, amount, payee, note, tags, import_hash, fit_id",
-            accounts: "id, user_id, type(A/L), group, name, currency, note",
+            accounts: "id, user_id, type(A/L), group, name, currency, note, archived, alias",
             categories: "id, user_id, type(E/I/T), group, name, note",
             budgets: "id, user_id, category_id, month(YYYY-MM), amount, currency",
             goals: "id, user_id, name, type, target_amount, current_amount, deadline, status, account_id",
@@ -2047,7 +2064,7 @@ export function registerPgTools(
       annual_rate: z.number().describe("Annual interest rate (e.g. 5.5 for 5.5%)"),
       term_months: z.number().int().positive().describe("Loan term in months"),
       start_date: z.string().describe("Loan start date (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Linked account name (fuzzy matched)"),
+      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
       payment_amount: z.number().optional().describe("Override computed monthly payment"),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional().describe("Default monthly"),
       extra_payment: z.number().optional().describe("Extra principal per payment (default 0)"),
@@ -2057,7 +2074,7 @@ export function registerPgTools(
     async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
       let accountId: number | null = null;
       if (account) {
-        const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+        const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
         const acct = fuzzyFind(account, allAccounts);
         if (!acct) return err(`Account "${account}" not found`);
         accountId = Number(acct.id);
@@ -2087,7 +2104,7 @@ export function registerPgTools(
       payment_amount: z.number().optional(),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
       extra_payment: z.number().optional(),
-      account: z.string().optional().describe("Linked account name (fuzzy matched). Pass empty string to clear."),
+      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias). Pass empty string to clear."),
       note: z.string().optional(),
     },
     async ({ id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, account, note }) => {
@@ -2099,7 +2116,7 @@ export function registerPgTools(
         if (account === "") {
           accountIdUpdate = null;
         } else {
-          const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+          const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
           const acct = fuzzyFind(account, allAccounts);
           if (!acct) return err(`Account "${account}" not found`);
           accountIdUpdate = Number(acct.id);
@@ -2390,7 +2407,7 @@ export function registerPgTools(
       next_billing_date: z.string().describe("Next billing date (YYYY-MM-DD)"),
       currency: z.enum(["CAD", "USD"]).optional().describe("Default CAD"),
       category: z.string().optional().describe("Category name (fuzzy matched)"),
-      account: z.string().optional().describe("Account name (fuzzy matched)"),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
       notes: z.string().optional(),
     },
     async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
@@ -2406,7 +2423,7 @@ export function registerPgTools(
       }
       let accountId: number | null = null;
       if (account) {
-        const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+        const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
         const acct = fuzzyFind(account, allAccounts);
         if (!acct) return err(`Account "${account}" not found`);
         accountId = Number(acct.id);
@@ -2432,7 +2449,7 @@ export function registerPgTools(
       next_billing_date: z.string().optional().describe("YYYY-MM-DD"),
       currency: z.enum(["CAD", "USD"]).optional(),
       category: z.string().optional().describe("Category name (fuzzy). Empty string clears."),
-      account: z.string().optional().describe("Account name (fuzzy). Empty string clears."),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
       status: z.enum(["active", "paused", "cancelled"]).optional(),
       cancel_reminder_date: z.string().optional().describe("YYYY-MM-DD"),
       notes: z.string().optional(),
@@ -2455,7 +2472,7 @@ export function registerPgTools(
       if (account !== undefined) {
         if (account === "") accountIdUpdate = null;
         else {
-          const allAccounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+          const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
           const acct = fuzzyFind(account, allAccounts);
           if (!acct) return err(`Account "${account}" not found`);
           accountIdUpdate = Number(acct.id);
@@ -3563,7 +3580,7 @@ export function registerPgTools(
 
         // Dedup via generateImportHash — runs against plaintext payee, which
         // is what we have at this boundary.
-        const accounts = await q(db, sql`SELECT id, name FROM accounts WHERE user_id = ${userId}`);
+        const accounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
         const accountByName = new Map<string, number>(accounts.map((a) => [String(a.name), Number(a.id)]));
         const existingHashRows = await q(db, sql`SELECT import_hash FROM transactions WHERE user_id = ${userId} AND import_hash IS NOT NULL`);
         const existingHashes = new Set<string>(existingHashRows.map((r) => String(r.import_hash)));
