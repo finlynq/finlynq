@@ -104,10 +104,25 @@ export async function GET(request: NextRequest) {
     firstPurchaseDate: string | null;
   };
   const aggByHolding = new Map<string, TxAgg>();
+  let undecryptedSkipped = 0;
   for (const r of rawTxRows) {
     if (!r.portfolioHolding) continue;
-    const key = (dek ? decryptField(dek, r.portfolioHolding) : r.portfolioHolding) ?? "";
+    // decryptField throws on DEK mismatch; try/catch so a single bad row
+    // (e.g. from a previous encryption generation) doesn't 500 the whole page.
+    let key = "";
+    try {
+      key = (dek ? decryptField(dek, r.portfolioHolding) : r.portfolioHolding) ?? "";
+    } catch {
+      key = r.portfolioHolding;
+    }
     if (!key) continue;
+    // DEK cache miss (post-restart, cold session) leaves ciphertext unchanged.
+    // Counting each unique IV as its own "orphan holding" spams the UI with
+    // v1: rows. Skip and surface the count so the page can prompt a re-login.
+    if (key.startsWith("v1:")) {
+      undecryptedSkipped++;
+      continue;
+    }
     const qty = Number(r.quantity ?? 0);
     const amt = Number(r.amount);
     const row = aggByHolding.get(key) ?? {
@@ -604,6 +619,10 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     holdings: holdingsWithPct,
+    // Non-zero when the session's DEK cache is cold (post-restart) and we
+    // couldn't decrypt tx.portfolio_holding. Client shows a re-login prompt
+    // rather than rendering the rows as v1: ciphertext orphans.
+    undecryptedTxCount: undecryptedSkipped,
     summary: {
       totalHoldings: holdings.length,
       totalAccounts: byAccount.size,
