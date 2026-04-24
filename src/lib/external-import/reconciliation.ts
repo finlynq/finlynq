@@ -66,6 +66,26 @@ export async function runWealthPositionReconciliation(
     ? await client.getBalances(date)
     : {};
 
+  // The ZIP importer uses synthetic external ids (`csv:acct:<name>`) in the
+  // saved mapping. WP's /account_balances returns balances keyed by its
+  // real UUIDs. Bridge the two by fetching /accounts and matching on name.
+  // The API path also calls this — it uses UUIDs as external ids, so the
+  // lookup falls through unchanged.
+  const wpAccounts = await client.listAccounts();
+  const wpIdByName = new Map(wpAccounts.map((a) => [a.name, a.id]));
+
+  function resolveWpBalance(externalId: string): number | undefined {
+    // Direct UUID hit (API-path mapping).
+    if (balances[externalId] !== undefined) return balances[externalId];
+    // CSV synthetic id → look up by name.
+    if (externalId.startsWith("csv:acct:")) {
+      const name = externalId.slice("csv:acct:".length);
+      const wpUuid = wpIdByName.get(name);
+      if (wpUuid && balances[wpUuid] !== undefined) return balances[wpUuid];
+    }
+    return undefined;
+  }
+
   const pfAccounts = await getAccounts(userId, { includeArchived: true });
   const accountById = new Map(pfAccounts.map((a) => [a.id, a]));
 
@@ -73,7 +93,7 @@ export async function runWealthPositionReconciliation(
   const unmatchedExternal: string[] = [];
 
   for (const [externalId, pfAccountId] of Object.entries(mapping.accountMap)) {
-    const wpBalance = balances[externalId];
+    const wpBalance = resolveWpBalance(externalId);
     if (wpBalance === undefined) {
       unmatchedExternal.push(externalId);
       continue;

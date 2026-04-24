@@ -134,14 +134,16 @@ describe("transformWealthPositionExport", () => {
     expect(inn?.amount).toBe(1000);
   });
 
-  it("routes a stock purchase to the brokerage account with symbol + quantity", () => {
+  it("routes a stock purchase to the brokerage account with holding name + quantity", () => {
     const parsed = parseWealthPositionExport(SYNTHETIC);
     const mapping = buildResolvedMapping(parsed);
     const r = transformWealthPositionExport(parsed, mapping);
     const stockTxs = r.flat.filter((t) => t.date === "2026-02-01");
-    // Parent (cash leg, IBKR TFSA -800) + holding leg (IBKR TFSA +800 with VCN.TO / 12 shares)
     expect(stockTxs.length).toBeGreaterThanOrEqual(1);
-    const holdingLeg = stockTxs.find((t) => t.portfolioHolding === "VCN.TO");
+    // `portfolio_holding` on the tx must be the holding NAME so the
+    // portfolio overview aggregator can look it up by portfolio_holdings.name.
+    // Symbol lives on portfolio_holdings.symbol, not on the transaction.
+    const holdingLeg = stockTxs.find((t) => t.portfolioHolding === "TFSA - Canada");
     expect(holdingLeg).toBeDefined();
     expect(holdingLeg!.account).toBe("IBKR TFSA");
     expect(holdingLeg!.quantity).toBe(12);

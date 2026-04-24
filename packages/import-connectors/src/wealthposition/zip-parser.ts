@@ -554,10 +554,12 @@ function buildRawTransaction(args: BuildArgs): RawTransaction {
     tags: args.tags ? args.tags : undefined,
     category: args.category,
   };
-  // Prefer the ticker symbol when available; otherwise fall back to the
-  // holding name so there's always *some* identifier on investment rows.
+  // `portfolio_holding` on a transaction must match `portfolio_holdings.name`
+  // — the portfolio/overview aggregator keys off that name when computing per-
+  // holding quantity + cost basis. Symbol lives separately on
+  // `portfolio_holdings.symbol`, so don't put it on the transaction.
   if (args.portfolioHolding) {
-    row.portfolioHolding = args.symbol || args.portfolioHolding;
+    row.portfolioHolding = args.portfolioHolding;
   }
   if (args.quantity !== undefined && Number.isFinite(args.quantity)) {
     row.quantity = args.quantity;
