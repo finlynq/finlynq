@@ -358,8 +358,13 @@ export function registerPgTools(
       // after decryption when the data is encrypted. Fetch a larger window then
       // trim to lim after filtering.
       const fetchCap = payee || tags ? Math.max(lim * 10, 500) : lim;
-      const rows = await q(db, sql`
-        SELECT t.id, t.date, a.name AS account, c.name AS category, c.type AS category_type,
+      // Stream D: category filter uses name_lookup (HMAC) when DEK present,
+      // falls back to legacy plaintext name= for stdio/pre-backfill rows.
+      const categoryLookup = category && dek ? nameLookup(dek, category) : null;
+      const rawRows = await q(db, sql`
+        SELECT t.id, t.date,
+               a.name AS account, a.name_ct AS account_ct,
+               c.name AS category, c.name_ct AS category_ct, c.type AS category_type,
                t.currency, t.amount, t.payee, t.note, t.tags
         FROM transactions t
         LEFT JOIN accounts a ON t.account_id = a.id
@@ -369,10 +374,22 @@ export function registerPgTools(
           ${max_amount !== undefined ? sql`AND t.amount <= ${max_amount}` : sql``}
           ${start_date ? sql`AND t.date >= ${start_date}` : sql``}
           ${end_date ? sql`AND t.date <= ${end_date}` : sql``}
-          ${category ? sql`AND c.name = ${category}` : sql``}
+          ${category
+            ? categoryLookup
+              ? sql`AND (c.name = ${category} OR c.name_lookup = ${categoryLookup})`
+              : sql`AND c.name = ${category}`
+            : sql``}
         ORDER BY t.date DESC
         LIMIT ${fetchCap}
       `);
+      const rows = rawRows.map((r) => {
+        const { account_ct, category_ct, ...rest } = r;
+        return {
+          ...rest,
+          account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
+          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+        };
+      });
       let decrypted = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
       if (payee) {
         const q = payee.toLowerCase();
@@ -400,17 +417,25 @@ export function registerPgTools(
       const [y, m] = month.split("-").map(Number);
       const startDate = `${month}-01`;
       const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
-      const rows = await q(db, sql`
-        SELECT b.id, c.name AS category, c."group" AS category_group,
+      // Stream D: GROUP BY c.id so encrypted rows don't bucket together.
+      const rawRows = await q(db, sql`
+        SELECT b.id, c.name AS category, c.name_ct AS category_ct, c."group" AS category_group,
                b.amount AS budget,
                COALESCE(ABS(SUM(CASE WHEN t.date >= ${startDate} AND t.date <= ${endDate} THEN t.amount ELSE 0 END)), 0) AS spent
         FROM budgets b
         JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
         LEFT JOIN transactions t ON t.category_id = c.id AND t.user_id = ${userId}
         WHERE b.month = ${month} AND b.user_id = ${userId}
-        GROUP BY b.id, c.name, c."group", b.amount
-        ORDER BY c."group", c.name
+        GROUP BY b.id, c.id, c.name, c.name_ct, c."group", b.amount
+        ORDER BY c."group"
       `);
+      const rows = rawRows.map((r) => {
+        const { category_ct, ...rest } = r;
+        return {
+          ...rest,
+          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+        };
+      });
       return text(rows);
     }
   );
@@ -435,15 +460,24 @@ export function registerPgTools(
         ? sql`TO_CHAR(t.date::date, 'YYYY')`
         : sql`TO_CHAR(t.date::date, 'YYYY-MM')`;
 
-      const rows = await q(db, sql`
-        SELECT ${truncExpr} AS period, c.name AS category, c."group" AS category_group,
-               SUM(t.amount) AS total
+      // Stream D: GROUP BY c.id + c.name_ct so encrypted rows don't merge.
+      const rawRows = await q(db, sql`
+        SELECT ${truncExpr} AS period, c.id AS category_id,
+               c.name AS category, c.name_ct AS category_ct,
+               c."group" AS category_group, SUM(t.amount) AS total
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId} AND t.date >= ${startDate} AND c.type = 'E'
-        GROUP BY ${truncExpr}, c.name, c."group"
+        GROUP BY ${truncExpr}, c.id, c.name, c.name_ct, c."group"
         ORDER BY period, total
       `);
+      const rows = rawRows.map((r) => {
+        const { category_ct, ...rest } = r;
+        return {
+          ...rest,
+          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+        };
+      });
       return text(rows);
     }
   );
@@ -457,8 +491,10 @@ export function registerPgTools(
       end_date: z.string().describe("End date"),
     },
     async ({ start_date, end_date }) => {
-      const rows = await q(db, sql`
-        SELECT c.type AS category_type, c."group" AS category_group, c.name AS category,
+      // Stream D: include c.name_ct for in-memory decrypt.
+      const rawRows = await q(db, sql`
+        SELECT c.id AS category_id, c.type AS category_type, c."group" AS category_group,
+               c.name AS category, c.name_ct AS category_ct,
                SUM(t.amount) AS total, COUNT(*) AS count
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
@@ -466,9 +502,16 @@ export function registerPgTools(
           AND t.date >= ${start_date}
           AND t.date <= ${end_date}
           AND c.type IN ('I','E')
-        GROUP BY c.id, c.type, c."group", c.name
+        GROUP BY c.id, c.type, c."group", c.name, c.name_ct
         ORDER BY c.type, c."group"
       `);
+      const rows = rawRows.map((r) => {
+        const { category_ct, ...rest } = r;
+        return {
+          ...rest,
+          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+        };
+      });
       return text(rows);
     }
   );
