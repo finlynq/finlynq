@@ -914,6 +914,7 @@ function TransactionsPageInner() {
                   <TableHead>Category</TableHead>
                   <TableHead>Payee</TableHead>
                   <TableHead>Note</TableHead>
+                  <TableHead className="text-right">Qty</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
                   <TableHead className="w-24"></TableHead>
                 </TableRow>
@@ -944,6 +945,14 @@ function TransactionsPageInner() {
                     </TableCell>
                     <TableCell className="text-sm">{t.payee || "-"}</TableCell>
                     <TableCell className="text-sm text-muted-foreground max-w-40 truncate">{t.note || "-"}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-muted-foreground">
+                      {t.quantity != null && t.quantity !== 0
+                        ? t.quantity.toLocaleString("en-CA", {
+                            minimumFractionDigits: 0,
+                            maximumFractionDigits: t.quantity % 1 === 0 ? 0 : 4,
+                          })
+                        : "-"}
+                    </TableCell>
                     <TableCell className={`text-right font-mono text-sm font-semibold ${t.amount >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
                       {formatCurrency(t.amount, t.currency)}
                     </TableCell>

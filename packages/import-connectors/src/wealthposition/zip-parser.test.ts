@@ -30,6 +30,7 @@ I,Salaries,Wages & salary,
 E,Interest,Mortgage Interest,
 R,Transfers,RRSP Contribution,
 R,Transfers,Transfers,
+I,Investment Returns,Dividends,
 `,
   portfolioCsv: `Portfolio account name,Portfolio holding name,Symbol,Currency,Note
 IBKR TFSA,TFSA - Canada,VCN.TO,CAD,
@@ -38,6 +39,7 @@ WealthSimple,Ethereum,,CAD,
 IBKR Joint,Joint - USD,,USD,
 IBKR Joint,Joint - CAD,,CAD,
 IBKR Joint,Joint - Dev Asia ex Japan - A,VDEA.TO,USD,
+IBKR Joint,Joint - All W - D,VWRD.L,USD,
 `,
   transactionsCsv: `Date,Account,Categorization,Currency,Amount,Quantity,Portfolio holding,Note,Payee,Tags
 2026-03-08,Cash CAD,Groceries,CAD,-100.00,,,walmart,,
@@ -55,6 +57,7 @@ IBKR Joint,Joint - Dev Asia ex Japan - A,VDEA.TO,USD,
 2025-08-11,#SPLIT#,Joint - CAD,CAD,52414.16,52414.16,Joint - CAD,,,
 2025-07-31,Joint - Dev Asia ex Japan - A,#SPLIT#,USD,-1420.4,-40,Joint - USD,,,
 2025-07-31,#SPLIT#,Joint - USD,CAD,1960,1420.4,Joint - USD,,,
+2024-12-31,Joint - USD,Dividends,CAD,20,14.29,Joint - All W - D,,,
 `,
 };
 
@@ -104,10 +107,10 @@ describe("parseWealthPositionExport", () => {
   it("parses accounts / categories / portfolio / transactions", () => {
     const parsed = parseWealthPositionExport(SYNTHETIC);
     expect(parsed.accounts).toHaveLength(8);
-    expect(parsed.categories).toHaveLength(5);
+    expect(parsed.categories).toHaveLength(6);
     expect(parsed.portfolioByHolding.get("Bitcoin")?.brokerageAccount).toBe("WealthSimple");
     expect(parsed.portfolioByHolding.get("TFSA - Canada")?.symbol).toBe("VCN.TO");
-    expect(parsed.transactions).toHaveLength(15);
+    expect(parsed.transactions).toHaveLength(16);
   });
 });
 
@@ -268,6 +271,27 @@ describe("transformWealthPositionExport", () => {
     // Linked.
     expect(sellLeg!.linkId).toBeTruthy();
     expect(sellLeg!.linkId).toBe(cashLeg!.linkId);
+  });
+
+  it("records a dividend with a source-holding tag, without moving shares", () => {
+    // CSV row: `Joint - USD, Dividends, CAD, 20, 14.29, Joint - All W - D`
+    // WP semantics: Joint - USD received $20 cash (+14.29 USD qty on the
+    // cash sleeve) as a dividend from Joint - All W - D. NO share movement
+    // on Joint - All W - D — its qty stays exactly the same. The source
+    // holding is a reporting tag, preserved in `tags` as `source:...`.
+    const parsed = parseWealthPositionExport(SYNTHETIC);
+    const mapping = buildResolvedMapping(parsed);
+    const r = transformWealthPositionExport(parsed, mapping);
+    const divTxs = r.flat.filter((t) => t.date === "2024-12-31");
+    expect(divTxs).toHaveLength(1);
+    const div = divTxs[0];
+    // Landed on the source holding (Joint - USD), NOT the tagged holding.
+    expect(div.portfolioHolding).toBe("Joint - USD");
+    expect(div.amount).toBe(20);
+    expect(div.quantity).toBe(14.29);
+    expect(div.category).toBe("Dividends");
+    // Source-holding preserved as a tag.
+    expect(div.tags).toBe("source:Joint - All W - D");
   });
 
   it("rejects orphan #SPLIT# rows that have no preceding parent", () => {
