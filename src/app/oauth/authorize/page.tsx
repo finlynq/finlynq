@@ -37,16 +37,13 @@ function AuthorizePageInner() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  // Check if user is logged in
+  // Check if user is logged in. `/api/auth/unlock` was removed in the SQLite
+  // purge (db9fd75) — /api/auth/session is the single source of truth now.
   useEffect(() => {
-    fetch("/api/auth/unlock")
+    fetch("/api/auth/session")
       .then((r) => r.json())
       .then((data) => {
-        if (data.unlocked) {
-          setSessionState("loggedIn");
-        } else {
-          setSessionState("loggedOut");
-        }
+        setSessionState(data.authenticated ? "loggedIn" : "loggedOut");
       })
       .catch(() => setSessionState("loggedOut"));
   }, []);
