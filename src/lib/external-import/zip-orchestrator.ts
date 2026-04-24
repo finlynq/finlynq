@@ -29,7 +29,7 @@ import {
   type ImportResult,
 } from "@/lib/import-pipeline";
 import { signConfirmationToken, verifyConfirmationToken } from "@/lib/mcp/confirmation-token";
-import { encryptSplitWrite } from "@/lib/crypto/encrypted-columns";
+import { encryptSplitWrite, nameLookup as computeNameLookup } from "@/lib/crypto/encrypted-columns";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import {
   loadConnectorMapping,
@@ -131,17 +131,33 @@ async function materializeZipMapping(
   // UNIQUE (user_id, name_lookup) partial index — the orchestrator wouldn't
   // catch it and the INSERT would fail mid-batch.
   // Dedup key matches Stream D's name_lookup (HMAC of lowercased-trimmed
-  // name). Null-safe: once Stream D Phase 3 nulls out plaintext `name`
-  // on encrypted rows, we'd crash here if we assumed non-null. Rows with
-  // null names are skipped (they'll always need a fresh lookup via
-  // name_lookup, which isn't wired through this path yet).
+  // name). Two indexes because:
+  //   1. Legacy rows have plaintext name but no name_lookup — key by
+  //      trim+lowercase plaintext.
+  //   2. Stream D Phase 3 rows have null plaintext but populated
+  //      name_lookup — key by the HMAC (computed from desiredName via
+  //      computeNameLookup(dek, desiredName) at lookup time).
+  // The DB's UNIQUE (user_id, name_lookup) partial index is the source of
+  // truth; either map hit means the INSERT would collide.
   const nameKey = (n: string | null | undefined): string =>
     typeof n === "string" ? n.trim().toLowerCase() : "";
   const accountByName = new Map<string, (typeof existingAccounts)[number]>();
+  const accountByLookup = new Map<string, (typeof existingAccounts)[number]>();
   for (const a of existingAccounts) {
     const key = nameKey(a.name);
     if (key) accountByName.set(key, a);
+    if (a.nameLookup) accountByLookup.set(a.nameLookup, a);
   }
+  const findAccountByDesired = (desired: string) => {
+    const k = nameKey(desired);
+    const byPlain = k ? accountByName.get(k) : undefined;
+    if (byPlain) return byPlain;
+    if (dek && desired) {
+      const hash = computeNameLookup(dek, desired);
+      return accountByLookup.get(hash);
+    }
+    return undefined;
+  };
   // Only carry over prior-mapping entries whose Finlynq account still exists.
   // Accounts can be deleted outside this flow (manual cleanup in /accounts,
   // wipe-account, schema rebuild on dev) which leaves us with a stale
@@ -164,7 +180,7 @@ async function materializeZipMapping(
     if (row.autoCreate) {
       const ext = externalAccountById.get(row.externalId);
       const desiredName = row.autoCreate.name || ext?.name || row.externalId;
-      const existing = accountByName.get(nameKey(desiredName));
+      const existing = findAccountByDesired(desiredName);
       if (existing) {
         accountMap[row.externalId] = existing.id;
         continue;
@@ -179,7 +195,9 @@ async function materializeZipMapping(
       });
       if (created) {
         accountMap[row.externalId] = created.id;
-        accountByName.set(nameKey(desiredName), created);
+        const k = nameKey(desiredName);
+        if (k) accountByName.set(k, created);
+        if (dek) accountByLookup.set(computeNameLookup(dek, desiredName), created);
       }
     }
   }
@@ -187,10 +205,22 @@ async function materializeZipMapping(
   const externalCategoryById = new Map(parsed.categories.map((c) => [c.id, c]));
   const existingCats = await getCategories(userId);
   const catByName = new Map<string, (typeof existingCats)[number]>();
+  const catByLookup = new Map<string, (typeof existingCats)[number]>();
   for (const c of existingCats) {
     const key = nameKey(c.name);
     if (key) catByName.set(key, c);
+    if (c.nameLookup) catByLookup.set(c.nameLookup, c);
   }
+  const findCatByDesired = (desired: string) => {
+    const k = nameKey(desired);
+    const byPlain = k ? catByName.get(k) : undefined;
+    if (byPlain) return byPlain;
+    if (dek && desired) {
+      const hash = computeNameLookup(dek, desired);
+      return catByLookup.get(hash);
+    }
+    return undefined;
+  };
   const existingCatIds = new Set(existingCats.map((c) => c.id));
   for (const [extId, pfId] of Object.entries(existing.categoryMap)) {
     if (pfId === null || existingCatIds.has(pfId)) categoryMap[extId] = pfId;
@@ -211,7 +241,7 @@ async function materializeZipMapping(
     if (row.autoCreate) {
       const ext = externalCategoryById.get(row.externalId);
       const desiredName = row.autoCreate.name || ext?.name || row.externalId;
-      const existing = catByName.get(nameKey(desiredName));
+      const existing = findCatByDesired(desiredName);
       if (existing) {
         categoryMap[row.externalId] = existing.id;
         continue;
@@ -225,7 +255,9 @@ async function materializeZipMapping(
       });
       if (created) {
         categoryMap[row.externalId] = created.id;
-        catByName.set(nameKey(desiredName), created);
+        const k = nameKey(desiredName);
+        if (k) catByName.set(k, created);
+        if (dek) catByLookup.set(computeNameLookup(dek, desiredName), created);
       }
     }
   }
@@ -235,7 +267,7 @@ async function materializeZipMapping(
       ? input.transferCategoryId
       : null;
   if (transferCategoryId === null && input.transferCategoryAutoCreate) {
-    const existingByName = catByName.get(nameKey(input.transferCategoryAutoCreate.name));
+    const existingByName = findCatByDesired(input.transferCategoryAutoCreate.name);
     if (existingByName) {
       transferCategoryId = existingByName.id;
     } else {
@@ -248,7 +280,9 @@ async function materializeZipMapping(
       });
       if (created) {
         transferCategoryId = created.id;
-        catByName.set(nameKey(created.name), created);
+        const k = nameKey(created.name);
+        if (k) catByName.set(k, created);
+        if (dek) catByLookup.set(computeNameLookup(dek, created.name ?? input.transferCategoryAutoCreate.name), created);
       }
     }
   }
@@ -257,7 +291,7 @@ async function materializeZipMapping(
       ? input.openingBalanceCategoryId
       : null;
   if (openingBalanceCategoryId === null && input.openingBalanceCategoryAutoCreate) {
-    const existingByName = catByName.get(nameKey(input.openingBalanceCategoryAutoCreate.name));
+    const existingByName = findCatByDesired(input.openingBalanceCategoryAutoCreate.name);
     if (existingByName) {
       openingBalanceCategoryId = existingByName.id;
     } else {
@@ -270,7 +304,9 @@ async function materializeZipMapping(
       });
       if (created) {
         openingBalanceCategoryId = created.id;
-        catByName.set(nameKey(created.name), created);
+        const k = nameKey(created.name);
+        if (k) catByName.set(k, created);
+        if (dek) catByLookup.set(computeNameLookup(dek, created.name ?? input.openingBalanceCategoryAutoCreate.name), created);
       }
     }
   }

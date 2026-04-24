@@ -4,7 +4,7 @@
 // existing Finlynq import pipeline.
 
 import { getAccounts, createAccount, getCategories, createCategory } from "@/lib/queries";
-import { buildNameFields } from "@/lib/crypto/encrypted-columns";
+import { buildNameFields, nameLookup as computeNameLookup } from "@/lib/crypto/encrypted-columns";
 import {
   wealthposition,
   WealthPositionApiError,
@@ -127,16 +127,29 @@ export async function materializeMapping(
   // has "entertainment" and the importer tries to auto-create "Entertainment",
   // and the INSERT would then fail on the UNIQUE (user_id, name_lookup)
   // partial index.
-  // Null-safe: once Stream D Phase 3 nulls plaintext `name`, rows without
-  // plaintext are skipped here (auto-create will still collide at the DB
-  // level on name_lookup, but the Map.get path works for the common case).
+  // Two dedup indexes so we catch both legacy plaintext rows AND Stream D
+  // Phase 3 rows (plaintext nulled, only name_lookup populated). The DB's
+  // UNIQUE (user_id, name_lookup) partial index is the ground truth; a hit
+  // in either map means the INSERT would collide.
   const nameKey = (n: string | null | undefined): string =>
     typeof n === "string" ? n.trim().toLowerCase() : "";
   const accountByName = new Map<string, (typeof existingAccounts)[number]>();
+  const accountByLookup = new Map<string, (typeof existingAccounts)[number]>();
   for (const a of existingAccounts) {
     const key = nameKey(a.name);
     if (key) accountByName.set(key, a);
+    if (a.nameLookup) accountByLookup.set(a.nameLookup, a);
   }
+  const findAccountByDesired = (desired: string) => {
+    const k = nameKey(desired);
+    const byPlain = k ? accountByName.get(k) : undefined;
+    if (byPlain) return byPlain;
+    if (dek && desired) {
+      const hash = computeNameLookup(dek, desired);
+      return accountByLookup.get(hash);
+    }
+    return undefined;
+  };
 
   for (const row of input.accounts) {
     if (row.finlynqId !== undefined) {
@@ -147,7 +160,7 @@ export async function materializeMapping(
       const ext = externalAccountById.get(row.externalId);
       const desiredName = row.autoCreate.name || ext?.name || row.externalId;
       // Avoid duplicate auto-creates if the user runs the dialog twice.
-      const existing = accountByName.get(nameKey(desiredName));
+      const existing = findAccountByDesired(desiredName);
       if (existing) {
         accountMap[row.externalId] = existing.id;
         continue;
@@ -162,7 +175,9 @@ export async function materializeMapping(
       });
       if (created) {
         accountMap[row.externalId] = created.id;
-        accountByName.set(nameKey(desiredName), created);
+        const k = nameKey(desiredName);
+        if (k) accountByName.set(k, created);
+        if (dek) accountByLookup.set(computeNameLookup(dek, desiredName), created);
       }
     }
   }
@@ -170,10 +185,22 @@ export async function materializeMapping(
   const externalCategoryById = new Map(externalCategories.map((c) => [c.id, c] as const));
   const existingCategories = await getCategories(userId);
   const categoryByName = new Map<string, (typeof existingCategories)[number]>();
+  const categoryByLookup = new Map<string, (typeof existingCategories)[number]>();
   for (const c of existingCategories) {
     const key = nameKey(c.name);
     if (key) categoryByName.set(key, c);
+    if (c.nameLookup) categoryByLookup.set(c.nameLookup, c);
   }
+  const findCatByDesired = (desired: string) => {
+    const k = nameKey(desired);
+    const byPlain = k ? categoryByName.get(k) : undefined;
+    if (byPlain) return byPlain;
+    if (dek && desired) {
+      const hash = computeNameLookup(dek, desired);
+      return categoryByLookup.get(hash);
+    }
+    return undefined;
+  };
 
   for (const row of input.categories) {
     if (row.uncategorized) {
@@ -187,7 +214,7 @@ export async function materializeMapping(
     if (row.autoCreate) {
       const ext = externalCategoryById.get(row.externalId);
       const desiredName = row.autoCreate.name || ext?.name || row.externalId;
-      const existing = categoryByName.get(nameKey(desiredName));
+      const existing = findCatByDesired(desiredName);
       if (existing) {
         categoryMap[row.externalId] = existing.id;
         continue;
@@ -201,7 +228,9 @@ export async function materializeMapping(
       });
       if (created) {
         categoryMap[row.externalId] = created.id;
-        categoryByName.set(nameKey(desiredName), created);
+        const k = nameKey(desiredName);
+        if (k) categoryByName.set(k, created);
+        if (dek) categoryByLookup.set(computeNameLookup(dek, desiredName), created);
       }
     }
   }
