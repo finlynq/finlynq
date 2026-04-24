@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -66,10 +66,27 @@ export function ConnectorMappingDialog({ open, onOpenChange, probe, state, onCon
     () => probe.finlynq.categories.map((c) => ({ id: c.id, label: `${c.name} (${c.type})` })),
     [probe.finlynq.categories],
   );
+  const accountLabelById = useMemo(() => new Map(finlynqAccountOptions.map((o) => [o.id, o.label])), [finlynqAccountOptions]);
+  const categoryLabelById = useMemo(() => new Map(finlynqCategoryOptions.map((o) => [o.id, o.label])), [finlynqCategoryOptions]);
+
+  const renderAccountValue = (raw: unknown): React.ReactNode => {
+    const v = typeof raw === "string" ? raw : "";
+    if (v === "__auto") return "Auto-create";
+    if (v === "__skip") return "Skip";
+    const n = Number(v);
+    return accountLabelById.get(n) ?? v;
+  };
+  const renderCategoryValue = (raw: unknown): React.ReactNode => {
+    const v = typeof raw === "string" ? raw : "";
+    if (v === "__auto") return "Auto-create";
+    if (v === "__none") return "Leave uncategorized";
+    const n = Number(v);
+    return categoryLabelById.get(n) ?? v;
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>Map WealthPosition to Finlynq</DialogTitle>
           <DialogDescription>
@@ -78,7 +95,7 @@ export function ConnectorMappingDialog({ open, onOpenChange, probe, state, onCon
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="space-y-4 overflow-y-auto flex-1 pr-1">
           {/* Defaults */}
           <div className="space-y-3 rounded-md border p-3 bg-muted/30">
             <div className="flex items-center justify-between gap-2">
@@ -117,7 +134,7 @@ export function ConnectorMappingDialog({ open, onOpenChange, probe, state, onCon
                 }}
               >
                 <SelectTrigger className="h-9 text-sm">
-                  <SelectValue />
+                  <SelectValue>{(v: unknown) => (v === "__auto" ? "Auto-create \u201cTransfers\u201d" : renderCategoryValue(v))}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__auto">Auto-create &ldquo;Transfers&rdquo;</SelectItem>
@@ -139,7 +156,7 @@ export function ConnectorMappingDialog({ open, onOpenChange, probe, state, onCon
                 }}
               >
                 <SelectTrigger className="h-9 text-sm">
-                  <SelectValue />
+                  <SelectValue>{(v: unknown) => (v === "__auto" ? "Auto-create \u201cOpening Balance\u201d" : renderCategoryValue(v))}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__auto">Auto-create &ldquo;Opening Balance&rdquo;</SelectItem>
@@ -206,7 +223,7 @@ export function ConnectorMappingDialog({ open, onOpenChange, probe, state, onCon
                         }}
                       >
                         <SelectTrigger className="h-7 text-xs flex-1">
-                          <SelectValue />
+                          <SelectValue>{renderAccountValue}</SelectValue>
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="__auto">Auto-create</SelectItem>
@@ -249,7 +266,7 @@ export function ConnectorMappingDialog({ open, onOpenChange, probe, state, onCon
                         }}
                       >
                         <SelectTrigger className="h-7 text-xs flex-1">
-                          <SelectValue />
+                          <SelectValue>{renderCategoryValue}</SelectValue>
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="__auto">Auto-create</SelectItem>

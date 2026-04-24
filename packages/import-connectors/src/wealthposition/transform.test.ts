@@ -225,6 +225,44 @@ describe("transformTransactions", () => {
     expect(r.flat[0].quantity).toBeCloseTo(0.000311, 9);
   });
 
+  it("sets portfolioHolding to the WP account name when holding != amount", () => {
+    const btc = wpAccount("acc-btc", "Bitcoin", "A", "CAD");
+    const cad = wpCategory("cat-cad", "Crypto purchase", "E");
+    const { mapping, byName } = buildMapping([btc], [cad]);
+
+    const tx: ExternalTransaction = {
+      id: "tx-holding-symbol",
+      date: "2026-01-15",
+      reviewed: false,
+      tags: [],
+      entries: [
+        { categorization: "Bitcoin", amount: "50", currency: "CAD", holding: "0.000311", note: "" },
+        { categorization: "Crypto purchase", amount: "50", currency: "CAD", holding: null, note: "" },
+      ],
+    };
+    const r = transformTransactions([tx], mapping, byName);
+    expect(r.flat[0].portfolioHolding).toBe("Bitcoin");
+  });
+
+  it("does NOT set portfolioHolding when holding equals amount", () => {
+    const cad = wpAccount("acc-cad", "CAD WS", "A", "CAD");
+    const exp = wpCategory("cat-exp", "Misc", "E");
+    const { mapping, byName } = buildMapping([cad], [exp]);
+
+    const tx: ExternalTransaction = {
+      id: "tx-cash-no-symbol",
+      date: "2026-01-15",
+      reviewed: false,
+      tags: [],
+      entries: [
+        { categorization: "CAD WS", amount: "-50", currency: "CAD", holding: "-50", note: "" },
+        { categorization: "Misc", amount: "-50", currency: "CAD", holding: null, note: "" },
+      ],
+    };
+    const r = transformTransactions([tx], mapping, byName);
+    expect(r.flat[0].portfolioHolding).toBeUndefined();
+  });
+
   it("does NOT set quantity when holding equals amount (cash 1:1)", () => {
     const cad = wpAccount("acc-cad", "CAD WS", "A", "CAD");
     const exp = wpCategory("cat-exp", "Misc", "E");

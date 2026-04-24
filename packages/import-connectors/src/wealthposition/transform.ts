@@ -91,6 +91,7 @@ export function transformTransactions(
           buildRawTransaction({
             date: tx.date,
             accountName: only.accountName,
+            externalAccountName: only.externalAccountName,
             amount: only.amount,
             currency: only.entry.currency,
             payee: tx.payee || only.entry.note,
@@ -124,6 +125,7 @@ export function transformTransactions(
         buildRawTransaction({
           date: tx.date,
           accountName: a.accountName!,
+          externalAccountName: a.externalAccountName,
           amount: a.amount,
           currency: a.entry.currency,
           payee: tx.payee || `Transfer: ${b.externalAccountName ?? b.accountName ?? ""}`.trim(),
@@ -137,6 +139,7 @@ export function transformTransactions(
         buildRawTransaction({
           date: tx.date,
           accountName: b.accountName!,
+          externalAccountName: b.externalAccountName,
           amount: b.amount,
           currency: b.entry.currency,
           payee: tx.payee || `Transfer: ${a.externalAccountName ?? a.accountName ?? ""}`.trim(),
@@ -158,6 +161,7 @@ export function transformTransactions(
           buildRawTransaction({
             date: tx.date,
             accountName: acct.accountName!,
+            externalAccountName: acct.externalAccountName,
             amount: acct.amount,
             currency: acct.entry.currency,
             payee: tx.payee || acct.entry.note || cat.entry.note,
@@ -174,6 +178,7 @@ export function transformTransactions(
       const parent = buildRawTransaction({
         date: tx.date,
         accountName: acct.accountName!,
+        externalAccountName: acct.externalAccountName,
         amount: acct.amount,
         currency: acct.entry.currency,
         payee: tx.payee || acct.entry.note,
@@ -250,6 +255,13 @@ function classifyEntryFull(
 interface BuildRawTransactionArgs {
   date: string;
   accountName: string;
+  /**
+   * External account name this entry originated from — used as the
+   * portfolioHolding symbol when holding ≠ amount (so multiple WP crypto /
+   * stock accounts can be collapsed onto one Finlynq brokerage account and
+   * still preserve which holding each transaction was against).
+   */
+  externalAccountName?: string;
   amount: number;
   currency?: string;
   payee?: string;
@@ -275,6 +287,15 @@ function buildRawTransaction(args: BuildRawTransactionArgs): RawTransaction {
   // spam quantity on every cash tx.
   if (args.holding !== null && Math.abs(args.holding - args.amount) > 1e-9) {
     row.quantity = args.holding;
+    // WP models each asset (Bitcoin, Ethereum, a stock position) as its own
+    // account. If the user points multiple WP accounts at a single Finlynq
+    // brokerage account via the mapping dialog, we need to preserve which
+    // holding each transaction belonged to. The external account name is a
+    // human-readable symbol — Bitcoin, CL, Matic — which is what ends up in
+    // Finlynq's `portfolioHolding` (ticker) column.
+    if (args.externalAccountName) {
+      row.portfolioHolding = args.externalAccountName;
+    }
   }
   return row;
 }
