@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
@@ -107,7 +108,18 @@ function SplitBadge({ transactionId }: { transactionId: number }) {
 
 const emptySplitRow = (): SplitRow => ({ categoryId: "", amount: "", note: "" });
 
+// useSearchParams requires Suspense. The inner component owns the page
+// state + side effects; the default export just wraps it.
 export default function TransactionsPage() {
+  return (
+    <Suspense fallback={<TableSkeleton />}>
+      <TransactionsPageInner />
+    </Suspense>
+  );
+}
+
+function TransactionsPageInner() {
+  const urlParams = useSearchParams();
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [total, setTotal] = useState(0);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -116,12 +128,16 @@ export default function TransactionsPage() {
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchInput, setSearchInput] = useState("");
+  // Initialize from URL params so /portfolio can deep-link into a scoped view.
+  // `portfolioHolding` is a server-side post-decrypt filter (ciphertext-at-
+  // rest on this column), `accountId` is a standard SQL filter.
   const [filters, setFilters] = useState({
-    startDate: "",
-    endDate: "",
-    accountId: "",
-    categoryId: "",
-    search: "",
+    startDate: urlParams.get("startDate") ?? "",
+    endDate: urlParams.get("endDate") ?? "",
+    accountId: urlParams.get("accountId") ?? "",
+    categoryId: urlParams.get("categoryId") ?? "",
+    search: urlParams.get("search") ?? "",
+    portfolioHolding: urlParams.get("portfolioHolding") ?? "",
   });
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -181,6 +197,7 @@ export default function TransactionsPage() {
     if (filters.accountId) params.set("accountId", filters.accountId);
     if (filters.categoryId) params.set("categoryId", filters.categoryId);
     if (filters.search) params.set("search", filters.search);
+    if (filters.portfolioHolding) params.set("portfolioHolding", filters.portfolioHolding);
     params.set("limit", String(limit));
     params.set("offset", String(page * limit));
 
@@ -212,7 +229,7 @@ export default function TransactionsPage() {
 
   function clearFilters() {
     setSearchInput("");
-    setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "" });
+    setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "", portfolioHolding: "" });
     setPage(0);
   }
 
@@ -782,12 +799,27 @@ export default function TransactionsPage() {
                 {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
               </SelectContent>
             </Select>
-            {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search) && (
+            {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search || filters.portfolioHolding) && (
               <button onClick={clearFilters} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors ml-1">
                 <X className="h-3 w-3" /> Clear all
               </button>
             )}
           </div>
+          {filters.portfolioHolding && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Holding:</span>
+              <Badge variant="outline" className="h-7 gap-1.5 pr-1 border-primary/30 bg-primary/5 text-primary">
+                <span className="font-medium">{filters.portfolioHolding}</span>
+                <button
+                  onClick={() => { setFilters({ ...filters, portfolioHolding: "" }); setPage(0); }}
+                  className="p-0.5 rounded hover:bg-primary/10 transition-colors"
+                  aria-label="Clear holding filter"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </Badge>
+            </div>
+          )}
         </CardContent>
       </Card>
 

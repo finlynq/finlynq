@@ -827,6 +827,15 @@ export default function PortfolioPage() {
                                 </p>
                               </div>
                             </div>
+                            <div className="mt-3 pt-3 border-t border-border/50 flex justify-end">
+                              <Link
+                                href={`/transactions?portfolioHolding=${encodeURIComponent(h.name)}${h.accountId ? `&accountId=${h.accountId}` : ""}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
+                              >
+                                View transactions →
+                              </Link>
+                            </div>
                           </TableCell>
                         </TableRow>
                       )}

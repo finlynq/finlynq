@@ -55,14 +55,23 @@ export async function GET(request: NextRequest) {
 
   const params = request.nextUrl.searchParams;
   const search = params.get("search") ?? undefined;
+  // `portfolioHolding` is ciphertext-at-rest (AES-GCM with random IV), so it
+  // can't be filtered in SQL. We fetch the account-scoped set and match on
+  // plaintext after decryption — same pattern as `search`. Passing the
+  // account + holding pair from /portfolio → /transactions deep-links the
+  // user to every leg that touched a specific position.
+  const portfolioHolding = params.get("portfolioHolding") ?? undefined;
   const filters = {
     startDate: params.get("startDate") ?? undefined,
     endDate: params.get("endDate") ?? undefined,
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
     categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
     // Search is applied after decryption, so don't push it into the SQL filter.
-    limit: params.get("limit") ? parseInt(params.get("limit")!) : 100,
-    offset: params.get("offset") ? parseInt(params.get("offset")!) : 0,
+    // Pull a wider page when portfolioHolding is set so the in-memory filter
+    // doesn't paginate an empty window. The client still honors the original
+    // limit.
+    limit: portfolioHolding ? 1000 : (params.get("limit") ? parseInt(params.get("limit")!) : 100),
+    offset: portfolioHolding ? 0 : (params.get("offset") ? parseInt(params.get("offset")!) : 0),
   };
 
   const rawRows = await getTransactions(userId, filters);
@@ -72,10 +81,21 @@ export async function GET(request: NextRequest) {
     decrypted = filterDecryptedBySearch(decrypted, search);
   }
 
-  // Count mirrors the filtered set; legacy callers use this for pagination UI.
-  const total = search
-    ? decrypted.length
-    : await getTransactionCount(userId, filters);
+  if (portfolioHolding) {
+    decrypted = decrypted.filter((r) => r.portfolioHolding === portfolioHolding);
+  }
+
+  // Re-apply client-requested pagination after in-memory filters so the
+  // chip-filtered view doesn't spill into an empty page.
+  let total: number;
+  if (search || portfolioHolding) {
+    total = decrypted.length;
+    const clientLimit = params.get("limit") ? parseInt(params.get("limit")!) : 100;
+    const clientOffset = params.get("offset") ? parseInt(params.get("offset")!) : 0;
+    decrypted = decrypted.slice(clientOffset, clientOffset + clientLimit);
+  } else {
+    total = await getTransactionCount(userId, filters);
+  }
 
   return NextResponse.json({ data: decrypted, total });
 }
