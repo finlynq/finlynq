@@ -8,7 +8,7 @@
 import crypto from "crypto";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
-import { wrapDEKForSecret, unwrapDEKForSecret } from "@/lib/api-auth";
+import { wrapDEKForSecret, unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -58,15 +58,18 @@ export async function createAuthCode(opts: {
   dek?: Buffer | null;
 }): Promise<string> {
   const code = crypto.randomBytes(32).toString("hex");
+  const codeHash = authLookupHash(code);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + AUTH_CODE_TTL_MS).toISOString();
+  // DEK wrap uses the raw code; stored value is the hash. Domain-separated
+  // derivations mean the stored hash is not the wrap key.
   const dekWrapped = opts.dek ? wrapDEKForSecret(opts.dek, code) : null;
 
   await pgDb.execute(sql`
     INSERT INTO oauth_authorization_codes
       (user_id, code, code_challenge, code_challenge_method, redirect_uri, client_id, expires_at, used, created_at, dek_wrapped)
     VALUES
-      (${opts.userId}, ${code}, ${opts.codeChallenge}, ${opts.codeChallengeMethod},
+      (${opts.userId}, ${codeHash}, ${opts.codeChallenge}, ${opts.codeChallengeMethod},
        ${opts.redirectUri}, ${opts.clientId}, ${expiresAt}, 0, ${now.toISOString()}, ${dekWrapped})
   `);
 
@@ -104,8 +107,10 @@ export async function consumeAuthCode(opts: {
   codeVerifier: string;
 }): Promise<{ userId: string; dek: Buffer | null } | null> {
   // Atomic claim — at most one caller gets the row; everyone else sees empty.
+  // Lookup by hash; the raw code is never stored in DB.
+  const codeHash = authLookupHash(opts.code);
   const result = await pgDb.execute(sql`
-    DELETE FROM oauth_authorization_codes WHERE code = ${opts.code} RETURNING *
+    DELETE FROM oauth_authorization_codes WHERE code = ${codeHash} RETURNING *
   `);
   const rows: AuthCodeRow[] = result.rows ?? result ?? [];
   if (!rows.length) return null;
@@ -152,16 +157,22 @@ export async function createAccessToken(
 }> {
   const accessToken = `pf_oauth_${crypto.randomBytes(32).toString("hex")}`;
   const refreshToken = `pf_refresh_${crypto.randomBytes(32).toString("hex")}`;
+  const accessHash = authLookupHash(accessToken);
+  const refreshHash = authLookupHash(refreshToken);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ACCESS_TOKEN_TTL_MS).toISOString();
   const refreshExpiresAt = new Date(now.getTime() + REFRESH_TOKEN_TTL_MS).toISOString();
+  // Two envelopes: one unwrappable with the access token (validateOauthToken),
+  // one with the refresh token (refreshAccessToken carries DEK forward without
+  // ever storing the old access token plaintext).
   const dekWrapped = dek ? wrapDEKForSecret(dek, accessToken) : null;
+  const dekWrappedRefresh = dek ? wrapDEKForSecret(dek, refreshToken) : null;
 
   await pgDb.execute(sql`
     INSERT INTO oauth_access_tokens
-      (user_id, token, refresh_token, client_id, expires_at, refresh_expires_at, created_at, dek_wrapped)
+      (user_id, token, refresh_token, client_id, expires_at, refresh_expires_at, created_at, dek_wrapped, dek_wrapped_refresh)
     VALUES
-      (${userId}, ${accessToken}, ${refreshToken}, ${clientId}, ${expiresAt}, ${refreshExpiresAt}, ${now.toISOString()}, ${dekWrapped})
+      (${userId}, ${accessHash}, ${refreshHash}, ${clientId}, ${expiresAt}, ${refreshExpiresAt}, ${now.toISOString()}, ${dekWrapped}, ${dekWrappedRefresh})
   `);
 
   return { accessToken, refreshToken, expiresIn: ACCESS_TOKEN_TTL_MS / 1000 };
@@ -176,6 +187,7 @@ type TokenRow = {
   expires_at: string;
   refresh_expires_at: string;
   dek_wrapped: string | null;
+  dek_wrapped_refresh: string | null;
   revoked_at: string | null;
 };
 
@@ -184,10 +196,11 @@ type TokenRow = {
  * Revoked tokens (rotated or killed by reuse-detection) are rejected.
  */
 export async function validateOauthToken(token: string): Promise<{ userId: string; dek: Buffer | null } | null> {
+  const tokenHash = authLookupHash(token);
   const result = await pgDb.execute(sql`
     SELECT user_id, expires_at, dek_wrapped
       FROM oauth_access_tokens
-     WHERE token = ${token}
+     WHERE token = ${tokenHash}
        AND revoked_at IS NULL
      LIMIT 1
   `);
@@ -225,12 +238,13 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
   expiresIn: number;
 } | null> {
   const nowIso = new Date().toISOString();
+  const refreshHash = authLookupHash(refreshToken);
 
   // Atomic claim: flip the live row to revoked_at = now() and return it.
   const claim = await pgDb.execute(sql`
     UPDATE oauth_access_tokens
        SET revoked_at = now()
-     WHERE refresh_token = ${refreshToken}
+     WHERE refresh_token = ${refreshHash}
        AND client_id = ${clientId}
        AND revoked_at IS NULL
        AND refresh_expires_at > ${nowIso}
@@ -246,7 +260,7 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
     // for that user to contain the blast radius.
     const recheck = await pgDb.execute(sql`
       SELECT user_id FROM oauth_access_tokens
-       WHERE refresh_token = ${refreshToken}
+       WHERE refresh_token = ${refreshHash}
          AND client_id = ${clientId}
          AND revoked_at IS NOT NULL
        LIMIT 1
@@ -263,15 +277,14 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
     return null;
   }
 
-  const { user_id, token: oldAccessToken, dek_wrapped } = rows[0];
+  const { user_id, dek_wrapped_refresh } = rows[0];
 
-  // Unwrap the DEK from the old access token so we can re-wrap it under the
-  // new one. Keeps MCP access to encrypted columns working across rotations
-  // without re-prompting the user.
+  // Unwrap DEK using the refresh-token-wrapped envelope. We never stored the
+  // old access token plaintext, so the refresh path uses its own envelope.
   let dek: Buffer | null = null;
-  if (dek_wrapped) {
+  if (dek_wrapped_refresh) {
     try {
-      dek = unwrapDEKForSecret(dek_wrapped, oldAccessToken);
+      dek = unwrapDEKForSecret(dek_wrapped_refresh, refreshToken);
     } catch {
       dek = null;
     }

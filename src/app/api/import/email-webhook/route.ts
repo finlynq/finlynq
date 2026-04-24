@@ -37,7 +37,7 @@ import { executeImport } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
 import { deserializeTemplate, findBestTemplate, autoDetectColumnMapping } from "@/lib/import-templates";
-import { unwrapDEKForSecret } from "@/lib/api-auth";
+import { unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { extractSvixHeaders, verifySvixSignature, SvixVerifyError } from "@/lib/webhooks/svix";
@@ -324,13 +324,23 @@ function extractEmail(raw: unknown): string | null {
 async function handleSelfHostedMultipart(request: NextRequest): Promise<NextResponse> {
   try {
     const secret = request.headers.get("x-webhook-secret");
+    if (!secret) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    // Stored value is a hash; compare by hashing the presented secret.
+    const secretHash = authLookupHash(secret);
     const storedSecret = await db
       .select()
       .from(schema.settings)
-      .where(eq(schema.settings.key, "email_webhook_secret"))
+      .where(
+        and(
+          eq(schema.settings.key, "email_webhook_secret"),
+          eq(schema.settings.value, secretHash)
+        )
+      )
       .get();
 
-    if (!storedSecret || secret !== storedSecret.value) {
+    if (!storedSecret) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 

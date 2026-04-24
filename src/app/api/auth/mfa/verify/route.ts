@@ -18,6 +18,7 @@ import { getUserById, recordSuccessfulLogin } from "@/lib/auth/queries";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { getDEK, putDEK, deleteDEK } from "@/lib/crypto/dek-cache";
+import { decryptField } from "@/lib/crypto/envelope";
 
 const verifySchema = z.object({
   mfaPendingToken: z.string().min(1, "Pending token is required"),
@@ -61,18 +62,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!verifyMfaCode(user.mfaSecret, code)) {
+    // Need DEK to decrypt stored MFA secret. The password-verify step on /login
+    // put the user's DEK in the cache keyed by the pending-session jti; we
+    // promote it onto the full session below after we've verified the code.
+    const pendingJti = (payload.jti as string | undefined) ?? null;
+    const pendingDek = pendingJti ? getDEK(pendingJti) : null;
+    if (!pendingDek) {
+      return NextResponse.json(
+        { error: "Pending session has no DEK. Please sign in again." },
+        { status: 401 }
+      );
+    }
+
+    let decryptedSecret: string | null;
+    try {
+      decryptedSecret = decryptField(pendingDek, user.mfaSecret);
+    } catch {
+      return NextResponse.json(
+        { error: "MFA secret could not be decrypted. Please contact support." },
+        { status: 500 }
+      );
+    }
+
+    if (!decryptedSecret || !verifyMfaCode(decryptedSecret, code)) {
       return NextResponse.json(
         { error: "Invalid verification code." },
         { status: 401 }
       );
     }
-
-    // Promote the pending session's cached DEK onto the full session.
-    // Pending token has its own jti; the new full-session jti is different,
-    // so we move the DEK from one key to the other and delete the pending entry.
-    const pendingJti = (payload.jti as string | undefined) ?? null;
-    const pendingDek = pendingJti ? getDEK(pendingJti) : null;
 
     // Issue full session with MFA verified
     await recordSuccessfulLogin(user.id);

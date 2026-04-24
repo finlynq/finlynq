@@ -319,6 +319,7 @@ export const oauthClients = pgTable("oauth_clients", {
 export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
+  // Stored as authLookupHash(code) — the raw code is on the wire, never in DB.
   code: text("code").notNull().unique(),
   codeChallenge: text("code_challenge").notNull(),
   codeChallengeMethod: text("code_challenge_method").notNull().default("S256"),
@@ -327,7 +328,7 @@ export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
   expiresAt: text("expires_at").notNull(),
   used: integer("used").notNull().default(0),
   createdAt: text("created_at").notNull(),
-  // Session DEK wrapped with SHA-256(code). Null for pre-encryption auth flows.
+  // Session DEK wrapped with secretWrapKey(code). Null for pre-encryption auth flows.
   dekWrapped: text("dek_wrapped"),
 });
 
@@ -335,14 +336,20 @@ export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
 export const oauthAccessTokens = pgTable("oauth_access_tokens", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
+  // Stored as authLookupHash(accessToken) — raw token never in DB.
   token: text("token").notNull().unique(),
+  // Stored as authLookupHash(refreshToken) — raw token never in DB.
   refreshToken: text("refresh_token").notNull().unique(),
   clientId: text("client_id").notNull(),
   expiresAt: text("expires_at").notNull(),        // 1 hour
   refreshExpiresAt: text("refresh_expires_at").notNull(), // 30 days
   createdAt: text("created_at").notNull(),
-  // Session DEK wrapped with SHA-256(token). Null for pre-encryption tokens.
+  // Session DEK wrapped with secretWrapKey(accessToken). Used by validateOauthToken.
   dekWrapped: text("dek_wrapped"),
+  // Session DEK wrapped with secretWrapKey(refreshToken). Used by refreshAccessToken
+  // to carry the DEK forward when rotating — we don't have the old access token plaintext
+  // after the rotation lookup (only the refresh token on the wire).
+  dekWrappedRefresh: text("dek_wrapped_refresh"),
   // Set when the pair has been rotated on refresh, or force-invalidated by a
   // reuse-detection event. Live tokens have revoked_at IS NULL. See
   // scripts/migrate-oauth-revoked-at.sql.
@@ -435,4 +442,23 @@ export const incomingEmails = pgTable("incoming_emails", {
   expiresAt: timestamp("expires_at", { withTimezone: true }),
   triagedAt: timestamp("triaged_at", { withTimezone: true }),
   triagedBy: text("triaged_by").references(() => users.id),
+});
+
+// ─── Admin Audit Log (Finding #16) ──────────────────────────────────────────
+//
+// Append-only record of every admin mutation. Never UPDATE/DELETE via app code;
+// if enforcement is needed, use a Postgres role with only INSERT on this table
+// for the app user. Events so far: role_change, plan_change, inbox_triaged,
+// inbox_promoted, inbox_deleted.
+export const adminAudit = pgTable("admin_audit", {
+  id: serial("id").primaryKey(),
+  adminUserId: text("admin_user_id").notNull().references(() => users.id),
+  targetUserId: text("target_user_id").references(() => users.id),
+  action: text("action").notNull(),
+  // JSON-serialised "before" + "after" snapshots (for role/plan changes).
+  // Free-form so new actions can add their own shape without migrations.
+  beforeJson: text("before_json"),
+  afterJson: text("after_json"),
+  ip: text("ip"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

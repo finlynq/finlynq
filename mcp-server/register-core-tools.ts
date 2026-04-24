@@ -2505,7 +2505,19 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     const expiresAt = new Date(String(upload.expires_at));
     if (expiresAt.getTime() < Date.now()) throw new Error("Upload expired");
 
-    const buf = await fs.readFile(String(upload.storage_path));
+    const rawBuf = await fs.readFile(String(upload.storage_path));
+    // Finding #7 — HTTP-side uploads are encrypted at rest. Stdio has no DEK,
+    // so if the file carries the encryption magic we can't read it; fail
+    // clearly instead of handing ciphertext to the CSV parser.
+    const { isEncryptedFile } = await import("../src/lib/crypto/file-envelope");
+    if (isEncryptedFile(rawBuf)) {
+      throw new Error(
+        "This upload was created via the HTTP MCP transport and is encrypted " +
+          "at rest. Stdio MCP cannot decrypt it — use the HTTP transport " +
+          "(OAuth or Bearer pf_ token) to import this upload."
+      );
+    }
+    const buf = rawBuf;
     const format = String(upload.format);
     let rows: RawTransaction[] = [];
     const errors: Array<{ row: number; message: string }> = [];

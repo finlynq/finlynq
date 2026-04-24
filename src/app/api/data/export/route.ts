@@ -1,10 +1,47 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, inArray } from "drizzle-orm";
+import { pbkdf2Sync, randomBytes, createCipheriv } from "crypto";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
 import { safeErrorMessage } from "@/lib/validate";
+import { validatePasswordStrength } from "@/lib/auth/password-policy";
+
+// Finding #8 — optional passphrase-wrap for backup exports.
+// Format when wrapped:
+//   {"v": "pf-backup-1", "kdf": "pbkdf2-sha256", "iters": 600000,
+//    "salt": "<b64 16>", "iv": "<b64 12>", "tag": "<b64 16>",
+//    "ciphertext": "<b64>"}
+// On import, client derives a 32-byte key with PBKDF2-SHA256(passphrase, salt,
+// iters, 32) and AES-GCM-decrypts the ciphertext. The inner plaintext is the
+// same JSON as the non-wrapped export (so import code only needs one format).
+const PBKDF2_ITERS = 600_000;
+const PBKDF2_SALT_LEN = 16;
+const WRAP_IV_LEN = 12;
+const WRAP_KEY_LEN = 32;
+
+function wrapBackupWithPassphrase(jsonBody: string, passphrase: string): string {
+  const salt = randomBytes(PBKDF2_SALT_LEN);
+  const iv = randomBytes(WRAP_IV_LEN);
+  const key = pbkdf2Sync(passphrase, salt, PBKDF2_ITERS, WRAP_KEY_LEN, "sha256");
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ct = Buffer.concat([cipher.update(Buffer.from(jsonBody, "utf8")), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return JSON.stringify(
+    {
+      v: "pf-backup-1",
+      kdf: "pbkdf2-sha256",
+      iters: PBKDF2_ITERS,
+      salt: salt.toString("base64"),
+      iv: iv.toString("base64"),
+      tag: tag.toString("base64"),
+      ciphertext: ct.toString("base64"),
+    },
+    null,
+    2
+  );
+}
 
 function decryptRowFields(dek: Buffer | null, row: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
   if (!dek) return row;
@@ -21,7 +58,17 @@ function decryptRowFields(dek: Buffer | null, row: Record<string, unknown>, fiel
 const TX_FIELDS = ["payee", "note", "tags", "portfolioHolding"] as const;
 const SPLIT_FIELDS = ["note", "description", "tags"] as const;
 
+// POST accepts `{ passphrase: string }` to passphrase-wrap the export —
+// Finding #8. Both GET and POST share the same body builder below.
+export async function POST(request: NextRequest) {
+  return handleExport(request);
+}
+
 export async function GET(request: NextRequest) {
+  return handleExport(request);
+}
+
+async function handleExport(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
@@ -108,11 +155,54 @@ export async function GET(request: NextRequest) {
       },
     };
 
-    return new NextResponse(JSON.stringify(backup, null, 2), {
+    const jsonBody = JSON.stringify(backup, null, 2);
+
+    // Optional passphrase-wrap — if the caller supplies a ?passphrase=..., we
+    // AES-GCM the export body with a PBKDF2-derived key. The file is then
+    // self-protecting: losing it to cloud sync or email attachments does not
+    // leak content unless the attacker also has the passphrase. Passphrase
+    // lives in the request body (POST only) rather than the URL (GET query)
+    // so it doesn't end up in Caddy access logs.
+    let body: string;
+    let filename: string;
+    let contentType: string;
+    if (request.method === "POST") {
+      let passphrase: string | null = null;
+      try {
+        const parsed = await request.json();
+        if (parsed && typeof parsed.passphrase === "string") {
+          passphrase = parsed.passphrase;
+        }
+      } catch {
+        // No JSON body — fall through to plain export.
+      }
+      if (passphrase) {
+        const strengthError = validatePasswordStrength(passphrase);
+        if (strengthError) {
+          return NextResponse.json(
+            { error: `Backup passphrase too weak: ${strengthError}` },
+            { status: 400 }
+          );
+        }
+        body = wrapBackupWithPassphrase(jsonBody, passphrase);
+        filename = `finlynq-backup-${dateStr}.pf-encrypted.json`;
+        contentType = "application/json";
+      } else {
+        body = jsonBody;
+        filename = `finlynq-backup-${dateStr}.json`;
+        contentType = "application/json";
+      }
+    } else {
+      body = jsonBody;
+      filename = `finlynq-backup-${dateStr}.json`;
+      contentType = "application/json";
+    }
+
+    return new NextResponse(body, {
       status: 200,
       headers: {
-        "Content-Type": "application/json",
-        "Content-Disposition": `attachment; filename="finlynq-backup-${dateStr}.json"`,
+        "Content-Type": contentType,
+        "Content-Disposition": `attachment; filename="${filename}"`,
       },
     });
   } catch (error: unknown) {

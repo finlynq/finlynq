@@ -16,6 +16,8 @@ import {
   disableUserMfa,
 } from "@/lib/auth/queries";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { getDEK } from "@/lib/crypto/dek-cache";
+import { decryptField } from "@/lib/crypto/envelope";
 
 const setupSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("generate") }),
@@ -39,7 +41,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, setupSchema);
     if (parsed.error) return parsed.error;
 
-    const { userId } = auth.context;
+    const { userId, sessionId } = auth.context;
     const user = await getUserById(userId);
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
@@ -59,7 +61,17 @@ export async function POST(request: NextRequest) {
             { status: 400 }
           );
         }
-        await enableUserMfa(userId, secret);
+        // Need the DEK to encrypt the TOTP seed at rest. Enabling MFA requires
+        // an active encrypted session; send the user to re-login if the DEK
+        // is missing (stale deploy cache, legacy unencrypted account, etc.).
+        const dek = sessionId ? getDEK(sessionId) : null;
+        if (!dek) {
+          return NextResponse.json(
+            { error: "Session expired. Please sign in again to enable MFA." },
+            { status: 423 }
+          );
+        }
+        await enableUserMfa(userId, secret, dek);
         return NextResponse.json({ success: true, mfaEnabled: true });
       }
 
@@ -70,7 +82,24 @@ export async function POST(request: NextRequest) {
             { status: 400 }
           );
         }
-        if (!verifyMfaCode(user.mfaSecret, parsed.data.code)) {
+        // Decrypt stored MFA secret with the session DEK.
+        const dek = sessionId ? getDEK(sessionId) : null;
+        if (!dek) {
+          return NextResponse.json(
+            { error: "Session expired. Please sign in again to disable MFA." },
+            { status: 423 }
+          );
+        }
+        let decryptedSecret: string | null;
+        try {
+          decryptedSecret = decryptField(dek, user.mfaSecret);
+        } catch {
+          return NextResponse.json(
+            { error: "MFA secret could not be decrypted. Please contact support." },
+            { status: 500 }
+          );
+        }
+        if (!decryptedSecret || !verifyMfaCode(decryptedSecret, parsed.data.code)) {
           return NextResponse.json(
             { error: "Invalid verification code." },
             { status: 400 }

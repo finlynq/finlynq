@@ -17,6 +17,10 @@ import {
   updateUserPlan,
 } from "@/lib/auth/queries";
 import { validateBody } from "@/lib/validate";
+import { logAdminAction, clientIp } from "@/lib/admin-audit";
+import { getDEK } from "@/lib/crypto/dek-cache";
+import { decryptField } from "@/lib/crypto/envelope";
+import { verifyMfaCode } from "@/lib/auth";
 
 export async function GET(request: NextRequest) {
   if (getDialect() !== "postgres") {
@@ -44,6 +48,9 @@ const updateSchema = z.object({
   role: z.enum(["user", "admin"]).optional(),
   plan: z.enum(["free", "pro", "premium"]).optional(),
   planExpiresAt: z.string().optional(),
+  // Required if the acting admin has MFA enabled — Finding Admin-MFA-step-up.
+  // A stale session cookie alone can no longer silently mutate other users.
+  mfaCode: z.string().length(6).optional(),
 });
 
 export async function PATCH(request: NextRequest) {
@@ -56,23 +63,93 @@ export async function PATCH(request: NextRequest) {
 
   const auth = await requireAdmin(request);
   if (!auth.authenticated) return auth.response;
+  const { userId: adminUserId, sessionId } = auth.context;
 
   try {
     const body = await request.json();
     const parsed = validateBody(body, updateSchema);
     if (parsed.error) return parsed.error;
 
-    const { userId, role, plan, planExpiresAt } = parsed.data;
+    const { userId, role, plan, planExpiresAt, mfaCode } = parsed.data;
+
+    const adminUser = await getUserById(adminUserId);
+    if (!adminUser) {
+      return NextResponse.json({ error: "Admin user not found." }, { status: 404 });
+    }
+
+    // MFA step-up: if the admin has MFA enabled, require a fresh TOTP on the
+    // request. Decrypt the stored secret with the admin's session DEK.
+    if (adminUser.mfaEnabled && adminUser.mfaSecret) {
+      if (!mfaCode) {
+        return NextResponse.json(
+          { error: "MFA code required for admin mutations.", code: "MFA_REQUIRED" },
+          { status: 403 }
+        );
+      }
+      const dek = sessionId ? getDEK(sessionId) : null;
+      if (!dek) {
+        return NextResponse.json(
+          { error: "Session expired. Please sign in again." },
+          { status: 423 }
+        );
+      }
+      let mfaSecret: string | null;
+      try {
+        mfaSecret = decryptField(dek, adminUser.mfaSecret);
+      } catch {
+        return NextResponse.json(
+          { error: "MFA secret could not be decrypted." },
+          { status: 500 }
+        );
+      }
+      if (!mfaSecret || !verifyMfaCode(mfaSecret, mfaCode)) {
+        return NextResponse.json(
+          { error: "Invalid MFA code." },
+          { status: 401 }
+        );
+      }
+    }
 
     const target = await getUserById(userId);
     if (!target) {
       return NextResponse.json({ error: "User not found." }, { status: 404 });
     }
 
+    const before = { role: target.role, plan: target.plan, planExpiresAt: target.planExpiresAt };
+
     if (role) await updateUserRole(userId, role);
     if (plan) await updateUserPlan(userId, plan, planExpiresAt);
 
-    return NextResponse.json({ success: true });
+    const after = {
+      role: role ?? target.role,
+      plan: plan ?? target.plan,
+      planExpiresAt: planExpiresAt ?? target.planExpiresAt,
+    };
+
+    // Finding #16 — audit-log the mutation. Fire-and-forget so a failed audit
+    // write doesn't block a legitimate admin op (but it is logged to server log).
+    if (role && role !== target.role) {
+      await logAdminAction({
+        adminUserId,
+        targetUserId: userId,
+        action: "role_change",
+        before: { role: target.role },
+        after: { role },
+        ip: clientIp(request),
+      });
+    }
+    if (plan && plan !== target.plan) {
+      await logAdminAction({
+        adminUserId,
+        targetUserId: userId,
+        action: "plan_change",
+        before: { plan: target.plan, planExpiresAt: target.planExpiresAt },
+        after: { plan, planExpiresAt: planExpiresAt ?? null },
+        ip: clientIp(request),
+      });
+    }
+
+    return NextResponse.json({ success: true, before, after });
   } catch {
     return NextResponse.json(
       { error: "Failed to update user." },

@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { and, eq, asc } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { decryptStaged } from "@/lib/crypto/staging-envelope";
 
 export const dynamic = "force-dynamic";
 
@@ -56,7 +57,17 @@ export async function GET(
     .orderBy(asc(schema.stagedTransactions.rowIndex))
     .all();
 
-  return NextResponse.json({ staged, rows });
+  // Finding #9 — decrypt staging-envelope fields for the user preview.
+  // Rows are stored sv1:...-encrypted in the DB; render as plaintext for the UI.
+  const decryptedRows = rows.map((r) => ({
+    ...r,
+    payee: decryptStaged(r.payee),
+    category: decryptStaged(r.category),
+    accountName: decryptStaged(r.accountName),
+    note: decryptStaged(r.note),
+  }));
+
+  return NextResponse.json({ staged, rows: decryptedRows });
 }
 
 export async function DELETE(

@@ -24,6 +24,7 @@ import { and, eq, inArray, asc } from "drizzle-orm";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { executeImport, type RawTransaction } from "@/lib/import-pipeline";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
+import { decryptStaged } from "@/lib/crypto/staging-envelope";
 
 export const dynamic = "force-dynamic";
 
@@ -81,15 +82,17 @@ export async function POST(
     return NextResponse.json({ error: "No rows selected" }, { status: 400 });
   }
 
-  // Shape for executeImport.
+  // Shape for executeImport. Decrypt the staging-envelope fields (Finding #9)
+  // before passing to the pipeline — the pipeline expects plaintext and then
+  // re-encrypts under the user's DEK inside `transactions`.
   const rows: RawTransaction[] = selected.map((r) => ({
     date: r.date,
-    account: r.accountName ?? "",
+    account: decryptStaged(r.accountName) ?? "",
     amount: r.amount,
-    payee: r.payee ?? "",
-    category: r.category ?? undefined,
+    payee: decryptStaged(r.payee) ?? "",
+    category: decryptStaged(r.category) ?? undefined,
     currency: r.currency ?? undefined,
-    note: r.note ?? undefined,
+    note: decryptStaged(r.note) ?? undefined,
   }));
 
   const result = await executeImport(rows, forceImportIndices, userId, dek);

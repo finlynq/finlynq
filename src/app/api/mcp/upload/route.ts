@@ -22,6 +22,7 @@ import crypto from "crypto";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { db, schema } from "@/db";
 import { safeErrorMessage } from "@/lib/validate";
+import { encryptFileBytes } from "@/lib/crypto/file-envelope";
 
 const MAX_BYTES = 5 * 1024 * 1024; // 5 MB
 const ALLOWED_FORMATS = new Set(["csv", "ofx", "qfx"]);
@@ -38,7 +39,7 @@ export async function POST(request: NextRequest) {
   // DEK required: we can't accept an upload that would later fail to encrypt.
   const auth = await requireEncryption(request);
   if (!auth.ok) return auth.response;
-  const { userId } = auth;
+  const { userId, dek } = auth;
 
   // Early rejection before we start buffering if Content-Length is obviously over.
   const contentLength = request.headers.get("content-length");
@@ -86,7 +87,10 @@ export async function POST(request: NextRequest) {
     await fs.mkdir(uploadsRoot, { recursive: true });
     const id = crypto.randomUUID();
     const storagePath = path.join(uploadsRoot, `${id}.${format}`);
-    await fs.writeFile(storagePath, bytes);
+    // Finding #7 — never write the raw upload to disk. AES-GCM under the
+    // user's session DEK; preview_import/execute_import decrypt on read.
+    const encrypted = encryptFileBytes(dek, bytes);
+    await fs.writeFile(storagePath, encrypted);
 
     const now = new Date();
     const expiresAt = new Date(now.getTime() + TTL_MS);

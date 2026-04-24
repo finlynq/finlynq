@@ -19,28 +19,41 @@ import crypto from "crypto";
 const API_KEY_SETTING = "api_key";
 const API_KEY_DEK_SETTING = "api_key_dek";
 
-// Prefix for hashed keys stored in settings.value. Keeps old raw and new
-// hashed rows trivially distinguishable so validateApiKey can migrate on
-// access and the migration script is idempotent.
+// Prefix for hashed keys stored in settings.value. Keeps storage format
+// trivially identifiable for future migrations.
 const API_KEY_HASH_PREFIX = "sha256:";
 
-/**
- * Deterministic hash of an API key for storage + lookup. SHA-256 is
- * pre-image resistant; the input is ≥192 bits of crypto-random entropy so
- * no salt is needed. The DEK-envelope path (`wrapDEKForApiKey`) still uses
- * the raw key provided by the client per-request, so hashing the stored
- * copy does not affect unwrap.
- */
-function hashApiKey(rawKey: string): string {
-  return API_KEY_HASH_PREFIX + crypto.createHash("sha256").update(rawKey).digest("hex");
+// Domain-separation prefixes — the lookup hash and the DEK wrap key are
+// now independent derivations from the same raw secret. Before this, the
+// value stored in the DB (for API-key lookup) and the 32-byte value used
+// to wrap the DEK were the SAME sha256 output, so any DB-read attacker
+// could unwrap encrypted columns directly. The two prefixes make those
+// derivations cryptographically separated: compromise of the stored hash
+// (lookup) does not yield the wrap key, and vice versa.
+const AUTH_HASH_PREFIX = "auth|";
+const DEK_WRAP_PREFIX = "dek|";
+
+/** Deterministic hash for AUTH/LOOKUP at rest. Used for API keys, OAuth
+ * codes, OAuth access tokens, and webhook secrets — anywhere we need to
+ * store a hash of a high-entropy random secret for equality lookup. */
+export function authLookupHash(secret: string): string {
+  return (
+    API_KEY_HASH_PREFIX +
+    crypto.createHash("sha256").update(AUTH_HASH_PREFIX).update(secret).digest("hex")
+  );
 }
 
-/** Derive a 32-byte wrap key from a random high-entropy secret (API key,
- * OAuth access token, webhook secret, etc). SHA-256 is deterministic and
- * sufficient because the input is already ≥192 bits of crypto-random data;
- * no extra stretching is needed. */
+/** Backward-compat alias for the API-key path. */
+function hashApiKey(rawKey: string): string {
+  return authLookupHash(rawKey);
+}
+
+/** Derive a 32-byte DEK-wrap key from a high-entropy random secret.
+ * Domain-separated from `authLookupHash` so the stored-hash value never
+ * equals the wrap key — even though both derive from the same raw secret,
+ * one cannot be computed from the other without the raw input. */
 export function secretWrapKey(secret: string): Buffer {
-  return crypto.createHash("sha256").update(secret).digest();
+  return crypto.createHash("sha256").update(DEK_WRAP_PREFIX).update(secret).digest();
 }
 
 /**
