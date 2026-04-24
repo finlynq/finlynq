@@ -45,6 +45,8 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   serverExternalPackages: ["pg", "pdf-parse", "@napi-rs/canvas"],
+  // Compile .ts workspace packages directly (they ship source, not dist).
+  transpilePackages: ["@finlynq/import-connectors"],
   distDir: process.env.NEXT_DIST_DIR || ".next",
   // When deployed behind Nginx as the managed instance, the app is served
   // under /app. Set NEXT_BASE_PATH=/app at build time to enable this.

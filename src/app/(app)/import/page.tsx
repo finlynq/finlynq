@@ -21,12 +21,14 @@ import {
   RefreshCw,
   BookTemplate,
   Sparkles,
+  Link as LinkIcon,
 } from "lucide-react";
 import { FileDropZone } from "./components/file-drop-zone";
 import { ImportPreviewDialog } from "./components/import-preview-dialog";
 import { OfxPreview } from "./components/ofx-preview";
 import { TemplateManager } from "./components/template-manager";
 import { ColumnMappingDialog } from "./components/column-mapping-dialog";
+import { ConnectorTab } from "./components/connector-tab";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import type { OfxTransaction, OfxAccountInfo } from "@/lib/ofx-parser";
 import type { ColumnMapping, ImportTemplate } from "@/lib/import-templates";
@@ -315,6 +317,10 @@ export default function ImportPage() {
             <Mail className="h-4 w-4 mr-1.5" />
             Email Import
           </TabsTrigger>
+          <TabsTrigger value="connect">
+            <LinkIcon className="h-4 w-4 mr-1.5" />
+            Connect a Service
+          </TabsTrigger>
           <TabsTrigger value="templates">
             <BookTemplate className="h-4 w-4 mr-1.5" />
             Templates
@@ -480,7 +486,12 @@ export default function ImportPage() {
           </div>
         </TabsContent>
 
-        {/* Tab 3: Templates */}
+        {/* Tab 3: Connect a Service */}
+        <TabsContent value="connect">
+          <ConnectorTab />
+        </TabsContent>
+
+        {/* Tab 4: Templates */}
         <TabsContent value="templates">
           <div className="space-y-4 mt-4">
             <div>
