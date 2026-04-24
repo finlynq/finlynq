@@ -61,17 +61,23 @@ export async function GET(request: NextRequest) {
   // account + holding pair from /portfolio → /transactions deep-links the
   // user to every leg that touched a specific position.
   const portfolioHolding = params.get("portfolioHolding") ?? undefined;
+  // Tag is an in-memory exact-match filter on the comma-split list. The
+  // column is ciphertext-at-rest so SQL LIKE won't work, and substring
+  // match on decrypted text would false-match (e.g. `source:X` in one tag
+  // shouldn't match `source:XY` in another). Split then exact-compare each.
+  const tag = params.get("tag") ?? undefined;
+  const postDecryptFilter = search || portfolioHolding || tag;
   const filters = {
     startDate: params.get("startDate") ?? undefined,
     endDate: params.get("endDate") ?? undefined,
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
     categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
     // Search is applied after decryption, so don't push it into the SQL filter.
-    // Pull a wider page when portfolioHolding is set so the in-memory filter
-    // doesn't paginate an empty window. The client still honors the original
-    // limit.
-    limit: portfolioHolding ? 1000 : (params.get("limit") ? parseInt(params.get("limit")!) : 100),
-    offset: portfolioHolding ? 0 : (params.get("offset") ? parseInt(params.get("offset")!) : 0),
+    // Pull a wider page when any post-decrypt filter is set so the in-memory
+    // pass doesn't paginate an empty window. The client still honors the
+    // original limit.
+    limit: postDecryptFilter ? 1000 : (params.get("limit") ? parseInt(params.get("limit")!) : 100),
+    offset: postDecryptFilter ? 0 : (params.get("offset") ? parseInt(params.get("offset")!) : 0),
   };
 
   const rawRows = await getTransactions(userId, filters);
@@ -85,10 +91,17 @@ export async function GET(request: NextRequest) {
     decrypted = decrypted.filter((r) => r.portfolioHolding === portfolioHolding);
   }
 
+  if (tag) {
+    decrypted = decrypted.filter((r) => {
+      if (!r.tags) return false;
+      return r.tags.split(",").map((t) => t.trim()).includes(tag);
+    });
+  }
+
   // Re-apply client-requested pagination after in-memory filters so the
   // chip-filtered view doesn't spill into an empty page.
   let total: number;
-  if (search || portfolioHolding) {
+  if (postDecryptFilter) {
     total = decrypted.length;
     const clientLimit = params.get("limit") ? parseInt(params.get("limit")!) : 100;
     const clientOffset = params.get("offset") ? parseInt(params.get("offset")!) : 0;
