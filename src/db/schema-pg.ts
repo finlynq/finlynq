@@ -56,6 +56,7 @@ export const transactions = pgTable("transactions", {
   isBusiness: integer("is_business").default(0),
   importHash: text("import_hash"),
   fitId: text("fit_id"),
+  linkId: text("link_id"),
 });
 
 export const portfolioHoldings = pgTable("portfolio_holdings", {

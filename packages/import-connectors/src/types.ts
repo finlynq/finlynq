@@ -22,6 +22,10 @@ export interface RawTransaction {
   quantity?: number;
   portfolioHolding?: string;
   fitId?: string;
+  /** Shared id for every row in a multi-leg group (transfer, same-account
+   *  conversion, liquidation). Lets the UI surface siblings of a transfer
+   *  from either leg. Unset for standalone transactions. */
+  linkId?: string;
 }
 
 export interface ExternalAccount {

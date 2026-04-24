@@ -7,6 +7,7 @@
 // Output: the same TransformResult shape that transform.ts returns for the
 // API path — so the orchestrator + route code is interchangeable.
 
+import { randomUUID } from "node:crypto";
 import type {
   ConnectorMappingResolved,
   ExternalAccount,
@@ -143,6 +144,22 @@ function classifyAccountCell(
   const port = idx.portfolioByHolding.get(raw);
   if (port) return { kind: "holding", holdingRef: { ...port, holdingName: raw } };
   return { kind: "unknown" };
+}
+
+/**
+ * Some accounts (e.g. "Joint - USD", "Joint - CAD") live in BOTH Accounts.csv
+ * AND Portfolio.csv — they're top-level accounts AND currency-sleeved
+ * holdings of a brokerage. When emitting a tx on such an account, we want
+ * `portfolio_holding` to match the account name so the portfolio aggregator
+ * can key off it. Returns the matching Portfolio.csv entry or null.
+ */
+function holdingForAccountName(
+  accountName: string,
+  idx: ParsedExportIndexes,
+): { brokerageAccount: string; symbol: string | null; currency: string; holdingName: string } | null {
+  const port = idx.portfolioByHolding.get(accountName);
+  if (!port) return null;
+  return { ...port, holdingName: accountName };
 }
 
 function classifyCategorizationCell(
@@ -357,8 +374,19 @@ function emitGroup(
     return;
   }
 
+  // A dual-nature account (present in both Accounts.csv and Portfolio.csv,
+  // e.g. "Joint - USD") is an account for routing purposes but also a
+  // portfolio holding for balance-tracking purposes. Tag the parent row's
+  // portfolio_holding with the account name so the portfolio aggregator
+  // sees the qty movement.
+  const parentHolding = parentHoldingRef ?? holdingForAccountName(parent.account, idx);
+
+  // Every multi-leg group gets one linkId — the UI uses this to show the
+  // sibling legs when the user opens any one of them.
+  const groupLinkId = children.length > 0 ? randomUUID() : undefined;
+
   if (children.length === 0) {
-    // Parent with no children — emit as a single tx.
+    // Parent with no children — emit as a single tx (no linkId; it's standalone).
     flat.push(buildRawTransaction({
       date: parent.date,
       accountName: finlynq.finlynqAccountName,
@@ -368,8 +396,8 @@ function emitGroup(
       note: parent.note,
       tags: parent.tags,
       category: undefined,
-      portfolioHolding: parentHoldingRef?.holdingName ?? parent.portfolioHolding ?? undefined,
-      symbol: parentHoldingRef?.symbol ?? null,
+      portfolioHolding: parentHolding?.holdingName ?? parent.portfolioHolding ?? undefined,
+      symbol: parentHolding?.symbol ?? null,
       quantity: parent.quantity ?? undefined,
     }));
     return;
@@ -382,6 +410,8 @@ function emitGroup(
   const holdingChildren = childClasses.filter((c) => c.cls.kind === "holding");
 
   // --- All children are categories → category split (parent + N splits)
+  // Splits are intra-transaction; we don't link them via linkId (the splits
+  // table already provides the parent→child relation).
   if (catChildren.length === children.length && children.length >= 1) {
     const parentTx = buildRawTransaction({
       date: parent.date,
@@ -392,8 +422,8 @@ function emitGroup(
       note: parent.note,
       tags: parent.tags,
       category: undefined,
-      portfolioHolding: parentHoldingRef?.holdingName ?? parent.portfolioHolding ?? undefined,
-      symbol: parentHoldingRef?.symbol ?? null,
+      portfolioHolding: parentHolding?.holdingName ?? parent.portfolioHolding ?? undefined,
+      symbol: parentHolding?.symbol ?? null,
       quantity: parent.quantity ?? undefined,
     });
     const splitRows: TransformSplitRow[] = catChildren.map((c) => {
@@ -404,10 +434,11 @@ function emitGroup(
     return;
   }
 
+  const transferId = mapping.transferCategoryId;
+  const transferName = transferId !== null ? mapping.categoryNameById.get(transferId) : undefined;
+
   // --- All children are accounts → transfer set (parent + N flat txs, all with Transfer category)
   if (acctChildren.length === children.length) {
-    const transferId = mapping.transferCategoryId;
-    const transferName = transferId !== null ? mapping.categoryNameById.get(transferId) : undefined;
     // Parent leg
     flat.push(buildRawTransaction({
       date: parent.date,
@@ -418,9 +449,10 @@ function emitGroup(
       note: parent.note,
       tags: parent.tags,
       category: transferName,
-      portfolioHolding: parentHoldingRef?.holdingName ?? parent.portfolioHolding ?? undefined,
-      symbol: parentHoldingRef?.symbol ?? null,
+      portfolioHolding: parentHolding?.holdingName ?? parent.portfolioHolding ?? undefined,
+      symbol: parentHolding?.symbol ?? null,
       quantity: parent.quantity ?? undefined,
+      linkId: groupLinkId,
     }));
     for (const c of acctChildren) {
       const resolved = resolveFinlynqAccount(c.cls.account, undefined, idx, mapping);
@@ -428,6 +460,9 @@ function emitGroup(
         errors.push({ externalId: `row-${c.row.order}`, reason: `Transfer leg account "${c.cls.account!.name}" is not mapped.` });
         continue;
       }
+      // Child row's account may itself be a holding (dual-nature account
+      // like Joint - CAD) — tag portfolio_holding so balances track.
+      const childHolding = holdingForAccountName(c.cls.account!.name, idx);
       flat.push(buildRawTransaction({
         date: c.row.date,
         accountName: resolved.finlynqAccountName,
@@ -437,42 +472,42 @@ function emitGroup(
         note: c.row.note || parent.note,
         tags: c.row.tags || parent.tags,
         category: transferName,
-        portfolioHolding: c.row.portfolioHolding || undefined,
-        symbol: null,
+        portfolioHolding: childHolding?.holdingName ?? c.row.portfolioHolding ?? undefined,
+        symbol: childHolding?.symbol ?? null,
         quantity: c.row.quantity ?? undefined,
+        linkId: groupLinkId,
       }));
     }
     return;
   }
 
-  // --- All children are holdings → position purchases
+  // --- All children are holdings → position purchases / sells / swaps.
+  // Always emit the parent leg (cash OR position) so both ends of the
+  // movement show up. A liquidation (parent = position, children = cash
+  // holding) previously dropped the position leg entirely, leaving the
+  // portfolio aggregator blind to the sell. A buy (parent = cash,
+  // children = positions) needs the cash leg so account balances track.
   if (holdingChildren.length === children.length) {
-    // Emit the parent cash leg on its own account so balances reconcile
-    // against WP's /account_balances (e.g., RBC Checking drops by $6000
-    // when the money leaves to buy positions). Skip when the parent is
-    // itself a holding on the same brokerage — that's an intra-brokerage
-    // swap where parent + children are all positions in the same account.
-    if (!parentHoldingRef) {
-      const transferId = mapping.transferCategoryId;
-      const transferName = transferId !== null ? mapping.categoryNameById.get(transferId) : undefined;
-      flat.push(buildRawTransaction({
-        date: parent.date,
-        accountName: finlynq.finlynqAccountName,
-        amount: parent.amount,
-        currency: parent.currency,
-        payee: parent.payee,
-        note: parent.note,
-        tags: parent.tags,
-        category: transferName,
-        portfolioHolding: undefined,
-        symbol: null,
-        quantity: parent.quantity ?? undefined,
-      }));
-    }
+    flat.push(buildRawTransaction({
+      date: parent.date,
+      accountName: finlynq.finlynqAccountName,
+      amount: parent.amount,
+      currency: parent.currency,
+      payee: parent.payee,
+      note: parent.note,
+      tags: parent.tags,
+      category: transferName,
+      portfolioHolding: parentHolding?.holdingName ?? undefined,
+      symbol: parentHolding?.symbol ?? null,
+      quantity: parent.quantity ?? undefined,
+      linkId: groupLinkId,
+    }));
 
     // Each position leg goes to its OWN brokerage (via Portfolio.csv),
-    // NOT to the parent's account. A stock buy from a Questrade holding
-    // should land on Questrade, not on the CL cash account that funded it.
+    // NOT to the parent's account. A stock buy from a cash account lands
+    // the shares on the brokerage named in Portfolio.csv, not on the
+    // funding account. Same-brokerage holding-to-holding swaps resolve
+    // to the same Finlynq account on both legs but different holdings.
     for (const c of holdingChildren) {
       const holdingRef = c.cls.holdingRef!;
       const brokerageExt = idx.accountsByName.get(holdingRef.brokerageAccount);
@@ -492,10 +527,11 @@ function emitGroup(
         payee: c.row.payee || parent.payee,
         note: c.row.note || parent.note,
         tags: c.row.tags || parent.tags,
-        category: undefined,
-        portfolioHolding: c.row.portfolioHolding || holdingRef.holdingName,
+        category: transferName,
+        portfolioHolding: holdingRef.holdingName,
         symbol: holdingRef.symbol,
         quantity: c.row.quantity ?? undefined,
+        linkId: groupLinkId,
       }));
     }
     return;
@@ -513,9 +549,13 @@ function emitGroup(
     note: parent.note,
     tags: parent.tags,
     category: undefined,
-    portfolioHolding: parentHoldingRef?.holdingName ?? parent.portfolioHolding ?? undefined,
-    symbol: parentHoldingRef?.symbol ?? null,
+    portfolioHolding: parentHolding?.holdingName ?? parent.portfolioHolding ?? undefined,
+    symbol: parentHolding?.symbol ?? null,
     quantity: parent.quantity ?? undefined,
+    // Mixed groups share the linkId so the user can jump between the
+    // non-split legs; the split rows themselves are grouped via the
+    // transaction_splits table.
+    linkId: acctChildren.length + holdingChildren.length > 0 ? groupLinkId : undefined,
   });
   if (catChildren.length > 0) {
     splits.push({
@@ -534,6 +574,7 @@ function emitGroup(
   for (const c of acctChildren) {
     const resolved = resolveFinlynqAccount(c.cls.account, undefined, idx, mapping);
     if (!resolved) continue;
+    const childHolding = holdingForAccountName(c.cls.account!.name, idx);
     flat.push(buildRawTransaction({
       date: c.row.date,
       accountName: resolved.finlynqAccountName,
@@ -542,10 +583,11 @@ function emitGroup(
       payee: c.row.payee || parent.payee,
       note: c.row.note || parent.note,
       tags: c.row.tags || parent.tags,
-      category: undefined,
-      portfolioHolding: c.row.portfolioHolding || undefined,
-      symbol: null,
+      category: transferName,
+      portfolioHolding: childHolding?.holdingName ?? c.row.portfolioHolding ?? undefined,
+      symbol: childHolding?.symbol ?? null,
       quantity: c.row.quantity ?? undefined,
+      linkId: groupLinkId,
     }));
   }
   for (const c of holdingChildren) {
@@ -567,10 +609,11 @@ function emitGroup(
       payee: c.row.payee || parent.payee,
       note: c.row.note || parent.note,
       tags: c.row.tags || parent.tags,
-      category: undefined,
-      portfolioHolding: c.row.portfolioHolding || holdingRef.holdingName,
+      category: transferName,
+      portfolioHolding: holdingRef.holdingName,
       symbol: holdingRef.symbol,
       quantity: c.row.quantity ?? undefined,
+      linkId: groupLinkId,
     }));
   }
 }
@@ -587,6 +630,7 @@ interface BuildArgs {
   portfolioHolding?: string;
   symbol: string | null;
   quantity?: number;
+  linkId?: string;
 }
 
 function buildRawTransaction(args: BuildArgs): RawTransaction {
@@ -609,6 +653,9 @@ function buildRawTransaction(args: BuildArgs): RawTransaction {
   }
   if (args.quantity !== undefined && Number.isFinite(args.quantity)) {
     row.quantity = args.quantity;
+  }
+  if (args.linkId) {
+    row.linkId = args.linkId;
   }
   return row;
 }

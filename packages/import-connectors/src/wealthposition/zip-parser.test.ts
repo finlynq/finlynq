@@ -8,12 +8,20 @@ import { parseCsv, parseCsvDicts } from "./csv";
 import type { ConnectorMappingResolved } from "../types";
 
 // Small synthetic CSV fixtures covering every shape the real export carries.
+// IBKR Joint, Joint - USD, and Joint - CAD are "dual-nature" — they appear
+// in BOTH Accounts.csv and Portfolio.csv (they're top-level accounts AND
+// currency-sleeved holdings of the brokerage). This mirrors how a real WP
+// export looks and exercises the transform's holding-name tagging for same-
+// account conversions + liquidations.
 const SYNTHETIC: ZipContents = {
   accountsCsv: `Type,Group,Account,Currency,Note
 A,Banks,RBC Checking,CAD,
 A,Cash Accounts,Cash CAD,CAD,
 A,Investments,IBKR TFSA,CAD,
 A,Investments,WealthSimple,CAD,
+A,Investments,IBKR Joint,CAD,
+A,Investments,Joint - USD,USD,
+A,Investments,Joint - CAD,CAD,
 L,Mortgage,Mortage,CAD,
 `,
   categoriesCsv: `Type,Group,Category,Note
@@ -27,6 +35,9 @@ R,Transfers,Transfers,
 IBKR TFSA,TFSA - Canada,VCN.TO,CAD,
 WealthSimple,Bitcoin,,CAD,
 WealthSimple,Ethereum,,CAD,
+IBKR Joint,Joint - USD,,USD,
+IBKR Joint,Joint - CAD,,CAD,
+IBKR Joint,Joint - Dev Asia ex Japan - A,VDEA.TO,USD,
 `,
   transactionsCsv: `Date,Account,Categorization,Currency,Amount,Quantity,Portfolio holding,Note,Payee,Tags
 2026-03-08,Cash CAD,Groceries,CAD,-100.00,,,walmart,,
@@ -40,6 +51,10 @@ WealthSimple,Ethereum,,CAD,
 2026-02-01,#SPLIT#,TFSA - Canada,CAD,800.00,12.0000,,,,
 2026-01-15,WealthSimple,#SPLIT#,CAD,-50.00,,,Buy BTC,,
 2026-01-15,#SPLIT#,Bitcoin,CAD,50.00,0.000311,,,,
+2025-08-11,Joint - USD,#SPLIT#,CAD,-52414.16,-38000,Joint - CAD,,,
+2025-08-11,#SPLIT#,Joint - CAD,CAD,52414.16,52414.16,Joint - CAD,,,
+2025-07-31,Joint - Dev Asia ex Japan - A,#SPLIT#,USD,-1420.4,-40,Joint - USD,,,
+2025-07-31,#SPLIT#,Joint - USD,CAD,1960,1420.4,Joint - USD,,,
 `,
 };
 
@@ -88,11 +103,11 @@ describe("csv parser", () => {
 describe("parseWealthPositionExport", () => {
   it("parses accounts / categories / portfolio / transactions", () => {
     const parsed = parseWealthPositionExport(SYNTHETIC);
-    expect(parsed.accounts).toHaveLength(5);
+    expect(parsed.accounts).toHaveLength(8);
     expect(parsed.categories).toHaveLength(5);
     expect(parsed.portfolioByHolding.get("Bitcoin")?.brokerageAccount).toBe("WealthSimple");
     expect(parsed.portfolioByHolding.get("TFSA - Canada")?.symbol).toBe("VCN.TO");
-    expect(parsed.transactions).toHaveLength(11);
+    expect(parsed.transactions).toHaveLength(15);
   });
 });
 
@@ -175,6 +190,84 @@ describe("transformWealthPositionExport", () => {
     mapping.accountMap.delete(rbcExtId);
     const r = transformWealthPositionExport(parsed, mapping);
     expect(r.errors.some((e) => e.reason.includes("RBC Checking"))).toBe(true);
+  });
+
+  it("shares one linkId across every leg of a transfer set", () => {
+    const parsed = parseWealthPositionExport(SYNTHETIC);
+    const mapping = buildResolvedMapping(parsed);
+    const r = transformWealthPositionExport(parsed, mapping);
+    const transferTxs = r.flat.filter((t) => t.date === "2026-02-14");
+    expect(transferTxs).toHaveLength(2);
+    const linkIds = new Set(transferTxs.map((t) => t.linkId));
+    expect(linkIds.size).toBe(1);
+    expect([...linkIds][0]).toBeTruthy();
+  });
+
+  it("shares one linkId across a stock-buy cash leg + position leg", () => {
+    const parsed = parseWealthPositionExport(SYNTHETIC);
+    const mapping = buildResolvedMapping(parsed);
+    const r = transformWealthPositionExport(parsed, mapping);
+    const stockTxs = r.flat.filter((t) => t.date === "2026-02-01");
+    const linkIds = new Set(stockTxs.map((t) => t.linkId));
+    expect(linkIds.size).toBe(1);
+  });
+
+  it("emits a same-account holding conversion with both legs categorized as Transfer (Case 2)", () => {
+    // Aug 11 USD→CAD conversion inside IBKR Joint:
+    //   Joint - USD (holding), qty -38000, amt -52414.16 → parent
+    //   Joint - CAD (holding), qty +52414.16, amt +52414.16 → child
+    // Both legs should be on IBKR Joint in Finlynq, both with Transfer
+    // category, each tagged with its own portfolio_holding so the
+    // aggregator sees the qty movements on both sides.
+    const parsed = parseWealthPositionExport(SYNTHETIC);
+    const mapping = buildResolvedMapping(parsed);
+    const r = transformWealthPositionExport(parsed, mapping);
+    const conversionTxs = r.flat.filter((t) => t.date === "2025-08-11");
+    expect(conversionTxs).toHaveLength(2);
+    // Both sides use the Transfer category (parent was silently null before).
+    expect(conversionTxs.every((t) => t.category === "Transfers")).toBe(true);
+    // Portfolio holdings match the parent/child account, not the CSV's
+    // Portfolio-holding column (which points at the destination, not the
+    // source).
+    const usdLeg = conversionTxs.find((t) => t.portfolioHolding === "Joint - USD");
+    const cadLeg = conversionTxs.find((t) => t.portfolioHolding === "Joint - CAD");
+    expect(usdLeg).toBeDefined();
+    expect(cadLeg).toBeDefined();
+    expect(usdLeg!.amount).toBe(-52414.16);
+    expect(usdLeg!.quantity).toBe(-38000);
+    expect(cadLeg!.amount).toBe(52414.16);
+    expect(cadLeg!.quantity).toBe(52414.16);
+    // Shared linkId so the UI can surface them as siblings.
+    expect(usdLeg!.linkId).toBeTruthy();
+    expect(usdLeg!.linkId).toBe(cadLeg!.linkId);
+  });
+
+  it("emits a stock liquidation with the sell leg preserving qty<0 on the position (Case 3)", () => {
+    // Jul 31 liquidation: -40 shares of "Joint - Dev Asia ex Japan - A"
+    // for $1420.4 USD into Joint - USD cash. The position leg MUST carry
+    // portfolio_holding="Joint - Dev Asia ex Japan - A" + quantity=-40
+    // so the portfolio aggregator sees the sell. Before the fix it was
+    // dropped because parentHoldingRef was set but the branch skipped the
+    // parent entirely.
+    const parsed = parseWealthPositionExport(SYNTHETIC);
+    const mapping = buildResolvedMapping(parsed);
+    const r = transformWealthPositionExport(parsed, mapping);
+    const liquidationTxs = r.flat.filter((t) => t.date === "2025-07-31");
+    // 2 txs: sell leg on the position + cash leg on Joint - USD.
+    expect(liquidationTxs).toHaveLength(2);
+    const sellLeg = liquidationTxs.find((t) => t.portfolioHolding === "Joint - Dev Asia ex Japan - A");
+    expect(sellLeg).toBeDefined();
+    expect(sellLeg!.amount).toBe(-1420.4);
+    expect(sellLeg!.quantity).toBe(-40);
+    expect(sellLeg!.category).toBe("Transfers");
+    const cashLeg = liquidationTxs.find((t) => t.portfolioHolding === "Joint - USD");
+    expect(cashLeg).toBeDefined();
+    expect(cashLeg!.amount).toBe(1960);
+    expect(cashLeg!.quantity).toBe(1420.4);
+    expect(cashLeg!.category).toBe("Transfers");
+    // Linked.
+    expect(sellLeg!.linkId).toBeTruthy();
+    expect(sellLeg!.linkId).toBe(cashLeg!.linkId);
   });
 
   it("rejects orphan #SPLIT# rows that have no preceding parent", () => {
