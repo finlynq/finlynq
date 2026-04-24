@@ -130,8 +130,18 @@ async function materializeZipMapping(
   // when the user already has "entertainment" would collide at the DB's
   // UNIQUE (user_id, name_lookup) partial index — the orchestrator wouldn't
   // catch it and the INSERT would fail mid-batch.
-  const nameKey = (n: string) => n.trim().toLowerCase();
-  const accountByName = new Map(existingAccounts.map((a) => [nameKey(a.name), a]));
+  // Dedup key matches Stream D's name_lookup (HMAC of lowercased-trimmed
+  // name). Null-safe: once Stream D Phase 3 nulls out plaintext `name`
+  // on encrypted rows, we'd crash here if we assumed non-null. Rows with
+  // null names are skipped (they'll always need a fresh lookup via
+  // name_lookup, which isn't wired through this path yet).
+  const nameKey = (n: string | null | undefined): string =>
+    typeof n === "string" ? n.trim().toLowerCase() : "";
+  const accountByName = new Map<string, (typeof existingAccounts)[number]>();
+  for (const a of existingAccounts) {
+    const key = nameKey(a.name);
+    if (key) accountByName.set(key, a);
+  }
   // Only carry over prior-mapping entries whose Finlynq account still exists.
   // Accounts can be deleted outside this flow (manual cleanup in /accounts,
   // wipe-account, schema rebuild on dev) which leaves us with a stale
@@ -176,7 +186,11 @@ async function materializeZipMapping(
 
   const externalCategoryById = new Map(parsed.categories.map((c) => [c.id, c]));
   const existingCats = await getCategories(userId);
-  const catByName = new Map(existingCats.map((c) => [nameKey(c.name), c]));
+  const catByName = new Map<string, (typeof existingCats)[number]>();
+  for (const c of existingCats) {
+    const key = nameKey(c.name);
+    if (key) catByName.set(key, c);
+  }
   const existingCatIds = new Set(existingCats.map((c) => c.id));
   for (const [extId, pfId] of Object.entries(existing.categoryMap)) {
     if (pfId === null || existingCatIds.has(pfId)) categoryMap[extId] = pfId;

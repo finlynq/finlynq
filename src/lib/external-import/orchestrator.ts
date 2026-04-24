@@ -127,8 +127,16 @@ export async function materializeMapping(
   // has "entertainment" and the importer tries to auto-create "Entertainment",
   // and the INSERT would then fail on the UNIQUE (user_id, name_lookup)
   // partial index.
-  const nameKey = (n: string) => n.trim().toLowerCase();
-  const accountByName = new Map(existingAccounts.map((a) => [nameKey(a.name), a]));
+  // Null-safe: once Stream D Phase 3 nulls plaintext `name`, rows without
+  // plaintext are skipped here (auto-create will still collide at the DB
+  // level on name_lookup, but the Map.get path works for the common case).
+  const nameKey = (n: string | null | undefined): string =>
+    typeof n === "string" ? n.trim().toLowerCase() : "";
+  const accountByName = new Map<string, (typeof existingAccounts)[number]>();
+  for (const a of existingAccounts) {
+    const key = nameKey(a.name);
+    if (key) accountByName.set(key, a);
+  }
 
   for (const row of input.accounts) {
     if (row.finlynqId !== undefined) {
@@ -161,7 +169,11 @@ export async function materializeMapping(
 
   const externalCategoryById = new Map(externalCategories.map((c) => [c.id, c] as const));
   const existingCategories = await getCategories(userId);
-  const categoryByName = new Map(existingCategories.map((c) => [nameKey(c.name), c]));
+  const categoryByName = new Map<string, (typeof existingCategories)[number]>();
+  for (const c of existingCategories) {
+    const key = nameKey(c.name);
+    if (key) categoryByName.set(key, c);
+  }
 
   for (const row of input.categories) {
     if (row.uncategorized) {
