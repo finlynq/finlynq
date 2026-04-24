@@ -307,6 +307,36 @@ function emitSingleRowTx(
     // Portfolio purchase written as a single row — use the holding as symbol.
   }
 
+  // If the account is also listed in Portfolio.csv (dual-natured holding
+  // like Joint - USD), tag the row's portfolio_holding with the account name
+  // so its balance tracks. When the CSV's "Portfolio holding" column points
+  // at a different holding — e.g. a dividend row where Joint - USD received
+  // the cash because of a distribution from Joint - All W - D — that's a
+  // reporting attribution, not a share move. Preserve it as a tag so
+  // reports can group dividends by source holding without incorrectly
+  // crediting shares to the tagged position.
+  const ownHolding = holdingForAccountName(account.name, idx);
+  const csvPortfolioHolding = row.portfolioHolding || "";
+  const sourceTagNeeded =
+    ownHolding !== null &&
+    csvPortfolioHolding.length > 0 &&
+    csvPortfolioHolding !== account.name;
+  const resolvedHolding =
+    catKind.kind === "holding"
+      ? catKind.holdingRef!.holdingName
+      : ownHolding
+      ? ownHolding.holdingName
+      : row.portfolioHolding || undefined;
+  const resolvedSymbol =
+    catKind.kind === "holding"
+      ? catKind.holdingRef!.symbol
+      : ownHolding
+      ? ownHolding.symbol
+      : null;
+  const tags = sourceTagNeeded
+    ? (row.tags ? `${row.tags}, source:${csvPortfolioHolding}` : `source:${csvPortfolioHolding}`)
+    : row.tags;
+
   flat.push(buildRawTransaction({
     date: row.date,
     accountName: finlynq.finlynqAccountName,
@@ -314,10 +344,10 @@ function emitSingleRowTx(
     currency: row.currency,
     payee: row.payee,
     note: row.note,
-    tags: row.tags,
+    tags,
     category: categoryName,
-    portfolioHolding: catKind.kind === "holding" ? catKind.holdingRef!.holdingName : row.portfolioHolding || undefined,
-    symbol: catKind.kind === "holding" ? catKind.holdingRef!.symbol : null,
+    portfolioHolding: resolvedHolding,
+    symbol: resolvedSymbol,
     quantity: row.quantity ?? undefined,
   }));
 }
@@ -341,6 +371,24 @@ function emitHoldingSideTx(
     const catId = mapping.categoryMap.get(catKind.category!.id);
     if (catId !== undefined && catId !== null) categoryName = mapping.categoryNameById.get(catId);
   }
+
+  // When the CSV's "Portfolio holding" column points at a DIFFERENT holding
+  // than the row's account, it's WP's way of tagging which position
+  // generated the income — e.g. `Joint - USD, Dividends, 20, 14.29,
+  // Joint - All W - D` = a cash dividend of $20 / 14.29 USD credited to the
+  // Joint - USD sleeve because of a distribution from the Joint - All W - D
+  // position. The balance change lands on Joint - USD (the account); the
+  // source holding is a reporting attribution, preserved as a tag so
+  // reports like "dividends received from each holding" can group on it.
+  // Without this, we'd incorrectly credit +14.29 shares to Joint - All W -
+  // D (zero-ing its cost basis) while leaving Joint - USD cash untouched.
+  const csvPortfolioHolding = row.portfolioHolding || "";
+  const sourceTagNeeded =
+    csvPortfolioHolding.length > 0 && csvPortfolioHolding !== holdingRef.holdingName;
+  const tags = sourceTagNeeded
+    ? (row.tags ? `${row.tags}, source:${csvPortfolioHolding}` : `source:${csvPortfolioHolding}`)
+    : row.tags;
+
   flat.push(buildRawTransaction({
     date: row.date,
     accountName: finlynq.finlynqAccountName,
@@ -348,9 +396,12 @@ function emitHoldingSideTx(
     currency: row.currency,
     payee: row.payee,
     note: row.note,
-    tags: row.tags,
+    tags,
     category: categoryName,
-    portfolioHolding: row.portfolioHolding || holdingRef.holdingName,
+    // Always use the ACCOUNT's holding as portfolio_holding. The CSV's
+    // Portfolio-holding column is reporting attribution only (captured in
+    // tags), not a share-move destination.
+    portfolioHolding: holdingRef.holdingName,
     symbol: holdingRef.symbol,
     quantity: row.quantity ?? undefined,
   }));
