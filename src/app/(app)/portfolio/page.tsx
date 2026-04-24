@@ -101,6 +101,7 @@ type EtfDetail = {
 
 type OverviewData = {
   holdings: EnrichedHolding[];
+  undecryptedTxCount?: number;
   summary: {
     totalHoldings: number;
     totalAccounts: number;
@@ -463,6 +464,28 @@ export default function PortfolioPage() {
           {summary.totalHoldings} holdings across {summary.totalAccounts} accounts
         </p>
       </div>
+
+      {/* Re-login prompt — surfaces when the server couldn't decrypt
+          tx.portfolio_holding (cold DEK cache after a server restart).
+          Without this the page would render every encrypted tx as a separate
+          orphan row because each AES-GCM IV is unique. */}
+      {(data.undecryptedTxCount ?? 0) > 0 && (
+        <div className="rounded-lg border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 p-4 flex items-start gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/50 shrink-0">
+            <span className="text-amber-700 dark:text-amber-300 font-semibold">!</span>
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
+              {data.undecryptedTxCount} transaction{data.undecryptedTxCount === 1 ? "" : "s"} couldn't be decrypted
+            </p>
+            <p className="text-xs text-amber-800/80 dark:text-amber-300/80 mt-0.5">
+              Your session needs to refresh after the last deploy.{" "}
+              <Link href="/login" className="underline font-medium">Sign in again</Link>{" "}
+              to unlock your portfolio data.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* ── Hero Summary Cards ────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
