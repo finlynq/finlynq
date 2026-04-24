@@ -364,6 +364,39 @@ Mint's grouped rows) need row-order grouping, **not** (date, payee)
 grouping. Child rows often have empty payee/note fields even when the
 parent's are populated.
 
+### Linking multi-leg legs (transfer / conversion / liquidation)
+
+Every multi-leg group emits rows that share one `randomUUID()`
+`linkId` (field on `RawTransaction`). `executeImport` persists it on
+`transactions.link_id`. The UI's transactions edit dialog fetches
+siblings via `GET /api/transactions/linked?linkId=…&excludeId=…` so the
+user can jump between the legs of a transfer pair, a same-account FX
+conversion, or a position sell + cash receive. Category splits stay
+UNLINKED — the `transaction_splits` table already encodes that parent/
+child relation.
+
+### Always emit the parent leg
+
+For a holding-parent + holding-children group (a liquidation: parent is
+the position being sold, children are cash / other holdings receiving),
+the parent leg MUST be emitted on its brokerage with
+`portfolioHolding = parent holding name`, `quantity < 0`, and the
+Transfer category. Dropping the parent leaves the aggregator blind to
+the sell and the position stays at its pre-sell quantity.
+
+### Dividend / distribution rows with a source holding
+
+If a provider encodes a dividend as `Account=<cash holding>,
+Category=Dividends, Amount=20, Quantity=14.29, Portfolio holding=<stock
+holding>`, the meaning is "the cash holding received the dividend; the
+stock holding generated it". The balance + quantity change land on the
+`account` (the cash sleeve), and the source holding goes into `tags` as
+`source:<holding name>`. Do NOT set `tx.portfolio_holding` to the source
+holding — the aggregator would credit +qty shares to a position that
+didn't actually receive any, zeroing its cost basis. Verified against
+WP's UI (Jan 2026) — "Link category amounts to portfolio holding" is
+reporting attribution, not a share move.
+
 ### Orphan rows
 
 If a provider row can't be classified (no preceding parent, unmapped
@@ -396,6 +429,26 @@ Don't regress on them without a new comment explaining the change.
    silently returns zero rows.
 7. **`#SPLIT#` / multi-leg chains grouped by CSV row order**, never by
    (date, payee) — child rows have empty metadata.
+8. **Dedup maps in the orchestrator match the DB's
+   `UNIQUE (user_id, name_lookup)` partial index.** Keep TWO indexes per
+   table — one keyed by `trim().toLowerCase()` plaintext (legacy rows)
+   and one keyed by the `name_lookup` HMAC (Stream D Phase 3 rows whose
+   plaintext is nulled). On auto-create, compute `nameLookup(dek,
+   desiredName)` and check both before INSERTing. Case-sensitive
+   plaintext-only lookup misses both same-CSV collisions (`Balance
+   adjustments` vs `Balance Adjustments`) and Phase 3 encrypted rows.
+9. **Parent leg always emitted in multi-leg groups**, including when the
+   parent itself is a holding (liquidation). Dropping the parent blinds
+   the aggregator to sell-side qty changes.
+10. **CSV `Portfolio holding` column may be attribution, not a share
+   move.** When `csv.portfolio_holding != row.account` on a dividend /
+   distribution row, the source holding goes to `tags` as `source:<name>`
+   and the balance change lands on the `account`. The aggregator would
+   otherwise credit phantom shares to the tagged holding.
+11. **Multi-leg groups share one `linkId`** so the UI can surface them
+   as siblings. Category-split groups (parent + N splits) intentionally
+   don't share a linkId — the `transaction_splits` table already encodes
+   that relation.
 
 ---
 
