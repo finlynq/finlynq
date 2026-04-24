@@ -10,6 +10,14 @@ import { transformTransactions } from "./transform";
 
 export { WealthPositionClient, WealthPositionApiError } from "./client";
 export { transformTransactions } from "./transform";
+export {
+  parseWealthPositionExport,
+  transformWealthPositionExport,
+  type ZipContents,
+  type ParsedExport,
+  type ZipTransactionRow,
+} from "./zip-parser";
+export { parseCsv, parseCsvDicts } from "./csv";
 
 export const metadata: ConnectorMetadata = {
   id: "wealthposition",
