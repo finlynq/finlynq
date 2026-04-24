@@ -1,6 +1,7 @@
 // WealthPosition API client. Docs: https://www.wealthposition.com/api/v0.1
 // Rate limit: 1 request / second. Bearer auth.
 
+import { createHash } from "crypto";
 import { createRateLimitedFetch, type RateLimitedFetch } from "../rate-limited-fetch";
 import type {
   ConnectorClient,
@@ -11,6 +12,7 @@ import type {
 } from "../types";
 
 const BASE_URL = "https://www.wealthposition.com/api/v0.1";
+const MAX_RATE_LIMIT_RETRIES = 3;
 
 interface WpEnvelope<T> {
   success: boolean;
@@ -88,32 +90,48 @@ export class WealthPositionClient implements ConnectorClient {
     if (!opts.apiKey) throw new Error("WealthPositionClient: apiKey is required");
     this.apiKey = opts.apiKey;
     this.baseUrl = opts.baseUrl ?? BASE_URL;
+    // Bucket by SHA of the API key — state survives across client instances
+    // spawned by separate HTTP requests in the same process. Multiple users
+    // with different keys get independent queues; a single user who clicks
+    // Probe then Preview in quick succession can't stampede the 1 req/s limit.
+    const bucketKey = `wealthposition:${createHash("sha256").update(opts.apiKey).digest("hex")}`;
     this.fetchImpl =
-      opts.fetchImpl ?? createRateLimitedFetch({ minIntervalMs: 1000 });
+      opts.fetchImpl ??
+      createRateLimitedFetch({ minIntervalMs: 1200, bucketKey });
   }
 
   private async call<T>(path: string): Promise<T> {
     const url = `${this.baseUrl}${path}`;
-    const res = await this.fetchImpl(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-    });
+    let lastError: WealthPositionApiError | null = null;
+    for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+      const res = await this.fetchImpl(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+      });
 
-    let body: WpEnvelope<T> | null = null;
-    try {
-      body = (await res.json()) as WpEnvelope<T>;
-    } catch {
-      // fall through
-    }
+      let body: WpEnvelope<T> | null = null;
+      try {
+        body = (await res.json()) as WpEnvelope<T>;
+      } catch {
+        // fall through
+      }
 
-    if (!res.ok || !body?.success) {
+      if (res.ok && body?.success) {
+        return body.data;
+      }
+
       const code = body?.error?.code ?? `HTTP_${res.status}`;
-      const detail =
-        body?.error?.detail ?? body?.error?.message ?? res.statusText;
-      throw new WealthPositionApiError(code, detail, res.status);
-    }
+      const detail = body?.error?.detail ?? body?.error?.message ?? res.statusText;
+      lastError = new WealthPositionApiError(code, detail, res.status);
 
-    return body.data;
+      // Only retry on rate-limit — other errors (401, 400, etc.) fail fast.
+      if (code !== "RATE_LIMIT_ERROR" && res.status !== 429) break;
+      if (attempt === MAX_RATE_LIMIT_RETRIES) break;
+      // Exponential back-off with jitter: 1.5s, 3s, 6s.
+      const backoff = 1500 * Math.pow(2, attempt) + Math.floor(Math.random() * 400);
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+    throw lastError ?? new WealthPositionApiError("ENDPOINT_ERROR", "Unknown failure", 500);
   }
 
   async listAccounts(): Promise<ExternalAccount[]> {
