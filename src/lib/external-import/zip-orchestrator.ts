@@ -39,6 +39,11 @@ import {
   WEALTHPOSITION_CONNECTOR_ID,
   type MappingInput,
 } from "@/lib/external-import/orchestrator";
+import { hasConnectorCredentials } from "@/lib/external-import/credentials";
+import {
+  runWealthPositionReconciliation,
+  type ReconciliationResult,
+} from "@/lib/external-import/reconciliation";
 
 export const ZIP_SYNC_OPERATION = "wealthposition_zip_sync";
 
@@ -209,6 +214,67 @@ async function materializeZipMapping(
   return mapping;
 }
 
+/**
+ * For each Portfolio.csv row, insert a portfolio_holdings row on the mapped
+ * brokerage account. Idempotent — skips holdings that already exist for this
+ * (user, account, name) triple. Crypto detection is heuristic: Portfolio.csv
+ * doesn't flag it, but holdings with no symbol that belong to a WealthSimple-
+ * style brokerage are likely crypto. We just leave isCrypto=0 for now; the
+ * user can flag it in the portfolio page.
+ */
+async function syncPortfolioHoldings(
+  userId: string,
+  parsed: ParsedExport,
+  mapping: ConnectorMapping,
+): Promise<{ inserted: number }> {
+  const accountsByName = new Map(parsed.accounts.map((a) => [a.name, a]));
+
+  // Existing holdings for this user — avoid duplicates.
+  const existing = await db
+    .select({
+      id: schema.portfolioHoldings.id,
+      accountId: schema.portfolioHoldings.accountId,
+      name: schema.portfolioHoldings.name,
+    })
+    .from(schema.portfolioHoldings)
+    .where(eq(schema.portfolioHoldings.userId, userId))
+    .all();
+  const existingKeys = new Set(existing.map((e) => `${e.accountId}|${e.name}`));
+
+  const toInsert: Array<{
+    userId: string;
+    accountId: number;
+    name: string;
+    symbol: string | null;
+    currency: string;
+    isCrypto: number;
+    note: string;
+  }> = [];
+
+  for (const [holdingName, info] of parsed.portfolioByHolding) {
+    const brokerageExt = accountsByName.get(info.brokerageAccount);
+    if (!brokerageExt) continue;
+    const finlynqAccountId = mapping.accountMap[brokerageExt.id];
+    if (!finlynqAccountId) continue;
+    const key = `${finlynqAccountId}|${holdingName}`;
+    if (existingKeys.has(key)) continue;
+    toInsert.push({
+      userId,
+      accountId: finlynqAccountId,
+      name: holdingName,
+      symbol: info.symbol || null,
+      currency: info.currency || "CAD",
+      isCrypto: 0,
+      note: "",
+    });
+    existingKeys.add(key);
+  }
+
+  if (toInsert.length === 0) return { inserted: 0 };
+  await db.insert(schema.portfolioHoldings).values(toInsert);
+  return { inserted: toInsert.length };
+}
+
 function buildResolvedMapping(
   mapping: ConnectorMapping,
   parsed: ParsedExport,
@@ -292,7 +358,11 @@ export interface ZipExecuteResult {
   splitsInserted: number;
   splitInsertErrors: Array<{ externalId: string; reason: string }>;
   transformErrors: TransformResult["errors"];
+  portfolioHoldingsInserted: number;
   syncWatermark: string;
+  /** Populated when the user has a WP API key saved. Null otherwise. */
+  reconciliation: ReconciliationResult | null;
+  reconciliationError: string | null;
 }
 
 export async function runZipExecute(
@@ -316,6 +386,14 @@ export async function runZipExecute(
   const contents = await extractZipContents(buffer);
   const parsed = parseWealthPositionExport(contents);
   const mapping = await materializeZipMapping(userId, input, parsed);
+  // Portfolio.csv → portfolio_holdings rows on the mapped brokerage accounts.
+  // Runs before executeImport so holdings exist when the /portfolio page
+  // first loads the freshly-imported data.
+  const { inserted: portfolioHoldingsInserted } = await syncPortfolioHoldings(
+    userId,
+    parsed,
+    mapping,
+  );
   const pfAccounts = await getAccounts(userId, { includeArchived: false });
   const pfCategories = await getCategories(userId);
   const resolved = buildResolvedMapping(mapping, parsed, pfAccounts, pfCategories);
@@ -392,11 +470,32 @@ export async function runZipExecute(
   });
   invalidateUserTxCache(userId);
 
+  // If the user has an API key saved, run reconciliation immediately so the
+  // summary can surface balance mismatches + suggest opening-balance
+  // adjustments without a separate button click.
+  let reconciliation: ReconciliationResult | null = null;
+  let reconciliationError: string | null = null;
+  try {
+    const hasKey = await hasConnectorCredentials(userId, WEALTHPOSITION_CONNECTOR_ID);
+    if (hasKey) {
+      reconciliation = await runWealthPositionReconciliation(
+        userId,
+        dek,
+        new Date().toISOString().slice(0, 10),
+      );
+    }
+  } catch (err) {
+    reconciliationError = err instanceof Error ? err.message : "Reconciliation failed";
+  }
+
   return {
     import: importResult,
     splitsInserted,
     splitInsertErrors,
     transformErrors: transformed.errors,
+    portfolioHoldingsInserted,
     syncWatermark,
+    reconciliation,
+    reconciliationError,
   };
 }

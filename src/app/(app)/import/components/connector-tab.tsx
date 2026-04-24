@@ -74,6 +74,13 @@ export function ConnectorTab() {
     imported: number; skipped: number; splitsInserted: number;
     splitInsertErrors: Array<{ externalId: string; reason: string }>;
     transformErrors: Array<{ externalId: string; reason: string }>;
+    portfolioHoldingsInserted: number;
+    reconciliation: {
+      date: string;
+      rows: Array<{ accountName: string; currency: string; wpBalance: number; pfBalance: number; diff: number; matches: boolean; finlynqAccountId: number }>;
+      unmatchedExternal: string[];
+    } | null;
+    reconciliationError: string | null;
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -244,6 +251,9 @@ export function ConnectorTab() {
           splitsInserted: data.splitsInserted,
           splitInsertErrors: data.splitInsertErrors ?? [],
           transformErrors: data.transformErrors ?? [],
+          portfolioHoldingsInserted: data.portfolioHoldingsInserted ?? 0,
+          reconciliation: data.reconciliation ?? null,
+          reconciliationError: data.reconciliationError ?? null,
         });
         setZipStage("executed");
       } catch (err) {
@@ -365,24 +375,70 @@ export function ConnectorTab() {
             )}
 
             {zipSummary && (
-              <div className="rounded-md border border-green-500/30 bg-green-500/5 p-3 text-sm space-y-1">
-                <div className="font-medium flex items-center gap-1.5">
-                  <CheckCircle2 className="h-4 w-4 text-green-600" />
-                  Import complete
+              <div className="rounded-md border border-green-500/30 bg-green-500/5 p-3 text-sm space-y-3">
+                <div>
+                  <div className="font-medium flex items-center gap-1.5">
+                    <CheckCircle2 className="h-4 w-4 text-green-600" />
+                    Import complete
+                  </div>
+                  <div className="text-xs text-muted-foreground space-y-0.5 font-mono mt-1">
+                    <div>Imported: {zipSummary.imported}</div>
+                    <div>Skipped duplicates: {zipSummary.skipped}</div>
+                    <div>Splits inserted: {zipSummary.splitsInserted}</div>
+                    <div>Portfolio holdings added: {zipSummary.portfolioHoldingsInserted}</div>
+                    {zipSummary.splitInsertErrors.length > 0 && (
+                      <div className="text-destructive">Split insert errors: {zipSummary.splitInsertErrors.length}</div>
+                    )}
+                    {zipSummary.transformErrors.length > 0 && (
+                      <div className="text-amber-600 dark:text-amber-400">
+                        Transform warnings: {zipSummary.transformErrors.length}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="text-xs text-muted-foreground space-y-0.5 font-mono">
-                  <div>Imported: {zipSummary.imported}</div>
-                  <div>Skipped duplicates: {zipSummary.skipped}</div>
-                  <div>Splits inserted: {zipSummary.splitsInserted}</div>
-                  {zipSummary.splitInsertErrors.length > 0 && (
-                    <div className="text-destructive">Split insert errors: {zipSummary.splitInsertErrors.length}</div>
-                  )}
-                  {zipSummary.transformErrors.length > 0 && (
-                    <div className="text-amber-600 dark:text-amber-400">
-                      Transform warnings: {zipSummary.transformErrors.length}
+
+                {zipSummary.reconciliation && (
+                  <div className="pt-2 border-t border-green-500/20 space-y-2">
+                    <div className="text-xs font-medium">Balance reconciliation (as of {zipSummary.reconciliation.date})</div>
+                    <div className="max-h-56 overflow-y-auto">
+                      <table className="w-full text-xs font-mono">
+                        <thead className="text-muted-foreground text-left">
+                          <tr>
+                            <th className="pb-1">Account</th>
+                            <th className="pb-1 text-right">WP</th>
+                            <th className="pb-1 text-right">Finlynq</th>
+                            <th className="pb-1 text-right">Diff</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {zipSummary.reconciliation.rows.map((r) => (
+                            <tr key={r.finlynqAccountId} className={r.matches ? "" : "text-amber-700 dark:text-amber-400"}>
+                              <td className="py-0.5 pr-2">{r.accountName} <span className="text-muted-foreground">{r.currency}</span></td>
+                              <td className="py-0.5 text-right">{r.wpBalance.toFixed(2)}</td>
+                              <td className="py-0.5 text-right">{r.pfBalance.toFixed(2)}</td>
+                              <td className="py-0.5 text-right">{r.matches ? "✓" : r.diff.toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
-                  )}
-                </div>
+                    <div className="pt-1">
+                      <Button size="sm" variant="outline" onClick={() => setReconcileOpen(true)}>
+                        Open reconciliation dialog (adjust opening balances)
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {!zipSummary.reconciliation && !zipSummary.reconciliationError && (
+                  <div className="pt-2 border-t border-green-500/20 text-xs text-muted-foreground">
+                    Save your API key below to reconcile balances against WealthPosition&rsquo;s live data.
+                  </div>
+                )}
+                {zipSummary.reconciliationError && (
+                  <div className="pt-2 border-t border-green-500/20 text-xs text-amber-700 dark:text-amber-400">
+                    Reconciliation failed: {zipSummary.reconciliationError}
+                  </div>
+                )}
               </div>
             )}
           </div>

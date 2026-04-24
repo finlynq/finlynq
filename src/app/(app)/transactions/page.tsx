@@ -280,6 +280,25 @@ export default function TransactionsPage() {
     if (t.isBusiness === 1 || t.quantity != null || t.portfolioHolding) {
       setShowAdvanced(true);
     }
+    setShowSplits(false);
+    setSplitRows([emptySplitRow(), emptySplitRow()]);
+    // Load existing splits so the edit dialog surfaces them instead of
+    // hiding them behind the "Split this transaction" call-to-action.
+    fetch(`/api/transactions/splits?transactionId=${t.id}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: Array<{ categoryId: number | null; amount: number; note: string | null }>) => {
+        if (Array.isArray(rows) && rows.length > 0) {
+          setSplitRows(
+            rows.map((r) => ({
+              categoryId: r.categoryId ? String(r.categoryId) : "",
+              amount: String(r.amount),
+              note: r.note ?? "",
+            })),
+          );
+          setShowSplits(true);
+        }
+      })
+      .catch(() => {});
     setDialogOpen(true);
   }
 
