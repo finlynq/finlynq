@@ -134,15 +134,22 @@ describe("transformWealthPositionExport", () => {
     expect(inn?.amount).toBe(1000);
   });
 
-  it("routes a stock purchase to the brokerage account with holding name + quantity", () => {
+  it("routes a stock purchase: cash leg on cash account + holding leg on brokerage", () => {
     const parsed = parseWealthPositionExport(SYNTHETIC);
     const mapping = buildResolvedMapping(parsed);
     const r = transformWealthPositionExport(parsed, mapping);
     const stockTxs = r.flat.filter((t) => t.date === "2026-02-01");
-    expect(stockTxs.length).toBeGreaterThanOrEqual(1);
-    // `portfolio_holding` on the tx must be the holding NAME so the
-    // portfolio overview aggregator can look it up by portfolio_holdings.name.
-    // Symbol lives on portfolio_holdings.symbol, not on the transaction.
+    // Expect 2 legs: cash parent on IBKR TFSA (parent was on that account
+    // in SYNTHETIC) and one holding leg on IBKR TFSA.
+    expect(stockTxs.length).toBe(2);
+    // Parent cash leg — amount preserved (WP convention: position purchase
+    // from this cash account is -800 = cash out).
+    const cashLeg = stockTxs.find((t) => !t.portfolioHolding);
+    expect(cashLeg).toBeDefined();
+    expect(cashLeg!.amount).toBe(-800);
+    // Holding leg — routed via Portfolio.csv to the brokerage that owns
+    // the holding, carries the holding NAME (not symbol) on the tx so the
+    // aggregator can match portfolio_holdings.name.
     const holdingLeg = stockTxs.find((t) => t.portfolioHolding === "TFSA - Canada");
     expect(holdingLeg).toBeDefined();
     expect(holdingLeg!.account).toBe("IBKR TFSA");

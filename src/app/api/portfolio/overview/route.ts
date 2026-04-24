@@ -119,16 +119,21 @@ export async function GET(request: NextRequest) {
       dividendsReceived: 0,
       firstPurchaseDate: null as string | null,
     };
-    if (amt < 0) {
+    // Classify by quantity direction first so we catch both:
+    //   - Finlynq convention: amt<0 + qty>0 (paid cash, got shares)
+    //   - WP / ZIP-import convention: amt>0 + qty>0 (position balance grew)
+    // Both represent a buy and should accumulate totalBuyQty. Same for sells.
+    if (qty > 0) {
       row.totalBuyQty += qty;
       row.totalBuyAmount += Math.abs(amt);
       if (!row.firstPurchaseDate || r.date < row.firstPurchaseDate) {
         row.firstPurchaseDate = r.date;
       }
-    } else if (amt > 0 && qty < 0) {
+    } else if (qty < 0) {
       row.totalSellQty += Math.abs(qty);
-      row.totalSellAmount += amt;
-    } else if (amt > 0 && (qty === 0 || r.quantity == null)) {
+      row.totalSellAmount += Math.abs(amt);
+    } else if (amt > 0) {
+      // Quantity unchanged but amount positive — treat as dividend / cash-like income.
       row.dividendsReceived += amt;
     }
     aggByHolding.set(key, row);

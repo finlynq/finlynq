@@ -445,20 +445,56 @@ function emitGroup(
     return;
   }
 
-  // --- All children are holdings → position purchases (N flat txs on the parent account)
+  // --- All children are holdings → position purchases
   if (holdingChildren.length === children.length) {
+    // Emit the parent cash leg on its own account so balances reconcile
+    // against WP's /account_balances (e.g., RBC Checking drops by $6000
+    // when the money leaves to buy positions). Skip when the parent is
+    // itself a holding on the same brokerage — that's an intra-brokerage
+    // swap where parent + children are all positions in the same account.
+    if (!parentHoldingRef) {
+      const transferId = mapping.transferCategoryId;
+      const transferName = transferId !== null ? mapping.categoryNameById.get(transferId) : undefined;
+      flat.push(buildRawTransaction({
+        date: parent.date,
+        accountName: finlynq.finlynqAccountName,
+        amount: parent.amount,
+        currency: parent.currency,
+        payee: parent.payee,
+        note: parent.note,
+        tags: parent.tags,
+        category: transferName,
+        portfolioHolding: undefined,
+        symbol: null,
+        quantity: parent.quantity ?? undefined,
+      }));
+    }
+
+    // Each position leg goes to its OWN brokerage (via Portfolio.csv),
+    // NOT to the parent's account. A stock buy from a Questrade holding
+    // should land on Questrade, not on the CL cash account that funded it.
     for (const c of holdingChildren) {
+      const holdingRef = c.cls.holdingRef!;
+      const brokerageExt = idx.accountsByName.get(holdingRef.brokerageAccount);
+      const childResolved = resolveFinlynqAccount(brokerageExt, holdingRef, idx, mapping);
+      if (!childResolved) {
+        errors.push({
+          externalId: `row-${c.row.order}`,
+          reason: `Brokerage "${holdingRef.brokerageAccount}" (for holding "${holdingRef.holdingName}") is not mapped.`,
+        });
+        continue;
+      }
       flat.push(buildRawTransaction({
         date: c.row.date,
-        accountName: finlynq.finlynqAccountName,
+        accountName: childResolved.finlynqAccountName,
         amount: c.row.amount,
         currency: c.row.currency,
         payee: c.row.payee || parent.payee,
         note: c.row.note || parent.note,
         tags: c.row.tags || parent.tags,
         category: undefined,
-        portfolioHolding: c.row.portfolioHolding || c.cls.holdingRef!.holdingName,
-        symbol: c.cls.holdingRef!.symbol,
+        portfolioHolding: c.row.portfolioHolding || holdingRef.holdingName,
+        symbol: holdingRef.symbol,
         quantity: c.row.quantity ?? undefined,
       }));
     }
@@ -513,17 +549,27 @@ function emitGroup(
     }));
   }
   for (const c of holdingChildren) {
+    const holdingRef = c.cls.holdingRef!;
+    const brokerageExt = idx.accountsByName.get(holdingRef.brokerageAccount);
+    const childResolved = resolveFinlynqAccount(brokerageExt, holdingRef, idx, mapping);
+    if (!childResolved) {
+      errors.push({
+        externalId: `row-${c.row.order}`,
+        reason: `Brokerage "${holdingRef.brokerageAccount}" (for holding "${holdingRef.holdingName}") is not mapped.`,
+      });
+      continue;
+    }
     flat.push(buildRawTransaction({
       date: c.row.date,
-      accountName: finlynq.finlynqAccountName,
+      accountName: childResolved.finlynqAccountName,
       amount: c.row.amount,
       currency: c.row.currency,
       payee: c.row.payee || parent.payee,
       note: c.row.note || parent.note,
       tags: c.row.tags || parent.tags,
       category: undefined,
-      portfolioHolding: c.row.portfolioHolding || c.cls.holdingRef!.holdingName,
-      symbol: c.cls.holdingRef!.symbol,
+      portfolioHolding: c.row.portfolioHolding || holdingRef.holdingName,
+      symbol: holdingRef.symbol,
       quantity: c.row.quantity ?? undefined,
     }));
   }
