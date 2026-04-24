@@ -797,13 +797,20 @@ export function registerPgTools(
       const sixAgo = new Date(now); sixAgo.setMonth(sixAgo.getMonth() - 6);
       const startDate = `${sixAgo.getFullYear()}-${String(sixAgo.getMonth() + 1).padStart(2, "0")}-01`;
 
-      const rows = await q(db, sql`
-        SELECT TO_CHAR(t.date::date, 'YYYY-MM') AS month, c.name AS category, SUM(t.amount) AS total
+      // Stream D: GROUP BY c.id so encrypted rows don't merge; decrypt in memory.
+      const rawRows = await q(db, sql`
+        SELECT TO_CHAR(t.date::date, 'YYYY-MM') AS month, c.id AS cat_id,
+               c.name AS category, c.name_ct AS category_ct, SUM(t.amount) AS total
         FROM transactions t LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId} AND t.date >= ${startDate} AND c.type = 'E'
-        GROUP BY TO_CHAR(t.date::date, 'YYYY-MM'), c.name
+        GROUP BY TO_CHAR(t.date::date, 'YYYY-MM'), c.id, c.name, c.name_ct
         ORDER BY month
-      `) as { month: string; category: string; total: number }[];
+      `) as { month: string; cat_id: number; category: string | null; category_ct: string | null; total: number }[];
+      const rows: { month: string; category: string; total: number }[] = rawRows.map((r) => ({
+        month: r.month,
+        category: (r.category_ct && dek ? decryptField(dek, r.category_ct) : r.category) ?? "",
+        total: r.total,
+      }));
 
       const byCategory = new Map<string, typeof rows>();
       for (const row of rows) {
@@ -845,14 +852,19 @@ export function registerPgTools(
 
       const items: { type: string; severity: string; title: string; description: string; amount?: number }[] = [];
 
-      const budgetRows = await q(db, sql`
-        SELECT c.name AS cat, b.amount AS budget,
+      const budgetRawRows = await q(db, sql`
+        SELECT c.id AS cat_id, c.name AS cat, c.name_ct AS cat_ct, b.amount AS budget,
                COALESCE(ABS(SUM(CASE WHEN t.date >= ${monthStart} AND t.date <= ${monthEnd} THEN t.amount ELSE 0 END)), 0) AS spent
         FROM budgets b LEFT JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
         LEFT JOIN transactions t ON t.category_id = b.category_id AND t.user_id = ${userId}
         WHERE b.month = ${month} AND b.user_id = ${userId}
-        GROUP BY c.name, b.amount
-      `) as { cat: string; budget: number; spent: number }[];
+        GROUP BY c.id, c.name, c.name_ct, b.amount
+      `) as { cat_id: number; cat: string | null; cat_ct: string | null; budget: number; spent: number }[];
+      const budgetRows: { cat: string; budget: number; spent: number }[] = budgetRawRows.map((r) => ({
+        cat: (r.cat_ct && dek ? decryptField(dek, r.cat_ct) : r.cat) ?? "",
+        budget: r.budget,
+        spent: r.spent,
+      }));
 
       for (const r of budgetRows) {
         if (r.budget > 0 && Number(r.spent) > Number(r.budget)) {
@@ -861,10 +873,14 @@ export function registerPgTools(
         }
       }
 
-      const subs = await q(db, sql`
-        SELECT name, amount, next_date, frequency FROM subscriptions
+      const rawSubs = await q(db, sql`
+        SELECT name, name_ct, amount, next_date, frequency FROM subscriptions
         WHERE user_id = ${userId} AND status = 'active' AND next_date >= ${today} AND next_date <= ${weekAhead}
-      `) as { name: string; amount: number; next_date: string; frequency: string }[];
+      `) as { name: string | null; name_ct: string | null; amount: number; next_date: string; frequency: string }[];
+      const subs = rawSubs.map((s) => ({
+        ...s,
+        name: (s.name_ct && dek ? decryptField(dek, s.name_ct) : s.name) ?? "",
+      }));
 
       for (const s of subs) {
         if (Math.abs(Number(s.amount)) >= 100) {
@@ -906,12 +922,16 @@ export function registerPgTools(
       const ps = prevStart.toISOString().split("T")[0];
       const pe = prevEnd.toISOString().split("T")[0];
 
-      const spending = await q(db, sql`
-        SELECT c.name, ABS(SUM(t.amount)) AS total
+      const spendingRaw = await q(db, sql`
+        SELECT c.id AS cat_id, c.name, c.name_ct, ABS(SUM(t.amount)) AS total
         FROM transactions t LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId} AND c.type = 'E' AND t.date >= ${ws} AND t.date <= ${we}
-        GROUP BY c.id, c.name ORDER BY total DESC
-      `) as { name: string; total: number }[];
+        GROUP BY c.id, c.name, c.name_ct ORDER BY total DESC
+      `) as { cat_id: number; name: string | null; name_ct: string | null; total: number }[];
+      const spending: { name: string; total: number }[] = spendingRaw.map((r) => ({
+        name: (r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name) ?? "",
+        total: r.total,
+      }));
 
       const totalSpent = spending.reduce((s, r) => s + Number(r.total), 0);
 
@@ -931,15 +951,19 @@ export function registerPgTools(
       const income = Number(incRow[0]?.total ?? 0);
 
       const notableRaw = await q(db, sql`
-        SELECT t.date, t.payee, c.name AS category, ABS(t.amount) AS amt
+        SELECT t.date, t.payee, c.name AS category, c.name_ct AS category_ct, ABS(t.amount) AS amt
         FROM transactions t LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId} AND c.type = 'E' AND t.date >= ${ws} AND t.date <= ${we}
         ORDER BY ABS(t.amount) DESC LIMIT 5
       `);
-      const notable = notableRaw.map((n) => ({
-        ...n,
-        payee: dek ? (decryptField(dek, String(n.payee ?? "")) ?? "") : n.payee,
-      }));
+      const notable = notableRaw.map((n) => {
+        const { category_ct, ...rest } = n;
+        return {
+          ...rest,
+          payee: dek ? (decryptField(dek, String(n.payee ?? "")) ?? "") : n.payee,
+          category: category_ct && dek ? decryptField(dek, String(category_ct)) : rest.category,
+        };
+      });
 
       return text({
         weekStart: ws, weekEnd: we,
@@ -1753,12 +1777,19 @@ export function registerPgTools(
     async ({ symbols }) => {
       const metrics = await aggregateHoldings(db, userId, dek);
 
-      const ph = await q(db, sql`
-        SELECT ph.name, ph.symbol, ph.currency, a.name as account_name
+      const phRaw = await q(db, sql`
+        SELECT ph.name, ph.name_ct, ph.symbol, ph.symbol_ct, ph.currency,
+               a.name as account_name, a.name_ct as account_name_ct
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
         WHERE ph.user_id = ${userId}
       `);
+      const ph: Row[] = phRaw.map((p) => ({
+        ...p,
+        name: p.name_ct && dek ? decryptField(dek, p.name_ct) : p.name,
+        symbol: p.symbol_ct && dek ? decryptField(dek, p.symbol_ct) : p.symbol,
+        account_name: p.account_name_ct && dek ? decryptField(dek, p.account_name_ct) : p.account_name,
+      }));
       const phMap = new Map(ph.map(p => [String(p.name), p]));
 
       const symbolFilters = symbols?.length ? symbols.map(s => s.toLowerCase()) : null;
@@ -1924,7 +1955,7 @@ export function registerPgTools(
       // LIKE on ciphertext won't match (random IV per row).
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags, t.portfolio_holding,
-               a.name as account_name, a.currency
+               a.name as account_name, a.name_ct as account_name_ct, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId}
@@ -1937,7 +1968,8 @@ export function registerPgTools(
         const pay = dek ? decryptField(dek, String(t.payee ?? "")) : t.payee;
         const nt = dek ? decryptField(dek, String(t.note ?? "")) : t.note;
         const tg = dek ? decryptField(dek, String(t.tags ?? "")) : t.tags;
-        return { ...t, portfolio_holding: ph, payee: pay, note: nt, tags: tg };
+        const accName = t.account_name_ct && dek ? decryptField(dek, String(t.account_name_ct)) : t.account_name;
+        return { ...t, portfolio_holding: ph, payee: pay, note: nt, tags: tg, account_name: accName };
       });
       const txns = decryptedAll.filter((t) => {
         const ph = String(t.portfolio_holding ?? "").toLowerCase();
@@ -2190,15 +2222,20 @@ export function registerPgTools(
     "List all loans with balance, rate, payment, payoff date, and linked account",
     {},
     async () => {
-      const rows = await q(db, sql`
-        SELECT l.id, l.name, l.type, l.principal, l.annual_rate, l.term_months,
+      const rawRows = await q(db, sql`
+        SELECT l.id, l.name, l.name_ct, l.type, l.principal, l.annual_rate, l.term_months,
                l.start_date, l.payment_amount, l.payment_frequency, l.extra_payment,
-               l.note, l.account_id, a.name AS account_name
+               l.note, l.account_id, a.name AS account_name, a.name_ct AS account_name_ct
         FROM loans l
         LEFT JOIN accounts a ON a.id = l.account_id
         WHERE l.user_id = ${userId}
         ORDER BY l.start_date DESC, l.id
       `);
+      const rows: Row[] = rawRows.map((r) => ({
+        ...r,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
+        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : r.account_name,
+      }));
       const today = new Date().toISOString().split("T")[0];
       const enriched = rows.map((r) => {
         const summary = generateAmortizationSchedule(
@@ -2730,15 +2767,22 @@ export function registerPgTools(
     "List all auto-categorization rules with their match patterns and target categories",
     {},
     async () => {
-      const rows = await q(db, sql`
+      const rawRows = await q(db, sql`
         SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
-               r.assign_category_id, c.name AS category_name,
+               r.assign_category_id, c.name AS category_name, c.name_ct AS category_name_ct,
                r.assign_tags, r.rename_to, r.is_active, r.priority, r.created_at
         FROM transaction_rules r
         LEFT JOIN categories c ON c.id = r.assign_category_id
         WHERE r.user_id = ${userId}
         ORDER BY r.priority DESC, r.id
       `);
+      const rows = rawRows.map((r) => {
+        const { category_name_ct, ...rest } = r;
+        return {
+          ...rest,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
+        };
+      });
       return text({ success: true, data: rows });
     }
   );
@@ -2837,9 +2881,10 @@ export function registerPgTools(
       if (!value && field !== "amount") return err("match_value or match_payee is required");
       const limit = sample_size ?? 5000;
 
-      const raw = await q(db, sql`
-        SELECT t.id, t.date, t.payee, t.tags, t.amount, t.category_id, c.name AS category_name,
-               t.account_id, a.name AS account_name
+      const rawTxns = await q(db, sql`
+        SELECT t.id, t.date, t.payee, t.tags, t.amount, t.category_id,
+               c.name AS category_name, c.name_ct AS category_name_ct,
+               t.account_id, a.name AS account_name, a.name_ct AS account_name_ct
         FROM transactions t
         LEFT JOIN categories c ON c.id = t.category_id
         LEFT JOIN accounts a ON a.id = t.account_id
@@ -2847,6 +2892,14 @@ export function registerPgTools(
         ORDER BY t.date DESC, t.id DESC
         LIMIT ${limit}
       `);
+      const raw: Row[] = rawTxns.map((r) => {
+        const { category_name_ct, account_name_ct, ...rest } = r;
+        return {
+          ...rest,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
+          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account_name,
+        };
+      });
 
       // Decrypt payee/tags in memory (identical pattern to apply_rules_to_uncategorized).
       const matched: Record<string, unknown>[] = [];
@@ -3026,9 +3079,10 @@ export function registerPgTools(
     async ({ transaction_id }) => {
       const owner = await q(db, sql`SELECT id FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
-      const rows = await q(db, sql`
-        SELECT s.id, s.transaction_id, s.category_id, c.name AS category_name,
-               s.account_id, a.name AS account_name,
+      const rawSplits = await q(db, sql`
+        SELECT s.id, s.transaction_id, s.category_id,
+               c.name AS category_name, c.name_ct AS category_name_ct,
+               s.account_id, a.name AS account_name, a.name_ct AS account_name_ct,
                s.amount, s.note, s.description, s.tags
         FROM transaction_splits s
         LEFT JOIN categories c ON c.id = s.category_id
@@ -3036,6 +3090,14 @@ export function registerPgTools(
         WHERE s.transaction_id = ${transaction_id}
         ORDER BY s.id
       `);
+      const rows: Row[] = rawSplits.map((r) => {
+        const { category_name_ct, account_name_ct, ...rest } = r;
+        return {
+          ...rest,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
+          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account_name,
+        };
+      });
       const decrypted = rows.map((r) => {
         if (!dek) return r;
         return {
@@ -3297,8 +3359,9 @@ export function registerPgTools(
     if (ids.length === 0) return { affectedCount: 0, sampleBefore: [], sampleAfter: [], confirmationToken: "" };
 
     const sampleIds = ids.slice(0, 10);
-    const rows = await q(db, sql`
-      SELECT t.id, t.date, t.account_id, a.name AS account, t.category_id, c.name AS category,
+    const rawRows = await q(db, sql`
+      SELECT t.id, t.date, t.account_id, a.name AS account, a.name_ct AS account_ct,
+             t.category_id, c.name AS category, c.name_ct AS category_ct,
              t.currency, t.amount, t.payee, t.note, t.tags, t.is_business
       FROM transactions t
       LEFT JOIN accounts a ON t.account_id = a.id
@@ -3306,6 +3369,14 @@ export function registerPgTools(
       WHERE t.id IN ${sql.raw(`(${sampleIds.join(",")})`)} AND t.user_id = ${userId}
       ORDER BY t.id
     `);
+    const rows = rawRows.map((r) => {
+      const { account_ct, category_ct, ...rest } = r;
+      return {
+        ...rest,
+        account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
+        category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+      };
+    });
     const before = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
     const after = before.map((r) => applyChangesToRow(r, changes));
     // The token payload encodes the resolved ids — not the filter — so Claude
@@ -3421,14 +3492,24 @@ export function registerPgTools(
           return text({ success: true, data: { affectedCount: 0, sample: [], confirmationToken: "" } });
         }
         const sampleIds = ids.slice(0, 10);
-        const rows = await q(db, sql`
-          SELECT t.id, t.date, a.name AS account, c.name AS category, t.currency, t.amount, t.payee, t.note, t.tags
+        const rawRows = await q(db, sql`
+          SELECT t.id, t.date, a.name AS account, a.name_ct AS account_ct,
+                 c.name AS category, c.name_ct AS category_ct,
+                 t.currency, t.amount, t.payee, t.note, t.tags
           FROM transactions t
           LEFT JOIN accounts a ON t.account_id = a.id
           LEFT JOIN categories c ON t.category_id = c.id
           WHERE t.id IN ${sql.raw(`(${sampleIds.join(",")})`)} AND t.user_id = ${userId}
           ORDER BY t.id
         `);
+        const rows = rawRows.map((r) => {
+          const { account_ct, category_ct, ...rest } = r;
+          return {
+            ...rest,
+            account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
+            category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          };
+        });
         const sample = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
         const token = signConfirmationToken(userId, "bulk_delete", { ids });
         return text({ success: true, data: { affectedCount: ids.length, sample, confirmationToken: token } });
