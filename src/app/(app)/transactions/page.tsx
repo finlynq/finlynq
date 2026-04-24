@@ -138,6 +138,7 @@ function TransactionsPageInner() {
     categoryId: urlParams.get("categoryId") ?? "",
     search: urlParams.get("search") ?? "",
     portfolioHolding: urlParams.get("portfolioHolding") ?? "",
+    tag: urlParams.get("tag") ?? "",
   });
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -198,6 +199,7 @@ function TransactionsPageInner() {
     if (filters.categoryId) params.set("categoryId", filters.categoryId);
     if (filters.search) params.set("search", filters.search);
     if (filters.portfolioHolding) params.set("portfolioHolding", filters.portfolioHolding);
+    if (filters.tag) params.set("tag", filters.tag);
     params.set("limit", String(limit));
     params.set("offset", String(page * limit));
 
@@ -229,7 +231,7 @@ function TransactionsPageInner() {
 
   function clearFilters() {
     setSearchInput("");
-    setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "", portfolioHolding: "" });
+    setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "", portfolioHolding: "", tag: "" });
     setPage(0);
   }
 
@@ -799,7 +801,7 @@ function TransactionsPageInner() {
                 {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
               </SelectContent>
             </Select>
-            {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search || filters.portfolioHolding) && (
+            {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search || filters.portfolioHolding || filters.tag) && (
               <button onClick={clearFilters} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors ml-1">
                 <X className="h-3 w-3" /> Clear all
               </button>
@@ -814,6 +816,21 @@ function TransactionsPageInner() {
                   onClick={() => { setFilters({ ...filters, portfolioHolding: "" }); setPage(0); }}
                   className="p-0.5 rounded hover:bg-primary/10 transition-colors"
                   aria-label="Clear holding filter"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </Badge>
+            </div>
+          )}
+          {filters.tag && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Tag:</span>
+              <Badge variant="outline" className="h-7 gap-1.5 pr-1 border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-300">
+                <span className="font-medium font-mono">{filters.tag}</span>
+                <button
+                  onClick={() => { setFilters({ ...filters, tag: "" }); setPage(0); }}
+                  className="p-0.5 rounded hover:bg-sky-100 dark:hover:bg-sky-900 transition-colors"
+                  aria-label="Clear tag filter"
                 >
                   <X className="h-3 w-3" />
                 </button>
@@ -944,7 +961,31 @@ function TransactionsPageInner() {
                       </span>
                     </TableCell>
                     <TableCell className="text-sm">{t.payee || "-"}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground max-w-40 truncate">{t.note || "-"}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground max-w-60">
+                      <div className="flex flex-col gap-1">
+                        {t.note && <span className="truncate">{t.note}</span>}
+                        {t.tags && (
+                          <div className="flex flex-wrap gap-1">
+                            {t.tags.split(",").map((rawTag) => rawTag.trim()).filter(Boolean).map((tagValue) => (
+                              <button
+                                key={tagValue}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setFilters({ ...filters, tag: tagValue });
+                                  setPage(0);
+                                }}
+                                className="inline-flex items-center rounded-md border border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-300 px-1.5 py-0 text-[10px] font-mono hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-900 transition-colors"
+                                title={`Filter by tag: ${tagValue}`}
+                              >
+                                {tagValue}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {!t.note && !t.tags && <span>-</span>}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right font-mono text-xs text-muted-foreground">
                       {t.quantity != null && t.quantity !== 0
                         ? t.quantity.toLocaleString("en-CA", {

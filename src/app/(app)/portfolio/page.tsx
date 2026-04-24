@@ -6,6 +6,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
   LineChart, Line, XAxis, YAxis, Legend,
@@ -13,7 +16,7 @@ import {
 import {
   TrendingUp, Wallet, BarChart3, Coins, ArrowUpRight, ArrowDownRight,
   Globe2, Building2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Layers, PieChart as PieChartIcon,
-  Briefcase, DollarSign, Flame, Snowflake, Search, Download,
+  Briefcase, DollarSign, Flame, Snowflake, Search, Download, Pencil, Trash2, AlertTriangle,
 } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
 import { motion, AnimatePresence } from "framer-motion";
@@ -303,6 +306,10 @@ export default function PortfolioPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<FilterType>("all");
+  // Edit/delete dialog for individual portfolio holdings. Null = closed.
+  const [editingHolding, setEditingHolding] = useState<EnrichedHolding | null>(null);
+  const [holdingDeleteConfirm, setHoldingDeleteConfirm] = useState(false);
+  const [holdingSaving, setHoldingSaving] = useState(false);
   const [benchmarks, setBenchmarks] = useState<BenchmarkData[]>([]);
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
@@ -850,7 +857,14 @@ export default function PortfolioPage() {
                                 </p>
                               </div>
                             </div>
-                            <div className="mt-3 pt-3 border-t border-border/50 flex justify-end">
+                            <div className="mt-3 pt-3 border-t border-border/50 flex justify-end gap-3">
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setEditingHolding(h); }}
+                                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground font-medium"
+                              >
+                                <Pencil className="h-3 w-3" /> Edit
+                              </button>
                               <Link
                                 href={`/transactions?portfolioHolding=${encodeURIComponent(h.name)}${h.accountId ? `&accountId=${h.accountId}` : ""}`}
                                 onClick={(e) => e.stopPropagation()}
@@ -1495,7 +1509,159 @@ export default function PortfolioPage() {
           })}
         </CardContent>
       </Card>
+
+      {/* Edit holding dialog — lets the user fix symbol/name/currency/note
+          or flag a row as crypto. Does NOT rewrite referenced transactions
+          (their portfolio_holding string is encrypted + per-row; rename here
+          orphans existing txs in the aggregator until the user re-tags). */}
+      <HoldingEditDialog
+        holding={editingHolding}
+        onClose={() => { setEditingHolding(null); setHoldingDeleteConfirm(false); }}
+        onSaved={() => {
+          setEditingHolding(null);
+          setHoldingDeleteConfirm(false);
+          setLoading(true);
+          fetch("/api/portfolio/overview").then((r) => r.json()).then((d) => { setData(d); setLoading(false); });
+        }}
+        deleteConfirm={holdingDeleteConfirm}
+        setDeleteConfirm={setHoldingDeleteConfirm}
+        saving={holdingSaving}
+        setSaving={setHoldingSaving}
+      />
     </div>
+  );
+}
+
+function HoldingEditDialog({
+  holding,
+  onClose,
+  onSaved,
+  deleteConfirm,
+  setDeleteConfirm,
+  saving,
+  setSaving,
+}: {
+  holding: EnrichedHolding | null;
+  onClose: () => void;
+  onSaved: () => void;
+  deleteConfirm: boolean;
+  setDeleteConfirm: (v: boolean) => void;
+  saving: boolean;
+  setSaving: (v: boolean) => void;
+}) {
+  const [form, setForm] = useState({ name: "", symbol: "", currency: "CAD", isCrypto: false, note: "" });
+
+  useEffect(() => {
+    if (!holding) return;
+    setForm({
+      name: holding.name ?? "",
+      symbol: holding.symbol ?? "",
+      currency: holding.currency ?? "CAD",
+      isCrypto: (holding as unknown as { isCrypto?: number }).isCrypto === 1,
+      note: (holding as unknown as { note?: string }).note ?? "",
+    });
+  }, [holding]);
+
+  if (!holding) return null;
+
+  async function save() {
+    if (!holding) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/portfolio", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: holding.id,
+          name: form.name.trim() || undefined,
+          symbol: form.symbol.trim() || null,
+          currency: form.currency,
+          isCrypto: form.isCrypto ? 1 : 0,
+          note: form.note,
+        }),
+      });
+      if (res.ok) onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!holding) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/portfolio?id=${holding.id}`, { method: "DELETE" });
+      if (res.ok) onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!holding} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit Holding</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>Name</Label>
+            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            <p className="text-[11px] text-muted-foreground">
+              Aggregator joins transactions by this name. Renaming won't rewrite existing transactions — they'll stay under the old name until updated.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label>Symbol</Label>
+              <Input value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })} placeholder="e.g. VCN.TO" />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Currency</Label>
+              <Input value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value.toUpperCase() })} />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="is-crypto"
+              checked={form.isCrypto}
+              onChange={(e) => setForm({ ...form, isCrypto: e.target.checked })}
+              className="h-4 w-4 rounded border-input"
+            />
+            <Label htmlFor="is-crypto" className="cursor-pointer">Crypto asset</Label>
+          </div>
+          <div className="space-y-1.5">
+            <Label>Note</Label>
+            <Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+          </div>
+
+          {deleteConfirm ? (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 space-y-2">
+              <p className="text-xs text-destructive flex items-center gap-1.5">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Delete <strong>{holding.name}</strong>? Transactions that reference this holding will stay but stop aggregating here.
+              </p>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" className="flex-1" onClick={() => setDeleteConfirm(false)} disabled={saving}>Cancel</Button>
+                <Button variant="destructive" size="sm" className="flex-1" onClick={handleDelete} disabled={saving}>
+                  {saving ? "Deleting…" : "Delete holding"}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex gap-2 pt-1">
+              <Button variant="outline" className="text-destructive border-destructive/30" onClick={() => setDeleteConfirm(true)}>
+                <Trash2 className="h-4 w-4 mr-1.5" /> Delete
+              </Button>
+              <Button className="flex-1" onClick={save} disabled={saving}>
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
