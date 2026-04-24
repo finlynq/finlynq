@@ -13,10 +13,17 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { sendEmail, emailVerificationEmail, welcomeEmail } from "@/lib/email";
 import { createWrappedDEKForPassword } from "@/lib/crypto/envelope";
 import { putDEK } from "@/lib/crypto/dek-cache";
+import { validatePasswordStrength } from "@/lib/auth/password-policy";
 
 const registerSchema = z.object({
   email: z.string().email("Invalid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  password: z
+    .string()
+    .min(12, "Password must be at least 12 characters")
+    .max(256, "Password is too long")
+    .refine((pw) => validatePasswordStrength(pw) === null, {
+      message: "Password is too weak — see strength requirements",
+    }),
   displayName: z.string().max(100).optional(),
 });
 

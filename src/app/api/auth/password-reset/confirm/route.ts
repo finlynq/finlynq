@@ -18,10 +18,17 @@ import { createWrappedDEKForPassword } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { validatePasswordStrength } from "@/lib/auth/password-policy";
 
 const confirmSchema = z.object({
   token: z.string().min(1, "Token is required"),
-  newPassword: z.string().min(8, "Password must be at least 8 characters"),
+  newPassword: z
+    .string()
+    .min(12, "Password must be at least 12 characters")
+    .max(256, "Password is too long")
+    .refine((pw) => validatePasswordStrength(pw) === null, {
+      message: "Password is too weak — see strength requirements",
+    }),
   confirmation: z.literal("WIPE", {
     message: "Confirmation phrase must be 'WIPE' — all your data will be erased",
   }),

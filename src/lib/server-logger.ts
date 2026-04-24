@@ -22,6 +22,33 @@ interface ErrorLogEntry {
   stack?: string;
 }
 
+// Finding #12 — PII / secret scrubber. Applied to `message` and `stack`
+// before we write or console.log anything. Catches obvious leaks that would
+// otherwise end up in server logs + journald / Caddy logs.
+//
+// Patterns redact values following common secret keys (password, token,
+// api_key, dek, pepper, mfa_secret, webhook_secret, etc.) and obvious
+// token/key shapes (pf_..., pf_oauth_..., pf_refresh_..., long hex runs
+// that look like secrets). Values get replaced with `<redacted>`.
+const SECRET_KEY_PATTERN = /\b(password|passphrase|pass|token|api[-_]?key|dek|pepper|mfa[-_]?secret|webhook[-_]?secret|authorization|cookie|session|jti)\b\s*[:=]\s*["']?([^"'\s,}\]]+)/gi;
+const PF_TOKEN_PATTERN = /\b(pf_(?:oauth_|refresh_)?[A-Za-z0-9]{32,})\b/g;
+const LONG_HEX_PATTERN = /\b[a-f0-9]{48,}\b/gi; // 48+ hex chars (sha256+)
+const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+
+function scrubSensitive(value: string): string {
+  if (!value) return value;
+  let out = value;
+  // Redact secret-key assignments. Keep the key name visible for context.
+  out = out.replace(SECRET_KEY_PATTERN, (_m, key) => `${key}=<redacted>`);
+  // Redact any pf_ token shape regardless of context.
+  out = out.replace(PF_TOKEN_PATTERN, "<redacted-pf-token>");
+  // Redact long hex runs (likely secrets / hashes containing sensitive data).
+  out = out.replace(LONG_HEX_PATTERN, "<redacted-hex>");
+  // Redact emails — these are PII too.
+  out = out.replace(EMAIL_PATTERN, "<redacted-email>");
+  return out;
+}
+
 function formatEntry(entry: ErrorLogEntry): string {
   const parts = [
     `[${entry.timestamp}]`,
@@ -34,6 +61,8 @@ function formatEntry(entry: ErrorLogEntry): string {
   return parts.join(" ");
 }
 
+export { scrubSensitive };
+
 export async function logServerError(
   method: string,
   path: string,
@@ -41,6 +70,8 @@ export async function logServerError(
   error: unknown,
   userId?: string,
 ): Promise<void> {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const rawStack = error instanceof Error ? error.stack : undefined;
   const entry: ErrorLogEntry = {
     timestamp: new Date().toISOString(),
     level: status >= 500 ? "error" : "warn",
@@ -48,8 +79,10 @@ export async function logServerError(
     path,
     status,
     userId,
-    message: error instanceof Error ? error.message : String(error),
-    stack: error instanceof Error ? error.stack : undefined,
+    // Scrub before write — Finding #12. User IDs stay; tokens/secrets/emails
+    // in free-form error text are redacted. See `scrubSensitive` above.
+    message: scrubSensitive(rawMessage),
+    stack: rawStack ? scrubSensitive(rawStack) : undefined,
   };
 
   // Always log to console

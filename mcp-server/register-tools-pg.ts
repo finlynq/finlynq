@@ -12,6 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { decryptField, encryptField } from "../src/lib/crypto/envelope";
+import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
 import {
   generateAmortizationSchedule,
   calculateDebtPayoff,
@@ -3499,7 +3500,10 @@ export function registerPgTools(
     const expiresAt = new Date(String(upload.expires_at));
     if (expiresAt.getTime() < Date.now()) throw new Error("Upload expired");
 
-    const buf = await fs.readFile(String(upload.storage_path));
+    const rawBuf = await fs.readFile(String(upload.storage_path));
+    // Finding #7 — files are encrypted at rest; decrypt with the user's DEK.
+    // Legacy plaintext files (pre-rollout) pass through via the magic check.
+    const buf = maybeDecryptFileBytes(dek, rawBuf);
     const format = String(upload.format);
     let rows: RawTransaction[] = [];
     const errors: Array<{ row: number; message: string }> = [];

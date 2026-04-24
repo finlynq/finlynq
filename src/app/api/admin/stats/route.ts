@@ -54,21 +54,14 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const recentLogins = allUsers
-    .filter((u) => u.lastLoginAt)
-    .sort(
-      (a, b) =>
-        new Date(b.lastLoginAt as string).getTime() -
-        new Date(a.lastLoginAt as string).getTime()
-    )
-    .slice(0, 15)
-    .map((u) => ({
-      id: u.id,
-      email: u.email,
-      displayName: u.displayName,
-      loginCount: Number(u.loginCount ?? 0),
-      lastLoginAt: u.lastLoginAt,
-    }));
+  // Finding #18 — dropped the per-user recent-logins list. It exposed
+  // email + displayName + loginCount of other users on every admin dashboard
+  // hit, which isn't needed for operational awareness. Aggregate counts
+  // below cover the same need.
+  const loginsLast24h = allUsers.filter((u) => {
+    if (!u.lastLoginAt) return false;
+    return new Date(u.lastLoginAt as string).getTime() >= now - 24 * 60 * 60 * 1000;
+  }).length;
 
   return NextResponse.json({
     ...stats,
@@ -80,6 +73,6 @@ export async function GET(request: NextRequest) {
     totalLogins,
     activeUsersLast7Days: activeLast7,
     activeUsersLast30Days: activeLast30,
-    recentLogins,
+    loginsLast24Hours: loginsLast24h,
   });
 }

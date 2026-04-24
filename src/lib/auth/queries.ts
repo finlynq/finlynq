@@ -32,7 +32,14 @@ export interface CreateUserInput {
 export async function createUser(input: CreateUserInput) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  const emailVerifyToken = crypto.randomUUID();
+  // Finding #10 — generate a raw verify token and store only its SHA-256 hash.
+  // The raw token is returned to the caller (who sends it in the verification
+  // email) but the DB holds only the hash. Same pattern as password_reset_tokens.
+  const emailVerifyToken = crypto.randomBytes(32).toString("hex");
+  const emailVerifyTokenHash = crypto
+    .createHash("sha256")
+    .update(emailVerifyToken)
+    .digest("hex");
 
   await db.insert(getSchema().users)
     .values({
@@ -42,7 +49,7 @@ export async function createUser(input: CreateUserInput) {
       displayName: input.displayName ?? null,
       role: "user",
       emailVerified: 0,
-      emailVerifyToken,
+      emailVerifyToken: emailVerifyTokenHash,
       mfaEnabled: 0,
       mfaSecret: null,
       onboardingComplete: 0,
@@ -127,10 +134,14 @@ export async function updateUserPasswordAndWrap(
     .where(eq(getSchema().users.id, userId));
 }
 
-export async function enableUserMfa(userId: string, mfaSecret: string) {
+export async function enableUserMfa(userId: string, mfaSecret: string, dek: Buffer) {
+  const { encryptField } = await import("@/lib/crypto/envelope");
   const now = new Date().toISOString();
+  // Encrypt the TOTP seed under the user's DEK. A DB dump alone no longer
+  // reveals the MFA secret; verification requires the user's live session DEK.
+  const encrypted = encryptField(dek, mfaSecret);
   await db.update(getSchema().users)
-    .set({ mfaEnabled: 1, mfaSecret, updatedAt: now })
+    .set({ mfaEnabled: 1, mfaSecret: encrypted, updatedAt: now })
     .where(eq(getSchema().users.id, userId));
 }
 
@@ -179,10 +190,12 @@ export async function markResetTokenUsed(tokenHash: string) {
 
 export async function verifyUserEmail(token: string) {
   const now = new Date().toISOString();
+  // Finding #10 — stored column is a SHA-256 of the raw token.
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   const rows = await db
     .select()
     .from(getSchema().users)
-    .where(eq(getSchema().users.emailVerifyToken, token));
+    .where(eq(getSchema().users.emailVerifyToken, tokenHash));
 
   const user = rows[0] ?? null;
   if (!user) return null;
@@ -285,6 +298,40 @@ export async function wipeUserDataAndRewrap(
     }
   }
 
+  // Before deleting the `mcp_uploads` rows, unlink the referenced files on
+  // disk — Finding #5 fix. Shadow files would otherwise survive the wipe.
+  try {
+    const uploadRows = await db
+      .select({ storagePath: s.mcpUploads.storagePath })
+      .from(s.mcpUploads)
+      .where(eq(s.mcpUploads.userId, userId));
+    const { unlink } = await import("fs/promises");
+    for (const row of uploadRows) {
+      if (!row.storagePath) continue;
+      try {
+        await unlink(row.storagePath);
+      } catch {
+        // File may already be gone — swallow. The DB row delete below cleans it up.
+      }
+    }
+  } catch {
+    // If the mcp_uploads table is missing on this environment (older deploys),
+    // the DELETE below will ENOENT — don't let that block the wipe.
+  }
+
+  // Get this user's import-email address so we can purge matching
+  // `incoming_emails` rows (the table has no user_id column).
+  let userImportEmail: string | null = null;
+  try {
+    const { and } = await import("drizzle-orm");
+    const emailRow = await db
+      .select({ value: s.settings.value })
+      .from(s.settings)
+      .where(and(eq(s.settings.key, "import_email"), eq(s.settings.userId, userId)))
+      .get();
+    userImportEmail = emailRow?.value ?? null;
+  } catch { /* ignore */ }
+
   // Per-user tables with a user_id column
   await db.delete(s.notifications).where(eq(s.notifications.userId, userId));
   await db.delete(s.subscriptions).where(eq(s.subscriptions.userId, userId));
@@ -304,6 +351,27 @@ export async function wipeUserDataAndRewrap(
   await db.delete(s.portfolioHoldings).where(eq(s.portfolioHoldings.userId, userId));
   await db.delete(s.categories).where(eq(s.categories.userId, userId));
   await db.delete(s.accounts).where(eq(s.accounts.userId, userId));
+
+  // Tables missed by the original implementation — Finding #5. Covers the
+  // tokens that would survive a "wipe my account" click and still decrypt the
+  // user's session DEK after wipe, plus the staged-import plaintext buffer
+  // and mcp_uploads metadata rows whose on-disk files were unlinked above.
+  await db.delete(s.mcpUploads).where(eq(s.mcpUploads.userId, userId));
+  await db.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
+  await db.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
+  await db.delete(s.passwordResetTokens).where(eq(s.passwordResetTokens.userId, userId));
+  await db.delete(s.oauthAccessTokens).where(eq(s.oauthAccessTokens.userId, userId));
+  await db.delete(s.oauthAuthorizationCodes).where(eq(s.oauthAuthorizationCodes.userId, userId));
+  if (userImportEmail) {
+    // incoming_emails has no user_id; match on the user's own import-* address.
+    // Typo'd emails that were routed to trash by display_name match are left
+    // in place (the match is best-effort and we don't want to cascade-delete
+    // unrelated admin-inbox content).
+    await db.delete(s.incomingEmails).where(eq(s.incomingEmails.toAddress, userImportEmail));
+  }
+
+  // settings last — it holds the api_key/api_key_dek/email_webhook_* rows and
+  // we also just read the import_email from here above.
   await db.delete(s.settings).where(eq(s.settings.userId, userId));
 
   // Rewrap the DEK with the new password + bump encryption version so any

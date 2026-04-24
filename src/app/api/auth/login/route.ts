@@ -36,15 +36,15 @@ export async function POST(request: NextRequest) {
   // Rate limit: 5 attempts per 60 seconds per IP
   const ip =
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  const rateLimit = checkRateLimit(`login:${ip}`, 5, 60_000);
-  if (!rateLimit.allowed) {
+  const ipLimit = checkRateLimit(`login:${ip}`, 5, 60_000);
+  if (!ipLimit.allowed) {
     return NextResponse.json(
       { error: "Too many login attempts. Please try again later." },
       {
         status: 429,
         headers: {
           "Retry-After": String(
-            Math.ceil((rateLimit.resetAt - Date.now()) / 1000)
+            Math.ceil((ipLimit.resetAt - Date.now()) / 1000)
           ),
         },
       }
@@ -57,6 +57,30 @@ export async function POST(request: NextRequest) {
     if (parsed.error) return parsed.error;
 
     const { email, password } = parsed.data;
+
+    // Finding #11 — also rate-limit per email (10/hour, 50/day). Stops a
+    // distributed attacker from grinding one account via a botnet. The
+    // key is normalised lowercase so "X@Y" and "x@y" share the bucket.
+    // Error message is identical to the per-IP limit so attackers can't
+    // use the response to enumerate which emails exist.
+    const emailKey = email.toLowerCase().trim();
+    const emailHourly = checkRateLimit(`login:email:h:${emailKey}`, 10, 60 * 60 * 1000);
+    const emailDaily = checkRateLimit(`login:email:d:${emailKey}`, 50, 24 * 60 * 60 * 1000);
+    if (!emailHourly.allowed || !emailDaily.allowed) {
+      const resetAt = Math.max(
+        emailHourly.allowed ? 0 : emailHourly.resetAt,
+        emailDaily.allowed ? 0 : emailDaily.resetAt
+      );
+      return NextResponse.json(
+        { error: "Too many login attempts. Please try again later." },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(Math.ceil((resetAt - Date.now()) / 1000)),
+          },
+        }
+      );
+    }
 
     // Generic error to prevent user enumeration
     const invalidCredentials = NextResponse.json(

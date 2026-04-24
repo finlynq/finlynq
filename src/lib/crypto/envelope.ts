@@ -3,6 +3,7 @@ import {
   randomBytes,
   createCipheriv,
   createDecipheriv,
+  createHmac,
   timingSafeEqual,
 } from "crypto";
 
@@ -20,6 +21,55 @@ const TAG_LEN = 16;
 
 const FIELD_VERSION = "v1";
 
+/**
+ * Optional server-side pepper mixed into the scrypt password input. When set,
+ * a stolen DB alone (with `password_hash` + `kek_salt` + `dek_wrapped`) is
+ * insufficient to run an offline crack — the attacker also needs filesystem
+ * access to read this value. Required in production; dev falls back to
+ * no-pepper with a one-time warning so tests still work.
+ *
+ * The pepper is not a secret-to-users feature (users can't recover it even
+ * if they lose access); it only raises the bar against DB-only leaks.
+ *
+ * Rotating the pepper invalidates every existing DEK envelope — don't
+ * rotate without re-wrapping on login (Finding #3 deploy notes).
+ */
+function getPepper(): Buffer {
+  const raw = process.env.PF_PEPPER;
+  if (raw && raw.length >= 32) return Buffer.from(raw, "utf8");
+  if (process.env.NODE_ENV === "production" && !raw) {
+    throw new Error(
+      "PF_PEPPER env var is required in production (≥32 chars). " +
+        "Generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+    );
+  }
+  if (process.env.NODE_ENV === "production" && raw && raw.length < 32) {
+    throw new Error("PF_PEPPER must be at least 32 characters");
+  }
+  // Dev fallback — stable empty buffer so dev DEKs stay readable across
+  // restarts. We warn once so it's visible but not noisy.
+  if (!pepperWarned && process.env.NODE_ENV !== "production") {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[envelope] PF_PEPPER not set — using empty pepper for dev. " +
+        "DO NOT deploy to production without setting it."
+    );
+    pepperWarned = true;
+  }
+  return Buffer.alloc(0);
+}
+let pepperWarned = false;
+
+/** HMAC the password with the pepper before scrypt. The scrypt input becomes
+ * HMAC-SHA256(pepper, password), which is cryptographically equivalent to
+ * a password-plus-pepper scheme but avoids worrying about delimiter
+ * collisions, pepper-length edge cases, or concatenation ambiguity. An
+ * empty pepper (dev fallback) degrades gracefully to plain HMAC(∅, password). */
+function pepperedPasswordBytes(password: string): Buffer {
+  const pepper = getPepper();
+  return createHmac("sha256", pepper).update(password, "utf8").digest();
+}
+
 export interface WrappedDEK {
   salt: Buffer;
   wrapped: Buffer;
@@ -27,9 +77,14 @@ export interface WrappedDEK {
   tag: Buffer;
 }
 
-/** Derive a 32-byte KEK from a password + salt via scrypt. Slow by design. */
+/** Derive a 32-byte KEK from a password + salt via scrypt. Slow by design.
+ *
+ * Input is `HMAC(PF_PEPPER, password)` — the pepper lives in server env only,
+ * not in the DB. A DB-only leak can't compute this input, so offline scrypt
+ * cracking is blocked unless the attacker also has filesystem access.
+ */
 export function deriveKEK(password: string, salt: Buffer): Buffer {
-  return scryptSync(password, salt, KEY_LEN, {
+  return scryptSync(pepperedPasswordBytes(password), salt, KEY_LEN, {
     N: SCRYPT_N,
     r: SCRYPT_R,
     p: SCRYPT_P,

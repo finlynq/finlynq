@@ -60,7 +60,11 @@ interface UsageStats {
   totalLogins: number;
   activeUsersLast7Days: number;
   activeUsersLast30Days: number;
-  recentLogins: LoginActivityRow[];
+  loginsLast24Hours?: number;
+  // Finding #18 — recentLogins list was dropped from the API. Field kept optional
+  // for source-compat in case any callers still reference it; new renders should
+  // use loginsLast24Hours for the aggregate count.
+  recentLogins?: LoginActivityRow[];
 }
 
 // ─── Animation ──────────────────────────────────────────────────────────────

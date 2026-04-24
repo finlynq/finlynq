@@ -22,6 +22,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { generateImportHash } from "@/lib/import-hash";
 import { normalizeDate, parseAmount as parseAmountStr } from "@/lib/csv-parser";
 import type { RawTransaction } from "@/lib/import-pipeline";
+import { encryptStaged } from "@/lib/crypto/staging-envelope";
 
 export interface StageEmailImportInput {
   userId: string;
@@ -161,6 +162,10 @@ export async function stageEmailImport(
     const chunk = 500;
     for (let i = 0; i < prepared.length; i += chunk) {
       const slice = prepared.slice(i, i + chunk);
+      // Finding #9 — encrypt the free-text fields under the server staging
+      // key before INSERT. A DB-dump-only attacker reading `staged_transactions`
+      // sees `sv1:...` ciphertexts for payee/note/category/accountName instead
+      // of plaintext. Decrypted at approve time (see /import/staged route).
       await db.insert(schema.stagedTransactions).values(
         slice.map((p) => ({
           id: randomUUID(),
@@ -169,10 +174,10 @@ export async function stageEmailImport(
           date: p.date,
           amount: p.amount,
           currency: p.currency ?? "CAD",
-          payee: p.payee,
-          category: p.category ?? null,
-          accountName: p.accountName ?? null,
-          note: p.note ?? null,
+          payee: encryptStaged(p.payee),
+          category: encryptStaged(p.category ?? null),
+          accountName: encryptStaged(p.accountName ?? null),
+          note: encryptStaged(p.note ?? null),
           rowIndex: p.rowIndex,
           isDuplicate: p.hasResolvedAccount && existingHashes.has(p.importHash),
           importHash: p.importHash,
