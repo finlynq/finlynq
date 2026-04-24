@@ -118,17 +118,30 @@ async function materializeZipMapping(
   parsed: ParsedExport,
 ): Promise<ConnectorMapping> {
   const existing = await loadConnectorMapping(userId, WEALTHPOSITION_CONNECTOR_ID);
-  const accountMap: Record<string, number> = { ...existing.accountMap };
-  const categoryMap: Record<string, number | null> = { ...existing.categoryMap };
+  const accountMap: Record<string, number> = {};
+  const categoryMap: Record<string, number | null> = {};
 
   const externalAccountById = new Map(parsed.accounts.map((a) => [a.id, a]));
   const existingAccounts = await getAccounts(userId, { includeArchived: false });
   const accountByName = new Map(existingAccounts.map((a) => [a.name, a]));
+  // Only carry over prior-mapping entries whose Finlynq account still exists.
+  // Accounts can be deleted outside this flow (manual cleanup in /accounts,
+  // wipe-account, schema rebuild on dev) which leaves us with a stale
+  // accountMap pointing at ids that were reclaimed by the sequence. Trusting
+  // those silently turns into "No data to import" with every row erroring
+  // into transformErrors.
+  const existingIds = new Set(existingAccounts.map((a) => a.id));
+  for (const [extId, pfId] of Object.entries(existing.accountMap)) {
+    if (existingIds.has(pfId)) accountMap[extId] = pfId;
+  }
 
   for (const row of input.accounts) {
     if (row.finlynqId !== undefined) {
-      accountMap[row.externalId] = row.finlynqId;
-      continue;
+      if (existingIds.has(row.finlynqId)) {
+        accountMap[row.externalId] = row.finlynqId;
+        continue;
+      }
+      // Stale id from a previous session — fall through to autoCreate or skip.
     }
     if (row.autoCreate) {
       const ext = externalAccountById.get(row.externalId);
@@ -154,6 +167,10 @@ async function materializeZipMapping(
   const externalCategoryById = new Map(parsed.categories.map((c) => [c.id, c]));
   const existingCats = await getCategories(userId);
   const catByName = new Map(existingCats.map((c) => [c.name, c]));
+  const existingCatIds = new Set(existingCats.map((c) => c.id));
+  for (const [extId, pfId] of Object.entries(existing.categoryMap)) {
+    if (pfId === null || existingCatIds.has(pfId)) categoryMap[extId] = pfId;
+  }
 
   for (const row of input.categories) {
     if (row.uncategorized) {
@@ -161,8 +178,11 @@ async function materializeZipMapping(
       continue;
     }
     if (row.finlynqId !== undefined) {
-      categoryMap[row.externalId] = row.finlynqId;
-      continue;
+      if (existingCatIds.has(row.finlynqId)) {
+        categoryMap[row.externalId] = row.finlynqId;
+        continue;
+      }
+      // Stale id — fall through to autoCreate.
     }
     if (row.autoCreate) {
       const ext = externalCategoryById.get(row.externalId);
@@ -184,23 +204,45 @@ async function materializeZipMapping(
     }
   }
 
-  let transferCategoryId = input.transferCategoryId;
+  let transferCategoryId =
+    input.transferCategoryId !== null && existingCatIds.has(input.transferCategoryId)
+      ? input.transferCategoryId
+      : null;
   if (transferCategoryId === null && input.transferCategoryAutoCreate) {
-    const created = await createCategory(userId, {
-      type: "R",
-      group: input.transferCategoryAutoCreate.group,
-      name: input.transferCategoryAutoCreate.name,
-    });
-    if (created) transferCategoryId = created.id;
+    const existingByName = catByName.get(input.transferCategoryAutoCreate.name);
+    if (existingByName) {
+      transferCategoryId = existingByName.id;
+    } else {
+      const created = await createCategory(userId, {
+        type: "R",
+        group: input.transferCategoryAutoCreate.group,
+        name: input.transferCategoryAutoCreate.name,
+      });
+      if (created) {
+        transferCategoryId = created.id;
+        catByName.set(created.name, created);
+      }
+    }
   }
-  let openingBalanceCategoryId = input.openingBalanceCategoryId;
+  let openingBalanceCategoryId =
+    input.openingBalanceCategoryId !== null && existingCatIds.has(input.openingBalanceCategoryId)
+      ? input.openingBalanceCategoryId
+      : null;
   if (openingBalanceCategoryId === null && input.openingBalanceCategoryAutoCreate) {
-    const created = await createCategory(userId, {
-      type: "R",
-      group: input.openingBalanceCategoryAutoCreate.group,
-      name: input.openingBalanceCategoryAutoCreate.name,
-    });
-    if (created) openingBalanceCategoryId = created.id;
+    const existingByName = catByName.get(input.openingBalanceCategoryAutoCreate.name);
+    if (existingByName) {
+      openingBalanceCategoryId = existingByName.id;
+    } else {
+      const created = await createCategory(userId, {
+        type: "R",
+        group: input.openingBalanceCategoryAutoCreate.group,
+        name: input.openingBalanceCategoryAutoCreate.name,
+      });
+      if (created) {
+        openingBalanceCategoryId = created.id;
+        catByName.set(created.name, created);
+      }
+    }
   }
 
   const mapping: ConnectorMapping = {

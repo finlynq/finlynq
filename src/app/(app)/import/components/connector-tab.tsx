@@ -129,14 +129,34 @@ export function ConnectorTab() {
       }
       const data = (await res.json()) as ZipProbeResponse;
       setZipProbe(data);
+      // Filter stale overrides: only keep ones that still reference a
+      // live Finlynq account / category. Accounts can be deleted outside
+      // this flow (manual cleanup, wipe-account), and trusting the stale
+      // map would silently error every row with "Account not mapped".
+      const liveAccountIds = new Set(data.finlynq.accounts.map((a) => a.id));
+      const liveCategoryIds = new Set(data.finlynq.categories.map((c) => c.id));
+      const accountOverrides: Record<string, number> = {};
+      for (const [k, v] of Object.entries(data.mapping.accountMap)) {
+        if (liveAccountIds.has(v)) accountOverrides[k] = v;
+      }
+      const categoryOverrides: Record<string, number | null> = {};
+      for (const [k, v] of Object.entries(data.mapping.categoryMap)) {
+        if (v === null || liveCategoryIds.has(v)) categoryOverrides[k] = v;
+      }
       setZipMapping({
         accountAutoCreateByDefault: true,
         categoryAutoCreateByDefault: true,
-        accountOverrides: { ...data.mapping.accountMap },
-        categoryOverrides: { ...data.mapping.categoryMap },
-        transferCategoryId: data.mapping.transferCategoryId,
+        accountOverrides,
+        categoryOverrides,
+        transferCategoryId:
+          data.mapping.transferCategoryId !== null && liveCategoryIds.has(data.mapping.transferCategoryId)
+            ? data.mapping.transferCategoryId
+            : null,
         transferAutoCreateName: "Transfers",
-        openingBalanceCategoryId: data.mapping.openingBalanceCategoryId,
+        openingBalanceCategoryId:
+          data.mapping.openingBalanceCategoryId !== null && liveCategoryIds.has(data.mapping.openingBalanceCategoryId)
+            ? data.mapping.openingBalanceCategoryId
+            : null,
         openingBalanceAutoCreateName: "Opening Balance",
         startDate: "",
       });
@@ -515,7 +535,22 @@ export function ConnectorTab() {
           onOpenChange={setZipPreviewOpen}
           validRows={zipPreview.preview.valid}
           duplicateRows={zipPreview.preview.duplicates}
-          errorRows={zipPreview.preview.errors}
+          errorRows={[
+            ...zipPreview.preview.errors,
+            // Surface transformErrors alongside pipeline errors so users
+            // see the real failure ("Account X not mapped") rather than
+            // the catch-all "No data to import".
+            ...zipPreview.transformErrors.slice(0, 50).map((e) => ({
+              rowIndex: 0,
+              message: `${e.externalId}: ${e.reason}`,
+            })),
+            ...(zipPreview.transformErrors.length > 50
+              ? [{
+                  rowIndex: 0,
+                  message: `…and ${zipPreview.transformErrors.length - 50} more transform errors (showing first 50).`,
+                }]
+              : []),
+          ]}
           onConfirm={runZipExecute}
           isImporting={zipStage === "executing"}
         />
