@@ -4,6 +4,12 @@ Pluggable connectors for importing transactions from third-party personal-financ
 services into Finlynq. Designed so migrating from Mint, YNAB, Lunch Money, or any
 future provider is a copy-paste of an existing directory with a new client.
 
+> **Full architecture + contribution guide:** [pf-app/docs/import-connectors.md](../../docs/import-connectors.md).
+> This README covers the package itself; the architecture doc explains where
+> everything lives across the repo (orchestrators, routes, UI), the 7
+> load-bearing invariants, and the step-by-step checklist for adding a new
+> provider.
+
 Currently ships:
 
 - **WealthPosition** — [docs](https://www.wealthposition.com/api/v0.1). Supports
