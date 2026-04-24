@@ -21,6 +21,7 @@ export async function GET(request: NextRequest) {
   const dek = sessionId ? getDEK(sessionId) : null;
   const params = request.nextUrl.searchParams;
   const displayCurrency = params.get("currency") ?? "CAD";
+  const includeArchived = params.get("includeArchived") === "1";
 
   try {
     const now = new Date();
@@ -33,7 +34,7 @@ export async function GET(request: NextRequest) {
 
     const rateMap = await getRateMap(displayCurrency, userId);
 
-    const balances = await getAccountBalances(userId);
+    const balances = await getAccountBalances(userId, { includeArchived });
     // Add live market value of holdings to accounts that have any — so investment
     // accounts reflect total value (cash + positions), not just cash flow.
     const holdingsByAccount = await getHoldingsValueByAccount(userId, dek);

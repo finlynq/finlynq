@@ -27,6 +27,7 @@ export const accounts = pgTable("accounts", {
   name: text("name").notNull(),
   currency: text("currency").notNull().default("CAD"),
   note: text("note").default(""),
+  archived: boolean("archived").notNull().default(false),
 });
 
 export const categories = pgTable("categories", {
@@ -290,7 +291,7 @@ export const importTemplates = pgTable("import_templates", {
 // Transaction Splits — split a single transaction across multiple categories/accounts
 export const transactionSplits = pgTable("transaction_splits", {
   id: serial("id").primaryKey(),
-  transactionId: integer("transaction_id").notNull().references(() => transactions.id),
+  transactionId: integer("transaction_id").notNull().references(() => transactions.id, { onDelete: "cascade" }),
   categoryId: integer("category_id").references(() => categories.id),
   accountId: integer("account_id").references(() => accounts.id),
   amount: doublePrecision("amount").notNull(),

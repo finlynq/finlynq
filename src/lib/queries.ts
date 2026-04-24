@@ -12,8 +12,10 @@ function monthExpr(dateCol: typeof transactions.date | typeof transactions.date)
 }
 
 // Accounts
-export async function getAccounts(userId: string) {
-  return db.select().from(accounts).where(eq(accounts.userId, userId)).orderBy(accounts.type, accounts.group, accounts.name).all();
+export async function getAccounts(userId: string, opts?: { includeArchived?: boolean }) {
+  const conditions = [eq(accounts.userId, userId)];
+  if (!opts?.includeArchived) conditions.push(eq(accounts.archived, false));
+  return db.select().from(accounts).where(and(...conditions)).orderBy(accounts.type, accounts.group, accounts.name).all();
 }
 
 export async function getAccountById(id: number, userId: string) {
@@ -24,7 +26,7 @@ export async function createAccount(userId: string, data: { type: string; group:
   return db.insert(accounts).values({ ...data, userId }).returning().get();
 }
 
-export async function updateAccount(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; currency: string; note: string }>) {
+export async function updateAccount(id: number, userId: string, data: Partial<{ type: string; group: string; name: string; currency: string; note: string; archived: boolean }>) {
   return db.update(accounts).set(data).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).returning().get();
 }
 
@@ -301,7 +303,9 @@ export async function getBudgetRollover(userId: string, currentMonth: string) {
 }
 
 // Dashboard aggregations
-export async function getAccountBalances(userId: string) {
+export async function getAccountBalances(userId: string, opts?: { includeArchived?: boolean }) {
+  const conditions = [eq(accounts.userId, userId)];
+  if (!opts?.includeArchived) conditions.push(eq(accounts.archived, false));
   return db
     .select({
       accountId: accounts.id,
@@ -309,12 +313,13 @@ export async function getAccountBalances(userId: string) {
       accountType: accounts.type,
       accountGroup: accounts.group,
       currency: accounts.currency,
+      archived: accounts.archived,
       balance: sql<number>`COALESCE(SUM(${transactions.amount}), 0)`,
     })
     .from(accounts)
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
-    .where(eq(accounts.userId, userId))
-    .groupBy(accounts.id, accounts.name, accounts.type, accounts.group, accounts.currency)
+    .where(and(...conditions))
+    .groupBy(accounts.id, accounts.name, accounts.type, accounts.group, accounts.currency, accounts.archived)
     .orderBy(accounts.type, accounts.group, accounts.name)
     .all();
 }

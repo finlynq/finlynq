@@ -21,6 +21,9 @@ import {
   ArrowDownRight,
   Plus,
   Pencil,
+  Archive,
+  ArchiveRestore,
+  Trash2,
 } from "lucide-react";
 
 type AccountBalance = {
@@ -30,6 +33,7 @@ type AccountBalance = {
   accountGroup: string;
   currency: string;
   balance: number;
+  archived?: boolean;
 };
 
 const ACCOUNT_TYPES = [
@@ -115,15 +119,23 @@ export default function AccountsPage() {
   // Edit account dialog
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editAccountId, setEditAccountId] = useState<number | null>(null);
+  const [editAccountArchived, setEditAccountArchived] = useState(false);
   const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "CAD", note: "" });
   const [editFormErrors, setEditFormErrors] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
   const [editSaveError, setEditSaveError] = useState("");
+  const [archiving, setArchiving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
-  function loadAccounts() {
+  // Show-archived toggle (persists archived accounts in the list with a badge)
+  const [showArchived, setShowArchived] = useState(false);
+
+  function loadAccounts(includeArchived = showArchived) {
     setLoading(true);
     setError(false);
-    fetch("/api/dashboard")
+    const url = includeArchived ? "/api/dashboard?includeArchived=1" : "/api/dashboard";
+    fetch(url)
       .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
       .then((d) => {
         setAccounts(d.balances ?? []);
@@ -132,7 +144,7 @@ export default function AccountsPage() {
       .catch(() => { setError(true); setLoading(false); });
   }
 
-  useEffect(() => { loadAccounts(); }, []);
+  useEffect(() => { loadAccounts(showArchived); }, [showArchived]);
 
   function resetForm() {
     setForm(emptyForm);
@@ -201,10 +213,58 @@ export default function AccountsPage() {
 
   function openEditDialog(a: AccountBalance) {
     setEditAccountId(a.accountId);
+    setEditAccountArchived(Boolean(a.archived));
     setEditForm({ name: a.accountName, type: a.accountType, group: a.accountGroup || "", currency: a.currency, note: "" });
     setEditFormErrors({});
     setEditSaveError("");
+    setConfirmDelete(false);
     setEditDialogOpen(true);
+  }
+
+  async function handleToggleArchive() {
+    if (editAccountId == null) return;
+    setArchiving(true);
+    setEditSaveError("");
+    try {
+      const res = await fetch("/api/accounts", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: editAccountId, archived: !editAccountArchived }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setEditSaveError(data.error ?? "Failed to update account");
+        return;
+      }
+      setEditDialogOpen(false);
+      loadAccounts(showArchived);
+    } catch {
+      setEditSaveError("Failed to update account");
+    } finally {
+      setArchiving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (editAccountId == null) return;
+    setDeleting(true);
+    setEditSaveError("");
+    try {
+      const res = await fetch(`/api/accounts?id=${editAccountId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setEditSaveError(data.error ?? "Failed to delete account");
+        setConfirmDelete(false);
+        return;
+      }
+      setEditDialogOpen(false);
+      loadAccounts(showArchived);
+    } catch {
+      setEditSaveError("Failed to delete account");
+      setConfirmDelete(false);
+    } finally {
+      setDeleting(false);
+    }
   }
 
   async function handleEdit(e: React.FormEvent) {
@@ -239,6 +299,9 @@ export default function AccountsPage() {
 
   const assets = accounts.filter((a) => a.accountType === "A");
   const liabilities = accounts.filter((a) => a.accountType === "L");
+  // Totals always exclude archived, even when the toggle surfaces them in the list.
+  const activeAssets = assets.filter((a) => !a.archived);
+  const activeLiabilities = liabilities.filter((a) => !a.archived);
 
   const groups = (list: AccountBalance[]) => {
     const map = new Map<string, AccountBalance[]>();
@@ -270,7 +333,7 @@ export default function AccountsPage() {
           </CardHeader>
           <CardContent className="space-y-1">
             {accts.map((a) => (
-              <div key={a.accountId} className="flex items-center gap-1 rounded-lg hover:bg-muted/50 transition-colors group">
+              <div key={a.accountId} className={`flex items-center gap-1 rounded-lg hover:bg-muted/50 transition-colors group ${a.archived ? "opacity-60" : ""}`}>
                 <Link
                   href={`/accounts/${a.accountId}`}
                   className="flex items-center justify-between flex-1 py-2.5 px-3 gap-2 min-w-0"
@@ -283,7 +346,10 @@ export default function AccountsPage() {
                     </div>
                     <div className="min-w-0">
                       <p className="font-medium text-sm truncate">{a.accountName}</p>
-                      <Badge variant="outline" className="text-[10px] mt-0.5">{a.currency}</Badge>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <Badge variant="outline" className="text-[10px]">{a.currency}</Badge>
+                        {a.archived && <Badge variant="secondary" className="text-[10px]">Archived</Badge>}
+                      </div>
                     </div>
                   </div>
                   <span className={`font-mono text-sm font-semibold shrink-0 ${a.balance >= 0 ? color : "text-rose-600"}`}>
@@ -308,9 +374,9 @@ export default function AccountsPage() {
   );
 
   const totalAssets = (currency: string) =>
-    assets.filter((a) => a.currency === currency).reduce((s, a) => s + a.balance, 0);
+    activeAssets.filter((a) => a.currency === currency).reduce((s, a) => s + a.balance, 0);
   const totalLiabilities = (currency: string) =>
-    liabilities.filter((a) => a.currency === currency).reduce((s, a) => s + a.balance, 0);
+    activeLiabilities.filter((a) => a.currency === currency).reduce((s, a) => s + a.balance, 0);
 
   const createAccountDialog = (
     <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
@@ -456,7 +522,18 @@ export default function AccountsPage() {
             Overview of your assets, liabilities, and net worth
           </p>
         </div>
-        {createAccountDialog}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowArchived((v) => !v)}
+            title={showArchived ? "Hide archived accounts" : "Show archived accounts"}
+          >
+            <Archive className="h-4 w-4 mr-1.5" />
+            {showArchived ? "Hide archived" : "Show archived"}
+          </Button>
+          {createAccountDialog}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -545,9 +622,55 @@ export default function AccountsPage() {
             {editSaveError && <p className="text-sm text-destructive">{editSaveError}</p>}
             <div className="flex gap-2 pt-1">
               <Button type="button" variant="outline" className="flex-1" onClick={() => setEditDialogOpen(false)}>Cancel</Button>
-              <Button type="submit" className="flex-1" disabled={editSaving}>{editSaving ? "Saving…" : "Save Changes"}</Button>
+              <Button type="submit" className="flex-1" disabled={editSaving || archiving || deleting}>{editSaving ? "Saving…" : "Save Changes"}</Button>
             </div>
           </form>
+          <div className="mt-4 pt-4 border-t space-y-2">
+            <p className="text-xs uppercase tracking-wider text-muted-foreground">Account actions</p>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="flex-1"
+                onClick={handleToggleArchive}
+                disabled={archiving || editSaving || deleting}
+                title={editAccountArchived
+                  ? "Unarchive — show this account in balances and pickers again"
+                  : "Archive — hide from balances and pickers but keep history"}
+              >
+                {editAccountArchived ? (
+                  <><ArchiveRestore className="h-4 w-4 mr-1.5" />{archiving ? "Unarchiving…" : "Unarchive"}</>
+                ) : (
+                  <><Archive className="h-4 w-4 mr-1.5" />{archiving ? "Archiving…" : "Archive"}</>
+                )}
+              </Button>
+              {confirmDelete ? (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  className="flex-1"
+                  onClick={handleDelete}
+                  disabled={deleting || archiving || editSaving}
+                >
+                  <Trash2 className="h-4 w-4 mr-1.5" />{deleting ? "Deleting…" : "Confirm delete"}
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="flex-1 text-destructive hover:text-destructive"
+                  onClick={() => setConfirmDelete(true)}
+                  disabled={deleting || archiving || editSaving}
+                  title="Permanently delete — only allowed if no transactions reference this account"
+                >
+                  <Trash2 className="h-4 w-4 mr-1.5" />Delete
+                </Button>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Archive hides the account from balances and pickers but keeps its history. Delete is permanent and only works when no transactions reference the account.
+            </p>
+          </div>
         </DialogContent>
       </Dialog>
     </div>
