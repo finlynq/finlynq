@@ -17,6 +17,10 @@ export interface RawTransaction {
   quantity?: number;
   portfolioHolding?: string;
   fitId?: string;
+  /** Groups multi-leg rows (transfer, same-account conversion, liquidation)
+   *  so the UI can display them as linked siblings. Every row in one group
+   *  shares the same linkId; unset for standalone transactions. */
+  linkId?: string;
 }
 
 export interface PreviewResult {
@@ -194,6 +198,7 @@ export async function executeImport(
     tags: string;
     importHash: string;
     fitId: string | null;
+    linkId: string | null;
     rowIndex: number;
   }> = [];
 
@@ -238,6 +243,7 @@ export async function executeImport(
       tags: row.tags ?? "",
       importHash: hash,
       fitId: row.fitId ?? null,
+      linkId: row.linkId ?? null,
       rowIndex: i,
     });
   }

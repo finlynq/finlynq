@@ -97,6 +97,7 @@ export async function getTransactions(userId: string, filters?: {
       note: transactions.note,
       payee: transactions.payee,
       tags: transactions.tags,
+      linkId: transactions.linkId,
     })
     .from(transactions)
     .leftJoin(accounts, eq(transactions.accountId, accounts.id))

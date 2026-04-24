@@ -12,7 +12,7 @@ import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle, Link2 } from "lucide-react";
 import { SplitDialog } from "./_components/split-dialog";
 
 type Transaction = {
@@ -31,6 +31,19 @@ type Transaction = {
   payee: string;
   tags: string;
   isBusiness: number | null;
+  linkId: string | null;
+};
+
+type LinkedSibling = {
+  id: number;
+  date: string;
+  accountName: string | null;
+  categoryName: string | null;
+  amount: number;
+  currency: string;
+  quantity: number | null;
+  portfolioHolding: string | null;
+  payee: string | null;
 };
 
 type Account = { id: number; name: string; currency: string };
@@ -133,6 +146,9 @@ export default function TransactionsPage() {
   // Inline split rows in the add/edit form (Task 6)
   const [showSplits, setShowSplits] = useState(false);
   const [splitRows, setSplitRows] = useState<SplitRow[]>([emptySplitRow(), emptySplitRow()]);
+
+  // Linked sibling transactions (other legs of a multi-leg import)
+  const [linkedSiblings, setLinkedSiblings] = useState<LinkedSibling[]>([]);
 
   // Delete confirmation
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
@@ -282,6 +298,7 @@ export default function TransactionsPage() {
     }
     setShowSplits(false);
     setSplitRows([emptySplitRow(), emptySplitRow()]);
+    setLinkedSiblings([]);
     // Load existing splits so the edit dialog surfaces them instead of
     // hiding them behind the "Split this transaction" call-to-action.
     fetch(`/api/transactions/splits?transactionId=${t.id}`)
@@ -299,7 +316,30 @@ export default function TransactionsPage() {
         }
       })
       .catch(() => {});
+    // Linked siblings — the other legs of a multi-leg import (transfer,
+    // same-account currency conversion, position liquidation).
+    if (t.linkId) {
+      fetch(`/api/transactions/linked?linkId=${encodeURIComponent(t.linkId)}&excludeId=${t.id}`)
+        .then((r) => (r.ok ? r.json() : { data: [] }))
+        .then((d: { data?: LinkedSibling[] }) => {
+          if (Array.isArray(d.data)) setLinkedSiblings(d.data);
+        })
+        .catch(() => {});
+    }
     setDialogOpen(true);
+  }
+
+  function openLinkedSibling(sibling: LinkedSibling) {
+    const match = txns.find((t) => t.id === sibling.id);
+    if (match) {
+      startEdit(match);
+      return;
+    }
+    // Sibling isn't on the current page — jump to the first page filtered
+    // by date so the user can find it. The user can then click Edit.
+    setFilters((f) => ({ ...f, startDate: sibling.date, endDate: sibling.date }));
+    setPage(0);
+    setDialogOpen(false);
   }
 
   function confirmDelete(t: Transaction) {
@@ -517,6 +557,39 @@ export default function TransactionsPage() {
                 <Label>Tags (comma-separated)</Label>
                 <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
               </div>
+
+              {/* Linked transactions — other legs of a multi-leg import
+                  (transfer, same-account currency conversion, liquidation).
+                  Only shown when editing an existing tx with a linkId. */}
+              {editId && linkedSiblings.length > 0 && (
+                <div className="space-y-2 rounded-lg border border-sky-200 dark:border-sky-900 bg-sky-50/50 dark:bg-sky-950/30 p-3">
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-sky-700 dark:text-sky-300">
+                    <Link2 className="h-3.5 w-3.5" />
+                    Linked transaction{linkedSiblings.length > 1 ? "s" : ""}
+                  </div>
+                  <div className="space-y-1">
+                    {linkedSiblings.map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => openLinkedSibling(s)}
+                        className="flex w-full items-center justify-between gap-2 rounded-md bg-background/50 px-2 py-1.5 text-xs hover:bg-background transition-colors border border-transparent hover:border-sky-200 dark:hover:border-sky-800"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-muted-foreground font-mono shrink-0">{formatDate(s.date)}</span>
+                          <span className="truncate font-medium">{s.accountName ?? "—"}</span>
+                          {s.portfolioHolding && (
+                            <span className="text-muted-foreground truncate">· {s.portfolioHolding}</span>
+                          )}
+                        </div>
+                        <span className={`font-mono font-semibold shrink-0 ${s.amount >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {formatCurrency(s.amount, s.currency)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Inline split editor (Task 6) */}
               <button
@@ -827,14 +900,15 @@ export default function TransactionsPage() {
                     <TableCell className="text-sm">{formatDate(t.date)}</TableCell>
                     <TableCell className="text-sm">{t.accountName}</TableCell>
                     <TableCell className="text-sm">
-                      {t.categoryName ? (
-                        <span className="flex items-center gap-1">
+                      <span className="flex items-center gap-1">
+                        {t.categoryName && (
                           <Badge variant="outline" className={`text-xs ${getCategoryBadgeClass(t.categoryType)}`}>{t.categoryName}</Badge>
-                          <SplitBadge transactionId={t.id} />
-                        </span>
-                      ) : (
+                        )}
                         <SplitBadge transactionId={t.id} />
-                      )}
+                        {t.linkId && (
+                          <Link2 className="h-3 w-3 text-sky-500 shrink-0" aria-label="Linked transaction" />
+                        )}
+                      </span>
                     </TableCell>
                     <TableCell className="text-sm">{t.payee || "-"}</TableCell>
                     <TableCell className="text-sm text-muted-foreground max-w-40 truncate">{t.note || "-"}</TableCell>
