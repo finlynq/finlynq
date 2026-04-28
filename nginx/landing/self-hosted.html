@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PF - Self-Hosted Setup</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --background: #f8f8fa;
+      --foreground: #1a1a2e;
+      --card: #ffffff;
+      --card-border: #e5e5ec;
+      --primary: #581ceb;
+      --primary-fg: #fafafa;
+      --muted: #71717a;
+      --muted-light: rgba(113, 113, 122, 0.4);
+      --secondary-bg: #f0f0f6;
+      --code-bg: #1e1e2e;
+      --code-fg: #cdd6f4;
+      --radius: 0.75rem;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--background);
+      color: var(--foreground);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 36rem;
+      padding: 3rem 1.5rem;
+    }
+
+    .back {
+      display: inline-block;
+      color: var(--primary);
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+      margin-bottom: 2rem;
+    }
+    .back:hover { text-decoration: underline; }
+
+    h1 {
+      font-size: 1.875rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      margin-bottom: 2rem;
+      font-size: 1rem;
+    }
+
+    h2 {
+      font-size: 1.125rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      margin-top: 2rem;
+    }
+
+    p, li {
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 0.9375rem;
+    }
+
+    ul { padding-left: 1.25rem; margin-bottom: 1rem; }
+    li { margin-bottom: 0.25rem; }
+
+    .code-block {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
+      font-size: 0.875rem;
+      overflow-x: auto;
+      margin: 1rem 0;
+      line-height: 1.5;
+    }
+
+    code {
+      background: var(--secondary-bg);
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+      font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
+      font-size: 0.85em;
+    }
+
+    .footer {
+      margin-top: 3rem;
+      font-size: 0.75rem;
+      color: var(--muted-light);
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <a href="/" class="back">&larr; Back to home</a>
+
+    <h1>Self-Hosted Setup</h1>
+    <p class="subtitle">Run PF on your own machine. Your data never leaves your device.</p>
+
+    <h2>Quick Start with Docker</h2>
+    <div class="code-block">docker run -d \<br>&nbsp;&nbsp;--name pf \<br>&nbsp;&nbsp;-p 3000:3000 \<br>&nbsp;&nbsp;-v pf-data:/app/data \<br>&nbsp;&nbsp;ghcr.io/nextsoftwareconsulting/pf:latest</div>
+    <p>Then open <code>http://localhost:3000</code> in your browser.</p>
+
+    <h2>What You Get</h2>
+    <ul>
+      <li>Local SQLite database &mdash; encrypted with your passphrase</li>
+      <li>All data stored in a Docker volume (<code>pf-data</code>)</li>
+      <li>No external network calls &mdash; fully offline capable</li>
+      <li>Automatic updates via Docker image pulls</li>
+    </ul>
+
+    <h2>Environment Variables</h2>
+    <ul>
+      <li><code>PF_DATA_DIR</code> &mdash; data directory (default: <code>/app/data</code>)</li>
+      <li><code>PORT</code> &mdash; server port (default: <code>3000</code>)</li>
+    </ul>
+
+    <p class="footer">PF &mdash; Track your money here, analyze it anywhere</p>
+  </div>
+</body>
+</html>

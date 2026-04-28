@@ -1,0 +1,960 @@
+import { NextRequest, NextResponse } from "next/server";
+import { db, schema } from "@/db";
+import { eq, and, isNotNull, isNull, sql } from "drizzle-orm";
+import { fetchMultipleQuotes, aggregatePortfolioExposure, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, getAvailableEtfSymbols, autoSeedEtfIfMissing } from "@/lib/price-service";
+import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
+import { getLatestFxRate, convertCurrency, getDisplayCurrency, getRate } from "@/lib/fx-service";
+import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
+import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
+import { decryptField } from "@/lib/crypto/envelope";
+import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+
+const CRYPTO_SYMBOLS = new Set([
+  "BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AAVE", "ATOM", "AVAX",
+  "CRV", "FTM", "HBAR", "LINK", "LTC", "MATIC", "POL", "DOT", "XLM",
+  "UNI", "YFI", "SNX", "BNB", "SHIB", "ARB", "OP", "APT", "SUI",
+  "NEAR", "FIL", "ICP", "ALGO", "XTZ", "EOS", "SAND", "MANA", "AXS", "S",
+]);
+
+function isCryptoSymbol(symbol: string): boolean {
+  const base = symbol.toUpperCase().split("-")[0];
+  return CRYPTO_SYMBOLS.has(base);
+}
+
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId, sessionId } = auth.context;
+  const dek = sessionId ? getDEK(sessionId) : null;
+  const displayCurrency = await getDisplayCurrency(userId, request.nextUrl.searchParams.get("currency"));
+  const todayDate = new Date().toISOString().split("T")[0];
+
+  // Active currencies — used to recognize user-defined currency codes (XAU
+  // etc.) as cash positions when they appear as a holding's symbol.
+  const activeRow = await db
+    .select({ value: schema.settings.value })
+    .from(schema.settings)
+    .where(and(eq(schema.settings.key, "active_currencies"), eq(schema.settings.userId, userId)))
+    .limit(1);
+  let activeCurrencies: string[] = [];
+  if (activeRow[0]?.value) {
+    try {
+      const parsed = JSON.parse(activeRow[0].value);
+      if (Array.isArray(parsed)) activeCurrencies = parsed.map((s: string) => s.toUpperCase());
+    } catch { /* fall through */ }
+  }
+  const isCurrencyCodeSymbol = (sym: string | null | undefined): boolean => {
+    if (!sym) return false;
+    const s = sym.trim().toUpperCase();
+    return /^[A-Z]{3,4}$/.test(s) && (isSupportedCurrency(s) || activeCurrencies.includes(s));
+  };
+
+  // 1. Get all holdings with account info. Stream D: pull the *_ct columns
+  // alongside plaintext; decrypt in-memory before any name/symbol lookup.
+  const rawHoldings = await db
+    .select({
+      id: schema.portfolioHoldings.id,
+      accountId: schema.portfolioHoldings.accountId,
+      accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
+      name: schema.portfolioHoldings.name,
+      nameCt: schema.portfolioHoldings.nameCt,
+      symbol: schema.portfolioHoldings.symbol,
+      symbolCt: schema.portfolioHoldings.symbolCt,
+      currency: schema.portfolioHoldings.currency,
+      isCrypto: schema.portfolioHoldings.isCrypto,
+      note: schema.portfolioHoldings.note,
+    })
+    .from(schema.portfolioHoldings)
+    .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+    .where(eq(schema.portfolioHoldings.userId, userId));
+  const holdings = decryptNamedRows(rawHoldings, dek, {
+    nameCt: "name",
+    symbolCt: "symbol",
+    accountNameCt: "accountName",
+  });
+
+  // 2. Classify holdings.
+  //
+  // Cash includes truly-empty-symbol rows AND rows whose symbol IS itself
+  // a currency code (USD, CAD, EUR, XAU, …). Without the second branch,
+  // a holding with symbol="CAD" was being looked up as a stock on Yahoo —
+  // Yahoo happens to return data for some unrelated ticker named CAD,
+  // surfaced as a fake "$95.88" price + Stocks badge in the UI.
+  const cryptoHoldings = holdings.filter(h => {
+    if (h.isCrypto === 1) return true;
+    return h.symbol ? isCryptoSymbol(h.symbol) : false;
+  });
+  const nonCryptoWithSymbol = holdings.filter(h => {
+    if (h.isCrypto === 1) return false;
+    if (!h.symbol) return false;
+    if (isCryptoSymbol(h.symbol)) return false;
+    if (isCurrencyCodeSymbol(h.symbol)) return false; // cash, not a stock
+    return true;
+  });
+  const cashHoldings = holdings.filter(h => {
+    if (h.isCrypto === 1) return false;
+    if (!h.symbol) return true;
+    return isCurrencyCodeSymbol(h.symbol);
+  });
+
+  // 3. Fetch stock/ETF prices from Yahoo Finance
+  const stockSymbols = nonCryptoWithSymbol.map(h => h.symbol!);
+  const quotes = await fetchMultipleQuotes(stockSymbols);
+
+  // 4. Fetch crypto prices from CoinGecko
+  const coinGeckoIds: string[] = [];
+  const symbolToId = new Map<string, string>();
+  for (const h of cryptoHoldings) {
+    if (!h.symbol) continue;
+    const base = String(h.symbol).toUpperCase().split("-")[0];
+    const cgId = symbolToCoinGeckoId(base);
+    if (cgId && !symbolToId.has(base)) {
+      symbolToId.set(base, cgId);
+      coinGeckoIds.push(cgId);
+    }
+  }
+  const cryptoPrices = await getCryptoPrices(coinGeckoIds);
+  const cryptoPriceMap = new Map(cryptoPrices.map(p => [p.symbol.toUpperCase(), p]));
+
+  // 5. Get FX rates for currency conversion to the display currency.
+  // Triangulates through USD via getRate() so any user currency works.
+  // Also pre-populate metal-symbol rates (XAU/XAG/XPT/XPD) so the cash
+  // branch can compute price = symbol→holding-currency cross-rate when
+  // the symbol is a metal but the holding currency is something else
+  // (e.g. XAU in a USD account).
+  const currencies = new Set<string>(holdings.map(h => h.currency).filter(Boolean));
+  for (const h of holdings) {
+    if (h.symbol) {
+      const symU = h.symbol.toUpperCase();
+      if (isMetalCurrency(symU)) currencies.add(symU);
+    }
+  }
+  const fxRates = new Map<string, number>();
+  for (const cur of currencies) {
+    fxRates.set(cur, await getRate(cur, displayCurrency, todayDate, userId));
+  }
+
+  // Cross-currency-cost-basis cache: rate(entered_currency → holding_currency,
+  // today). Used to normalize cost basis to the holding's own currency before
+  // computing P&L. Without this, a CAD cash position held in a USD account
+  // (Fidelity-CAD style) sums cost basis in USD but market value in CAD —
+  // subtracting the two yields a meaningless number.
+  const crossRateCache = new Map<string, number>();
+  const getCrossRate = async (from: string, to: string): Promise<number> => {
+    if (from === to) return 1;
+    const key = `${from}->${to}`;
+    if (crossRateCache.has(key)) return crossRateCache.get(key)!;
+    const r = await getRate(from, to, todayDate, userId);
+    crossRateCache.set(key, r);
+    return r;
+  };
+
+  // 6. Aggregate transaction metrics per holding. Two paths:
+  //   (a) FK-bound rows (portfolio_holding_id IS NOT NULL) — SQL GROUP BY,
+  //       no decryption. This is the canonical path post-Phase-2.
+  //   (b) Orphan-fallback rows (portfolio_holding_id IS NULL but
+  //       portfolio_holding text IS NOT NULL) — pre-backfill rows, or txs
+  //       whose target holding was deleted. Decrypt-and-group-by-name so
+  //       they don't disappear from the aggregator until backfill catches up.
+  // Once Phase 4 backfill is complete and Phase 5 NULLs the text column,
+  // path (b) goes away.
+
+  type TxAgg = {
+    totalBuyQty: number;
+    totalBuyAmount: number;       // in HOLDING'S currency, after FX normalization
+    totalSellQty: number;
+    totalSellAmount: number;      // in HOLDING'S currency
+    dividendsReceived: number;    // in HOLDING'S currency
+    firstPurchaseDate: string | null;
+  };
+
+  // Per-bucket pre-aggregation. Each bucket = (holdingId, enteredCurrency).
+  // The classifier groups buys/sells/divs and sums entered_amount within
+  // its bucket; the FX hop into holding currency happens when we merge.
+  type PerCurrencyBucket = {
+    enteredCurrency: string;
+    totalBuyQty: number;
+    totalBuyAmountInEntered: number;
+    totalSellQty: number;
+    totalSellAmountInEntered: number;
+    dividendsInEntered: number;
+    firstPurchaseDate: string | null;
+  };
+
+  // Path (a): SQL aggregation on the FK + entered_currency. Sums
+  // ABS(entered_amount) so cost basis stays in the user's typed currency.
+  // COALESCE handles un-backfilled rows where entered_* are still NULL —
+  // the migration backfilled clean rows but defensive fallback is cheap.
+  // Both Finlynq-native (amt<0 + qty>0) and WP convention (amt>0 + qty>0)
+  // are handled by ABS().
+  const fkAggRows = await db
+    .select({
+      portfolioHoldingId: schema.transactions.portfolioHoldingId,
+      enteredCurrency: sql<string>`COALESCE(${schema.transactions.enteredCurrency}, ${schema.transactions.currency})`,
+      totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
+      totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
+      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
+      totalSellAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
+      dividendsInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) = 0 AND ${schema.transactions.amount} > 0 THEN COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}) ELSE 0 END), 0)::float8`,
+      firstPurchaseDate: sql<string | null>`MIN(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.date} END)`,
+    })
+    .from(schema.transactions)
+    .where(and(
+      eq(schema.transactions.userId, userId),
+      isNotNull(schema.transactions.portfolioHoldingId),
+    ))
+    .groupBy(
+      schema.transactions.portfolioHoldingId,
+      sql`COALESCE(${schema.transactions.enteredCurrency}, ${schema.transactions.currency})`,
+    );
+
+  const bucketsById = new Map<number, PerCurrencyBucket[]>();
+  for (const r of fkAggRows) {
+    if (r.portfolioHoldingId == null) continue;
+    const arr = bucketsById.get(r.portfolioHoldingId) ?? [];
+    arr.push({
+      enteredCurrency: String(r.enteredCurrency || "").toUpperCase() || displayCurrency,
+      totalBuyQty: Number(r.totalBuyQty),
+      totalBuyAmountInEntered: Number(r.totalBuyAmountInEntered),
+      totalSellQty: Number(r.totalSellQty),
+      totalSellAmountInEntered: Number(r.totalSellAmountInEntered),
+      dividendsInEntered: Number(r.dividendsInEntered),
+      firstPurchaseDate: r.firstPurchaseDate,
+    });
+    bucketsById.set(r.portfolioHoldingId, arr);
+  }
+
+  // Collapse per-holding buckets into a TxAgg expressed in the holding's
+  // own currency. Cross-currency buckets are converted via today's FX
+  // rate. Same-currency buckets pass through directly.
+  const aggInHoldingCurrency = async (
+    buckets: PerCurrencyBucket[],
+    holdingCurrency: string,
+  ): Promise<TxAgg> => {
+    const out: TxAgg = {
+      totalBuyQty: 0,
+      totalBuyAmount: 0,
+      totalSellQty: 0,
+      totalSellAmount: 0,
+      dividendsReceived: 0,
+      firstPurchaseDate: null,
+    };
+    for (const b of buckets) {
+      const fx = await getCrossRate(b.enteredCurrency, holdingCurrency);
+      out.totalBuyQty += b.totalBuyQty;
+      out.totalBuyAmount += b.totalBuyAmountInEntered * fx;
+      out.totalSellQty += b.totalSellQty;
+      out.totalSellAmount += b.totalSellAmountInEntered * fx;
+      out.dividendsReceived += b.dividendsInEntered * fx;
+      if (b.firstPurchaseDate) {
+        if (!out.firstPurchaseDate || b.firstPurchaseDate < out.firstPurchaseDate) {
+          out.firstPurchaseDate = b.firstPurchaseDate;
+        }
+      }
+    }
+    return out;
+  };
+
+  // Path (b): orphan-fallback decrypt loop, scoped to rows that haven't
+  // backfilled yet. Same logic as the pre-FK code, just narrower input.
+  // Cost basis stays in account currency here because there's no holding
+  // row yet (orphan symbols auto-detect a "holding" with currency=CAD as
+  // a placeholder anyway). Once an orphan promotes via backfill, the FK
+  // path handles it correctly.
+  const orphanRawRows = await db
+    .select({
+      portfolioHolding: schema.transactions.portfolioHolding,
+      amount: schema.transactions.amount,
+      enteredAmount: schema.transactions.enteredAmount,
+      enteredCurrency: schema.transactions.enteredCurrency,
+      currency: schema.transactions.currency,
+      quantity: schema.transactions.quantity,
+      date: schema.transactions.date,
+    })
+    .from(schema.transactions)
+    .where(and(
+      eq(schema.transactions.userId, userId),
+      isNull(schema.transactions.portfolioHoldingId),
+      isNotNull(schema.transactions.portfolioHolding),
+    ));
+
+  type OrphanBucket = { entered: string; agg: TxAgg };
+  const aggByName = new Map<string, OrphanBucket[]>();
+  let undecryptedSkipped = 0;
+  for (const r of orphanRawRows) {
+    if (!r.portfolioHolding) continue;
+    let key = "";
+    try {
+      key = (dek ? decryptField(dek, r.portfolioHolding) : r.portfolioHolding) ?? "";
+    } catch {
+      key = r.portfolioHolding;
+    }
+    if (!key) continue;
+    if (key.startsWith("v1:")) {
+      undecryptedSkipped++;
+      continue;
+    }
+    const qty = Number(r.quantity ?? 0);
+    const amt = Number(r.enteredAmount ?? r.amount);
+    const enteredCcy = String(r.enteredCurrency ?? r.currency ?? displayCurrency).toUpperCase();
+    const arr = aggByName.get(key) ?? [];
+    let bucket = arr.find(x => x.entered === enteredCcy);
+    if (!bucket) {
+      bucket = { entered: enteredCcy, agg: {
+        totalBuyQty: 0, totalBuyAmount: 0, totalSellQty: 0,
+        totalSellAmount: 0, dividendsReceived: 0, firstPurchaseDate: null,
+      } };
+      arr.push(bucket);
+    }
+    if (qty > 0) {
+      bucket.agg.totalBuyQty += qty;
+      bucket.agg.totalBuyAmount += Math.abs(amt);
+      if (!bucket.agg.firstPurchaseDate || r.date < bucket.agg.firstPurchaseDate) {
+        bucket.agg.firstPurchaseDate = r.date;
+      }
+    } else if (qty < 0) {
+      bucket.agg.totalSellQty += Math.abs(qty);
+      bucket.agg.totalSellAmount += Math.abs(amt);
+    } else if (amt > 0) {
+      bucket.agg.dividendsReceived += amt;
+    }
+    aggByName.set(key, arr);
+  }
+
+  // Collapse orphan buckets to a single TxAgg in a target currency.
+  const orphanInCurrency = async (buckets: OrphanBucket[], target: string): Promise<TxAgg> => {
+    const out: TxAgg = {
+      totalBuyQty: 0,
+      totalBuyAmount: 0,
+      totalSellQty: 0,
+      totalSellAmount: 0,
+      dividendsReceived: 0,
+      firstPurchaseDate: null,
+    };
+    for (const b of buckets) {
+      const fx = await getCrossRate(b.entered, target);
+      out.totalBuyQty += b.agg.totalBuyQty;
+      out.totalBuyAmount += b.agg.totalBuyAmount * fx;
+      out.totalSellQty += b.agg.totalSellQty;
+      out.totalSellAmount += b.agg.totalSellAmount * fx;
+      out.dividendsReceived += b.agg.dividendsReceived * fx;
+      if (b.agg.firstPurchaseDate) {
+        if (!out.firstPurchaseDate || b.agg.firstPurchaseDate < out.firstPurchaseDate) {
+          out.firstPurchaseDate = b.agg.firstPurchaseDate;
+        }
+      }
+    }
+    return out;
+  };
+
+  type TxMetrics = {
+    qty: number;
+    totalBuyQty: number;
+    totalBuyAmount: number;
+    totalSellQty: number;
+    totalSellAmount: number;
+    avgCostPerShare: number | null;
+    totalCostBasis: number | null;   // remaining cost basis
+    lifetimeCostBasis: number;       // total ever invested
+    realizedGain: number;
+    dividendsReceived: number;
+    firstPurchaseDate: string | null;
+    daysHeld: number | null;
+  };
+
+  const today = new Date();
+  // Compute derived metrics from a TxAgg → TxMetrics. Used by both the
+  // FK path and the orphan path; collapses the two-loop duplication.
+  const toMetrics = (a: TxAgg): TxMetrics => {
+    const buyQty = a.totalBuyQty;
+    const buyAmt = a.totalBuyAmount;
+    const sellQty = a.totalSellQty;
+    const sellAmt = a.totalSellAmount;
+    const divs = a.dividendsReceived;
+    const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
+    const remainingQty = buyQty - sellQty;
+    const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
+    const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
+    const fpDate = a.firstPurchaseDate ?? null;
+    const daysHeld = fpDate
+      ? Math.floor((today.getTime() - new Date(fpDate).getTime()) / 86400000)
+      : null;
+    return {
+      qty: remainingQty,
+      totalBuyQty: buyQty,
+      totalBuyAmount: buyAmt,
+      totalSellQty: sellQty,
+      totalSellAmount: sellAmt,
+      avgCostPerShare: avgCost,
+      totalCostBasis: costBasis,
+      lifetimeCostBasis: buyAmt,
+      realizedGain,
+      dividendsReceived: divs,
+      firstPurchaseDate: fpDate,
+      daysHeld,
+    };
+  };
+
+  // Pre-compute the quote currency for each holding — the currency that
+  // marketValue (price × quantity) will be in once we enrich. Cost basis
+  // MUST be normalized to this currency so unrealizedGain = marketValue −
+  // costBasis is dimensionally consistent. Crypto's quote is "CAD" (the
+  // crypto-service quirk); cash uses the symbol; stocks use Yahoo's q.currency.
+  const quoteCurrencyById = new Map<number, string>();
+  for (const h of holdings) {
+    const isCryptoH = h.isCrypto === 1 || (h.symbol ? isCryptoSymbol(h.symbol) : false);
+    const symbolIsCurrencyH = isCurrencyCodeSymbol(h.symbol);
+    let qc = h.currency;
+    if (isCryptoH) qc = "CAD";
+    else if (symbolIsCurrencyH && h.symbol) {
+      const symU = h.symbol.toUpperCase();
+      // Metals (XAU/XAG/XPT/XPD) are tradeable units priced in the holding's
+      // currency, not unit currencies — quote them in h.currency so 6.9 oz
+      // shows as USD 32,287, not XAU 6.90. Fiat-cash positions (USD cash in
+      // a CAD account, etc.) keep the symbol as quote so the user sees the
+      // actual currency they hold.
+      qc = isMetalCurrency(symU) ? h.currency : symU;
+    }
+    else if (h.symbol) {
+      const q = quotes.get(h.symbol);
+      if (q?.currency) qc = q.currency;
+    }
+    quoteCurrencyById.set(h.id, qc);
+  }
+
+  // Backfill fxRates with any quote currencies not already covered (crypto
+  // returns "CAD" even when h.currency is USD; Yahoo may return a quote
+  // currency that doesn't match the holding's row currency).
+  for (const qc of new Set(quoteCurrencyById.values())) {
+    if (qc && !fxRates.has(qc)) {
+      fxRates.set(qc, await getRate(qc, displayCurrency, todayDate, userId));
+    }
+  }
+
+  // Merge fk + name aggs per registered holding. During the backfill
+  // window a single holding can have rows in BOTH paths — sum them so the
+  // user sees one consolidated position rather than two half-counts. After
+  // backfill catches up, every row is FK-bound and the merge is a no-op.
+  // Cost basis is normalized to the holding's quote currency via FX before
+  // summing — fixes the cross-currency P&L bug for cash-as-currency
+  // positions.
+  const metricsByHoldingId = new Map<number, TxMetrics>();
+  const consumedNames = new Set<string>();
+  for (const h of holdings) {
+    const fkBuckets = bucketsById.get(h.id);
+    const orphanBuckets = h.name ? aggByName.get(h.name) : undefined;
+    if (!fkBuckets && !orphanBuckets) continue;
+    if (h.name && orphanBuckets) consumedNames.add(h.name);
+    const targetCcy = quoteCurrencyById.get(h.id) ?? h.currency;
+    const fkAgg = fkBuckets ? await aggInHoldingCurrency(fkBuckets, targetCcy) : null;
+    const orphanAgg = orphanBuckets ? await orphanInCurrency(orphanBuckets, targetCcy) : null;
+    const merged: TxAgg = {
+      totalBuyQty: (fkAgg?.totalBuyQty ?? 0) + (orphanAgg?.totalBuyQty ?? 0),
+      totalBuyAmount: (fkAgg?.totalBuyAmount ?? 0) + (orphanAgg?.totalBuyAmount ?? 0),
+      totalSellQty: (fkAgg?.totalSellQty ?? 0) + (orphanAgg?.totalSellQty ?? 0),
+      totalSellAmount: (fkAgg?.totalSellAmount ?? 0) + (orphanAgg?.totalSellAmount ?? 0),
+      dividendsReceived: (fkAgg?.dividendsReceived ?? 0) + (orphanAgg?.dividendsReceived ?? 0),
+      firstPurchaseDate: [fkAgg?.firstPurchaseDate, orphanAgg?.firstPurchaseDate]
+        .filter((d): d is string => Boolean(d))
+        .sort()[0] ?? null,
+    };
+    metricsByHoldingId.set(h.id, toMetrics(merged));
+  }
+
+  // 6b. Orphan-symbol path: any aggByName entry whose name didn't merge
+  //     into a registered holding AND has a non-zero net quantity. These
+  //     show as auto-detected positions in the UI until the user creates
+  //     a portfolio_holdings row for them (or backfill finds a match).
+  // Auto-detected orphans don't have a holding currency — keep them in
+  // display currency (which is consistent with how their UI row is built
+  // below: currency: "CAD" placeholder, marketValue computed via Yahoo).
+  const metricsByName = new Map<string, TxMetrics>();
+  const orphanSymbols: string[] = [];
+  for (const [name, buckets] of aggByName) {
+    if (consumedNames.has(name)) continue;
+    const totalQty = buckets.reduce((s, b) => s + b.agg.totalBuyQty - b.agg.totalSellQty, 0);
+    if (totalQty === 0) continue;
+    const agg = await orphanInCurrency(buckets, displayCurrency);
+    metricsByName.set(name, toMetrics(agg));
+    orphanSymbols.push(name);
+  }
+
+  // Fetch prices for orphan symbols separately
+  const orphanQuotes = orphanSymbols.length > 0 ? await fetchMultipleQuotes(orphanSymbols) : new Map();
+
+  // 6c. Auto-seed any ETF symbols not yet in the shared ETF database
+  for (const h of nonCryptoWithSymbol) {
+    if (h.symbol) autoSeedEtfIfMissing(h.symbol);
+  }
+
+  // 7. Build enriched holdings
+  type AssetType = "etf" | "stock" | "crypto" | "cash";
+
+  const enrichedHoldings = holdings.map(h => {
+    const isCrypto = h.isCrypto === 1 || (h.symbol ? isCryptoSymbol(h.symbol) : false);
+    const symbolIsCurrency = isCurrencyCodeSymbol(h.symbol);
+    const isEtf = h.symbol && !symbolIsCurrency ? (getEtfRegionBreakdown(h.symbol) !== null) : false;
+
+    let assetType: AssetType = "cash";
+    if (isCrypto) assetType = "crypto";
+    else if (!h.symbol || symbolIsCurrency) assetType = "cash";
+    else if (isEtf) assetType = "etf";
+    else assetType = "stock";
+
+    let price: number | null = null;
+    let change: number | null = null;
+    let changePct: number | null = null;
+    let quoteCurrency: string | null = null;
+    let marketCap: number | null = null;
+    let image: string | null = null;
+
+    if (isCrypto && h.symbol) {
+      const base = String(h.symbol).toUpperCase().split("-")[0];
+      const cp = cryptoPriceMap.get(base);
+      if (cp) {
+        price = cp.price;
+        change = cp.change24h;
+        changePct = cp.changePct24h;
+        marketCap = cp.marketCap;
+        image = cp.image ?? null;
+        quoteCurrency = "CAD";
+      }
+    } else if (h.symbol && !symbolIsCurrency) {
+      // Stocks/ETFs only — currency-code symbols skip Yahoo to avoid
+      // matching unrelated tickers (Yahoo has stocks under CAD, USD, etc.).
+      const q = quotes.get(h.symbol);
+      if (q) {
+        price = q.price;
+        change = q.change;
+        changePct = q.changePct ? Math.round(q.changePct * 100) / 100 : null;
+        quoteCurrency = q.currency;
+      }
+    }
+
+    // Get quantity and cost metrics from transactions. FK-keyed lookup —
+    // independent of holding name, so renames don't orphan transactions.
+    const txData = metricsByHoldingId.get(h.id) ?? null;
+    const quantity = txData?.qty ?? null;
+    const avgCostPerShare = txData?.avgCostPerShare ?? null;
+    const totalCostBasis = txData?.totalCostBasis ?? null;
+    const lifetimeCostBasis = txData?.lifetimeCostBasis ?? null;
+    const realizedGain = txData?.realizedGain ?? null;
+    const dividendsReceived = txData?.dividendsReceived ?? null;
+    const firstPurchaseDate = txData?.firstPurchaseDate ?? null;
+    const daysHeld = txData?.daysHeld ?? null;
+
+    // Calculate market value
+    let marketValue: number | null = null;
+    let marketValueDisplay: number | null = null;
+    if (price !== null && quantity !== null && quantity !== 0) {
+      marketValue = price * quantity;
+      const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
+      marketValueDisplay = convertCurrency(marketValue, fxRate);
+    } else if (price !== null && !quantity) {
+      // No quantity data — show price as informational only
+      marketValue = price;
+      const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
+      marketValueDisplay = convertCurrency(price, fxRate);
+    } else if (price === null && (symbolIsCurrency || !h.symbol) && h.isCrypto !== 1 && quantity !== null && quantity !== 0) {
+      // Cash position: either no symbol OR symbol is itself a currency code
+      // (USD, CAD, XAU, …). The price = 1 in the holding's own currency
+      // (one CAD is one CAD), AND the value converted to the display
+      // currency = quantity × FX-rate(holding-currency → display-currency).
+      // The "Price" column should show "$1.00 CAD" not "US$95.88" — so
+      // quoteCurrency is the holding's own currency, not the display target.
+      //
+      // Exception: a metal symbol (XAU/XAG/XPT/XPD) on a holding whose
+      // currency is something else means the symbol is a tradeable unit
+      // priced in h.currency. Compute price as the cross-rate so e.g. 6.9
+      // oz of gold in a USD account shows as $4679/oz × 6.9 = $32,287 USD,
+      // not "1.00 XAU × 6.90 = 6.90 XAU".
+      const symU = h.symbol ? h.symbol.toUpperCase() : null;
+      const ccU = h.currency.toUpperCase();
+      if (symU && isMetalCurrency(symU) && symU !== ccU) {
+        const symInDisplay = fxRates.get(symU) ?? 0;
+        const ccInDisplay = fxRates.get(h.currency) ?? 0;
+        if (symInDisplay > 0 && ccInDisplay > 0) {
+          const priceInHoldingCcy = symInDisplay / ccInDisplay;
+          price = priceInHoldingCcy;
+          quoteCurrency = h.currency;
+          marketValue = quantity * priceInHoldingCcy; // in h.currency
+          marketValueDisplay = quantity * symInDisplay; // in displayCurrency
+        }
+      } else {
+        const cashCurrency = symbolIsCurrency ? h.symbol!.toUpperCase() : h.currency;
+        const fxRate = fxRates.get(cashCurrency) ?? 1;
+        price = 1;
+        quoteCurrency = cashCurrency;
+        marketValue = quantity; // in cashCurrency
+        marketValueDisplay = quantity * fxRate; // in displayCurrency despite the legacy field name
+      }
+    }
+
+    // Compute unrealized gain using remaining cost basis
+    const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
+    let unrealizedGain: number | null = null;
+    let unrealizedGainPct: number | null = null;
+    if (marketValue !== null && totalCostBasis !== null && quantity !== null && quantity !== 0) {
+      unrealizedGain = marketValue - totalCostBasis;
+      unrealizedGainPct = totalCostBasis > 0 ? (unrealizedGain / totalCostBasis) * 100 : null;
+    }
+
+    // CAD-converted unrealized for summaries
+    const unrealizedGainDisplay = unrealizedGain !== null ? convertCurrency(unrealizedGain, fxRate) : null;
+
+    // Total return: unrealized + realized + dividends
+    const totalReturn = unrealizedGain !== null || realizedGain !== null || dividendsReceived !== null
+      ? ((unrealizedGain ?? 0) + (realizedGain ?? 0) + (dividendsReceived ?? 0))
+      : null;
+    const totalReturnDisplay = totalReturn !== null ? convertCurrency(totalReturn, fxRate) : null;
+    const totalReturnPct = totalReturn !== null && lifetimeCostBasis !== null && lifetimeCostBasis > 0
+      ? (totalReturn / lifetimeCostBasis) * 100
+      : null;
+
+    return {
+      id: h.id,
+      accountId: h.accountId,
+      accountName: h.accountName ?? "Unknown",
+      name: h.name,
+      symbol: h.symbol,
+      currency: h.currency,
+      assetType,
+      price,
+      change,
+      changePct,
+      quoteCurrency,
+      marketCap,
+      image,
+      quantity,
+      avgCostPerShare,
+      totalCostBasis,
+      lifetimeCostBasis,
+      marketValue,
+      marketValueDisplay,
+      unrealizedGain,
+      unrealizedGainPct,
+      unrealizedGainDisplay,
+      realizedGain,
+      dividendsReceived,
+      totalReturn,
+      totalReturnDisplay,
+      totalReturnPct,
+      firstPurchaseDate,
+      daysHeld,
+    };
+  });
+
+  // 7b. Append orphan holdings (transaction-based, not in portfolioHoldings table)
+  for (const sym of orphanSymbols) {
+    const txData = metricsByName.get(sym);
+    if (!txData || txData.qty === 0) continue;
+    const isCrypto = isCryptoSymbol(sym);
+    const oq = orphanQuotes.get(sym);
+    const price = oq?.price ?? null;
+    const change = oq?.change ?? null;
+    const changePct = oq?.changePct ? Math.round(oq.changePct * 100) / 100 : null;
+    const quoteCurrency = oq?.currency ?? "CAD";
+    const isEtf = getEtfRegionBreakdown(sym) !== null;
+    const assetType: AssetType = isCrypto ? "crypto" : isEtf ? "etf" : "stock";
+    const fxRate = fxRates.get(quoteCurrency) ?? 1;
+    let marketValue: number | null = null;
+    let marketValueDisplay: number | null = null;
+    if (price !== null && txData.qty !== 0) {
+      marketValue = price * txData.qty;
+      marketValueDisplay = convertCurrency(marketValue, fxRate);
+    }
+    const unrealizedGain = marketValue !== null && txData.totalCostBasis !== null && txData.qty !== 0
+      ? marketValue - txData.totalCostBasis
+      : null;
+    const unrealizedGainPct = unrealizedGain !== null && txData.totalCostBasis !== null && txData.totalCostBasis > 0
+      ? (unrealizedGain / txData.totalCostBasis) * 100
+      : null;
+    const unrealizedGainDisplay = unrealizedGain !== null ? convertCurrency(unrealizedGain, fxRate) : null;
+    const totalReturn = unrealizedGain !== null || txData.realizedGain !== 0 || txData.dividendsReceived !== 0
+      ? (unrealizedGain ?? 0) + txData.realizedGain + txData.dividendsReceived
+      : null;
+    const totalReturnDisplay = totalReturn !== null ? convertCurrency(totalReturn, fxRate) : null;
+    const totalReturnPct = totalReturn !== null && txData.lifetimeCostBasis > 0
+      ? (totalReturn / txData.lifetimeCostBasis) * 100
+      : null;
+    enrichedHoldings.push({
+      id: -1,
+      accountId: null,
+      accountName: "Auto-detected",
+      name: sym,
+      symbol: sym,
+      currency: "CAD",
+      assetType,
+      price,
+      change,
+      changePct,
+      quoteCurrency,
+      marketCap: null,
+      image: null,
+      quantity: txData.qty,
+      avgCostPerShare: txData.avgCostPerShare,
+      totalCostBasis: txData.totalCostBasis,
+      lifetimeCostBasis: txData.lifetimeCostBasis,
+      marketValue,
+      marketValueDisplay,
+      unrealizedGain,
+      unrealizedGainPct,
+      unrealizedGainDisplay,
+      realizedGain: txData.realizedGain,
+      dividendsReceived: txData.dividendsReceived,
+      totalReturn,
+      totalReturnDisplay,
+      totalReturnPct,
+      firstPurchaseDate: txData.firstPurchaseDate,
+      daysHeld: txData.daysHeld,
+    });
+  }
+
+  // 8. Compute summaries
+  const totalValueDisplay = enrichedHoldings.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
+  const hasQuantityData = enrichedHoldings.some(h => h.quantity !== null && h.quantity !== 0);
+
+  // Day change: weighted sum of changePct across holdings with known values
+  const holdingsWithChange = enrichedHoldings.filter(h => h.changePct !== null && h.marketValueDisplay !== null);
+  const totalDayChangeDisplay = holdingsWithChange.reduce((s, h) => {
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    const changeAmt = (h.change ?? 0) * (h.quantity ?? 1);
+    return s + convertCurrency(changeAmt, fxRate);
+  }, 0);
+  const totalDayChangePct = totalValueDisplay > 0
+    ? (totalDayChangeDisplay / (totalValueDisplay - totalDayChangeDisplay)) * 100
+    : 0;
+
+  // Investment P&L summaries
+  const holdingsWithMetrics = enrichedHoldings.filter(h => h.quantity !== null && h.quantity !== 0);
+  const totalCostBasisDisplay = holdingsWithMetrics.reduce((s, h) => {
+    if (h.totalCostBasis === null) return s;
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    return s + convertCurrency(h.totalCostBasis, fxRate);
+  }, 0);
+  const totalUnrealizedGainDisplay = holdingsWithMetrics.reduce((s, h) => s + (h.unrealizedGainDisplay ?? 0), 0);
+  const totalUnrealizedGainPct = totalCostBasisDisplay > 0
+    ? (totalUnrealizedGainDisplay / totalCostBasisDisplay) * 100
+    : 0;
+  const totalRealizedGainDisplay = holdingsWithMetrics.reduce((s, h) => {
+    if (h.realizedGain === null) return s;
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    return s + convertCurrency(h.realizedGain, fxRate);
+  }, 0);
+  const totalDividendsDisplay = holdingsWithMetrics.reduce((s, h) => {
+    if (h.dividendsReceived === null) return s;
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    return s + convertCurrency(h.dividendsReceived, fxRate);
+  }, 0);
+  const totalReturnDisplay = totalUnrealizedGainDisplay + totalRealizedGainDisplay + totalDividendsDisplay;
+  const lifetimeCostBasisDisplay = holdingsWithMetrics.reduce((s, h) => {
+    if (h.lifetimeCostBasis === null) return s;
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    return s + convertCurrency(h.lifetimeCostBasis, fxRate);
+  }, 0);
+  const totalReturnPct = lifetimeCostBasisDisplay > 0 ? (totalReturnDisplay / lifetimeCostBasisDisplay) * 100 : 0;
+
+  // Asset type breakdown
+  const byType: Record<AssetType, { count: number; value: number }> = {
+    etf: { count: 0, value: 0 },
+    stock: { count: 0, value: 0 },
+    crypto: { count: 0, value: 0 },
+    cash: { count: 0, value: 0 },
+  };
+  for (const h of enrichedHoldings) {
+    byType[h.assetType].count++;
+    byType[h.assetType].value += h.marketValueDisplay ?? 0;
+  }
+
+  // By-account breakdown
+  const byAccount = new Map<string, { count: number; value: number }>();
+  for (const h of enrichedHoldings) {
+    const acc = h.accountName;
+    const existing = byAccount.get(acc) ?? { count: 0, value: 0 };
+    existing.count++;
+    existing.value += h.marketValueDisplay ?? 0;
+    byAccount.set(acc, existing);
+  }
+
+  // 9. ETF X-Ray: region, sector, and stock-level look-through
+  const etfHoldings = enrichedHoldings.filter(h => h.assetType === "etf" && h.symbol);
+  const regionExposure: Record<string, number> = {};
+  const sectorExposure: Record<string, number> = {};
+  let etfTotalValue = 0;
+
+  // Track per-ETF info for the combined view
+  const etfDetails: {
+    symbol: string;
+    name: string;
+    account: string;
+    fullName: string;
+    totalHoldings: number;
+    valueCAD: number;
+    weightPct: number;
+  }[] = [];
+
+  // Aggregated stock-level look-through
+  const stockExposure = new Map<string, {
+    ticker: string;
+    name: string;
+    sector: string;
+    country: string;
+    effectiveWeight: number; // weighted % across all ETFs
+    contributingEtfs: { symbol: string; weight: number }[];
+  }>();
+
+  for (const h of etfHoldings) {
+    const value = h.marketValueDisplay ?? 0;
+    etfTotalValue += value;
+
+    const regions = getEtfRegionBreakdown(h.symbol!);
+    if (regions) {
+      for (const [region, pct] of Object.entries(regions)) {
+        regionExposure[region] = (regionExposure[region] ?? 0) + (value * pct) / 100;
+      }
+    }
+    const sectors = getEtfSectorBreakdown(h.symbol!);
+    if (sectors) {
+      for (const [sector, pct] of Object.entries(sectors)) {
+        sectorExposure[sector] = (sectorExposure[sector] ?? 0) + (value * pct) / 100;
+      }
+    }
+
+    // Stock-level constituents
+    const topHoldings = getEtfTopHoldings(h.symbol!);
+    if (topHoldings) {
+      etfDetails.push({
+        symbol: h.symbol!,
+        name: h.name,
+        account: h.accountName,
+        fullName: topHoldings.fullName,
+        totalHoldings: topHoldings.totalHoldings,
+        valueCAD: value,
+        weightPct: 0, // filled after we know total
+      });
+
+      for (const c of topHoldings.constituents) {
+        const existing = stockExposure.get(c.ticker);
+        // effectiveWeight = (ETF value / total ETF value) * stock weight in ETF
+        const etfContrib = value * c.weight / 100;
+        if (existing) {
+          existing.effectiveWeight += etfContrib;
+          existing.contributingEtfs.push({ symbol: h.symbol!, weight: c.weight });
+        } else {
+          stockExposure.set(c.ticker, {
+            ticker: c.ticker,
+            name: c.name,
+            sector: c.sector,
+            country: c.country,
+            effectiveWeight: etfContrib,
+            contributingEtfs: [{ symbol: h.symbol!, weight: c.weight }],
+          });
+        }
+      }
+    }
+  }
+
+  // Convert region/sector to percentages
+  if (etfTotalValue > 0) {
+    for (const k of Object.keys(regionExposure)) {
+      regionExposure[k] = Math.round((regionExposure[k] / etfTotalValue) * 1000) / 10;
+    }
+    for (const k of Object.keys(sectorExposure)) {
+      sectorExposure[k] = Math.round((sectorExposure[k] / etfTotalValue) * 1000) / 10;
+    }
+    // Fill ETF weight percentages
+    for (const d of etfDetails) {
+      d.weightPct = Math.round((d.valueCAD / etfTotalValue) * 1000) / 10;
+    }
+  }
+
+  // Convert stock exposure to percentages and sort by effective weight
+  const namedStocks = Array.from(stockExposure.values())
+    .map(s => ({
+      ...s,
+      effectiveValueDisplay: Math.round(s.effectiveWeight * 100) / 100,
+      effectiveWeight: etfTotalValue > 0
+        ? Math.round((s.effectiveWeight / etfTotalValue) * 1000) / 10
+        : 0,
+    }))
+    .sort((a, b) => b.effectiveWeight - a.effectiveWeight);
+
+  // Add "Other / Remaining" bucket so weights sum to 100%
+  const namedTotalPct = namedStocks.reduce((s, x) => s + x.effectiveWeight, 0);
+  const remainingPct = Math.round((100 - namedTotalPct) * 10) / 10;
+  const remainingValueDisplay = etfTotalValue > 0
+    ? Math.round((etfTotalValue * remainingPct / 100) * 100) / 100
+    : 0;
+
+  const aggregatedStocks = remainingPct > 0.1
+    ? [
+        ...namedStocks,
+        {
+          ticker: "OTHER",
+          name: "Other / Remaining Holdings",
+          sector: "Other",
+          country: "Various",
+          effectiveWeight: remainingPct,
+          effectiveValueDisplay: remainingValueDisplay,
+          contributingEtfs: [] as { symbol: string; weight: number }[],
+        },
+      ]
+    : namedStocks;
+
+  // 10. Gainers & losers (top movers by changePct)
+  const movers = enrichedHoldings
+    .filter(h => h.changePct !== null && h.symbol)
+    .sort((a, b) => Math.abs(b.changePct!) - Math.abs(a.changePct!));
+  const topGainers = movers.filter(h => (h.changePct ?? 0) > 0).slice(0, 5);
+  const topLosers = movers.filter(h => (h.changePct ?? 0) < 0).slice(0, 5);
+
+  // Add pctOfPortfolio to each holding
+  const holdingsWithPct = enrichedHoldings.map(h => ({
+    ...h,
+    pctOfPortfolio: totalValueDisplay > 0 && h.marketValueDisplay != null
+      ? Math.round((h.marketValueDisplay / totalValueDisplay) * 10000) / 100
+      : null,
+  }));
+
+  return NextResponse.json({
+    holdings: holdingsWithPct,
+    // Currency the totals + marketValueDisplay field are denominated in. The
+    // field name kept its legacy "CAD" suffix for compat; the value is in
+    // displayCurrency. Format with this on the client to avoid mislabeling.
+    displayCurrency,
+    // Non-zero when the session's DEK cache is cold (post-restart) and we
+    // couldn't decrypt tx.portfolio_holding. Client shows a re-login prompt
+    // rather than rendering the rows as v1: ciphertext orphans.
+    undecryptedTxCount: undecryptedSkipped,
+    summary: {
+      totalHoldings: holdings.length,
+      totalAccounts: byAccount.size,
+      totalValueDisplay: Math.round(totalValueDisplay * 100) / 100,
+      dayChangeDisplay: Math.round(totalDayChangeDisplay * 100) / 100,
+      dayChangePct: Math.round(totalDayChangePct * 100) / 100,
+      hasQuantityData,
+      // Investment P&L
+      totalCostBasisDisplay: Math.round(totalCostBasisDisplay * 100) / 100,
+      totalUnrealizedGainDisplay: Math.round(totalUnrealizedGainDisplay * 100) / 100,
+      totalUnrealizedGainPct: Math.round(totalUnrealizedGainPct * 100) / 100,
+      totalRealizedGainDisplay: Math.round(totalRealizedGainDisplay * 100) / 100,
+      totalDividendsDisplay: Math.round(totalDividendsDisplay * 100) / 100,
+      totalReturnDisplay: Math.round(totalReturnDisplay * 100) / 100,
+      totalReturnPct: Math.round(totalReturnPct * 100) / 100,
+    },
+    byType,
+    byAccount: Object.fromEntries(byAccount),
+    etfXray: {
+      etfCount: etfHoldings.length,
+      etfTotalValueDisplay: Math.round(etfTotalValue * 100) / 100,
+      etfs: etfDetails,
+      regions: regionExposure,
+      sectors: sectorExposure,
+      aggregatedStocks,
+    },
+    topGainers,
+    topLosers,
+  });
+}

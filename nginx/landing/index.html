@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PF - Personal Finance</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --background: #f8f8fa;
+      --foreground: #1a1a2e;
+      --card: #ffffff;
+      --card-border: #e5e5ec;
+      --card-hover-border: rgba(88, 28, 235, 0.35);
+      --card-hover-bg: #f0f0f6;
+      --primary: #581ceb;
+      --primary-fg: #fafafa;
+      --muted: #71717a;
+      --muted-light: rgba(113, 113, 122, 0.4);
+      --secondary-bg: #f0f0f6;
+      --radius: 0.75rem;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--background);
+      color: var(--foreground);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 28rem;
+      padding: 3rem 1.5rem;
+      text-align: center;
+    }
+
+    .logo {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 4rem;
+      height: 4rem;
+      border-radius: 1rem;
+      background: var(--primary);
+      color: var(--primary-fg);
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      margin-bottom: 1.5rem;
+    }
+
+    h1 {
+      font-size: 1.875rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      margin-bottom: 2.5rem;
+      font-size: 1rem;
+    }
+
+    .cards { display: grid; gap: 1rem; }
+
+    .card {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 1.25rem;
+      border: 1px solid var(--card-border);
+      border-radius: calc(var(--radius) * 1.4);
+      background: var(--card);
+      text-decoration: none;
+      color: inherit;
+      text-align: left;
+      transition: border-color 0.15s, background 0.15s;
+    }
+
+    .card:hover {
+      border-color: var(--card-hover-border);
+      background: var(--card-hover-bg);
+    }
+
+    .card:hover .card-title { color: var(--primary); }
+
+    .card-icon {
+      flex-shrink: 0;
+      width: 3rem;
+      height: 3rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: calc(var(--radius) * 1.4);
+      background: var(--secondary-bg);
+      font-size: 1.5rem;
+    }
+
+    .card-title {
+      font-size: 1rem;
+      font-weight: 600;
+      transition: color 0.15s;
+    }
+
+    .card-desc {
+      margin-top: 0.25rem;
+      font-size: 0.875rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .footer {
+      margin-top: 2rem;
+      font-size: 0.75rem;
+      color: var(--muted-light);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">PF</div>
+    <h1>Welcome to PF</h1>
+    <p class="subtitle">Choose how you want to manage your finances</p>
+
+    <div class="cards">
+      <a href="/app" class="card">
+        <div class="card-icon">&#9729;&#65039;</div>
+        <div>
+          <div class="card-title">Cloud</div>
+          <p class="card-desc">
+            Sign in with your account. Access your data from any device. Synced and backed up.
+          </p>
+        </div>
+      </a>
+
+      <a href="/self-hosted" class="card">
+        <div class="card-icon">&#128274;</div>
+        <div>
+          <div class="card-title">Self-Hosted</div>
+          <p class="card-desc">
+            Your data stays on your device. Secured with a passphrase. No account needed.
+          </p>
+        </div>
+      </a>
+    </div>
+
+    <p class="footer">PF &mdash; Track your money here, analyze it anywhere</p>
+  </div>
+</body>
+</html>

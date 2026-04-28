@@ -1,0 +1,35 @@
+# Finlynq — Self-hosted setup
+# Usage: docker compose up -d
+# Then visit http://localhost:3000
+
+services:
+  app:
+    image: ghcr.io/finlynq/finlynq:latest
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:changeme@db:5432/finlynq
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: change-this-to-a-random-secret-at-least-32-chars
+      NODE_ENV: production
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: finlynq
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
