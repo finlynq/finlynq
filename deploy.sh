@@ -4,9 +4,20 @@ set -euo pipefail
 # PF Deploy Script
 # Pulls latest code, builds, and restarts the service.
 # Usage: ./deploy.sh [--skip-pull] [--skip-build]
+#
+# Auto-detects target env from where the script lives:
+#   /home/projects/pf         -> service "pf"         (production)
+#   /home/projects/pf-staging -> service "pf-staging"
+#   /home/projects/pf-dev     -> service "pf-dev"
+# Override either with APP_DIR=... SERVICE_NAME=... env vars before invoking.
 
-APP_DIR="/home/projects/pf"
-SERVICE_NAME="pf"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
+case "$APP_DIR" in
+  *pf-staging) SERVICE_NAME="${SERVICE_NAME:-pf-staging}" ;;
+  *pf-dev)     SERVICE_NAME="${SERVICE_NAME:-pf-dev}" ;;
+  *)           SERVICE_NAME="${SERVICE_NAME:-pf}" ;;
+esac
 
 SKIP_PULL=false
 SKIP_BUILD=false
