@@ -242,21 +242,29 @@ async function autoCategory(
 }
 
 /**
- * Look up a portfolio_holdings row by name for the given user. Lookup-only —
- * NEVER auto-creates (auto-create is the import pipeline's job; MCP callers
- * use add_portfolio_holding for that).
+ * Look up a portfolio_holdings row by NAME OR TICKER SYMBOL for the given
+ * user. Lookup-only — NEVER auto-creates (auto-create is the import pipeline's
+ * job; MCP callers use add_portfolio_holding for that).
  *
- * Matching ladder (case-insensitive):
- *   - exact plaintext name (legacy + dual-write rows)
- *   - HMAC name_lookup match when DEK is available (Phase-3 NULL'd rows)
+ * Matching ladder (case-insensitive, exact):
+ *   - plaintext `name` (legacy + dual-write rows)
+ *   - plaintext `symbol` (e.g. "HURN" → "Huron Consulting Group Inc.")
+ *   - HMAC `name_lookup`   match when DEK is available (Phase-3 NULL'd rows)
+ *   - HMAC `symbol_lookup` match when DEK is available
+ *
+ * The same `nameLookup(dek, trimmed)` HMAC value is checked against both
+ * `name_lookup` and `symbol_lookup` columns since the HMAC is computed over
+ * trimmed-lowercase input regardless of whether that input is a name or
+ * ticker. Phase-1 helper, ergonomic for write tools where users naturally
+ * say "HURN" instead of the full company name.
  *
  * When `accountId` is set, the lookup is scoped to that account — disambiguates
- * the same name in two brokerages. The `(user_id, account_id, name_lookup)`
+ * the same name/ticker in two brokerages. The `(user_id, account_id, name_lookup)`
  * partial UNIQUE makes per-account matches unambiguous; without scoping, two
  * accounts with the same-named holding return an ambiguity error.
  *
  * Mirrors the dual-cohort handling in portfolio-holding-resolver.ts but
- * single-shot — no map pre-build.
+ * single-shot — no map pre-build, no auto-create.
  */
 async function resolvePortfolioHoldingByName(
   db: DbLike,
@@ -276,16 +284,19 @@ async function resolvePortfolioHoldingByName(
      WHERE user_id = ${userId}
        AND (
          LOWER(name) = LOWER(${trimmed})
-         ${lookup ? sql`OR name_lookup = ${lookup}` : sql``}
+         OR LOWER(symbol) = LOWER(${trimmed})
+         ${lookup ? sql`OR name_lookup = ${lookup} OR symbol_lookup = ${lookup}` : sql``}
        )
        ${accountFilter}
      LIMIT 5
   `);
 
   if (matches.length === 0) {
-    // Surface candidate names so the agent can recover. Decrypt when needed.
+    // Surface candidate "name (TICKER)" entries so the agent can retry with a
+    // valid identifier. Decrypt name_ct + symbol_ct under DEK; fall back to
+    // plaintext columns for legacy rows.
     const allRaw = await q(db, sql`
-      SELECT id, name, name_ct
+      SELECT id, name, name_ct, symbol, symbol_ct
         FROM portfolio_holdings
        WHERE user_id = ${userId}
        ${accountFilter}
@@ -293,15 +304,23 @@ async function resolvePortfolioHoldingByName(
     `);
     const candidates = allRaw
       .map((r) => {
+        let nm: string | null = null;
         if (r.name_ct && dek) {
-          try { return decryptField(dek, String(r.name_ct)); } catch { return null; }
+          try { nm = decryptField(dek, String(r.name_ct)); } catch { nm = null; }
         }
-        return r.name ? String(r.name) : null;
+        if (!nm && r.name) nm = String(r.name);
+        if (!nm) return null;
+        let sym: string | null = null;
+        if (r.symbol_ct && dek) {
+          try { sym = decryptField(dek, String(r.symbol_ct)); } catch { sym = null; }
+        }
+        if (!sym && r.symbol) sym = String(r.symbol);
+        return sym ? `${nm} (${sym})` : nm;
       })
       .filter((n): n is string => Boolean(n));
     return {
       ok: false,
-      error: `Holding "${trimmed}" not found${accountId ? " in this account" : ""}.${candidates.length ? ` Candidates: ${candidates.slice(0, 10).join(", ")}.` : ""} Use add_portfolio_holding to create a new one.`,
+      error: `Holding "${trimmed}" not found${accountId ? " in this account" : ""}.${candidates.length ? ` Candidates (name (ticker)): ${candidates.slice(0, 10).join(", ")}.` : ""} Use add_portfolio_holding to create a new one.`,
     };
   }
 
@@ -1705,7 +1724,7 @@ export function registerPgTools(
       note: z.string().optional().describe("Optional note"),
       tags: z.string().optional().describe("Comma-separated tags"),
       portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this transaction to a position. Get the id from get_portfolio_analysis (each holding now exposes `id`) or from add_portfolio_holding. Must belong to the user; rejected otherwise."),
-      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's name. Resolved against your existing holdings (no auto-create — error if no match). Scoped to the resolved account, so the same name in two brokerages disambiguates. When both portfolioHolding and portfolioHoldingId are passed and they disagree, returns an error. Use add_portfolio_holding to create new positions before binding."),
+      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\" — both resolve to the same holding). Exact case-insensitive match; no fuzzy/substring fallback. Errors with a candidate list on miss. Scoped to the resolved account, so the same name/ticker in two brokerages disambiguates. When both portfolioHolding and portfolioHoldingId are passed and they disagree, returns an error. Use add_portfolio_holding to create new positions before binding."),
       quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move. ALWAYS pair with portfolioHolding or portfolioHoldingId — a quantity on an unbound row is invisible to the portfolio aggregator."),
       enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided."),
       enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted."),
@@ -1806,7 +1825,7 @@ export function registerPgTools(
         note: z.string().optional(),
         tags: z.string().optional(),
         portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this row to a position. Get the id from get_portfolio_analysis (each holding exposes `id`) or add_portfolio_holding."),
-        portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's name. Resolved against your existing holdings scoped to this row's account (no auto-create — error if no match). When both are passed and disagree, the row fails."),
+        portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\"). Exact case-insensitive match against the user's existing holdings scoped to this row's account (no auto-create — error if no match). When both are passed and disagree, the row fails."),
         quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Omit for cash-only rows. RSU vest → amount=0, quantity=+net_shares; ESPP/buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares. ALWAYS pair with portfolioHolding or portfolioHoldingId — quantity on an unbound row is invisible to the portfolio aggregator."),
         enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency. Server converts to account currency."),
         enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
@@ -1905,7 +1924,7 @@ export function registerPgTools(
       note: z.string().optional(),
       tags: z.string().optional(),
       portfolioHoldingId: z.number().int().nullable().optional().describe("FK to portfolio_holdings.id (or null to clear). Get the id from get_portfolio_analysis (each holding exposes `id`) or analyze_holding (`holdingId`). Holding must belong to the user."),
-      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's name. Resolved against your existing holdings scoped to this transaction's account (no auto-create — error if no match). When both are passed and disagree, returns an error. Pass portfolioHoldingId=null to clear; passing an empty portfolioHolding is rejected."),
+      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\"). Exact case-insensitive match against the user's existing holdings scoped to this transaction's account (no auto-create — error if no match). When both are passed and disagree, returns an error. Pass portfolioHoldingId=null to clear; passing an empty portfolioHolding is rejected."),
       quantity: z.number().nullable().optional().describe("Share count for stock/ETF/crypto rows. Positive=shares acquired, negative=shares sold, null=clear. Useful for backfilling rows that were previously booked cash-only. Pair with portfolioHolding/portfolioHoldingId so the row joins the position aggregator."),
       enteredAmount: z.number().optional().describe("Update the user-typed amount; server re-derives account-side amount via FX at the row's date."),
       enteredCurrency: z.string().optional().describe("Update the entered currency. Requires enteredAmount."),
@@ -3101,6 +3120,7 @@ export function registerPgTools(
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
                t.portfolio_holding, t.portfolio_holding_id,
                ph.name_ct as ph_name_ct, ph.name as ph_name,
+               ph.symbol as ph_symbol, ph.symbol_ct as ph_symbol_ct,
                a.name as account_name, a.name_ct as account_name_ct, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
@@ -3125,16 +3145,28 @@ export function registerPgTools(
         } else if (t.ph_name) {
           ph = String(t.ph_name);
         }
+        // Decrypt the FK'd holding's symbol so the filter below honors the
+        // tool's "fuzzy match on name OR symbol" contract. Only available on
+        // FK-bound rows (orphan-fallback rows have no FK to JOIN against).
+        let ph_sym: string | null = null;
+        if (t.ph_symbol_ct && dek) {
+          try { ph_sym = decryptField(dek, String(t.ph_symbol_ct)) ?? null; } catch { ph_sym = null; }
+        }
+        if (!ph_sym && t.ph_symbol) ph_sym = String(t.ph_symbol);
         const pay = dek ? decryptField(dek, String(t.payee ?? "")) : t.payee;
         const nt = dek ? decryptField(dek, String(t.note ?? "")) : t.note;
         const tg = dek ? decryptField(dek, String(t.tags ?? "")) : t.tags;
         const accName = t.account_name_ct && dek ? decryptField(dek, String(t.account_name_ct)) : t.account_name;
-        return { ...t, portfolio_holding: ph, payee: pay, note: nt, tags: tg, account_name: accName };
+        return { ...t, portfolio_holding: ph, ph_symbol: ph_sym, payee: pay, note: nt, tags: tg, account_name: accName };
       });
       const txns = decryptedAll.filter((t) => {
         const ph = String(t.portfolio_holding ?? "").toLowerCase();
+        const sym = String(t.ph_symbol ?? "").toLowerCase();
         const pay = String(t.payee ?? "").toLowerCase();
-        return ph.includes(lo) || pay.includes(lo);
+        // Symbol gets exact-equality preference (tickers are short and prone
+        // to spurious substring hits — "GE" inside "ORANGE" etc.). Name and
+        // payee retain substring matching for the long-string ergonomics.
+        return ph.includes(lo) || pay.includes(lo) || sym === lo;
       });
 
       if (!txns.length) return err(`No transactions found for holding matching "${symbol}"`);

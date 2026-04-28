@@ -1356,12 +1356,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     },
     async ({ symbol, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
+      // Match on portfolio_holding text (substring) OR payee (substring) OR
+      // ph.symbol (exact case-insensitive — tickers are short and prone to
+      // spurious substring hits like "GE" inside "ORANGE"). The LEFT JOIN on
+      // portfolio_holdings keeps orphan-fallback rows queryable; symbol-match
+      // only fires on FK-bound rows that have a holding to JOIN.
       const txns = await sqlite.prepare(`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding, t.portfolio_holding_id, a.name as account_name, a.currency
-        FROM transactions t JOIN accounts a ON a.id = t.account_id
-        WHERE t.user_id = ? AND (LOWER(t.portfolio_holding) LIKE LOWER(?) OR LOWER(t.payee) LIKE LOWER(?))
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+        WHERE t.user_id = ?
+          AND (
+            LOWER(t.portfolio_holding) LIKE LOWER(?)
+            OR LOWER(t.payee) LIKE LOWER(?)
+            OR LOWER(ph.symbol) = LOWER(?)
+          )
         ORDER BY t.date ASC
-      `).all(userId, `%${symbol}%`, `%${symbol}%`) as SqliteRow[];
+      `).all(userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
 
       if (!txns.length) return sqliteErr(`No transactions found for "${symbol}"`);
 
