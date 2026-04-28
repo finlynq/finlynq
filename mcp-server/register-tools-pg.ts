@@ -241,6 +241,80 @@ async function autoCategory(
   return bestId;
 }
 
+/**
+ * Look up a portfolio_holdings row by name for the given user. Lookup-only —
+ * NEVER auto-creates (auto-create is the import pipeline's job; MCP callers
+ * use add_portfolio_holding for that).
+ *
+ * Matching ladder (case-insensitive):
+ *   - exact plaintext name (legacy + dual-write rows)
+ *   - HMAC name_lookup match when DEK is available (Phase-3 NULL'd rows)
+ *
+ * When `accountId` is set, the lookup is scoped to that account — disambiguates
+ * the same name in two brokerages. The `(user_id, account_id, name_lookup)`
+ * partial UNIQUE makes per-account matches unambiguous; without scoping, two
+ * accounts with the same-named holding return an ambiguity error.
+ *
+ * Mirrors the dual-cohort handling in portfolio-holding-resolver.ts but
+ * single-shot — no map pre-build.
+ */
+async function resolvePortfolioHoldingByName(
+  db: DbLike,
+  userId: string,
+  name: string,
+  dek: Buffer | null,
+  accountId?: number,
+): Promise<{ ok: true; id: number } | { ok: false; error: string }> {
+  const trimmed = name.trim();
+  if (!trimmed) return { ok: false, error: "portfolioHolding cannot be empty" };
+
+  const lookup = dek ? nameLookup(dek, trimmed) : null;
+  const accountFilter = accountId ? sql`AND account_id = ${accountId}` : sql``;
+  const matches = await q(db, sql`
+    SELECT id
+      FROM portfolio_holdings
+     WHERE user_id = ${userId}
+       AND (
+         LOWER(name) = LOWER(${trimmed})
+         ${lookup ? sql`OR name_lookup = ${lookup}` : sql``}
+       )
+       ${accountFilter}
+     LIMIT 5
+  `);
+
+  if (matches.length === 0) {
+    // Surface candidate names so the agent can recover. Decrypt when needed.
+    const allRaw = await q(db, sql`
+      SELECT id, name, name_ct
+        FROM portfolio_holdings
+       WHERE user_id = ${userId}
+       ${accountFilter}
+       LIMIT 20
+    `);
+    const candidates = allRaw
+      .map((r) => {
+        if (r.name_ct && dek) {
+          try { return decryptField(dek, String(r.name_ct)); } catch { return null; }
+        }
+        return r.name ? String(r.name) : null;
+      })
+      .filter((n): n is string => Boolean(n));
+    return {
+      ok: false,
+      error: `Holding "${trimmed}" not found${accountId ? " in this account" : ""}.${candidates.length ? ` Candidates: ${candidates.slice(0, 10).join(", ")}.` : ""} Use add_portfolio_holding to create a new one.`,
+    };
+  }
+
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      error: `Holding "${trimmed}" is ambiguous (${matches.length} matches: ids ${matches.map((m) => m.id).join(", ")}). ${accountId ? "Even within the resolved account" : "Pass `account` to scope the lookup"}, or pass portfolioHoldingId directly.`,
+    };
+  }
+
+  return { ok: true, id: Number(matches[0].id) };
+}
+
 const PORTFOLIO_DISCLAIMER =
   "⚠️ DISCLAIMER: This analysis is for informational purposes only and does not constitute financial advice. Past performance is not indicative of future results. Consult a qualified financial advisor before making investment decisions.";
 
@@ -1630,12 +1704,13 @@ export function registerPgTools(
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional().describe("Optional note"),
       tags: z.string().optional().describe("Comma-separated tags"),
-      portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this transaction to a position. Get the id from get_portfolio_analysis. Must belong to the user; rejected otherwise."),
-      quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move."),
+      portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this transaction to a position. Get the id from get_portfolio_analysis (each holding now exposes `id`) or from add_portfolio_holding. Must belong to the user; rejected otherwise."),
+      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's name. Resolved against your existing holdings (no auto-create — error if no match). Scoped to the resolved account, so the same name in two brokerages disambiguates. When both portfolioHolding and portfolioHoldingId are passed and they disagree, returns an error. Use add_portfolio_holding to create new positions before binding."),
+      quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move. ALWAYS pair with portfolioHolding or portfolioHoldingId — a quantity on an unbound row is invisible to the portfolio aggregator."),
       enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided."),
       enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted."),
     },
-    async ({ amount, payee, date, account, category, note, tags, portfolioHoldingId, quantity, enteredAmount, enteredCurrency }) => {
+    async ({ amount, payee, date, account, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
@@ -1659,15 +1734,28 @@ export function registerPgTools(
         catId = await autoCategory(db, userId, payee, dek);
       }
 
-      // Ownership pre-check on the holding FK — same pattern as accountId
-      // / categoryId checks. Rejecting unowned ids prevents cross-tenant
-      // attach. Auto-create is intentionally NOT done here (only the import
-      // pipeline auto-creates); MCP callers must pass an existing id.
-      if (portfolioHoldingId != null) {
+      // Resolve the holding FK from either input form. Auto-create is
+      // intentionally NOT done here (only the import pipeline auto-creates);
+      // MCP callers must pass an id, a name that resolves, or use
+      // add_portfolio_holding first.
+      //   - portfolioHolding (name) → fuzzy lookup scoped to this account
+      //   - portfolioHoldingId       → ownership pre-check
+      //   - both                     → must agree (else error — silent
+      //                                "I named X but you bound Y" is worse)
+      let resolvedHoldingId: number | null = null;
+      if (portfolioHolding != null) {
+        const r = await resolvePortfolioHoldingByName(db, userId, portfolioHolding, dek, Number(acct.id));
+        if (!r.ok) return err(r.error);
+        if (portfolioHoldingId != null && portfolioHoldingId !== r.id) {
+          return err(`portfolioHolding "${portfolioHolding}" resolves to id #${r.id}, but portfolioHoldingId=${portfolioHoldingId} disagrees. Pass only one, or make them match.`);
+        }
+        resolvedHoldingId = r.id;
+      } else if (portfolioHoldingId != null) {
         const ownsHolding = await q(db, sql`
           SELECT 1 AS ok FROM portfolio_holdings WHERE id = ${portfolioHoldingId} AND user_id = ${userId}
         `);
         if (!ownsHolding.length) return err(`Portfolio holding #${portfolioHoldingId} not found or not owned by you.`);
+        resolvedHoldingId = portfolioHoldingId;
       }
 
       // Resolve the entered/account trilogy. Refuses on fallback rate.
@@ -1690,7 +1778,7 @@ export function registerPgTools(
 
       const result = await q(db, sql`
         INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
-        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${portfolioHoldingId ?? null}, ${quantity ?? null})
+        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null})
         RETURNING id
       `);
 
@@ -1717,8 +1805,9 @@ export function registerPgTools(
         category: z.string().optional(),
         note: z.string().optional(),
         tags: z.string().optional(),
-        portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this row to a position."),
-        quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Omit for cash-only rows. RSU vest → amount=0, quantity=+net_shares; ESPP/buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares."),
+        portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this row to a position. Get the id from get_portfolio_analysis (each holding exposes `id`) or add_portfolio_holding."),
+        portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's name. Resolved against your existing holdings scoped to this row's account (no auto-create — error if no match). When both are passed and disagree, the row fails."),
+        quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Omit for cash-only rows. RSU vest → amount=0, quantity=+net_shares; ESPP/buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares. ALWAYS pair with portfolioHolding or portfolioHoldingId — quantity on an unbound row is invisible to the portfolio aggregator."),
         enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency. Server converts to account currency."),
         enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
       })).describe("Array of transactions to record"),
@@ -1739,9 +1828,26 @@ export function registerPgTools(
           const acct = fuzzyFind(t.account, allAccounts);
           if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
 
-          if (t.portfolioHoldingId != null && !ownedHoldingIds.has(t.portfolioHoldingId)) {
-            results.push({ index: i, success: false, message: `Portfolio holding #${t.portfolioHoldingId} not found or not owned by you.` });
-            continue;
+          // Resolve holding FK from either input form. Lookup-only — see
+          // record_transaction comment above for the policy.
+          let rowHoldingId: number | null = null;
+          if (t.portfolioHolding != null) {
+            const r = await resolvePortfolioHoldingByName(db, userId, t.portfolioHolding, dek, Number(acct.id));
+            if (!r.ok) {
+              results.push({ index: i, success: false, message: r.error });
+              continue;
+            }
+            if (t.portfolioHoldingId != null && t.portfolioHoldingId !== r.id) {
+              results.push({ index: i, success: false, message: `portfolioHolding "${t.portfolioHolding}" resolves to id #${r.id}, but portfolioHoldingId=${t.portfolioHoldingId} disagrees.` });
+              continue;
+            }
+            rowHoldingId = r.id;
+          } else if (t.portfolioHoldingId != null) {
+            if (!ownedHoldingIds.has(t.portfolioHoldingId)) {
+              results.push({ index: i, success: false, message: `Portfolio holding #${t.portfolioHoldingId} not found or not owned by you.` });
+              continue;
+            }
+            rowHoldingId = t.portfolioHoldingId;
           }
 
           let catId: number | null = null;
@@ -1772,7 +1878,7 @@ export function registerPgTools(
 
           await db.execute(sql`
             INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
-            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${t.portfolioHoldingId ?? null}, ${t.quantity ?? null})
+            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null})
           `);
           results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}` });
         } catch (e) {
@@ -1798,12 +1904,13 @@ export function registerPgTools(
       category: z.string().optional().describe("Category name (fuzzy matched)"),
       note: z.string().optional(),
       tags: z.string().optional(),
-      portfolioHoldingId: z.number().int().nullable().optional().describe("FK to portfolio_holdings.id (or null to clear). Holding must belong to the user."),
-      quantity: z.number().nullable().optional().describe("Share count for stock/ETF/crypto rows. Positive=shares acquired, negative=shares sold, null=clear. Useful for backfilling rows that were previously booked cash-only."),
+      portfolioHoldingId: z.number().int().nullable().optional().describe("FK to portfolio_holdings.id (or null to clear). Get the id from get_portfolio_analysis (each holding exposes `id`) or analyze_holding (`holdingId`). Holding must belong to the user."),
+      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's name. Resolved against your existing holdings scoped to this transaction's account (no auto-create — error if no match). When both are passed and disagree, returns an error. Pass portfolioHoldingId=null to clear; passing an empty portfolioHolding is rejected."),
+      quantity: z.number().nullable().optional().describe("Share count for stock/ETF/crypto rows. Positive=shares acquired, negative=shares sold, null=clear. Useful for backfilling rows that were previously booked cash-only. Pair with portfolioHolding/portfolioHoldingId so the row joins the position aggregator."),
       enteredAmount: z.number().optional().describe("Update the user-typed amount; server re-derives account-side amount via FX at the row's date."),
       enteredCurrency: z.string().optional().describe("Update the entered currency. Requires enteredAmount."),
     },
-    async ({ id, date, amount, payee, category, note, tags, portfolioHoldingId, quantity, enteredAmount, enteredCurrency }) => {
+    async ({ id, date, amount, payee, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
       const existing = await q(db, sql`
         SELECT t.id, t.account_id, t.date, a.currency AS account_currency
           FROM transactions t
@@ -1812,6 +1919,7 @@ export function registerPgTools(
       `);
       if (!existing.length) return err(`Transaction #${id} not found`);
       const accountCurrency = String(existing[0].account_currency ?? "CAD");
+      const txAccountId = existing[0].account_id != null ? Number(existing[0].account_id) : undefined;
 
       let catId: number | undefined;
       if (category !== undefined) {
@@ -1821,10 +1929,23 @@ export function registerPgTools(
         catId = Number(cat.id);
       }
 
-      // Ownership pre-check on the FK target. Only fires when caller wants
-      // to set a non-null FK; passing null is an explicit clear and skips
-      // the check.
-      if (portfolioHoldingId != null) {
+      // Resolve the holding FK from either input form, then run the existing
+      // UPDATE path (which already accepts a numeric id or null-to-clear).
+      // `portfolioHoldingId === null` is an explicit clear; `portfolioHolding`
+      // requires a non-empty string. When both are passed and disagree, error
+      // — silent "I named X but you bound Y" is worse than rejecting.
+      let resolvedHoldingId: number | null | undefined = portfolioHoldingId;
+      if (portfolioHolding !== undefined) {
+        if (portfolioHolding === "" || portfolioHolding == null) {
+          return err("portfolioHolding cannot be empty — pass portfolioHoldingId=null to clear the binding instead.");
+        }
+        const r = await resolvePortfolioHoldingByName(db, userId, portfolioHolding, dek, txAccountId);
+        if (!r.ok) return err(r.error);
+        if (portfolioHoldingId != null && portfolioHoldingId !== r.id) {
+          return err(`portfolioHolding "${portfolioHolding}" resolves to id #${r.id}, but portfolioHoldingId=${portfolioHoldingId} disagrees. Pass only one, or make them match.`);
+        }
+        resolvedHoldingId = r.id;
+      } else if (portfolioHoldingId != null) {
         const ownsHolding = await q(db, sql`
           SELECT 1 AS ok FROM portfolio_holdings WHERE id = ${portfolioHoldingId} AND user_id = ${userId}
         `);
@@ -1885,8 +2006,8 @@ export function registerPgTools(
         await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
-      if (portfolioHoldingId !== undefined) {
-        await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${portfolioHoldingId} WHERE id = ${id} AND user_id = ${userId}`);
+      if (resolvedHoldingId !== undefined) {
+        await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolvedHoldingId} WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (quantity !== undefined) {
@@ -2764,6 +2885,7 @@ export function registerPgTools(
 
       const today = new Date();
       type HoldingResult = {
+        id: number | null;
         name: unknown; symbol: unknown; account: unknown; currency: string;
         quantity: number; avgCostPerShare: number | null; totalCostBasis: number | null;
         lifetimeCostBasis: number; realizedGain: number; dividendsReceived: number;
@@ -2803,6 +2925,12 @@ export function registerPgTools(
         const fx = await fxFor(ccy);
 
         results.push({
+          // FK to portfolio_holdings.id — pass this as portfolioHoldingId on
+          // record_transaction / update_transaction to bind a transaction to
+          // this position. Null only for orphan-fallback rows whose tx had
+          // a plaintext portfolio_holding column populated but no FK yet
+          // (Phase 4 backfill catches these on next login).
+          id: m.holding_id ?? null,
           name: m.name,
           symbol: info?.symbol ?? null,
           account: info?.account_name ?? null,
@@ -3012,6 +3140,17 @@ export function registerPgTools(
       if (!txns.length) return err(`No transactions found for holding matching "${symbol}"`);
 
       const holdingName = txns[0].portfolio_holding || txns[0].payee;
+      // Pull the holding's FK id so the agent can pass it back on
+      // record_transaction / update_transaction. Prefer rows whose decrypted
+      // portfolio_holding equals the chosen holdingName — payee-only matches
+      // (e.g. "Huron Sale" payee on a non-investment cash row) could otherwise
+      // surface a different holding's id and mislead the caller.
+      const holdingId: number | null =
+        (txns.find(
+          (t) =>
+            t.portfolio_holding_id != null &&
+            String(t.portfolio_holding ?? "") === holdingName
+        )?.portfolio_holding_id as number | undefined) ?? null;
       const today = new Date();
 
       let buyQty = 0, buyAmt = 0, sellQty = 0, sellAmt = 0, divAmt = 0;
@@ -3052,6 +3191,12 @@ export function registerPgTools(
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
         note: "unrealizedGain requires live prices — not available in MCP.",
+        // FK to portfolio_holdings.id — pass as portfolioHoldingId on
+        // record_transaction / update_transaction to bind a transaction to
+        // this position. Null when the matched rows are pure payee-fuzzy
+        // hits with no FK yet (e.g. cash payee like "Huron Sale" with the
+        // holding never bound).
+        holdingId,
         holding: holdingName,
         currency: holdingCurrency,
         reportingCurrency: reporting,

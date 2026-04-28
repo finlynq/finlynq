@@ -1268,6 +1268,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         totalHoldings: holdings.length,
         totalBookValue: Math.round(totalBV * 100) / 100,
         holdings: holdings.map(h => ({
+          // FK to portfolio_holdings.id — pass as portfolioHoldingId on
+          // record_transaction / update_transaction in the HTTP MCP. (Stdio
+          // MCP write tools don't currently bind to portfolio_holdings.)
+          id: Number(h.id),
           name: h.name, symbol: h.symbol, account: h.account_name, currency: h.currency,
           quantity: Number(h.total_quantity),
           bookValue: Math.round(Math.abs(Number(h.book_value)) * 100) / 100,
@@ -1353,7 +1357,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ symbol, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       const txns = await sqlite.prepare(`
-        SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding, a.name as account_name, a.currency
+        SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding, t.portfolio_holding_id, a.name as account_name, a.currency
         FROM transactions t JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ? AND (LOWER(t.portfolio_holding) LIKE LOWER(?) OR LOWER(t.payee) LIKE LOWER(?))
         ORDER BY t.date ASC
@@ -1362,6 +1366,16 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!txns.length) return sqliteErr(`No transactions found for "${symbol}"`);
 
       const holdingName = txns[0].portfolio_holding || txns[0].payee;
+      // Pull the holding's FK id so the agent can pass it back on
+      // record_transaction / update_transaction in the HTTP MCP. Prefer rows
+      // whose portfolio_holding equals the chosen holdingName — payee-only
+      // matches could otherwise surface a different holding's id.
+      const holdingId: number | null =
+        (txns.find(
+          (t) =>
+            t.portfolio_holding_id != null &&
+            String(t.portfolio_holding ?? "") === String(holdingName)
+        )?.portfolio_holding_id as number | undefined) ?? null;
       let totalShares = 0, totalCost = 0;
       const purchases: SqliteRow[] = [], sales: SqliteRow[] = [];
       // qty>0 = buy (handles Finlynq-native amt<0+qty>0 and WP convention
@@ -1377,6 +1391,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       return txt({
         disclaimer: PORTFOLIO_DISCLAIMER,
+        holdingId,
         holding: holdingName, totalTransactions: txns.length,
         reportingCurrency: reporting,
         purchases: purchases.length, sales: sales.length,
