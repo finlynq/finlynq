@@ -16,7 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle, Link2, ArrowRightLeft, Columns3 } from "lucide-react";
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./_components/split-dialog";
 import { formatAccountLabel } from "@/lib/account-label";
 
@@ -1942,14 +1942,16 @@ function TransactionsPageInner() {
                 }
               />
               <DropdownMenuContent align="start" className="min-w-44">
-                <DropdownMenuLabel>Optional columns</DropdownMenuLabel>
-                <DropdownMenuCheckboxItem
-                  checked={colPrefs.portfolio}
-                  onCheckedChange={(v) => setColPrefs({ ...colPrefs, portfolio: !!v })}
-                  closeOnClick={false}
-                >
-                  Portfolio
-                </DropdownMenuCheckboxItem>
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>Optional columns</DropdownMenuLabel>
+                  <DropdownMenuCheckboxItem
+                    checked={colPrefs.portfolio}
+                    onCheckedChange={(v) => setColPrefs({ ...colPrefs, portfolio: !!v })}
+                    closeOnClick={false}
+                  >
+                    Portfolio
+                  </DropdownMenuCheckboxItem>
+                </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
             {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search || filters.portfolioHolding || filters.tag) && (
