@@ -36,6 +36,7 @@ type AccountBalance = {
   balance: number;
   convertedBalance?: number;
   archived?: boolean;
+  isInvestment?: boolean;
   alias?: string | null;
 };
 
@@ -139,7 +140,7 @@ export default function AccountsPage() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editAccountId, setEditAccountId] = useState<number | null>(null);
   const [editAccountArchived, setEditAccountArchived] = useState(false);
-  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "CAD", note: "", alias: "" });
+  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "CAD", note: "", alias: "", isInvestment: false });
   const [editFormErrors, setEditFormErrors] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
   const [editSaveError, setEditSaveError] = useState("");
@@ -237,7 +238,7 @@ export default function AccountsPage() {
   function openEditDialog(a: AccountBalance) {
     setEditAccountId(a.accountId);
     setEditAccountArchived(Boolean(a.archived));
-    setEditForm({ name: a.accountName, type: a.accountType, group: a.accountGroup || "", currency: a.currency, note: "", alias: a.alias ?? "" });
+    setEditForm({ name: a.accountName, type: a.accountType, group: a.accountGroup || "", currency: a.currency, note: "", alias: a.alias ?? "", isInvestment: Boolean(a.isInvestment) });
     setEditFormErrors({});
     setEditSaveError("");
     setConfirmDelete(false);
@@ -303,7 +304,7 @@ export default function AccountsPage() {
       const res = await fetch("/api/accounts", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: editAccountId, name: editForm.name.trim(), type: editForm.type, group: editForm.group.trim(), currency: editForm.currency, note: editForm.note.trim(), alias: editForm.alias.trim() || null }),
+        body: JSON.stringify({ id: editAccountId, name: editForm.name.trim(), type: editForm.type, group: editForm.group.trim(), currency: editForm.currency, note: editForm.note.trim(), alias: editForm.alias.trim() || null, isInvestment: editForm.isInvestment }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -669,6 +670,21 @@ export default function AccountsPage() {
             <div className="space-y-1.5">
               <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
               <Input value={editForm.note} onChange={(e) => setEditForm({ ...editForm, note: e.target.value })} />
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="isInvestment"
+                  checked={editForm.isInvestment}
+                  onChange={(e) => setEditForm({ ...editForm, isInvestment: e.target.checked })}
+                  className="h-4 w-4 rounded border-input"
+                />
+                <Label htmlFor="isInvestment" className="cursor-pointer">Investment account</Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                When enabled, every transaction in this account must reference a portfolio holding (a security or the auto-created &quot;Cash&quot; sleeve). Turning this on now will reassign any unattributed transactions to this account&apos;s Cash holding.
+              </p>
             </div>
             {editSaveError && <p className="text-sm text-destructive">{editSaveError}</p>}
             <div className="flex gap-2 pt-1">

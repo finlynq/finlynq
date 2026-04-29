@@ -40,6 +40,7 @@ import { encryptField, decryptField } from "@/lib/crypto/envelope";
 import { resolveTxAmountsCore } from "@/lib/currency-conversion";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
+import { defaultHoldingForInvestmentAccount } from "@/lib/investment-account";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -491,6 +492,17 @@ export async function createTransferPair(
   const note = opts.note ?? "";
   const tags = opts.tags ?? "";
 
+  // Investment-account constraint: when a leg lands on an is_investment
+  // account and no in-kind holding was resolved (pure-cash transfer),
+  // default to the per-account Cash holding so the leg is attributed.
+  // Non-investment accounts return null and behave as before.
+  const fromHoldingId =
+    holdingResolved?.fromHoldingId ??
+    (await defaultHoldingForInvestmentAccount(userId, fromAcct.id, dek, undefined));
+  const toHoldingId =
+    holdingResolved?.toHoldingId ??
+    (await defaultHoldingForInvestmentAccount(userId, toAcct.id, dek, undefined));
+
   // Atomic dual-insert. If either INSERT throws we want both rows to roll
   // back — never leave a half-recorded transfer.
   let fromTransactionId = 0;
@@ -522,12 +534,10 @@ export async function createTransferPair(
           enteredCurrency: fromCurrency,
           enteredAmount: -sentAmount,
           enteredFxRate: 1,
-          ...(holdingResolved
-            ? {
-                portfolioHoldingId: holdingResolved.fromHoldingId,
-                quantity: -Math.abs(holdingResolved.quantity),
-              }
-            : {}),
+          portfolioHoldingId: fromHoldingId,
+          // quantity stays null on pure-cash legs; only in-kind transfers
+          // carry share counts. Cash sleeves track cash amount, not shares.
+          quantity: holdingResolved ? -Math.abs(holdingResolved.quantity) : null,
           ...sourceRow,
           linkId,
         })
@@ -545,14 +555,10 @@ export async function createTransferPair(
           enteredCurrency: fromCurrency,
           enteredAmount: sentAmount,
           enteredFxRate,
-          ...(holdingResolved
-            ? {
-                portfolioHoldingId: holdingResolved.toHoldingId,
-                // destQuantity may differ from source quantity (stock split,
-                // merger, share-class conversion).
-                quantity: Math.abs(holdingResolved.destQuantity),
-              }
-            : {}),
+          portfolioHoldingId: toHoldingId,
+          // destQuantity may differ from source quantity (stock split,
+          // merger, share-class conversion). Null on pure-cash legs.
+          quantity: holdingResolved ? Math.abs(holdingResolved.destQuantity) : null,
           ...destRow,
           linkId,
         })
@@ -1629,6 +1635,16 @@ export async function createTransferPairViaSql(
   const tags = opts.tags ?? "";
   const enc = (v: string) => (dek ? encryptField(dek, v) : v);
 
+  // Investment-account constraint — same default-to-Cash logic as the
+  // Drizzle path. Computed before withTx so a Cash-holding INSERT can't
+  // race the transfer pair's atomic block.
+  const fromHoldingId =
+    holdingResolved?.fromHoldingId ??
+    (await defaultHoldingForInvestmentAccount(userId, fromAcct.id, dek, undefined));
+  const toHoldingId =
+    holdingResolved?.toHoldingId ??
+    (await defaultHoldingForInvestmentAccount(userId, toAcct.id, dek, undefined));
+
   let fromTransactionId = 0;
   let toTransactionId = 0;
   try {
@@ -1654,7 +1670,7 @@ export async function createTransferPairViaSql(
           fromCurrency, -sentAmount,
           fromCurrency, -sentAmount, 1,
           enc(sourcePayee), enc(note), enc(tags), linkId,
-          holdingResolved?.fromHoldingId ?? null,
+          fromHoldingId,
           holdingResolved ? -Math.abs(holdingResolved.quantity) : null,
         ],
       );
@@ -1679,7 +1695,7 @@ export async function createTransferPairViaSql(
           toCurrency, receivedAmount,
           fromCurrency, sentAmount, enteredFxRate,
           enc(destPayee), enc(note), enc(tags), linkId,
-          holdingResolved?.toHoldingId ?? null,
+          toHoldingId,
           // destQuantity may differ from source quantity (split / merger).
           holdingResolved ? Math.abs(holdingResolved.destQuantity) : null,
         ],

@@ -37,6 +37,10 @@ import {
   getUserTransactions,
 } from "../src/lib/mcp/user-tx-cache";
 import {
+  isInvestmentAccount as isInvestmentAccountFn,
+  getInvestmentAccountIds,
+} from "../src/lib/investment-account";
+import {
   signConfirmationToken,
   verifyConfirmationToken,
 } from "../src/lib/mcp/confirmation-token";
@@ -1777,6 +1781,14 @@ export function registerPgTools(
         resolvedHoldingId = portfolioHoldingId;
       }
 
+      // Investment-account constraint: every transaction in a flagged
+      // account must reference a holding. MCP tools take the strict path —
+      // refuse rather than silently default — so Claude surfaces an actionable
+      // error to the user instead of attributing a trade to "Cash".
+      if (resolvedHoldingId == null && (await isInvestmentAccountFn(userId, Number(acct.id)))) {
+        return err(`Account "${acct.name}" is an investment account — pass portfolioHolding (e.g. the ticker, or "Cash" for a cash leg) or portfolioHoldingId. Use get_portfolio_analysis to list this account's holdings.`);
+      }
+
       // Resolve the entered/account trilogy. Refuses on fallback rate.
       const resolved = await resolveTxAmountsCore({
         accountCurrency: String(acct.currency),
@@ -1839,6 +1851,9 @@ export function registerPgTools(
       // check per row.
       const ownedHoldings = await q(db, sql`SELECT id FROM portfolio_holdings WHERE user_id = ${userId}`);
       const ownedHoldingIds = new Set(ownedHoldings.map((r) => Number(r.id)));
+      // Pre-fetch investment-account ids so the per-row constraint check is
+      // a Set lookup, not a SELECT.
+      const investmentAccountIds = await getInvestmentAccountIds(userId);
 
       const results: { index: number; success: boolean; message: string }[] = [];
       for (let i = 0; i < transactions.length; i++) {
@@ -1867,6 +1882,18 @@ export function registerPgTools(
               continue;
             }
             rowHoldingId = t.portfolioHoldingId;
+          }
+
+          // Investment-account constraint — fail this row only, not the
+          // whole batch. Caller can resubmit just the failures with a
+          // holding name.
+          if (rowHoldingId == null && investmentAccountIds.has(Number(acct.id))) {
+            results.push({
+              index: i,
+              success: false,
+              message: `Account "${acct.name}" is an investment account — set portfolioHolding (e.g. the ticker, or "Cash" for a cash leg) or portfolioHoldingId on this row.`,
+            });
+            continue;
           }
 
           let catId: number | null = null;
@@ -1969,6 +1996,18 @@ export function registerPgTools(
           SELECT 1 AS ok FROM portfolio_holdings WHERE id = ${portfolioHoldingId} AND user_id = ${userId}
         `);
         if (!ownsHolding.length) return err(`Portfolio holding #${portfolioHoldingId} not found or not owned by you.`);
+      }
+
+      // Investment-account constraint check on the post-merge state. Only
+      // matters when the caller is touching the holding (resolvedHoldingId
+      // !== undefined) and the row's account is flagged investment.
+      // Explicit clear (resolvedHoldingId === null) on an investment-account
+      // row is rejected; passing the field as undefined leaves the existing
+      // FK alone.
+      if (resolvedHoldingId === null && txAccountId != null) {
+        if (await isInvestmentAccountFn(userId, txAccountId)) {
+          return err(`Cannot clear portfolioHoldingId — transaction belongs to an investment account; pass a holding instead (e.g. the account's "Cash" holding for cash legs).`);
+        }
       }
 
       // Apply each field as its own parameterized UPDATE. Simpler and safer

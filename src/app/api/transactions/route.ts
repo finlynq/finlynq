@@ -7,6 +7,7 @@ import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch } from "@/lib/cr
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
+import { InvestmentHoldingRequiredError } from "@/lib/investment-account";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
@@ -295,6 +296,12 @@ export async function POST(request: NextRequest) {
     invalidateUserTxCache(auth.userId);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {
+    if (error instanceof InvestmentHoldingRequiredError) {
+      return NextResponse.json(
+        { error: error.message, code: error.code, accountId: error.accountId },
+        { status: 400 },
+      );
+    }
     await logApiError("POST", "/api/transactions", error, auth.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create transaction") }, { status: 500 });
   }
@@ -329,6 +336,12 @@ export async function PUT(request: NextRequest) {
     invalidateUserTxCache(auth.userId);
     return NextResponse.json(tx);
   } catch (error: unknown) {
+    if (error instanceof InvestmentHoldingRequiredError) {
+      return NextResponse.json(
+        { error: error.message, code: error.code, accountId: error.accountId },
+        { status: 400 },
+      );
+    }
     await logApiError("PUT", "/api/transactions", error, auth.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update transaction") }, { status: 500 });
   }

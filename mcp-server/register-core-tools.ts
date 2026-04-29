@@ -588,10 +588,19 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
-      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       if (!allAccounts.length) return sqliteErr("No accounts found — create an account first.");
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return sqliteErr(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+
+      // Investment-account constraint: stdio MCP record_transaction has no
+      // portfolio-holding parameter, so it can't satisfy the FK requirement.
+      // Refuse with a pointer to the HTTP MCP / web UI rather than silently
+      // writing a row that the aggregator can't attribute. Stdio MCP is a
+      // self-hosted-only path; the HTTP MCP at /mcp does support holdings.
+      if (acct.is_investment) {
+        return sqliteErr(`Account "${acct.name}" is an investment account — record_transaction over stdio MCP can't bind to a portfolio holding. Use the HTTP MCP at /mcp (record_transaction has portfolioHolding/portfolioHoldingId there) or the web app to record transactions in this account.`);
+      }
 
       let catId: number | null = null;
       if (category) {
@@ -642,7 +651,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     },
     async ({ transactions }) => {
       const today = new Date().toISOString().split("T")[0];
-      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
       const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
@@ -652,6 +661,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         try {
           const acct = fuzzyFind(t.account, allAccounts);
           if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
+          // Investment-account constraint — stdio MCP can't bind holdings,
+          // so investment-account rows fail individually. See the same
+          // check in record_transaction for rationale.
+          if (acct.is_investment) {
+            results.push({ index: i, success: false, message: `Account "${acct.name}" is an investment account — stdio MCP can't bind portfolio holdings. Use the HTTP MCP at /mcp or the web app for this account.` });
+            continue;
+          }
           let catId: number | null = null;
           if (t.category) { const cat = fuzzyFind(t.category, allCats); catId = cat ? Number(cat.id) : null; }
           else catId = await autoCategory(sqlite, userId, t.payee);

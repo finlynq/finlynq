@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAccounts, createAccount, updateAccount, deleteAccount } from "@/lib/queries";
+import { getAccounts, getAccountById, createAccount, updateAccount, deleteAccount } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { backfillInvestmentAccount } from "@/lib/investment-account";
 
 const postSchema = z.object({
   name: z.string(),
@@ -12,6 +13,7 @@ const postSchema = z.object({
   currency: z.string(),
   note: z.string().optional(),
   alias: z.string().max(64).trim().optional(),
+  isInvestment: z.boolean().optional(),
 });
 
 const putSchema = z.object({
@@ -23,6 +25,7 @@ const putSchema = z.object({
   note: z.string().optional(),
   archived: z.boolean().optional(),
   alias: z.string().max(64).trim().nullable().optional(),
+  isInvestment: z.boolean().optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -53,6 +56,17 @@ export async function POST(request: NextRequest) {
     const normalizedAlias = alias ? alias : null;
     const enc = buildNameFields(auth.context.dek, { name: rest.name, alias: normalizedAlias });
     const account = await createAccount(auth.context.userId, { ...rest, alias: normalizedAlias, ...enc });
+    // When the user creates an account already flagged investment, ensure
+    // the per-account Cash holding exists so the constraint is satisfiable
+    // out of the gate. No transactions to reassign on a fresh account.
+    if (rest.isInvestment === true && account?.id != null) {
+      try {
+        await backfillInvestmentAccount(auth.context.userId, account.id, auth.context.dek);
+      } catch (e) {
+        // Backfill failure shouldn't undo the account creation — log only.
+        await logApiError("POST-backfill", "/api/accounts", e, auth.context.userId);
+      }
+    }
     return NextResponse.json(account, { status: 201 });
   } catch (error: unknown) {
     await logApiError("POST", "/api/accounts", error, auth.context.userId);
@@ -73,8 +87,32 @@ export async function PUT(request: NextRequest) {
     if ("name" in normalized && normalized.name !== undefined) toEncrypt.name = normalized.name;
     if ("alias" in normalized) toEncrypt.alias = normalized.alias ?? null;
     const enc = buildNameFields(auth.context.dek, toEncrypt);
+    // Detect false → true flip on isInvestment so we can run the backfill
+    // (Cash holding + null-FK reassignment) in the same request.
+    let needsInvestmentBackfill = false;
+    if (normalized.isInvestment === true) {
+      const before = await getAccountById(id, auth.context.userId);
+      if (before && before.isInvestment === false) needsInvestmentBackfill = true;
+    }
     const account = await updateAccount(id, auth.context.userId, { ...normalized, ...enc });
     if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    if (needsInvestmentBackfill) {
+      try {
+        await backfillInvestmentAccount(auth.context.userId, id, auth.context.dek);
+      } catch (e) {
+        // Surface the backfill failure rather than leaving the user with a
+        // freshly-flagged account whose existing rows still violate the
+        // constraint. The flag flip already committed; the error tells
+        // them to retry or investigate.
+        await logApiError("PUT-backfill", "/api/accounts", e, auth.context.userId);
+        return NextResponse.json(
+          {
+            error: "Account flagged as investment, but the cash-holding backfill failed. Existing transactions in this account may not yet satisfy the constraint — retry the toggle or contact support.",
+          },
+          { status: 500 },
+        );
+      }
+    }
     return NextResponse.json(account);
   } catch (error: unknown) {
     await logApiError("PUT", "/api/accounts", error, auth.context.userId);

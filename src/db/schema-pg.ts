@@ -30,6 +30,13 @@ export const accounts = pgTable("accounts", {
   currency: text("currency").notNull().default("CAD"),
   note: text("note").default(""),
   archived: boolean("archived").notNull().default(false),
+  // When true, every transaction in this account must reference a
+  // portfolio_holdings row (FK). Cash legs point at a per-account 'Cash'
+  // holding; trades/dividends point at their security. Enforcement is
+  // application-layer — see src/lib/investment-account.ts. The migration
+  // scripts/migrate-accounts-is-investment.sql backfills the flag from any
+  // account that already has at least one portfolio_holdings row.
+  isInvestment: boolean("is_investment").notNull().default(false),
   alias: text("alias"),
   // Stream D (2026-04-24) — dual-write: plaintext columns stay until Phase 3 cutover.
   nameCt: text("name_ct"),

@@ -1,6 +1,7 @@
 import { db, schema, getDialect } from "@/db";
 import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
+import { requireHoldingForInvestmentAccount } from "@/lib/investment-account";
 
 const { accounts, categories, transactions, portfolioHoldings, budgets, budgetTemplates } = schema;
 
@@ -36,6 +37,7 @@ type AccountWrite = {
   currency: string;
   note?: string;
   alias?: string | null;
+  isInvestment?: boolean;
   nameCt?: string | null;
   nameLookup?: string | null;
   aliasCt?: string | null;
@@ -49,7 +51,7 @@ export async function createAccount(userId: string, data: AccountWrite) {
 export async function updateAccount(
   id: number,
   userId: string,
-  data: Partial<AccountWrite & { archived: boolean }>,
+  data: Partial<AccountWrite & { archived: boolean; isInvestment: boolean }>,
 ) {
   return db.update(accounts).set(data).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).returning().get();
 }
@@ -203,6 +205,11 @@ export async function createTransaction(userId: string, data: {
   splitPerson?: string;
   splitRatio?: number;
 }) {
+  // Investment-account constraint: every transaction in a flagged account
+  // must reference a portfolio_holdings row. Throws
+  // InvestmentHoldingRequiredError when the FK is missing — the route
+  // handler maps it to a 400.
+  await requireHoldingForInvestmentAccount(userId, data.accountId, data.portfolioHoldingId);
   return db.insert(transactions).values({ ...data, userId }).returning().get();
 }
 
@@ -225,6 +232,32 @@ export async function updateTransaction(id: number, userId: string, data: Partia
   splitPerson: string;
   splitRatio: number;
 }>) {
+  // Investment-account constraint applies to the post-merge state. Touching
+  // accountId xor portfolioHoldingId can flip the row in or out of the
+  // constraint, so we resolve both against the current row before checking.
+  // `data.portfolioHoldingId === undefined` means the caller didn't include
+  // the field; an explicit `null` is treated as a clear intent to unlink
+  // (and rejected when the resulting account is investment).
+  if (
+    data.accountId !== undefined ||
+    Object.prototype.hasOwnProperty.call(data, "portfolioHoldingId")
+  ) {
+    const current = await db
+      .select({
+        accountId: transactions.accountId,
+        portfolioHoldingId: transactions.portfolioHoldingId,
+      })
+      .from(transactions)
+      .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
+      .get();
+    if (current) {
+      const resultingAccountId = data.accountId ?? current.accountId;
+      const resultingHoldingId = Object.prototype.hasOwnProperty.call(data, "portfolioHoldingId")
+        ? (data.portfolioHoldingId ?? null)
+        : current.portfolioHoldingId;
+      await requireHoldingForInvestmentAccount(userId, resultingAccountId, resultingHoldingId);
+    }
+  }
   return db.update(transactions).set(data).where(and(eq(transactions.id, id), eq(transactions.userId, userId))).returning().get();
 }
 
@@ -424,6 +457,7 @@ export async function getAccountBalances(userId: string, opts?: { includeArchive
       accountGroup: accounts.group,
       currency: accounts.currency,
       archived: accounts.archived,
+      isInvestment: accounts.isInvestment,
       alias: accounts.alias,
       aliasCt: accounts.aliasCt,
       balance: sql<number>`COALESCE(SUM(${transactions.amount}), 0)`,
@@ -439,6 +473,7 @@ export async function getAccountBalances(userId: string, opts?: { includeArchive
       accounts.group,
       accounts.currency,
       accounts.archived,
+      accounts.isInvestment,
       accounts.alias,
       accounts.aliasCt,
     )

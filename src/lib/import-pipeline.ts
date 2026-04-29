@@ -6,6 +6,10 @@ import { normalizeDate, parseAmount as parseAmountStr } from "./csv-parser";
 import { encryptField, decryptField, tryDecryptField } from "./crypto/envelope";
 import { nameLookup } from "./crypto/encrypted-columns";
 import { buildHoldingResolver } from "./external-import/portfolio-holding-resolver";
+import {
+  defaultHoldingForInvestmentAccount,
+  getInvestmentAccountIds,
+} from "./investment-account";
 import { safeConvertToAccountCurrency } from "./currency-conversion";
 import { prewarmRates } from "./fx-service";
 
@@ -434,6 +438,33 @@ export async function executeImport(
     // and let the orphan-fallback read paths handle it. Log for ops.
     importErrors.push(
       `Holding resolver failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+    );
+  }
+
+  // Investment-account constraint pass: any row whose account is flagged
+  // is_investment but didn't get a holding from the resolver above (no
+  // portfolioHolding text — pure cash leg, fee, deposit) gets defaulted to
+  // the per-account Cash holding so the row satisfies the constraint
+  // instead of failing the whole batch. Single Set lookup keeps this
+  // O(rows) and a single Cash-holding INSERT per investment account
+  // amortizes across the rest of the batch.
+  try {
+    const investmentAccountIds = await getInvestmentAccountIds(userId);
+    if (investmentAccountIds.size > 0) {
+      for (const row of toInsert) {
+        if (row.portfolioHoldingId != null) continue;
+        if (!investmentAccountIds.has(row.accountId)) continue;
+        row.portfolioHoldingId = await defaultHoldingForInvestmentAccount(
+          userId,
+          row.accountId,
+          userDek ?? null,
+          undefined,
+        );
+      }
+    }
+  } catch (err) {
+    importErrors.push(
+      `Investment-account Cash holding default failed: ${err instanceof Error ? err.message : "Unknown error"}`,
     );
   }
 
