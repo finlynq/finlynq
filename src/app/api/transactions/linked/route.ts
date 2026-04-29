@@ -3,7 +3,7 @@ import { and, eq, ne } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
-import { decryptTxRows } from "@/lib/crypto/encrypted-columns";
+import { decryptTxRows, decryptName } from "@/lib/crypto/encrypted-columns";
 import { decryptField } from "@/lib/crypto/envelope";
 
 /**
@@ -44,9 +44,13 @@ export async function GET(request: NextRequest) {
       date: schema.transactions.date,
       accountId: schema.transactions.accountId,
       accountName: schema.accounts.name,
+      // Stream D Phase 3 cutover NULLs `accounts.name` — pull the ciphertext
+      // alongside so we can decrypt with the session DEK below.
+      accountNameCt: schema.accounts.nameCt,
       accountCurrency: schema.accounts.currency,
       categoryId: schema.transactions.categoryId,
       categoryName: schema.categories.name,
+      categoryNameCt: schema.categories.nameCt,
       // categoryType lets the client run the "transfer pair" four-check rule
       // (link_id non-null + 1 sibling + both type='R' + different accounts)
       // and decide whether to render the unified Transfer edit view or the
@@ -91,7 +95,8 @@ export async function GET(request: NextRequest) {
   //   1. JOINed plaintext (Stream D legacy or pre-Phase-3 row)
   //   2. JOINed nameCt decrypted with the session DEK (Phase 3 NULL'd row)
   // The first non-empty wins. We surface this as a single `portfolioHolding`
-  // string so the client can ignore the underlying source.
+  // string so the client can ignore the underlying source. Same ladder runs
+  // for accountName + categoryName via decryptName().
   const enriched = decrypted.map((r) => {
     let resolvedName = r.portfolioHoldingNameJoined ?? null;
     if (!resolvedName && r.portfolioHoldingNameCt && dek) {
@@ -103,9 +108,13 @@ export async function GET(request: NextRequest) {
     }
     return {
       ...r,
+      accountName: decryptName(r.accountNameCt, dek, r.accountName),
+      categoryName: decryptName(r.categoryNameCt, dek, r.categoryName),
       portfolioHolding: resolvedName,
       // Strip the JOIN fields from the response shape — the client uses
-      // the resolved `portfolioHolding` only.
+      // the resolved `portfolioHolding` / `accountName` / `categoryName`.
+      accountNameCt: undefined,
+      categoryNameCt: undefined,
       portfolioHoldingNameJoined: undefined,
       portfolioHoldingNameCt: undefined,
     };

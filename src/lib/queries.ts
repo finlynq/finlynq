@@ -124,14 +124,22 @@ export async function getTransactions(userId: string, filters?: {
       date: transactions.date,
       accountId: transactions.accountId,
       accountName: accounts.name,
+      // Stream D Phase 3 cutover NULLs `accounts.name` once a user is fully
+      // backfilled — pull the ciphertext alongside so the route handler can
+      // decrypt with the session DEK and fall back to plaintext for un-
+      // backfilled / DEK-mismatch users (decryptName ladder).
+      accountNameCt: accounts.nameCt,
       // Plaintext alias + type so the UI can build a context-rich label
       // (e.g. "Credit Card · 609") for accounts whose name is terse/numeric.
-      // Stream-D-correct decryption of `alias_ct` happens via the dedicated
-      // /api/accounts path; same dual-write story as accounts.name.
       accountAlias: accounts.alias,
+      accountAliasCt: accounts.aliasCt,
       accountType: accounts.type,
       categoryId: transactions.categoryId,
       categoryName: categories.name,
+      // Same Phase-3 NULL story applies to categories — without nameCt the
+      // /transactions page and the Reports endpoints render an empty
+      // Category column for every backfilled user.
+      categoryNameCt: categories.nameCt,
       categoryType: categories.type,
       currency: transactions.currency,
       amount: transactions.amount,
@@ -148,6 +156,8 @@ export async function getTransactions(userId: string, filters?: {
       portfolioHoldingId: transactions.portfolioHoldingId,
       portfolioHoldingName: portfolioHoldings.name,
       portfolioHoldingNameCt: portfolioHoldings.nameCt,
+      portfolioHoldingSymbol: portfolioHoldings.symbol,
+      portfolioHoldingSymbolCt: portfolioHoldings.symbolCt,
       note: transactions.note,
       payee: transactions.payee,
       tags: transactions.tags,

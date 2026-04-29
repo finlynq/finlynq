@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, gte, lte, eq } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
+import { decryptName } from "@/lib/crypto/encrypted-columns";
 
 type Period = "daily" | "weekly" | "monthly" | "quarterly";
 type GroupBy = "category" | "group";
@@ -38,7 +40,11 @@ function formatPeriodLabel(key: string, period: Period): string {
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const { userId, sessionId } = auth.context;
+  // DEK is needed to resolve `categories.name_ct` for Phase-3 NULL'd users.
+  // Soft-fail (null DEK) keeps legacy plaintext readable; encrypted-only
+  // rows surface as "" and roll up under the existing "Uncategorized" bucket.
+  const dek = sessionId ? getDEK(sessionId) : null;
 
   const params = request.nextUrl.searchParams;
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;
@@ -91,31 +97,66 @@ export async function GET(request: NextRequest) {
       net: Math.round((val.income - val.expenses) * 100) / 100,
     }));
 
-  // Breakdown by category or group per period
-  const groupCol = groupBy === "group" ? schema.categories.group : schema.categories.name;
+  // Breakdown by category or group per period.
+  // For category-mode: group on categories.id (stable through Phase-3 NULL)
+  // and decrypt name_ct after the SQL aggregation. Group-mode keeps using
+  // the plaintext `categories.group` column (unencrypted).
+  const isCategoryMode = groupBy !== "group";
 
-  const breakdownRows = await db
-    .select({
-      period: periodCol,
-      categoryType: schema.categories.type,
-      groupName: groupCol,
-      categoryGroup: schema.categories.group,
-      total: sql<number>`SUM(${schema.transactions.amount})`,
-      count: sql<number>`COUNT(*)`,
-    })
-    .from(schema.transactions)
-    .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
-    .where(and(...conditions))
-    .groupBy(periodCol, groupCol, schema.categories.type, schema.categories.group)
-    .orderBy(periodCol, schema.categories.type, groupCol)
-    .all();
+  const breakdownRows = isCategoryMode
+    ? await db
+        .select({
+          period: periodCol,
+          categoryType: schema.categories.type,
+          categoryId: schema.categories.id,
+          categoryName: schema.categories.name,
+          categoryNameCt: schema.categories.nameCt,
+          categoryGroup: schema.categories.group,
+          total: sql<number>`SUM(${schema.transactions.amount})`,
+          count: sql<number>`COUNT(*)`,
+        })
+        .from(schema.transactions)
+        .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+        .where(and(...conditions))
+        .groupBy(
+          periodCol,
+          schema.categories.id,
+          schema.categories.name,
+          schema.categories.nameCt,
+          schema.categories.type,
+          schema.categories.group,
+        )
+        .orderBy(periodCol, schema.categories.type, schema.categories.group)
+        .all()
+    : await db
+        .select({
+          period: periodCol,
+          categoryType: schema.categories.type,
+          categoryId: sql<number | null>`NULL`,
+          categoryName: schema.categories.group,
+          categoryNameCt: sql<string | null>`NULL`,
+          categoryGroup: schema.categories.group,
+          total: sql<number>`SUM(${schema.transactions.amount})`,
+          count: sql<number>`COUNT(*)`,
+        })
+        .from(schema.transactions)
+        .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+        .where(and(...conditions))
+        .groupBy(periodCol, schema.categories.group, schema.categories.type)
+        .orderBy(periodCol, schema.categories.type, schema.categories.group)
+        .all();
 
-  // Build grouped breakdown (totals across all periods)
+  // Build grouped breakdown (totals across all periods). Keyed on the
+  // resolved display name + categoryType so income/expense rows with the
+  // same label don't collide.
   const incomeGroups = new Map<string, { group: string; total: number; count: number; periods: Record<string, number> }>();
   const expenseGroups = new Map<string, { group: string; total: number; count: number; periods: Record<string, number> }>();
 
   for (const row of breakdownRows) {
-    const name = row.groupName ?? "Uncategorized";
+    const resolvedName = isCategoryMode
+      ? decryptName(row.categoryNameCt, dek, row.categoryName)
+      : row.categoryName;
+    const name = resolvedName && resolvedName !== "" ? resolvedName : "Uncategorized";
     const catGroup = row.categoryGroup ?? "";
     const target = row.categoryType === "I" ? incomeGroups : expenseGroups;
     if (!target.has(name)) target.set(name, { group: catGroup, total: 0, count: 0, periods: {} });
