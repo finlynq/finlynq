@@ -224,7 +224,7 @@ function generateTransactions(): TxSeed[] {
 }
 
 /** Investment buys/sells on the Brokerage account.
- * These use the transactions.quantity + transactions.portfolioHolding fields
+ * Each row binds to a portfolio_holdings row via portfolio_holding_id (FK)
  * so the portfolio page can price holdings at live market rates. */
 type InvestmentTx = { daysFromStart: number; holding: string; quantity: number; amount: number; payee: string };
 

@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch, nameLookup } from "@/lib/crypto/encrypted-columns";
+import { decryptField } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
@@ -130,6 +131,30 @@ export async function GET(request: NextRequest) {
 
   const rawRows = await getTransactions(userId, filters);
   let decrypted = decryptTxRows(dek, rawRows as Array<Parameters<typeof decryptTxRows>[1][number]>);
+
+  // Surface the JOINed holding name as `portfolioHolding` for the UI.
+  // Falls back to plaintext name when name_ct is null (legacy rows pre
+  // Stream D). Phase 6 (2026-04-29) dropped the legacy text column on
+  // transactions; this JOIN replaces that source.
+  decrypted = decrypted.map((r) => {
+    const row = r as typeof r & {
+      portfolioHoldingName?: string | null;
+      portfolioHoldingNameCt?: string | null;
+      portfolioHolding?: string | null;
+    };
+    let resolved: string | null = row.portfolioHoldingName ?? null;
+    if (!resolved && row.portfolioHoldingNameCt && dek) {
+      try {
+        resolved = decryptField(dek, row.portfolioHoldingNameCt);
+      } catch {
+        resolved = null;
+      }
+    }
+    row.portfolioHolding = resolved;
+    delete row.portfolioHoldingName;
+    delete row.portfolioHoldingNameCt;
+    return row;
+  });
 
   if (search) {
     decrypted = filterDecryptedBySearch(decrypted, search);

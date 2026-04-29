@@ -142,7 +142,12 @@ export async function getTransactions(userId: string, filters?: {
       enteredAmount: transactions.enteredAmount,
       enteredFxRate: transactions.enteredFxRate,
       quantity: transactions.quantity,
-      portfolioHolding: transactions.portfolioHolding,
+      // Portfolio holding name comes off the JOINed portfolio_holdings row.
+      // Phase 5 + 6 (2026-04-29) retired the legacy text column on
+      // transactions; the FK is now the sole source of truth.
+      portfolioHoldingId: transactions.portfolioHoldingId,
+      portfolioHoldingName: portfolioHoldings.name,
+      portfolioHoldingNameCt: portfolioHoldings.nameCt,
       note: transactions.note,
       payee: transactions.payee,
       tags: transactions.tags,
@@ -151,6 +156,7 @@ export async function getTransactions(userId: string, filters?: {
     .from(transactions)
     .leftJoin(accounts, eq(transactions.accountId, accounts.id))
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .leftJoin(portfolioHoldings, eq(transactions.portfolioHoldingId, portfolioHoldings.id))
     .where(and(...conditions))
     .orderBy(desc(transactions.date))
     .limit(filters?.limit ?? 100)
@@ -202,7 +208,6 @@ export async function createTransaction(userId: string, data: {
   enteredAmount?: number | null;
   enteredFxRate?: number | null;
   quantity?: number;
-  portfolioHolding?: string | null;
   portfolioHoldingId?: number | null;
   note?: string;
   payee?: string;
@@ -229,7 +234,6 @@ export async function updateTransaction(id: number, userId: string, data: Partia
   enteredAmount: number | null;
   enteredFxRate: number | null;
   quantity: number;
-  portfolioHolding: string | null;
   portfolioHoldingId: number | null;
   note: string;
   payee: string;

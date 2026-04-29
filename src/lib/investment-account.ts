@@ -213,7 +213,6 @@ export async function backfillInvestmentAccount(
         eq(schema.transactions.userId, userId),
         eq(schema.transactions.accountId, accountId),
         sql`${schema.transactions.portfolioHoldingId} IS NULL`,
-        sql`${schema.transactions.portfolioHolding} IS NULL`,
       ),
     )
     .returning({ id: schema.transactions.id });
