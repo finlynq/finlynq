@@ -654,8 +654,13 @@ async function findHoldingIdByAccountAndName(
 
 /**
  * Load and validate a transfer pair. Returns null if the linkId/transactionId
- * resolves to a row that doesn't satisfy the four-check rule (link_id non-
- * null, exactly one sibling, both type='R', different accounts).
+ * resolves to a row that doesn't satisfy the (relaxed) three-check rule:
+ * link_id non-null, exactly one sibling (N≤2 legs), different accounts.
+ *
+ * The legacy `category_type === 'R'` requirement was dropped (#8) so
+ * transfer-shaped pairs whose category was renamed by the user (e.g.
+ * `Non-Cash - Transfers`) still resolve here. Updates leave `category_id`
+ * alone (see `updateTransferPair`), so this is non-destructive.
  *
  * Used by both PUT and DELETE handlers + the unified edit view to confirm
  * a transfer pair before mutating it.
@@ -724,9 +729,8 @@ export async function loadTransferPair(
       ),
     );
 
-  // Four-check rule.
+  // Three-check rule (categoryType==='R' relaxed in #8).
   if (rows.length !== 2) return null;
-  if (!rows.every((r) => r.categoryType === "R")) return null;
   if (rows[0].accountId === rows[1].accountId) return null;
 
   // Decrypt payee/note/tags so the caller can render or pre-fill the form.
