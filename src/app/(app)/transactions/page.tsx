@@ -15,14 +15,18 @@ import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle, Link2, ArrowRightLeft } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle, Link2, ArrowRightLeft, Columns3 } from "lucide-react";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./_components/split-dialog";
+import { formatAccountLabel } from "@/lib/account-label";
 
 type Transaction = {
   id: number;
   date: string;
   accountId: number;
   accountName: string;
+  accountAlias?: string | null;
+  accountType?: string | null;
   categoryId: number;
   categoryName: string;
   categoryType: string;
@@ -66,7 +70,7 @@ type LinkedSibling = {
   tags: string | null;
 };
 
-type Account = { id: number; name: string; currency: string };
+type Account = { id: number; name: string; currency: string; alias?: string | null; type?: string | null };
 type Category = { id: number; name: string; type: string; group: string };
 type Holding = {
   id: number;
@@ -168,6 +172,26 @@ function TransactionsPageInner() {
     tag: urlParams.get("tag") ?? "",
   });
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Optional table columns persisted in localStorage. Keep this off by default
+  // so users without investment activity don't see a column of dashes. Bumping
+  // the storage key (-vN) is the migration story when the shape grows.
+  type TxColPrefs = { portfolio: boolean };
+  const COL_PREFS_KEY = "pf-tx-cols-v1";
+  const defaultColPrefs: TxColPrefs = { portfolio: false };
+  const [colPrefs, setColPrefs] = useState<TxColPrefs>(defaultColPrefs);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(COL_PREFS_KEY);
+      if (raw) setColPrefs({ ...defaultColPrefs, ...JSON.parse(raw) });
+    } catch { /* ignore */ }
+    // defaultColPrefs is a stable literal in this scope; we want this hook to
+    // run once on mount, mirroring the read-once-on-load contract.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(COL_PREFS_KEY, JSON.stringify(colPrefs)); } catch { /* ignore */ }
+  }, [colPrefs]);
 
   // Add/edit dialog
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -752,23 +776,24 @@ function TransactionsPageInner() {
     setTransferEdit(null);
     setTransferReceivedTouched(false);
 
-    // Four-check rule for "open this in unified Transfer mode":
+    // Three-check rule for "open this in unified Transfer mode":
     //   1. row has link_id
-    //   2. exactly one sibling shares the link_id
-    //   3. both rows are in a type='R' (Reconciliation) category
-    //   4. the two rows reference DIFFERENT accounts
+    //   2. exactly one sibling shares the link_id (so N≤2 legs)
+    //   3. the two rows reference DIFFERENT accounts
     //
-    // Anything that fails the rule (WP liquidations with N>2 legs, same-
-    // account conversions, type-mismatched pairs from old data) falls back
-    // to the standard transaction-mode edit + linked-siblings panel.
-    if (t.linkId && t.categoryType === "R") {
+    // The legacy `category_type === 'R'` check was intentionally relaxed
+    // (#8): transfer-shaped pairs whose category was renamed by the user
+    // (e.g. `Non-Cash - Transfers`) still open here. Anything that fails
+    // the rule (WP liquidations with N>2 legs, same-account conversions)
+    // falls back to the standard transaction-mode edit + linked-siblings
+    // panel.
+    if (t.linkId) {
       fetch(`/api/transactions/linked?linkId=${encodeURIComponent(t.linkId)}&excludeId=${t.id}`)
         .then((r) => (r.ok ? r.json() : { data: [] }))
         .then((d: { data?: LinkedSibling[] }) => {
           const siblings = Array.isArray(d.data) ? d.data : [];
           const isCleanPair =
             siblings.length === 1 &&
-            siblings[0].categoryType === "R" &&
             siblings[0].accountId != null &&
             siblings[0].accountId !== t.accountId;
           if (isCleanPair) {
@@ -1193,9 +1218,15 @@ function TransactionsPageInner() {
 
               {/* Linked transactions — other legs of a multi-leg import
                   (transfer, same-account currency conversion, liquidation).
-                  Only shown when editing an existing tx with a linkId. */}
+                  Only shown when editing an existing tx with a linkId.
+                  Reaching this panel means the unified Edit Transfer dialog
+                  declined the row (N≠2 siblings, or same account) — so the
+                  user is editing one leg at a time. */}
               {editId && linkedSiblings.length > 0 && (
                 <div className="space-y-2 rounded-lg border border-sky-200 dark:border-sky-900 bg-sky-50/50 dark:bg-sky-950/30 p-3">
+                  <div className="text-[11px] text-sky-700/80 dark:text-sky-300/80">
+                    This transaction is part of a multi-leg group; legs are edited individually.
+                  </div>
                   <div className="flex items-center gap-1.5 text-xs font-medium text-sky-700 dark:text-sky-300">
                     <Link2 className="h-3.5 w-3.5" />
                     Linked transaction{linkedSiblings.length > 1 ? "s" : ""}
@@ -1888,19 +1919,66 @@ function TransactionsPageInner() {
             <span className="text-xs text-muted-foreground">to</span>
             <Input type="date" className="w-36 h-8 text-xs" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
             <Select value={filters.accountId} onValueChange={(v) => { setFilters({ ...filters, accountId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger className="w-40 h-8 text-xs"><SelectValue placeholder="All accounts" /></SelectTrigger>
+              <SelectTrigger className="w-40 h-8 text-xs">
+                {/* Render-prop on SelectValue — base-ui's default trigger
+                    renders the raw `value` (the account id, e.g. "609") rather
+                    than the SelectItem's children. Look the id back up so the
+                    trigger shows the same `formatAccountLabel` string the
+                    dropdown items + table cells use. */}
+                <SelectValue placeholder="All accounts">
+                  {(v) => {
+                    const val = v == null ? "" : String(v);
+                    if (!val || val === "all") return "All accounts";
+                    const a = accounts.find((x) => String(x.id) === val);
+                    return a ? formatAccountLabel(a) : val;
+                  }}
+                </SelectValue>
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All accounts</SelectItem>
-                {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
+                {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{formatAccountLabel(a)}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={filters.categoryId} onValueChange={(v) => { setFilters({ ...filters, categoryId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger className="w-44 h-8 text-xs"><SelectValue placeholder="All categories" /></SelectTrigger>
+              <SelectTrigger className="w-44 h-8 text-xs">
+                {/* Same render-prop pattern as Account filter — without it
+                    the trigger shows the raw category id when one's selected. */}
+                <SelectValue placeholder="All categories">
+                  {(v) => {
+                    const val = v == null ? "" : String(v);
+                    if (!val || val === "all") return "All categories";
+                    const c = categories.find((x) => String(x.id) === val);
+                    return c?.name ?? val;
+                  }}
+                </SelectValue>
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All categories</SelectItem>
                 {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
               </SelectContent>
             </Select>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5">
+                    <Columns3 className="h-3.5 w-3.5" />
+                    Columns
+                  </Button>
+                }
+              />
+              <DropdownMenuContent align="start" className="min-w-44">
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>Optional columns</DropdownMenuLabel>
+                  <DropdownMenuCheckboxItem
+                    checked={colPrefs.portfolio}
+                    onCheckedChange={(v) => setColPrefs({ ...colPrefs, portfolio: !!v })}
+                    closeOnClick={false}
+                  >
+                    Portfolio
+                  </DropdownMenuCheckboxItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
             {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search || filters.portfolioHolding || filters.tag) && (
               <button onClick={clearFilters} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors ml-1">
                 <X className="h-3 w-3" /> Clear all
@@ -2030,6 +2108,7 @@ function TransactionsPageInner() {
                   <TableHead>Account</TableHead>
                   <TableHead>Category</TableHead>
                   <TableHead>Payee</TableHead>
+                  {colPrefs.portfolio && <TableHead>Portfolio</TableHead>}
                   <TableHead>Note</TableHead>
                   <TableHead className="text-right">Qty</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
@@ -2048,7 +2127,7 @@ function TransactionsPageInner() {
                       />
                     </TableCell>
                     <TableCell className="text-sm">{formatDate(t.date)}</TableCell>
-                    <TableCell className="text-sm">{t.accountName}</TableCell>
+                    <TableCell className="text-sm">{formatAccountLabel({ name: t.accountName, alias: t.accountAlias, type: t.accountType })}</TableCell>
                     <TableCell className="text-sm">
                       <span className="flex items-center gap-1">
                         {t.categoryName && (
@@ -2061,6 +2140,11 @@ function TransactionsPageInner() {
                       </span>
                     </TableCell>
                     <TableCell className="text-sm">{t.payee || "-"}</TableCell>
+                    {colPrefs.portfolio && (
+                      <TableCell className="text-sm text-muted-foreground">
+                        {t.portfolioHolding || "-"}
+                      </TableCell>
+                    )}
                     <TableCell className="text-sm text-muted-foreground max-w-60">
                       <div className="flex flex-col gap-1">
                         {t.note && <span className="truncate">{t.note}</span>}

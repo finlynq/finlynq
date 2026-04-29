@@ -81,10 +81,20 @@ else
   echo "==> Warning: DATABASE_URL not set, skipping backup"
 fi
 
-# 2.7. Run database migrations
-echo "==> Running database migrations..."
-run_as "npm run db:push"
-echo "==> Migrations complete"
+# 2.7. Schema migrations are NOT run from this script.
+#
+# Drizzle-Kit's `npm run db:push` used to live here, but in practice it
+# silently no-op'd during automated deploys (see issue #5 — the env var
+# `DATABASE_URL` set on the systemd unit doesn't survive the `sudo -u`
+# hop in `run_as`, so db:push falls back to its `postgres://localhost`
+# default URL and either fails authentication silently or connects to the
+# wrong DB). Keeping the step in here gave a false sense of automation
+# while the real schema changes had to be applied by hand anyway.
+#
+# Apply each schema change PER ENV via the playbook in
+# `pf-app/docs/migrations.md` BEFORE running this deploy. The deploy is
+# now strictly "pull code + npm install + build + restart"; the database
+# is the human's responsibility.
 
 # 3. Build
 if [ "$SKIP_BUILD" = false ]; then

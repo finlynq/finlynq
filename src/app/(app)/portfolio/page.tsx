@@ -333,6 +333,13 @@ export default function PortfolioPage() {
   // holding's native quote currency. Convenient for comparing apples to
   // apples across mixed-currency portfolios.
   const [showInReporting, setShowInReporting] = useState(false);
+  // Hide entries with no current position. For table rows: quantity is null
+  // or 0 (matches the row's own `hasMetrics` rule below — these are the
+  // rows that already render as "--" across Qty/Avg/Mkt Value). For chart
+  // buckets: aggregated value rounds to $0 (>0.005 keeps half-cent rounding
+  // safe). Default on — empty rows are noise on a value-weighted view.
+  // Toggle lives in the holdings table filter bar.
+  const [hideEmpty, setHideEmpty] = useState(true);
 
   // Fetch portfolio overview — re-runs when display currency changes so
   // totals + currency-as-holding prices reflect the user's choice.
@@ -358,6 +365,7 @@ export default function PortfolioPage() {
     if (!data) return [];
     let list = data.holdings;
     if (filter !== "all") list = list.filter(h => h.assetType === filter);
+    if (hideEmpty) list = list.filter(h => h.quantity != null && h.quantity !== 0);
 
     list = [...list].sort((a, b) => {
       let cmp = 0;
@@ -372,7 +380,7 @@ export default function PortfolioPage() {
       return sortDir === "desc" ? -cmp : cmp;
     });
     return list;
-  }, [data, filter, sortField, sortDir]);
+  }, [data, filter, sortField, sortDir, hideEmpty]);
 
   // Account groups for collapsible section
   const accountGroups = useMemo(() => {
@@ -444,23 +452,29 @@ export default function PortfolioPage() {
   // Build benchmark chart data
   const benchmarkChartData = buildBenchmarkChartData(benchmarks);
 
-  // Allocation data
+  // Allocation data — value-weighted in display currency. `value` powers
+  // both slice size and legend amount; we filter zero-value buckets when
+  // hideEmpty is on (>0.005 keeps half-cent rounding safe).
   const allocationByType = Object.entries(byType)
-    .filter(([, v]) => v.count > 0)
+    .filter(([, v]) => v.count > 0 && (!hideEmpty || v.value > 0.005))
     .map(([type, v]) => ({
       name: ASSET_TYPE_CONFIG[type]?.label ?? type,
-      value: v.count,
-      pct: summary.totalHoldings > 0 ? Math.round((v.count / summary.totalHoldings) * 100) : 0,
+      value: v.value,
+      pct: summary.totalValueDisplay > 0
+        ? Math.round((v.value / summary.totalValueDisplay) * 100)
+        : 0,
       color: ASSET_TYPE_CONFIG[type]?.color ?? "#64748b",
     }));
 
   const allocationByAccount = Object.entries(data.byAccount)
-    .filter(([, v]) => v.count > 0)
-    .sort(([, a], [, b]) => b.count - a.count)
+    .filter(([, v]) => v.count > 0 && (!hideEmpty || v.value > 0.005))
+    .sort(([, a], [, b]) => b.value - a.value)
     .map(([name, v]) => ({
       name,
-      value: v.count,
-      pct: summary.totalHoldings > 0 ? Math.round((v.count / summary.totalHoldings) * 100) : 0,
+      value: v.value,
+      pct: summary.totalValueDisplay > 0
+        ? Math.round((v.value / summary.totalValueDisplay) * 100)
+        : 0,
     }));
 
   // ETF X-Ray data
@@ -721,6 +735,15 @@ export default function PortfolioPage() {
                 ))}
               </div>
               <Button
+                variant={hideEmpty ? "default" : "outline"}
+                size="sm"
+                className="text-xs gap-1.5 h-7"
+                onClick={() => setHideEmpty(!hideEmpty)}
+                title="Hide holdings with no current position (quantity = 0, e.g. fully-sold)"
+              >
+                {hideEmpty ? "Hiding empty" : "Showing all"}
+              </Button>
+              <Button
                 variant={showInReporting ? "default" : "outline"}
                 size="sm"
                 className="text-xs gap-1.5 h-7"
@@ -931,6 +954,17 @@ export default function PortfolioPage() {
                   <TableRow>
                     <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                       No {filter === "all" ? "" : ASSET_TYPE_CONFIG[filter]?.label} holdings found.
+                      {hideEmpty && data.holdings.length > 0 && (
+                        <span className="block mt-1 text-xs">
+                          Showing only positions with quantity &gt; 0.
+                          <button
+                            onClick={() => setHideEmpty(false)}
+                            className="ml-1 underline hover:text-foreground"
+                          >
+                            Show all
+                          </button>
+                        </span>
+                      )}
                     </TableCell>
                   </TableRow>
                 )}
@@ -1287,7 +1321,7 @@ export default function PortfolioPage() {
                   <div key={d.name} className="flex items-center gap-2">
                     <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: d.color }} />
                     <span className="text-xs text-muted-foreground flex-1">{d.name}</span>
-                    <span className="text-xs font-medium tabular-nums">{d.value} ({d.pct}%)</span>
+                    <span className="text-xs font-medium tabular-nums">{formatCurrency(d.value, displayCurrency)} ({d.pct}%)</span>
                   </div>
                 ))}
               </div>
@@ -1332,7 +1366,7 @@ export default function PortfolioPage() {
                   <div key={d.name} className="flex items-center gap-2">
                     <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
                     <span className="text-xs text-muted-foreground flex-1 truncate">{d.name}</span>
-                    <span className="text-xs font-medium tabular-nums">{d.value} ({d.pct}%)</span>
+                    <span className="text-xs font-medium tabular-nums">{formatCurrency(d.value, displayCurrency)} ({d.pct}%)</span>
                   </div>
                 ))}
               </div>

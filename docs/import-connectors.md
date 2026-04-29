@@ -463,6 +463,39 @@ Don't regress on them without a new comment explaining the change.
    as siblings. Category-split groups (parent + N splits) intentionally
    don't share a linkId — the `transaction_splits` table already encodes
    that relation.
+12. **Dual-natured accounts get the account name as `portfolio_holding`.**
+   `Joint - USD` and `Joint - CAD` appear in BOTH `Accounts.csv` AND
+   `Portfolio.csv` — they're top-level accounts AND currency-sleeved
+   holdings of IBKR Joint. `holdingForAccountName(account.name)` in the
+   transform returns the Portfolio entry for the account when it's
+   dual-natured, and the emit paths use the account name as
+   `portfolio_holding` (not the CSV's `Portfolio holding` column, which
+   may point at a counterparty). Without this the aggregator misses
+   balance changes on the cash sleeves of a brokerage.
+13. **Orchestrator dedup MUST include archived accounts** (commit
+   [`152e4e6`](https://github.com/finlynq/finlynq/commit/152e4e6),
+   2026-04-27). The DB's `UNIQUE (user_id, name_lookup) WHERE
+   name_lookup IS NOT NULL` partial index on `accounts` spans archived
+   rows too — it doesn't filter by `archived = false`. Both
+   `materializeMapping` (API path) and `materializeZipMapping` (ZIP
+   path) call `getAccounts(userId, { includeArchived: true })` for the
+   dedup view; calling it with `includeArchived: false` would miss
+   archived rows in the in-memory map and 500 the import on the first
+   INSERT (real-world bug: user archived "Nissan Pathfinder",
+   re-imported the same WP file → dedup misses → INSERT collides on the
+   archived row's `name_lookup`). When dedup binds to an archived
+   account, `bindToExisting` auto-unarchives it via
+   `updateAccount(id, userId, { archived: false })` — otherwise
+   imported transactions land on a hidden account and silently
+   disappear from balances + pickers. Same helper covers the explicit
+   `finlynqId` path so the user-picked-an-archived-account-in-the-UI
+   case is also safe.
+14. **Aggregator skips `v1:` ciphertext rows and surfaces
+   `undecryptedTxCount`** in the response. Post-restart DEK-cache
+   misses otherwise spam the UI with 1000+ ciphertext-as-holding-name
+   orphans; the Portfolio page renders an amber "Sign in again to
+   unlock" banner when the count is non-zero. Mirror the same skip in
+   any new aggregator path.
 
 ---
 
