@@ -125,10 +125,9 @@ const putSchema = z.object({
 /**
  * PUT /api/portfolio — update an existing portfolio holding.
  *
- * Renames cascade to all transactions automatically because the portfolio
- * aggregator groups by `transactions.portfolio_holding_id` (integer FK) and
- * JOINs to `portfolio_holdings` for the display name. The legacy text column
- * `transactions.portfolio_holding` is the orphan-fallback path only.
+ * Renames cascade to all transactions automatically: the aggregator groups by
+ * `transactions.portfolio_holding_id` (integer FK) and JOINs to
+ * `portfolio_holdings` for the display name.
  *
  * Stream D dual-write: name_ct/name_lookup + symbol_ct/symbol_lookup are
  * regenerated whenever name or symbol changes. Requires an unlocked session
@@ -203,8 +202,8 @@ export async function PUT(request: NextRequest) {
  * DELETE /api/portfolio?id=N — remove a holding.
  *
  * The FK `transactions.portfolio_holding_id … ON DELETE SET NULL` auto-NULLs
- * referencing rows. Transactions survive (no data loss) and fall back to the
- * orphan-aggregation path until reassigned. The response reports the count
+ * referencing rows. Transactions survive (no data loss) but disappear from
+ * the portfolio aggregator until reassigned. The response reports the count
  * of unlinked transactions for transparency.
  */
 export async function DELETE(request: NextRequest) {

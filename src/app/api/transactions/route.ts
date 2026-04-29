@@ -3,11 +3,13 @@ import { getTransactions, getTransactionCount, createTransaction, updateTransact
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { getDEK } from "@/lib/crypto/dek-cache";
-import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch } from "@/lib/crypto/encrypted-columns";
+import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch, nameLookup } from "@/lib/crypto/encrypted-columns";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
 import { InvestmentHoldingRequiredError } from "@/lib/investment-account";
+import { db, schema } from "@/db";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 
@@ -73,27 +75,45 @@ export async function GET(request: NextRequest) {
 
   const params = request.nextUrl.searchParams;
   const search = params.get("search") ?? undefined;
-  // `portfolioHolding` is ciphertext-at-rest (AES-GCM with random IV), so it
-  // can't be filtered in SQL. We fetch the account-scoped set and match on
-  // plaintext after decryption — same pattern as `search`. Passing the
-  // account + holding pair from /portfolio → /transactions deep-links the
-  // user to every leg that touched a specific position.
-  const portfolioHolding = params.get("portfolioHolding") ?? undefined;
-  // FK fast-path: when /portfolio knows the holding's id, pass it instead
-  // of the name. SQL `WHERE portfolio_holding_id = ?` runs server-side and
-  // is much cheaper than the per-row decrypt below. Falls through to the
-  // name-based path if absent.
+  // `portfolioHolding` (name) is resolved server-side to a holding id and
+  // applied as a SQL `WHERE portfolio_holding_id = ?` filter. Phase 5
+  // (2026-04-29) eliminated the in-memory ciphertext scan — the FK is the
+  // source of truth and the legacy text column is NULL on every row.
+  const portfolioHoldingNameParam = params.get("portfolioHolding") ?? undefined;
   const portfolioHoldingIdParam = params.get("portfolioHoldingId");
-  const portfolioHoldingId = portfolioHoldingIdParam
+  let portfolioHoldingId = portfolioHoldingIdParam
     ? parseInt(portfolioHoldingIdParam)
     : undefined;
+  // Resolve name → id via the user's name_lookup HMAC. Returns empty when
+  // no holding matches that name (deleted, never existed) — short-circuits
+  // before the SQL roundtrip.
+  if (
+    portfolioHoldingNameParam &&
+    (portfolioHoldingId == null || !Number.isFinite(portfolioHoldingId)) &&
+    dek
+  ) {
+    const lookup = nameLookup(dek, portfolioHoldingNameParam);
+    const matched = await db
+      .select({ id: schema.portfolioHoldings.id })
+      .from(schema.portfolioHoldings)
+      .where(and(
+        eq(schema.portfolioHoldings.userId, userId),
+        eq(schema.portfolioHoldings.nameLookup, lookup),
+      ))
+      .limit(1);
+    if (matched[0]) {
+      portfolioHoldingId = matched[0].id;
+    } else {
+      return NextResponse.json([]);
+    }
+  }
   // Tag is an in-memory exact-match filter on the comma-split list. The
   // column is ciphertext-at-rest so SQL LIKE won't work, and substring
   // match on decrypted text would false-match (e.g. `source:X` in one tag
   // shouldn't match `source:XY` in another). Split then exact-compare each.
   const tag = params.get("tag") ?? undefined;
   // FK filter is SQL-side, so it's NOT a postDecryptFilter — paginate normally.
-  const postDecryptFilter = search || portfolioHolding || tag;
+  const postDecryptFilter = search || tag;
   const filters = {
     startDate: params.get("startDate") ?? undefined,
     endDate: params.get("endDate") ?? undefined,
@@ -113,10 +133,6 @@ export async function GET(request: NextRequest) {
 
   if (search) {
     decrypted = filterDecryptedBySearch(decrypted, search);
-  }
-
-  if (portfolioHolding) {
-    decrypted = decrypted.filter((r) => r.portfolioHolding === portfolioHolding);
   }
 
   if (tag) {
@@ -294,6 +310,9 @@ export async function POST(request: NextRequest) {
       data.portfolioHoldingId =
         (await resolver.resolve(data.accountId, data.portfolioHolding)) ?? undefined;
     }
+    // Phase 5: never persist the legacy text column. The FK is the source
+    // of truth and the column is being dropped in a follow-up release.
+    delete data.portfolioHolding;
     const encrypted = encryptTxWrite(auth.dek, data);
     const tx = await createTransaction(auth.userId, encrypted);
     invalidateUserTxCache(auth.userId);
@@ -343,6 +362,8 @@ export async function PUT(request: NextRequest) {
       data.portfolioHoldingId =
         (await resolver.resolve(data.accountId, data.portfolioHolding)) ?? undefined;
     }
+    // Phase 5: never persist the legacy text column.
+    delete data.portfolioHolding;
     const encrypted = encryptTxWrite(auth.dek, data);
     const tx = await updateTransaction(id, auth.userId, encrypted);
     invalidateUserTxCache(auth.userId);

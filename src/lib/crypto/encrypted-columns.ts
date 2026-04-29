@@ -39,12 +39,16 @@
 import { createHmac } from "crypto";
 import { encryptField, decryptField } from "./envelope";
 
-/** Columns on `transactions` that are ciphertext-at-rest in Phase 1. */
+/** Columns on `transactions` that are ciphertext-at-rest in Phase 1.
+ *  `portfolioHolding` was removed by Phase 5 (2026-04-29) — the FK
+ *  `portfolio_holding_id` is now the sole source of truth, the legacy
+ *  text column is NULLed by scripts/migrate-tx-portfolio-holding-phase5-null.sql,
+ *  and the holding name is decrypted off `portfolio_holdings.name_ct` via the
+ *  Stream D `decryptName()` helper. */
 export const TX_ENCRYPTED_FIELDS = [
   "payee",
   "note",
   "tags",
-  "portfolioHolding",
 ] as const;
 
 type TxEncryptedKey = (typeof TX_ENCRYPTED_FIELDS)[number];

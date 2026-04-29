@@ -354,7 +354,7 @@ function decryptTxRowFields(
   row: Record<string, unknown>
 ): Record<string, unknown> {
   if (!dek) return row;
-  for (const k of ["payee", "note", "tags", "portfolio_holding"] as const) {
+  for (const k of ["payee", "note", "tags"] as const) {
     const v = row[k];
     if (typeof v === "string") {
       row[k] = decryptField(dek, v) ?? v;
@@ -390,10 +390,12 @@ async function aggregateHoldings(
     : sql``;
   const dateFilter = opts?.since ? sql`AND t.date >= ${opts.since}` : sql``;
 
-  // Path (a): FK-bound rows. JOIN to portfolio_holdings so we get the
+  // FK-bound aggregation. JOIN to portfolio_holdings so we get the
   // (encrypted) display name in the same trip; decrypt it post-query and
   // key the aggregator by that. The decrypt cost is O(holdings) instead of
   // O(transactions) — much cheaper than the legacy per-tx decrypt.
+  // Phase 5 (2026-04-29) removed the orphan-fallback path; every tx now
+  // has portfolio_holding_id and the legacy text column is NULL.
   type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null };
   const out = new Map<string, Agg>();
   const fkRows = await q(db, sql`
@@ -419,24 +421,6 @@ async function aggregateHoldings(
     if (!name) name = String(r.holding_name ?? "");
     if (!name || name.startsWith("v1:")) continue;
     accumulate(out, name, Number(r.portfolio_holding_id ?? 0) || null, r);
-  }
-
-  // Path (b): orphan-fallback rows — text column populated but no FK yet.
-  // Pre-Phase-2 imports + post-deploy backfill window. Decrypt per row.
-  const orphanRows = await q(db, sql`
-    SELECT portfolio_holding, amount, quantity, date
-    FROM transactions
-    WHERE user_id = ${userId}
-      AND portfolio_holding_id IS NULL
-      AND portfolio_holding IS NOT NULL AND portfolio_holding != ''
-      ${opts?.buysOnly ? sql`AND amount < 0` : sql``}
-      ${opts?.since ? sql`AND date >= ${opts.since}` : sql``}
-  `);
-  for (const r of orphanRows) {
-    const ph = String(r.portfolio_holding ?? "");
-    const name = dek ? (decryptField(dek, ph) ?? "") : ph;
-    if (!name || name.startsWith("v1:")) continue;
-    accumulate(out, name, null, r);
   }
 
   return Array.from(out.values()).sort((a, b) => b.buy_amount - a.buy_amount);
