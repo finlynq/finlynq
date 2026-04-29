@@ -2142,7 +2142,12 @@ function TransactionsPageInner() {
                     <TableCell className="text-sm">{t.payee || "-"}</TableCell>
                     {colPrefs.portfolio && (
                       <TableCell className="text-sm text-muted-foreground">
-                        {t.portfolioHolding || "-"}
+                        {/* Mirror the Qty cell rule: a holding tag is only
+                            meaningful for an actual share movement. Dividends,
+                            reinvestments, and fees can carry portfolioHolding
+                            on the row but quantity=0 — show "-" so the column
+                            stays aligned with what the Qty column says. */}
+                        {t.quantity != null && t.quantity !== 0 ? (t.portfolioHolding || "-") : "-"}
                       </TableCell>
                     )}
                     <TableCell className="text-sm text-muted-foreground max-w-60">
