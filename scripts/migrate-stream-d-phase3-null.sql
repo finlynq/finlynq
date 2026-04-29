@@ -1,3 +1,11 @@
+-- ⚠️  SUPERSEDED by scripts/migrate-stream-d-phase3-per-user.sql + the runtime
+-- helper in src/lib/crypto/stream-d-phase3-null.ts. The eager all-or-nothing
+-- variant below was applied to PROD only on 2026-04-24. New environments
+-- (staging, dev) get the per-user lazy cutover instead — it's safe to run on
+-- DBs where some users still have un-backfilled rows or DEK-mismatch issues
+-- (the per-user helper checks both before NULLing). Kept here as a record of
+-- prod's eager run; do not run this script on new envs.
+--
 -- Stream D Phase 3 (pragmatic variant) — NULL the plaintext name columns on
 -- encrypted rows, keep the plaintext column in the schema. Same privacy
 -- benefit vs a DB-dump attacker (no readable plaintext on rows that were

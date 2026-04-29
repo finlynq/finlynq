@@ -30,6 +30,7 @@ import { deriveKEK, unwrapDEK, createWrappedDEKForPassword } from "@/lib/crypto/
 import { putDEK } from "@/lib/crypto/dek-cache";
 import { enqueueStreamDBackfill } from "@/lib/crypto/stream-d-backfill";
 import { enqueuePortfolioHoldingFkBackfill } from "@/lib/crypto/portfolio-holding-fk-backfill";
+import { enqueuePhase3NullIfReady } from "@/lib/crypto/stream-d-phase3-null";
 
 // Accept either {identifier, password} (preferred) OR {email, password}
 // (legacy clients). Both shapes normalise to an `identifier` string.
@@ -188,6 +189,11 @@ export async function POST(request: NextRequest) {
       // still have only the encrypted-text holding name. Independent of
       // Stream D — runs even if Stream D is already done for this user.
       enqueuePortfolioHoldingFkBackfill(user.id, dek);
+      // Stream D Phase 3 (per-user lazy): NULL the plaintext name columns
+      // once backfill is complete AND a sample row decrypts. Races with
+      // backfill above; the helper's blocking-row check naturally retries
+      // on the next login if backfill is still mid-flight.
+      enqueuePhase3NullIfReady(user.id, dek);
     }
 
     const response = NextResponse.json({ success: true });

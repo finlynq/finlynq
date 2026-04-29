@@ -21,6 +21,7 @@ import { getDEK, putDEK, deleteDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
 import { enqueueStreamDBackfill } from "@/lib/crypto/stream-d-backfill";
 import { enqueuePortfolioHoldingFkBackfill } from "@/lib/crypto/portfolio-holding-fk-backfill";
+import { enqueuePhase3NullIfReady } from "@/lib/crypto/stream-d-phase3-null";
 
 const verifySchema = z.object({
   mfaPendingToken: z.string().min(1, "Pending token is required"),
@@ -102,6 +103,8 @@ export async function POST(request: NextRequest) {
       // Stream D lazy backfill — same pattern as the non-MFA login path.
       enqueueStreamDBackfill(user.id, pendingDek);
       enqueuePortfolioHoldingFkBackfill(user.id, pendingDek);
+      // Phase 3 per-user plaintext NULL — same pattern as the non-MFA path.
+      enqueuePhase3NullIfReady(user.id, pendingDek);
     }
 
     const response = NextResponse.json({ success: true });
