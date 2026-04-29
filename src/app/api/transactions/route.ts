@@ -14,8 +14,11 @@ import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 const postSchema = z.object({
   date: z.string(),
   amount: z.number().optional(),       // account-currency amount; computed by server when entered* is provided
-  accountId: z.number(),
-  categoryId: z.number(),
+  accountId: z.number().int().positive({ message: "Please pick an account" }),
+  // Reject 0 (the UI's "no selection" sentinel) up front — letting it through
+  // to the INSERT raises a Postgres FK violation 23503 which surfaces as a
+  // confusing 500. Real category ids are positive serial values.
+  categoryId: z.number().int().positive({ message: "Please pick a category" }),
   currency: z.string().optional(),     // account currency; defaults to the account's currency
   // Phase 2 of the currency rework — the user-typed values. When provided,
   // the server triangulates to the account's currency and locks the rate.
@@ -40,8 +43,8 @@ const putSchema = z.object({
   id: z.number(),
   date: z.string().optional(),
   amount: z.number().optional(),
-  accountId: z.number().optional(),
-  categoryId: z.number().optional(),
+  accountId: z.number().int().positive({ message: "Please pick an account" }).optional(),
+  categoryId: z.number().int().positive({ message: "Please pick a category" }).optional(),
   currency: z.string().optional(),
   enteredAmount: z.number().optional(),
   enteredCurrency: z.string().optional(),
@@ -302,6 +305,15 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
+    // Postgres FK violation — typically a stale categoryId / accountId /
+    // portfolioHoldingId from a stale UI form. Map to 400 with a friendly
+    // pointer instead of leaking the SQL error as a 500.
+    if (typeof error === "object" && error !== null && (error as { code?: string }).code === "23503") {
+      return NextResponse.json(
+        { error: "Pick a valid account, category, and portfolio holding — one of them no longer exists.", code: "fk_violation" },
+        { status: 400 },
+      );
+    }
     await logApiError("POST", "/api/transactions", error, auth.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create transaction") }, { status: 500 });
   }
@@ -339,6 +351,12 @@ export async function PUT(request: NextRequest) {
     if (error instanceof InvestmentHoldingRequiredError) {
       return NextResponse.json(
         { error: error.message, code: error.code, accountId: error.accountId },
+        { status: 400 },
+      );
+    }
+    if (typeof error === "object" && error !== null && (error as { code?: string }).code === "23503") {
+      return NextResponse.json(
+        { error: "Pick a valid account, category, and portfolio holding — one of them no longer exists.", code: "fk_violation" },
         { status: 400 },
       );
     }
