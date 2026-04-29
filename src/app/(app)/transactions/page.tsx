@@ -752,23 +752,24 @@ function TransactionsPageInner() {
     setTransferEdit(null);
     setTransferReceivedTouched(false);
 
-    // Four-check rule for "open this in unified Transfer mode":
+    // Three-check rule for "open this in unified Transfer mode":
     //   1. row has link_id
-    //   2. exactly one sibling shares the link_id
-    //   3. both rows are in a type='R' (Reconciliation) category
-    //   4. the two rows reference DIFFERENT accounts
+    //   2. exactly one sibling shares the link_id (so N≤2 legs)
+    //   3. the two rows reference DIFFERENT accounts
     //
-    // Anything that fails the rule (WP liquidations with N>2 legs, same-
-    // account conversions, type-mismatched pairs from old data) falls back
-    // to the standard transaction-mode edit + linked-siblings panel.
-    if (t.linkId && t.categoryType === "R") {
+    // The legacy `category_type === 'R'` check was intentionally relaxed
+    // (#8): transfer-shaped pairs whose category was renamed by the user
+    // (e.g. `Non-Cash - Transfers`) still open here. Anything that fails
+    // the rule (WP liquidations with N>2 legs, same-account conversions)
+    // falls back to the standard transaction-mode edit + linked-siblings
+    // panel.
+    if (t.linkId) {
       fetch(`/api/transactions/linked?linkId=${encodeURIComponent(t.linkId)}&excludeId=${t.id}`)
         .then((r) => (r.ok ? r.json() : { data: [] }))
         .then((d: { data?: LinkedSibling[] }) => {
           const siblings = Array.isArray(d.data) ? d.data : [];
           const isCleanPair =
             siblings.length === 1 &&
-            siblings[0].categoryType === "R" &&
             siblings[0].accountId != null &&
             siblings[0].accountId !== t.accountId;
           if (isCleanPair) {
@@ -1193,9 +1194,15 @@ function TransactionsPageInner() {
 
               {/* Linked transactions — other legs of a multi-leg import
                   (transfer, same-account currency conversion, liquidation).
-                  Only shown when editing an existing tx with a linkId. */}
+                  Only shown when editing an existing tx with a linkId.
+                  Reaching this panel means the unified Edit Transfer dialog
+                  declined the row (N≠2 siblings, or same account) — so the
+                  user is editing one leg at a time. */}
               {editId && linkedSiblings.length > 0 && (
                 <div className="space-y-2 rounded-lg border border-sky-200 dark:border-sky-900 bg-sky-50/50 dark:bg-sky-950/30 p-3">
+                  <div className="text-[11px] text-sky-700/80 dark:text-sky-300/80">
+                    This transaction is part of a multi-leg group; legs are edited individually.
+                  </div>
                   <div className="flex items-center gap-1.5 text-xs font-medium text-sky-700 dark:text-sky-300">
                     <Link2 className="h-3.5 w-3.5" />
                     Linked transaction{linkedSiblings.length > 1 ? "s" : ""}
