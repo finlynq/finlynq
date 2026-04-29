@@ -1,0 +1,178 @@
+# Encryption architecture
+
+End-to-end envelope encryption for sensitive text columns. Pulled out of CLAUDE.md on 2026-04-28 to keep the load-bearing rules in one searchable file. The original design doc lives at [Research/encryption-architecture.md](../../../Research/encryption-architecture.md); this is the operational reference.
+
+## Envelope encryption (Phase 2 + Phase 3)
+
+Live on prod since 2026-04-22 (commits `fa79dee` → `8dea14e`). Sensitive text columns are encrypted at rest with AES-256-GCM using a per-user DEK; amounts, dates, and FKs stay plaintext so MCP aggregations work server-side.
+
+**Encrypted fields** (see [src/lib/crypto/encrypted-columns.ts](../../src/lib/crypto/encrypted-columns.ts)):
+- `transactions.payee`, `note`, `tags`, `portfolio_holding` (`TX_ENCRYPTED_FIELDS`)
+- `transaction_splits.note`, `description`, `tags` (`SPLIT_ENCRYPTED_FIELDS`)
+- `accounts.name`, `categories.name`, `goals.name`, `loans.name`, `subscriptions.name`, `portfolio_holdings.name` + `symbol` + `accounts.alias` — all migrated 2026-04-24 in Stream D via parallel `(name_ct, name_lookup)` columns
+
+**Key hierarchy:**
+- User password → scrypt KDF → KEK (in memory only, discarded after wrap/unwrap)
+- KEK wraps the per-user DEK; wrapped DEK stored in `users.dek_wrapped`
+- DEK lives in an in-memory cache keyed by JWT `jti` (TTL = session TTL, plus a 2h sliding idle window)
+- AES-256-GCM with random IV per row encrypts each field; `v1:` prefix marks ciphertext
+
+**Primitives:**
+- [src/lib/crypto/envelope.ts](../../src/lib/crypto/envelope.ts) — scrypt KDF, AES-GCM wrap/unwrap, field encrypt/decrypt with `v1:` prefix and legacy-plaintext passthrough
+- [src/lib/crypto/dek-cache.ts](../../src/lib/crypto/dek-cache.ts) — session-keyed cache with sliding idle window
+- [src/lib/crypto/encrypted-columns.ts](../../src/lib/crypto/encrypted-columns.ts) — Drizzle column helpers
+- [src/lib/crypto/staging-envelope.ts](../../src/lib/crypto/staging-envelope.ts) — `PF_STAGING_KEY`-wrapped envelope for the email-import staging window
+- [src/lib/crypto/file-envelope.ts](../../src/lib/crypto/file-envelope.ts) — `v1\0`-prefixed disk envelope for MCP uploads
+
+## Read vs write auth guards
+
+**Important distinction.** Misapplying these is the single most common encryption-adjacent regression.
+
+**Writes** that store encrypted data use `requireEncryption()` (returns 423 if no DEK). Silently writing plaintext into a DB that's supposed to be encrypted is worse than blocking the write. Covers:
+- `/api/transactions` POST/PUT
+- `/api/transactions/bulk` (update_note/payee/tags)
+- `/api/transactions/splits` POST
+- `/api/transactions/transfer` POST/PUT/DELETE
+- `/api/data/import`, `/api/import/execute`, `/api/import/backfill`, `/api/import/email-config`
+- `/api/auth/wipe-account`
+- `/api/settings/api-key` POST
+- MCP HTTP `record_transaction` / `bulk_record_transactions` / `update_transaction` / `record_transfer` / `update_transfer` / `delete_transfer`
+
+**Reads** use `requireAuth()` + `getDEK(sessionId)` (nullable DEK passed down). Decrypt helpers (`decryptTxRows`, `decryptSplitRows`, `decryptField`) short-circuit when DEK is null — rows pass through unchanged, so encrypted rows surface as `v1:...` ciphertext rather than 423-ing the whole page. Legacy plaintext rows always work. This matters because the in-memory DEK cache is wiped on every deploy restart; a hard 423 on read would block every logged-in user until they re-log in. Covers:
+- `/api/dashboard`, `/api/recap`, `/api/recurring`, `/api/forecast`
+- `/api/portfolio/overview`, `/api/transactions` GET, `/api/transactions/splits` GET
+- `/api/transactions/suggest`, `/api/insights`, `/api/chat`
+- `/api/data/export`, `/api/settings/api-key` GET
+
+The original Phase 3 deploy used `requireEncryption()` on read routes and 423'd every logged-in session after the deploy restart. Hotfix chain `4531988` → `35b79c5` rewrote reads to the nullable-DEK pattern.
+
+## Auth-tag failure resilience
+
+A null DEK from cache is one failure mode. A *valid DEK that doesn't match the row's ciphertext* is another. AES-GCM throws `Unsupported state or unable to authenticate data` from `Decipheriv.final()` and would otherwise 500 every read for the affected user. All read paths now soft-fall-back instead of throwing.
+
+Shipped 2026-04-27 in commits `152e4e6` + `b45c9cf` + `efd7de2`.
+
+- **`decryptName`, `decryptTxRow`, `decryptSplitRow`** in [src/lib/crypto/encrypted-columns.ts](../../src/lib/crypto/encrypted-columns.ts) wrap their `decryptField` calls in `try/catch`. On failure they log a single `[envelope] decryptName failed; falling back to plaintext` warn line (single, not per-row spam — log dedup is left to journald) and return the dual-write plaintext column when present, or the raw `v1:...` ciphertext as a UI marker.
+- **`tryDecryptField(dek, value, context?)`** in [src/lib/crypto/envelope.ts](../../src/lib/crypto/envelope.ts) is the helper for direct-decrypt call sites. Returns `null` on auth-tag failure (NOT the raw ciphertext — see footgun below) so callers can use the standard `tryDecryptField(dek, ct, "label") ?? plaintextFallback` pattern. Used by:
+  - [import-pipeline.buildLookups](../../src/lib/import-pipeline.ts)
+  - `/api/forecast`, `/api/recurring`, `/api/insights`, `/api/transactions/suggest`, `/api/data/export`
+  - [holdings-value.ts](../../src/lib/holdings-value.ts), [weekly-recap.ts](../../src/lib/weekly-recap.ts) (5 sites)
+  - [external-import/credentials.ts](../../src/lib/external-import/credentials.ts)
+- **Strict `decryptField` stays for write paths** where silent fallback would mask real bugs (e.g. the import pipeline's `import_hash` generation, OAuth token unwrap, MFA secret decrypt). Don't replace it everywhere — the soft fallback is for read paths that have a usable plaintext column or where a UI marker beats 500ing the whole page.
+
+### Footgun — `tryDecryptField` MUST return null on failure
+
+Never return the raw ciphertext on decrypt failure. The first iteration of the helper returned `value` on failure to "preserve a marker." That broke every `?? plaintext` fallback at the call sites — `"v1:..."` is truthy, so `??` skipped the fallback and the import preview keyed `accountMap` on ciphertext, producing 6409 false-negative "Unknown account" errors for an affected user.
+
+**Lesson:** never return a truthy "marker" value when the caller's fallback chain depends on null/undefined. If a caller wants a UI marker, it can write `tryDecryptField(...) ?? value`.
+
+### Categories endpoint wrapper
+
+`/api/categories` GET got a `try/catch + logApiError + safeErrorMessage` wrapper to match the `/api/accounts` pattern. Was returning empty 500 bodies that triggered "Unexpected end of JSON input" on the client. Apply the same wrapper to any new route that calls `decryptNamedRows`.
+
+### Known open issue — pathfinder DEK mismatch
+
+User `6c4f164a-…` has 38 accounts / 50 categories / 60 portfolio_holdings whose `name_ct` columns can't be decrypted with the current cached DEK. `encryption_v=1`, `kek_salt`/`dek_wrapped` lengths look correct, login successfully unwraps the DEK 5+ times, `PF_PEPPER` hasn't rotated. Root cause is unidentified. Follow-up: [routine `trig_01WY3vqzqWgxqf8hQ4Bx4hJ5`](https://claude.ai/code/routines/trig_01WY3vqzqWgxqf8hQ4Bx4hJ5) will deploy short-lived `PF_CRYPTO_DEBUG=1` DEK-fingerprint logging to compare login-time vs decrypt-time DEKs. Until then the soft-fallback layer keeps the user's app working off the dual-written plaintext columns.
+
+## Invariants — do not violate
+
+### `import_hash` always over plaintext
+
+`generateImportHash` in [src/lib/import-hash.ts](../../src/lib/import-hash.ts) MUST always see plaintext payee. AES-GCM uses a random IV so ciphertext hashes are non-deterministic and dedup would break. `/api/import/backfill` decrypts before hashing existing rows.
+
+### Auto-categorize rule schema — NO `match_payee` column
+
+The schema is `(match_field, match_type, match_value)` — there is NO `match_payee` column (hasn't been for a long time; an older form referenced one and broke every MCP `record_transaction` call when an active rule existed; fix shipped in commit [`7d70677`](https://github.com/finlynq/finlynq/commit/7d70677)).
+
+Both [src/app/api/transactions/suggest/route.ts](../../src/app/api/transactions/suggest/route.ts) and the MCP HTTP `autoCategory` helper now SQL-filter on `match_field='payee' AND is_active=1 AND assign_category_id IS NOT NULL`, then iterate in memory in priority order to apply `contains` / `exact` / `regex` semantics — same as [src/lib/auto-categorize.ts](../../src/lib/auto-categorize.ts).
+
+The historical-frequency fallback (payee-equality against existing rows) also runs in memory after decryption when a DEK is present.
+
+**Other MCP rule-management tools** (`apply_rules_to_uncategorized`, `create_rule`, `list_rules`, `update_rule` HTTP + stdio versions) all reference `match_payee` similarly and are similarly broken — pre-existing, no regression — needs a parallel migration in a follow-up sweep.
+
+### Portfolio aggregation — `qty>0` is a buy regardless of amount sign
+
+Finlynq-native data records a buy as `amt<0 + qty>0` (paid cash, got shares); the WP ZIP importer records it as `amt>0 + qty>0` (WP's "position balance grew by X" convention). The aggregator tolerates both. Dividends stay the fallback when `qty === 0 && amt > 0`.
+
+**Every aggregator must implement the same rule** — keying on `amt<0` instead of `qty>0` silently drops every WP-imported holding leg (root cause of a 2026-04-27 prod symptom where the web Portfolio page showed `Uniswap = 1.2606` shares but MCP `analyze_holding` returned `0`; fix in commit [`8046b9b`](https://github.com/finlynq/finlynq/commit/8046b9b)).
+
+Five implementations to keep in sync:
+- [/api/portfolio/overview/route.ts:119-124](../../src/app/api/portfolio/overview/route.ts) (FK SQL CASE, canonical) + its orphan-fallback in-memory branch
+- MCP HTTP [register-tools-pg.ts](../../mcp-server/register-tools-pg.ts) `accumulate()` + `analyze_holding` loop + `recentTransactions[].type` label
+- [src/lib/holdings-value.ts](../../src/lib/holdings-value.ts) FK SQL CASE + orphan-fallback
+- MCP stdio [register-core-tools.ts](../../mcp-server/register-core-tools.ts) `analyze_holding` loop
+
+The aggregator also *skips any row whose decrypted key still starts with `v1:`* and surfaces the count as `undecryptedTxCount` in the response — post-restart DEK-cache misses otherwise spam the UI with 1000+ ciphertext-as-holding-name orphans; the Portfolio page renders an amber "Sign in again to unlock" banner when that count is non-zero.
+
+### Portfolio aggregation uses integer FK, not the encrypted text column
+
+SQL `GROUP BY portfolio_holding_id` is the canonical path post-2026-04-26 — the integer FK is plaintext metadata so groups bucket correctly. `aggregateHoldings()` in `mcp-server/register-tools-pg.ts`, the `/api/portfolio/overview` route, and `src/lib/holdings-value.ts` all run a SQL aggregation on the FK plus a JOIN to `portfolio_holdings.name_ct` for the display name. They keep an orphan-fallback decrypt loop scoped to `WHERE portfolio_holding_id IS NULL AND portfolio_holding IS NOT NULL` so pre-Phase-2 rows still aggregate until backfill catches up; once Phase 5 NULLs the text column and `withoutFk = 0`, the fallback can be deleted.
+
+## Secret-derived DEK envelopes
+
+The user password isn't the only key the DEK gets wrapped under. Each long-lived secret that authenticates against the API gets its own envelope so MCP-over-OAuth, API-key, and webhook flows can decrypt user data without re-prompting for the password.
+
+### API-key DEK envelope
+
+When a user creates/regenerates their API key while logged in, the DEK is also wrapped with `secretWrapKey("dek|"+api_key)` and stored in `settings` under key `api_key_dek`. Same wrap helper (`wrapDEKForSecret` / `unwrapDEKForSecret` in [src/lib/api-auth.ts](../../src/lib/api-auth.ts)) is reused for OAuth access tokens and the email-webhook secret.
+
+API keys themselves are stored hashed (`sha256:<64 hex>`) — see [api-auth.ts](../../src/lib/api-auth.ts) `getOrCreateApiKey` and `regenerateApiKey`. `validateApiKey` does a hashed lookup first, falls back to a raw lookup + migrates the row in place on access. The DEK-envelope path is untouched — client-supplied raw key per request is still the unwrap input.
+
+### OAuth MCP DEK envelope
+
+`oauth_authorization_codes.dek_wrapped` holds the session DEK wrapped under `secretWrapKey("dek|"+code)` at authorize time; token exchange unwraps and re-wraps under `secretWrapKey("dek|"+access_token)` into `oauth_access_tokens.dek_wrapped`. Refresh rotations carry the DEK forward via the new `oauth_access_tokens.dek_wrapped_refresh` column (added in the 2026-04-24 Privacy Hardening batch). `validateOauthToken()` returns `{userId, dek}` so MCP-over-OAuth sees decrypted data without re-auth.
+
+OAuth code consumption uses `DELETE ... RETURNING` (atomic claim — concurrent exchanges on the same code can no longer both succeed). Refresh rotation atomically flips the live row to `revoked_at = now()` and detects reuse: presenting a revoked refresh token revokes every live access token for that user (token-theft containment).
+
+### Webhook DEK envelope
+
+When the user regenerates the email webhook from settings, the DEK is wrapped with `secretWrapKey("dek|"+webhook_secret)` and stored as `settings.email_webhook_dek`. The webhook handler unwraps on each call so email-forwarded imports land as ciphertext.
+
+## Wipe-account primitive
+
+`POST /api/auth/wipe-account` (password + `confirmation: "WIPE"`) deletes all user-owned rows and installs a fresh DEK wrapped under the same password. `/api/auth/password-reset/confirm` shares the primitive (`wipeUserDataAndRewrap()` in [src/lib/auth/queries.ts](../../src/lib/auth/queries.ts)) — requires `confirmation: "WIPE"`.
+
+**Atomicity** (commits [`5571070`](https://github.com/finlynq/finlynq/commit/5571070) + [`ad87419`](https://github.com/finlynq/finlynq/commit/ad87419)): the entire delete sequence + the final DEK rewrap run inside a single `db.transaction(async (tx) => ...)` so a late FK failure rolls back instead of leaving the user signed in to a half-wiped account whose DEK was never rotated.
+
+**Strict user_id isolation:** every delete filters by `user_id` only — never by FK reach — so the wipe can ONLY remove rows owned by the wiping user. If a row in another user's table has an FK pointing at one of this user's accounts/categories (cross-tenant data leak from older bugs), the wipe fails with FK 23503 + transaction rollback rather than silently destroying that other user's data. Cleanup of pre-existing cross-tenant rows is an admin out-of-band task.
+
+The `mcp_uploads` file unlink loop runs BEFORE the DB transaction (unlink is not transactional — better to leak a DB row than orphan a plaintext file on disk if the wipe later fails).
+
+`wipeUserDataAndRewrap` also bumps `users.encryptionV` so multi-tab sessions can't keep using the old cached DEK after a password reset.
+
+The wipe cleans `mcp_uploads`+files, `staged_imports`, `staged_transactions`, `password_reset_tokens`, `oauth_access_tokens`, `oauth_authorization_codes`, and the user's own `incoming_emails` rows.
+
+## Backup-restore FK remap
+
+Commit [`ad87419`](https://github.com/finlynq/finlynq/commit/ad87419), 2026-04-27. `/api/data/import` (the JSON backup-restore handler) used to call a `strip()` helper that only removed `id` and forced `userId`, leaving `accountId` / `categoryId` / `assignCategoryId` UNCHANGED from the source backup. When user A's backup was restored as user B, dependent tables silently inherited user A's old account/category integer IDs — and if those IDs still existed in the same DB, Postgres accepted the FK and the row became a cross-tenant reference.
+
+Concrete blast radius on prod: a test user's restore created 60 portfolio_holdings owned by them but pointing at the admin's accounts, which then blocked the admin's wipe with FK 23503.
+
+The fixed `strip()` takes optional `{ accountIdMap, categoryIdMap }` and remaps each FK column through them, **throwing on an unmapped FK** so a corrupt or partial backup fails loudly rather than silently writing leaked rows. Every restore call site that touches an FK-bearing table now passes the right map. Tables with no `accountId`/`categoryId` (target_allocations, fx_rates, import_templates, contribution_room, notifications) keep the old single-arg call.
+
+## Grace migration
+
+Pre-encryption accounts (bcrypt hash but no DEK columns) auto-promote on their next successful login. Existing plaintext rows stay readable via the `v1:` passthrough in `decryptField`. See `promoteUserToEncryption` in [src/lib/auth/queries.ts](../../src/lib/auth/queries.ts).
+
+## Forgot-password policy
+
+Zero-knowledge — there is no recovery key. The reset flow wipes all user data and provisions a fresh DEK. Admin password reset is NOT possible without destroying the user's data.
+
+## Stale-session UX
+
+After a deploy restart, the in-memory DEK cache is empty. Existing JWTs are still valid, but their DEK is gone. Reads degrade gracefully (users see `v1:...` blobs in payee/note/tags until they re-login). Writes that need the DEK return 423 — the client should guide the user to re-login. This is the intentional design; there's no server-side fix short of adding a Redis-backed DEK cache.
+
+The deploy-generation force-logout (see [mcp.md](mcp.md)) addresses this proactively by invalidating JWTs across deploy boundaries so users get a clean re-auth instead of a degraded session.
+
+## Phase 3 status — what's done vs deferred
+
+Phase 2 + Phase 3 shipped to prod on 2026-04-22.
+
+- Writes encrypt on all session-authed paths. Stdio MCP stays plaintext (no DEK in that transport). As of the 2026-04-22 security audit remediation, stdio tools ARE user-scoped via `PF_USER_ID`, but the data they write is still plaintext. Known self-hosted limitation.
+- Reads decrypt with the soft-guard pattern.
+- `import_hash` on plaintext.
+- Auto-categorize fixed.
+- Wipe-account + password-reset-confirm.
+- OAuth + webhook DEK envelopes wired.
+- **Phase 4+ (Stream D):** display-name encryption on accounts/categories/goals/loans/subscriptions/portfolio_holdings shipped 2026-04-24 in the Privacy Hardening batch. See [STREAM_D.md](../../../STREAM_D.md).
+- **Still deferred:** `users.display_name`, `contribution_room.note`. Lower priority.
