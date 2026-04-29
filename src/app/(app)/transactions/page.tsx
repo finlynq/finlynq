@@ -40,6 +40,9 @@ type Transaction = {
   enteredFxRate?: number | null;
   quantity: number | null;
   portfolioHolding: string | null;
+  // Ticker for the transaction's holding (e.g. "VGRO.TO"). Surfaced so the
+  // optional Ticker column doesn't need a separate fetch per row.
+  portfolioHoldingSymbol?: string | null;
   note: string;
   payee: string;
   tags: string;
@@ -173,25 +176,217 @@ function TransactionsPageInner() {
   });
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Optional table columns persisted in localStorage. Keep this off by default
-  // so users without investment activity don't see a column of dashes. Bumping
-  // the storage key (-vN) is the migration story when the shape grows.
-  type TxColPrefs = { portfolio: boolean };
-  const COL_PREFS_KEY = "pf-tx-cols-v1";
-  const defaultColPrefs: TxColPrefs = { portfolio: false };
-  const [colPrefs, setColPrefs] = useState<TxColPrefs>(defaultColPrefs);
+  // Per-user table column layout (visibility + order) persisted via
+  // /api/settings/tx-columns. Mirrors display-currency's pattern — last-
+  // writer-wins is acceptable for column prefs. Migrates the legacy
+  // localStorage["pf-tx-cols-v1"] blob on first load (then clears it) so
+  // existing users keep their Portfolio toggle.
+  type ColumnId =
+    | "select"
+    | "date"
+    | "account"
+    | "accountType"
+    | "accountName"
+    | "accountAlias"
+    | "category"
+    | "payee"
+    | "portfolio"
+    | "portfolioTicker"
+    | "note"
+    | "tags"
+    | "quantity"
+    | "amount"
+    | "actions";
+  type ColumnPref = { id: ColumnId; visible: boolean };
+  const ALL_COLUMNS: ColumnId[] = [
+    "select",
+    "date",
+    "account",
+    "accountType",
+    "accountName",
+    "accountAlias",
+    "category",
+    "payee",
+    "portfolio",
+    "portfolioTicker",
+    "note",
+    "tags",
+    "quantity",
+    "amount",
+    "actions",
+  ];
+  const COLUMN_LABELS: Record<ColumnId, string> = {
+    select: "Select",
+    date: "Date",
+    account: "Account",
+    accountType: "Account type",
+    accountName: "Account name",
+    accountAlias: "Account alias",
+    category: "Category",
+    payee: "Payee",
+    portfolio: "Portfolio",
+    portfolioTicker: "Ticker",
+    note: "Note",
+    tags: "Tags",
+    quantity: "Qty",
+    amount: "Amount",
+    actions: "Actions",
+  };
+  // select + actions are render scaffolding (checkbox column + the per-row
+  // edit/split/delete icon group). Hiding them would break bulk selection
+  // and inline editing — keep them locked on.
+  const TOGGLEABLE_COLUMNS: Set<ColumnId> = new Set([
+    "date",
+    "account",
+    "accountType",
+    "accountName",
+    "accountAlias",
+    "category",
+    "payee",
+    "portfolio",
+    "portfolioTicker",
+    "note",
+    "tags",
+    "quantity",
+    "amount",
+  ]);
+  const DEFAULT_COL_PREFS: ColumnPref[] = [
+    { id: "select", visible: true },
+    { id: "date", visible: true },
+    { id: "account", visible: true },
+    { id: "accountType", visible: false },
+    { id: "accountName", visible: false },
+    { id: "accountAlias", visible: false },
+    { id: "category", visible: true },
+    { id: "payee", visible: true },
+    { id: "portfolio", visible: false },
+    { id: "portfolioTicker", visible: false },
+    { id: "note", visible: true },
+    { id: "tags", visible: false },
+    { id: "quantity", visible: true },
+    { id: "amount", visible: true },
+    { id: "actions", visible: true },
+  ];
+  function mergeColPrefs(saved: ColumnPref[] | null | undefined): ColumnPref[] {
+    if (!saved || saved.length === 0) return DEFAULT_COL_PREFS;
+    const seen = new Set<ColumnId>();
+    const out: ColumnPref[] = [];
+    for (const entry of saved) {
+      if (!ALL_COLUMNS.includes(entry.id)) continue;
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      out.push({ id: entry.id, visible: !!entry.visible });
+    }
+    for (const def of DEFAULT_COL_PREFS) {
+      if (seen.has(def.id)) continue;
+      out.push(def);
+    }
+    return out;
+  }
+  const [columnPrefs, setColumnPrefs] = useState<ColumnPref[]>(DEFAULT_COL_PREFS);
+  const colPrefsLoaded = useRef(false);
+  const colPrefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(COL_PREFS_KEY);
-      if (raw) setColPrefs({ ...defaultColPrefs, ...JSON.parse(raw) });
-    } catch { /* ignore */ }
-    // defaultColPrefs is a stable literal in this scope; we want this hook to
-    // run once on mount, mirroring the read-once-on-load contract.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let cancelled = false;
+    (async () => {
+      // Read the legacy localStorage blob only when the server endpoint has
+      // never been written for this user — otherwise the server-side layout
+      // wins (cross-device sync). The legacy blob is cleared after one
+      // successful migration.
+      let legacy: ColumnPref[] | null = null;
+      try {
+        const raw = localStorage.getItem("pf-tx-cols-v1");
+        if (raw) {
+          const parsed = JSON.parse(raw) as { portfolio?: boolean };
+          if (parsed && typeof parsed === "object") {
+            legacy = DEFAULT_COL_PREFS.map((c) =>
+              c.id === "portfolio"
+                ? { ...c, visible: !!parsed.portfolio }
+                : c,
+            );
+          }
+        }
+      } catch { /* ignore */ }
+      try {
+        const r = await fetch("/api/settings/tx-columns");
+        if (cancelled) return;
+        if (r.ok) {
+          const d = (await r.json()) as { columns?: ColumnPref[] };
+          const serverPrefs = mergeColPrefs(d?.columns ?? null);
+          // If the server has the canonical defaults AND we have a legacy
+          // blob, push the legacy preferences up so the migration sticks.
+          const isServerDefault =
+            !d?.columns || d.columns.length === 0;
+          if (legacy && isServerDefault) {
+            setColumnPrefs(legacy);
+            try {
+              await fetch("/api/settings/tx-columns", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ columns: legacy }),
+              });
+              localStorage.removeItem("pf-tx-cols-v1");
+            } catch { /* best-effort */ }
+          } else {
+            setColumnPrefs(serverPrefs);
+            try { localStorage.removeItem("pf-tx-cols-v1"); } catch { /* ignore */ }
+          }
+        } else if (legacy) {
+          setColumnPrefs(legacy);
+        }
+      } catch {
+        if (legacy) setColumnPrefs(legacy);
+      } finally {
+        if (!cancelled) colPrefsLoaded.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
   useEffect(() => {
-    try { localStorage.setItem(COL_PREFS_KEY, JSON.stringify(colPrefs)); } catch { /* ignore */ }
-  }, [colPrefs]);
+    if (!colPrefsLoaded.current) return;
+    if (colPrefsSaveTimer.current) clearTimeout(colPrefsSaveTimer.current);
+    colPrefsSaveTimer.current = setTimeout(() => {
+      fetch("/api/settings/tx-columns", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ columns: columnPrefs }),
+      }).catch(() => { /* swallow — next save retries */ });
+    }, 400);
+    return () => {
+      if (colPrefsSaveTimer.current) clearTimeout(colPrefsSaveTimer.current);
+    };
+  }, [columnPrefs]);
+  const isColVisible = (id: ColumnId): boolean => {
+    const e = columnPrefs.find((c) => c.id === id);
+    return e ? e.visible : true;
+  };
+  const toggleCol = (id: ColumnId, value: boolean) => {
+    setColumnPrefs((prev) => prev.map((c) => (c.id === id ? { ...c, visible: value } : c)));
+  };
+  const resetColPrefs = () => setColumnPrefs(DEFAULT_COL_PREFS);
+  // Native HTML5 drag state — id of the column currently being dragged. The
+  // ondragover handler reorders in place, so we only need to track the source.
+  const [draggingCol, setDraggingCol] = useState<ColumnId | null>(null);
+  const onColDragStart = (id: ColumnId) => (e: React.DragEvent<HTMLTableCellElement>) => {
+    setDraggingCol(id);
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", id); } catch { /* ignore */ }
+  };
+  const onColDragOver = (id: ColumnId) => (e: React.DragEvent<HTMLTableCellElement>) => {
+    if (!draggingCol || draggingCol === id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setColumnPrefs((prev) => {
+      const fromIdx = prev.findIndex((c) => c.id === draggingCol);
+      const toIdx = prev.findIndex((c) => c.id === id);
+      if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return prev;
+      const next = prev.slice();
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      return next;
+    });
+  };
+  const onColDragEnd = () => setDraggingCol(null);
 
   // Add/edit dialog
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -1966,16 +2161,28 @@ function TransactionsPageInner() {
                   </Button>
                 }
               />
-              <DropdownMenuContent align="start" className="min-w-44">
+              <DropdownMenuContent align="start" className="min-w-56 max-h-96 overflow-y-auto">
                 <DropdownMenuGroup>
-                  <DropdownMenuLabel>Optional columns</DropdownMenuLabel>
-                  <DropdownMenuCheckboxItem
-                    checked={colPrefs.portfolio}
-                    onCheckedChange={(v) => setColPrefs({ ...colPrefs, portfolio: !!v })}
-                    closeOnClick={false}
+                  <DropdownMenuLabel>Visible columns</DropdownMenuLabel>
+                  {columnPrefs
+                    .filter((c) => TOGGLEABLE_COLUMNS.has(c.id))
+                    .map((c) => (
+                      <DropdownMenuCheckboxItem
+                        key={c.id}
+                        checked={c.visible}
+                        onCheckedChange={(v) => toggleCol(c.id, !!v)}
+                        closeOnClick={false}
+                      >
+                        {COLUMN_LABELS[c.id]}
+                      </DropdownMenuCheckboxItem>
+                    ))}
+                  <button
+                    type="button"
+                    onClick={resetColPrefs}
+                    className="w-full text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors mt-1 border-t"
                   >
-                    Portfolio
-                  </DropdownMenuCheckboxItem>
+                    Reset to default
+                  </button>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -2095,124 +2302,196 @@ function TransactionsPageInner() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-10">
-                    <input
-                      type="checkbox"
-                      checked={allSelected}
-                      onChange={toggleAll}
-                      className="h-4 w-4 rounded border-input cursor-pointer"
-                      title="Select all"
-                    />
-                  </TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Account</TableHead>
-                  <TableHead>Category</TableHead>
-                  <TableHead>Payee</TableHead>
-                  {colPrefs.portfolio && <TableHead>Portfolio</TableHead>}
-                  <TableHead>Note</TableHead>
-                  <TableHead className="text-right">Qty</TableHead>
-                  <TableHead className="text-right">Amount</TableHead>
-                  <TableHead className="w-24"></TableHead>
+                  {columnPrefs.filter((c) => c.visible).map((c) => {
+                    const isDraggable = TOGGLEABLE_COLUMNS.has(c.id);
+                    const isAmount = c.id === "amount" || c.id === "quantity";
+                    const widthClass =
+                      c.id === "select" ? "w-10" :
+                      c.id === "actions" ? "w-24" :
+                      "";
+                    const isDragging = draggingCol === c.id;
+                    return (
+                      <TableHead
+                        key={c.id}
+                        className={`${widthClass} ${isAmount ? "text-right" : ""} ${isDraggable ? "cursor-grab select-none" : ""} ${isDragging ? "opacity-50" : ""}`}
+                        draggable={isDraggable}
+                        onDragStart={isDraggable ? onColDragStart(c.id) : undefined}
+                        onDragOver={isDraggable ? onColDragOver(c.id) : undefined}
+                        onDragEnd={isDraggable ? onColDragEnd : undefined}
+                      >
+                        {c.id === "select" ? (
+                          <input
+                            type="checkbox"
+                            checked={allSelected}
+                            onChange={toggleAll}
+                            className="h-4 w-4 rounded border-input cursor-pointer"
+                            title="Select all"
+                          />
+                        ) : c.id === "actions" ? (
+                          ""
+                        ) : (
+                          COLUMN_LABELS[c.id]
+                        )}
+                      </TableHead>
+                    );
+                  })}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {txns.map((t) => (
                   <TableRow key={t.id} className={`hover:bg-muted/30 ${selected.has(t.id) ? "bg-primary/5" : ""}`}>
-                    <TableCell>
-                      <input
-                        type="checkbox"
-                        checked={selected.has(t.id)}
-                        onChange={() => toggleOne(t.id)}
-                        className="h-4 w-4 rounded border-input cursor-pointer"
-                      />
-                    </TableCell>
-                    <TableCell className="text-sm">{formatDate(t.date)}</TableCell>
-                    <TableCell className="text-sm">{formatAccountLabel({ name: t.accountName, alias: t.accountAlias, type: t.accountType })}</TableCell>
-                    <TableCell className="text-sm">
-                      <span className="flex items-center gap-1">
-                        {t.categoryName && (
-                          <Badge variant="outline" className={`text-xs ${getCategoryBadgeClass(t.categoryType)}`}>{t.categoryName}</Badge>
-                        )}
-                        <SplitBadge transactionId={t.id} />
-                        {t.linkId && (
-                          <Link2 className="h-3 w-3 text-sky-500 shrink-0" aria-label="Linked transaction" />
-                        )}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-sm">{t.payee || "-"}</TableCell>
-                    {colPrefs.portfolio && (
-                      <TableCell className="text-sm text-muted-foreground">
-                        {t.portfolioHolding || "-"}
-                      </TableCell>
-                    )}
-                    <TableCell className="text-sm text-muted-foreground max-w-60">
-                      <div className="flex flex-col gap-1">
-                        {t.note && <span className="truncate">{t.note}</span>}
-                        {t.tags && (
-                          <div className="flex flex-wrap gap-1">
-                            {t.tags.split(",").map((rawTag) => rawTag.trim()).filter(Boolean).map((tagValue) => (
-                              <button
-                                key={tagValue}
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setFilters({ ...filters, tag: tagValue });
-                                  setPage(0);
-                                }}
-                                className="inline-flex items-center rounded-md border border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-300 px-1.5 py-0 text-[10px] font-mono hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-900 transition-colors"
-                                title={`Filter by tag: ${tagValue}`}
-                              >
-                                {tagValue}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        {!t.note && !t.tags && <span>-</span>}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                      {t.quantity != null && t.quantity !== 0
-                        ? t.quantity.toLocaleString("en-CA", {
-                            minimumFractionDigits: 0,
-                            maximumFractionDigits: t.quantity % 1 === 0 ? 0 : 4,
-                          })
-                        : "-"}
-                    </TableCell>
-                    <TableCell className={`text-right font-mono text-sm font-semibold ${t.amount >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
-                      {(() => {
-                        // Show the entered side (what the user typed); fall
-                        // back to amount/currency on legacy rows. When the
-                        // settlement currency differs, append a muted
-                        // converted label so both the trade and settlement
-                        // are visible.
-                        const enteredAmt = t.enteredAmount ?? t.amount;
-                        const enteredCcy = t.enteredCurrency ?? t.currency;
-                        const showSecondary = enteredCcy !== t.currency;
-                        return (
-                          <div className="flex flex-col items-end">
-                            <span>{formatCurrency(enteredAmt, enteredCcy)}</span>
-                            {showSecondary && (
-                              <span className="text-[10px] font-normal text-muted-foreground">
-                                → {formatCurrency(t.amount, t.currency)}
+                    {columnPrefs.filter((c) => c.visible).map((c) => {
+                      switch (c.id) {
+                        case "select":
+                          return (
+                            <TableCell key={c.id}>
+                              <input
+                                type="checkbox"
+                                checked={selected.has(t.id)}
+                                onChange={() => toggleOne(t.id)}
+                                className="h-4 w-4 rounded border-input cursor-pointer"
+                              />
+                            </TableCell>
+                          );
+                        case "date":
+                          return (
+                            <TableCell key={c.id} className="text-sm">{formatDate(t.date)}</TableCell>
+                          );
+                        case "account":
+                          return (
+                            <TableCell key={c.id} className="text-sm">
+                              {formatAccountLabel({ name: t.accountName, alias: t.accountAlias, type: t.accountType })}
+                            </TableCell>
+                          );
+                        case "accountType":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground">
+                              {t.accountType || "-"}
+                            </TableCell>
+                          );
+                        case "accountName":
+                          return (
+                            <TableCell key={c.id} className="text-sm">{t.accountName || "-"}</TableCell>
+                          );
+                        case "accountAlias":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground">
+                              {t.accountAlias || "-"}
+                            </TableCell>
+                          );
+                        case "category":
+                          return (
+                            <TableCell key={c.id} className="text-sm">
+                              <span className="flex items-center gap-1">
+                                {t.categoryName && (
+                                  <Badge variant="outline" className={`text-xs ${getCategoryBadgeClass(t.categoryType)}`}>{t.categoryName}</Badge>
+                                )}
+                                <SplitBadge transactionId={t.id} />
+                                {t.linkId && (
+                                  <Link2 className="h-3 w-3 text-sky-500 shrink-0" aria-label="Linked transaction" />
+                                )}
                               </span>
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex gap-0.5">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(t)} title="Edit">
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-violet-500" onClick={() => openSplitDialog(t)} title="Split">
-                          <Scissors className="h-3 w-3" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => confirmDelete(t)} title="Delete">
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    </TableCell>
+                            </TableCell>
+                          );
+                        case "payee":
+                          return (
+                            <TableCell key={c.id} className="text-sm">{t.payee || "-"}</TableCell>
+                          );
+                        case "portfolio":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground">
+                              {t.portfolioHolding || "-"}
+                            </TableCell>
+                          );
+                        case "portfolioTicker":
+                          return (
+                            <TableCell key={c.id} className="text-sm font-mono text-muted-foreground">
+                              {t.portfolioHoldingSymbol || "-"}
+                            </TableCell>
+                          );
+                        case "note":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground max-w-60">
+                              {t.note ? <span className="truncate block">{t.note}</span> : <span>-</span>}
+                            </TableCell>
+                          );
+                        case "tags":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground">
+                              {t.tags ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {t.tags.split(",").map((rawTag) => rawTag.trim()).filter(Boolean).map((tagValue) => (
+                                    <button
+                                      key={tagValue}
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setFilters({ ...filters, tag: tagValue });
+                                        setPage(0);
+                                      }}
+                                      className="inline-flex items-center rounded-md border border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-300 px-1.5 py-0 text-[10px] font-mono hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-900 transition-colors"
+                                      title={`Filter by tag: ${tagValue}`}
+                                    >
+                                      {tagValue}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span>-</span>
+                              )}
+                            </TableCell>
+                          );
+                        case "quantity":
+                          return (
+                            <TableCell key={c.id} className="text-right font-mono text-xs text-muted-foreground">
+                              {t.quantity != null && t.quantity !== 0
+                                ? t.quantity.toLocaleString("en-CA", {
+                                    minimumFractionDigits: 0,
+                                    maximumFractionDigits: t.quantity % 1 === 0 ? 0 : 4,
+                                  })
+                                : "-"}
+                            </TableCell>
+                          );
+                        case "amount": {
+                          // Show the entered side (what the user typed); fall
+                          // back to amount/currency on legacy rows. When the
+                          // settlement currency differs, append a muted
+                          // converted label so both the trade and settlement
+                          // are visible.
+                          const enteredAmt = t.enteredAmount ?? t.amount;
+                          const enteredCcy = t.enteredCurrency ?? t.currency;
+                          const showSecondary = enteredCcy !== t.currency;
+                          return (
+                            <TableCell key={c.id} className={`text-right font-mono text-sm font-semibold ${t.amount >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                              <div className="flex flex-col items-end">
+                                <span>{formatCurrency(enteredAmt, enteredCcy)}</span>
+                                {showSecondary && (
+                                  <span className="text-[10px] font-normal text-muted-foreground">
+                                    → {formatCurrency(t.amount, t.currency)}
+                                  </span>
+                                )}
+                              </div>
+                            </TableCell>
+                          );
+                        }
+                        case "actions":
+                          return (
+                            <TableCell key={c.id}>
+                              <div className="flex gap-0.5">
+                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(t)} title="Edit">
+                                  <Pencil className="h-3 w-3" />
+                                </Button>
+                                <Button variant="ghost" size="icon" className="h-7 w-7 text-violet-500" onClick={() => openSplitDialog(t)} title="Split">
+                                  <Scissors className="h-3 w-3" />
+                                </Button>
+                                <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => confirmDelete(t)} title="Delete">
+                                  <Trash2 className="h-3 w-3" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          );
+                      }
+                    })}
                   </TableRow>
                 ))}
               </TableBody>

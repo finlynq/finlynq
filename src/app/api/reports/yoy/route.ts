@@ -2,20 +2,29 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, gte, lte, eq } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { getDEK } from "@/lib/crypto/dek-cache";
+import { decryptName } from "@/lib/crypto/encrypted-columns";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const { userId, sessionId } = auth.context;
+  // Soft-DEK policy mirrors the income-statement endpoint: legacy plaintext
+  // stays readable when the cache is cold; Phase-3 NULL'd rows degrade to
+  // "Uncategorized" rather than 423-ing the whole report.
+  const dek = sessionId ? getDEK(sessionId) : null;
   const params = request.nextUrl.searchParams;
   const currentYear = new Date().getFullYear();
   const year1 = parseInt(params.get("year1") ?? String(currentYear - 1), 10);
   const year2 = parseInt(params.get("year2") ?? String(currentYear), 10);
 
-  // Category comparison for each year
+  // Category comparison for each year — keyed on categories.id so Phase-3
+  // NULL plaintext doesn't collapse every category into a single bucket.
   async function getCategoryTotals(year: number) {
-    return await db
+    const rows = await db
       .select({
+        categoryId: schema.categories.id,
         categoryName: schema.categories.name,
+        categoryNameCt: schema.categories.nameCt,
         categoryType: schema.categories.type,
         categoryGroup: schema.categories.group,
         total: sql<number>`SUM(${schema.transactions.amount})`,
@@ -29,8 +38,15 @@ export async function GET(request: NextRequest) {
           lte(schema.transactions.date, `${year}-12-31`)
         )
       )
-      .groupBy(schema.categories.id, schema.categories.name, schema.categories.type, schema.categories.group)
+      .groupBy(schema.categories.id, schema.categories.name, schema.categories.nameCt, schema.categories.type, schema.categories.group)
       .all();
+    return rows.map((r) => ({
+      categoryId: r.categoryId,
+      categoryName: decryptName(r.categoryNameCt, dek, r.categoryName) ?? "",
+      categoryType: r.categoryType,
+      categoryGroup: r.categoryGroup,
+      total: r.total,
+    }));
   }
 
   // Monthly totals for each year
