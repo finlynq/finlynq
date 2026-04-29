@@ -1256,13 +1256,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     },
     async ({ reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
+      // Phase 6 (2026-04-29): JOIN on the FK rather than the (dropped)
+      // portfolio_holding text column.
       const holdings = await sqlite.prepare(`
         SELECT ph.id, ph.name, ph.symbol, ph.currency, a.name as account_name,
                COALESCE(SUM(t.quantity), 0) as total_quantity,
                COALESCE(SUM(t.amount), 0) as book_value
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
-        LEFT JOIN transactions t ON t.portfolio_holding = ph.name AND t.user_id = ?
+        LEFT JOIN transactions t ON t.portfolio_holding_id = ph.id AND t.user_id = ?
         WHERE ph.user_id = ?
         GROUP BY ph.id, ph.name, ph.symbol, ph.currency, a.name
         ORDER BY ABS(COALESCE(SUM(t.amount), 0)) DESC
@@ -1323,14 +1325,19 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         "all": "1900-01-01",
       };
       const since = cutoff[period ?? "all"];
+      // Phase 6 (2026-04-29): aggregate by FK + JOIN portfolio_holdings for
+      // the display name. The legacy `portfolio_holding` text column was
+      // dropped; FK is the sole source of truth.
       const perf = await sqlite.prepare(`
-        SELECT portfolio_holding as holding, COUNT(*) as tx_count,
-               SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as cost_basis,
-               SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as proceeds,
-               SUM(quantity) as net_quantity,
-               MIN(date) as first_purchase, MAX(date) as last_activity
-        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND date >= ?
-        GROUP BY portfolio_holding ORDER BY cost_basis DESC
+        SELECT ph.name as holding, COUNT(*) as tx_count,
+               SUM(CASE WHEN t.amount < 0 THEN ABS(t.amount) ELSE 0 END) as cost_basis,
+               SUM(CASE WHEN t.amount > 0 THEN t.amount ELSE 0 END) as proceeds,
+               SUM(t.quantity) as net_quantity,
+               MIN(t.date) as first_purchase, MAX(t.date) as last_activity
+        FROM transactions t
+        LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+        WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.date >= ?
+        GROUP BY ph.id, ph.name ORDER BY cost_basis DESC
       `).all(userId, since) as SqliteRow[];
 
       const results = perf.map(p => {
@@ -1372,19 +1379,21 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     },
     async ({ symbol, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      // Match on portfolio_holding text (substring) OR payee (substring) OR
-      // ph.symbol (exact case-insensitive — tickers are short and prone to
-      // spurious substring hits like "GE" inside "ORANGE"). The LEFT JOIN on
-      // portfolio_holdings keeps orphan-fallback rows queryable; symbol-match
-      // only fires on FK-bound rows that have a holding to JOIN.
+      // Phase 6 (2026-04-29): match on the JOINed portfolio_holdings name +
+      // symbol + tx payee. The legacy `t.portfolio_holding` text column was
+      // dropped; FK + JOIN is the only source of truth for holding names.
+      // Symbol gets exact case-insensitive equality (tickers are short and
+      // prone to spurious substring hits — "GE" inside "ORANGE" etc.).
       const txns = await sqlite.prepare(`
-        SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding, t.portfolio_holding_id, a.name as account_name, a.currency
+        SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding_id,
+               ph.name as portfolio_holding,
+               a.name as account_name, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
         WHERE t.user_id = ?
           AND (
-            LOWER(t.portfolio_holding) LIKE LOWER(?)
+            LOWER(ph.name) LIKE LOWER(?)
             OR LOWER(t.payee) LIKE LOWER(?)
             OR LOWER(ph.symbol) = LOWER(?)
           )
@@ -1394,10 +1403,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!txns.length) return sqliteErr(`No transactions found for "${symbol}"`);
 
       const holdingName = txns[0].portfolio_holding || txns[0].payee;
-      // Pull the holding's FK id so the agent can pass it back on
-      // record_transaction / update_transaction in the HTTP MCP. Prefer rows
-      // whose portfolio_holding equals the chosen holdingName — payee-only
-      // matches could otherwise surface a different holding's id.
+      // Prefer rows whose joined portfolio_holding name equals the chosen
+      // holdingName — payee-only matches could otherwise surface a different
+      // holding's id.
       const holdingId: number | null =
         (txns.find(
           (t) =>
@@ -1451,10 +1459,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       if (m === "rebalancing") {
         if (!targets?.length) return sqliteErr("targets is required when mode='rebalancing'");
+        // Phase 6 (2026-04-29): aggregate by FK + JOIN.
         const holdings = await sqlite.prepare(`
-          SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value
-          FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
-          GROUP BY portfolio_holding
+          SELECT ph.name as name, SUM(ABS(t.amount)) as book_value
+          FROM transactions t
+          LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+          WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.amount < 0
+          GROUP BY ph.id, ph.name
         `).all(userId) as SqliteRow[];
 
         const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
@@ -1498,9 +1509,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         };
         const info = bmInfo[bm];
 
+        // Phase 6 (2026-04-29): FK filter replaces legacy text-column check.
         const row = await sqlite.prepare(`
           SELECT MIN(date) as first_date, MAX(date) as last_date, SUM(ABS(amount)) as total_invested
-          FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+          FROM transactions WHERE user_id = ? AND portfolio_holding_id IS NOT NULL AND amount < 0
         `).get(userId) as { first_date: string | null; last_date: string; total_invested: number } | undefined;
 
         if (!row?.first_date) return txt({ disclaimer: PORTFOLIO_DISCLAIMER, mode: "benchmark", reportingCurrency: reporting, message: "No investment transactions found" });
@@ -1531,15 +1543,18 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }
 
       // Default: mode === "patterns"
+      // Phase 6 (2026-04-29): aggregate by FK + JOIN.
       const positions = await sqlite.prepare(`
-        SELECT portfolio_holding as name, SUM(ABS(amount)) as book_value, COUNT(*) as purchases
-        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
-        GROUP BY portfolio_holding ORDER BY book_value DESC
+        SELECT ph.name as name, SUM(ABS(t.amount)) as book_value, COUNT(*) as purchases
+        FROM transactions t
+        LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+        WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.amount < 0
+        GROUP BY ph.id, ph.name ORDER BY book_value DESC
       `).all(userId) as SqliteRow[];
 
       const contributions = await sqlite.prepare(`
         SELECT strftime('%Y-%m', date) as month, SUM(ABS(amount)) as invested
-        FROM transactions WHERE user_id = ? AND portfolio_holding IS NOT NULL AND portfolio_holding != '' AND amount < 0
+        FROM transactions WHERE user_id = ? AND portfolio_holding_id IS NOT NULL AND amount < 0
         GROUP BY strftime('%Y-%m', date) ORDER BY month DESC LIMIT 12
       `).all(userId) as SqliteRow[];
 

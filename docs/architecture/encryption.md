@@ -7,7 +7,7 @@ End-to-end envelope encryption for sensitive text columns. Pulled out of CLAUDE.
 Live on prod since 2026-04-22 (commits `fa79dee` → `8dea14e`). Sensitive text columns are encrypted at rest with AES-256-GCM using a per-user DEK; amounts, dates, and FKs stay plaintext so MCP aggregations work server-side.
 
 **Encrypted fields** (see [src/lib/crypto/encrypted-columns.ts](../../src/lib/crypto/encrypted-columns.ts)):
-- `transactions.payee`, `note`, `tags`, `portfolio_holding` (`TX_ENCRYPTED_FIELDS`)
+- `transactions.payee`, `note`, `tags` (`TX_ENCRYPTED_FIELDS`). `portfolio_holding` was retired 2026-04-29 (Phase 5 + 6); the FK `portfolio_holding_id` is now the sole source of truth.
 - `transaction_splits.note`, `description`, `tags` (`SPLIT_ENCRYPTED_FIELDS`)
 - `accounts.name`, `categories.name`, `goals.name`, `loans.name`, `subscriptions.name`, `portfolio_holdings.name` + `symbol` + `accounts.alias` — all migrated 2026-04-24 in Stream D via parallel `(name_ct, name_lookup)` columns
 
@@ -96,17 +96,15 @@ Finlynq-native data records a buy as `amt<0 + qty>0` (paid cash, got shares); th
 
 **Every aggregator must implement the same rule** — keying on `amt<0` instead of `qty>0` silently drops every WP-imported holding leg (root cause of a 2026-04-27 prod symptom where the web Portfolio page showed `Uniswap = 1.2606` shares but MCP `analyze_holding` returned `0`; fix in commit [`8046b9b`](https://github.com/finlynq/finlynq/commit/8046b9b)).
 
-Five implementations to keep in sync:
-- [/api/portfolio/overview/route.ts:119-124](../../src/app/api/portfolio/overview/route.ts) (FK SQL CASE, canonical) + its orphan-fallback in-memory branch
+Four implementations to keep in sync:
+- [/api/portfolio/overview/route.ts](../../src/app/api/portfolio/overview/route.ts) (FK SQL CASE, canonical)
 - MCP HTTP [register-tools-pg.ts](../../mcp-server/register-tools-pg.ts) `accumulate()` + `analyze_holding` loop + `recentTransactions[].type` label
-- [src/lib/holdings-value.ts](../../src/lib/holdings-value.ts) FK SQL CASE + orphan-fallback
+- [src/lib/holdings-value.ts](../../src/lib/holdings-value.ts) FK SQL CASE
 - MCP stdio [register-core-tools.ts](../../mcp-server/register-core-tools.ts) `analyze_holding` loop
 
-The aggregator also *skips any row whose decrypted key still starts with `v1:`* and surfaces the count as `undecryptedTxCount` in the response — post-restart DEK-cache misses otherwise spam the UI with 1000+ ciphertext-as-holding-name orphans; the Portfolio page renders an amber "Sign in again to unlock" banner when that count is non-zero.
+### Portfolio aggregation uses integer FK, not the (now-dropped) encrypted text column
 
-### Portfolio aggregation uses integer FK, not the encrypted text column
-
-SQL `GROUP BY portfolio_holding_id` is the canonical path post-2026-04-26 — the integer FK is plaintext metadata so groups bucket correctly. `aggregateHoldings()` in `mcp-server/register-tools-pg.ts`, the `/api/portfolio/overview` route, and `src/lib/holdings-value.ts` all run a SQL aggregation on the FK plus a JOIN to `portfolio_holdings.name_ct` for the display name. They keep an orphan-fallback decrypt loop scoped to `WHERE portfolio_holding_id IS NULL AND portfolio_holding IS NOT NULL` so pre-Phase-2 rows still aggregate until backfill catches up; once Phase 5 NULLs the text column and `withoutFk = 0`, the fallback can be deleted.
+SQL `GROUP BY portfolio_holding_id` is the canonical and only path. `aggregateHoldings()` in `mcp-server/register-tools-pg.ts`, the `/api/portfolio/overview` route, and `src/lib/holdings-value.ts` all run a SQL aggregation on the FK plus a JOIN to `portfolio_holdings.name_ct` for the display name. The legacy `transactions.portfolio_holding` text column was retired 2026-04-29 in [#18](https://github.com/finlynq/finlynq/pull/18) (Phase 5 NULL'd it; Phase 6 dropped it); the orphan-fallback decrypt loop and the `undecryptedTxCount` "sign in again to unlock" banner are gone with it. Portfolio reads no longer need a DEK.
 
 ## Secret-derived DEK envelopes
 

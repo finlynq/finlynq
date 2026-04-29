@@ -2969,9 +2969,7 @@ export function registerPgTools(
         results.push({
           // FK to portfolio_holdings.id — pass this as portfolioHoldingId on
           // record_transaction / update_transaction to bind a transaction to
-          // this position. Null only for orphan-fallback rows whose tx had
-          // a plaintext portfolio_holding column populated but no FK yet
-          // (Phase 4 backfill catches these on next login).
+          // this position. Always set post-Phase-6 (orphan-fallback path is gone).
           id: m.holding_id ?? null,
           name: m.name,
           symbol: info?.symbol ?? null,
@@ -3132,16 +3130,13 @@ export function registerPgTools(
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const todayStr = new Date().toISOString().split("T")[0];
       const lo = symbol.toLowerCase();
-      // Fetch all investment-y rows for the user, then filter in memory.
-      // LIKE on ciphertext won't match (random IV per row), so substring +
-      // payee fuzzy-match still happens post-decrypt. Future-proof the
-      // WHERE clause: include FK-bound rows even when text column is NULL
-      // (Phase 5 cutover will null plaintext on backfilled rows). JOIN to
-      // portfolio_holdings so we can recover the name from name_ct when
-      // the tx's own text column is empty.
+      // Fetch every FK-bound transaction for the user, JOINing portfolio_holdings
+      // for the (encrypted) display name + symbol. Phase 6 (2026-04-29) dropped
+      // the legacy t.portfolio_holding text column; the FK is now the sole
+      // source of truth.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
-               t.portfolio_holding, t.portfolio_holding_id,
+               t.portfolio_holding_id,
                ph.name_ct as ph_name_ct, ph.name as ph_name,
                ph.symbol as ph_symbol, ph.symbol_ct as ph_symbol_ct,
                a.name as account_name, a.name_ct as account_name_ct, a.currency
@@ -3149,28 +3144,20 @@ export function registerPgTools(
         JOIN accounts a ON a.id = t.account_id
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
         WHERE t.user_id = ${userId}
-          AND (
-            (t.portfolio_holding IS NOT NULL AND t.portfolio_holding <> '')
-            OR t.portfolio_holding_id IS NOT NULL
-          )
+          AND t.portfolio_holding_id IS NOT NULL
         ORDER BY t.date ASC
       `);
 
       const decryptedAll: Row[] = rawTxns.map((t) => {
-        // Prefer the tx's own portfolio_holding (its plaintext name at write
-        // time). When that's null but a FK is set, decrypt ph.name_ct for
-        // the substring filter below.
+        // Decrypt the JOINed holding's name (ph_name_ct preferred, plaintext
+        // ph_name fallback for legacy rows pre-Stream-D).
         let ph: string | null = null;
-        if (t.portfolio_holding) {
-          ph = dek ? (decryptField(dek, String(t.portfolio_holding)) ?? null) : String(t.portfolio_holding);
-        } else if (t.ph_name_ct && dek) {
+        if (t.ph_name_ct && dek) {
           try { ph = decryptField(dek, String(t.ph_name_ct)) ?? null; } catch { ph = null; }
-        } else if (t.ph_name) {
-          ph = String(t.ph_name);
         }
-        // Decrypt the FK'd holding's symbol so the filter below honors the
-        // tool's "fuzzy match on name OR symbol" contract. Only available on
-        // FK-bound rows (orphan-fallback rows have no FK to JOIN against).
+        if (!ph && t.ph_name) ph = String(t.ph_name);
+        // Same fallback ladder for the symbol — tool's "fuzzy match on name
+        // OR symbol" contract relies on exact equality on this.
         let ph_sym: string | null = null;
         if (t.ph_symbol_ct && dek) {
           try { ph_sym = decryptField(dek, String(t.ph_symbol_ct)) ?? null; } catch { ph_sym = null; }
@@ -3196,8 +3183,8 @@ export function registerPgTools(
 
       const holdingName = txns[0].portfolio_holding || txns[0].payee;
       // Pull the holding's FK id so the agent can pass it back on
-      // record_transaction / update_transaction. Prefer rows whose decrypted
-      // portfolio_holding equals the chosen holdingName — payee-only matches
+      // record_transaction / update_transaction. Prefer rows whose JOINed
+      // holding name equals the chosen holdingName — payee-only matches
       // (e.g. "Huron Sale" payee on a non-investment cash row) could otherwise
       // surface a different holding's id and mislead the caller.
       const holdingId: number | null =
@@ -3412,6 +3399,8 @@ export function registerPgTools(
         const bmInfo = bmReturns[bm];
 
         // Convert the per-currency totals to reporting before summing.
+        // FK filter replaces the legacy `portfolio_holding IS NOT NULL` check
+        // (column dropped in Phase 6).
         const investedRows = await q(db, sql`
           SELECT MIN(t.date) as first_date, MAX(t.date) as last_date,
                  COALESCE(t.currency, a.currency) AS currency,
@@ -3419,7 +3408,7 @@ export function registerPgTools(
           FROM transactions t
           LEFT JOIN accounts a ON a.id = t.account_id
           WHERE t.user_id = ${userId}
-            AND t.portfolio_holding IS NOT NULL AND t.portfolio_holding != ''
+            AND t.portfolio_holding_id IS NOT NULL
             AND t.amount < 0
           GROUP BY COALESCE(t.currency, a.currency)
         `);
@@ -3477,7 +3466,8 @@ export function registerPgTools(
         });
       }
 
-      // Default: mode === "patterns"
+      // Default: mode === "patterns". FK filter replaces the legacy
+      // `portfolio_holding IS NOT NULL` check (column dropped in Phase 6).
       const contributions = await q(db, sql`
         SELECT DATE_TRUNC('month', t.date::date) as month,
                COALESCE(t.currency, a.currency) AS currency,
@@ -3485,7 +3475,7 @@ export function registerPgTools(
         FROM transactions t
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId}
-          AND t.portfolio_holding IS NOT NULL AND t.portfolio_holding != ''
+          AND t.portfolio_holding_id IS NOT NULL
           AND t.amount < 0
         GROUP BY DATE_TRUNC('month', t.date::date), COALESCE(t.currency, a.currency)
         ORDER BY month DESC
