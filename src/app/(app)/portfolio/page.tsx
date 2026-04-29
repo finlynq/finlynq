@@ -333,11 +333,13 @@ export default function PortfolioPage() {
   // holding's native quote currency. Convenient for comparing apples to
   // apples across mixed-currency portfolios.
   const [showInReporting, setShowInReporting] = useState(false);
-  // Hide entries whose market value rounds to $0 (e.g. fully-sold positions
-  // still in the DB). Drives both the All Holdings table rows and the donut
-  // chart slices/legend; default on — zero rows are noise on a value-weighted
-  // view. Toggle lives in the holdings table filter bar.
-  const [hideZeroValue, setHideZeroValue] = useState(true);
+  // Hide entries with no current position. For table rows: quantity is null
+  // or 0 (matches the row's own `hasMetrics` rule below — these are the
+  // rows that already render as "--" across Qty/Avg/Mkt Value). For chart
+  // buckets: aggregated value rounds to $0 (>0.005 keeps half-cent rounding
+  // safe). Default on — empty rows are noise on a value-weighted view.
+  // Toggle lives in the holdings table filter bar.
+  const [hideEmpty, setHideEmpty] = useState(true);
 
   // Fetch portfolio overview — re-runs when display currency changes so
   // totals + currency-as-holding prices reflect the user's choice.
@@ -363,7 +365,7 @@ export default function PortfolioPage() {
     if (!data) return [];
     let list = data.holdings;
     if (filter !== "all") list = list.filter(h => h.assetType === filter);
-    if (hideZeroValue) list = list.filter(h => (h.marketValueDisplay ?? 0) > 0.005);
+    if (hideEmpty) list = list.filter(h => h.quantity != null && h.quantity !== 0);
 
     list = [...list].sort((a, b) => {
       let cmp = 0;
@@ -378,7 +380,7 @@ export default function PortfolioPage() {
       return sortDir === "desc" ? -cmp : cmp;
     });
     return list;
-  }, [data, filter, sortField, sortDir, hideZeroValue]);
+  }, [data, filter, sortField, sortDir, hideEmpty]);
 
   // Account groups for collapsible section
   const accountGroups = useMemo(() => {
@@ -451,10 +453,10 @@ export default function PortfolioPage() {
   const benchmarkChartData = buildBenchmarkChartData(benchmarks);
 
   // Allocation data — value-weighted in display currency. `value` powers
-  // both slice size and legend amount; we filter zero-value rows when
-  // hideZeroValue is on (>0.005 keeps half-cent rounding safe).
+  // both slice size and legend amount; we filter zero-value buckets when
+  // hideEmpty is on (>0.005 keeps half-cent rounding safe).
   const allocationByType = Object.entries(byType)
-    .filter(([, v]) => v.count > 0 && (!hideZeroValue || v.value > 0.005))
+    .filter(([, v]) => v.count > 0 && (!hideEmpty || v.value > 0.005))
     .map(([type, v]) => ({
       name: ASSET_TYPE_CONFIG[type]?.label ?? type,
       value: v.value,
@@ -465,7 +467,7 @@ export default function PortfolioPage() {
     }));
 
   const allocationByAccount = Object.entries(data.byAccount)
-    .filter(([, v]) => v.count > 0 && (!hideZeroValue || v.value > 0.005))
+    .filter(([, v]) => v.count > 0 && (!hideEmpty || v.value > 0.005))
     .sort(([, a], [, b]) => b.value - a.value)
     .map(([name, v]) => ({
       name,
@@ -733,13 +735,13 @@ export default function PortfolioPage() {
                 ))}
               </div>
               <Button
-                variant={hideZeroValue ? "default" : "outline"}
+                variant={hideEmpty ? "default" : "outline"}
                 size="sm"
                 className="text-xs gap-1.5 h-7"
-                onClick={() => setHideZeroValue(!hideZeroValue)}
-                title="Hide holdings whose market value rounds to $0 (e.g. fully-sold positions)"
+                onClick={() => setHideEmpty(!hideEmpty)}
+                title="Hide holdings with no current position (quantity = 0, e.g. fully-sold)"
               >
-                {hideZeroValue ? "Hiding $0" : "Showing all"}
+                {hideEmpty ? "Hiding empty" : "Showing all"}
               </Button>
               <Button
                 variant={showInReporting ? "default" : "outline"}
@@ -952,11 +954,11 @@ export default function PortfolioPage() {
                   <TableRow>
                     <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                       No {filter === "all" ? "" : ASSET_TYPE_CONFIG[filter]?.label} holdings found.
-                      {hideZeroValue && data.holdings.length > 0 && (
+                      {hideEmpty && data.holdings.length > 0 && (
                         <span className="block mt-1 text-xs">
-                          Showing only positions with market value &gt; $0.
+                          Showing only positions with quantity &gt; 0.
                           <button
-                            onClick={() => setHideZeroValue(false)}
+                            onClick={() => setHideEmpty(false)}
                             className="ml-1 underline hover:text-foreground"
                           >
                             Show all
