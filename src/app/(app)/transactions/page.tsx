@@ -505,6 +505,24 @@ function TransactionsPageInner() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitError(null);
+
+    // Client-side validation — stop the round-trip on missing required
+    // fields so the user sees a clear message at the field rather than a
+    // generic server error. Server still validates (Zod + FK catch in
+    // /api/transactions) as the source of truth.
+    if (!form.accountId) {
+      setSubmitError({ message: "Pick an account" });
+      return;
+    }
+    if (!form.categoryId) {
+      setSubmitError({ message: "Pick a category" });
+      return;
+    }
+    if (!form.amount || Number.isNaN(parseFloat(form.amount))) {
+      setSubmitError({ message: "Enter an amount" });
+      return;
+    }
+
     // Phase 2 currency rework — send the entered side. Server triangulates
     // to the account's currency via convertToAccountCurrency() and locks
     // enteredFxRate at write time.
