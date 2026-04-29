@@ -124,6 +124,12 @@ export async function getTransactions(userId: string, filters?: {
       date: transactions.date,
       accountId: transactions.accountId,
       accountName: accounts.name,
+      // Plaintext alias + type so the UI can build a context-rich label
+      // (e.g. "Credit Card · 609") for accounts whose name is terse/numeric.
+      // Stream-D-correct decryption of `alias_ct` happens via the dedicated
+      // /api/accounts path; same dual-write story as accounts.name.
+      accountAlias: accounts.alias,
+      accountType: accounts.type,
       categoryId: transactions.categoryId,
       categoryName: categories.name,
       categoryType: categories.type,
