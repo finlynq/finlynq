@@ -1919,14 +1919,39 @@ function TransactionsPageInner() {
             <span className="text-xs text-muted-foreground">to</span>
             <Input type="date" className="w-36 h-8 text-xs" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
             <Select value={filters.accountId} onValueChange={(v) => { setFilters({ ...filters, accountId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger className="w-40 h-8 text-xs"><SelectValue placeholder="All accounts" /></SelectTrigger>
+              <SelectTrigger className="w-40 h-8 text-xs">
+                {/* Render-prop on SelectValue — base-ui's default trigger
+                    renders the raw `value` (the account id, e.g. "609") rather
+                    than the SelectItem's children. Look the id back up so the
+                    trigger shows the same `formatAccountLabel` string the
+                    dropdown items + table cells use. */}
+                <SelectValue placeholder="All accounts">
+                  {(v) => {
+                    const val = v == null ? "" : String(v);
+                    if (!val || val === "all") return "All accounts";
+                    const a = accounts.find((x) => String(x.id) === val);
+                    return a ? formatAccountLabel(a) : val;
+                  }}
+                </SelectValue>
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All accounts</SelectItem>
                 {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{formatAccountLabel(a)}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={filters.categoryId} onValueChange={(v) => { setFilters({ ...filters, categoryId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger className="w-44 h-8 text-xs"><SelectValue placeholder="All categories" /></SelectTrigger>
+              <SelectTrigger className="w-44 h-8 text-xs">
+                {/* Same render-prop pattern as Account filter — without it
+                    the trigger shows the raw category id when one's selected. */}
+                <SelectValue placeholder="All categories">
+                  {(v) => {
+                    const val = v == null ? "" : String(v);
+                    if (!val || val === "all") return "All categories";
+                    const c = categories.find((x) => String(x.id) === val);
+                    return c?.name ?? val;
+                  }}
+                </SelectValue>
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All categories</SelectItem>
                 {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
