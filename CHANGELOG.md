@@ -6,6 +6,9 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Fixed
+- **Friendly 400 for missing category on transaction create/update (2026-04-28, commits [`72f3a8d`](https://github.com/finlynq/finlynq/commit/72f3a8d) + [`eda999a`](https://github.com/finlynq/finlynq/commit/eda999a)).** `POST /api/transactions` accepted `categoryId: z.number()`, which let the UI's `0` "no selection" sentinel through to the INSERT and surfaced as a 500 on the FK violation. Tightened the Zod schema (`accountId` + `categoryId` require positive ints with friendly messages "Please pick a category" / "Please pick an account"); same for `PUT`. Added a 23503 FK-violation catch in both handlers as defense-in-depth — covers stale UI forms referencing a deleted category / account / holding, returning `code: "fk_violation"` instead of leaking the SQL error. UI form ([src/app/(app)/transactions/page.tsx](src/app/%28app%29/transactions/page.tsx)) now refuses the submit with an inline `submitError` ("Pick an account" / "Pick a category" / "Enter an amount") matching the existing transfer-handler validation pattern, so the user sees the issue before the round-trip.
+
 ### Added
 - **Investment-account constraint — every transaction in a flagged account must reference a portfolio holding (2026-04-28).** New `accounts.is_investment` boolean flag with a per-account opt-in checkbox in the account edit dialog. Once set, every transaction in that account must reference a `portfolio_holdings` row (FK `transactions.portfolio_holding_id`) — trades point at their security; cash legs (deposits, dividends paid as cash, fees, transfers) point at a per-account "Cash" holding using the existing currency-as-holding pattern. Closes the long-standing gap where the portfolio aggregator's orphan-fallback path silently dropped null-FK / null-text rows from cost-basis math, dividend totals, and per-holding performance — even though those rows still affected the cash balance.
 
