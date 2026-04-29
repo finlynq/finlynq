@@ -333,6 +333,10 @@ export default function PortfolioPage() {
   // holding's native quote currency. Convenient for comparing apples to
   // apples across mixed-currency portfolios.
   const [showInReporting, setShowInReporting] = useState(false);
+  // Hide allocation rows whose market value rounds to $0 (e.g. fully-sold
+  // positions still in the DB). Default on — zero rows are noise on a
+  // value-weighted chart. Toggle exposes them again.
+  const [hideZeroAllocations, setHideZeroAllocations] = useState(true);
 
   // Fetch portfolio overview — re-runs when display currency changes so
   // totals + currency-as-holding prices reflect the user's choice.
@@ -444,23 +448,29 @@ export default function PortfolioPage() {
   // Build benchmark chart data
   const benchmarkChartData = buildBenchmarkChartData(benchmarks);
 
-  // Allocation data
+  // Allocation data — value-weighted in display currency. `value` powers
+  // both slice size and legend amount; we filter zero-value rows when
+  // hideZeroAllocations is on (>0.005 keeps half-cent rounding safe).
   const allocationByType = Object.entries(byType)
-    .filter(([, v]) => v.count > 0)
+    .filter(([, v]) => v.count > 0 && (!hideZeroAllocations || v.value > 0.005))
     .map(([type, v]) => ({
       name: ASSET_TYPE_CONFIG[type]?.label ?? type,
-      value: v.count,
-      pct: summary.totalHoldings > 0 ? Math.round((v.count / summary.totalHoldings) * 100) : 0,
+      value: v.value,
+      pct: summary.totalValueDisplay > 0
+        ? Math.round((v.value / summary.totalValueDisplay) * 100)
+        : 0,
       color: ASSET_TYPE_CONFIG[type]?.color ?? "#64748b",
     }));
 
   const allocationByAccount = Object.entries(data.byAccount)
-    .filter(([, v]) => v.count > 0)
-    .sort(([, a], [, b]) => b.count - a.count)
+    .filter(([, v]) => v.count > 0 && (!hideZeroAllocations || v.value > 0.005))
+    .sort(([, a], [, b]) => b.value - a.value)
     .map(([name, v]) => ({
       name,
-      value: v.count,
-      pct: summary.totalHoldings > 0 ? Math.round((v.count / summary.totalHoldings) * 100) : 0,
+      value: v.value,
+      pct: summary.totalValueDisplay > 0
+        ? Math.round((v.value / summary.totalValueDisplay) * 100)
+        : 0,
     }));
 
   // ETF X-Ray data
@@ -1253,9 +1263,20 @@ export default function PortfolioPage() {
         {/* By Asset Type */}
         <Card>
           <CardHeader className="pb-2">
-            <div className="flex items-center gap-2">
-              <PieChartIcon className="h-4 w-4 text-indigo-500" />
-              <CardTitle className="text-base">By Asset Type</CardTitle>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <PieChartIcon className="h-4 w-4 text-indigo-500" />
+                <CardTitle className="text-base">By Asset Type</CardTitle>
+              </div>
+              <Button
+                variant={hideZeroAllocations ? "default" : "outline"}
+                size="sm"
+                className="text-xs gap-1.5 h-7"
+                onClick={() => setHideZeroAllocations(!hideZeroAllocations)}
+                title="Hide groups with $0 market value"
+              >
+                {hideZeroAllocations ? "Hiding $0" : "Showing all"}
+              </Button>
             </div>
           </CardHeader>
           <CardContent>
@@ -1287,7 +1308,7 @@ export default function PortfolioPage() {
                   <div key={d.name} className="flex items-center gap-2">
                     <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: d.color }} />
                     <span className="text-xs text-muted-foreground flex-1">{d.name}</span>
-                    <span className="text-xs font-medium tabular-nums">{d.value} ({d.pct}%)</span>
+                    <span className="text-xs font-medium tabular-nums">{formatCurrency(d.value, displayCurrency)} ({d.pct}%)</span>
                   </div>
                 ))}
               </div>
@@ -1298,9 +1319,20 @@ export default function PortfolioPage() {
         {/* By Account */}
         <Card>
           <CardHeader className="pb-2">
-            <div className="flex items-center gap-2">
-              <Wallet className="h-4 w-4 text-violet-500" />
-              <CardTitle className="text-base">By Account</CardTitle>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Wallet className="h-4 w-4 text-violet-500" />
+                <CardTitle className="text-base">By Account</CardTitle>
+              </div>
+              <Button
+                variant={hideZeroAllocations ? "default" : "outline"}
+                size="sm"
+                className="text-xs gap-1.5 h-7"
+                onClick={() => setHideZeroAllocations(!hideZeroAllocations)}
+                title="Hide groups with $0 market value"
+              >
+                {hideZeroAllocations ? "Hiding $0" : "Showing all"}
+              </Button>
             </div>
           </CardHeader>
           <CardContent>
@@ -1332,7 +1364,7 @@ export default function PortfolioPage() {
                   <div key={d.name} className="flex items-center gap-2">
                     <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
                     <span className="text-xs text-muted-foreground flex-1 truncate">{d.name}</span>
-                    <span className="text-xs font-medium tabular-nums">{d.value} ({d.pct}%)</span>
+                    <span className="text-xs font-medium tabular-nums">{formatCurrency(d.value, displayCurrency)} ({d.pct}%)</span>
                   </div>
                 ))}
               </div>
