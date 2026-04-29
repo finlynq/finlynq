@@ -333,10 +333,11 @@ export default function PortfolioPage() {
   // holding's native quote currency. Convenient for comparing apples to
   // apples across mixed-currency portfolios.
   const [showInReporting, setShowInReporting] = useState(false);
-  // Hide allocation rows whose market value rounds to $0 (e.g. fully-sold
-  // positions still in the DB). Default on — zero rows are noise on a
-  // value-weighted chart. Toggle exposes them again.
-  const [hideZeroAllocations, setHideZeroAllocations] = useState(true);
+  // Hide entries whose market value rounds to $0 (e.g. fully-sold positions
+  // still in the DB). Drives both the All Holdings table rows and the donut
+  // chart slices/legend; default on — zero rows are noise on a value-weighted
+  // view. Toggle lives in the holdings table filter bar.
+  const [hideZeroValue, setHideZeroValue] = useState(true);
 
   // Fetch portfolio overview — re-runs when display currency changes so
   // totals + currency-as-holding prices reflect the user's choice.
@@ -362,6 +363,7 @@ export default function PortfolioPage() {
     if (!data) return [];
     let list = data.holdings;
     if (filter !== "all") list = list.filter(h => h.assetType === filter);
+    if (hideZeroValue) list = list.filter(h => (h.marketValueDisplay ?? 0) > 0.005);
 
     list = [...list].sort((a, b) => {
       let cmp = 0;
@@ -376,7 +378,7 @@ export default function PortfolioPage() {
       return sortDir === "desc" ? -cmp : cmp;
     });
     return list;
-  }, [data, filter, sortField, sortDir]);
+  }, [data, filter, sortField, sortDir, hideZeroValue]);
 
   // Account groups for collapsible section
   const accountGroups = useMemo(() => {
@@ -450,9 +452,9 @@ export default function PortfolioPage() {
 
   // Allocation data — value-weighted in display currency. `value` powers
   // both slice size and legend amount; we filter zero-value rows when
-  // hideZeroAllocations is on (>0.005 keeps half-cent rounding safe).
+  // hideZeroValue is on (>0.005 keeps half-cent rounding safe).
   const allocationByType = Object.entries(byType)
-    .filter(([, v]) => v.count > 0 && (!hideZeroAllocations || v.value > 0.005))
+    .filter(([, v]) => v.count > 0 && (!hideZeroValue || v.value > 0.005))
     .map(([type, v]) => ({
       name: ASSET_TYPE_CONFIG[type]?.label ?? type,
       value: v.value,
@@ -463,7 +465,7 @@ export default function PortfolioPage() {
     }));
 
   const allocationByAccount = Object.entries(data.byAccount)
-    .filter(([, v]) => v.count > 0 && (!hideZeroAllocations || v.value > 0.005))
+    .filter(([, v]) => v.count > 0 && (!hideZeroValue || v.value > 0.005))
     .sort(([, a], [, b]) => b.value - a.value)
     .map(([name, v]) => ({
       name,
@@ -731,6 +733,15 @@ export default function PortfolioPage() {
                 ))}
               </div>
               <Button
+                variant={hideZeroValue ? "default" : "outline"}
+                size="sm"
+                className="text-xs gap-1.5 h-7"
+                onClick={() => setHideZeroValue(!hideZeroValue)}
+                title="Hide holdings whose market value rounds to $0 (e.g. fully-sold positions)"
+              >
+                {hideZeroValue ? "Hiding $0" : "Showing all"}
+              </Button>
+              <Button
                 variant={showInReporting ? "default" : "outline"}
                 size="sm"
                 className="text-xs gap-1.5 h-7"
@@ -941,6 +952,17 @@ export default function PortfolioPage() {
                   <TableRow>
                     <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                       No {filter === "all" ? "" : ASSET_TYPE_CONFIG[filter]?.label} holdings found.
+                      {hideZeroValue && data.holdings.length > 0 && (
+                        <span className="block mt-1 text-xs">
+                          Showing only positions with market value &gt; $0.
+                          <button
+                            onClick={() => setHideZeroValue(false)}
+                            className="ml-1 underline hover:text-foreground"
+                          >
+                            Show all
+                          </button>
+                        </span>
+                      )}
                     </TableCell>
                   </TableRow>
                 )}
@@ -1263,20 +1285,9 @@ export default function PortfolioPage() {
         {/* By Asset Type */}
         <Card>
           <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <PieChartIcon className="h-4 w-4 text-indigo-500" />
-                <CardTitle className="text-base">By Asset Type</CardTitle>
-              </div>
-              <Button
-                variant={hideZeroAllocations ? "default" : "outline"}
-                size="sm"
-                className="text-xs gap-1.5 h-7"
-                onClick={() => setHideZeroAllocations(!hideZeroAllocations)}
-                title="Hide groups with $0 market value"
-              >
-                {hideZeroAllocations ? "Hiding $0" : "Showing all"}
-              </Button>
+            <div className="flex items-center gap-2">
+              <PieChartIcon className="h-4 w-4 text-indigo-500" />
+              <CardTitle className="text-base">By Asset Type</CardTitle>
             </div>
           </CardHeader>
           <CardContent>
@@ -1319,20 +1330,9 @@ export default function PortfolioPage() {
         {/* By Account */}
         <Card>
           <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Wallet className="h-4 w-4 text-violet-500" />
-                <CardTitle className="text-base">By Account</CardTitle>
-              </div>
-              <Button
-                variant={hideZeroAllocations ? "default" : "outline"}
-                size="sm"
-                className="text-xs gap-1.5 h-7"
-                onClick={() => setHideZeroAllocations(!hideZeroAllocations)}
-                title="Hide groups with $0 market value"
-              >
-                {hideZeroAllocations ? "Hiding $0" : "Showing all"}
-              </Button>
+            <div className="flex items-center gap-2">
+              <Wallet className="h-4 w-4 text-violet-500" />
+              <CardTitle className="text-base">By Account</CardTitle>
             </div>
           </CardHeader>
           <CardContent>
