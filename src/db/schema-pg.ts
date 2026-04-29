@@ -81,11 +81,10 @@ export const transactions = pgTable("transactions", {
   // entries that the nightly cron should re-rate once their date arrives.
   enteredAt: timestamp("entered_at", { withTimezone: true }).notNull().defaultNow(),
   quantity: doublePrecision("quantity"),
-  portfolioHolding: text("portfolio_holding"),
-  // FK introduced 2026-04-26. Nullable. portfolio_holding (text) stays as the
-  // encrypted plaintext name through Phase 4 (dual-write); Phase 5 drops it
-  // from TX_ENCRYPTED_FIELDS and NULLs it on backfilled rows.
-  // ON DELETE SET NULL — see scripts/migrate-tx-portfolio-holding-fk.sql.
+  // FK introduced 2026-04-26. Nullable. The legacy encrypted text column
+  // `portfolio_holding` was dropped in Phase 6 (2026-04-29) — the FK is
+  // the sole source of truth, JOIN to portfolio_holdings for the display
+  // name. ON DELETE SET NULL — see scripts/migrate-tx-portfolio-holding-fk.sql.
   portfolioHoldingId: integer("portfolio_holding_id").references(
     () => portfolioHoldings.id,
     { onDelete: "set null" }

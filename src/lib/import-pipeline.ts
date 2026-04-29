@@ -416,14 +416,10 @@ export async function executeImport(
     // Auto-categorize is best-effort — don't fail the import
   }
 
-  // Resolve portfolio_holding name → portfolio_holdings.id for every row
-  // that has a holding name. Auto-creates the holding when missing. This
-  // runs before encryption so the resolver sees plaintext names — once
-  // portfolioHolding is encrypted in the batch loop below, we can't reverse
-  // it without the DEK and can't GROUP BY it in SQL (random IV per row).
-  // Single resolver instance for the whole import — it pre-loads all of
-  // the user's holdings, so per-row .resolve() is a Map lookup until a
-  // miss triggers an auto-create.
+  // Resolve the holding name → portfolio_holdings.id for every row that has
+  // a name. Auto-creates the holding when missing. Single resolver instance
+  // for the whole import — pre-loaded with the user's holdings so per-row
+  // .resolve() is a Map lookup until a miss triggers an auto-create.
   try {
     const resolver = await buildHoldingResolver(userId, userDek ?? null);
     for (const row of toInsert) {
@@ -435,7 +431,7 @@ export async function executeImport(
     }
   } catch (err) {
     // Resolver failure shouldn't blow up the whole import — leave FKs null
-    // and let the orphan-fallback read paths handle it. Log for ops.
+    // and surface to the user via importErrors.
     importErrors.push(
       `Holding resolver failed: ${err instanceof Error ? err.message : "Unknown error"}`,
     );
@@ -469,16 +465,18 @@ export async function executeImport(
   }
 
   // Batch insert — encrypt text fields at the boundary (hash was computed on
-  // plaintext above, so dedup stays stable across imports).
+  // plaintext above, so dedup stays stable across imports). Phase 6
+  // (2026-04-29) dropped the legacy portfolio_holding text column; the
+  // in-memory `portfolioHolding` field stays for the resolver above but
+  // is stripped before each insert via destructuring.
   for (let i = 0; i < toInsert.length; i += batchSize) {
     const batch = toInsert.slice(i, i + batchSize);
-    const values = batch.map(({ rowIndex: _, ...rest }) => {
+    const values = batch.map(({ rowIndex: _, portfolioHolding: _ph, ...rest }) => {
       const row = { ...rest, userId };
       if (userDek) {
         row.payee = encryptField(userDek, row.payee) ?? "";
         row.note = encryptField(userDek, row.note) ?? "";
         row.tags = encryptField(userDek, row.tags) ?? "";
-        row.portfolioHolding = encryptField(userDek, row.portfolioHolding ?? null);
       }
       return row;
     });

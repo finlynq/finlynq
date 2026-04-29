@@ -1781,9 +1781,6 @@ function HoldingEditDialog({
           <div className="space-y-1.5">
             <Label>Name</Label>
             <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            <p className="text-[11px] text-muted-foreground">
-              Aggregator joins transactions by this name. Renaming won&apos;t rewrite existing transactions — they&apos;ll stay under the old name until updated.
-            </p>
           </div>
           <div className="space-y-1.5">
             <Label>Symbol / ticker</Label>

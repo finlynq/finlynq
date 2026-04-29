@@ -224,7 +224,7 @@ function generateTransactions(): TxSeed[] {
 }
 
 /** Investment buys/sells on the Brokerage account.
- * These use the transactions.quantity + transactions.portfolioHolding fields
+ * Each row binds to a portfolio_holdings row via portfolio_holding_id (FK)
  * so the portfolio page can price holdings at live market rates. */
 type InvestmentTx = { daysFromStart: number; holding: string; quantity: number; amount: number; payee: string };
 
@@ -374,16 +374,41 @@ async function main() {
       );
     }
 
-    // Investment buys — link quantity + portfolio_holding for the portfolio page to price at market
+    // Portfolio holdings — inserted BEFORE investment transactions so we can
+    // bind portfolio_holding_id (FK) directly on each tx. Without this, the
+    // demo perpetually contributes withoutFk > 0 to
+    // /api/admin/portfolio-holding-fk-progress and blocks the Phase 5 cutover.
+    const brokerageId = accountIds["Brokerage"];
+    console.log(`[seed-demo] Inserting portfolio holdings…`);
+    const holdingsSeed = [
+      { name: "VTI", symbol: "VTI", currency: "USD", isCrypto: 0, note: "Vanguard Total Stock Market" },
+      { name: "VOO", symbol: "VOO", currency: "USD", isCrypto: 0, note: "Vanguard S&P 500" },
+      { name: "BTC", symbol: "BTC", currency: "USD", isCrypto: 1, note: "Bitcoin" },
+    ];
+    const holdingIdsByName: Record<string, number> = {};
+    for (const h of holdingsSeed) {
+      const { rows } = await client.query(
+        `INSERT INTO portfolio_holdings (user_id, account_id, name, symbol, currency, is_crypto, note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [userId, brokerageId, h.name, h.symbol, h.currency, h.isCrypto, h.note]
+      );
+      holdingIdsByName[h.name] = rows[0].id;
+    }
+
+    // Investment buys — bind portfolio_holding_id (FK). Phase 5 (2026-04-29)
+    // retired the legacy encrypted portfolio_holding text column.
     const today0 = new Date(); today0.setHours(0, 0, 0, 0);
     const invStart = new Date(today0); invStart.setMonth(invStart.getMonth() - 6);
     const invTxs = investmentTransactions(invStart);
     console.log(`[seed-demo] Inserting ${invTxs.length} investment transactions…`);
-    const brokerageId = accountIds["Brokerage"];
     for (const i of invTxs) {
       const d = new Date(invStart); d.setDate(d.getDate() + i.daysFromStart);
+      const holdingId = holdingIdsByName[i.holding];
+      if (!holdingId) {
+        throw new Error(`[seed-demo] Investment tx references unknown holding '${i.holding}'`);
+      }
       await client.query(
-        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, quantity, portfolio_holding, payee, note, tags, is_business)
+        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, quantity, portfolio_holding_id, payee, note, tags, is_business)
          VALUES ($1, $2, $3, NULL, 'CAD', $4, $5, $6, $7, $8, $9, 0)`,
         [
           userId,
@@ -391,7 +416,7 @@ async function main() {
           brokerageId,
           i.amount,
           i.quantity,
-          encryptField(demoDek, i.holding),
+          holdingId,
           encryptField(demoDek, i.payee),
           encryptField(demoDek, ""),
           encryptField(demoDek, ""),
@@ -418,19 +443,7 @@ async function main() {
       );
     }
 
-    // 7. Investments (portfolio holdings)
-    console.log(`[seed-demo] Inserting portfolio holdings…`);
-    // Holding name must equal transactions.portfolio_holding so qty/cost metrics match up.
-    await client.query(
-      `INSERT INTO portfolio_holdings (user_id, account_id, name, symbol, currency, is_crypto, note)
-       VALUES
-         ($1, $2, 'VTI', 'VTI', 'USD', 0, 'Vanguard Total Stock Market'),
-         ($1, $2, 'VOO', 'VOO', 'USD', 0, 'Vanguard S&P 500'),
-         ($1, $2, 'BTC', 'BTC', 'USD', 1, 'Bitcoin')`,
-      [userId, brokerageId]
-    );
-
-    // 8. Goals
+    // 7. Goals
     console.log(`[seed-demo] Inserting goals…`);
     await client.query(
       `INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, priority, status, note)

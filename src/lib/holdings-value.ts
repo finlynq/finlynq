@@ -11,12 +11,11 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, isNotNull, lte, sql } from "drizzle-orm";
 import { fetchMultipleQuotes, fetchMultipleQuotesAtDate } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, getRate } from "@/lib/fx-service";
 import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
-import { tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 function todayISO(): string {
@@ -135,44 +134,6 @@ export async function getHoldingsValueByAccount(
     });
   }
 
-  // Orphan-fallback: rows without an FK but with the encrypted text column
-  // populated (pre-Phase-2 imports, or rows whose holding was deleted).
-  // Decrypt-and-group-by-name so they don't disappear before backfill.
-  const orphanRows = await db
-    .select({
-      portfolioHolding: schema.transactions.portfolioHolding,
-      quantity: schema.transactions.quantity,
-      amount: schema.transactions.amount,
-    })
-    .from(schema.transactions)
-    .where(and(
-      eq(schema.transactions.userId, userId),
-      isNull(schema.transactions.portfolioHoldingId),
-      isNotNull(schema.transactions.portfolioHolding),
-      lte(schema.transactions.date, asOfDate),
-    ));
-
-  const qtyByHoldingName = new Map<string, number>();
-  const costAggByHoldingName = new Map<string, CostAgg>();
-  for (const r of orphanRows) {
-    if (!r.portfolioHolding) continue;
-    const name = dek ? (tryDecryptField(dek, r.portfolioHolding, "transactions.portfolio_holding") ?? "") : r.portfolioHolding;
-    if (!name || name.startsWith("v1:")) continue;
-    const qty = Number(r.quantity ?? 0);
-    const amt = Number(r.amount ?? 0);
-    // qty>0 = buy (both amt-sign conventions); qty<0 = sell; qty=0 = dividend.
-    const delta = qty !== 0 ? qty : 0;
-    qtyByHoldingName.set(name, (qtyByHoldingName.get(name) ?? 0) + delta);
-    const agg = costAggByHoldingName.get(name) ?? { buyQty: 0, buyAmount: 0, sellQty: 0 };
-    if (qty > 0) {
-      agg.buyQty += qty;
-      agg.buyAmount += Math.abs(amt);
-    } else if (qty < 0) {
-      agg.sellQty += Math.abs(qty);
-    }
-    costAggByHoldingName.set(name, agg);
-  }
-
   // Price lookups — exclude currency-code symbols (CAD, USD, …) since
   // Yahoo returns unrelated stock data for those tickers. For asOfDate
   // == today use the regular live-quote endpoint; for past dates use
@@ -215,9 +176,7 @@ export async function getHoldingsValueByAccount(
 
   for (const h of holdings) {
     if (h.accountId == null) continue;
-    // Sum FK-bound + orphan-name aggregates for this holding. Most rows
-    // are FK-bound post-backfill; the name fallback covers the transition.
-    const qty = (qtyByHoldingId.get(h.id) ?? 0) + (h.name ? (qtyByHoldingName.get(h.name) ?? 0) : 0);
+    const qty = qtyByHoldingId.get(h.id) ?? 0;
     if (qty <= 0) continue;
 
     const accountCurrency = h.accountCurrency ?? h.currency;
@@ -280,9 +239,8 @@ export async function getHoldingsValueByAccount(
     // from a snapshot with quantity but no buy legs) — sets unrealized G/L
     // to 0 rather than fabricating a gain.
     const fkAgg = costAggByHoldingId.get(h.id);
-    const orphanAgg = h.name ? costAggByHoldingName.get(h.name) : undefined;
-    const buyQty = (fkAgg?.buyQty ?? 0) + (orphanAgg?.buyQty ?? 0);
-    const buyAmount = (fkAgg?.buyAmount ?? 0) + (orphanAgg?.buyAmount ?? 0);
+    const buyQty = fkAgg?.buyQty ?? 0;
+    const buyAmount = fkAgg?.buyAmount ?? 0;
     const avgCostInTxCcy = buyQty > 0 ? buyAmount / buyQty : null;
     let costBasisInAccountCcy: number;
     if (avgCostInTxCcy != null) {

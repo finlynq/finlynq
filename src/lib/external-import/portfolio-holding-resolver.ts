@@ -5,8 +5,8 @@
  * Used by:
  *   - import-pipeline.ts::executeImport — resolve before DB insert so each
  *     transaction row gets portfolio_holding_id set in the same write.
- *   - portfolio-holding-fk-backfill.ts — resolve existing transactions whose
- *     portfolio_holding text column is populated but FK is NULL.
+ *   - /api/transactions POST/PUT — name → id when the caller passes a name
+ *     instead of an FK.
  *
  * Why a dedicated resolver: portfolio_holdings rows under Stream D have BOTH
  * plaintext `name` AND encrypted `name_ct` + `name_lookup`. Legacy rows have

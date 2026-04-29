@@ -61,11 +61,8 @@ export async function GET(request: NextRequest) {
       enteredCurrency: schema.transactions.enteredCurrency,
       enteredFxRate: schema.transactions.enteredFxRate,
       quantity: schema.transactions.quantity,
-      // Two sources for the holding name: the legacy plaintext text column
-      // on the transaction row (auto-decrypted by decryptTxRows) AND a JOIN
-      // to portfolio_holdings via the integer FK. The new transfer flow only
-      // writes the FK; Phase 3 NULL'd plaintext rows also rely on the FK.
-      portfolioHolding: schema.transactions.portfolioHolding,
+      // Holding name comes from a JOIN to portfolio_holdings via the FK.
+      // Phase 5 (2026-04-29) NULL'd the legacy text column on every row.
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
       portfolioHoldingNameJoined: schema.portfolioHoldings.name,
       portfolioHoldingNameCt: schema.portfolioHoldings.nameCt,
@@ -84,7 +81,7 @@ export async function GET(request: NextRequest) {
     .where(and(...conditions))
     .all();
 
-  // Decrypt tx-level encrypted fields (payee/note/tags/portfolioHolding text).
+  // Decrypt tx-level encrypted fields (payee/note/tags).
   const decrypted = decryptTxRows(
     dek,
     rows as Array<Parameters<typeof decryptTxRows>[1][number]>,
@@ -93,7 +90,6 @@ export async function GET(request: NextRequest) {
   // Resolve the holding name with a fallback ladder:
   //   1. JOINed plaintext (Stream D legacy or pre-Phase-3 row)
   //   2. JOINed nameCt decrypted with the session DEK (Phase 3 NULL'd row)
-  //   3. The legacy text column on the transaction (already decrypted above)
   // The first non-empty wins. We surface this as a single `portfolioHolding`
   // string so the client can ignore the underlying source.
   const enriched = decrypted.map((r) => {
@@ -105,7 +101,6 @@ export async function GET(request: NextRequest) {
         resolvedName = null;
       }
     }
-    if (!resolvedName) resolvedName = r.portfolioHolding ?? null;
     return {
       ...r,
       portfolioHolding: resolvedName,

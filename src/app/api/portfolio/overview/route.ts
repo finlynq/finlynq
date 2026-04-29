@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and, isNotNull, isNull, sql } from "drizzle-orm";
+import { eq, and, isNotNull, sql } from "drizzle-orm";
 import { fetchMultipleQuotes, aggregatePortfolioExposure, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, getAvailableEtfSymbols, autoSeedEtfIfMissing } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, convertCurrency, getDisplayCurrency, getRate } from "@/lib/fx-service";
 import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
-import { decryptField } from "@/lib/crypto/envelope";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 const CRYPTO_SYMBOLS = new Set([
@@ -151,15 +150,9 @@ export async function GET(request: NextRequest) {
     return r;
   };
 
-  // 6. Aggregate transaction metrics per holding. Two paths:
-  //   (a) FK-bound rows (portfolio_holding_id IS NOT NULL) — SQL GROUP BY,
-  //       no decryption. This is the canonical path post-Phase-2.
-  //   (b) Orphan-fallback rows (portfolio_holding_id IS NULL but
-  //       portfolio_holding text IS NOT NULL) — pre-backfill rows, or txs
-  //       whose target holding was deleted. Decrypt-and-group-by-name so
-  //       they don't disappear from the aggregator until backfill catches up.
-  // Once Phase 4 backfill is complete and Phase 5 NULLs the text column,
-  // path (b) goes away.
+  // 6. Aggregate transaction metrics per holding via FK + entered_currency.
+  // Phase 5 cutover (2026-04-29) eliminated the orphan-fallback decrypt loop:
+  // every tx now has portfolio_holding_id, the legacy text column is NULL.
 
   type TxAgg = {
     totalBuyQty: number;
@@ -257,98 +250,6 @@ export async function GET(request: NextRequest) {
     return out;
   };
 
-  // Path (b): orphan-fallback decrypt loop, scoped to rows that haven't
-  // backfilled yet. Same logic as the pre-FK code, just narrower input.
-  // Cost basis stays in account currency here because there's no holding
-  // row yet (orphan symbols auto-detect a "holding" with currency=CAD as
-  // a placeholder anyway). Once an orphan promotes via backfill, the FK
-  // path handles it correctly.
-  const orphanRawRows = await db
-    .select({
-      portfolioHolding: schema.transactions.portfolioHolding,
-      amount: schema.transactions.amount,
-      enteredAmount: schema.transactions.enteredAmount,
-      enteredCurrency: schema.transactions.enteredCurrency,
-      currency: schema.transactions.currency,
-      quantity: schema.transactions.quantity,
-      date: schema.transactions.date,
-    })
-    .from(schema.transactions)
-    .where(and(
-      eq(schema.transactions.userId, userId),
-      isNull(schema.transactions.portfolioHoldingId),
-      isNotNull(schema.transactions.portfolioHolding),
-    ));
-
-  type OrphanBucket = { entered: string; agg: TxAgg };
-  const aggByName = new Map<string, OrphanBucket[]>();
-  let undecryptedSkipped = 0;
-  for (const r of orphanRawRows) {
-    if (!r.portfolioHolding) continue;
-    let key = "";
-    try {
-      key = (dek ? decryptField(dek, r.portfolioHolding) : r.portfolioHolding) ?? "";
-    } catch {
-      key = r.portfolioHolding;
-    }
-    if (!key) continue;
-    if (key.startsWith("v1:")) {
-      undecryptedSkipped++;
-      continue;
-    }
-    const qty = Number(r.quantity ?? 0);
-    const amt = Number(r.enteredAmount ?? r.amount);
-    const enteredCcy = String(r.enteredCurrency ?? r.currency ?? displayCurrency).toUpperCase();
-    const arr = aggByName.get(key) ?? [];
-    let bucket = arr.find(x => x.entered === enteredCcy);
-    if (!bucket) {
-      bucket = { entered: enteredCcy, agg: {
-        totalBuyQty: 0, totalBuyAmount: 0, totalSellQty: 0,
-        totalSellAmount: 0, dividendsReceived: 0, firstPurchaseDate: null,
-      } };
-      arr.push(bucket);
-    }
-    if (qty > 0) {
-      bucket.agg.totalBuyQty += qty;
-      bucket.agg.totalBuyAmount += Math.abs(amt);
-      if (!bucket.agg.firstPurchaseDate || r.date < bucket.agg.firstPurchaseDate) {
-        bucket.agg.firstPurchaseDate = r.date;
-      }
-    } else if (qty < 0) {
-      bucket.agg.totalSellQty += Math.abs(qty);
-      bucket.agg.totalSellAmount += Math.abs(amt);
-    } else if (amt > 0) {
-      bucket.agg.dividendsReceived += amt;
-    }
-    aggByName.set(key, arr);
-  }
-
-  // Collapse orphan buckets to a single TxAgg in a target currency.
-  const orphanInCurrency = async (buckets: OrphanBucket[], target: string): Promise<TxAgg> => {
-    const out: TxAgg = {
-      totalBuyQty: 0,
-      totalBuyAmount: 0,
-      totalSellQty: 0,
-      totalSellAmount: 0,
-      dividendsReceived: 0,
-      firstPurchaseDate: null,
-    };
-    for (const b of buckets) {
-      const fx = await getCrossRate(b.entered, target);
-      out.totalBuyQty += b.agg.totalBuyQty;
-      out.totalBuyAmount += b.agg.totalBuyAmount * fx;
-      out.totalSellQty += b.agg.totalSellQty;
-      out.totalSellAmount += b.agg.totalSellAmount * fx;
-      out.dividendsReceived += b.agg.dividendsReceived * fx;
-      if (b.agg.firstPurchaseDate) {
-        if (!out.firstPurchaseDate || b.agg.firstPurchaseDate < out.firstPurchaseDate) {
-          out.firstPurchaseDate = b.agg.firstPurchaseDate;
-        }
-      }
-    }
-    return out;
-  };
-
   type TxMetrics = {
     qty: number;
     totalBuyQty: number;
@@ -365,8 +266,7 @@ export async function GET(request: NextRequest) {
   };
 
   const today = new Date();
-  // Compute derived metrics from a TxAgg → TxMetrics. Used by both the
-  // FK path and the orphan path; collapses the two-loop duplication.
+  // Compute derived metrics from a TxAgg → TxMetrics.
   const toMetrics = (a: TxAgg): TxMetrics => {
     const buyQty = a.totalBuyQty;
     const buyAmt = a.totalBuyAmount;
@@ -433,56 +333,18 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // Merge fk + name aggs per registered holding. During the backfill
-  // window a single holding can have rows in BOTH paths — sum them so the
-  // user sees one consolidated position rather than two half-counts. After
-  // backfill catches up, every row is FK-bound and the merge is a no-op.
-  // Cost basis is normalized to the holding's quote currency via FX before
+  // Reduce per-currency buckets into a single TxMetrics keyed by holding id.
+  // Cost basis normalized to the holding's quote currency via FX before
   // summing — fixes the cross-currency P&L bug for cash-as-currency
   // positions.
   const metricsByHoldingId = new Map<number, TxMetrics>();
-  const consumedNames = new Set<string>();
   for (const h of holdings) {
     const fkBuckets = bucketsById.get(h.id);
-    const orphanBuckets = h.name ? aggByName.get(h.name) : undefined;
-    if (!fkBuckets && !orphanBuckets) continue;
-    if (h.name && orphanBuckets) consumedNames.add(h.name);
+    if (!fkBuckets) continue;
     const targetCcy = quoteCurrencyById.get(h.id) ?? h.currency;
-    const fkAgg = fkBuckets ? await aggInHoldingCurrency(fkBuckets, targetCcy) : null;
-    const orphanAgg = orphanBuckets ? await orphanInCurrency(orphanBuckets, targetCcy) : null;
-    const merged: TxAgg = {
-      totalBuyQty: (fkAgg?.totalBuyQty ?? 0) + (orphanAgg?.totalBuyQty ?? 0),
-      totalBuyAmount: (fkAgg?.totalBuyAmount ?? 0) + (orphanAgg?.totalBuyAmount ?? 0),
-      totalSellQty: (fkAgg?.totalSellQty ?? 0) + (orphanAgg?.totalSellQty ?? 0),
-      totalSellAmount: (fkAgg?.totalSellAmount ?? 0) + (orphanAgg?.totalSellAmount ?? 0),
-      dividendsReceived: (fkAgg?.dividendsReceived ?? 0) + (orphanAgg?.dividendsReceived ?? 0),
-      firstPurchaseDate: [fkAgg?.firstPurchaseDate, orphanAgg?.firstPurchaseDate]
-        .filter((d): d is string => Boolean(d))
-        .sort()[0] ?? null,
-    };
-    metricsByHoldingId.set(h.id, toMetrics(merged));
+    const fkAgg = await aggInHoldingCurrency(fkBuckets, targetCcy);
+    metricsByHoldingId.set(h.id, toMetrics(fkAgg));
   }
-
-  // 6b. Orphan-symbol path: any aggByName entry whose name didn't merge
-  //     into a registered holding AND has a non-zero net quantity. These
-  //     show as auto-detected positions in the UI until the user creates
-  //     a portfolio_holdings row for them (or backfill finds a match).
-  // Auto-detected orphans don't have a holding currency — keep them in
-  // display currency (which is consistent with how their UI row is built
-  // below: currency: "CAD" placeholder, marketValue computed via Yahoo).
-  const metricsByName = new Map<string, TxMetrics>();
-  const orphanSymbols: string[] = [];
-  for (const [name, buckets] of aggByName) {
-    if (consumedNames.has(name)) continue;
-    const totalQty = buckets.reduce((s, b) => s + b.agg.totalBuyQty - b.agg.totalSellQty, 0);
-    if (totalQty === 0) continue;
-    const agg = await orphanInCurrency(buckets, displayCurrency);
-    metricsByName.set(name, toMetrics(agg));
-    orphanSymbols.push(name);
-  }
-
-  // Fetch prices for orphan symbols separately
-  const orphanQuotes = orphanSymbols.length > 0 ? await fetchMultipleQuotes(orphanSymbols) : new Map();
 
   // 6c. Auto-seed any ETF symbols not yet in the shared ETF database
   for (const h of nonCryptoWithSymbol) {
@@ -645,72 +507,6 @@ export async function GET(request: NextRequest) {
       daysHeld,
     };
   });
-
-  // 7b. Append orphan holdings (transaction-based, not in portfolioHoldings table)
-  for (const sym of orphanSymbols) {
-    const txData = metricsByName.get(sym);
-    if (!txData || txData.qty === 0) continue;
-    const isCrypto = isCryptoSymbol(sym);
-    const oq = orphanQuotes.get(sym);
-    const price = oq?.price ?? null;
-    const change = oq?.change ?? null;
-    const changePct = oq?.changePct ? Math.round(oq.changePct * 100) / 100 : null;
-    const quoteCurrency = oq?.currency ?? "CAD";
-    const isEtf = getEtfRegionBreakdown(sym) !== null;
-    const assetType: AssetType = isCrypto ? "crypto" : isEtf ? "etf" : "stock";
-    const fxRate = fxRates.get(quoteCurrency) ?? 1;
-    let marketValue: number | null = null;
-    let marketValueDisplay: number | null = null;
-    if (price !== null && txData.qty !== 0) {
-      marketValue = price * txData.qty;
-      marketValueDisplay = convertCurrency(marketValue, fxRate);
-    }
-    const unrealizedGain = marketValue !== null && txData.totalCostBasis !== null && txData.qty !== 0
-      ? marketValue - txData.totalCostBasis
-      : null;
-    const unrealizedGainPct = unrealizedGain !== null && txData.totalCostBasis !== null && txData.totalCostBasis > 0
-      ? (unrealizedGain / txData.totalCostBasis) * 100
-      : null;
-    const unrealizedGainDisplay = unrealizedGain !== null ? convertCurrency(unrealizedGain, fxRate) : null;
-    const totalReturn = unrealizedGain !== null || txData.realizedGain !== 0 || txData.dividendsReceived !== 0
-      ? (unrealizedGain ?? 0) + txData.realizedGain + txData.dividendsReceived
-      : null;
-    const totalReturnDisplay = totalReturn !== null ? convertCurrency(totalReturn, fxRate) : null;
-    const totalReturnPct = totalReturn !== null && txData.lifetimeCostBasis > 0
-      ? (totalReturn / txData.lifetimeCostBasis) * 100
-      : null;
-    enrichedHoldings.push({
-      id: -1,
-      accountId: null,
-      accountName: "Auto-detected",
-      name: sym,
-      symbol: sym,
-      currency: "CAD",
-      assetType,
-      price,
-      change,
-      changePct,
-      quoteCurrency,
-      marketCap: null,
-      image: null,
-      quantity: txData.qty,
-      avgCostPerShare: txData.avgCostPerShare,
-      totalCostBasis: txData.totalCostBasis,
-      lifetimeCostBasis: txData.lifetimeCostBasis,
-      marketValue,
-      marketValueDisplay,
-      unrealizedGain,
-      unrealizedGainPct,
-      unrealizedGainDisplay,
-      realizedGain: txData.realizedGain,
-      dividendsReceived: txData.dividendsReceived,
-      totalReturn,
-      totalReturnDisplay,
-      totalReturnPct,
-      firstPurchaseDate: txData.firstPurchaseDate,
-      daysHeld: txData.daysHeld,
-    });
-  }
 
   // 8. Compute summaries
   const totalValueDisplay = enrichedHoldings.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
@@ -924,10 +720,6 @@ export async function GET(request: NextRequest) {
     // field name kept its legacy "CAD" suffix for compat; the value is in
     // displayCurrency. Format with this on the client to avoid mislabeling.
     displayCurrency,
-    // Non-zero when the session's DEK cache is cold (post-restart) and we
-    // couldn't decrypt tx.portfolio_holding. Client shows a re-login prompt
-    // rather than rendering the rows as v1: ciphertext orphans.
-    undecryptedTxCount: undecryptedSkipped,
     summary: {
       totalHoldings: holdings.length,
       totalAccounts: byAccount.size,
