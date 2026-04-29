@@ -109,7 +109,7 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 
 Phases 1-4 of the integer-FK rollout. Adds `transactions.portfolio_holding_id integer` FK (nullable, ON DELETE SET NULL) referencing `portfolio_holdings(id)`, a partial index on `(user_id, portfolio_holding_id)`, and a partial UNIQUE index on `portfolio_holdings (user_id, account_id, name_lookup)` so the resolver's ON CONFLICT path is concurrency-safe.
 
-Phase 2 (dual-write) and Phase 3 (FK-keyed reads) shipped in the same code deploy; Phase 4 lazy backfill runs on each user's next login. Phase 5 cutover (NULL plaintext + drop `portfolio_holding` from `TX_ENCRYPTED_FIELDS`) is a separate later deploy gated on `/api/admin/portfolio-holding-fk-progress`.
+Phase 2 (dual-write) and Phase 3 (FK-keyed reads) shipped in the same code deploy; Phase 4 lazy backfill runs on each user's next login.
 
 The FK constraint is introspected by `(table, column)` in `pg_constraint` so the migration is safe to run before OR after `npm run db:push` (db:push generates its own auto-named FK; the DO $$ block recognizes either name and aligns the ON DELETE behavior). Idempotent. Applied prod + staging + dev on 2026-04-26 (commit 97463a7); code shipped to prod only.
 
@@ -117,6 +117,24 @@ The FK constraint is introspected by `(table, column)` in `pg_constraint` so the
 PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-tx-portfolio-holding-fk.sql
 PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-tx-portfolio-holding-fk.sql
 PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-tx-portfolio-holding-fk.sql
+```
+
+## tx-portfolio-holding-phase5-null (2026-04-29)
+
+Phase 5 of the FK rollout. NULLs the legacy encrypted `transactions.portfolio_holding` text column on every row whose FK is populated — the FK becomes the sole source of truth. Idempotent (re-running on an already-NULL'd DB is a no-op). Run **before** the matching code deploy (drops `portfolioHolding` from `TX_ENCRYPTED_FIELDS` + deletes the orphan-fallback decrypt loops).
+
+Pre-check inside the migration aborts with `RAISE EXCEPTION` if any row has plaintext but no FK — `withoutFk` must be 0 first. Applied prod-only on 2026-04-29 (1200 rows updated); staging + dev are still on the dual-write Phases 1-4 schema and don't have rows that would be affected.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-tx-portfolio-holding-phase5-null.sql
+```
+
+## tx-portfolio-holding-phase6-drop-column (2026-04-29)
+
+Phase 6: `ALTER TABLE transactions DROP COLUMN IF EXISTS portfolio_holding`. Backwards-incompatible — code stops referencing the column **before** the migration runs (deploy code first, then SQL). Defensive pre-check refuses to run if Phase 5 left rows with non-NULL plaintext. Applied prod-only on 2026-04-29; staging + dev still have the column.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-tx-portfolio-holding-phase6-drop-column.sql
 ```
 
 ## users-username
