@@ -78,6 +78,11 @@ export async function settleFutureFxRates(): Promise<SettleResult> {
         .set({
           amount: conv.amount,
           enteredFxRate: conv.enteredFxRate,
+          // Issue #28: any DB-side row mutation bumps updated_at, including
+          // system-driven settlement. `source` is preserved (INSERT-only),
+          // so an originally-imported row stays 'import' even after the cron
+          // re-locks its rate.
+          updatedAt: sql`NOW()`,
         })
         .where(eq(schema.transactions.id, row.id));
       settled++;

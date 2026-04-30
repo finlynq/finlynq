@@ -2,6 +2,7 @@ import { db, schema, getDialect } from "@/db";
 import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { requireHoldingForInvestmentAccount } from "@/lib/investment-account";
+import type { TransactionSource } from "@/lib/tx-source";
 
 const { accounts, categories, transactions, portfolioHoldings, budgets, budgetTemplates } = schema;
 
@@ -162,6 +163,12 @@ export async function getTransactions(userId: string, filters?: {
       payee: transactions.payee,
       tags: transactions.tags,
       linkId: transactions.linkId,
+      // Audit-trio (issue #28). Surface for the edit dialog footer + the
+      // future "recently modified" sort. Pre-migration rows backfill to
+      // NOW()/'manual' — see migrate-tx-audit-fields.sql.
+      createdAt: transactions.createdAt,
+      updatedAt: transactions.updatedAt,
+      source: transactions.source,
     })
     .from(transactions)
     .leftJoin(accounts, eq(transactions.accountId, accounts.id))
@@ -225,6 +232,11 @@ export async function createTransaction(userId: string, data: {
   isBusiness?: number;
   splitPerson?: string;
   splitRatio?: number;
+  // Audit-source attribution (issue #28). Defaults to 'manual' when the
+  // caller doesn't pass one — the UI POST handler relies on the default,
+  // every other writer (import/MCP/connector/sample-data/restore) sets
+  // it explicitly so the surface info is set at the route boundary.
+  source?: TransactionSource;
 }) {
   // Investment-account constraint: every transaction in a flagged account
   // must reference a portfolio_holdings row. Throws
@@ -278,7 +290,16 @@ export async function updateTransaction(id: number, userId: string, data: Partia
       await requireHoldingForInvestmentAccount(userId, resultingAccountId, resultingHoldingId);
     }
   }
-  return db.update(transactions).set(data).where(and(eq(transactions.id, id), eq(transactions.userId, userId))).returning().get();
+  // Audit-trio (issue #28): every UPDATE bumps updated_at = NOW(). `source`
+  // is INSERT-only and intentionally NOT spread into `data`. The Partial<>
+  // input type above doesn't include `source`, so a future caller adding it
+  // here would be a type error.
+  return db
+    .update(transactions)
+    .set({ ...data, updatedAt: sql`NOW()` })
+    .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
+    .returning()
+    .get();
 }
 
 /**

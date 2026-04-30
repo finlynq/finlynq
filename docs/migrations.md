@@ -281,3 +281,16 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 3. Smoke-test on staging first: open `/settings/holding-accounts`, confirm every existing holding shows up with one `is_primary=true` pairing matching its current `portfolio_holdings.account_id`. Add a second pairing on a test holding, confirm the legacy column stays unchanged. Toggle "Make primary" to the new pairing, confirm `portfolio_holdings.account_id` flips.
 4. Repeat the smoke test on prod after the prod deploy completes.
 5. The 5 portfolio aggregator callsites + 8 investment-account-constraint callsites in CLAUDE.md still read `portfolio_holdings.account_id` in this release; `holding_accounts` is additive. Issue [#25](https://github.com/finlynq/finlynq/pull/25) (Section F) migrates them onto the join table as a separate PR — that PR is NOT additive, so its deploy will require freshly verifying that the migration's qty + cost_basis backfill matches the aggregator output the moment before code switchover.
+
+
+## tx-audit-fields (2026-04-30, issue #28)
+
+Adds `transactions.created_at`, `transactions.updated_at`, and `transactions.source` (`text NOT NULL DEFAULT 'manual'` with a CHECK constraint on the seven allowed values: `manual`, `import`, `mcp_http`, `mcp_stdio`, `connector`, `sample_data`, `backup_restore`). All three are system-time / system-attribution facts distinct from the user-supplied `transactions.date`. Maintained at the application layer (no triggers — matches the existing convention; coverage grep is cheap to run). Idempotent. Pre-migration creation time + true source are unrecoverable — backfill sets timestamps to NOW() and source to 'manual'. We deliberately do NOT use `entered_at` as a backfill source because semantics differ (entered_at is FX-settlement input, created_at is system audit). Run BEFORE the matching code deploy so the new columns exist when `getTransactions` SELECTs them.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-tx-audit-fields.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-tx-audit-fields.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-tx-audit-fields.sql
+```
+
+After each env, smoke-check by inserting any transaction (UI or MCP) and confirming `created_at` / `updated_at` / `source` populate; then edit the same row and confirm `updated_at` advances while `created_at` and `source` stay frozen.

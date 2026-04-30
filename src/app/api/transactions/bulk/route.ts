@@ -20,10 +20,15 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptField } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { db, schema } from "@/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
 const { transactions } = schema;
+
+// Issue #28: every UPDATE site bumps updated_at = NOW() so the audit
+// timestamp reflects the row's last mutation. Hoisted into a constant so
+// re-using it in each switch arm reads as one chokepoint.
+const AUDIT_BUMP = { updatedAt: sql`NOW()` } as const;
 
 const bulkSchema = z.discriminatedUnion("action", [
   z.object({
@@ -107,7 +112,7 @@ export async function POST(request: NextRequest) {
       case "update_category":
         await db
           .update(transactions)
-          .set({ categoryId: parsed.data.categoryId })
+          .set({ categoryId: parsed.data.categoryId, ...AUDIT_BUMP })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;
@@ -115,7 +120,7 @@ export async function POST(request: NextRequest) {
       case "update_account":
         await db
           .update(transactions)
-          .set({ accountId: parsed.data.accountId })
+          .set({ accountId: parsed.data.accountId, ...AUDIT_BUMP })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;
@@ -123,7 +128,7 @@ export async function POST(request: NextRequest) {
       case "update_date":
         await db
           .update(transactions)
-          .set({ date: parsed.data.date })
+          .set({ date: parsed.data.date, ...AUDIT_BUMP })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;
@@ -131,7 +136,7 @@ export async function POST(request: NextRequest) {
       case "update_note":
         await db
           .update(transactions)
-          .set({ note: encryptField(dek!, parsed.data.note) })
+          .set({ note: encryptField(dek!, parsed.data.note), ...AUDIT_BUMP })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;
@@ -139,7 +144,7 @@ export async function POST(request: NextRequest) {
       case "update_payee":
         await db
           .update(transactions)
-          .set({ payee: encryptField(dek!, parsed.data.payee) })
+          .set({ payee: encryptField(dek!, parsed.data.payee), ...AUDIT_BUMP })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;
@@ -147,7 +152,7 @@ export async function POST(request: NextRequest) {
       case "update_tags":
         await db
           .update(transactions)
-          .set({ tags: encryptField(dek!, parsed.data.tags) })
+          .set({ tags: encryptField(dek!, parsed.data.tags), ...AUDIT_BUMP })
           .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
           ;
         break;

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, sql } from "drizzle-orm";
 import { generateImportHash } from "@/lib/import-hash";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptField } from "@/lib/crypto/envelope";
@@ -34,7 +34,8 @@ export async function POST(request: NextRequest) {
         );
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         db.update(schema.transactions)
-          .set({ importHash: hash } as any)
+          // Issue #28: row mutation → bump audit timestamp.
+          .set({ importHash: hash, updatedAt: sql`NOW()` } as any)
           .where(and(eq(schema.transactions.id, tx.id), eq(schema.transactions.userId, userId)))
           ;
         updated++;

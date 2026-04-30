@@ -186,7 +186,10 @@ export async function POST(request: NextRequest) {
 
     // Bulk insert transactions
     if (sampleTransactions.length > 0) {
-      await db.insert(schema.transactions).values(sampleTransactions);
+      // Issue #28: tag the writer surface explicitly so the analytics view
+      // can distinguish onboarded sample rows from real user data.
+      const tagged = sampleTransactions.map((r) => ({ ...r, source: "sample_data" as const }));
+      await db.insert(schema.transactions).values(tagged);
       invalidateUserTxCache(userId);
     }
 

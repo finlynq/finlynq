@@ -534,7 +534,8 @@ export async function runZipExecute(
     ...transformed.flat,
     ...transformed.splits.map((s) => s.parent),
   ];
-  const importResult = await executeImport(rowsForImport, forceImportIndices, userId, dek);
+  // Issue #28: connector lineage.
+  const importResult = await executeImport(rowsForImport, forceImportIndices, userId, dek, "connector");
 
   // Splits insert — same shape as the API path.
   const splitInsertErrors: ZipExecuteResult["splitInsertErrors"] = [];

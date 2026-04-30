@@ -508,6 +508,8 @@ export async function importTransactions(csvText: string, userId: string) {
         payee: row.payee ?? "",
         tags: row.tags ?? "",
         importHash: hash,
+        // Issue #28: legacy CSV parser.
+        source: "import",
       });
     }
 

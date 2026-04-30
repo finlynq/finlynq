@@ -21,6 +21,7 @@ import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, Che
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./_components/split-dialog";
 import { formatAccountLabel } from "@/lib/account-label";
+import { type TransactionSource, labelForSource } from "@/lib/tx-source";
 
 type Transaction = {
   id: number;
@@ -50,6 +51,13 @@ type Transaction = {
   tags: string;
   isBusiness: number | null;
   linkId: string | null;
+  // Audit-trio (issue #28). Surfaced as a footer line in the edit dialog so
+  // users can see when a row was created/last edited and which writer
+  // surface authored it. Server-side fields are non-null (NOT NULL DEFAULTs)
+  // but typed optional here for tolerance against any stale client state.
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  source?: TransactionSource | null;
 };
 
 type LinkedSibling = {
@@ -1781,6 +1789,29 @@ function TransactionsPageInner() {
                   )}
                 </div>
               )}
+
+              {/* Audit-trio footer (issue #28). Only on edit — irrelevant on
+                  create. Shows when the row was created/last-edited and which
+                  writer surface authored it. Times use the same locale-aware
+                  formatter as the rest of the page; falls back to ISO string
+                  if the field is missing (older rows / mid-rollout). */}
+              {editId && (() => {
+                const t = txns.find((t) => t.id === editId);
+                if (!t) return null;
+                const created = t.createdAt ? new Date(t.createdAt).toLocaleString() : null;
+                const updated = t.updatedAt ? new Date(t.updatedAt).toLocaleString() : null;
+                const sourceLabel = t.source ? labelForSource(t.source) : null;
+                if (!created && !updated && !sourceLabel) return null;
+                return (
+                  <div className="text-[11px] text-muted-foreground border-t pt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {created && <span>Created {created}</span>}
+                    {updated && <span>· Updated {updated}</span>}
+                    {sourceLabel && (
+                      <Badge variant="outline" className="text-[10px] py-0 px-1.5">{sourceLabel}</Badge>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div className="flex gap-2">
                 {editId && (
