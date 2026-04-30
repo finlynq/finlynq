@@ -25,6 +25,7 @@ import {
   summarizeUnrealizedPnL,
 } from "../src/lib/unrealized-pnl";
 import { resolveTxAmountsCore } from "../src/lib/currency-conversion";
+import { deriveTxWriteWarnings } from "../src/lib/queries";
 import {
   createTransferPair,
   updateTransferPair,
@@ -1879,11 +1880,17 @@ export function registerPgTools(
 
       const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
       invalidateUserTxCache(userId);
+      const warnings = deriveTxWriteWarnings({
+        portfolioHoldingId: resolvedHoldingId,
+        amount: resolved.amount,
+        quantity,
+      });
       return text({
         success: true,
         transactionId: result[0]?.id,
         resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
         message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
+        warnings,
       });
     }
   );
@@ -1935,7 +1942,7 @@ export function registerPgTools(
         if (!defaultAcct) defaultAcctError = `Top-level account_id #${defaultAccountId} not found or not owned by you.`;
       }
 
-      const results: { index: number; success: boolean; message: string; resolvedAccount?: { id: number; name: string } }[] = [];
+      const results: { index: number; success: boolean; message: string; resolvedAccount?: { id: number; name: string }; warnings?: string[] }[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
@@ -2035,7 +2042,18 @@ export function registerPgTools(
             INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
             VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null})
           `);
-          results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}`, resolvedAccount: resolvedAccountInfo });
+          const rowWarnings = deriveTxWriteWarnings({
+            portfolioHoldingId: rowHoldingId,
+            amount: resolved.amount,
+            quantity: t.quantity,
+          });
+          results.push({
+            index: i,
+            success: true,
+            message: `${t.payee}: ${resolved.amount} ${resolved.currency}`,
+            resolvedAccount: resolvedAccountInfo,
+            ...(rowWarnings.length ? { warnings: rowWarnings } : {}),
+          });
         } catch (e) {
           results.push({ index: i, success: false, message: String(e) });
         }
@@ -2067,7 +2085,7 @@ export function registerPgTools(
     },
     async ({ id, date, amount, payee, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
       const existing = await q(db, sql`
-        SELECT t.id, t.account_id, t.date, a.currency AS account_currency
+        SELECT t.id, t.account_id, t.date, t.amount, a.currency AS account_currency
           FROM transactions t
           LEFT JOIN accounts a ON a.id = t.account_id
          WHERE t.user_id = ${userId} AND t.id = ${id}
@@ -2075,6 +2093,7 @@ export function registerPgTools(
       if (!existing.length) return err(`Transaction #${id} not found`);
       const accountCurrency = String(existing[0].account_currency ?? "CAD");
       const txAccountId = existing[0].account_id != null ? Number(existing[0].account_id) : undefined;
+      const existingAmount = existing[0].amount != null ? Number(existing[0].amount) : null;
 
       let catId: number | undefined;
       if (category !== undefined) {
@@ -2123,6 +2142,7 @@ export function registerPgTools(
       // than a dynamic SET clause, and the per-call latency is negligible
       // (tool is called once at a time).
       let changed = 0;
+      let postMergeAmount: number | null = existingAmount;
       if (date !== undefined) {
         await db.execute(sql`UPDATE transactions SET date = ${date} WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
@@ -2149,10 +2169,12 @@ export function registerPgTools(
            WHERE id = ${id} AND user_id = ${userId}
         `);
         changed++;
+        postMergeAmount = resolved.amount;
       } else if (amount !== undefined) {
         // Account-side-only update: leave entered_* alone.
         await db.execute(sql`UPDATE transactions SET amount = ${amount} WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
+        postMergeAmount = amount;
       }
       if (catId !== undefined) {
         await db.execute(sql`UPDATE transactions SET category_id = ${catId} WHERE id = ${id} AND user_id = ${userId}`);
@@ -2185,7 +2207,17 @@ export function registerPgTools(
       if (!changed) return err("No fields to update");
 
       invalidateUserTxCache(userId);
-      return text({ success: true, message: `Transaction #${id} updated (${changed} field(s))` });
+      // Warn only when the user explicitly bound a holding on this update
+      // without also passing quantity. We don't nag about every cosmetic edit
+      // (e.g. date) on a previously-bound row — that would be noise.
+      const warnings = (resolvedHoldingId != null && quantity === undefined)
+        ? deriveTxWriteWarnings({
+            portfolioHoldingId: resolvedHoldingId,
+            amount: postMergeAmount,
+            quantity: null,
+          })
+        : [];
+      return text({ success: true, message: `Transaction #${id} updated (${changed} field(s))`, warnings });
     }
   );
 
