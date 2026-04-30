@@ -75,7 +75,18 @@ type LinkedSibling = {
   tags: string | null;
 };
 
-type Account = { id: number; name: string; currency: string; alias?: string | null; type?: string | null };
+type Account = {
+  id: number;
+  name: string;
+  currency: string;
+  alias?: string | null;
+  type?: string | null;
+  // Surfaced from /api/accounts so the Transfer dialog can hide the in-kind
+  // / portfolio block when neither the source nor destination is an
+  // investment account (Section E #10). Always present on the wire because
+  // getAccounts uses select()-all on the row.
+  isInvestment?: boolean;
+};
 type Category = { id: number; name: string; type: string; group: string };
 type Holding = {
   id: number;
@@ -687,6 +698,33 @@ function TransactionsPageInner() {
     // (false→true→false) doesn't cause a refetch; same for receivedAmount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dialogOpen, dialogMode, transferForm.fromAccountId, transferForm.toAccountId, transferForm.amount, transferForm.date, accounts]);
+
+  // Reset in-kind transfer state when the user changes accounts so neither
+  // side is an investment account (Section E #10 — the violet panel is
+  // hidden in that case). Without this, a stale `inKind: true` + holding
+  // name would silently roundtrip on submit. Only fires on the actual
+  // transition `true -> false` so a brief account swap that returns to
+  // investment doesn't lose in-flight values.
+  const prevEitherIsInvestmentRef = useRef<boolean>(false);
+  useEffect(() => {
+    const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
+    const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
+    const eitherIsInvestment =
+      fromAcct?.isInvestment === true || toAcct?.isInvestment === true;
+    if (prevEitherIsInvestmentRef.current && !eitherIsInvestment) {
+      setTransferForm((tf) => ({
+        ...tf,
+        inKind: false,
+        holdingName: "",
+        destHoldingName: "",
+        quantity: "",
+        destQuantity: "",
+      }));
+      setDestHoldingTouched(false);
+      setDestQuantityTouched(false);
+    }
+    prevEitherIsInvestmentRef.current = eitherIsInvestment;
+  }, [transferForm.fromAccountId, transferForm.toAccountId, accounts]);
 
   function handleSearchChange(value: string) {
     setSearchInput(value);
@@ -1733,21 +1771,39 @@ function TransactionsPageInner() {
                   and allows the cash amount to be 0. The destination holding
                   row is auto-created in the destination account if missing;
                   the source holding MUST already exist (the resolver rejects
-                  otherwise — you can't send shares you don't have). */}
+                  otherwise — you can't send shares you don't have).
+
+                  Visibility (Section E #10): the entire violet block is
+                  hidden when neither the source nor destination account is
+                  flagged isInvestment. The four-rule logic:
+                    1. Both accounts cash → block hidden, pure cash transfer.
+                    2. One side investment → block visible; cash leg on the
+                       investment side defaults to that account's Cash
+                       holding via defaultHoldingForInvestmentAccount in
+                       src/lib/transfer.ts (so hiding here doesn't break
+                       the application-layer constraint).
+                    3. Both investment → block visible, dropdowns filtered
+                       per-side by accountId.
+                    4. Same-account in-kind rebalance → still investment, so
+                       the block stays visible. Section C (mandatory
+                       enforcement) is out of scope for this UI guard. */}
               {(() => {
                 const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
                 // Filter holdings to those owned by the source account so
-                // users only see options that won't fail server-side. The
-                // /api/portfolio response only carries account NAME (not id),
-                // so match on that. If multiple accounts share a name (rare)
-                // this could over-filter — acceptable for v1.
+                // users only see options that won't fail server-side. Match
+                // on accountId (already projected by getPortfolioHoldings)
+                // rather than name — accountName collisions could otherwise
+                // surface holdings from another account.
                 const sourceHoldings = fromAcct
-                  ? holdings.filter((h) => h.accountName === fromAcct.name)
+                  ? holdings.filter((h) => h.accountId === fromAcct.id)
                   : [];
                 const toAcctLocal = accounts.find((a) => String(a.id) === transferForm.toAccountId);
                 const destHoldings = toAcctLocal
-                  ? holdings.filter((h) => h.accountName === toAcctLocal.name)
+                  ? holdings.filter((h) => h.accountId === toAcctLocal.id)
                   : [];
+                const eitherIsInvestment =
+                  fromAcct?.isInvestment === true || toAcctLocal?.isInvestment === true;
+                if (!eitherIsInvestment) return null;
                 // Detect whether the destination already has an exact name
                 // match for the source — if so, the "Same as source" default
                 // implicitly binds to it (server's resolver finds it before
