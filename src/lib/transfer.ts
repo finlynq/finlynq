@@ -40,7 +40,10 @@ import { encryptField, decryptField } from "@/lib/crypto/envelope";
 import { resolveTxAmountsCore } from "@/lib/currency-conversion";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
-import { defaultHoldingForInvestmentAccount } from "@/lib/investment-account";
+import {
+  InvestmentHoldingRequiredError,
+  isInvestmentAccount,
+} from "@/lib/investment-account";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -148,6 +151,21 @@ export type CreateTransferOpts = {
   destHoldingName?: string;
   quantity?: number;
   destQuantity?: number;
+  /**
+   * Explicit FK ids for cash legs into investment accounts (issue #22).
+   * Distinct from the in-kind `holdingName` path: these pin a leg's
+   * `portfolio_holding_id` directly without touching `quantity`, so the
+   * portfolio aggregator's cash-sleeve branch (currency-as-symbol) keeps
+   * tracking dollars via `transactions.amount`. Use this when sending cash
+   * to or from an investment account without recording a share move — the
+   * UI binds it to the per-account Cash holding via the "Cash (auto)"
+   * picker option. Ignored on a leg that already resolved an in-kind
+   * holding via `holdingName`. Validates: the supplied id must reference a
+   * holding row owned by `userId` and scoped to that leg's account; an
+   * `account-not-found` style failure otherwise.
+   */
+  fromHoldingId?: number;
+  toHoldingId?: number;
   note?: string;
   tags?: string;
   /**
@@ -518,16 +536,39 @@ export async function createTransferPair(
   const note = opts.note ?? "";
   const tags = applySourceTag(opts.tags ?? "", opts.source);
 
-  // Investment-account constraint: when a leg lands on an is_investment
-  // account and no in-kind holding was resolved (pure-cash transfer),
-  // default to the per-account Cash holding so the leg is attributed.
-  // Non-investment accounts return null and behave as before.
-  const fromHoldingId =
-    holdingResolved?.fromHoldingId ??
-    (await defaultHoldingForInvestmentAccount(userId, fromAcct.id, dek, undefined));
-  const toHoldingId =
-    holdingResolved?.toHoldingId ??
-    (await defaultHoldingForInvestmentAccount(userId, toAcct.id, dek, undefined));
+  // Investment-account constraint (strict — issue #22): when a leg lands on
+  // an is_investment account and no in-kind holding was resolved (pure-cash
+  // transfer), refuse the write rather than silently defaulting to Cash.
+  // Callers that *want* Cash must say so explicitly — either via the
+  // in-kind `holdingName` path (with quantity) or via the explicit
+  // `fromHoldingId` / `toHoldingId` FK pins (cash legs, no quantity).
+  // The dialog defaults to "Cash (auto)" → the per-account Cash holding's
+  // id, so the user keeps the one-click path. Non-investment legs stay
+  // null. InvestmentHoldingRequiredError escapes; route handlers map to 400.
+  if (opts.fromHoldingId != null && !(await holdingBelongsToAccount(userId, opts.fromHoldingId, fromAcct.id))) {
+    return {
+      ok: false,
+      code: "holding-not-found",
+      message: `Source holding #${opts.fromHoldingId} not found in account "${fromAcct.name}".`,
+      side: "source",
+    };
+  }
+  if (opts.toHoldingId != null && !(await holdingBelongsToAccount(userId, opts.toHoldingId, toAcct.id))) {
+    return {
+      ok: false,
+      code: "holding-not-found",
+      message: `Destination holding #${opts.toHoldingId} not found in account "${toAcct.name}".`,
+      side: "destination",
+    };
+  }
+  const fromHoldingId = holdingResolved?.fromHoldingId ?? opts.fromHoldingId ?? null;
+  const toHoldingId = holdingResolved?.toHoldingId ?? opts.toHoldingId ?? null;
+  if (fromHoldingId == null && (await isInvestmentAccount(userId, fromAcct.id))) {
+    throw new InvestmentHoldingRequiredError(fromAcct.id);
+  }
+  if (toHoldingId == null && (await isInvestmentAccount(userId, toAcct.id))) {
+    throw new InvestmentHoldingRequiredError(toAcct.id);
+  }
 
   // Atomic dual-insert. If either INSERT throws we want both rows to roll
   // back — never leave a half-recorded transfer.
@@ -627,6 +668,32 @@ export async function createTransferPair(
         }
       : {}),
   };
+}
+
+/**
+ * Validate that a portfolio_holdings row exists for this user AND is bound
+ * to `accountId`. Used to verify explicit `fromHoldingId` / `toHoldingId`
+ * pins on a transfer leg before we trust them as the FK. Returns false on
+ * cross-tenant ids, cross-account ids, and unknown ids alike — caller
+ * surfaces `holding-not-found`.
+ */
+async function holdingBelongsToAccount(
+  userId: string,
+  holdingId: number,
+  accountId: number,
+): Promise<boolean> {
+  const row = await db
+    .select({ id: schema.portfolioHoldings.id })
+    .from(schema.portfolioHoldings)
+    .where(
+      and(
+        eq(schema.portfolioHoldings.id, holdingId),
+        eq(schema.portfolioHoldings.userId, userId),
+        eq(schema.portfolioHoldings.accountId, accountId),
+      ),
+    )
+    .get();
+  return row != null;
 }
 
 /**
@@ -1665,15 +1732,37 @@ export async function createTransferPairViaSql(
   const tags = applySourceTag(opts.tags ?? "", opts.source);
   const enc = (v: string) => (dek ? encryptField(dek, v) : v);
 
-  // Investment-account constraint — same default-to-Cash logic as the
-  // Drizzle path. Computed before withTx so a Cash-holding INSERT can't
-  // race the transfer pair's atomic block.
-  const fromHoldingId =
-    holdingResolved?.fromHoldingId ??
-    (await defaultHoldingForInvestmentAccount(userId, fromAcct.id, dek, undefined));
-  const toHoldingId =
-    holdingResolved?.toHoldingId ??
-    (await defaultHoldingForInvestmentAccount(userId, toAcct.id, dek, undefined));
+  // Investment-account constraint (strict — issue #22): same refusal as
+  // the Drizzle path. Stdio MCP runs without holding parameters on
+  // record_transfer's cash path, so a transfer into an investment account
+  // either supplies in-kind `holding`+`quantity` or hits the throw and gets
+  // mapped to a friendly tool error by the MCP wrapper. The Drizzle/HTTP
+  // path additionally accepts `fromHoldingId` / `toHoldingId` cash pins,
+  // validated against the leg's account ownership before use.
+  if (opts.fromHoldingId != null && !(await holdingBelongsToAccountViaSql(pool as unknown as SqlPool, userId, opts.fromHoldingId, fromAcct.id))) {
+    return {
+      ok: false,
+      code: "holding-not-found",
+      message: `Source holding #${opts.fromHoldingId} not found in account "${fromAcct.name}".`,
+      side: "source",
+    };
+  }
+  if (opts.toHoldingId != null && !(await holdingBelongsToAccountViaSql(pool as unknown as SqlPool, userId, opts.toHoldingId, toAcct.id))) {
+    return {
+      ok: false,
+      code: "holding-not-found",
+      message: `Destination holding #${opts.toHoldingId} not found in account "${toAcct.name}".`,
+      side: "destination",
+    };
+  }
+  const fromHoldingId = holdingResolved?.fromHoldingId ?? opts.fromHoldingId ?? null;
+  const toHoldingId = holdingResolved?.toHoldingId ?? opts.toHoldingId ?? null;
+  if (fromHoldingId == null && (await isInvestmentAccount(userId, fromAcct.id))) {
+    throw new InvestmentHoldingRequiredError(fromAcct.id);
+  }
+  if (toHoldingId == null && (await isInvestmentAccount(userId, toAcct.id))) {
+    throw new InvestmentHoldingRequiredError(toAcct.id);
+  }
 
   let fromTransactionId = 0;
   let toTransactionId = 0;
@@ -1766,6 +1855,26 @@ export async function createTransferPairViaSql(
         }
       : {}),
   };
+}
+
+/**
+ * Raw-SQL mirror of {@link holdingBelongsToAccount} for the stdio path.
+ */
+async function holdingBelongsToAccountViaSql(
+  pool: SqlPool,
+  userId: string,
+  holdingId: number,
+  accountId: number,
+): Promise<boolean> {
+  const r = await withClient(pool, (c) =>
+    c.query<{ id: number }>(
+      `SELECT id FROM portfolio_holdings
+        WHERE id = $1 AND user_id = $2 AND account_id = $3
+        LIMIT 1`,
+      [holdingId, userId, accountId],
+    ),
+  );
+  return r.rows.length > 0;
 }
 
 /**
