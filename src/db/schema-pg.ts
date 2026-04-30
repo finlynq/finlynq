@@ -131,6 +131,52 @@ export const portfolioHoldings = pgTable("portfolio_holdings", {
   symbolLookup: text("symbol_lookup"),
 });
 
+// Holding ↔ account many-to-many (2026-04-30). Issue #26 (Section G).
+//
+// The same holding (e.g. an ETF or a metal) can exist in multiple accounts.
+// This join table is the long-term shape; the legacy one-to-many
+// `portfolio_holdings.account_id` link is kept during cutover and the row
+// here whose `is_primary = true` mirrors it. The 5 portfolio aggregator
+// callsites + 8 investment-account-constraint callsites still read the
+// legacy column today; issue #25 (Section F) migrates them onto this table.
+//
+// No encrypted fields — only ids + numbers — so no Stream D dual-write
+// considerations and no DEK is required for CRUD on this table. PK is
+// composite (holding_id, account_id).
+export const holdingAccounts = pgTable(
+  "holding_accounts",
+  {
+    holdingId: integer("holding_id")
+      .notNull()
+      .references(() => portfolioHoldings.id, { onDelete: "cascade" }),
+    accountId: integer("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    // Denormalized for per-user filtering. Mirrors portfolioHoldings.userId
+    // and accounts.userId — application-layer enforces all three match on
+    // every write.
+    userId: text("user_id").notNull(),
+    qty: doublePrecision("qty").notNull().default(0),
+    costBasis: doublePrecision("cost_basis").notNull().default(0),
+    // Exactly one row per holding_id should have is_primary=true while the
+    // legacy portfolio_holdings.account_id column still exists; that flagged
+    // row is what the legacy column mirrors. After Section F drops the
+    // column, the flag becomes purely advisory.
+    isPrimary: boolean("is_primary").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.holdingId, t.accountId] }),
+    // Hot path: list every pairing for a user. Composite index ordered for
+    // the (user, holding) prefix probe used by GET /api/holding-accounts.
+    uniqueIndex("holding_accounts_user_holding_idx").on(
+      t.userId,
+      t.holdingId,
+      t.accountId,
+    ),
+  ],
+);
+
 export const budgets = pgTable("budgets", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
