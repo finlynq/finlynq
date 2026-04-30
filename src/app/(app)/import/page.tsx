@@ -22,7 +22,9 @@ import {
   BookTemplate,
   Sparkles,
   Link as LinkIcon,
+  ListChecks,
 } from "lucide-react";
+import Link from "next/link";
 import { FileDropZone } from "./components/file-drop-zone";
 import { ImportPreviewDialog } from "./components/import-preview-dialog";
 import { OfxPreview } from "./components/ofx-preview";
@@ -362,6 +364,32 @@ export default function ImportPage() {
             )}
 
             <FileDropZone onFileSelected={handleFileUpload} />
+
+            {/* Reconciliation Mode entry — issue #36. Statement-aware
+                preview/diff/approve flow that classifies each row as
+                NEW / EXISTING / PROBABLE_DUPLICATE before any write. */}
+            <Card className="border-dashed border-indigo-200 bg-indigo-50/30 dark:bg-indigo-950/10">
+              <CardContent className="py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ListChecks className="h-4 w-4 text-indigo-600 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">Reconciliation Mode</p>
+                      <p className="text-xs text-muted-foreground">
+                        Diff a statement row-by-row before committing. Flags
+                        probable duplicates and lets you fix routing inline.
+                      </p>
+                    </div>
+                  </div>
+                  <Link
+                    href="/import/reconcile"
+                    className="shrink-0 inline-flex h-8 items-center rounded-md border bg-background px-3 text-xs font-medium hover:bg-muted"
+                  >
+                    Open
+                  </Link>
+                </div>
+              </CardContent>
+            </Card>
 
             {/* Auto-match suggestion banner */}
             {suggestedTemplate && (
