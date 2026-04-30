@@ -138,3 +138,92 @@ export function applyRulesToBatch(
     match: applyRules(txn, rules),
   }));
 }
+
+// Investment-account-aware auto-categorization helpers (#32).
+//
+// When the MCP `record_transaction` / `bulk_record_transactions` tools write
+// to an `is_investment=true` account with no explicit `category`, the regular
+// rules+history fallback can land on an expense category meant for grocery /
+// transport tracking — corrupting spending reports. These helpers route those
+// writes to non-expense categories instead. Pure (no DB access) so the MCP
+// caller decrypts category names once and we can unit-test the routing logic.
+
+export type InvestmentCategoryHint = {
+  id: number;
+  name: string;
+  /** Category type: 'E' expense, 'I' income, 'R' reconciliation/transfer. */
+  type: string;
+};
+
+function buildLowerNameIndex(categories: ReadonlyArray<InvestmentCategoryHint>): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const c of categories) {
+    const key = c.name.trim().toLowerCase();
+    if (key && !out.has(key)) out.set(key, c.id);
+  }
+  return out;
+}
+
+/**
+ * Match a payee against a small set of investment-row keywords and return
+ * the user's matching category id. Pattern (case-insensitive substrings):
+ *   - `dividend`     → "Dividends"
+ *   - `interest`     → "Credit Interest" / "Interest Income" / "Interest"
+ *   - `forex` / `\bfx\b` / `currency` → "Currency Revaluation" / "Forex" / "Transfers"
+ *   - `disbursement` / `withdrawal`   → "Transfers" / "Withdrawals"
+ *
+ * Returns null when nothing matches OR the user has no category by any of the
+ * candidate names — caller should fall through to {@link fallbackInvestmentCategory}
+ * or leave the row uncategorized.
+ */
+export function pickInvestmentCategoryByPayee(
+  payee: string,
+  categories: ReadonlyArray<InvestmentCategoryHint>,
+): number | null {
+  if (!payee) return null;
+  const byLowerName = buildLowerNameIndex(categories);
+  const find = (...names: string[]): number | null => {
+    for (const n of names) {
+      const id = byLowerName.get(n.toLowerCase());
+      if (id !== undefined) return id;
+    }
+    return null;
+  };
+
+  const lower = payee.toLowerCase();
+
+  if (lower.includes("dividend")) {
+    const id = find("Dividends", "Dividend");
+    if (id !== null) return id;
+  }
+  if (lower.includes("interest")) {
+    const id = find("Credit Interest", "Interest Income", "Interest");
+    if (id !== null) return id;
+  }
+  if (lower.includes("forex") || /\bfx\b/.test(lower) || lower.includes("currency")) {
+    const id = find("Currency Revaluation", "Forex", "Transfers");
+    if (id !== null) return id;
+  }
+  if (lower.includes("disbursement") || lower.includes("withdrawal")) {
+    const id = find("Transfers", "Withdrawals");
+    if (id !== null) return id;
+  }
+
+  return null;
+}
+
+/**
+ * Final fallback when no rule, keyword, or non-expense history match was
+ * found for an investment-account write — prefer "Transfers", then a generic
+ * "Investment Activity". Returns null when neither category exists.
+ */
+export function fallbackInvestmentCategory(
+  categories: ReadonlyArray<InvestmentCategoryHint>,
+): number | null {
+  const byLowerName = buildLowerNameIndex(categories);
+  const transfers = byLowerName.get("transfers");
+  if (transfers !== undefined) return transfers;
+  const investActivity = byLowerName.get("investment activity");
+  if (investActivity !== undefined) return investActivity;
+  return null;
+}
