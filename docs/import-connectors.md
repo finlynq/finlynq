@@ -532,6 +532,32 @@ Run everything: `cd pf-app && npm test`.
 | Provider | ID | Added | Paths | Reconciliation | Notes |
 |---|---|---|---|---|---|
 | WealthPosition | `wealthposition` | 2026-04-24 | ZIP + API | via API `/account_balances` | Portfolio.csv is the holding→brokerage ground truth. `#SPLIT#` sentinel preserves multi-leg shape. |
+| Interactive Brokers | `ibkr` | 2026-04-30 | XML (Flex Query) + Activity CSV | not yet — open positions infer sub-account → Finlynq mapping | Multi-account: each `<FlexStatement>` is a sub-account. Forex (`assetCategory="CASH"`) collapses to one same-account 2-leg in-kind currency conversion (NOT two cash flows). Cancellation triplets share an `actionID` and net to one row (or drop entirely if they sum to zero). XML preferred over CSV — header drift in CSV is real, XML attributes are deterministic. |
+
+#### IBKR-specific notes
+
+The IBKR connector is **upload-only** (XML or activity CSV) at v1 — no live
+Flex Web Service client yet. Pipeline:
+
+```
+fileBody (XML or CSV)
+   │
+   ▼  parseFlexXml / parseFlexCsv   →  IbkrStatement[]   (per sub-account)
+   ▼  transformIbkrFile             →  ExternalAccount[] + ExternalCategory[]
+   │                                    + ExternalTransaction[]
+   ▼  transformTransactions         →  TransformResult (flat + splits + errors)
+                                       with `source:ibkr` tags applied
+```
+
+Sub-account → Finlynq-account mapping is suggested by
+`inferAccountMapping()` (Jaccard similarity on held tickers from
+`<OpenPositions>`); the orchestrator on the Finlynq side surfaces this in
+the mapping dialog and lets the user override before commit.
+
+The `transformTransactions()` shared helper now accepts an
+`{ sourceConnectorId }` option (default `"wealthposition"`) — every new
+connector passes its own id so the auto-applied row tag (`source:<id>`)
+matches the originating provider, not WP. See §7 invariant 15.
 
 ### Candidate providers (not yet started)
 
@@ -543,6 +569,7 @@ Run everything: `cd pf-app && npm test`.
 | **Lunch Money** | Yes — CSV + full API | REST API with token | Tags are structured; categories nested. |
 | **Quicken** | Yes — QIF/CSV | No | QIF parser would live alongside csv.ts. |
 | **Personal Capital / Empower** | Yes — CSV | No public API | Strong holdings + balances in CSV. |
+| ~~**Interactive Brokers**~~ | ~~Yes — Flex Query XML / Activity CSV~~ | ~~Flex Web Service (token + queryId)~~ | _Shipped 2026-04-30 — see table above._ |
 
 Before starting a new connector:
 1. Download an export from a real account. Inspect the shape.
