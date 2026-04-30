@@ -6,11 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import { Plus, Trash2, Target, CheckCircle2, TrendingUp, Calendar } from "lucide-react";
 
@@ -61,6 +63,8 @@ export default function GoalsPage() {
 
   const load = useCallback(() => { fetch("/api/goals").then((r) => r.json()).then(setGoals); }, []);
   useEffect(() => { load(); fetch("/api/accounts").then((r) => r.json()).then(setAccounts); }, [load]);
+
+  const sortAccount = useDropdownOrder("account");
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -147,10 +151,19 @@ export default function GoalsPage() {
                 </div>
               </div>
               <div><Label>Link to Account</Label>
-                <Select value={form.accountId} onValueChange={(v) => setForm({ ...form, accountId: v ?? "" })}>
-                  <SelectTrigger><SelectValue placeholder="None (manual tracking)" /></SelectTrigger>
-                  <SelectContent>{accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}</SelectContent>
-                </Select>
+                <Combobox
+                  value={form.accountId}
+                  onValueChange={(v) => setForm({ ...form, accountId: v })}
+                  items={sortAccount(
+                    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                    (a) => Number(a.value),
+                    (a, z) => a.label.localeCompare(z.label),
+                  )}
+                  placeholder="None (manual tracking)"
+                  searchPlaceholder="Search accounts…"
+                  emptyMessage="No matches"
+                  className="w-full"
+                />
               </div>
               <div><Label>Note</Label><Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></div>
               <Button type="submit" className="w-full" disabled={!isFormValid}>Create Goal</Button>

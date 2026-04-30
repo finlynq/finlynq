@@ -93,6 +93,40 @@ Scroll reveals via `IntersectionObserver` — elements get the `.in` class once 
 
 - `onValueChange` returns `string | null` — always add `?? ""` fallback.
 
+## Combobox component (type-ahead dropdowns)
+
+For user-data-backed dropdowns (categories, accounts, holdings, currencies) prefer `<Combobox>` from [src/components/ui/combobox.tsx](../src/components/ui/combobox.tsx) over `<Select>`. Built on `@base-ui/react/combobox`, visually identical to `<Select>` (same Tailwind tokens) but adds a search input and per-user pinned ordering.
+
+High-level usage (drop-in for most `<Select>` sites):
+
+```tsx
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
+
+const sortAccount = useDropdownOrder("account");
+
+<Combobox
+  value={form.accountId}
+  onValueChange={(v) => setForm({ ...form, accountId: v })}
+  items={sortAccount(
+    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+    (a) => Number(a.value),
+    (a, z) => a.label.localeCompare(z.label),
+  )}
+  placeholder="Select account"
+  searchPlaceholder="Search accounts…"
+  emptyMessage="No matches"
+  className="w-full"
+/>
+```
+
+- `onValueChange` receives a coerced `string` (the wrapper applies `?? ""` for you).
+- Pass `items` as `Array<{ value, label, disabled? }>`. Filtering uses base-ui's collator against `label`.
+- Use `<Combobox>` for: categories, accounts, portfolio holdings, currencies, rule `assignCategoryId`. Keep `<Select>` for short fixed enums (transaction type I/E/T/R, frequency, account group/type, date presets, column-name pickers in the import mapper).
+- Use `useDropdownOrder(kind)` (kind = `"category" | "account" | "holding" | "currency"`) to apply the user's saved pin order before `.map()`. The hook is SSR-safe and returns the items in fallback order until `DropdownOrderProvider` (mounted in `(app)/layout.tsx`) hydrates.
+
+Persistence — `GET`/`PUT /api/settings/dropdown-order` writes a JSON map `{ version: 1, lists: { category, account, holding, currency } }` keyed `dropdown_order` in the `settings` table. Identifiers are opaque (numeric IDs / ISO codes); no display names enter the row, so the value is unencrypted. The forthcoming Section G "setup pages" UI is the only writer in production (manual `psql` insert is fine for dev).
+
 ## Form validation
 
 - Use `useState<Record<string, string>>({})` for errors. Clear errors with `""`, NOT `undefined`.

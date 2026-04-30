@@ -7,6 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Download, Database, Server, Shield, Wallet, Tag, ArrowLeftRight, Briefcase, Trash2, Pencil, Plus, AlertTriangle, Settings2, Check, X, Zap, ToggleLeft, ToggleRight, Play, Lock, Eye, EyeOff, FolderOpen, HardDrive, Cloud, RefreshCw, BarChart3, Upload, FileText, Key } from "lucide-react";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { SUPPORTED_FIAT_CURRENCIES, currencyLabel } from "@/lib/fx/supported-currencies";
@@ -56,6 +58,7 @@ export default function SettingsPage() {
 
   // Category management
   const [categories, setCategories] = useState<Category[]>([]);
+  const sortCategory = useDropdownOrder("category");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
   const [catError, setCatError] = useState("");
@@ -1282,15 +1285,19 @@ export default function SettingsPage() {
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <Label>Assign Category</Label>
-                  <Select value={ruleForm.assignCategoryId} onValueChange={(v) => setRuleForm({ ...ruleForm, assignCategoryId: v ?? "" })}>
-                    <SelectTrigger><SelectValue placeholder="Select..." /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="">None</SelectItem>
-                      {categories.map((c) => (
-                        <SelectItem key={c.id} value={c.id.toString()}>{c.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox
+                    value={ruleForm.assignCategoryId}
+                    onValueChange={(v) => setRuleForm({ ...ruleForm, assignCategoryId: v })}
+                    items={sortCategory(
+                      categories.map((c): ComboboxItemShape => ({ value: c.id.toString(), label: c.name })),
+                      (c) => Number(c.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="None"
+                    searchPlaceholder="Search categories…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
                 <div>
                   <Label>Assign Tags</Label>

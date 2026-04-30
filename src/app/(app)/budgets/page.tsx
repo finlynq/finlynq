@@ -7,10 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import {
   Plus, ChevronLeft, ChevronRight, Trash2, PiggyBank, TrendingDown,
   Wallet, LayoutGrid, Save, FileDown, ArrowRightLeft, Clock,
@@ -77,6 +79,8 @@ export default function BudgetsPage() {
 
   // Envelope mode: track per-category available amounts (income allocated)
   const [envelopeIncome, setEnvelopeIncome] = useState(0);
+
+  const sortCategory = useDropdownOrder("category");
 
   function validateForm() {
     const newErrors: Record<string, string> = {};
@@ -407,29 +411,40 @@ export default function BudgetsPage() {
                 <div className="space-y-4">
                   <div>
                     <Label>From</Label>
-                    <Select value={moveFrom} onValueChange={(v) => setMoveFrom(v ?? "")}>
-                      <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
-                      <SelectContent>
-                        {budgets.map((b) => (
-                          <SelectItem key={b.id} value={String(b.categoryId)}>
-                            {b.categoryName} ({formatCurrency(b.amount - (spendingMap.get(b.categoryId) ?? 0), displayCurrency)} available)
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <Combobox
+                      value={moveFrom}
+                      onValueChange={(v) => setMoveFrom(v)}
+                      items={sortCategory(
+                        budgets.map((b): ComboboxItemShape => ({
+                          value: String(b.categoryId),
+                          label: `${b.categoryName} (${formatCurrency(b.amount - (spendingMap.get(b.categoryId) ?? 0), displayCurrency)} available)`,
+                        })),
+                        (b) => Number(b.value),
+                        (a, z) => a.label.localeCompare(z.label),
+                      )}
+                      placeholder="Select category"
+                      searchPlaceholder="Search categories…"
+                      emptyMessage="No matches"
+                      className="w-full"
+                    />
                   </div>
                   <div>
                     <Label>To</Label>
-                    <Select value={moveTo} onValueChange={(v) => setMoveTo(v ?? "")}>
-                      <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
-                      <SelectContent>
-                        {budgets.filter((b) => String(b.categoryId) !== moveFrom).map((b) => (
-                          <SelectItem key={b.id} value={String(b.categoryId)}>
-                            {b.categoryName}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <Combobox
+                      value={moveTo}
+                      onValueChange={(v) => setMoveTo(v)}
+                      items={sortCategory(
+                        budgets
+                          .filter((b) => String(b.categoryId) !== moveFrom)
+                          .map((b): ComboboxItemShape => ({ value: String(b.categoryId), label: b.categoryName })),
+                        (b) => Number(b.value),
+                        (a, z) => a.label.localeCompare(z.label),
+                      )}
+                      placeholder="Select category"
+                      searchPlaceholder="Search categories…"
+                      emptyMessage="No matches"
+                      className="w-full"
+                    />
                   </div>
                   <div>
                     <Label>Amount</Label>
@@ -464,14 +479,19 @@ export default function BudgetsPage() {
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
                   <Label>Category</Label>
-                  <Select value={form.categoryId} onValueChange={(v) => { setForm({ ...form, categoryId: v ?? "" }); setErrors({ ...errors, categoryId: "" }); }}>
-                    <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
-                    <SelectContent>
-                      {categories.map((c) => (
-                        <SelectItem key={c.id} value={String(c.id)}>{c.group} - {c.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox
+                    value={form.categoryId}
+                    onValueChange={(v) => { setForm({ ...form, categoryId: v }); setErrors({ ...errors, categoryId: "" }); }}
+                    items={sortCategory(
+                      categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} - ${c.name}` })),
+                      (c) => Number(c.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Select category"
+                    searchPlaceholder="Search categories…"
+                    emptyMessage="No categories"
+                    className="w-full"
+                  />
                   {errors.categoryId && <p className="text-xs text-destructive mt-1">{errors.categoryId}</p>}
                 </div>
                 <div>

@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
@@ -159,6 +161,9 @@ function TransactionsPageInner() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [holdings, setHoldings] = useState<Holding[]>([]);
+  const sortAccount = useDropdownOrder("account");
+  const sortCategory = useDropdownOrder("category");
+  const sortHolding = useDropdownOrder("holding");
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchInput, setSearchInput] = useState("");
@@ -1343,46 +1348,38 @@ function TransactionsPageInner() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>Account</Label>
-                  <Select value={form.accountId} onValueChange={(v) => {
-                    const val = v ?? "";
-                    const acct = accounts.find((a) => String(a.id) === val);
-                    setForm({ ...form, accountId: val, currency: acct?.currency ?? "CAD" });
-                  }}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select account">
-                        {(v) => {
-                          const val = v == null ? "" : String(v);
-                          if (!val) return "Select account";
-                          return accounts.find((a) => String(a.id) === val)?.name ?? val;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accounts.map((a) => (
-                        <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox
+                    value={form.accountId}
+                    onValueChange={(v) => {
+                      const acct = accounts.find((a) => String(a.id) === v);
+                      setForm({ ...form, accountId: v, currency: acct?.currency ?? "CAD" });
+                    }}
+                    items={sortAccount(
+                      accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                      (a) => Number(a.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Select account"
+                    searchPlaceholder="Search accounts…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Category</Label>
-                  <Select value={form.categoryId} onValueChange={(v) => setForm({ ...form, categoryId: v ?? "" })}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select category">
-                        {(v) => {
-                          const val = v == null ? "" : String(v);
-                          if (!val) return "Select category";
-                          const c = categories.find((c) => String(c.id) === val);
-                          return c ? `${c.group} - ${c.name}` : val;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {categories.map((c) => (
-                        <SelectItem key={c.id} value={String(c.id)}>{c.group} - {c.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox
+                    value={form.categoryId}
+                    onValueChange={(v) => setForm({ ...form, categoryId: v })}
+                    items={sortCategory(
+                      categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} - ${c.name}` })),
+                      (c) => Number(c.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Select category"
+                    searchPlaceholder="Search categories…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
@@ -1465,17 +1462,24 @@ function TransactionsPageInner() {
                   <div className="text-xs text-muted-foreground font-medium">Split rows (must sum to total amount)</div>
                   {splitRows.map((row, i) => (
                     <div key={i} className="flex gap-1.5 items-center">
-                      <Select value={row.categoryId} onValueChange={(v) => {
-                        const next = [...splitRows];
-                        next[i] = { ...next[i], categoryId: v ?? "" };
-                        setSplitRows(next);
-                      }}>
-                        <SelectTrigger className="h-7 text-xs flex-1"><SelectValue placeholder="Category" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="">No category</SelectItem>
-                          {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
+                      <Combobox
+                        value={row.categoryId}
+                        onValueChange={(v) => {
+                          const next = [...splitRows];
+                          next[i] = { ...next[i], categoryId: v };
+                          setSplitRows(next);
+                        }}
+                        items={sortCategory(
+                          categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: c.name })),
+                          (c) => Number(c.value),
+                          (a, z) => a.label.localeCompare(z.label),
+                        )}
+                        placeholder="Category"
+                        searchPlaceholder="Search categories…"
+                        emptyMessage="No matches"
+                        size="sm"
+                        className="h-7 flex-1 text-xs"
+                      />
                       <Input
                         type="number"
                         step="0.01"
@@ -1551,35 +1555,27 @@ function TransactionsPageInner() {
                     </div>
                     <div className="space-y-1.5">
                       <Label>Portfolio Holding</Label>
-                      <Select
-                        value={form.portfolioHoldingId || "__none__"}
-                        onValueChange={(v) => setForm({ ...form, portfolioHoldingId: v === "__none__" ? "" : (v ?? "") })}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select holding">
-                            {(v) => {
-                              const val = v == null ? "" : String(v);
-                              if (!val || val === "__none__") return "None";
-                              const h = holdings.find((h) => h.name === val);
-                              if (!h) return val;
-                              return h.symbol ? `${h.name} (${h.symbol})` : h.name;
-                            }}
-                          </SelectValue>
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__none__">None</SelectItem>
-                          {holdings.map((h) => (
-                            <SelectItem key={h.id} value={h.name}>
-                              {h.symbol ? `${h.name} (${h.symbol})` : h.name}
-                              {h.accountName ? ` — ${h.accountName}` : ""}
-                            </SelectItem>
-                          ))}
-                          {form.portfolioHoldingId &&
-                            !holdings.some((h) => h.name === form.portfolioHoldingId) && (
-                              <SelectItem value={form.portfolioHoldingId}>{form.portfolioHoldingId}</SelectItem>
-                            )}
-                        </SelectContent>
-                      </Select>
+                      <Combobox
+                        value={form.portfolioHoldingId}
+                        onValueChange={(v) => setForm({ ...form, portfolioHoldingId: v })}
+                        items={[
+                          ...sortHolding(
+                            holdings.map((h): ComboboxItemShape => ({
+                              value: h.name,
+                              label: `${h.symbol ? `${h.name} (${h.symbol})` : h.name}${h.accountName ? ` — ${h.accountName}` : ""}`,
+                            })),
+                            (h) => holdings.find((x) => x.name === h.value)?.id ?? h.value,
+                            (a, z) => a.label.localeCompare(z.label),
+                          ),
+                          ...(form.portfolioHoldingId && !holdings.some((h) => h.name === form.portfolioHoldingId)
+                            ? [{ value: form.portfolioHoldingId, label: form.portfolioHoldingId } satisfies ComboboxItemShape]
+                            : []),
+                        ]}
+                        placeholder="None"
+                        searchPlaceholder="Search holdings…"
+                        emptyMessage="No matches"
+                        className="w-full"
+                      />
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1659,58 +1655,39 @@ function TransactionsPageInner() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>From account</Label>
-                  <Select
+                  <Combobox
                     value={transferForm.fromAccountId}
-                    onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v ?? "" })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Source account">
-                        {(v) => {
-                          const val = v == null ? "" : String(v);
-                          if (!val) return "Source account";
-                          const a = accounts.find((a) => String(a.id) === val);
-                          return a ? `${a.name} · ${a.currency}` : val;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accounts
-                        // Allow same-account when in-kind is on (rebalance
-                        // between two holdings inside one brokerage); only
-                        // exclude the picked destination for cash transfers.
+                    onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v })}
+                    items={sortAccount(
+                      accounts
                         .filter((a) => transferForm.inKind || String(a.id) !== transferForm.toAccountId)
-                        .map((a) => (
-                          <SelectItem key={a.id} value={String(a.id)}>{a.name} · {a.currency}</SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
+                        .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
+                      (a) => Number(a.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Source account"
+                    searchPlaceholder="Search accounts…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label>To account</Label>
-                  <Select
+                  <Combobox
                     value={transferForm.toAccountId}
-                    onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v ?? "" })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Destination account">
-                        {(v) => {
-                          const val = v == null ? "" : String(v);
-                          if (!val) return "Destination account";
-                          const a = accounts.find((a) => String(a.id) === val);
-                          return a ? `${a.name} · ${a.currency}` : val;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accounts
-                        // Mirror of the From dropdown: same-account allowed
-                        // when in-kind is on, blocked otherwise.
+                    onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v })}
+                    items={sortAccount(
+                      accounts
                         .filter((a) => transferForm.inKind || String(a.id) !== transferForm.fromAccountId)
-                        .map((a) => (
-                          <SelectItem key={a.id} value={String(a.id)}>{a.name} · {a.currency}</SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
+                        .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
+                      (a) => Number(a.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Destination account"
+                    searchPlaceholder="Search accounts…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
               </div>
 
@@ -2113,45 +2090,40 @@ function TransactionsPageInner() {
             <Input type="date" className="w-36 h-8 text-xs" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
             <span className="text-xs text-muted-foreground">to</span>
             <Input type="date" className="w-36 h-8 text-xs" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
-            <Select value={filters.accountId} onValueChange={(v) => { setFilters({ ...filters, accountId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger className="w-40 h-8 text-xs">
-                {/* Render-prop on SelectValue — base-ui's default trigger
-                    renders the raw `value` (the account id, e.g. "609") rather
-                    than the SelectItem's children. Look the id back up so the
-                    trigger shows the same `formatAccountLabel` string the
-                    dropdown items + table cells use. */}
-                <SelectValue placeholder="All accounts">
-                  {(v) => {
-                    const val = v == null ? "" : String(v);
-                    if (!val || val === "all") return "All accounts";
-                    const a = accounts.find((x) => String(x.id) === val);
-                    return a ? formatAccountLabel(a) : val;
-                  }}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All accounts</SelectItem>
-                {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{formatAccountLabel(a)}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Select value={filters.categoryId} onValueChange={(v) => { setFilters({ ...filters, categoryId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger className="w-44 h-8 text-xs">
-                {/* Same render-prop pattern as Account filter — without it
-                    the trigger shows the raw category id when one's selected. */}
-                <SelectValue placeholder="All categories">
-                  {(v) => {
-                    const val = v == null ? "" : String(v);
-                    if (!val || val === "all") return "All categories";
-                    const c = categories.find((x) => String(x.id) === val);
-                    return c?.name ?? val;
-                  }}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All categories</SelectItem>
-                {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <Combobox
+              value={filters.accountId}
+              onValueChange={(v) => { setFilters({ ...filters, accountId: v === "all" ? "" : v }); setPage(0); }}
+              items={[
+                { value: "all", label: "All accounts" } satisfies ComboboxItemShape,
+                ...sortAccount(
+                  accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: formatAccountLabel(a) })),
+                  (a) => Number(a.value),
+                  (a, z) => a.label.localeCompare(z.label),
+                ),
+              ]}
+              placeholder="All accounts"
+              searchPlaceholder="Search accounts…"
+              emptyMessage="No matches"
+              size="sm"
+              className="h-8 w-40 text-xs"
+            />
+            <Combobox
+              value={filters.categoryId}
+              onValueChange={(v) => { setFilters({ ...filters, categoryId: v === "all" ? "" : v }); setPage(0); }}
+              items={[
+                { value: "all", label: "All categories" } satisfies ComboboxItemShape,
+                ...sortCategory(
+                  categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: c.name })),
+                  (c) => Number(c.value),
+                  (a, z) => a.label.localeCompare(z.label),
+                ),
+              ]}
+              placeholder="All categories"
+              searchPlaceholder="Search categories…"
+              emptyMessage="No matches"
+              size="sm"
+              className="h-8 w-44 text-xs"
+            />
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
@@ -2243,20 +2215,36 @@ function TransactionsPageInner() {
               </SelectContent>
             </Select>
             {bulkAction === "update_category" && (
-              <Select value={bulkCategoryId} onValueChange={(v) => setBulkCategoryId(v ?? "")}>
-                <SelectTrigger className="w-44 h-7 text-xs"><SelectValue placeholder="Select category" /></SelectTrigger>
-                <SelectContent>
-                  {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.group} — {c.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <Combobox
+                value={bulkCategoryId}
+                onValueChange={(v) => setBulkCategoryId(v)}
+                items={sortCategory(
+                  categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} — ${c.name}` })),
+                  (c) => Number(c.value),
+                  (a, z) => a.label.localeCompare(z.label),
+                )}
+                placeholder="Select category"
+                searchPlaceholder="Search categories…"
+                emptyMessage="No matches"
+                size="sm"
+                className="h-7 w-44 text-xs"
+              />
             )}
             {bulkAction === "update_account" && (
-              <Select value={bulkAccountId} onValueChange={(v) => setBulkAccountId(v ?? "")}>
-                <SelectTrigger className="w-44 h-7 text-xs"><SelectValue placeholder="Select account" /></SelectTrigger>
-                <SelectContent>
-                  {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <Combobox
+                value={bulkAccountId}
+                onValueChange={(v) => setBulkAccountId(v)}
+                items={sortAccount(
+                  accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                  (a) => Number(a.value),
+                  (a, z) => a.label.localeCompare(z.label),
+                )}
+                placeholder="Select account"
+                searchPlaceholder="Search accounts…"
+                emptyMessage="No matches"
+                size="sm"
+                className="h-7 w-44 text-xs"
+              />
             )}
             {bulkAction === "update_date" && (
               <Input type="date" className="h-7 text-xs w-36" value={bulkDate} onChange={(e) => setBulkDate(e.target.value)} />
