@@ -271,6 +271,25 @@ interface BuildRawTransactionArgs {
   holding: number | null;
 }
 
+/**
+ * Tag every WP-imported row with `source:wealthposition`. Lets future statement
+ * reconciliations (or a brokerage connector that overlaps with WP exports)
+ * identify rows the bank side has already booked, so cross-import dedup can
+ * skip them instead of double-recording. Merged into existing user/category
+ * tags rather than replacing — keeps the rule engine's `assignTags` and any
+ * caller-set tags intact. Idempotent on re-imports because the import-pipeline
+ * dedups on import_hash before this string ever reaches the DB.
+ */
+const SOURCE_TAG = "source:wealthposition";
+
+function withSourceTag(existing: string[] | undefined): string {
+  const tags = existing && existing.length ? [...existing] : [];
+  if (!tags.some((t) => t.trim().toLowerCase() === SOURCE_TAG)) {
+    tags.push(SOURCE_TAG);
+  }
+  return tags.join(",");
+}
+
 function buildRawTransaction(args: BuildRawTransactionArgs): RawTransaction {
   const row: RawTransaction = {
     date: args.date,
@@ -280,7 +299,7 @@ function buildRawTransaction(args: BuildRawTransactionArgs): RawTransaction {
     category: args.category,
     currency: args.currency,
     note: args.note,
-    tags: args.tags && args.tags.length ? args.tags.join(",") : undefined,
+    tags: withSourceTag(args.tags),
   };
   // holding→quantity only when it's a distinct "units of something" number.
   // Cash accounts report holding == amount; skip in that case so we don't

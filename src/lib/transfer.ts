@@ -150,6 +150,14 @@ export type CreateTransferOpts = {
   destQuantity?: number;
   note?: string;
   tags?: string;
+  /**
+   * When set, the connector / orchestrator name (e.g. "wealthposition") is
+   * prepended to both legs' `tags` as `source:<connector>`. Lets future
+   * statement reconciliations dedup against rows the bank side has already
+   * imported. No-op when undefined; merged with caller-supplied tags rather
+   * than replacing them.
+   */
+  source?: string;
 };
 
 export type UpdateTransferOpts = {
@@ -288,6 +296,24 @@ async function resolveTransferCategoryId(
 function defaultPayee(direction: "out" | "in", otherAccountName: string | null): string {
   const other = otherAccountName ?? "another account";
   return direction === "out" ? `Transfer to ${other}` : `Transfer from ${other}`;
+}
+
+/**
+ * Merge a `source:<connector>` tag into a user-supplied tags string. Idempotent:
+ * if the tag is already present (case-insensitive), the input is returned
+ * unchanged so re-running an import doesn't accumulate duplicates. Empty
+ * `source` is a no-op. Tags are stored comma-separated, matching what
+ * `transactions.tags` already holds.
+ */
+function applySourceTag(tags: string, source: string | undefined): string {
+  if (!source || !source.trim()) return tags;
+  const tag = `source:${source.trim()}`;
+  const existing = tags
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  if (existing.some((t) => t.toLowerCase() === tag.toLowerCase())) return tags;
+  return [tag, ...existing].join(",");
 }
 
 // ─── Create ─────────────────────────────────────────────────────────────────
@@ -490,7 +516,7 @@ export async function createTransferPair(
   const sourcePayee = defaultPayee("out", toAcct.name);
   const destPayee = defaultPayee("in", fromAcct.name);
   const note = opts.note ?? "";
-  const tags = opts.tags ?? "";
+  const tags = applySourceTag(opts.tags ?? "", opts.source);
 
   // Investment-account constraint: when a leg lands on an is_investment
   // account and no in-kind holding was resolved (pure-cash transfer),
@@ -1636,7 +1662,7 @@ export async function createTransferPairViaSql(
   const sourcePayee = defaultPayee("out", toAcct.name);
   const destPayee = defaultPayee("in", fromAcct.name);
   const note = opts.note ?? "";
-  const tags = opts.tags ?? "";
+  const tags = applySourceTag(opts.tags ?? "", opts.source);
   const enc = (v: string) => (dek ? encryptField(dek, v) : v);
 
   // Investment-account constraint — same default-to-Cash logic as the

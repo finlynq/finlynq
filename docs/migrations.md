@@ -236,3 +236,18 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 ```
 
 After deploy, monitor via `GET /api/admin/investment-orphans` — non-zero `orphanCount` means some users haven't logged in since the migration (Phase-4 lazy backfill hasn't run for them) or have legacy quantity-bearing rows that the resolver couldn't attribute. Both clear themselves once the user logs in / opens the orphan in the UI.
+
+## source-tag backfill (optional, per [#33](https://github.com/finlynq/finlynq/issues/33))
+
+Optional one-off backfill for tagging legacy connector imports with `source:<connector>` so future statement-reconciliation dedup can identify them. New imports carry the tag automatically (WP transform + `createTransferPair*`); this script handles only rows that pre-date the rollout.
+
+Per-user, parameterized — each invocation needs a `:user_id`, `:source` slug, comma-separated `:account_ids`, and a `:from_date` / `:to_date` window. Caveat: skips rows whose `transactions.tags` is encrypted (`v1:%`); those need a Node-side rewrite under the user's DEK and are out of scope for the SQL path. The script reports a count of skipped rows.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf \
+  -v user_id="$UID" -v source='wealthposition' \
+  -v account_ids='12,15,18' -v from_date='2024-01-01' -v to_date='2026-04-29' \
+  -f scripts/backfill-source-tag.sql
+```
+
+Inspect the SELECT preview and the encrypted-skip count, then uncomment `COMMIT;` at the bottom of the script. Idempotent on re-runs (won't double-tag rows that already contain `source:`).
