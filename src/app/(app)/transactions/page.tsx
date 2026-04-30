@@ -79,6 +79,12 @@ type Account = { id: number; name: string; currency: string; alias?: string | nu
 type Category = { id: number; name: string; type: string; group: string };
 type Holding = {
   id: number;
+  // accountId is the source-of-truth account linkage on portfolio_holdings.
+  // Used to filter the picker in Add Transaction so the user only sees
+  // holdings that belong to the selected account. Future M2M migration
+  // (Section F/G #15) will swap this for `accounts: number[]`; the dialog
+  // filter is the only line that changes.
+  accountId: number | null;
   name: string;
   symbol: string | null;
   accountName: string | null;
@@ -1352,7 +1358,23 @@ function TransactionsPageInner() {
                     value={form.accountId}
                     onValueChange={(v) => {
                       const acct = accounts.find((a) => String(a.id) === v);
-                      setForm({ ...form, accountId: v, currency: acct?.currency ?? "CAD" });
+                      // If the previously-selected holding doesn't belong to
+                      // the new account, clear it. The picker filters by
+                      // accountId below; leaving a stale value would render
+                      // as a fallback "unknown holding" item and trip a 23503
+                      // FK error on submit (the Cash holding for the old
+                      // account is invalid for the new one).
+                      const stillValid = form.portfolioHoldingId
+                        ? holdings.some(
+                            (h) => h.name === form.portfolioHoldingId && String(h.accountId) === v,
+                          )
+                        : true;
+                      setForm({
+                        ...form,
+                        accountId: v,
+                        currency: acct?.currency ?? "CAD",
+                        portfolioHoldingId: stillValid ? form.portfolioHoldingId : "",
+                      });
                     }}
                     items={sortAccount(
                       accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
@@ -1558,19 +1580,34 @@ function TransactionsPageInner() {
                       <Combobox
                         value={form.portfolioHoldingId}
                         onValueChange={(v) => setForm({ ...form, portfolioHoldingId: v })}
-                        items={[
-                          ...sortHolding(
-                            holdings.map((h): ComboboxItemShape => ({
-                              value: h.name,
-                              label: `${h.symbol ? `${h.name} (${h.symbol})` : h.name}${h.accountName ? ` — ${h.accountName}` : ""}`,
-                            })),
-                            (h) => holdings.find((x) => x.name === h.value)?.id ?? h.value,
-                            (a, z) => a.label.localeCompare(z.label),
-                          ),
-                          ...(form.portfolioHoldingId && !holdings.some((h) => h.name === form.portfolioHoldingId)
-                            ? [{ value: form.portfolioHoldingId, label: form.portfolioHoldingId } satisfies ComboboxItemShape]
-                            : []),
-                        ]}
+                        items={(() => {
+                          // Restrict the holding picker to the currently-
+                          // selected account so the user can't pick a
+                          // holding that lives in another account (which
+                          // would 23503-FK-error on submit). When no
+                          // account is picked yet, fall back to all
+                          // holdings — the unfiltered list is harmless
+                          // until the user moves on. The fallback unknown
+                          // item below still uses the full `holdings`
+                          // array so existing-but-out-of-account selections
+                          // (e.g. on edit) keep showing.
+                          const accountHoldings = form.accountId
+                            ? holdings.filter((h) => String(h.accountId) === form.accountId)
+                            : holdings;
+                          return [
+                            ...sortHolding(
+                              accountHoldings.map((h): ComboboxItemShape => ({
+                                value: h.name,
+                                label: `${h.symbol ? `${h.name} (${h.symbol})` : h.name}${h.accountName ? ` — ${h.accountName}` : ""}`,
+                              })),
+                              (h) => accountHoldings.find((x) => x.name === h.value)?.id ?? h.value,
+                              (a, z) => a.label.localeCompare(z.label),
+                            ),
+                            ...(form.portfolioHoldingId && !holdings.some((h) => h.name === form.portfolioHoldingId)
+                              ? [{ value: form.portfolioHoldingId, label: form.portfolioHoldingId } satisfies ComboboxItemShape]
+                              : []),
+                          ];
+                        })()}
                         placeholder="None"
                         searchPlaceholder="Search holdings…"
                         emptyMessage="No matches"
