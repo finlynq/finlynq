@@ -70,6 +70,8 @@ export const wealthposition: Connector<WealthPositionCredentials> = {
     for (const [id, acct] of mapping.externalAccountById) {
       byName.externalAccountByName.set(acct.name, id);
     }
-    return transformTransactions(externalTxs, mapping, byName);
+    return transformTransactions(externalTxs, mapping, byName, {
+      sourceConnectorId: "wealthposition",
+    });
   },
 };
