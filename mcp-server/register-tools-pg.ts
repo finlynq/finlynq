@@ -40,6 +40,7 @@ import {
 import {
   isInvestmentAccount as isInvestmentAccountFn,
   getInvestmentAccountIds,
+  InvestmentHoldingRequiredError,
 } from "../src/lib/investment-account";
 import {
   signConfirmationToken,
@@ -2432,21 +2433,31 @@ export function registerPgTools(
       const toAcct = fuzzyFind(toAccount, allAccounts);
       if (!toAcct) return err(`Destination account "${toAccount}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
 
-      const result = await createTransferPair({
-        userId,
-        dek,
-        fromAccountId: Number(fromAcct.id),
-        toAccountId: Number(toAcct.id),
-        enteredAmount: amount,
-        date,
-        receivedAmount,
-        holdingName: holding,
-        destHoldingName: destHolding,
-        quantity,
-        destQuantity,
-        note,
-        tags,
-      });
+      let result: Awaited<ReturnType<typeof createTransferPair>>;
+      try {
+        result = await createTransferPair({
+          userId,
+          dek,
+          fromAccountId: Number(fromAcct.id),
+          toAccountId: Number(toAcct.id),
+          enteredAmount: amount,
+          date,
+          receivedAmount,
+          holdingName: holding,
+          destHoldingName: destHolding,
+          quantity,
+          destQuantity,
+          note,
+          tags,
+        });
+      } catch (e) {
+        // Strict-mode investment-account guard escapes via throw rather than
+        // the helper's Result shape (issue #22). Map it to a friendly tool
+        // error pointing the user at the holding parameter so they can
+        // re-call with `holding: "Cash"` (or the symbol they meant).
+        if (e instanceof InvestmentHoldingRequiredError) return err(e.message);
+        throw e;
+      }
 
       if (!result.ok) return err(result.message);
 
@@ -2619,20 +2630,30 @@ export function registerPgTools(
       const sourceQty = side === "buy" ? cashAmountTrade : quantity;
       const destQty = side === "buy" ? quantity : cashAmountTrade;
 
-      const transferResult = await createTransferPair({
-        userId,
-        dek,
-        fromAccountId: Number(acct.id),
-        toAccountId: Number(acct.id),
-        enteredAmount: cashAmountAcct,
-        date: txDate,
-        holdingName: sourceHolding,
-        destHoldingName: destHolding,
-        quantity: sourceQty,
-        destQuantity: destQty,
-        note: note ?? tradePayee,
-        tags: "source:record_trade",
-      });
+      let transferResult: Awaited<ReturnType<typeof createTransferPair>>;
+      try {
+        transferResult = await createTransferPair({
+          userId,
+          dek,
+          fromAccountId: Number(acct.id),
+          toAccountId: Number(acct.id),
+          enteredAmount: cashAmountAcct,
+          date: txDate,
+          holdingName: sourceHolding,
+          destHoldingName: destHolding,
+          quantity: sourceQty,
+          destQuantity: destQty,
+          note: note ?? tradePayee,
+          tags: "source:record_trade",
+        });
+      } catch (e) {
+        // record_trade always supplies sourceHolding + destHolding, so the
+        // strict-mode guard shouldn't fire here. Defensive catch in case a
+        // future refactor removes one of those — surface the same friendly
+        // tool error rather than letting the throw escape as a 500.
+        if (e instanceof InvestmentHoldingRequiredError) return err(e.message);
+        throw e;
+      }
       if (!transferResult.ok) return err(transferResult.message);
 
       // Optional fees: a single negative-amount transaction on the cash

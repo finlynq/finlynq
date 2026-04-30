@@ -237,6 +237,18 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 
 After deploy, monitor via `GET /api/admin/investment-orphans` — non-zero `orphanCount` means some users haven't logged in since the migration (Phase-4 lazy backfill hasn't run for them) or have legacy quantity-bearing rows that the resolver couldn't attribute. Both clear themselves once the user logs in / opens the orphan in the UI.
 
+## investment-cash-backfill-strict (2026-04-30)
+
+One-time backfill prerequisite for the strict-mode investment-holding constraint (issue [#22](https://github.com/finlynq/finlynq/issues/22)). Reassigns every transaction in an `is_investment=true` account that still has `portfolio_holding_id IS NULL` to the per-account 'Cash' holding so the strict-enforcement code in `src/lib/transfer.ts` (`createTransferPair` + `createTransferPairViaSql`) and `src/lib/import-pipeline.ts` can refuse newly unattributed legs without breaking historical rows. Narrower than `migrate-accounts-is-investment.sql`: that one introduced the flag and reassigned `(FK NULL AND legacy text NULL)`; this one targets just `FK NULL` (Phase 6 already dropped the legacy text column on prod). Idempotent. Verifies orphan count = 0 inside the transaction; raises rather than commits a partial state. Run BEFORE deploying the matching code.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-investment-cash-backfill.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-investment-cash-backfill.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-investment-cash-backfill.sql
+```
+
+After each env, hit `GET /api/admin/investment-orphans` and confirm `{ complete: true, orphanCount: 0 }` before pushing the matching code.
+
 ## source-tag backfill (optional, per [#33](https://github.com/finlynq/finlynq/issues/33))
 
 Optional one-off backfill for tagging legacy connector imports with `source:<connector>` so future statement-reconciliation dedup can identify them. New imports carry the tag automatically (WP transform + `createTransferPair*`); this script handles only rows that pre-date the rollout.

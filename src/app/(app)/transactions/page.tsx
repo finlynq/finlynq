@@ -471,6 +471,12 @@ function TransactionsPageInner() {
     // splits / mergers / share-class conversions: source 100 of A may
     // arrive as 60 of B.
     destQuantity: "",
+    // Cash-leg holding pins for investment-account transfers (issue #22).
+    // Stored as the FK id (number-string from the picker). Sent as
+    // `fromHoldingId` / `toHoldingId` on POST when the corresponding
+    // account is is_investment AND inKind=false. Empty string = unset.
+    fromHoldingId: "",
+    toHoldingId: "",
     note: "",
     tags: "",
   });
@@ -757,6 +763,8 @@ function TransactionsPageInner() {
       destHoldingName: "",
       quantity: "",
       destQuantity: "",
+      fromHoldingId: "",
+      toHoldingId: "",
       note: "",
       tags: "",
     });
@@ -789,6 +797,18 @@ function TransactionsPageInner() {
     if (!form.amount || Number.isNaN(parseFloat(form.amount))) {
       setSubmitError({ message: "Enter an amount" });
       return;
+    }
+    // Investment-account constraint (issue #22): block submit before the
+    // server 400s — every transaction in an is_investment=true account
+    // must reference a portfolio holding. The dialog renders a required
+    // picker above Advanced when the selected account is investment;
+    // this guard catches the case where the user blanked it manually.
+    {
+      const sel = accounts.find((a) => String(a.id) === form.accountId);
+      if (sel?.isInvestment === true && !form.portfolioHoldingId) {
+        setSubmitError({ message: `Pick a portfolio holding — ${sel.name} is an investment account.` });
+        return;
+      }
     }
 
     // Phase 2 currency rework — send the entered side. Server triangulates
@@ -915,6 +935,30 @@ function TransactionsPageInner() {
     const toAcct = accounts.find((a) => a.id === toAccountId);
     const isCrossCcy = !!fromAcct && !!toAcct && fromAcct.currency !== toAcct.currency;
 
+    // Investment-account constraint for cash transfers (issue #22).
+    // The dialog renders required pickers above; this is the matching
+    // server-side guard that blocks submission when the user blanks them
+    // out manually. In-kind path supplies the holding via name+quantity
+    // and bypasses this check.
+    let fromHoldingPin: number | undefined;
+    let toHoldingPin: number | undefined;
+    if (!isInKind && !transferEdit) {
+      if (fromAcct?.isInvestment === true) {
+        if (!transferForm.fromHoldingId) {
+          setSubmitError({ message: `Pick a source holding — ${fromAcct.name} is an investment account.` });
+          return;
+        }
+        fromHoldingPin = Number(transferForm.fromHoldingId);
+      }
+      if (toAcct?.isInvestment === true) {
+        if (!transferForm.toHoldingId) {
+          setSubmitError({ message: `Pick a destination holding — ${toAcct.name} is an investment account.` });
+          return;
+        }
+        toHoldingPin = Number(transferForm.toHoldingId);
+      }
+    }
+
     let receivedAmount: number | undefined;
     if (isCrossCcy && transferForm.receivedAmount) {
       const parsed = parseFloat(transferForm.receivedAmount);
@@ -927,6 +971,8 @@ function TransactionsPageInner() {
       enteredAmount,
       date: transferForm.date,
       ...(receivedAmount != null ? { receivedAmount } : {}),
+      ...(fromHoldingPin != null ? { fromHoldingId: fromHoldingPin } : {}),
+      ...(toHoldingPin != null ? { toHoldingId: toHoldingPin } : {}),
       ...(transferForm.note ? { note: transferForm.note } : {}),
       ...(transferForm.tags ? { tags: transferForm.tags } : {}),
       ...(transferEdit ? { linkId: transferEdit.linkId } : {}),
@@ -1113,6 +1159,10 @@ function TransactionsPageInner() {
               destHoldingName: destHoldingDiffers ? (destLegHolding ?? "") : "",
               quantity: isInKind ? String(sourceLegQty || inKindQty) : "",
               destQuantity: destQtyDiffers ? String(destLegQty) : "",
+              // Cash-leg holding pins are create-only; PUT path doesn't
+              // accept them yet, so leave blank on edit (issue #22).
+              fromHoldingId: "",
+              toHoldingId: "",
               note: t.note || sibling.note || "",
               tags: t.tags || sibling.tags || "",
             });
@@ -1468,6 +1518,60 @@ function TransactionsPageInner() {
                 <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
               </div>
 
+              {/* Investment-account constraint (issue #22): when the
+                  selected account is is_investment=true, the Portfolio
+                  Holding picker is REQUIRED and surfaces above the
+                  Advanced Options collapse so the user can't miss it. The
+                  per-account "Cash (auto)" entry is the default for plain
+                  cash legs (deposits, fees, dividends paid as cash); for
+                  trades the user picks the symbol. The Advanced-collapse
+                  copy of the picker hides in this mode to avoid two
+                  pickers fighting over the same form field. */}
+              {(() => {
+                const sel = accounts.find((a) => String(a.id) === form.accountId);
+                if (sel?.isInvestment !== true) return null;
+                const accountHoldings = holdings.filter((h) => h.accountId === sel.id);
+                // The per-account Cash sleeve is the holding with no
+                // symbol (matches portfolio aggregator's empty-symbol
+                // cash branch). Surface it as "Cash (auto)" so the user
+                // sees it as the default option instead of a bare "Cash".
+                const cash = accountHoldings.find((h) => !h.symbol);
+                const items: ComboboxItemShape[] = [
+                  ...(cash
+                    ? [{ value: cash.name, label: `${cash.name} (auto) — cash sleeve` } satisfies ComboboxItemShape]
+                    : []),
+                  ...sortHolding(
+                    accountHoldings
+                      .filter((h) => h !== cash)
+                      .map((h): ComboboxItemShape => ({
+                        value: h.name,
+                        label: h.symbol ? `${h.name} (${h.symbol})` : h.name,
+                      })),
+                    (h) => accountHoldings.find((x) => x.name === h.value)?.id ?? h.value,
+                    (a, z) => a.label.localeCompare(z.label),
+                  ),
+                ];
+                return (
+                  <div className="space-y-1.5 rounded-md border border-violet-200 dark:border-violet-900 bg-violet-50/40 dark:bg-violet-950/20 p-3">
+                    <Label>
+                      Portfolio Holding <span className="text-rose-600">*</span>
+                    </Label>
+                    <Combobox
+                      value={form.portfolioHoldingId}
+                      onValueChange={(v) => setForm({ ...form, portfolioHoldingId: v })}
+                      items={items}
+                      placeholder={cash ? "Cash (auto)" : "Pick a holding"}
+                      searchPlaceholder="Search holdings…"
+                      emptyMessage="No matches"
+                      className="w-full"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      {sel.name} is an investment account — every transaction must reference a holding. Pick the symbol you traded, or leave the default Cash sleeve for cash legs (deposits, fees, dividends paid as cash).
+                    </p>
+                  </div>
+                );
+              })()}
+
               {/* Linked transactions — other legs of a multi-leg import
                   (transfer, same-account currency conversion, liquidation).
                   Only shown when editing an existing tx with a linkId.
@@ -1613,6 +1717,12 @@ function TransactionsPageInner() {
                       <Label>Quantity</Label>
                       <Input type="number" step="0.0001" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="e.g. 10" />
                     </div>
+                    {/* Hide the Advanced-collapse copy of the holding
+                        picker when the selected account is investment —
+                        the required violet block above already owns the
+                        field. Two pickers writing to the same state would
+                        confuse the user (issue #22). */}
+                    {accounts.find((a) => String(a.id) === form.accountId)?.isInvestment !== true && (
                     <div className="space-y-1.5">
                       <Label>Portfolio Holding</Label>
                       <Combobox
@@ -1652,6 +1762,7 @@ function TransactionsPageInner() {
                         className="w-full"
                       />
                     </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <input type="checkbox" id="isBusiness" checked={form.isBusiness} onChange={(e) => setForm({ ...form, isBusiness: e.target.checked })} className="h-4 w-4 rounded border-input" />
@@ -2050,6 +2161,80 @@ function TransactionsPageInner() {
                         </div>
                       </>
                     )}
+                  </div>
+                );
+              })()}
+
+              {/* Cash-leg holding pins for investment-account transfers
+                  (issue #22). Only rendered for the CASH-transfer path
+                  (inKind=false) — the in-kind block above already supplies
+                  a holding via name+quantity. For each leg whose account
+                  is is_investment=true, the user must pick a holding so
+                  the strict-mode constraint is met. The per-account Cash
+                  sleeve (auto-created on is_investment toggle) is the
+                  default option for plain cash legs. NEW transfers only:
+                  the PUT path doesn't accept cash-leg pins yet, so this
+                  block is hidden when editing an existing pair. */}
+              {(() => {
+                if (transferForm.inKind) return null;
+                if (transferEdit) return null;
+                const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
+                const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
+                const fromInv = fromAcct?.isInvestment === true;
+                const toInv = toAcct?.isInvestment === true;
+                if (!fromInv && !toInv) return null;
+                const renderPicker = (
+                  side: "from" | "to",
+                  acct: Account,
+                ) => {
+                  const accountHoldings = holdings.filter((h) => h.accountId === acct.id);
+                  const cash = accountHoldings.find((h) => !h.symbol);
+                  const valueKey = side === "from" ? "fromHoldingId" : "toHoldingId";
+                  const items: ComboboxItemShape[] = [
+                    ...(cash
+                      ? [{ value: String(cash.id), label: `${cash.name} (auto) — cash sleeve` } satisfies ComboboxItemShape]
+                      : []),
+                    ...sortHolding(
+                      accountHoldings
+                        .filter((h) => h !== cash)
+                        .map((h): ComboboxItemShape => ({
+                          value: String(h.id),
+                          label: h.symbol ? `${h.name} (${h.symbol})` : h.name,
+                        })),
+                      (h) => Number(h.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    ),
+                  ];
+                  return (
+                    <div className="space-y-1">
+                      <Label className="text-xs">
+                        {side === "from" ? "Source" : "Destination"} holding in {acct.name}{" "}
+                        <span className="text-rose-600">*</span>
+                      </Label>
+                      <Combobox
+                        value={transferForm[valueKey]}
+                        onValueChange={(v) =>
+                          setTransferForm({ ...transferForm, [valueKey]: v ?? "" })
+                        }
+                        items={items}
+                        placeholder={cash ? "Cash (auto)" : "Pick a holding"}
+                        searchPlaceholder="Search holdings…"
+                        emptyMessage="No matches"
+                        size="sm"
+                        className="w-full"
+                      />
+                    </div>
+                  );
+                };
+                return (
+                  <div className="space-y-2 rounded-md border border-violet-200 dark:border-violet-900 bg-violet-50/40 dark:bg-violet-950/20 p-3">
+                    <p className="text-[11px] text-muted-foreground">
+                      Investment account leg — every transfer leg into an investment account must reference a holding. Default is the per-account Cash sleeve.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      {fromInv && fromAcct ? renderPicker("from", fromAcct) : <div />}
+                      {toInv && toAcct ? renderPicker("to", toAcct) : <div />}
+                    </div>
                   </div>
                 );
               })()}

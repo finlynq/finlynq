@@ -28,6 +28,7 @@ import {
   signConfirmationToken,
   verifyConfirmationToken,
 } from "../src/lib/mcp/confirmation-token.js";
+import { InvestmentHoldingRequiredError } from "../src/lib/investment-account.js";
 import fs from "fs/promises";
 import {
   csvToRawTransactions,
@@ -976,19 +977,29 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!toAcct) return sqliteErr(`Destination account "${toAccount}" not found.`);
 
       const { createTransferPairViaSql } = await import("../src/lib/transfer.js");
-      const result = await createTransferPairViaSql(sqlite.pool, userId, null, {
-        fromAccountId: Number(fromAcct.id),
-        toAccountId: Number(toAcct.id),
-        enteredAmount: amount,
-        date,
-        receivedAmount,
-        holdingName: holding,
-        destHoldingName: destHolding,
-        quantity,
-        destQuantity,
-        note,
-        tags,
-      });
+      let result: Awaited<ReturnType<typeof createTransferPairViaSql>>;
+      try {
+        result = await createTransferPairViaSql(sqlite.pool, userId, null, {
+          fromAccountId: Number(fromAcct.id),
+          toAccountId: Number(toAcct.id),
+          enteredAmount: amount,
+          date,
+          receivedAmount,
+          holdingName: holding,
+          destHoldingName: destHolding,
+          quantity,
+          destQuantity,
+          note,
+          tags,
+        });
+      } catch (e) {
+        // Strict-mode investment-account guard (issue #22). Stdio exposes a
+        // `holding` parameter so the user can satisfy the constraint by
+        // re-calling with `holding: "Cash"`. Map the throw to a friendly
+        // tool error rather than crashing the stdio process.
+        if (e instanceof InvestmentHoldingRequiredError) return sqliteErr(e.message);
+        throw e;
+      }
       if (!result.ok) return sqliteErr(result.message);
       const inKindNote = result.holding
         ? (() => {
@@ -1122,18 +1133,27 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const destQty = side === "buy" ? quantity : cashAmountTrade;
 
       const { createTransferPairViaSql } = await import("../src/lib/transfer.js");
-      const transferResult = await createTransferPairViaSql(sqlite.pool, userId, null, {
-        fromAccountId: Number(acct.id),
-        toAccountId: Number(acct.id),
-        enteredAmount: cashAmountAcct,
-        date: txDate,
-        holdingName: sourceHolding,
-        destHoldingName: destHolding,
-        quantity: sourceQty,
-        destQuantity: destQty,
-        note: note ?? tradePayee,
-        tags: "source:record_trade",
-      });
+      let transferResult: Awaited<ReturnType<typeof createTransferPairViaSql>>;
+      try {
+        transferResult = await createTransferPairViaSql(sqlite.pool, userId, null, {
+          fromAccountId: Number(acct.id),
+          toAccountId: Number(acct.id),
+          enteredAmount: cashAmountAcct,
+          date: txDate,
+          holdingName: sourceHolding,
+          destHoldingName: destHolding,
+          quantity: sourceQty,
+          destQuantity: destQty,
+          note: note ?? tradePayee,
+          tags: "source:record_trade",
+        });
+      } catch (e) {
+        // record_trade always supplies sourceHolding + destHolding, so the
+        // strict-mode guard shouldn't fire. Defensive map in case a future
+        // refactor removes one of those.
+        if (e instanceof InvestmentHoldingRequiredError) return sqliteErr(e.message);
+        throw e;
+      }
       if (!transferResult.ok) return sqliteErr(transferResult.message);
 
       let feeTxId: number | null = null;
