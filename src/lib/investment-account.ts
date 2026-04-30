@@ -75,37 +75,27 @@ export async function isInvestmentAccount(userId: string, accountId: number | nu
 }
 
 /**
- * Find or create the per-account 'Cash' holding. Match is case-insensitive
- * on plaintext name (mirrors portfolio-holding-resolver's plainKey path so
- * legacy + Stream-D-Phase-3 cohorts both resolve). DEK is optional — when
- * absent, name_ct/name_lookup stay NULL and get filled lazily on next
- * login via the resolver's DEK-backed pass.
+ * Find or create the per-account cash sleeve holding. Match criteria
+ * intentionally broad: any holding on (user, account) with `symbol IS NULL`
+ * AND `currency = accounts.currency` qualifies. This covers both literal-
+ * named 'Cash' rows AND currency-coded cash sleeves that import connectors
+ * mint with the account currency (named after the account+currency rather
+ * than 'Cash'). When multiple match, prefer the literally-named 'Cash' row,
+ * tie-breaking on the lowest id for determinism (issue #30 — without this,
+ * the insert path fires on every cash transfer, creating duplicate rows or
+ * blowing up on partial-unique-index conflicts with stale soft-deletes).
  *
- * Concurrency: uses ON CONFLICT against the partial UNIQUE index
- * portfolio_holdings_user_account_lookup_uniq (user, account, name_lookup).
- * When DEK is null the index doesn't fire — same caveat as the resolver
- * (acceptable; dek-less paths are stdio-only and bounded).
+ * DEK is optional — when absent, name_ct/name_lookup stay NULL and get
+ * filled lazily on next login via the resolver's DEK-backed pass.
+ *
+ * Concurrency: 23505 (unique_violation) on the insert means a concurrent
+ * writer beat us; we re-SELECT with the same broad criteria.
  */
 export async function getOrCreateCashHolding(
   userId: string,
   accountId: number,
   dek: Buffer | null,
 ): Promise<number> {
-  // Look up by plaintext first — covers both legacy rows and migration-
-  // created cash sleeves (which have plaintext only).
-  const existing = await db
-    .select({ id: schema.portfolioHoldings.id })
-    .from(schema.portfolioHoldings)
-    .where(
-      and(
-        eq(schema.portfolioHoldings.userId, userId),
-        eq(schema.portfolioHoldings.accountId, accountId),
-        sql`lower(trim(coalesce(${schema.portfolioHoldings.name}, ''))) = 'cash'`,
-      ),
-    )
-    .get();
-  if (existing?.id != null) return existing.id;
-
   // Inherit the account's currency so isCurrencyCodeSymbol-based cash
   // detection in the portfolio aggregator routes the holding through the
   // cash branch instead of Yahoo Finance.
@@ -115,6 +105,23 @@ export async function getOrCreateCashHolding(
     .where(and(eq(schema.accounts.id, accountId), eq(schema.accounts.userId, userId)))
     .get();
   const currency = acct?.currency ?? "CAD";
+
+  const cashFirst = sql`(lower(trim(coalesce(${schema.portfolioHoldings.name}, ''))) = 'cash') desc, ${schema.portfolioHoldings.id} asc`;
+  const matchCashSleeve = and(
+    eq(schema.portfolioHoldings.userId, userId),
+    eq(schema.portfolioHoldings.accountId, accountId),
+    sql`${schema.portfolioHoldings.symbol} IS NULL`,
+    eq(schema.portfolioHoldings.currency, currency),
+  );
+
+  const existing = await db
+    .select({ id: schema.portfolioHoldings.id })
+    .from(schema.portfolioHoldings)
+    .where(matchCashSleeve)
+    .orderBy(cashFirst)
+    .limit(1)
+    .get();
+  if (existing?.id != null) return existing.id;
 
   const enc = buildNameFields(dek, { name: "Cash" });
   try {
@@ -142,13 +149,9 @@ export async function getOrCreateCashHolding(
   const after = await db
     .select({ id: schema.portfolioHoldings.id })
     .from(schema.portfolioHoldings)
-    .where(
-      and(
-        eq(schema.portfolioHoldings.userId, userId),
-        eq(schema.portfolioHoldings.accountId, accountId),
-        sql`lower(trim(coalesce(${schema.portfolioHoldings.name}, ''))) = 'cash'`,
-      ),
-    )
+    .where(matchCashSleeve)
+    .orderBy(cashFirst)
+    .limit(1)
     .get();
   if (after?.id == null) {
     throw new Error(`failed to find-or-create Cash holding for account ${accountId}`);
