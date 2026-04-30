@@ -108,6 +108,14 @@ The integer FK `transactions.portfolio_holding_id` is the canonical link between
 
 Available on `record_transaction` / `bulk_record_transactions` / `update_transaction` — HTTP only. Stdio MCP write tools still don't bind portfolio holdings per the [stdio carve-out](#self-hosted-limitation--stdio-writes-are-plaintext).
 
+### Write-time warnings ([#31](https://github.com/finlynq/finlynq/issues/31))
+
+`record_transaction` / `bulk_record_transactions` / `update_transaction` (HTTP) include a `warnings: string[]` field on success when a row binds a `portfolioHoldingId` and moves cash (`amount != 0`) but omits `quantity`. The transaction is still written; the warning is advisory — without `quantity`, the holding's unit count doesn't move and the portfolio aggregator drifts from the cash ledger.
+
+- Single check today: `portfolioHoldingId != null && amount != 0 && quantity == null` → `"quantity not set — holding unit count was not updated"`. Centralized in [`deriveTxWriteWarnings`](../../src/lib/queries.ts) so future advisory checks land in one place.
+- `record_transaction` puts `warnings` at the top level of the success response. `bulk_record_transactions` attaches `warnings` to per-row results only when non-empty (keeps the common case unchanged for callers that don't read it). `update_transaction` warns only when the user *explicitly bound a holding on this update* without also passing `quantity` — touching unrelated fields (e.g. date) on a previously-bound row doesn't fire.
+- Stdio MCP doesn't expose `portfolioHoldingId`/`quantity` on write tools and refuses investment-account writes outright, so the warning condition can't trigger there.
+
 ### Reading the id back
 
 - `get_portfolio_analysis` — exposes `id: <int>` per holding in the `holdings[]` array (HTTP + stdio).

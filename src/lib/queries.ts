@@ -282,6 +282,35 @@ export async function updateTransaction(id: number, userId: string, data: Partia
 }
 
 /**
+ * Per-row write warnings for transaction inserts/updates. Pure check —
+ * no DB access — so the MCP HTTP write tools (record_transaction,
+ * bulk_record_transactions, update_transaction) can call it post-resolve
+ * and surface advisory messages alongside `success: true`. Stdio MCP write
+ * tools refuse investment-account writes outright and don't expose
+ * `portfolioHoldingId`/`quantity`, so the warning condition can't trigger
+ * there — those tools don't need to call this.
+ *
+ * Today the only check: a row bound to a `portfolioHoldingId` that moves
+ * cash (`amount != 0`) but omits `quantity` won't move the holding's unit
+ * count. Silent today; surfaces a warning so callers don't end up with a
+ * stale portfolio view. See issue #31.
+ */
+export function deriveTxWriteWarnings(input: {
+  portfolioHoldingId?: number | null;
+  amount?: number | null;
+  quantity?: number | null;
+}): string[] {
+  const warnings: string[] = [];
+  const hasHolding = input.portfolioHoldingId != null;
+  const movesCash = input.amount != null && input.amount !== 0;
+  const noQuantity = input.quantity == null;
+  if (hasHolding && movesCash && noQuantity) {
+    warnings.push("quantity not set — holding unit count was not updated");
+  }
+  return warnings;
+}
+
+/**
  * Soft-fallback for the entered-fields trilogy on read paths. Un-backfilled
  * legacy rows have entered_* NULL — for those we surface the recorded
  * (account-currency) values as if the user typed them, since that's the
