@@ -55,7 +55,13 @@ import {
 import { parseOfx } from "../src/lib/ofx-parser";
 import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline";
 import { generateImportHash } from "../src/lib/import-hash";
-import { applyRulesToBatch, type TransactionRule } from "../src/lib/auto-categorize";
+import {
+  applyRulesToBatch,
+  type TransactionRule,
+  pickInvestmentCategoryByPayee,
+  fallbackInvestmentCategory,
+  type InvestmentCategoryHint,
+} from "../src/lib/auto-categorize";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -231,14 +237,53 @@ function buildCtLookup(
  * The historical-frequency match also runs in memory when payees are
  * encrypted — equality against ciphertext never hits. With no DEK the
  * history match is skipped; rule matches still work.
+ *
+ * Investment-account mode (#32): when the target account has
+ * `is_investment=true`, expense (type='E') candidates are filtered out of
+ * BOTH the rule and history candidate pools (forex/dividend/interest rows
+ * shouldn't land in "Groceries"), an additional payee-keyword pattern pass
+ * routes common brokerage rows to "Dividends" / "Credit Interest" /
+ * "Currency Revaluation" / "Transfers", and the final fallback prefers
+ * "Transfers" / "Investment Activity" over null. Non-investment writes are
+ * unchanged. See {@link pickInvestmentCategoryByPayee} +
+ * {@link fallbackInvestmentCategory} in src/lib/auto-categorize.ts.
  */
 async function autoCategory(
   db: DbLike,
   userId: string,
   payee: string,
-  dek: Buffer | null
+  dek: Buffer | null,
+  isInvestmentAccount: boolean = false,
 ): Promise<number | null> {
   if (!payee) return null;
+
+  // Investment-account mode pre-loads (id, name, type) for every category so
+  // the rule + history loops can drop expense matches and the keyword
+  // pattern + fallback can resolve well-known names ("Dividends",
+  // "Transfers"). Names may be Stream-D-encrypted; decrypt with the same
+  // ct → plaintext-fallback ladder used elsewhere.
+  let catTypeById: Map<number, string> | null = null;
+  let investmentHints: InvestmentCategoryHint[] | null = null;
+  if (isInvestmentAccount) {
+    const rawCats = await q(db, sql`
+      SELECT id, name, name_ct, type FROM categories WHERE user_id = ${userId}
+    `);
+    catTypeById = new Map();
+    investmentHints = [];
+    for (const r of rawCats) {
+      const id = Number(r.id);
+      const type = String(r.type ?? "");
+      catTypeById.set(id, type);
+      let nm: string;
+      if (r.name_ct && dek) {
+        nm = decryptField(dek, String(r.name_ct)) ?? String(r.name ?? "");
+      } else {
+        nm = String(r.name ?? "");
+      }
+      if (nm) investmentHints.push({ id, name: nm, type });
+    }
+  }
+
   // Rule lookup — schema is (match_field, match_type, match_value), NOT a single
   // `match_payee` column. The previous code referenced a non-existent column and
   // 500'd every record_transaction call when any active rule existed for the
@@ -268,9 +313,27 @@ async function autoCategory(
     else if (type === "regex") {
       try { hit = new RegExp(value, "i").test(payee); } catch { hit = false; }
     }
-    if (hit) return Number(rule.assign_category_id);
+    if (hit) {
+      const cid = Number(rule.assign_category_id);
+      // Investment-account: skip expense rules so the next priority gets a chance.
+      if (isInvestmentAccount && catTypeById?.get(cid) === "E") continue;
+      return cid;
+    }
   }
 
+  // Investment-account: keyword pattern pass before history. Common brokerage
+  // rows ("Dividend reinvestment", "Forex Trade", "Cash Disbursement") rarely
+  // have a per-payee history yet, so the keywords beat random history matches
+  // that happen to hit an expense category.
+  if (isInvestmentAccount && investmentHints) {
+    const id = pickInvestmentCategoryByPayee(payee, investmentHints);
+    if (id !== null) return id;
+  }
+
+  // Historical-frequency match. In investment mode, expense candidates are
+  // excluded so the tally can't elect a "Groceries" winner with 10 hits over
+  // a "Transfers" runner-up with 3.
+  let histId: number | null = null;
   if (!dek) {
     // Legacy plaintext-only fallback
     const hist = await q(db, sql`
@@ -278,35 +341,50 @@ async function autoCategory(
       WHERE user_id = ${userId} AND LOWER(payee) = LOWER(${payee}) AND category_id IS NOT NULL
       GROUP BY category_id ORDER BY cnt DESC LIMIT 1
     `);
-    return hist.length ? Number(hist[0].category_id) : null;
+    if (hist.length) {
+      const cid = Number(hist[0].category_id);
+      // Investment mode: drop the top match if it's expense; fall through to
+      // the fallback below. Non-investment: original behavior.
+      if (!isInvestmentAccount || catTypeById?.get(cid) !== "E") histId = cid;
+    }
+  } else {
+    // Fetch candidate rows with category, decrypt payee, then tally.
+    const rows = await q(db, sql`
+      SELECT payee, category_id FROM transactions
+      WHERE user_id = ${userId} AND category_id IS NOT NULL AND payee IS NOT NULL AND payee <> ''
+      ORDER BY date DESC, id DESC
+      LIMIT 5000
+    `);
+    const target = payee.toLowerCase();
+    const counts = new Map<number, number>();
+    for (const r of rows) {
+      const p = decryptField(dek, String(r.payee ?? ""));
+      if (!p) continue;
+      if (p.toLowerCase() === target) {
+        const cid = Number(r.category_id);
+        if (isInvestmentAccount && catTypeById?.get(cid) === "E") continue;
+        counts.set(cid, (counts.get(cid) ?? 0) + 1);
+      }
+    }
+    let bestCnt = 0;
+    for (const [id, cnt] of counts) {
+      if (cnt > bestCnt) {
+        bestCnt = cnt;
+        histId = id;
+      }
+    }
+  }
+  if (histId !== null) return histId;
+
+  // Investment-account final fallback — a brokerage cash leg with no rule,
+  // keyword, or non-expense history match defaults to "Transfers" (or
+  // "Investment Activity") rather than landing uncategorized.
+  if (isInvestmentAccount && investmentHints) {
+    const fb = fallbackInvestmentCategory(investmentHints);
+    if (fb !== null) return fb;
   }
 
-  // Fetch candidate rows with category, decrypt payee, then tally.
-  const rows = await q(db, sql`
-    SELECT payee, category_id FROM transactions
-    WHERE user_id = ${userId} AND category_id IS NOT NULL AND payee IS NOT NULL AND payee <> ''
-    ORDER BY date DESC, id DESC
-    LIMIT 5000
-  `);
-  const target = payee.toLowerCase();
-  const counts = new Map<number, number>();
-  for (const r of rows) {
-    const p = decryptField(dek, String(r.payee ?? ""));
-    if (!p) continue;
-    if (p.toLowerCase() === target) {
-      const cid = Number(r.category_id);
-      counts.set(cid, (counts.get(cid) ?? 0) + 1);
-    }
-  }
-  let bestId: number | null = null;
-  let bestCnt = 0;
-  for (const [id, cnt] of counts) {
-    if (cnt > bestCnt) {
-      bestCnt = cnt;
-      bestId = id;
-    }
-  }
-  return bestId;
+  return null;
 }
 
 /**
@@ -1810,7 +1888,9 @@ export function registerPgTools(
         acct = resolved.account;
       }
 
-      // Resolve category (fuzzy or auto)
+      // Resolve category (fuzzy or auto). Compute is_investment once — it's
+      // also re-used by the holding-FK constraint check below.
+      const isInvestment = await isInvestmentAccountFn(userId, Number(acct.id));
       let catId: number | null = null;
       if (category) {
         const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
@@ -1819,7 +1899,7 @@ export function registerPgTools(
         if (!cat) return err(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
         catId = Number(cat.id);
       } else {
-        catId = await autoCategory(db, userId, payee, dek);
+        catId = await autoCategory(db, userId, payee, dek, isInvestment);
       }
 
       // Resolve the holding FK from either input form. Auto-create is
@@ -1850,7 +1930,7 @@ export function registerPgTools(
       // account must reference a holding. MCP tools take the strict path —
       // refuse rather than silently default — so Claude surfaces an actionable
       // error to the user instead of attributing a trade to "Cash".
-      if (resolvedHoldingId == null && (await isInvestmentAccountFn(userId, Number(acct.id)))) {
+      if (resolvedHoldingId == null && isInvestment) {
         return err(`Account "${acct.name}" is an investment account — pass portfolioHolding (e.g. the ticker, or "Cash" for a cash leg) or portfolioHoldingId. Use get_portfolio_analysis to list this account's holdings.`);
       }
 
@@ -2017,7 +2097,13 @@ export function registerPgTools(
             const cat = fuzzyFind(t.category, allCats);
             catId = cat ? Number(cat.id) : null;
           } else {
-            catId = await autoCategory(db, userId, t.payee, dek);
+            catId = await autoCategory(
+              db,
+              userId,
+              t.payee,
+              dek,
+              investmentAccountIds.has(Number(acct.id)),
+            );
           }
 
           const txDate = t.date ?? today;

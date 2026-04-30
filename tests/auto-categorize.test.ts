@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { applyRules, suggestCategory, applyRulesToBatch, type TransactionInput, type RuleMatch } from "@/lib/auto-categorize";
+import {
+  applyRules,
+  suggestCategory,
+  applyRulesToBatch,
+  pickInvestmentCategoryByPayee,
+  fallbackInvestmentCategory,
+  type TransactionInput,
+  type RuleMatch,
+  type InvestmentCategoryHint,
+} from "@/lib/auto-categorize";
 
 function makeRule(overrides: Partial<{
   id: number; userId: string; name: string; matchField: string; matchType: string;
@@ -132,5 +141,102 @@ describe("applyRulesToBatch", () => {
     expect(results[0].match).not.toBeNull();
     expect(results[1].match).toBeNull();
     expect(results[2].match).not.toBeNull();
+  });
+});
+
+describe("pickInvestmentCategoryByPayee", () => {
+  // Realistic mix: a few expense categories the legacy auto-categorizer
+  // could have picked, plus the income / transfer ones we want for
+  // brokerage rows.
+  const cats: InvestmentCategoryHint[] = [
+    { id: 1, name: "Groceries", type: "E" },
+    { id: 2, name: "Bank Fees", type: "E" },
+    { id: 10, name: "Dividends", type: "I" },
+    { id: 11, name: "Credit Interest", type: "I" },
+    { id: 12, name: "Currency Revaluation", type: "R" },
+    { id: 13, name: "Transfers", type: "R" },
+  ];
+
+  it("routes 'Dividend' payees to Dividends", () => {
+    expect(pickInvestmentCategoryByPayee("Dividend reinvestment - VFV.TO", cats)).toBe(10);
+  });
+
+  it("routes 'Credit Interest' payees to Credit Interest (income)", () => {
+    expect(pickInvestmentCategoryByPayee("Credit Interest - August", cats)).toBe(11);
+  });
+
+  it("routes 'Forex Trade' to Currency Revaluation when present", () => {
+    expect(pickInvestmentCategoryByPayee("Forex Trade USD/CAD", cats)).toBe(12);
+  });
+
+  it("routes 'FX' payees to Currency Revaluation", () => {
+    expect(pickInvestmentCategoryByPayee("FX conversion", cats)).toBe(12);
+  });
+
+  it("does NOT match the bare letters 'fx' inside another word", () => {
+    // \bfx\b — "affix" must not trigger the forex branch.
+    expect(pickInvestmentCategoryByPayee("Affixed plate", cats)).toBeNull();
+  });
+
+  it("routes 'currency' to Currency Revaluation", () => {
+    expect(pickInvestmentCategoryByPayee("Currency adjustment", cats)).toBe(12);
+  });
+
+  it("routes 'disbursement' to Transfers", () => {
+    expect(pickInvestmentCategoryByPayee("Cash Disbursement", cats)).toBe(13);
+  });
+
+  it("routes 'withdrawal' to Transfers", () => {
+    expect(pickInvestmentCategoryByPayee("Withdrawal to chequing", cats)).toBe(13);
+  });
+
+  it("falls back to Transfers when Currency Revaluation is missing for a forex row", () => {
+    const minimal: InvestmentCategoryHint[] = [{ id: 13, name: "Transfers", type: "R" }];
+    expect(pickInvestmentCategoryByPayee("Forex Trade USD/CAD", minimal)).toBe(13);
+  });
+
+  it("returns null when nothing matches AND no fallback name exists", () => {
+    const minimal: InvestmentCategoryHint[] = [{ id: 1, name: "Groceries", type: "E" }];
+    expect(pickInvestmentCategoryByPayee("Random brokerage row", minimal)).toBeNull();
+  });
+
+  it("returns null on empty payee", () => {
+    expect(pickInvestmentCategoryByPayee("", cats)).toBeNull();
+  });
+
+  it("is case-insensitive on both payee and category names", () => {
+    const upper: InvestmentCategoryHint[] = [{ id: 10, name: "DIVIDENDS", type: "I" }];
+    expect(pickInvestmentCategoryByPayee("dividend", upper)).toBe(10);
+  });
+});
+
+describe("fallbackInvestmentCategory", () => {
+  it("prefers Transfers when present", () => {
+    const cats: InvestmentCategoryHint[] = [
+      { id: 13, name: "Transfers", type: "R" },
+      { id: 99, name: "Investment Activity", type: "R" },
+    ];
+    expect(fallbackInvestmentCategory(cats)).toBe(13);
+  });
+
+  it("falls back to Investment Activity when Transfers is missing", () => {
+    const cats: InvestmentCategoryHint[] = [
+      { id: 99, name: "Investment Activity", type: "R" },
+    ];
+    expect(fallbackInvestmentCategory(cats)).toBe(99);
+  });
+
+  it("returns null when neither category exists", () => {
+    const cats: InvestmentCategoryHint[] = [
+      { id: 1, name: "Groceries", type: "E" },
+    ];
+    expect(fallbackInvestmentCategory(cats)).toBeNull();
+  });
+
+  it("matches case-insensitively (Stream-D-decrypted names may have any case)", () => {
+    const cats: InvestmentCategoryHint[] = [
+      { id: 13, name: "transfers", type: "R" },
+    ];
+    expect(fallbackInvestmentCategory(cats)).toBe(13);
   });
 });
