@@ -2485,6 +2485,198 @@ export function registerPgTools(
     }
   );
 
+  // ── record_trade ───────────────────────────────────────────────────────────
+  // High-level brokerage-trade primitive built on top of record_transfer's
+  // same-account in-kind capability. Models a stock/ETF/crypto buy or sell as
+  // a paired in-kind transfer between the account's cash sleeve and the
+  // symbol holding, so the share count + cost basis flow through the
+  // portfolio aggregator unchanged. Optional fees post as a separate expense
+  // entry on the cash sleeve. Saves the agent from having to assemble the
+  // four-parameter dance (fromAccount=toAccount, holding+destHolding,
+  // quantity+destQuantity, amount=0/cashAmount) by hand.
+  server.tool(
+    "record_trade",
+    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (auto-created if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve. Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve is created in the trade currency on first use. Optional `fees` post as a separate expense transaction on the cash sleeve. Use this instead of record_transaction for trades — record_transaction loses the holding-pair link and can't move the share count + cost basis atomically.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required if `account_id` is not provided."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching. If both this and `account` are passed, this wins."),
+      side: z.enum(["buy", "sell"]).describe("'buy' (cash → symbol) or 'sell' (symbol → cash)."),
+      symbol: z.string().min(1).max(50).describe("Ticker symbol of the security being traded (e.g. 'AAPL', 'VEQT.TO', 'BTC'). Used as both the holding name and symbol when auto-creating the position."),
+      quantity: z.number().positive().describe("Share count (always positive — `side` controls the direction)."),
+      price: z.number().positive().describe("Per-share price in `currency` (defaults to account currency)."),
+      currency: z.string().optional().describe("ISO code (USD/CAD/...) of the trade — the cash sleeve and symbol holding both inherit this. Defaults to the account's currency."),
+      fees: z.number().nonnegative().optional().describe("Optional commission/fees in `currency`. Booked as a separate negative-amount cash transaction on the cash sleeve (not part of the trade pair). Defaults to 0."),
+      fxRate: z.number().positive().optional().describe("Trade-currency → account-currency rate for cross-currency trades. REQUIRED when `currency` differs from the account's currency. Ignored when currencies match (rate=1)."),
+      date: z.string().optional().describe("Trade/settlement date YYYY-MM-DD (default: today). Applied to both legs and the optional fees row."),
+      note: z.string().optional().describe("Optional note applied to both legs."),
+    },
+    async ({ account, account_id, side, symbol, quantity, price, currency, fees, fxRate, date, note }) => {
+      if (!dek) return err("Trades require an active session DEK — log in again to encrypt the rows.");
+
+      const txDate = date ?? new Date().toISOString().split("T")[0];
+      const trimmedSymbol = symbol.trim();
+      if (!trimmedSymbol) return err("symbol cannot be empty");
+
+      const rawAccounts = await q(db, sql`
+        SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+      `);
+      if (!rawAccounts.length) return err("No accounts found — create accounts first.");
+      const allAccounts = decryptNameish(rawAccounts, dek);
+      let acct: Row | null = null;
+      if (account_id != null) {
+        acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
+        if (!acct) return err(`Account #${account_id} not found or not owned by you.`);
+      } else {
+        if (!account) return err("Pass either `account_id` or `account` (name/alias).");
+        acct = fuzzyFind(account, allAccounts);
+        if (!acct) return err(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+      }
+
+      // Trades only make sense in investment accounts. Bail early so the
+      // user gets a pointed error rather than silently writing trade rows
+      // that the portfolio aggregator can't attribute (FK constraint would
+      // also refuse, but the message would be opaque).
+      const isInvestment = await isInvestmentAccountFn(userId, Number(acct.id));
+      if (!isInvestment) {
+        return err(`Account "${acct.name}" is not an investment account — toggle is_investment first or use record_transaction for non-trade entries.`);
+      }
+
+      const acctCurrency = String(acct.currency ?? "CAD").toUpperCase();
+      const tradeCurrency = (currency ?? acctCurrency).toUpperCase();
+      const isCrossCurrency = tradeCurrency !== acctCurrency;
+      let fx = 1;
+      if (isCrossCurrency) {
+        if (fxRate == null) {
+          return err(`Trade currency ${tradeCurrency} differs from account currency ${acctCurrency} — pass fxRate (${tradeCurrency}→${acctCurrency}) so the cost-basis side can be locked.`);
+        }
+        fx = fxRate;
+      }
+
+      const cashAmountTrade = Math.round(quantity * price * 100) / 100; // 2dp in trade currency
+      const cashAmountAcct = Math.round(cashAmountTrade * fx * 100) / 100;
+
+      // Find or create the cash sleeve in this account for tradeCurrency.
+      // Match: holding in (user, account) with currency=tradeCurrency AND
+      // (symbol IS NULL OR symbol = tradeCurrency). Prefer symbol IS NULL
+      // (the account's default cash sleeve when same currency) for
+      // determinism; falls back to the foreign-currency sleeve.
+      const cashName = isCrossCurrency ? `${tradeCurrency} Cash` : "Cash";
+      const cashCandidates = await q(db, sql`
+        SELECT id, name, name_ct, symbol, currency
+          FROM portfolio_holdings
+         WHERE user_id = ${userId} AND account_id = ${acct.id}
+           AND currency = ${tradeCurrency}
+           AND (symbol IS NULL OR UPPER(symbol) = ${tradeCurrency})
+         ORDER BY (symbol IS NULL) DESC, id ASC
+         LIMIT 1
+      `);
+      let cashHoldingId: number;
+      let cashHoldingName: string;
+      if (cashCandidates.length) {
+        cashHoldingId = Number(cashCandidates[0].id);
+        // Decrypt name_ct for Stream D Phase 3 NULL-plaintext rows so
+        // createTransferPair's name-based lookup hits — without this, a
+        // Phase 3 row with a non-canonical name (e.g. "WP USD Cash") would
+        // miss on both plaintext (NULL) and HMAC ("USD Cash" ≠ row).
+        const rawName = cashCandidates[0].name as string | null | undefined;
+        const ct = cashCandidates[0].name_ct as string | null | undefined;
+        const decrypted = ct ? decryptField(dek, String(ct)) : null;
+        cashHoldingName = decrypted ?? (rawName != null ? String(rawName) : cashName);
+      } else {
+        const cashSymbol = isCrossCurrency ? tradeCurrency : null;
+        const enc = encryptName(dek, cashName);
+        const symEnc = encryptName(dek, cashSymbol);
+        const ins = await q(db, sql`
+          INSERT INTO portfolio_holdings (
+            user_id, account_id, name, symbol, currency, is_crypto, note,
+            name_ct, name_lookup, symbol_ct, symbol_lookup
+          )
+          VALUES (
+            ${userId}, ${acct.id}, ${cashName}, ${cashSymbol}, ${tradeCurrency}, 0, 'auto-created for cash sleeve',
+            ${enc.ct}, ${enc.lookup}, ${symEnc.ct}, ${symEnc.lookup}
+          )
+          RETURNING id, name
+        `);
+        cashHoldingId = Number(ins[0]?.id);
+        cashHoldingName = String(ins[0]?.name ?? cashName);
+      }
+
+      // For BUY: cash sleeve is the source (must exist — done above);
+      //          symbol holding is the destination (createTransferPair
+      //          auto-creates if missing).
+      // For SELL: symbol holding is the source — MUST exist before the
+      //          transfer call. Pre-flight the lookup so the error is
+      //          actionable ("position not found") instead of the
+      //          generic createTransferPair message.
+      if (side === "sell") {
+        const symbolHolding = await resolvePortfolioHoldingByName(db, userId, trimmedSymbol, dek, Number(acct.id));
+        if (!symbolHolding.ok) return err(`Cannot sell "${trimmedSymbol}" in "${acct.name}" — no existing position. ${symbolHolding.error}`);
+      }
+
+      const tradePayee = `${side === "buy" ? "Buy" : "Sell"} ${quantity} ${trimmedSymbol} @ ${price.toFixed(2)} ${tradeCurrency}`;
+      const sourceHolding = side === "buy" ? cashHoldingName : trimmedSymbol;
+      const destHolding = side === "buy" ? trimmedSymbol : cashHoldingName;
+      const sourceQty = side === "buy" ? cashAmountTrade : quantity;
+      const destQty = side === "buy" ? quantity : cashAmountTrade;
+
+      const transferResult = await createTransferPair({
+        userId,
+        dek,
+        fromAccountId: Number(acct.id),
+        toAccountId: Number(acct.id),
+        enteredAmount: cashAmountAcct,
+        date: txDate,
+        holdingName: sourceHolding,
+        destHoldingName: destHolding,
+        quantity: sourceQty,
+        destQuantity: destQty,
+        note: note ?? tradePayee,
+        tags: "source:record_trade",
+      });
+      if (!transferResult.ok) return err(transferResult.message);
+
+      // Optional fees: a single negative-amount transaction on the cash
+      // sleeve. Same currency as the trade; converted to account currency
+      // via the same fx rate. Plain expense (no transfer link), categorized
+      // by the user's existing rule engine on next read. Tagged so it can be
+      // tied back to the trade pair if needed.
+      let feeTxId: number | null = null;
+      const feeAmountTrade = fees != null && fees > 0 ? Math.round(fees * 100) / 100 : 0;
+      if (feeAmountTrade > 0) {
+        const feeAmountAcct = Math.round(feeAmountTrade * fx * 100) / 100;
+        const feePayee = `Trade fee — ${trimmedSymbol}`;
+        const encPayee = encryptField(dek, feePayee);
+        const encNote = encryptField(dek, "");
+        const encTags = encryptField(dek, `source:record_trade,trade-link:${transferResult.linkId}`);
+        const feeIns = await q(db, sql`
+          INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
+          VALUES (${userId}, ${txDate}, ${acct.id}, NULL, ${acctCurrency}, ${-feeAmountAcct}, ${tradeCurrency}, ${-feeAmountTrade}, ${fx}, ${encPayee}, ${encNote}, ${encTags}, ${cashHoldingId}, NULL)
+          RETURNING id
+        `);
+        feeTxId = Number(feeIns[0]?.id ?? 0) || null;
+      }
+
+      invalidateUserTxCache(userId);
+      return text({
+        success: true,
+        side,
+        symbol: trimmedSymbol,
+        linkId: transferResult.linkId,
+        fromTransactionId: transferResult.fromTransactionId,
+        toTransactionId: transferResult.toTransactionId,
+        cashHoldingId,
+        symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
+        cashAmount: cashAmountTrade,
+        cashAmountAccountCurrency: cashAmountAcct,
+        tradeCurrency,
+        accountCurrency: acctCurrency,
+        fxRate: fx,
+        ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
+        message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
+      });
+    }
+  );
+
   // ── update_transfer ────────────────────────────────────────────────────────
   server.tool(
     "update_transfer",
@@ -2928,6 +3120,8 @@ export function registerPgTools(
           get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
+          record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair between two accounts. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity.",
+          record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
         };
         return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
       }
@@ -2985,6 +3179,9 @@ export function registerPgTools(
             { task: "Analyze investments", call: "get_portfolio_analysis()" },
             { task: "Rebalance vs targets", call: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}])' },
             { task: "Net worth trend", call: "get_net_worth(months=12)" },
+            { task: "Buy 10 AAPL @ $150 USD in a USD brokerage", call: 'record_trade(account="Questrade USD", side="buy", symbol="AAPL", quantity=10, price=150)' },
+            { task: "Sell 5 AAPL @ $160 USD with $4.95 commission", call: 'record_trade(account="Questrade USD", side="sell", symbol="AAPL", quantity=5, price=160, fees=4.95)' },
+            { task: "Cross-currency buy: 10 AAPL @ $150 USD in a CAD account", call: 'record_trade(account="Questrade CAD", side="buy", symbol="AAPL", quantity=10, price=150, currency="USD", fxRate=1.37)' },
           ],
         });
       }
