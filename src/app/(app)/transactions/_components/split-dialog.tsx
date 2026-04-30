@@ -11,7 +11,8 @@ import { useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { Plus, Trash2, Scissors } from "lucide-react";
@@ -55,6 +56,9 @@ export function SplitDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [hasSplits, setHasSplits] = useState(false);
+
+  const sortCategory = useDropdownOrder("category");
+  const sortAccount = useDropdownOrder("account");
 
   // Load existing splits when dialog opens
   useEffect(() => {
@@ -188,38 +192,37 @@ export function SplitDialog({
           <div className="space-y-1.5">
             {rows.map((row, i) => (
               <div key={i} className="grid grid-cols-[1fr_1fr_80px_1fr_1fr_32px] gap-1.5 items-center">
-                <Select
+                <Combobox
                   value={row.categoryId}
-                  onValueChange={(v) => updateRow(i, "categoryId", v ?? "")}
-                >
-                  <SelectTrigger className="h-7 text-xs">
-                    <SelectValue placeholder="Category" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">No category</SelectItem>
-                    {categories.map((c) => (
-                      <SelectItem key={c.id} value={String(c.id)}>
-                        {c.group} — {c.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Select
+                  onValueChange={(v) => updateRow(i, "categoryId", v)}
+                  items={sortCategory(
+                    categories.map((c): ComboboxItemShape => ({
+                      value: String(c.id),
+                      label: `${c.group} — ${c.name}`,
+                    })),
+                    (c) => Number(c.value),
+                    (a, z) => a.label.localeCompare(z.label),
+                  )}
+                  placeholder="Category"
+                  searchPlaceholder="Search categories…"
+                  emptyMessage="No matches"
+                  size="sm"
+                  className="h-7 w-full text-xs"
+                />
+                <Combobox
                   value={row.accountId}
-                  onValueChange={(v) => updateRow(i, "accountId", v ?? "")}
-                >
-                  <SelectTrigger className="h-7 text-xs">
-                    <SelectValue placeholder="Account" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">No account</SelectItem>
-                    {accounts.map((a) => (
-                      <SelectItem key={a.id} value={String(a.id)}>
-                        {a.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  onValueChange={(v) => updateRow(i, "accountId", v)}
+                  items={sortAccount(
+                    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                    (a) => Number(a.value),
+                    (a, z) => a.label.localeCompare(z.label),
+                  )}
+                  placeholder="Account"
+                  searchPlaceholder="Search accounts…"
+                  emptyMessage="No matches"
+                  size="sm"
+                  className="h-7 w-full text-xs"
+                />
                 <Input
                   type="number"
                   step="0.01"

@@ -2,11 +2,13 @@ import { Nav } from "@/components/nav";
 import { UnlockGate } from "@/components/unlock-gate";
 import { DonationBanner } from "@/components/donation-banner";
 import { CurrencyProvider } from "@/components/currency-provider";
+import { DropdownOrderProvider } from "@/components/dropdown-order-provider";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <UnlockGate>
       <CurrencyProvider>
+        <DropdownOrderProvider>
         <div className="relative flex min-h-screen flex-col">
           <DonationBanner />
           <div className="flex flex-1">
@@ -18,6 +20,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             </main>
           </div>
         </div>
+        </DropdownOrderProvider>
       </CurrencyProvider>
     </UnlockGate>
   );

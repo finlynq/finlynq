@@ -14,6 +14,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import {
   Dialog,
   DialogContent,
@@ -149,6 +151,10 @@ function SubscriptionsPageContent() {
       .then((r) => r.json())
       .then(setAccounts);
   }, [load]);
+
+  const sortAccount = useDropdownOrder("account");
+  const sortCategory = useDropdownOrder("category");
+  const sortCurrency = useDropdownOrder("currency");
 
   function resetForm() {
     setForm({
@@ -552,22 +558,19 @@ function SubscriptionsPageContent() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <Label>Currency</Label>
-                    <Select
+                    <Combobox
                       value={form.currency}
-                      onValueChange={(v) =>
-                        setForm({ ...form, currency: v ?? "CAD" })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="CAD">CAD</SelectItem>
-                        <SelectItem value="USD">USD</SelectItem>
-                        <SelectItem value="EUR">EUR</SelectItem>
-                        <SelectItem value="GBP">GBP</SelectItem>
-                      </SelectContent>
-                    </Select>
+                      onValueChange={(v) => setForm({ ...form, currency: v || "CAD" })}
+                      items={sortCurrency(
+                        ["CAD", "USD", "EUR", "GBP"].map((c): ComboboxItemShape => ({ value: c, label: c })),
+                        (c) => c.value,
+                        (a, z) => a.label.localeCompare(z.label),
+                      )}
+                      placeholder="CAD"
+                      searchPlaceholder="Search…"
+                      emptyMessage="No matches"
+                      className="w-full"
+                    />
                   </div>
                   <div>
                     <Label>Next Date</Label>
@@ -583,43 +586,35 @@ function SubscriptionsPageContent() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <Label>Category</Label>
-                    <Select
+                    <Combobox
                       value={form.categoryId}
-                      onValueChange={(v) =>
-                        setForm({ ...form, categoryId: v ?? "" })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="None" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {categories.map((c) => (
-                          <SelectItem key={c.id} value={String(c.id)}>
-                            {c.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      onValueChange={(v) => setForm({ ...form, categoryId: v })}
+                      items={sortCategory(
+                        categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: c.name })),
+                        (c) => Number(c.value),
+                        (a, z) => a.label.localeCompare(z.label),
+                      )}
+                      placeholder="None"
+                      searchPlaceholder="Search categories…"
+                      emptyMessage="No matches"
+                      className="w-full"
+                    />
                   </div>
                   <div>
                     <Label>Account</Label>
-                    <Select
+                    <Combobox
                       value={form.accountId}
-                      onValueChange={(v) =>
-                        setForm({ ...form, accountId: v ?? "" })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="None" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {accounts.map((a) => (
-                          <SelectItem key={a.id} value={String(a.id)}>
-                            {a.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      onValueChange={(v) => setForm({ ...form, accountId: v })}
+                      items={sortAccount(
+                        accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                        (a) => Number(a.value),
+                        (a, z) => a.label.localeCompare(z.label),
+                      )}
+                      placeholder="None"
+                      searchPlaceholder="Search accounts…"
+                      emptyMessage="No matches"
+                      className="w-full"
+                    />
                   </div>
                 </div>
                 <div>
