@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Plus, Trash2, RefreshCw } from "lucide-react";
 import {
   SUPPORTED_FIAT_CURRENCIES,
@@ -30,6 +32,8 @@ export function FxOverridesSection() {
   const [overrides, setOverrides] = useState<Override[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  const sortCurrency = useDropdownOrder("currency");
 
   // Add form
   const [adding, setAdding] = useState(false);
@@ -186,25 +190,28 @@ export function FxOverridesSection() {
                     </Button>
                   </div>
                 ) : (
-                  <Select value={form.currency} onValueChange={(v) => {
-                    if (v === "__custom__") { setCustomCode(true); setForm({ ...form, currency: "" }); return; }
-                    setForm({ ...form, currency: v ?? "EUR" });
-                  }}>
-                    <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {SUPPORTED_FIAT_CURRENCIES.filter((c) => c !== "USD").map((c) => (
-                        <SelectItem key={c} value={c}>
-                          {c} — {currencyLabel(c)}
-                        </SelectItem>
-                      ))}
-                      {SUPPORTED_CRYPTO_CURRENCIES.map((c) => (
-                        <SelectItem key={c} value={c}>
-                          {c} — {currencyLabel(c)}
-                        </SelectItem>
-                      ))}
-                      <SelectItem value="__custom__">+ Custom currency code…</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Combobox
+                    value={form.currency}
+                    onValueChange={(v) => {
+                      if (v === "__custom__") { setCustomCode(true); setForm({ ...form, currency: "" }); return; }
+                      setForm({ ...form, currency: v || "EUR" });
+                    }}
+                    items={[
+                      ...sortCurrency(
+                        [
+                          ...SUPPORTED_FIAT_CURRENCIES.filter((c) => c !== "USD"),
+                          ...SUPPORTED_CRYPTO_CURRENCIES,
+                        ].map((c): ComboboxItemShape => ({ value: c, label: `${c} — ${currencyLabel(c)}` })),
+                        (c) => c.value,
+                        (a, z) => a.label.localeCompare(z.label),
+                      ),
+                      { value: "__custom__", label: "+ Custom currency code…" } satisfies ComboboxItemShape,
+                    ]}
+                    placeholder="EUR"
+                    searchPlaceholder="Search currencies…"
+                    emptyMessage="No matches"
+                    className="h-9 w-full"
+                  />
                 )}
                 {customCode ? (
                   <p className="text-xs text-muted-foreground mt-1">

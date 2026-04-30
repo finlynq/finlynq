@@ -8,7 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
@@ -138,6 +140,8 @@ function LoansPageContent() {
   }, []);
   useEffect(() => { load(); fetch("/api/accounts").then((r) => r.json()).then(setAccounts); }, [load]);
 
+  const sortAccount = useDropdownOrder("account");
+
   async function viewAmortization(loan: Loan) {
     setSelectedLoan(loan);
     const [amortRes, whatIfRes] = await Promise.all([
@@ -234,10 +238,19 @@ function LoansPageContent() {
                 <div><Label>Extra Payment/mo</Label><Input type="number" step="0.01" value={form.extraPayment} onChange={(e) => setForm({ ...form, extraPayment: e.target.value })} /></div>
               </div>
               <div><Label>Linked Account</Label>
-                <Select value={form.accountId} onValueChange={(v) => setForm({ ...form, accountId: v ?? "" })}>
-                  <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
-                  <SelectContent>{accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}</SelectContent>
-                </Select>
+                <Combobox
+                  value={form.accountId}
+                  onValueChange={(v) => setForm({ ...form, accountId: v })}
+                  items={sortAccount(
+                    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                    (a) => Number(a.value),
+                    (a, z) => a.label.localeCompare(z.label),
+                  )}
+                  placeholder="None"
+                  searchPlaceholder="Search accounts…"
+                  emptyMessage="No matches"
+                  className="w-full"
+                />
               </div>
               <Button type="submit" className="w-full" disabled={!isFormValid}>Add Loan</Button>
             </form>

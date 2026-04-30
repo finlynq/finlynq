@@ -236,3 +236,61 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 ```
 
 After deploy, monitor via `GET /api/admin/investment-orphans` — non-zero `orphanCount` means some users haven't logged in since the migration (Phase-4 lazy backfill hasn't run for them) or have legacy quantity-bearing rows that the resolver couldn't attribute. Both clear themselves once the user logs in / opens the orphan in the UI.
+
+## investment-cash-backfill-strict (2026-04-30)
+
+One-time backfill prerequisite for the strict-mode investment-holding constraint (issue [#22](https://github.com/finlynq/finlynq/issues/22)). Reassigns every transaction in an `is_investment=true` account that still has `portfolio_holding_id IS NULL` to the per-account 'Cash' holding so the strict-enforcement code in `src/lib/transfer.ts` (`createTransferPair` + `createTransferPairViaSql`) and `src/lib/import-pipeline.ts` can refuse newly unattributed legs without breaking historical rows. Narrower than `migrate-accounts-is-investment.sql`: that one introduced the flag and reassigned `(FK NULL AND legacy text NULL)`; this one targets just `FK NULL` (Phase 6 already dropped the legacy text column on prod). Idempotent. Verifies orphan count = 0 inside the transaction; raises rather than commits a partial state. **Applied to prod + staging + dev on 2026-04-30** (11 Cash sleeves planted per env, 0 orphan reassignments — every existing tx in an investment account was already FK-bound). Run BEFORE deploying the matching code.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-investment-cash-backfill.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-investment-cash-backfill.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-investment-cash-backfill.sql
+```
+
+After each env, hit `GET /api/admin/investment-orphans` and confirm `{ complete: true, orphanCount: 0 }` before pushing the matching code.
+
+## source-tag backfill (optional, per [#33](https://github.com/finlynq/finlynq/issues/33))
+
+Optional one-off backfill for tagging legacy connector imports with `source:<connector>` so future statement-reconciliation dedup can identify them. New imports carry the tag automatically (WP transform + `createTransferPair*`); this script handles only rows that pre-date the rollout.
+
+Per-user, parameterized — each invocation needs a `:user_id`, `:source` slug, comma-separated `:account_ids`, and a `:from_date` / `:to_date` window. Caveat: skips rows whose `transactions.tags` is encrypted (`v1:%`); those need a Node-side rewrite under the user's DEK and are out of scope for the SQL path. The script reports a count of skipped rows.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf \
+  -v user_id="$UID" -v source='wealthposition' \
+  -v account_ids='12,15,18' -v from_date='2024-01-01' -v to_date='2026-04-29' \
+  -f scripts/backfill-source-tag.sql
+```
+
+Inspect the SELECT preview and the encrypted-skip count, then uncomment `COMMIT;` at the bottom of the script. Idempotent on re-runs (won't double-tag rows that already contain `source:`).
+
+## holding-accounts (2026-04-30)
+
+Adds the `holding_accounts(holding_id, account_id, user_id, qty, cost_basis, is_primary, created_at)` join table — many-to-many between `portfolio_holdings` and `accounts`. Issue [#26](https://github.com/finlynq/finlynq/pull/26) (Section G). The legacy one-to-many `portfolio_holdings.account_id` column stays in place during the issue [#25](https://github.com/finlynq/finlynq/pull/25) (Section F) consumer migration; the row here whose `is_primary=true` mirrors it. Backfills from the existing single-account state — qty + cost_basis are derived from `transactions` (`SUM(quantity)` and `SUM(ABS(amount)) WHERE quantity>0`) so re-running on a fresh env produces the same numbers the aggregator computes today. Idempotent (`CREATE TABLE IF NOT EXISTS`, `ON CONFLICT DO NOTHING`). No DEK required — only ids + numbers, no encrypted columns. **Applied to prod + staging + dev on 2026-04-30** — 75 rows backfilled per env, 75/75 with `is_primary=true`, equal to `COUNT(*) FROM portfolio_holdings WHERE account_id IS NOT NULL`. Migration ran BEFORE the matching code landed on staging/prod (still on `main`); the additive shape made that order safe (the new code reading `holding_accounts` is only on the `dev` branch as of the apply timestamp).
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-holding-accounts.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-holding-accounts.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-holding-accounts.sql
+```
+
+**Production-deploy ordering** (when promoting `dev → main`):
+
+1. The migration is already applied on prod + staging (2026-04-30, see above) — re-running is a no-op (`CREATE TABLE IF NOT EXISTS` + `ON CONFLICT DO NOTHING`), so the deploy itself doesn't need a separate migration step.
+2. Merge `dev → main`. GitHub Actions builds + SSH-deploys to staging then prod. The new code reads `holding_accounts` for the `/settings/holding-accounts` page + `/api/holding-accounts` endpoint; the table already exists from step (1), so the route renders on first hit.
+3. Smoke-test on staging first: open `/settings/holding-accounts`, confirm every existing holding shows up with one `is_primary=true` pairing matching its current `portfolio_holdings.account_id`. Add a second pairing on a test holding, confirm the legacy column stays unchanged. Toggle "Make primary" to the new pairing, confirm `portfolio_holdings.account_id` flips.
+4. Repeat the smoke test on prod after the prod deploy completes.
+5. The 5 portfolio aggregator callsites + 8 investment-account-constraint callsites in CLAUDE.md still read `portfolio_holdings.account_id` in this release; `holding_accounts` is additive. Issue [#25](https://github.com/finlynq/finlynq/pull/25) (Section F) migrates them onto the join table as a separate PR — that PR is NOT additive, so its deploy will require freshly verifying that the migration's qty + cost_basis backfill matches the aggregator output the moment before code switchover.
+
+
+## tx-audit-fields (2026-04-30, issue #28)
+
+Adds `transactions.created_at`, `transactions.updated_at`, and `transactions.source` (`text NOT NULL DEFAULT 'manual'` with a CHECK constraint on the seven allowed values: `manual`, `import`, `mcp_http`, `mcp_stdio`, `connector`, `sample_data`, `backup_restore`). All three are system-time / system-attribution facts distinct from the user-supplied `transactions.date`. Maintained at the application layer (no triggers — matches the existing convention; coverage grep is cheap to run). Idempotent. Pre-migration creation time + true source are unrecoverable — backfill sets timestamps to NOW() and source to 'manual'. We deliberately do NOT use `entered_at` as a backfill source because semantics differ (entered_at is FX-settlement input, created_at is system audit). **Applied to prod + staging + dev on 2026-04-30** (column DEFAULTs handled the backfill — UPDATE 0 in the defensive sweep on every env, meaning no rows needed coercion). Run BEFORE the matching code deploy so the new columns exist when `getTransactions` SELECTs them.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-tx-audit-fields.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-tx-audit-fields.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-tx-audit-fields.sql
+```
+
+After each env, smoke-check by inserting any transaction (UI or MCP) and confirming `created_at` / `updated_at` / `source` populate; then edit the same row and confirm `updated_at` advances while `created_at` and `source` stay frozen.

@@ -6,11 +6,21 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
-import { buildNameFields, nameLookup } from "@/lib/crypto/encrypted-columns";
+import { buildNameFields, decryptNamedRows, nameLookup } from "@/lib/crypto/encrypted-columns";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const data = await getPortfolioHoldings(auth.context.userId);
+  const rows = await getPortfolioHoldings(auth.context.userId);
+  // Stream D: holdings carry name_ct/symbol_ct/account.name_ct alongside the
+  // plaintext columns. Past Phase 3 cutover the plaintext columns are NULL on
+  // disk, so the dropdown in Add Transaction (and any other consumer) sees
+  // {name: null, symbol: null, accountName: null} unless we decrypt here.
+  // Mirrors /api/portfolio/overview and /api/accounts.
+  const data = decryptNamedRows(rows, auth.context.dek, {
+    nameCt: "name",
+    symbolCt: "symbol",
+    accountNameCt: "accountName",
+  });
   return NextResponse.json(data);
 }
 

@@ -440,7 +440,7 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
 
   server.tool(
     "search_transactions",
-    "Flexible transaction search with partial payee match, amount range, date range, category, and tags",
+    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly.",
     {
       payee: z.string().optional().describe("Partial payee/merchant name match"),
       min_amount: z.number().optional().describe("Minimum amount"),
@@ -449,9 +449,10 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
       end_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
       category: z.string().optional().describe("Category name (exact)"),
       tags: z.string().optional().describe("Tag to search for (partial match)"),
+      account_id: z.number().int().optional().describe("Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses)."),
       limit: z.number().optional().describe("Max results (default 50)"),
     },
-    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, limit }) => {
+    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, limit }) => {
       let query = `SELECT t.id, t.date, a.name as account, c.name as category, c.type as category_type,
                    t.currency, t.amount, t.payee, t.note, t.tags
                    FROM transactions t
@@ -467,6 +468,7 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
       if (end_date) { query += " AND t.date <= ?"; params.push(end_date); }
       if (category) { query += " AND c.name = ?"; params.push(category); }
       if (tags) { query += " AND t.tags LIKE ?"; params.push(`%${tags}%`); }
+      if (account_id !== undefined) { query += " AND t.account_id = ?"; params.push(account_id); }
 
       query += ` ORDER BY t.date DESC LIMIT ?`;
       params.push(limit ?? 50);

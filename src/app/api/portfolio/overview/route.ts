@@ -714,8 +714,143 @@ export async function GET(request: NextRequest) {
       : null,
   }));
 
+  // 11. By-holding aggregation — same financial position pooled across the
+  // accounts that hold it. Issue #25 (Section F) interim path (a):
+  // re-group `enrichedHoldings` by canonical key post-enrichment. The
+  // SQL-side join through `holding_accounts` (path (b)) is a follow-up;
+  // until canonical-name backfill ships, key on (assetType, symbol/currency)
+  // so user-edited free-text names don't fragment the same ticker into
+  // multiple rows.
+  type ByHoldingKey = { key: string; symbol: string | null; name: string };
+  const canonicalKey = (h: typeof enrichedHoldings[number]): ByHoldingKey => {
+    if (h.assetType === "crypto" && h.symbol) {
+      const base = h.symbol.toUpperCase().split("-")[0];
+      return { key: `crypto:${base}`, symbol: base, name: base };
+    }
+    if (h.assetType === "stock" || h.assetType === "etf") {
+      if (h.symbol) {
+        const sym = h.symbol.toUpperCase();
+        return { key: `eq:${sym}`, symbol: sym, name: sym };
+      }
+    }
+    if (h.assetType === "cash") {
+      if (h.symbol) {
+        const symU = h.symbol.toUpperCase();
+        // Metal sleeves (XAU/XAG/XPT/XPD) are universal regardless of the
+        // account's holding currency — XAU in a CAD account and XAU in a
+        // USD account hold the same ounces of gold.
+        if (isMetalCurrency(symU)) {
+          return { key: `metal:${symU}`, symbol: symU, name: symU };
+        }
+        // Currency-code symbol → cash sleeve in that currency.
+        return { key: `cash:${symU}`, symbol: symU, name: `Cash ${symU}` };
+      }
+      // No symbol → cash in the holding's own row currency.
+      const cur = h.currency.toUpperCase();
+      return { key: `cash:${cur}`, symbol: cur, name: `Cash ${cur}` };
+    }
+    // User-defined fallback (no symbol, non-cash) — fragment by name. Once
+    // canonicalization helper lands, these rows still collapse on (lowercased)
+    // free-text name within a user's portfolio.
+    return { key: `custom:${(h.name || "?").trim().toLowerCase()}`, symbol: null, name: h.name || "?" };
+  };
+
+  type ByHoldingAccum = {
+    key: string;
+    symbol: string | null;
+    name: string;
+    assetType: AssetType;
+    totalQty: number;
+    costBasisDisplay: number;
+    lifetimeCostBasisDisplay: number;
+    marketValueDisplay: number;
+    unrealizedGainDisplay: number;
+    realizedGainDisplay: number;
+    dividendsDisplay: number;
+    accountIds: Set<number>;
+    image: string | null;
+    quoteCurrency: string | null;
+  };
+
+  const byHoldingMap = new Map<string, ByHoldingAccum>();
+  for (const h of enrichedHoldings) {
+    const ck = canonicalKey(h);
+    let acc = byHoldingMap.get(ck.key);
+    if (!acc) {
+      acc = {
+        key: ck.key,
+        symbol: ck.symbol,
+        name: ck.name,
+        assetType: h.assetType,
+        totalQty: 0,
+        costBasisDisplay: 0,
+        lifetimeCostBasisDisplay: 0,
+        marketValueDisplay: 0,
+        unrealizedGainDisplay: 0,
+        realizedGainDisplay: 0,
+        dividendsDisplay: 0,
+        accountIds: new Set<number>(),
+        image: h.image ?? null,
+        quoteCurrency: h.quoteCurrency,
+      };
+      byHoldingMap.set(ck.key, acc);
+    }
+    if (h.accountId != null) acc.accountIds.add(h.accountId);
+    if (h.quantity != null) acc.totalQty += h.quantity;
+    acc.marketValueDisplay += h.marketValueDisplay ?? 0;
+    acc.unrealizedGainDisplay += h.unrealizedGainDisplay ?? 0;
+
+    // FX hop into displayCurrency for cost basis / realized / dividends —
+    // the per-row totalCostBasis / realizedGain / dividendsReceived live in
+    // the holding's quote currency. Reuse the same fxRates map the per-row
+    // path uses so the rollup matches summary totals to within rounding.
+    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
+    if (h.totalCostBasis != null) acc.costBasisDisplay += h.totalCostBasis * fxRate;
+    if (h.lifetimeCostBasis != null) acc.lifetimeCostBasisDisplay += h.lifetimeCostBasis * fxRate;
+    if (h.realizedGain != null) acc.realizedGainDisplay += h.realizedGain * fxRate;
+    if (h.dividendsReceived != null) acc.dividendsDisplay += h.dividendsReceived * fxRate;
+  }
+
+  const byHolding = Array.from(byHoldingMap.values()).map(a => {
+    // Avg cost across accounts is qty-weighted: Σ(costBasis_acct) / Σ(qty_acct).
+    // Avoids the simple-mean bug when one account holds 10× more shares.
+    const avgCostDisplay = a.totalQty > 0 && a.costBasisDisplay > 0
+      ? a.costBasisDisplay / a.totalQty
+      : null;
+    const unrealizedPct = a.costBasisDisplay > 0
+      ? (a.unrealizedGainDisplay / a.costBasisDisplay) * 100
+      : null;
+    const totalReturnDisplay = a.unrealizedGainDisplay + a.realizedGainDisplay + a.dividendsDisplay;
+    const totalReturnPct = a.lifetimeCostBasisDisplay > 0
+      ? (totalReturnDisplay / a.lifetimeCostBasisDisplay) * 100
+      : null;
+    const pctOfPortfolio = totalValueDisplay > 0
+      ? Math.round((a.marketValueDisplay / totalValueDisplay) * 10000) / 100
+      : null;
+    return {
+      key: a.key,
+      symbol: a.symbol,
+      name: a.name,
+      assetType: a.assetType,
+      totalQty: Math.round(a.totalQty * 1e6) / 1e6,
+      avgCostDisplay: avgCostDisplay != null ? Math.round(avgCostDisplay * 10000) / 10000 : null,
+      costBasisDisplay: Math.round(a.costBasisDisplay * 100) / 100,
+      marketValueDisplay: Math.round(a.marketValueDisplay * 100) / 100,
+      unrealizedGainDisplay: Math.round(a.unrealizedGainDisplay * 100) / 100,
+      unrealizedGainPct: unrealizedPct != null ? Math.round(unrealizedPct * 100) / 100 : null,
+      realizedGainDisplay: Math.round(a.realizedGainDisplay * 100) / 100,
+      dividendsDisplay: Math.round(a.dividendsDisplay * 100) / 100,
+      totalReturnDisplay: Math.round(totalReturnDisplay * 100) / 100,
+      totalReturnPct: totalReturnPct != null ? Math.round(totalReturnPct * 100) / 100 : null,
+      pctOfPortfolio,
+      accountCount: a.accountIds.size,
+      image: a.image,
+    };
+  }).sort((a, b) => b.marketValueDisplay - a.marketValueDisplay);
+
   return NextResponse.json({
     holdings: holdingsWithPct,
+    byHolding,
     // Currency the totals + marketValueDisplay field are denominated in. The
     // field name kept its legacy "CAD" suffix for compat; the value is in
     // displayCurrency. Format with this on the client to avoid mislabeling.

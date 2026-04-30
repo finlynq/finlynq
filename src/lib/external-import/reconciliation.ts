@@ -195,6 +195,8 @@ export async function insertOpeningBalanceAdjustment(
       note: noteCipher,
       tags: "",
       importHash,
+      // Issue #28: WP / future broker reconciliation rows are connector-driven.
+      source: "connector",
     })
     .returning({ id: schema.transactions.id })
     .get();

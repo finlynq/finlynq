@@ -3,6 +3,7 @@ import { db, schema } from "@/db";
 import { sql, eq, and, gte, lte } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
+import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-service";
 import {
   computeAllAccountsUnrealizedPnL,
@@ -32,9 +33,15 @@ export async function GET(request: NextRequest) {
 
     const rows = await db
       .select({
+        // Group on the stable id — Phase 3 NULLs `categories.name` for
+        // backfilled users, so grouping by name collapses every category
+        // into one "Uncategorized" bucket. Decrypt name_ct after the
+        // aggregation so the client still gets a human label.
+        categoryId: schema.categories.id,
         categoryType: schema.categories.type,
         categoryGroup: schema.categories.group,
         categoryName: schema.categories.name,
+        categoryNameCt: schema.categories.nameCt,
         currency: schema.transactions.currency,
         total: sql<number>`SUM(${schema.transactions.amount})`,
         count: sql<number>`COUNT(*)`,
@@ -42,17 +49,18 @@ export async function GET(request: NextRequest) {
       .from(schema.transactions)
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
       .where(and(...conditions))
-      .groupBy(schema.categories.id, schema.categories.type, schema.categories.group, schema.categories.name, schema.transactions.currency)
+      .groupBy(schema.categories.id, schema.categories.type, schema.categories.group, schema.categories.name, schema.categories.nameCt, schema.transactions.currency)
       .orderBy(schema.categories.type, schema.categories.group)
       .all();
 
-    // Aggregate across currencies per category
-    const categoryTotals = new Map<string, { categoryType: string; categoryGroup: string; categoryName: string; total: number; count: number }>();
+    // Aggregate across currencies per category — keyed on categoryId so
+    // rows with NULL plaintext (Phase-3 cutover) don't collide.
+    const categoryTotals = new Map<string | number, { categoryType: string; categoryGroup: string; categoryName: string; total: number; count: number }>();
     for (const row of rows) {
       const catType = row.categoryType ?? "";
       const catGroup = row.categoryGroup ?? "";
-      const catName = row.categoryName ?? "";
-      const key = `${catType}:${catGroup}:${catName}`;
+      const catName = decryptName(row.categoryNameCt, dek, row.categoryName) ?? "";
+      const key = row.categoryId ?? `null:${catType}:${catGroup}:${catName}`;
       const converted = convertWithRateMap(row.total, row.currency, rateMap);
       const existing = categoryTotals.get(key);
       if (existing) {
@@ -133,24 +141,31 @@ export async function GET(request: NextRequest) {
   if (type === "balance-sheet") {
     const balances = await db
       .select({
+        accountId: schema.accounts.id,
         accountType: schema.accounts.type,
         accountGroup: schema.accounts.group,
         accountName: schema.accounts.name,
+        accountNameCt: schema.accounts.nameCt,
         currency: schema.accounts.currency,
         balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
       })
       .from(schema.accounts)
       .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
       .where(eq(schema.accounts.userId, userId))
-      .groupBy(schema.accounts.id, schema.accounts.type, schema.accounts.group, schema.accounts.name, schema.accounts.currency)
+      .groupBy(schema.accounts.id, schema.accounts.type, schema.accounts.group, schema.accounts.name, schema.accounts.nameCt, schema.accounts.currency)
       .orderBy(schema.accounts.type, schema.accounts.group)
       .all();
 
-    const converted = balances.map((b) => ({
-      ...b,
-      convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
-      displayCurrency,
-    }));
+    const converted = balances.map((b) => {
+      const { accountNameCt: _ct, ...rest } = b;
+      void _ct;
+      return {
+        ...rest,
+        accountName: decryptName(b.accountNameCt, dek, b.accountName) ?? "",
+        convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
+        displayCurrency,
+      };
+    });
 
     const assets = converted.filter((b) => b.accountType === "A");
     const liabilities = converted.filter((b) => b.accountType === "L");
@@ -180,8 +195,10 @@ export async function GET(request: NextRequest) {
   if (type === "tax-summary") {
     const rows = await db
       .select({
+        categoryId: schema.categories.id,
         categoryGroup: schema.categories.group,
         categoryName: schema.categories.name,
+        categoryNameCt: schema.categories.nameCt,
         currency: schema.transactions.currency,
         total: sql<number>`SUM(${schema.transactions.amount})`,
       })
@@ -195,15 +212,16 @@ export async function GET(request: NextRequest) {
           sql`${schema.categories.type} IN ('I', 'E')`
         )
       )
-      .groupBy(schema.categories.id, schema.categories.group, schema.categories.name, schema.transactions.currency)
+      .groupBy(schema.categories.id, schema.categories.group, schema.categories.name, schema.categories.nameCt, schema.transactions.currency)
       .all();
 
-    // Aggregate across currencies per category
-    const categoryTotals = new Map<string, { group: string; category: string; total: number; isIncome: boolean }>();
+    // Aggregate across currencies per category — keyed on categoryId so
+    // Phase-3-NULL'd plaintext doesn't collapse rows together.
+    const categoryTotals = new Map<string | number, { group: string; category: string; total: number; isIncome: boolean }>();
     for (const r of rows) {
       const group = r.categoryGroup ?? "";
-      const category = r.categoryName ?? "";
-      const key = `${group}:${category}`;
+      const category = decryptName(r.categoryNameCt, dek, r.categoryName) ?? "";
+      const key = r.categoryId ?? `null:${group}:${category}`;
       const converted = convertWithRateMap(r.total, r.currency, rateMap);
       const existing = categoryTotals.get(key);
       if (existing) {

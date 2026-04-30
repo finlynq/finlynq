@@ -2,6 +2,7 @@ import { db, schema, getDialect } from "@/db";
 import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { requireHoldingForInvestmentAccount } from "@/lib/investment-account";
+import type { TransactionSource } from "@/lib/tx-source";
 
 const { accounts, categories, transactions, portfolioHoldings, budgets, budgetTemplates } = schema;
 
@@ -124,14 +125,22 @@ export async function getTransactions(userId: string, filters?: {
       date: transactions.date,
       accountId: transactions.accountId,
       accountName: accounts.name,
+      // Stream D Phase 3 cutover NULLs `accounts.name` once a user is fully
+      // backfilled — pull the ciphertext alongside so the route handler can
+      // decrypt with the session DEK and fall back to plaintext for un-
+      // backfilled / DEK-mismatch users (decryptName ladder).
+      accountNameCt: accounts.nameCt,
       // Plaintext alias + type so the UI can build a context-rich label
       // (e.g. "Credit Card · 609") for accounts whose name is terse/numeric.
-      // Stream-D-correct decryption of `alias_ct` happens via the dedicated
-      // /api/accounts path; same dual-write story as accounts.name.
       accountAlias: accounts.alias,
+      accountAliasCt: accounts.aliasCt,
       accountType: accounts.type,
       categoryId: transactions.categoryId,
       categoryName: categories.name,
+      // Same Phase-3 NULL story applies to categories — without nameCt the
+      // /transactions page and the Reports endpoints render an empty
+      // Category column for every backfilled user.
+      categoryNameCt: categories.nameCt,
       categoryType: categories.type,
       currency: transactions.currency,
       amount: transactions.amount,
@@ -148,10 +157,18 @@ export async function getTransactions(userId: string, filters?: {
       portfolioHoldingId: transactions.portfolioHoldingId,
       portfolioHoldingName: portfolioHoldings.name,
       portfolioHoldingNameCt: portfolioHoldings.nameCt,
+      portfolioHoldingSymbol: portfolioHoldings.symbol,
+      portfolioHoldingSymbolCt: portfolioHoldings.symbolCt,
       note: transactions.note,
       payee: transactions.payee,
       tags: transactions.tags,
       linkId: transactions.linkId,
+      // Audit-trio (issue #28). Surface for the edit dialog footer + the
+      // future "recently modified" sort. Pre-migration rows backfill to
+      // NOW()/'manual' — see migrate-tx-audit-fields.sql.
+      createdAt: transactions.createdAt,
+      updatedAt: transactions.updatedAt,
+      source: transactions.source,
     })
     .from(transactions)
     .leftJoin(accounts, eq(transactions.accountId, accounts.id))
@@ -215,6 +232,11 @@ export async function createTransaction(userId: string, data: {
   isBusiness?: number;
   splitPerson?: string;
   splitRatio?: number;
+  // Audit-source attribution (issue #28). Defaults to 'manual' when the
+  // caller doesn't pass one — the UI POST handler relies on the default,
+  // every other writer (import/MCP/connector/sample-data/restore) sets
+  // it explicitly so the surface info is set at the route boundary.
+  source?: TransactionSource;
 }) {
   // Investment-account constraint: every transaction in a flagged account
   // must reference a portfolio_holdings row. Throws
@@ -268,7 +290,45 @@ export async function updateTransaction(id: number, userId: string, data: Partia
       await requireHoldingForInvestmentAccount(userId, resultingAccountId, resultingHoldingId);
     }
   }
-  return db.update(transactions).set(data).where(and(eq(transactions.id, id), eq(transactions.userId, userId))).returning().get();
+  // Audit-trio (issue #28): every UPDATE bumps updated_at = NOW(). `source`
+  // is INSERT-only and intentionally NOT spread into `data`. The Partial<>
+  // input type above doesn't include `source`, so a future caller adding it
+  // here would be a type error.
+  return db
+    .update(transactions)
+    .set({ ...data, updatedAt: sql`NOW()` })
+    .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
+    .returning()
+    .get();
+}
+
+/**
+ * Per-row write warnings for transaction inserts/updates. Pure check —
+ * no DB access — so the MCP HTTP write tools (record_transaction,
+ * bulk_record_transactions, update_transaction) can call it post-resolve
+ * and surface advisory messages alongside `success: true`. Stdio MCP write
+ * tools refuse investment-account writes outright and don't expose
+ * `portfolioHoldingId`/`quantity`, so the warning condition can't trigger
+ * there — those tools don't need to call this.
+ *
+ * Today the only check: a row bound to a `portfolioHoldingId` that moves
+ * cash (`amount != 0`) but omits `quantity` won't move the holding's unit
+ * count. Silent today; surfaces a warning so callers don't end up with a
+ * stale portfolio view. See issue #31.
+ */
+export function deriveTxWriteWarnings(input: {
+  portfolioHoldingId?: number | null;
+  amount?: number | null;
+  quantity?: number | null;
+}): string[] {
+  const warnings: string[] = [];
+  const hasHolding = input.portfolioHoldingId != null;
+  const movesCash = input.amount != null && input.amount !== 0;
+  const noQuantity = input.quantity == null;
+  if (hasHolding && movesCash && noQuantity) {
+    warnings.push("quantity not set — holding unit count was not updated");
+  }
+  return warnings;
 }
 
 /**

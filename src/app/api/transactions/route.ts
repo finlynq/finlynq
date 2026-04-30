@@ -3,7 +3,7 @@ import { getTransactions, getTransactionCount, createTransaction, updateTransact
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { getDEK } from "@/lib/crypto/dek-cache";
-import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch, nameLookup } from "@/lib/crypto/encrypted-columns";
+import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
 import { decryptField } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
@@ -132,27 +132,48 @@ export async function GET(request: NextRequest) {
   const rawRows = await getTransactions(userId, filters);
   let decrypted = decryptTxRows(dek, rawRows as Array<Parameters<typeof decryptTxRows>[1][number]>);
 
-  // Surface the JOINed holding name as `portfolioHolding` for the UI.
-  // Falls back to plaintext name when name_ct is null (legacy rows pre
-  // Stream D). Phase 6 (2026-04-29) dropped the legacy text column on
-  // transactions; this JOIN replaces that source.
+  // Resolve every Stream-D-encrypted display name and strip the *_ct
+  // companion fields before serializing. Falls back to plaintext (legacy
+  // rows + DEK-mismatch users) via decryptName's ladder. Without the
+  // category + account decrypts, the /transactions page and the Reports
+  // tabs render empty cells for every Phase-3-NULL'd user.
   decrypted = decrypted.map((r) => {
     const row = r as typeof r & {
+      accountName?: string | null;
+      accountNameCt?: string | null;
+      accountAlias?: string | null;
+      accountAliasCt?: string | null;
+      categoryName?: string | null;
+      categoryNameCt?: string | null;
       portfolioHoldingName?: string | null;
       portfolioHoldingNameCt?: string | null;
+      portfolioHoldingSymbol?: string | null;
+      portfolioHoldingSymbolCt?: string | null;
       portfolioHolding?: string | null;
     };
-    let resolved: string | null = row.portfolioHoldingName ?? null;
-    if (!resolved && row.portfolioHoldingNameCt && dek) {
+    row.accountName = decryptName(row.accountNameCt, dek, row.accountName);
+    row.accountAlias = decryptName(row.accountAliasCt, dek, row.accountAlias);
+    row.categoryName = decryptName(row.categoryNameCt, dek, row.categoryName);
+    let resolvedHolding: string | null = row.portfolioHoldingName ?? null;
+    if (!resolvedHolding && row.portfolioHoldingNameCt && dek) {
       try {
-        resolved = decryptField(dek, row.portfolioHoldingNameCt);
+        resolvedHolding = decryptField(dek, row.portfolioHoldingNameCt);
       } catch {
-        resolved = null;
+        resolvedHolding = null;
       }
     }
-    row.portfolioHolding = resolved;
+    row.portfolioHolding = resolvedHolding;
+    row.portfolioHoldingSymbol = decryptName(
+      row.portfolioHoldingSymbolCt,
+      dek,
+      row.portfolioHoldingSymbol,
+    );
+    delete row.accountNameCt;
+    delete row.accountAliasCt;
+    delete row.categoryNameCt;
     delete row.portfolioHoldingName;
     delete row.portfolioHoldingNameCt;
+    delete row.portfolioHoldingSymbolCt;
     return row;
   });
 
@@ -339,7 +360,10 @@ export async function POST(request: NextRequest) {
     // of truth and the column is being dropped in a follow-up release.
     delete data.portfolioHolding;
     const encrypted = encryptTxWrite(auth.dek, data);
-    const tx = await createTransaction(auth.userId, encrypted);
+    // Issue #28: hard-code the writer surface at the route boundary rather
+    // than relying on the schema default. Defensive against a future writer
+    // path that forgets to set it — every entry point is grep-discoverable.
+    const tx = await createTransaction(auth.userId, { ...encrypted, source: "manual" });
     invalidateUserTxCache(auth.userId);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {

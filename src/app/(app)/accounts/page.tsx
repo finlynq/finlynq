@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { formatCurrency } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
@@ -150,6 +152,8 @@ export default function AccountsPage() {
 
   // Show-archived toggle (persists archived accounts in the list with a badge)
   const [showArchived, setShowArchived] = useState(false);
+
+  const sortCurrency = useDropdownOrder("currency");
 
   function loadAccounts(includeArchived = showArchived) {
     setLoading(true);
@@ -479,15 +483,19 @@ export default function AccountsPage() {
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Currency</Label>
-              <Select value={form.currency} onValueChange={(v) => setForm({ ...form, currency: v ?? "CAD" })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="CAD">CAD</SelectItem>
-                  <SelectItem value="USD">USD</SelectItem>
-                  <SelectItem value="EUR">EUR</SelectItem>
-                  <SelectItem value="GBP">GBP</SelectItem>
-                </SelectContent>
-              </Select>
+              <Combobox
+                value={form.currency}
+                onValueChange={(v) => setForm({ ...form, currency: v || "CAD" })}
+                items={sortCurrency(
+                  ["CAD", "USD", "EUR", "GBP"].map((c): ComboboxItemShape => ({ value: c, label: c })),
+                  (c) => c.value,
+                  (a, z) => a.label.localeCompare(z.label),
+                )}
+                placeholder="CAD"
+                searchPlaceholder="Search…"
+                emptyMessage="No matches"
+                className="w-full"
+              />
             </div>
 
             <div className="space-y-1.5">
@@ -657,15 +665,19 @@ export default function AccountsPage() {
             </div>
             <div className="space-y-1.5">
               <Label>Currency</Label>
-              <Select value={editForm.currency} onValueChange={(v) => setEditForm({ ...editForm, currency: v ?? "CAD" })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="CAD">CAD</SelectItem>
-                  <SelectItem value="USD">USD</SelectItem>
-                  <SelectItem value="EUR">EUR</SelectItem>
-                  <SelectItem value="GBP">GBP</SelectItem>
-                </SelectContent>
-              </Select>
+              <Combobox
+                value={editForm.currency}
+                onValueChange={(v) => setEditForm({ ...editForm, currency: v || "CAD" })}
+                items={sortCurrency(
+                  ["CAD", "USD", "EUR", "GBP"].map((c): ComboboxItemShape => ({ value: c, label: c })),
+                  (c) => c.value,
+                  (a, z) => a.label.localeCompare(z.label),
+                )}
+                placeholder="CAD"
+                searchPlaceholder="Search…"
+                emptyMessage="No matches"
+                className="w-full"
+              />
             </div>
             <div className="space-y-1.5">
               <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>

@@ -6,10 +6,7 @@ import { normalizeDate, parseAmount as parseAmountStr } from "./csv-parser";
 import { encryptField, decryptField, tryDecryptField } from "./crypto/envelope";
 import { nameLookup } from "./crypto/encrypted-columns";
 import { buildHoldingResolver } from "./external-import/portfolio-holding-resolver";
-import {
-  defaultHoldingForInvestmentAccount,
-  getInvestmentAccountIds,
-} from "./investment-account";
+import { getInvestmentAccountIds } from "./investment-account";
 import { safeConvertToAccountCurrency } from "./currency-conversion";
 import { prewarmRates } from "./fx-service";
 
@@ -219,6 +216,11 @@ export async function executeImport(
   forceImportIndices: number[] = [],
   userId: string,
   userDek?: Buffer,
+  // Issue #28: writer surface for the audit column. Defaults to 'import'
+  // because every caller of this pipeline today is a CSV/Excel/PDF/OFX
+  // import flow. Connector orchestrators (WP, future brokerages) call into
+  // reconciliation.ts directly and pass 'connector' on those INSERTs.
+  txSource: "import" | "connector" = "import",
 ): Promise<ImportResult> {
   if (rows.length === 0) {
     return { total: 0, imported: 0, skippedDuplicates: 0 };
@@ -437,31 +439,43 @@ export async function executeImport(
     );
   }
 
-  // Investment-account constraint pass: any row whose account is flagged
-  // is_investment but didn't get a holding from the resolver above (no
-  // portfolioHolding text — pure cash leg, fee, deposit) gets defaulted to
-  // the per-account Cash holding so the row satisfies the constraint
-  // instead of failing the whole batch. Single Set lookup keeps this
-  // O(rows) and a single Cash-holding INSERT per investment account
-  // amortizes across the rest of the batch.
+  // Investment-account constraint pass (strict — issue #22): any row whose
+  // account is flagged is_investment but didn't get a holding from the
+  // resolver above (no portfolioHolding text — pure cash leg, fee, deposit)
+  // is rejected with a per-row error and excluded from the batch. The
+  // resolver above still maps user-typed `Cash` (or any explicit holding
+  // name) to a real FK, so a CSV that sets `portfolioHolding` for cash legs
+  // continues to work end-to-end. The previous permissive default-to-Cash
+  // behavior silently masked broken mappings; this loud failure surfaces
+  // them at import time before they pollute the portfolio aggregator.
+  let rejected: number[] = [];
   try {
     const investmentAccountIds = await getInvestmentAccountIds(userId);
     if (investmentAccountIds.size > 0) {
-      for (const row of toInsert) {
-        if (row.portfolioHoldingId != null) continue;
-        if (!investmentAccountIds.has(row.accountId)) continue;
-        row.portfolioHoldingId = await defaultHoldingForInvestmentAccount(
-          userId,
-          row.accountId,
-          userDek ?? null,
-          undefined,
+      rejected = toInsert
+        .map((row, i) =>
+          row.portfolioHoldingId == null && investmentAccountIds.has(row.accountId)
+            ? i
+            : -1,
+        )
+        .filter((i) => i >= 0);
+      for (const idx of rejected) {
+        const row = toInsert[idx];
+        importErrors.push(
+          `Row ${row.rowIndex + 1}: investment account requires a portfolio holding — map a holding column (or set "Cash") for this row.`,
         );
       }
     }
   } catch (err) {
     importErrors.push(
-      `Investment-account Cash holding default failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+      `Investment-account holding check failed: ${err instanceof Error ? err.message : "Unknown error"}`,
     );
+  }
+  if (rejected.length > 0) {
+    const rejectedSet = new Set(rejected);
+    for (let i = toInsert.length - 1; i >= 0; i--) {
+      if (rejectedSet.has(i)) toInsert.splice(i, 1);
+    }
   }
 
   // Batch insert — encrypt text fields at the boundary (hash was computed on
@@ -472,7 +486,11 @@ export async function executeImport(
   for (let i = 0; i < toInsert.length; i += batchSize) {
     const batch = toInsert.slice(i, i + batchSize);
     const values = batch.map(({ rowIndex: _, portfolioHolding: _ph, ...rest }) => {
-      const row = { ...rest, userId };
+      // Issue #28: stamp the writer surface explicitly. Default 'import'
+      // covers CSV/Excel/PDF/OFX/email; connector orchestrators pass
+      // 'connector' so reconciliation lineage stays distinct from
+      // user-uploaded files.
+      const row = { ...rest, userId, source: txSource };
       if (userDek) {
         row.payee = encryptField(userDek, row.payee) ?? "";
         row.note = encryptField(userDek, row.note) ?? "";

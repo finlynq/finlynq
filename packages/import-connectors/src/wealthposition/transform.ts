@@ -39,6 +39,17 @@ function parseHolding(raw: string | number | null | undefined): number | null {
  * Main transform. Doesn't throw on bad input — collects errors per external
  * tx id and returns them in the TransformResult.
  */
+export interface TransformTransactionsOptions {
+  /**
+   * Connector id used for the auto-applied `source:<id>` tag on every
+   * emitted RawTransaction. Defaults to `"wealthposition"` for backward
+   * compatibility with the original single-connector caller. New connectors
+   * pass their own id (e.g. `"ibkr"`) so cross-import dedup can identify
+   * the originating provider per row.
+   */
+  sourceConnectorId?: string;
+}
+
 export function transformTransactions(
   externalTxs: ExternalTransaction[],
   mapping: ConnectorMappingResolved,
@@ -51,7 +62,9 @@ export function transformTransactions(
     externalAccountByName: Map<string, string>; // name → external id
     externalCategoryByName: Map<string, string>; // name → external id
   },
+  options: TransformTransactionsOptions = {},
 ): TransformResult {
+  const sourceTag = `source:${options.sourceConnectorId ?? "wealthposition"}`;
   const flat: RawTransaction[] = [];
   const splits: TransformResult["splits"] = [];
   const errors: TransformResult["errors"] = [];
@@ -99,6 +112,7 @@ export function transformTransactions(
             tags: tx.tags,
             category: undefined,
             holding: parseHolding(only.entry.holding),
+            sourceTag,
           }),
         );
         continue;
@@ -133,6 +147,7 @@ export function transformTransactions(
           tags: tx.tags,
           category: mapping.categoryNameById.get(transferCatId),
           holding: parseHolding(a.entry.holding),
+          sourceTag,
         }),
       );
       flat.push(
@@ -147,6 +162,7 @@ export function transformTransactions(
           tags: tx.tags,
           category: mapping.categoryNameById.get(transferCatId),
           holding: parseHolding(b.entry.holding),
+          sourceTag,
         }),
       );
       continue;
@@ -169,6 +185,7 @@ export function transformTransactions(
             tags: tx.tags,
             category: cat.categoryName,
             holding: parseHolding(acct.entry.holding),
+            sourceTag,
           }),
         );
         continue;
@@ -186,6 +203,7 @@ export function transformTransactions(
         tags: tx.tags,
         category: undefined, // parent has no single category when splits are present
         holding: parseHolding(acct.entry.holding),
+        sourceTag,
       });
 
       const splitRows: TransformSplitRow[] = categorySides.map((c) => ({
@@ -269,6 +287,27 @@ interface BuildRawTransactionArgs {
   tags?: string[];
   category?: string;
   holding: number | null;
+  /** Full source tag string, e.g. `"source:ibkr"`. */
+  sourceTag: string;
+}
+
+/**
+ * Tag every imported row with `source:<connectorId>`. Lets future statement
+ * reconciliations (or a connector whose data overlaps another's) identify
+ * rows the bank side has already booked, so cross-import dedup can skip them
+ * instead of double-recording. Merged into existing user/category tags
+ * rather than replacing — keeps the rule engine's `assignTags` and any
+ * caller-set tags intact. Idempotent on re-imports because the
+ * import-pipeline dedups on import_hash before this string ever reaches the
+ * DB.
+ */
+function withSourceTag(existing: string[] | undefined, sourceTag: string): string {
+  const lower = sourceTag.trim().toLowerCase();
+  const tags = existing && existing.length ? [...existing] : [];
+  if (!tags.some((t) => t.trim().toLowerCase() === lower)) {
+    tags.push(sourceTag);
+  }
+  return tags.join(",");
 }
 
 function buildRawTransaction(args: BuildRawTransactionArgs): RawTransaction {
@@ -280,7 +319,7 @@ function buildRawTransaction(args: BuildRawTransactionArgs): RawTransaction {
     category: args.category,
     currency: args.currency,
     note: args.note,
-    tags: args.tags && args.tags.length ? args.tags.join(",") : undefined,
+    tags: withSourceTag(args.tags, args.sourceTag),
   };
   // holding→quantity only when it's a distinct "units of something" number.
   // Cash accounts report holding == amount; skip in that case so we don't

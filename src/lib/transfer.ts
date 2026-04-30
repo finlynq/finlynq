@@ -40,7 +40,11 @@ import { encryptField, decryptField } from "@/lib/crypto/envelope";
 import { resolveTxAmountsCore } from "@/lib/currency-conversion";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
-import { defaultHoldingForInvestmentAccount } from "@/lib/investment-account";
+import {
+  InvestmentHoldingRequiredError,
+  isInvestmentAccount,
+} from "@/lib/investment-account";
+import type { TransactionSource } from "@/lib/tx-source";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -148,8 +152,46 @@ export type CreateTransferOpts = {
   destHoldingName?: string;
   quantity?: number;
   destQuantity?: number;
+  /**
+   * Explicit FK ids for cash legs into investment accounts (issue #22).
+   * Distinct from the in-kind `holdingName` path: these pin a leg's
+   * `portfolio_holding_id` directly without touching `quantity`, so the
+   * portfolio aggregator's cash-sleeve branch (currency-as-symbol) keeps
+   * tracking dollars via `transactions.amount`. Use this when sending cash
+   * to or from an investment account without recording a share move — the
+   * UI binds it to the per-account Cash holding via the "Cash (auto)"
+   * picker option. Ignored on a leg that already resolved an in-kind
+   * holding via `holdingName`. Validates: the supplied id must reference a
+   * holding row owned by `userId` and scoped to that leg's account; an
+   * `account-not-found` style failure otherwise.
+   */
+  fromHoldingId?: number;
+  toHoldingId?: number;
   note?: string;
   tags?: string;
+  /**
+   * When set, the connector / orchestrator name (e.g. "wealthposition") is
+   * prepended to both legs' `tags` as `source:<connector>`. Lets future
+   * statement reconciliations dedup against rows the bank side has already
+   * imported. No-op when undefined; merged with caller-supplied tags rather
+   * than replacing them.
+   *
+   * NOTE: this `source` is the connector slug for the tag merge — distinct
+   * from the audit-column `txSource` below (issue #28). The two coexist
+   * because the tag lineage is a connector-specific dedup key while the
+   * audit column is a coarse seven-value enum. Setting `source` here does
+   * NOT auto-derive `txSource`; the route handler sets both.
+   */
+  source?: string;
+  /**
+   * Audit-source attribution (issue #28). Hard-coded by each route handler
+   * at the boundary: 'manual' for UI POST, 'mcp_http' / 'mcp_stdio' for
+   * MCP transports, 'connector' for the WP / future-broker orchestrators.
+   * Both legs of the pair receive the same value — the surface that
+   * initiated the transfer is what matters, not the abstract concept of
+   * "transfer". Defaults to 'manual' when omitted.
+   */
+  txSource?: TransactionSource;
 };
 
 export type UpdateTransferOpts = {
@@ -288,6 +330,24 @@ async function resolveTransferCategoryId(
 function defaultPayee(direction: "out" | "in", otherAccountName: string | null): string {
   const other = otherAccountName ?? "another account";
   return direction === "out" ? `Transfer to ${other}` : `Transfer from ${other}`;
+}
+
+/**
+ * Merge a `source:<connector>` tag into a user-supplied tags string. Idempotent:
+ * if the tag is already present (case-insensitive), the input is returned
+ * unchanged so re-running an import doesn't accumulate duplicates. Empty
+ * `source` is a no-op. Tags are stored comma-separated, matching what
+ * `transactions.tags` already holds.
+ */
+function applySourceTag(tags: string, source: string | undefined): string {
+  if (!source || !source.trim()) return tags;
+  const tag = `source:${source.trim()}`;
+  const existing = tags
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  if (existing.some((t) => t.toLowerCase() === tag.toLowerCase())) return tags;
+  return [tag, ...existing].join(",");
 }
 
 // ─── Create ─────────────────────────────────────────────────────────────────
@@ -490,18 +550,41 @@ export async function createTransferPair(
   const sourcePayee = defaultPayee("out", toAcct.name);
   const destPayee = defaultPayee("in", fromAcct.name);
   const note = opts.note ?? "";
-  const tags = opts.tags ?? "";
+  const tags = applySourceTag(opts.tags ?? "", opts.source);
 
-  // Investment-account constraint: when a leg lands on an is_investment
-  // account and no in-kind holding was resolved (pure-cash transfer),
-  // default to the per-account Cash holding so the leg is attributed.
-  // Non-investment accounts return null and behave as before.
-  const fromHoldingId =
-    holdingResolved?.fromHoldingId ??
-    (await defaultHoldingForInvestmentAccount(userId, fromAcct.id, dek, undefined));
-  const toHoldingId =
-    holdingResolved?.toHoldingId ??
-    (await defaultHoldingForInvestmentAccount(userId, toAcct.id, dek, undefined));
+  // Investment-account constraint (strict — issue #22): when a leg lands on
+  // an is_investment account and no in-kind holding was resolved (pure-cash
+  // transfer), refuse the write rather than silently defaulting to Cash.
+  // Callers that *want* Cash must say so explicitly — either via the
+  // in-kind `holdingName` path (with quantity) or via the explicit
+  // `fromHoldingId` / `toHoldingId` FK pins (cash legs, no quantity).
+  // The dialog defaults to "Cash (auto)" → the per-account Cash holding's
+  // id, so the user keeps the one-click path. Non-investment legs stay
+  // null. InvestmentHoldingRequiredError escapes; route handlers map to 400.
+  if (opts.fromHoldingId != null && !(await holdingBelongsToAccount(userId, opts.fromHoldingId, fromAcct.id))) {
+    return {
+      ok: false,
+      code: "holding-not-found",
+      message: `Source holding #${opts.fromHoldingId} not found in account "${fromAcct.name}".`,
+      side: "source",
+    };
+  }
+  if (opts.toHoldingId != null && !(await holdingBelongsToAccount(userId, opts.toHoldingId, toAcct.id))) {
+    return {
+      ok: false,
+      code: "holding-not-found",
+      message: `Destination holding #${opts.toHoldingId} not found in account "${toAcct.name}".`,
+      side: "destination",
+    };
+  }
+  const fromHoldingId = holdingResolved?.fromHoldingId ?? opts.fromHoldingId ?? null;
+  const toHoldingId = holdingResolved?.toHoldingId ?? opts.toHoldingId ?? null;
+  if (fromHoldingId == null && (await isInvestmentAccount(userId, fromAcct.id))) {
+    throw new InvestmentHoldingRequiredError(fromAcct.id);
+  }
+  if (toHoldingId == null && (await isInvestmentAccount(userId, toAcct.id))) {
+    throw new InvestmentHoldingRequiredError(toAcct.id);
+  }
 
   // Atomic dual-insert. If either INSERT throws we want both rows to roll
   // back — never leave a half-recorded transfer.
@@ -522,6 +605,9 @@ export async function createTransferPair(
         tags,
       });
 
+      // Issue #28: both legs share the writer-surface attribution.
+      const txSource: TransactionSource = opts.txSource ?? "manual";
+
       const [sourceInserted] = await tx
         .insert(schema.transactions)
         .values({
@@ -538,6 +624,7 @@ export async function createTransferPair(
           // quantity stays null on pure-cash legs; only in-kind transfers
           // carry share counts. Cash sleeves track cash amount, not shares.
           quantity: holdingResolved ? -Math.abs(holdingResolved.quantity) : null,
+          source: txSource,
           ...sourceRow,
           linkId,
         })
@@ -559,6 +646,7 @@ export async function createTransferPair(
           // destQuantity may differ from source quantity (stock split,
           // merger, share-class conversion). Null on pure-cash legs.
           quantity: holdingResolved ? Math.abs(holdingResolved.destQuantity) : null,
+          source: txSource,
           ...destRow,
           linkId,
         })
@@ -601,6 +689,32 @@ export async function createTransferPair(
         }
       : {}),
   };
+}
+
+/**
+ * Validate that a portfolio_holdings row exists for this user AND is bound
+ * to `accountId`. Used to verify explicit `fromHoldingId` / `toHoldingId`
+ * pins on a transfer leg before we trust them as the FK. Returns false on
+ * cross-tenant ids, cross-account ids, and unknown ids alike — caller
+ * surfaces `holding-not-found`.
+ */
+async function holdingBelongsToAccount(
+  userId: string,
+  holdingId: number,
+  accountId: number,
+): Promise<boolean> {
+  const row = await db
+    .select({ id: schema.portfolioHoldings.id })
+    .from(schema.portfolioHoldings)
+    .where(
+      and(
+        eq(schema.portfolioHoldings.id, holdingId),
+        eq(schema.portfolioHoldings.userId, userId),
+        eq(schema.portfolioHoldings.accountId, accountId),
+      ),
+    )
+    .get();
+  return row != null;
 }
 
 /**
@@ -1144,6 +1258,9 @@ export async function updateTransferPair(opts: UpdateTransferOpts): Promise<Tran
           enteredCurrency: fromCurrency,
           enteredAmount: -sentAmount,
           enteredFxRate: 1,
+          // Issue #28: bump audit timestamp on every transfer-leg UPDATE.
+          // `source` is preserved (INSERT-only).
+          updatedAt: sql`NOW()`,
           ...sourceHoldingPatch,
           ...sourceUpdate,
         })
@@ -1164,6 +1281,7 @@ export async function updateTransferPair(opts: UpdateTransferOpts): Promise<Tran
           enteredCurrency: fromCurrency,
           enteredAmount: sentAmount,
           enteredFxRate,
+          updatedAt: sql`NOW()`,
           ...destHoldingPatch,
           ...destUpdate,
         })
@@ -1636,18 +1754,40 @@ export async function createTransferPairViaSql(
   const sourcePayee = defaultPayee("out", toAcct.name);
   const destPayee = defaultPayee("in", fromAcct.name);
   const note = opts.note ?? "";
-  const tags = opts.tags ?? "";
+  const tags = applySourceTag(opts.tags ?? "", opts.source);
   const enc = (v: string) => (dek ? encryptField(dek, v) : v);
 
-  // Investment-account constraint — same default-to-Cash logic as the
-  // Drizzle path. Computed before withTx so a Cash-holding INSERT can't
-  // race the transfer pair's atomic block.
-  const fromHoldingId =
-    holdingResolved?.fromHoldingId ??
-    (await defaultHoldingForInvestmentAccount(userId, fromAcct.id, dek, undefined));
-  const toHoldingId =
-    holdingResolved?.toHoldingId ??
-    (await defaultHoldingForInvestmentAccount(userId, toAcct.id, dek, undefined));
+  // Investment-account constraint (strict — issue #22): same refusal as
+  // the Drizzle path. Stdio MCP runs without holding parameters on
+  // record_transfer's cash path, so a transfer into an investment account
+  // either supplies in-kind `holding`+`quantity` or hits the throw and gets
+  // mapped to a friendly tool error by the MCP wrapper. The Drizzle/HTTP
+  // path additionally accepts `fromHoldingId` / `toHoldingId` cash pins,
+  // validated against the leg's account ownership before use.
+  if (opts.fromHoldingId != null && !(await holdingBelongsToAccountViaSql(pool as unknown as SqlPool, userId, opts.fromHoldingId, fromAcct.id))) {
+    return {
+      ok: false,
+      code: "holding-not-found",
+      message: `Source holding #${opts.fromHoldingId} not found in account "${fromAcct.name}".`,
+      side: "source",
+    };
+  }
+  if (opts.toHoldingId != null && !(await holdingBelongsToAccountViaSql(pool as unknown as SqlPool, userId, opts.toHoldingId, toAcct.id))) {
+    return {
+      ok: false,
+      code: "holding-not-found",
+      message: `Destination holding #${opts.toHoldingId} not found in account "${toAcct.name}".`,
+      side: "destination",
+    };
+  }
+  const fromHoldingId = holdingResolved?.fromHoldingId ?? opts.fromHoldingId ?? null;
+  const toHoldingId = holdingResolved?.toHoldingId ?? opts.toHoldingId ?? null;
+  if (fromHoldingId == null && (await isInvestmentAccount(userId, fromAcct.id))) {
+    throw new InvestmentHoldingRequiredError(fromAcct.id);
+  }
+  if (toHoldingId == null && (await isInvestmentAccount(userId, toAcct.id))) {
+    throw new InvestmentHoldingRequiredError(toAcct.id);
+  }
 
   let fromTransactionId = 0;
   let toTransactionId = 0;
@@ -1655,19 +1795,23 @@ export async function createTransferPairViaSql(
     await withTx(pool as unknown as SqlPool, async (client) => {
       const categoryId = await resolveTransferCategoryIdViaSql(client, userId, dek);
 
+      // Issue #28: both legs share the writer-surface attribution.
+      const txSource: TransactionSource = opts.txSource ?? "manual";
       const sourceIns = await client.query<{ id: number }>(
         `INSERT INTO transactions (
             user_id, date, account_id, category_id,
             currency, amount,
             entered_currency, entered_amount, entered_fx_rate,
             payee, note, tags, link_id,
-            portfolio_holding_id, quantity
+            portfolio_holding_id, quantity,
+            source
          ) VALUES (
             $1, $2, $3, $4,
             $5, $6,
             $7, $8, $9,
             $10, $11, $12, $13,
-            $14, $15
+            $14, $15,
+            $16
          ) RETURNING id`,
         [
           userId, date, fromAcct.id, categoryId,
@@ -1676,6 +1820,7 @@ export async function createTransferPairViaSql(
           enc(sourcePayee), enc(note), enc(tags), linkId,
           fromHoldingId,
           holdingResolved ? -Math.abs(holdingResolved.quantity) : null,
+          txSource,
         ],
       );
       fromTransactionId = sourceIns.rows[0].id;
@@ -1686,13 +1831,15 @@ export async function createTransferPairViaSql(
             currency, amount,
             entered_currency, entered_amount, entered_fx_rate,
             payee, note, tags, link_id,
-            portfolio_holding_id, quantity
+            portfolio_holding_id, quantity,
+            source
          ) VALUES (
             $1, $2, $3, $4,
             $5, $6,
             $7, $8, $9,
             $10, $11, $12, $13,
-            $14, $15
+            $14, $15,
+            $16
          ) RETURNING id`,
         [
           userId, date, toAcct.id, categoryId,
@@ -1702,6 +1849,7 @@ export async function createTransferPairViaSql(
           toHoldingId,
           // destQuantity may differ from source quantity (split / merger).
           holdingResolved ? Math.abs(holdingResolved.destQuantity) : null,
+          txSource,
         ],
       );
       toTransactionId = destIns.rows[0].id;
@@ -1740,6 +1888,26 @@ export async function createTransferPairViaSql(
         }
       : {}),
   };
+}
+
+/**
+ * Raw-SQL mirror of {@link holdingBelongsToAccount} for the stdio path.
+ */
+async function holdingBelongsToAccountViaSql(
+  pool: SqlPool,
+  userId: string,
+  holdingId: number,
+  accountId: number,
+): Promise<boolean> {
+  const r = await withClient(pool, (c) =>
+    c.query<{ id: number }>(
+      `SELECT id FROM portfolio_holdings
+        WHERE id = $1 AND user_id = $2 AND account_id = $3
+        LIMIT 1`,
+      [holdingId, userId, accountId],
+    ),
+  );
+  return r.rows.length > 0;
 }
 
 /**
@@ -1924,11 +2092,14 @@ export async function updateTransferPairViaSql(
 
   try {
     await withTx(pool as unknown as SqlPool, async (client) => {
+      // Issue #28: every UPDATE bumps updated_at. `source` stays untouched
+      // (INSERT-only). Both legs of the transfer pair get the same bump.
       await client.query(
         `UPDATE transactions
             SET date = $1, account_id = $2, currency = $3, amount = $4,
                 entered_currency = $5, entered_amount = $6, entered_fx_rate = $7,
-                payee = $8, note = $9, tags = $10
+                payee = $8, note = $9, tags = $10,
+                updated_at = NOW()
           WHERE id = $11 AND user_id = $12`,
         [
           date, fromAcct.id, fromCurrency, -sentAmount,
@@ -1941,7 +2112,8 @@ export async function updateTransferPairViaSql(
         `UPDATE transactions
             SET date = $1, account_id = $2, currency = $3, amount = $4,
                 entered_currency = $5, entered_amount = $6, entered_fx_rate = $7,
-                payee = $8, note = $9, tags = $10
+                payee = $8, note = $9, tags = $10,
+                updated_at = NOW()
           WHERE id = $11 AND user_id = $12`,
         [
           date, toAcct.id, toCurrency, receivedAmount,

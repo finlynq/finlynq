@@ -1,12 +1,15 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Download, Database, Server, Shield, Wallet, Tag, ArrowLeftRight, Briefcase, Trash2, Pencil, Plus, AlertTriangle, Settings2, Check, X, Zap, ToggleLeft, ToggleRight, Play, Lock, Eye, EyeOff, FolderOpen, HardDrive, Cloud, RefreshCw, BarChart3, Upload, FileText, Key } from "lucide-react";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { SUPPORTED_FIAT_CURRENCIES, currencyLabel } from "@/lib/fx/supported-currencies";
@@ -56,6 +59,7 @@ export default function SettingsPage() {
 
   // Category management
   const [categories, setCategories] = useState<Category[]>([]);
+  const sortCategory = useDropdownOrder("category");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
   const [catError, setCatError] = useState("");
@@ -1282,15 +1286,19 @@ export default function SettingsPage() {
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <Label>Assign Category</Label>
-                  <Select value={ruleForm.assignCategoryId} onValueChange={(v) => setRuleForm({ ...ruleForm, assignCategoryId: v ?? "" })}>
-                    <SelectTrigger><SelectValue placeholder="Select..." /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="">None</SelectItem>
-                      {categories.map((c) => (
-                        <SelectItem key={c.id} value={c.id.toString()}>{c.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox
+                    value={ruleForm.assignCategoryId}
+                    onValueChange={(v) => setRuleForm({ ...ruleForm, assignCategoryId: v })}
+                    items={sortCategory(
+                      categories.map((c): ComboboxItemShape => ({ value: c.id.toString(), label: c.name })),
+                      (c) => Number(c.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="None"
+                    searchPlaceholder="Search categories…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
                 <div>
                   <Label>Assign Tags</Label>
@@ -1486,6 +1494,46 @@ export default function SettingsPage() {
             </pre>
           </div>
         </CardContent>
+      </Card>
+
+      {/* Dropdown Ordering — sub-page (issue #26) */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-600">
+                <Settings2 className="h-5 w-5" />
+              </div>
+              <div>
+                <CardTitle className="text-base">Dropdown Ordering</CardTitle>
+                <CardDescription>Pin frequently-used items to the top of category, account, holding, and currency pickers</CardDescription>
+              </div>
+            </div>
+            <Link href="/settings/dropdown-order">
+              <Button variant="outline" size="sm">Open</Button>
+            </Link>
+          </div>
+        </CardHeader>
+      </Card>
+
+      {/* Holding ↔ Account map — sub-page (issue #26) */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600">
+                <Briefcase className="h-5 w-5" />
+              </div>
+              <div>
+                <CardTitle className="text-base">Holding ↔ Account Map</CardTitle>
+                <CardDescription>Track the same security across multiple accounts with per-pairing qty + cost basis</CardDescription>
+              </div>
+            </div>
+            <Link href="/settings/holding-accounts">
+              <Button variant="outline" size="sm">Open</Button>
+            </Link>
+          </div>
+        </CardHeader>
       </Card>
 
       {/* About */}

@@ -15,7 +15,7 @@ Self-hosters using stdio MCP must add `PF_USER_ID` to their Claude Desktop confi
 
 ## Tool surface — current count
 
-**81 tools registered on HTTP / 75 on stdio** as of 2026-04-28.
+**82 tools registered on HTTP / 78 on stdio** as of 2026-04-30.
 
 The 6 HTTP-only tools are:
 - File-upload flow: `list_pending_uploads`, `preview_import`, `execute_import`, `cancel_import`
@@ -43,10 +43,65 @@ The 6 HTTP-only tools are:
   - Atomic transfer-pair CRUD that creates BOTH legs (debit + credit) under a server-generated UUID `link_id` in a single DB transaction
   - Supports cash transfers, cross-currency (with `receivedAmount` override), in-kind / share transfers (`holding` + `quantity`), and asymmetric in-kind events for splits/mergers/share-class conversions (`destQuantity` ≠ `quantity`)
   - Auto-creates a Transfer category (type='R') on first use; same-account in-kind rebalances allowed
+- **2026-04-30 — `dryRun` previews + auto-source tag on imports ([#33](https://github.com/finlynq/finlynq/issues/33))** (no tool count change): `record_transaction` and `bulk_record_transactions` (HTTP + stdio) accept `dryRun: z.boolean().optional()`. When set, the full validation/resolution pipeline runs (account fuzzy-match, FX rate, holding binding, investment-account constraint, category auto-detect) but the `INSERT` is skipped and `invalidateUserTxCache` is NOT called. Response shape mirrors success: `dryRun: true`, `wouldBeId: null`, `resolvedAccount`/`resolvedCategory`/`resolvedHolding`. `bulk_record_transactions` propagates the flag to every per-row result and uses `previewed` instead of `imported` at the top level. Use this to sanity-check routing before committing — especially when fuzzy account matches might surprise you. The companion auto-source-tag work tags imported rows (`source:wealthposition`) so future statement reconciliations can dedup against rows the bank side has already booked — see [import-connectors.md](../import-connectors.md) §"Source tag" for the connector-side details.
+- **2026-04-30 — Investment-account-aware auto-categorization ([#32](https://github.com/finlynq/finlynq/issues/32))** (no tool count change): `record_transaction` / `bulk_record_transactions` writes to an `is_investment=true` account with no `category` no longer pick expense categories. The MCP `autoCategory` helper takes an `isInvestmentAccount` flag; in that mode, expense (`type='E'`) candidates are filtered out of both rule and history candidate pools, a payee-keyword pass routes `dividend` → `Dividends`, `interest` → `Credit Interest`, `forex` / `\bfx\b` / `currency` → `Currency Revaluation` / `Transfers`, and `disbursement` / `withdrawal` → `Transfers` (first-name-found wins among the user's existing categories), and the final fallback prefers `Transfers` / `Investment Activity` over null. Pure routing helpers `pickInvestmentCategoryByPayee` + `fallbackInvestmentCategory` live in [src/lib/auto-categorize.ts](../../src/lib/auto-categorize.ts) so the logic is unit-tested. Stdio MCP unchanged — investment-account writes are already refused there.
+- **2026-04-30 — `record_trade` brokerage primitive added ([#34](https://github.com/finlynq/finlynq/issues/34))** (81 → 82 HTTP, 77 → 78 stdio; the prior CLAUDE.md figure of 75 stdio was 2 short of the actual surface):
+  - `record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?, date?, note?)` — wraps `record_transfer`'s same-account in-kind path so a buy/sell produces a paired (cash sleeve ↔ symbol holding) transfer atomically. `BUY` source = cash sleeve, destination = symbol (auto-created if missing). `SELL` mirrors — symbol must exist, cash sleeve auto-created if missing.
+  - Refuses non-investment accounts. The cash sleeve is found-or-created per-currency: same currency as the account → reuses the default `Cash` (symbol IS NULL) sleeve via the existing isCurrencyCodeSymbol pattern; foreign currency → mints `${currency} Cash` with `symbol = currency` so the portfolio aggregator routes it through the cash branch.
+  - Cross-currency trades require explicit `fxRate` (trade currency → account currency). The cost-basis amount is locked at `quantity × price × fxRate` in account currency; the source/destination quantities stay in their native units (cash dollars for the sleeve, shares for the symbol).
+  - Optional `fees` post as a separate negative-amount transaction on the cash sleeve, tagged `source:record_trade,trade-link:<linkId>` for traceability — NOT part of the transfer pair.
+  - Stdio gets the same tool — stdio's record_transaction refuses investment-account writes (no portfolioHolding plumbing), but `record_trade` carries its own holding semantics so the constraint is satisfiable on stdio too. Stdio writes stay plaintext per the existing carve-out.
+  - See "Modeling brokerage statements with MCP" below for the recipe + the three statement-shape gotchas.
+- **2026-04-30 — `account_id` on transaction read/write tools, low-confidence fuzzy rejected ([#29](https://github.com/finlynq/finlynq/pull/29))** (no tool count change):
+  - `search_transactions` gains `account_id?: number` (HTTP + stdio) — FK fast-path mirroring the existing `portfolio_holding_id` filter, intended for dedup workflows against blank-payee bank-imported transfers where text search misses. Bump `limit` accordingly when this is the only filter.
+  - `record_transaction` and `bulk_record_transactions` gain `account_id?: number` (HTTP + stdio). On bulk it lives at both the top level (applies to every row that omits its own) and per row (wins over both name and the top-level fallback). When set, the resolver skips fuzzy matching entirely; the `account` (name) parameter is now optional but at least one of the two must be present.
+  - **New `resolveAccountStrict` helper** ([register-tools-pg.ts](../../mcp-server/register-tools-pg.ts) + [register-core-tools.ts](../../mcp-server/register-core-tools.ts)) used on the name path. Same exact/alias/startsWith waterfall as `fuzzyFind`, but substring/reverse-substring hits are only accepted when input and candidate share a whitespace-separated token of length ≥3. Otherwise the row fails with a "did you mean … (id=N)?" error pointing to what `fuzzyFind` would have picked. Reads still use plain `fuzzyFind` — wrong filters are recoverable, wrong writes aren't.
+  - **`resolvedAccount: { id, name }` returned in every per-row write response** so the agent can verify routing immediately. On `record_transaction` it's at the top level; on `bulk_record_transactions` it's per result entry — including per-row failures, once the account resolved (so the agent knows which account a row was *about to* write to).
+  - Stdio carve-out unchanged — investment-account writes are still refused on stdio (no `portfolioHolding` plumbing); `account_id` resolution runs first and the constraint check fires after.
 - **2026-04-28 — Holding-id ergonomics on portfolio reads + writes** (no tool count change; commits [`ca0a117`](https://github.com/finlynq/finlynq/commit/ca0a117) + [`f429c6f`](https://github.com/finlynq/finlynq/commit/f429c6f)):
   - `get_portfolio_analysis` now returns `id` per holding; `analyze_holding` returns `holdingId`. Both transports. Source: the FK already plumbed through `aggregateHoldings()` `accumulate()` ("first non-null id wins"); the response mappers were dropping it on the floor — write-tool descriptions told the agent to "Get the id from get_portfolio_analysis" but the read tool didn't expose it (root cause of the user-reported "MCP records the sale but the holding never moves" — agent had no way to populate `portfolioHoldingId`).
   - `record_transaction` / `bulk_record_transactions` / `update_transaction` now accept **`portfolioHolding`** (name OR ticker symbol) alongside `portfolioHoldingId`. Resolved via the lookup-only helper `resolvePortfolioHoldingByName` — exact case-insensitive match against `name` / `name_lookup` / `symbol` / `symbol_lookup`, scoped to the resolved account, no auto-create. Errors with a "Name (TICKER)" candidate list on miss; errors when both `portfolioHolding` and `portfolioHoldingId` are passed and disagree (silent "I named X but you bound Y" is worse than rejecting). Mirrors the HMAC dual-cohort handling in `portfolio-holding-resolver.ts` but single-shot — no map pre-build. **HTTP only** — stdio MCP write tools still don't bind to portfolio_holdings (pre-existing carve-out per [Self-hosted limitation](#self-hosted-limitation--stdio-writes-are-plaintext)).
   - `analyze_holding(symbol)` now actually filters by the holding's `symbol` column (HTTP JOINs `ph.symbol_ct` + decrypts; stdio LEFT JOINs `portfolio_holdings` and adds `LOWER(ph.symbol) = LOWER(?)` to the WHERE). Description always claimed "fuzzy match on name OR symbol" — until this commit it only matched name (via `portfolio_holding` text) + payee. Symbol uses **exact** equality, not substring — tickers are short and prone to spurious hits like "GE" matching "ORANGE". Name + payee retain substring matching for long-string ergonomics.
+
+## Modeling brokerage statements with MCP
+
+Brokerage statements have a handful of row shapes that consistently confuse agents reading the tool surface. This section is the canonical recipe — when an agent is importing a statement and is unsure how to model a row, the answer should come from here, not from improvised `record_transaction` calls that lose the holding link.
+
+**Default to `record_trade` for buys and sells.** Modeling a trade by hand with `record_transfer` requires assembling `fromAccount = toAccount`, explicit `holding` + `destHolding`, `quantity` + `destQuantity`, `enteredAmount = cashAmount`, optional `receivedAmount` for FX. This is non-obvious and agents tend to fall back to `record_transaction`, which loses the holding-pair link and atomic two-leg semantics. `record_trade` is the high-level wrapper:
+
+```
+record_trade(account="Questrade USD", side="buy", symbol="AAPL", quantity=10, price=150)
+record_trade(account="Questrade USD", side="sell", symbol="AAPL", quantity=5, price=160, fees=4.95)
+record_trade(account="Questrade CAD", side="buy", symbol="AAPL", quantity=10, price=150, currency="USD", fxRate=1.37)
+```
+
+For trades that don't fit the cash-sleeve ↔ symbol-holding shape (in-kind ACATS between brokerages, share-class conversions, rebalances between two existing positions in one account), drop down to `record_transfer` directly — see the `holding` / `destHolding` / `quantity` / `destQuantity` parameters and the in-kind examples in the tool description.
+
+### The three statement gotchas
+
+**(a) Forex trades that look like cross-account transfers but are actually same-account currency conversions.** A statement entry "USD/CAD 1370.00 → 1000.00" inside a single brokerage account is a Norbert's Gambit / FX conversion between the account's CAD cash sleeve and its USD cash sleeve. It is NOT two separate accounts. Model it as an in-kind same-account transfer between the two cash sleeves with `record_transfer`:
+
+```
+record_transfer(
+  fromAccount="Questrade", toAccount="Questrade",
+  amount=1370,                    # CAD leaving
+  receivedAmount=1000,            # USD landing — locks fxRate=1000/1370
+  holding="CAD Cash", destHolding="USD Cash",
+  quantity=1370, destQuantity=1000,
+)
+```
+
+If the user has a single account with both CAD and USD cash sleeves, this is one statement row → one transfer pair. `record_trade` does NOT handle pure forex (no symbol holding involved); use `record_transfer` directly. Agents that try to model this as `record_transaction(amount=-1370)` + a separate `record_transaction(amount=+1000)` end up with two unlinked rows the user has to reconcile by hand.
+
+**(b) Wire-out events that look like expenses but are cross-account transfers to a bank.** A "WIRE OUT - $5000.00" line on a brokerage statement is the brokerage debiting the user's cash sleeve and sending the funds to an external bank account the user already tracks in Finlynq. Model it as `record_transfer(fromAccount=brokerage, toAccount=bank, amount=5000, holding="Cash", quantity=5000)`. The transfer's auto-created `Transfer` category keeps it out of the user's expense reports; modeling it as `record_transaction(amount=-5000, category="Bank Fees")` would inflate spending and skip the offsetting deposit on the bank side.
+
+**(c) Cancellation / re-issue triplets that net to one entry.** Brokerages often book a trade as three rows: the original execution, a same-day cancellation (equal-and-opposite), and a corrected execution at a different price. Net effect = the corrected execution alone. **Skip the canceled and re-issued legs entirely** — book ONE `record_trade` for the final corrected price/quantity. Importing all three rows into the database yields three transactions whose share counts sum correctly but whose cost-basis history is misleading: the average-cost aggregator sees three buys instead of one.
+
+The canceling row is identifiable by an exactly-opposite quantity AND amount on the same date with the same symbol; the re-issued row carries the corrected numbers. The import-pipeline's dedup engine (SHA-256 hash + bank `fitId`) handles this when the connector tags it correctly, but ad-hoc imports via MCP need the agent to apply the rule explicitly.
+
+### Why not just expose `record_transaction(quantity=…)` for trades?
+
+`record_transaction` writes a single row. A buy or sell is two ledger entries (cash side + holding side) that must move together — the holding's share count (`quantity`) AND the cash sleeve's balance (`amount`) both change. Splitting them into two `record_transaction` calls leaves them unlinked: no shared `link_id`, the unified-edit view in the UI can't fold them back into one operation, and the four-check transfer-pair rule fails. `record_trade` (and `record_transfer` underneath it) writes both rows in a single DB transaction with a server-generated UUID `link_id`, mirroring how the web UI's `/api/transactions/transfer` POST handler works.
 
 ## Confirmation-token preview/execute pattern
 
@@ -101,6 +156,14 @@ The integer FK `transactions.portfolio_holding_id` is the canonical link between
 3. **Both passed** — they must agree. If they resolve to different ids the call errors rather than silently picking; the alternative ("I named X but you bound Y") is a worse failure mode than a clear rejection.
 
 Available on `record_transaction` / `bulk_record_transactions` / `update_transaction` — HTTP only. Stdio MCP write tools still don't bind portfolio holdings per the [stdio carve-out](#self-hosted-limitation--stdio-writes-are-plaintext).
+
+### Write-time warnings ([#31](https://github.com/finlynq/finlynq/issues/31))
+
+`record_transaction` / `bulk_record_transactions` / `update_transaction` (HTTP) include a `warnings: string[]` field on success when a row binds a `portfolioHoldingId` and moves cash (`amount != 0`) but omits `quantity`. The transaction is still written; the warning is advisory — without `quantity`, the holding's unit count doesn't move and the portfolio aggregator drifts from the cash ledger.
+
+- Single check today: `portfolioHoldingId != null && amount != 0 && quantity == null` → `"quantity not set — holding unit count was not updated"`. Centralized in [`deriveTxWriteWarnings`](../../src/lib/queries.ts) so future advisory checks land in one place.
+- `record_transaction` puts `warnings` at the top level of the success response. `bulk_record_transactions` attaches `warnings` to per-row results only when non-empty (keeps the common case unchanged for callers that don't read it). `update_transaction` warns only when the user *explicitly bound a holding on this update* without also passing `quantity` — touching unrelated fields (e.g. date) on a previously-bound row doesn't fire.
+- Stdio MCP doesn't expose `portfolioHoldingId`/`quantity` on write tools and refuses investment-account writes outright, so the warning condition can't trigger there.
 
 ### Reading the id back
 

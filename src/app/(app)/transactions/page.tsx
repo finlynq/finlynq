@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
@@ -19,6 +21,7 @@ import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, Che
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./_components/split-dialog";
 import { formatAccountLabel } from "@/lib/account-label";
+import { type TransactionSource, labelForSource } from "@/lib/tx-source";
 
 type Transaction = {
   id: number;
@@ -40,11 +43,21 @@ type Transaction = {
   enteredFxRate?: number | null;
   quantity: number | null;
   portfolioHolding: string | null;
+  // Ticker for the transaction's holding (e.g. "VGRO.TO"). Surfaced so the
+  // optional Ticker column doesn't need a separate fetch per row.
+  portfolioHoldingSymbol?: string | null;
   note: string;
   payee: string;
   tags: string;
   isBusiness: number | null;
   linkId: string | null;
+  // Audit-trio (issue #28). Surfaced as a footer line in the edit dialog so
+  // users can see when a row was created/last edited and which writer
+  // surface authored it. Server-side fields are non-null (NOT NULL DEFAULTs)
+  // but typed optional here for tolerance against any stale client state.
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  source?: TransactionSource | null;
 };
 
 type LinkedSibling = {
@@ -70,10 +83,27 @@ type LinkedSibling = {
   tags: string | null;
 };
 
-type Account = { id: number; name: string; currency: string; alias?: string | null; type?: string | null };
+type Account = {
+  id: number;
+  name: string;
+  currency: string;
+  alias?: string | null;
+  type?: string | null;
+  // Surfaced from /api/accounts so the Transfer dialog can hide the in-kind
+  // / portfolio block when neither the source nor destination is an
+  // investment account (Section E #10). Always present on the wire because
+  // getAccounts uses select()-all on the row.
+  isInvestment?: boolean;
+};
 type Category = { id: number; name: string; type: string; group: string };
 type Holding = {
   id: number;
+  // accountId is the source-of-truth account linkage on portfolio_holdings.
+  // Used to filter the picker in Add Transaction so the user only sees
+  // holdings that belong to the selected account. Future M2M migration
+  // (Section F/G #15) will swap this for `accounts: number[]`; the dialog
+  // filter is the only line that changes.
+  accountId: number | null;
   name: string;
   symbol: string | null;
   accountName: string | null;
@@ -156,6 +186,9 @@ function TransactionsPageInner() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [holdings, setHoldings] = useState<Holding[]>([]);
+  const sortAccount = useDropdownOrder("account");
+  const sortCategory = useDropdownOrder("category");
+  const sortHolding = useDropdownOrder("holding");
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchInput, setSearchInput] = useState("");
@@ -173,25 +206,217 @@ function TransactionsPageInner() {
   });
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Optional table columns persisted in localStorage. Keep this off by default
-  // so users without investment activity don't see a column of dashes. Bumping
-  // the storage key (-vN) is the migration story when the shape grows.
-  type TxColPrefs = { portfolio: boolean };
-  const COL_PREFS_KEY = "pf-tx-cols-v1";
-  const defaultColPrefs: TxColPrefs = { portfolio: false };
-  const [colPrefs, setColPrefs] = useState<TxColPrefs>(defaultColPrefs);
+  // Per-user table column layout (visibility + order) persisted via
+  // /api/settings/tx-columns. Mirrors display-currency's pattern — last-
+  // writer-wins is acceptable for column prefs. Migrates the legacy
+  // localStorage["pf-tx-cols-v1"] blob on first load (then clears it) so
+  // existing users keep their Portfolio toggle.
+  type ColumnId =
+    | "select"
+    | "date"
+    | "account"
+    | "accountType"
+    | "accountName"
+    | "accountAlias"
+    | "category"
+    | "payee"
+    | "portfolio"
+    | "portfolioTicker"
+    | "note"
+    | "tags"
+    | "quantity"
+    | "amount"
+    | "actions";
+  type ColumnPref = { id: ColumnId; visible: boolean };
+  const ALL_COLUMNS: ColumnId[] = [
+    "select",
+    "date",
+    "account",
+    "accountType",
+    "accountName",
+    "accountAlias",
+    "category",
+    "payee",
+    "portfolio",
+    "portfolioTicker",
+    "note",
+    "tags",
+    "quantity",
+    "amount",
+    "actions",
+  ];
+  const COLUMN_LABELS: Record<ColumnId, string> = {
+    select: "Select",
+    date: "Date",
+    account: "Account",
+    accountType: "Account type",
+    accountName: "Account name",
+    accountAlias: "Account alias",
+    category: "Category",
+    payee: "Payee",
+    portfolio: "Portfolio",
+    portfolioTicker: "Ticker",
+    note: "Note",
+    tags: "Tags",
+    quantity: "Qty",
+    amount: "Amount",
+    actions: "Actions",
+  };
+  // select + actions are render scaffolding (checkbox column + the per-row
+  // edit/split/delete icon group). Hiding them would break bulk selection
+  // and inline editing — keep them locked on.
+  const TOGGLEABLE_COLUMNS: Set<ColumnId> = new Set([
+    "date",
+    "account",
+    "accountType",
+    "accountName",
+    "accountAlias",
+    "category",
+    "payee",
+    "portfolio",
+    "portfolioTicker",
+    "note",
+    "tags",
+    "quantity",
+    "amount",
+  ]);
+  const DEFAULT_COL_PREFS: ColumnPref[] = [
+    { id: "select", visible: true },
+    { id: "date", visible: true },
+    { id: "account", visible: true },
+    { id: "accountType", visible: false },
+    { id: "accountName", visible: false },
+    { id: "accountAlias", visible: false },
+    { id: "category", visible: true },
+    { id: "payee", visible: true },
+    { id: "portfolio", visible: false },
+    { id: "portfolioTicker", visible: false },
+    { id: "note", visible: true },
+    { id: "tags", visible: false },
+    { id: "quantity", visible: true },
+    { id: "amount", visible: true },
+    { id: "actions", visible: true },
+  ];
+  function mergeColPrefs(saved: ColumnPref[] | null | undefined): ColumnPref[] {
+    if (!saved || saved.length === 0) return DEFAULT_COL_PREFS;
+    const seen = new Set<ColumnId>();
+    const out: ColumnPref[] = [];
+    for (const entry of saved) {
+      if (!ALL_COLUMNS.includes(entry.id)) continue;
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      out.push({ id: entry.id, visible: !!entry.visible });
+    }
+    for (const def of DEFAULT_COL_PREFS) {
+      if (seen.has(def.id)) continue;
+      out.push(def);
+    }
+    return out;
+  }
+  const [columnPrefs, setColumnPrefs] = useState<ColumnPref[]>(DEFAULT_COL_PREFS);
+  const colPrefsLoaded = useRef(false);
+  const colPrefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(COL_PREFS_KEY);
-      if (raw) setColPrefs({ ...defaultColPrefs, ...JSON.parse(raw) });
-    } catch { /* ignore */ }
-    // defaultColPrefs is a stable literal in this scope; we want this hook to
-    // run once on mount, mirroring the read-once-on-load contract.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let cancelled = false;
+    (async () => {
+      // Read the legacy localStorage blob only when the server endpoint has
+      // never been written for this user — otherwise the server-side layout
+      // wins (cross-device sync). The legacy blob is cleared after one
+      // successful migration.
+      let legacy: ColumnPref[] | null = null;
+      try {
+        const raw = localStorage.getItem("pf-tx-cols-v1");
+        if (raw) {
+          const parsed = JSON.parse(raw) as { portfolio?: boolean };
+          if (parsed && typeof parsed === "object") {
+            legacy = DEFAULT_COL_PREFS.map((c) =>
+              c.id === "portfolio"
+                ? { ...c, visible: !!parsed.portfolio }
+                : c,
+            );
+          }
+        }
+      } catch { /* ignore */ }
+      try {
+        const r = await fetch("/api/settings/tx-columns");
+        if (cancelled) return;
+        if (r.ok) {
+          const d = (await r.json()) as { columns?: ColumnPref[] };
+          const serverPrefs = mergeColPrefs(d?.columns ?? null);
+          // If the server has the canonical defaults AND we have a legacy
+          // blob, push the legacy preferences up so the migration sticks.
+          const isServerDefault =
+            !d?.columns || d.columns.length === 0;
+          if (legacy && isServerDefault) {
+            setColumnPrefs(legacy);
+            try {
+              await fetch("/api/settings/tx-columns", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ columns: legacy }),
+              });
+              localStorage.removeItem("pf-tx-cols-v1");
+            } catch { /* best-effort */ }
+          } else {
+            setColumnPrefs(serverPrefs);
+            try { localStorage.removeItem("pf-tx-cols-v1"); } catch { /* ignore */ }
+          }
+        } else if (legacy) {
+          setColumnPrefs(legacy);
+        }
+      } catch {
+        if (legacy) setColumnPrefs(legacy);
+      } finally {
+        if (!cancelled) colPrefsLoaded.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
   useEffect(() => {
-    try { localStorage.setItem(COL_PREFS_KEY, JSON.stringify(colPrefs)); } catch { /* ignore */ }
-  }, [colPrefs]);
+    if (!colPrefsLoaded.current) return;
+    if (colPrefsSaveTimer.current) clearTimeout(colPrefsSaveTimer.current);
+    colPrefsSaveTimer.current = setTimeout(() => {
+      fetch("/api/settings/tx-columns", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ columns: columnPrefs }),
+      }).catch(() => { /* swallow — next save retries */ });
+    }, 400);
+    return () => {
+      if (colPrefsSaveTimer.current) clearTimeout(colPrefsSaveTimer.current);
+    };
+  }, [columnPrefs]);
+  const isColVisible = (id: ColumnId): boolean => {
+    const e = columnPrefs.find((c) => c.id === id);
+    return e ? e.visible : true;
+  };
+  const toggleCol = (id: ColumnId, value: boolean) => {
+    setColumnPrefs((prev) => prev.map((c) => (c.id === id ? { ...c, visible: value } : c)));
+  };
+  const resetColPrefs = () => setColumnPrefs(DEFAULT_COL_PREFS);
+  // Native HTML5 drag state — id of the column currently being dragged. The
+  // ondragover handler reorders in place, so we only need to track the source.
+  const [draggingCol, setDraggingCol] = useState<ColumnId | null>(null);
+  const onColDragStart = (id: ColumnId) => (e: React.DragEvent<HTMLTableCellElement>) => {
+    setDraggingCol(id);
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", id); } catch { /* ignore */ }
+  };
+  const onColDragOver = (id: ColumnId) => (e: React.DragEvent<HTMLTableCellElement>) => {
+    if (!draggingCol || draggingCol === id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setColumnPrefs((prev) => {
+      const fromIdx = prev.findIndex((c) => c.id === draggingCol);
+      const toIdx = prev.findIndex((c) => c.id === id);
+      if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return prev;
+      const next = prev.slice();
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      return next;
+    });
+  };
+  const onColDragEnd = () => setDraggingCol(null);
 
   // Add/edit dialog
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -254,6 +479,12 @@ function TransactionsPageInner() {
     // splits / mergers / share-class conversions: source 100 of A may
     // arrive as 60 of B.
     destQuantity: "",
+    // Cash-leg holding pins for investment-account transfers (issue #22).
+    // Stored as the FK id (number-string from the picker). Sent as
+    // `fromHoldingId` / `toHoldingId` on POST when the corresponding
+    // account is is_investment AND inKind=false. Empty string = unset.
+    fromHoldingId: "",
+    toHoldingId: "",
     note: "",
     tags: "",
   });
@@ -482,6 +713,33 @@ function TransactionsPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dialogOpen, dialogMode, transferForm.fromAccountId, transferForm.toAccountId, transferForm.amount, transferForm.date, accounts]);
 
+  // Reset in-kind transfer state when the user changes accounts so neither
+  // side is an investment account (Section E #10 — the violet panel is
+  // hidden in that case). Without this, a stale `inKind: true` + holding
+  // name would silently roundtrip on submit. Only fires on the actual
+  // transition `true -> false` so a brief account swap that returns to
+  // investment doesn't lose in-flight values.
+  const prevEitherIsInvestmentRef = useRef<boolean>(false);
+  useEffect(() => {
+    const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
+    const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
+    const eitherIsInvestment =
+      fromAcct?.isInvestment === true || toAcct?.isInvestment === true;
+    if (prevEitherIsInvestmentRef.current && !eitherIsInvestment) {
+      setTransferForm((tf) => ({
+        ...tf,
+        inKind: false,
+        holdingName: "",
+        destHoldingName: "",
+        quantity: "",
+        destQuantity: "",
+      }));
+      setDestHoldingTouched(false);
+      setDestQuantityTouched(false);
+    }
+    prevEitherIsInvestmentRef.current = eitherIsInvestment;
+  }, [transferForm.fromAccountId, transferForm.toAccountId, accounts]);
+
   function handleSearchChange(value: string) {
     setSearchInput(value);
     if (searchTimer.current) clearTimeout(searchTimer.current);
@@ -513,6 +771,8 @@ function TransactionsPageInner() {
       destHoldingName: "",
       quantity: "",
       destQuantity: "",
+      fromHoldingId: "",
+      toHoldingId: "",
       note: "",
       tags: "",
     });
@@ -545,6 +805,18 @@ function TransactionsPageInner() {
     if (!form.amount || Number.isNaN(parseFloat(form.amount))) {
       setSubmitError({ message: "Enter an amount" });
       return;
+    }
+    // Investment-account constraint (issue #22): block submit before the
+    // server 400s — every transaction in an is_investment=true account
+    // must reference a portfolio holding. The dialog renders a required
+    // picker above Advanced when the selected account is investment;
+    // this guard catches the case where the user blanked it manually.
+    {
+      const sel = accounts.find((a) => String(a.id) === form.accountId);
+      if (sel?.isInvestment === true && !form.portfolioHoldingId) {
+        setSubmitError({ message: `Pick a portfolio holding — ${sel.name} is an investment account.` });
+        return;
+      }
     }
 
     // Phase 2 currency rework — send the entered side. Server triangulates
@@ -671,6 +943,30 @@ function TransactionsPageInner() {
     const toAcct = accounts.find((a) => a.id === toAccountId);
     const isCrossCcy = !!fromAcct && !!toAcct && fromAcct.currency !== toAcct.currency;
 
+    // Investment-account constraint for cash transfers (issue #22).
+    // The dialog renders required pickers above; this is the matching
+    // server-side guard that blocks submission when the user blanks them
+    // out manually. In-kind path supplies the holding via name+quantity
+    // and bypasses this check.
+    let fromHoldingPin: number | undefined;
+    let toHoldingPin: number | undefined;
+    if (!isInKind && !transferEdit) {
+      if (fromAcct?.isInvestment === true) {
+        if (!transferForm.fromHoldingId) {
+          setSubmitError({ message: `Pick a source holding — ${fromAcct.name} is an investment account.` });
+          return;
+        }
+        fromHoldingPin = Number(transferForm.fromHoldingId);
+      }
+      if (toAcct?.isInvestment === true) {
+        if (!transferForm.toHoldingId) {
+          setSubmitError({ message: `Pick a destination holding — ${toAcct.name} is an investment account.` });
+          return;
+        }
+        toHoldingPin = Number(transferForm.toHoldingId);
+      }
+    }
+
     let receivedAmount: number | undefined;
     if (isCrossCcy && transferForm.receivedAmount) {
       const parsed = parseFloat(transferForm.receivedAmount);
@@ -683,6 +979,8 @@ function TransactionsPageInner() {
       enteredAmount,
       date: transferForm.date,
       ...(receivedAmount != null ? { receivedAmount } : {}),
+      ...(fromHoldingPin != null ? { fromHoldingId: fromHoldingPin } : {}),
+      ...(toHoldingPin != null ? { toHoldingId: toHoldingPin } : {}),
       ...(transferForm.note ? { note: transferForm.note } : {}),
       ...(transferForm.tags ? { tags: transferForm.tags } : {}),
       ...(transferEdit ? { linkId: transferEdit.linkId } : {}),
@@ -869,6 +1167,10 @@ function TransactionsPageInner() {
               destHoldingName: destHoldingDiffers ? (destLegHolding ?? "") : "",
               quantity: isInKind ? String(sourceLegQty || inKindQty) : "",
               destQuantity: destQtyDiffers ? String(destLegQty) : "",
+              // Cash-leg holding pins are create-only; PUT path doesn't
+              // accept them yet, so leave blank on edit (issue #22).
+              fromHoldingId: "",
+              toHoldingId: "",
               note: t.note || sibling.note || "",
               tags: t.tags || sibling.tags || "",
             });
@@ -1148,46 +1450,54 @@ function TransactionsPageInner() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>Account</Label>
-                  <Select value={form.accountId} onValueChange={(v) => {
-                    const val = v ?? "";
-                    const acct = accounts.find((a) => String(a.id) === val);
-                    setForm({ ...form, accountId: val, currency: acct?.currency ?? "CAD" });
-                  }}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select account">
-                        {(v) => {
-                          const val = v == null ? "" : String(v);
-                          if (!val) return "Select account";
-                          return accounts.find((a) => String(a.id) === val)?.name ?? val;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accounts.map((a) => (
-                        <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox
+                    value={form.accountId}
+                    onValueChange={(v) => {
+                      const acct = accounts.find((a) => String(a.id) === v);
+                      // If the previously-selected holding doesn't belong to
+                      // the new account, clear it. The picker filters by
+                      // accountId below; leaving a stale value would render
+                      // as a fallback "unknown holding" item and trip a 23503
+                      // FK error on submit (the Cash holding for the old
+                      // account is invalid for the new one).
+                      const stillValid = form.portfolioHoldingId
+                        ? holdings.some(
+                            (h) => h.name === form.portfolioHoldingId && String(h.accountId) === v,
+                          )
+                        : true;
+                      setForm({
+                        ...form,
+                        accountId: v,
+                        currency: acct?.currency ?? "CAD",
+                        portfolioHoldingId: stillValid ? form.portfolioHoldingId : "",
+                      });
+                    }}
+                    items={sortAccount(
+                      accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                      (a) => Number(a.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Select account"
+                    searchPlaceholder="Search accounts…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Category</Label>
-                  <Select value={form.categoryId} onValueChange={(v) => setForm({ ...form, categoryId: v ?? "" })}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select category">
-                        {(v) => {
-                          const val = v == null ? "" : String(v);
-                          if (!val) return "Select category";
-                          const c = categories.find((c) => String(c.id) === val);
-                          return c ? `${c.group} - ${c.name}` : val;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {categories.map((c) => (
-                        <SelectItem key={c.id} value={String(c.id)}>{c.group} - {c.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox
+                    value={form.categoryId}
+                    onValueChange={(v) => setForm({ ...form, categoryId: v })}
+                    items={sortCategory(
+                      categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} - ${c.name}` })),
+                      (c) => Number(c.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Select category"
+                    searchPlaceholder="Search categories…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
@@ -1215,6 +1525,60 @@ function TransactionsPageInner() {
                 <Label>Tags (comma-separated)</Label>
                 <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
               </div>
+
+              {/* Investment-account constraint (issue #22): when the
+                  selected account is is_investment=true, the Portfolio
+                  Holding picker is REQUIRED and surfaces above the
+                  Advanced Options collapse so the user can't miss it. The
+                  per-account "Cash (auto)" entry is the default for plain
+                  cash legs (deposits, fees, dividends paid as cash); for
+                  trades the user picks the symbol. The Advanced-collapse
+                  copy of the picker hides in this mode to avoid two
+                  pickers fighting over the same form field. */}
+              {(() => {
+                const sel = accounts.find((a) => String(a.id) === form.accountId);
+                if (sel?.isInvestment !== true) return null;
+                const accountHoldings = holdings.filter((h) => h.accountId === sel.id);
+                // The per-account Cash sleeve is the holding with no
+                // symbol (matches portfolio aggregator's empty-symbol
+                // cash branch). Surface it as "Cash (auto)" so the user
+                // sees it as the default option instead of a bare "Cash".
+                const cash = accountHoldings.find((h) => !h.symbol);
+                const items: ComboboxItemShape[] = [
+                  ...(cash
+                    ? [{ value: cash.name, label: `${cash.name} (auto) — cash sleeve` } satisfies ComboboxItemShape]
+                    : []),
+                  ...sortHolding(
+                    accountHoldings
+                      .filter((h) => h !== cash)
+                      .map((h): ComboboxItemShape => ({
+                        value: h.name,
+                        label: h.symbol ? `${h.name} (${h.symbol})` : h.name,
+                      })),
+                    (h) => accountHoldings.find((x) => x.name === h.value)?.id ?? h.value,
+                    (a, z) => a.label.localeCompare(z.label),
+                  ),
+                ];
+                return (
+                  <div className="space-y-1.5 rounded-md border border-violet-200 dark:border-violet-900 bg-violet-50/40 dark:bg-violet-950/20 p-3">
+                    <Label>
+                      Portfolio Holding <span className="text-rose-600">*</span>
+                    </Label>
+                    <Combobox
+                      value={form.portfolioHoldingId}
+                      onValueChange={(v) => setForm({ ...form, portfolioHoldingId: v })}
+                      items={items}
+                      placeholder={cash ? "Cash (auto)" : "Pick a holding"}
+                      searchPlaceholder="Search holdings…"
+                      emptyMessage="No matches"
+                      className="w-full"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      {sel.name} is an investment account — every transaction must reference a holding. Pick the symbol you traded, or leave the default Cash sleeve for cash legs (deposits, fees, dividends paid as cash).
+                    </p>
+                  </div>
+                );
+              })()}
 
               {/* Linked transactions — other legs of a multi-leg import
                   (transfer, same-account currency conversion, liquidation).
@@ -1270,17 +1634,24 @@ function TransactionsPageInner() {
                   <div className="text-xs text-muted-foreground font-medium">Split rows (must sum to total amount)</div>
                   {splitRows.map((row, i) => (
                     <div key={i} className="flex gap-1.5 items-center">
-                      <Select value={row.categoryId} onValueChange={(v) => {
-                        const next = [...splitRows];
-                        next[i] = { ...next[i], categoryId: v ?? "" };
-                        setSplitRows(next);
-                      }}>
-                        <SelectTrigger className="h-7 text-xs flex-1"><SelectValue placeholder="Category" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="">No category</SelectItem>
-                          {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
+                      <Combobox
+                        value={row.categoryId}
+                        onValueChange={(v) => {
+                          const next = [...splitRows];
+                          next[i] = { ...next[i], categoryId: v };
+                          setSplitRows(next);
+                        }}
+                        items={sortCategory(
+                          categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: c.name })),
+                          (c) => Number(c.value),
+                          (a, z) => a.label.localeCompare(z.label),
+                        )}
+                        placeholder="Category"
+                        searchPlaceholder="Search categories…"
+                        emptyMessage="No matches"
+                        size="sm"
+                        className="h-7 flex-1 text-xs"
+                      />
                       <Input
                         type="number"
                         step="0.01"
@@ -1354,38 +1725,52 @@ function TransactionsPageInner() {
                       <Label>Quantity</Label>
                       <Input type="number" step="0.0001" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="e.g. 10" />
                     </div>
+                    {/* Hide the Advanced-collapse copy of the holding
+                        picker when the selected account is investment —
+                        the required violet block above already owns the
+                        field. Two pickers writing to the same state would
+                        confuse the user (issue #22). */}
+                    {accounts.find((a) => String(a.id) === form.accountId)?.isInvestment !== true && (
                     <div className="space-y-1.5">
                       <Label>Portfolio Holding</Label>
-                      <Select
-                        value={form.portfolioHoldingId || "__none__"}
-                        onValueChange={(v) => setForm({ ...form, portfolioHoldingId: v === "__none__" ? "" : (v ?? "") })}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select holding">
-                            {(v) => {
-                              const val = v == null ? "" : String(v);
-                              if (!val || val === "__none__") return "None";
-                              const h = holdings.find((h) => h.name === val);
-                              if (!h) return val;
-                              return h.symbol ? `${h.name} (${h.symbol})` : h.name;
-                            }}
-                          </SelectValue>
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__none__">None</SelectItem>
-                          {holdings.map((h) => (
-                            <SelectItem key={h.id} value={h.name}>
-                              {h.symbol ? `${h.name} (${h.symbol})` : h.name}
-                              {h.accountName ? ` — ${h.accountName}` : ""}
-                            </SelectItem>
-                          ))}
-                          {form.portfolioHoldingId &&
-                            !holdings.some((h) => h.name === form.portfolioHoldingId) && (
-                              <SelectItem value={form.portfolioHoldingId}>{form.portfolioHoldingId}</SelectItem>
-                            )}
-                        </SelectContent>
-                      </Select>
+                      <Combobox
+                        value={form.portfolioHoldingId}
+                        onValueChange={(v) => setForm({ ...form, portfolioHoldingId: v })}
+                        items={(() => {
+                          // Restrict the holding picker to the currently-
+                          // selected account so the user can't pick a
+                          // holding that lives in another account (which
+                          // would 23503-FK-error on submit). When no
+                          // account is picked yet, fall back to all
+                          // holdings — the unfiltered list is harmless
+                          // until the user moves on. The fallback unknown
+                          // item below still uses the full `holdings`
+                          // array so existing-but-out-of-account selections
+                          // (e.g. on edit) keep showing.
+                          const accountHoldings = form.accountId
+                            ? holdings.filter((h) => String(h.accountId) === form.accountId)
+                            : holdings;
+                          return [
+                            ...sortHolding(
+                              accountHoldings.map((h): ComboboxItemShape => ({
+                                value: h.name,
+                                label: `${h.symbol ? `${h.name} (${h.symbol})` : h.name}${h.accountName ? ` — ${h.accountName}` : ""}`,
+                              })),
+                              (h) => accountHoldings.find((x) => x.name === h.value)?.id ?? h.value,
+                              (a, z) => a.label.localeCompare(z.label),
+                            ),
+                            ...(form.portfolioHoldingId && !holdings.some((h) => h.name === form.portfolioHoldingId)
+                              ? [{ value: form.portfolioHoldingId, label: form.portfolioHoldingId } satisfies ComboboxItemShape]
+                              : []),
+                          ];
+                        })()}
+                        placeholder="None"
+                        searchPlaceholder="Search holdings…"
+                        emptyMessage="No matches"
+                        className="w-full"
+                      />
                     </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <input type="checkbox" id="isBusiness" checked={form.isBusiness} onChange={(e) => setForm({ ...form, isBusiness: e.target.checked })} className="h-4 w-4 rounded border-input" />
@@ -1404,6 +1789,29 @@ function TransactionsPageInner() {
                   )}
                 </div>
               )}
+
+              {/* Audit-trio footer (issue #28). Only on edit — irrelevant on
+                  create. Shows when the row was created/last-edited and which
+                  writer surface authored it. Times use the same locale-aware
+                  formatter as the rest of the page; falls back to ISO string
+                  if the field is missing (older rows / mid-rollout). */}
+              {editId && (() => {
+                const t = txns.find((t) => t.id === editId);
+                if (!t) return null;
+                const created = t.createdAt ? new Date(t.createdAt).toLocaleString() : null;
+                const updated = t.updatedAt ? new Date(t.updatedAt).toLocaleString() : null;
+                const sourceLabel = t.source ? labelForSource(t.source) : null;
+                if (!created && !updated && !sourceLabel) return null;
+                return (
+                  <div className="text-[11px] text-muted-foreground border-t pt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {created && <span>Created {created}</span>}
+                    {updated && <span>· Updated {updated}</span>}
+                    {sourceLabel && (
+                      <Badge variant="outline" className="text-[10px] py-0 px-1.5">{sourceLabel}</Badge>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div className="flex gap-2">
                 {editId && (
@@ -1464,58 +1872,39 @@ function TransactionsPageInner() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>From account</Label>
-                  <Select
+                  <Combobox
                     value={transferForm.fromAccountId}
-                    onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v ?? "" })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Source account">
-                        {(v) => {
-                          const val = v == null ? "" : String(v);
-                          if (!val) return "Source account";
-                          const a = accounts.find((a) => String(a.id) === val);
-                          return a ? `${a.name} · ${a.currency}` : val;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accounts
-                        // Allow same-account when in-kind is on (rebalance
-                        // between two holdings inside one brokerage); only
-                        // exclude the picked destination for cash transfers.
+                    onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v })}
+                    items={sortAccount(
+                      accounts
                         .filter((a) => transferForm.inKind || String(a.id) !== transferForm.toAccountId)
-                        .map((a) => (
-                          <SelectItem key={a.id} value={String(a.id)}>{a.name} · {a.currency}</SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
+                        .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
+                      (a) => Number(a.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Source account"
+                    searchPlaceholder="Search accounts…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label>To account</Label>
-                  <Select
+                  <Combobox
                     value={transferForm.toAccountId}
-                    onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v ?? "" })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Destination account">
-                        {(v) => {
-                          const val = v == null ? "" : String(v);
-                          if (!val) return "Destination account";
-                          const a = accounts.find((a) => String(a.id) === val);
-                          return a ? `${a.name} · ${a.currency}` : val;
-                        }}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accounts
-                        // Mirror of the From dropdown: same-account allowed
-                        // when in-kind is on, blocked otherwise.
+                    onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v })}
+                    items={sortAccount(
+                      accounts
                         .filter((a) => transferForm.inKind || String(a.id) !== transferForm.fromAccountId)
-                        .map((a) => (
-                          <SelectItem key={a.id} value={String(a.id)}>{a.name} · {a.currency}</SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
+                        .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
+                      (a) => Number(a.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    )}
+                    placeholder="Destination account"
+                    searchPlaceholder="Search accounts…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
                 </div>
               </div>
 
@@ -1524,21 +1913,39 @@ function TransactionsPageInner() {
                   and allows the cash amount to be 0. The destination holding
                   row is auto-created in the destination account if missing;
                   the source holding MUST already exist (the resolver rejects
-                  otherwise — you can't send shares you don't have). */}
+                  otherwise — you can't send shares you don't have).
+
+                  Visibility (Section E #10): the entire violet block is
+                  hidden when neither the source nor destination account is
+                  flagged isInvestment. The four-rule logic:
+                    1. Both accounts cash → block hidden, pure cash transfer.
+                    2. One side investment → block visible; cash leg on the
+                       investment side defaults to that account's Cash
+                       holding via defaultHoldingForInvestmentAccount in
+                       src/lib/transfer.ts (so hiding here doesn't break
+                       the application-layer constraint).
+                    3. Both investment → block visible, dropdowns filtered
+                       per-side by accountId.
+                    4. Same-account in-kind rebalance → still investment, so
+                       the block stays visible. Section C (mandatory
+                       enforcement) is out of scope for this UI guard. */}
               {(() => {
                 const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
                 // Filter holdings to those owned by the source account so
-                // users only see options that won't fail server-side. The
-                // /api/portfolio response only carries account NAME (not id),
-                // so match on that. If multiple accounts share a name (rare)
-                // this could over-filter — acceptable for v1.
+                // users only see options that won't fail server-side. Match
+                // on accountId (already projected by getPortfolioHoldings)
+                // rather than name — accountName collisions could otherwise
+                // surface holdings from another account.
                 const sourceHoldings = fromAcct
-                  ? holdings.filter((h) => h.accountName === fromAcct.name)
+                  ? holdings.filter((h) => h.accountId === fromAcct.id)
                   : [];
                 const toAcctLocal = accounts.find((a) => String(a.id) === transferForm.toAccountId);
                 const destHoldings = toAcctLocal
-                  ? holdings.filter((h) => h.accountName === toAcctLocal.name)
+                  ? holdings.filter((h) => h.accountId === toAcctLocal.id)
                   : [];
+                const eitherIsInvestment =
+                  fromAcct?.isInvestment === true || toAcctLocal?.isInvestment === true;
+                if (!eitherIsInvestment) return null;
                 // Detect whether the destination already has an exact name
                 // match for the source — if so, the "Same as source" default
                 // implicitly binds to it (server's resolver finds it before
@@ -1789,6 +2196,80 @@ function TransactionsPageInner() {
                 );
               })()}
 
+              {/* Cash-leg holding pins for investment-account transfers
+                  (issue #22). Only rendered for the CASH-transfer path
+                  (inKind=false) — the in-kind block above already supplies
+                  a holding via name+quantity. For each leg whose account
+                  is is_investment=true, the user must pick a holding so
+                  the strict-mode constraint is met. The per-account Cash
+                  sleeve (auto-created on is_investment toggle) is the
+                  default option for plain cash legs. NEW transfers only:
+                  the PUT path doesn't accept cash-leg pins yet, so this
+                  block is hidden when editing an existing pair. */}
+              {(() => {
+                if (transferForm.inKind) return null;
+                if (transferEdit) return null;
+                const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
+                const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
+                const fromInv = fromAcct?.isInvestment === true;
+                const toInv = toAcct?.isInvestment === true;
+                if (!fromInv && !toInv) return null;
+                const renderPicker = (
+                  side: "from" | "to",
+                  acct: Account,
+                ) => {
+                  const accountHoldings = holdings.filter((h) => h.accountId === acct.id);
+                  const cash = accountHoldings.find((h) => !h.symbol);
+                  const valueKey = side === "from" ? "fromHoldingId" : "toHoldingId";
+                  const items: ComboboxItemShape[] = [
+                    ...(cash
+                      ? [{ value: String(cash.id), label: `${cash.name} (auto) — cash sleeve` } satisfies ComboboxItemShape]
+                      : []),
+                    ...sortHolding(
+                      accountHoldings
+                        .filter((h) => h !== cash)
+                        .map((h): ComboboxItemShape => ({
+                          value: String(h.id),
+                          label: h.symbol ? `${h.name} (${h.symbol})` : h.name,
+                        })),
+                      (h) => Number(h.value),
+                      (a, z) => a.label.localeCompare(z.label),
+                    ),
+                  ];
+                  return (
+                    <div className="space-y-1">
+                      <Label className="text-xs">
+                        {side === "from" ? "Source" : "Destination"} holding in {acct.name}{" "}
+                        <span className="text-rose-600">*</span>
+                      </Label>
+                      <Combobox
+                        value={transferForm[valueKey]}
+                        onValueChange={(v) =>
+                          setTransferForm({ ...transferForm, [valueKey]: v ?? "" })
+                        }
+                        items={items}
+                        placeholder={cash ? "Cash (auto)" : "Pick a holding"}
+                        searchPlaceholder="Search holdings…"
+                        emptyMessage="No matches"
+                        size="sm"
+                        className="w-full"
+                      />
+                    </div>
+                  );
+                };
+                return (
+                  <div className="space-y-2 rounded-md border border-violet-200 dark:border-violet-900 bg-violet-50/40 dark:bg-violet-950/20 p-3">
+                    <p className="text-[11px] text-muted-foreground">
+                      Investment account leg — every transfer leg into an investment account must reference a holding. Default is the per-account Cash sleeve.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      {fromInv && fromAcct ? renderPicker("from", fromAcct) : <div />}
+                      {toInv && toAcct ? renderPicker("to", toAcct) : <div />}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Cross-currency preview + editable destination amount.
                   Only renders when source and destination accounts have
                   different currencies. The destination amount is auto-
@@ -1918,45 +2399,40 @@ function TransactionsPageInner() {
             <Input type="date" className="w-36 h-8 text-xs" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
             <span className="text-xs text-muted-foreground">to</span>
             <Input type="date" className="w-36 h-8 text-xs" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
-            <Select value={filters.accountId} onValueChange={(v) => { setFilters({ ...filters, accountId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger className="w-40 h-8 text-xs">
-                {/* Render-prop on SelectValue — base-ui's default trigger
-                    renders the raw `value` (the account id, e.g. "609") rather
-                    than the SelectItem's children. Look the id back up so the
-                    trigger shows the same `formatAccountLabel` string the
-                    dropdown items + table cells use. */}
-                <SelectValue placeholder="All accounts">
-                  {(v) => {
-                    const val = v == null ? "" : String(v);
-                    if (!val || val === "all") return "All accounts";
-                    const a = accounts.find((x) => String(x.id) === val);
-                    return a ? formatAccountLabel(a) : val;
-                  }}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All accounts</SelectItem>
-                {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{formatAccountLabel(a)}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Select value={filters.categoryId} onValueChange={(v) => { setFilters({ ...filters, categoryId: !v || v === "all" ? "" : v }); setPage(0); }}>
-              <SelectTrigger className="w-44 h-8 text-xs">
-                {/* Same render-prop pattern as Account filter — without it
-                    the trigger shows the raw category id when one's selected. */}
-                <SelectValue placeholder="All categories">
-                  {(v) => {
-                    const val = v == null ? "" : String(v);
-                    if (!val || val === "all") return "All categories";
-                    const c = categories.find((x) => String(x.id) === val);
-                    return c?.name ?? val;
-                  }}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All categories</SelectItem>
-                {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <Combobox
+              value={filters.accountId}
+              onValueChange={(v) => { setFilters({ ...filters, accountId: v === "all" ? "" : v }); setPage(0); }}
+              items={[
+                { value: "all", label: "All accounts" } satisfies ComboboxItemShape,
+                ...sortAccount(
+                  accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: formatAccountLabel(a) })),
+                  (a) => Number(a.value),
+                  (a, z) => a.label.localeCompare(z.label),
+                ),
+              ]}
+              placeholder="All accounts"
+              searchPlaceholder="Search accounts…"
+              emptyMessage="No matches"
+              size="sm"
+              className="h-8 w-40 text-xs"
+            />
+            <Combobox
+              value={filters.categoryId}
+              onValueChange={(v) => { setFilters({ ...filters, categoryId: v === "all" ? "" : v }); setPage(0); }}
+              items={[
+                { value: "all", label: "All categories" } satisfies ComboboxItemShape,
+                ...sortCategory(
+                  categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: c.name })),
+                  (c) => Number(c.value),
+                  (a, z) => a.label.localeCompare(z.label),
+                ),
+              ]}
+              placeholder="All categories"
+              searchPlaceholder="Search categories…"
+              emptyMessage="No matches"
+              size="sm"
+              className="h-8 w-44 text-xs"
+            />
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
@@ -1966,16 +2442,28 @@ function TransactionsPageInner() {
                   </Button>
                 }
               />
-              <DropdownMenuContent align="start" className="min-w-44">
+              <DropdownMenuContent align="start" className="min-w-56 max-h-96 overflow-y-auto">
                 <DropdownMenuGroup>
-                  <DropdownMenuLabel>Optional columns</DropdownMenuLabel>
-                  <DropdownMenuCheckboxItem
-                    checked={colPrefs.portfolio}
-                    onCheckedChange={(v) => setColPrefs({ ...colPrefs, portfolio: !!v })}
-                    closeOnClick={false}
+                  <DropdownMenuLabel>Visible columns</DropdownMenuLabel>
+                  {columnPrefs
+                    .filter((c) => TOGGLEABLE_COLUMNS.has(c.id))
+                    .map((c) => (
+                      <DropdownMenuCheckboxItem
+                        key={c.id}
+                        checked={c.visible}
+                        onCheckedChange={(v) => toggleCol(c.id, !!v)}
+                        closeOnClick={false}
+                      >
+                        {COLUMN_LABELS[c.id]}
+                      </DropdownMenuCheckboxItem>
+                    ))}
+                  <button
+                    type="button"
+                    onClick={resetColPrefs}
+                    className="w-full text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors mt-1 border-t"
                   >
-                    Portfolio
-                  </DropdownMenuCheckboxItem>
+                    Reset to default
+                  </button>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -2036,20 +2524,36 @@ function TransactionsPageInner() {
               </SelectContent>
             </Select>
             {bulkAction === "update_category" && (
-              <Select value={bulkCategoryId} onValueChange={(v) => setBulkCategoryId(v ?? "")}>
-                <SelectTrigger className="w-44 h-7 text-xs"><SelectValue placeholder="Select category" /></SelectTrigger>
-                <SelectContent>
-                  {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.group} — {c.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <Combobox
+                value={bulkCategoryId}
+                onValueChange={(v) => setBulkCategoryId(v)}
+                items={sortCategory(
+                  categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} — ${c.name}` })),
+                  (c) => Number(c.value),
+                  (a, z) => a.label.localeCompare(z.label),
+                )}
+                placeholder="Select category"
+                searchPlaceholder="Search categories…"
+                emptyMessage="No matches"
+                size="sm"
+                className="h-7 w-44 text-xs"
+              />
             )}
             {bulkAction === "update_account" && (
-              <Select value={bulkAccountId} onValueChange={(v) => setBulkAccountId(v ?? "")}>
-                <SelectTrigger className="w-44 h-7 text-xs"><SelectValue placeholder="Select account" /></SelectTrigger>
-                <SelectContent>
-                  {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <Combobox
+                value={bulkAccountId}
+                onValueChange={(v) => setBulkAccountId(v)}
+                items={sortAccount(
+                  accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                  (a) => Number(a.value),
+                  (a, z) => a.label.localeCompare(z.label),
+                )}
+                placeholder="Select account"
+                searchPlaceholder="Search accounts…"
+                emptyMessage="No matches"
+                size="sm"
+                className="h-7 w-44 text-xs"
+              />
             )}
             {bulkAction === "update_date" && (
               <Input type="date" className="h-7 text-xs w-36" value={bulkDate} onChange={(e) => setBulkDate(e.target.value)} />
@@ -2095,124 +2599,196 @@ function TransactionsPageInner() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-10">
-                    <input
-                      type="checkbox"
-                      checked={allSelected}
-                      onChange={toggleAll}
-                      className="h-4 w-4 rounded border-input cursor-pointer"
-                      title="Select all"
-                    />
-                  </TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Account</TableHead>
-                  <TableHead>Category</TableHead>
-                  <TableHead>Payee</TableHead>
-                  {colPrefs.portfolio && <TableHead>Portfolio</TableHead>}
-                  <TableHead>Note</TableHead>
-                  <TableHead className="text-right">Qty</TableHead>
-                  <TableHead className="text-right">Amount</TableHead>
-                  <TableHead className="w-24"></TableHead>
+                  {columnPrefs.filter((c) => c.visible).map((c) => {
+                    const isDraggable = TOGGLEABLE_COLUMNS.has(c.id);
+                    const isAmount = c.id === "amount" || c.id === "quantity";
+                    const widthClass =
+                      c.id === "select" ? "w-10" :
+                      c.id === "actions" ? "w-24" :
+                      "";
+                    const isDragging = draggingCol === c.id;
+                    return (
+                      <TableHead
+                        key={c.id}
+                        className={`${widthClass} ${isAmount ? "text-right" : ""} ${isDraggable ? "cursor-grab select-none" : ""} ${isDragging ? "opacity-50" : ""}`}
+                        draggable={isDraggable}
+                        onDragStart={isDraggable ? onColDragStart(c.id) : undefined}
+                        onDragOver={isDraggable ? onColDragOver(c.id) : undefined}
+                        onDragEnd={isDraggable ? onColDragEnd : undefined}
+                      >
+                        {c.id === "select" ? (
+                          <input
+                            type="checkbox"
+                            checked={allSelected}
+                            onChange={toggleAll}
+                            className="h-4 w-4 rounded border-input cursor-pointer"
+                            title="Select all"
+                          />
+                        ) : c.id === "actions" ? (
+                          ""
+                        ) : (
+                          COLUMN_LABELS[c.id]
+                        )}
+                      </TableHead>
+                    );
+                  })}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {txns.map((t) => (
                   <TableRow key={t.id} className={`hover:bg-muted/30 ${selected.has(t.id) ? "bg-primary/5" : ""}`}>
-                    <TableCell>
-                      <input
-                        type="checkbox"
-                        checked={selected.has(t.id)}
-                        onChange={() => toggleOne(t.id)}
-                        className="h-4 w-4 rounded border-input cursor-pointer"
-                      />
-                    </TableCell>
-                    <TableCell className="text-sm">{formatDate(t.date)}</TableCell>
-                    <TableCell className="text-sm">{formatAccountLabel({ name: t.accountName, alias: t.accountAlias, type: t.accountType })}</TableCell>
-                    <TableCell className="text-sm">
-                      <span className="flex items-center gap-1">
-                        {t.categoryName && (
-                          <Badge variant="outline" className={`text-xs ${getCategoryBadgeClass(t.categoryType)}`}>{t.categoryName}</Badge>
-                        )}
-                        <SplitBadge transactionId={t.id} />
-                        {t.linkId && (
-                          <Link2 className="h-3 w-3 text-sky-500 shrink-0" aria-label="Linked transaction" />
-                        )}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-sm">{t.payee || "-"}</TableCell>
-                    {colPrefs.portfolio && (
-                      <TableCell className="text-sm text-muted-foreground">
-                        {t.portfolioHolding || "-"}
-                      </TableCell>
-                    )}
-                    <TableCell className="text-sm text-muted-foreground max-w-60">
-                      <div className="flex flex-col gap-1">
-                        {t.note && <span className="truncate">{t.note}</span>}
-                        {t.tags && (
-                          <div className="flex flex-wrap gap-1">
-                            {t.tags.split(",").map((rawTag) => rawTag.trim()).filter(Boolean).map((tagValue) => (
-                              <button
-                                key={tagValue}
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setFilters({ ...filters, tag: tagValue });
-                                  setPage(0);
-                                }}
-                                className="inline-flex items-center rounded-md border border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-300 px-1.5 py-0 text-[10px] font-mono hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-900 transition-colors"
-                                title={`Filter by tag: ${tagValue}`}
-                              >
-                                {tagValue}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        {!t.note && !t.tags && <span>-</span>}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                      {t.quantity != null && t.quantity !== 0
-                        ? t.quantity.toLocaleString("en-CA", {
-                            minimumFractionDigits: 0,
-                            maximumFractionDigits: t.quantity % 1 === 0 ? 0 : 4,
-                          })
-                        : "-"}
-                    </TableCell>
-                    <TableCell className={`text-right font-mono text-sm font-semibold ${t.amount >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
-                      {(() => {
-                        // Show the entered side (what the user typed); fall
-                        // back to amount/currency on legacy rows. When the
-                        // settlement currency differs, append a muted
-                        // converted label so both the trade and settlement
-                        // are visible.
-                        const enteredAmt = t.enteredAmount ?? t.amount;
-                        const enteredCcy = t.enteredCurrency ?? t.currency;
-                        const showSecondary = enteredCcy !== t.currency;
-                        return (
-                          <div className="flex flex-col items-end">
-                            <span>{formatCurrency(enteredAmt, enteredCcy)}</span>
-                            {showSecondary && (
-                              <span className="text-[10px] font-normal text-muted-foreground">
-                                → {formatCurrency(t.amount, t.currency)}
+                    {columnPrefs.filter((c) => c.visible).map((c) => {
+                      switch (c.id) {
+                        case "select":
+                          return (
+                            <TableCell key={c.id}>
+                              <input
+                                type="checkbox"
+                                checked={selected.has(t.id)}
+                                onChange={() => toggleOne(t.id)}
+                                className="h-4 w-4 rounded border-input cursor-pointer"
+                              />
+                            </TableCell>
+                          );
+                        case "date":
+                          return (
+                            <TableCell key={c.id} className="text-sm">{formatDate(t.date)}</TableCell>
+                          );
+                        case "account":
+                          return (
+                            <TableCell key={c.id} className="text-sm">
+                              {formatAccountLabel({ name: t.accountName, alias: t.accountAlias, type: t.accountType })}
+                            </TableCell>
+                          );
+                        case "accountType":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground">
+                              {t.accountType || "-"}
+                            </TableCell>
+                          );
+                        case "accountName":
+                          return (
+                            <TableCell key={c.id} className="text-sm">{t.accountName || "-"}</TableCell>
+                          );
+                        case "accountAlias":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground">
+                              {t.accountAlias || "-"}
+                            </TableCell>
+                          );
+                        case "category":
+                          return (
+                            <TableCell key={c.id} className="text-sm">
+                              <span className="flex items-center gap-1">
+                                {t.categoryName && (
+                                  <Badge variant="outline" className={`text-xs ${getCategoryBadgeClass(t.categoryType)}`}>{t.categoryName}</Badge>
+                                )}
+                                <SplitBadge transactionId={t.id} />
+                                {t.linkId && (
+                                  <Link2 className="h-3 w-3 text-sky-500 shrink-0" aria-label="Linked transaction" />
+                                )}
                               </span>
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex gap-0.5">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(t)} title="Edit">
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-violet-500" onClick={() => openSplitDialog(t)} title="Split">
-                          <Scissors className="h-3 w-3" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => confirmDelete(t)} title="Delete">
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    </TableCell>
+                            </TableCell>
+                          );
+                        case "payee":
+                          return (
+                            <TableCell key={c.id} className="text-sm">{t.payee || "-"}</TableCell>
+                          );
+                        case "portfolio":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground">
+                              {t.portfolioHolding || "-"}
+                            </TableCell>
+                          );
+                        case "portfolioTicker":
+                          return (
+                            <TableCell key={c.id} className="text-sm font-mono text-muted-foreground">
+                              {t.portfolioHoldingSymbol || "-"}
+                            </TableCell>
+                          );
+                        case "note":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground max-w-60">
+                              {t.note ? <span className="truncate block">{t.note}</span> : <span>-</span>}
+                            </TableCell>
+                          );
+                        case "tags":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground">
+                              {t.tags ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {t.tags.split(",").map((rawTag) => rawTag.trim()).filter(Boolean).map((tagValue) => (
+                                    <button
+                                      key={tagValue}
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setFilters({ ...filters, tag: tagValue });
+                                        setPage(0);
+                                      }}
+                                      className="inline-flex items-center rounded-md border border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-300 px-1.5 py-0 text-[10px] font-mono hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-900 transition-colors"
+                                      title={`Filter by tag: ${tagValue}`}
+                                    >
+                                      {tagValue}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span>-</span>
+                              )}
+                            </TableCell>
+                          );
+                        case "quantity":
+                          return (
+                            <TableCell key={c.id} className="text-right font-mono text-xs text-muted-foreground">
+                              {t.quantity != null && t.quantity !== 0
+                                ? t.quantity.toLocaleString("en-CA", {
+                                    minimumFractionDigits: 0,
+                                    maximumFractionDigits: t.quantity % 1 === 0 ? 0 : 4,
+                                  })
+                                : "-"}
+                            </TableCell>
+                          );
+                        case "amount": {
+                          // Show the entered side (what the user typed); fall
+                          // back to amount/currency on legacy rows. When the
+                          // settlement currency differs, append a muted
+                          // converted label so both the trade and settlement
+                          // are visible.
+                          const enteredAmt = t.enteredAmount ?? t.amount;
+                          const enteredCcy = t.enteredCurrency ?? t.currency;
+                          const showSecondary = enteredCcy !== t.currency;
+                          return (
+                            <TableCell key={c.id} className={`text-right font-mono text-sm font-semibold ${t.amount >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                              <div className="flex flex-col items-end">
+                                <span>{formatCurrency(enteredAmt, enteredCcy)}</span>
+                                {showSecondary && (
+                                  <span className="text-[10px] font-normal text-muted-foreground">
+                                    → {formatCurrency(t.amount, t.currency)}
+                                  </span>
+                                )}
+                              </div>
+                            </TableCell>
+                          );
+                        }
+                        case "actions":
+                          return (
+                            <TableCell key={c.id}>
+                              <div className="flex gap-0.5">
+                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(t)} title="Edit">
+                                  <Pencil className="h-3 w-3" />
+                                </Button>
+                                <Button variant="ghost" size="icon" className="h-7 w-7 text-violet-500" onClick={() => openSplitDialog(t)} title="Split">
+                                  <Scissors className="h-3 w-3" />
+                                </Button>
+                                <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => confirmDelete(t)} title="Delete">
+                                  <Trash2 className="h-3 w-3" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          );
+                      }
+                    })}
                   </TableRow>
                 ))}
               </TableBody>

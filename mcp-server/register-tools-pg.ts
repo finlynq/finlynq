@@ -25,6 +25,7 @@ import {
   summarizeUnrealizedPnL,
 } from "../src/lib/unrealized-pnl";
 import { resolveTxAmountsCore } from "../src/lib/currency-conversion";
+import { deriveTxWriteWarnings } from "../src/lib/queries";
 import {
   createTransferPair,
   updateTransferPair,
@@ -39,6 +40,7 @@ import {
 import {
   isInvestmentAccount as isInvestmentAccountFn,
   getInvestmentAccountIds,
+  InvestmentHoldingRequiredError,
 } from "../src/lib/investment-account";
 import {
   signConfirmationToken,
@@ -54,7 +56,13 @@ import {
 import { parseOfx } from "../src/lib/ofx-parser";
 import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline";
 import { generateImportHash } from "../src/lib/import-hash";
-import { applyRulesToBatch, type TransactionRule } from "../src/lib/auto-categorize";
+import {
+  applyRulesToBatch,
+  type TransactionRule,
+  pickInvestmentCategoryByPayee,
+  fallbackInvestmentCategory,
+  type InvestmentCategoryHint,
+} from "../src/lib/auto-categorize";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -109,6 +117,69 @@ function fuzzyFind(input: string, options: Row[]): Row | null {
     options.find(o => lo.includes(String(o.name ?? "").toLowerCase())) ??
     null
   );
+}
+
+/**
+ * Strict resolver for write operations: same waterfall as `fuzzyFind`, but
+ * substring/reverse-substring hits are only accepted when the input and the
+ * candidate share a whitespace-separated token of length ≥3. Otherwise the
+ * substring fallback would silently route writes to a vaguely-similar account
+ * (e.g. typo-induced "Visra Card" → "Visa Card" via reverse-includes is fine,
+ * but "ar" → "Mortgage" via includes is not). Reads still use plain `fuzzyFind`
+ * — wrong filters are recoverable, wrong writes aren't.
+ *
+ * Returns:
+ *   { ok: true, account, tier }                  — caller can write safely
+ *   { ok: false, reason: "missing" }             — no candidate at all
+ *   { ok: false, reason: "low_confidence",
+ *     suggestion }                                — fuzzyFind would have matched
+ *                                                   `suggestion`, but token-overlap
+ *                                                   guard rejected it
+ */
+type AccountResolveTier = "exact" | "alias" | "startsWith" | "substring";
+type AccountResolveResult =
+  | { ok: true; account: Row; tier: AccountResolveTier }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: Row };
+function resolveAccountStrict(input: string, options: Row[]): AccountResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exact) return { ok: true, account: exact, tier: "exact" };
+  const alias = options.find(o => String(o.alias ?? "").toLowerCase() === lo);
+  if (alias) return { ok: true, account: alias, tier: "alias" };
+  const starts = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (starts) return { ok: true, account: starts, tier: "startsWith" };
+  // Substring/reverse-substring tier — gate on token overlap.
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (name: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, account: sub, tier: "substring" };
+  // No strong match. Surface what fuzzyFind WOULD have picked so the caller
+  // can include it in the error message ("did you mean …?").
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
 }
 
 /**
@@ -167,14 +238,53 @@ function buildCtLookup(
  * The historical-frequency match also runs in memory when payees are
  * encrypted — equality against ciphertext never hits. With no DEK the
  * history match is skipped; rule matches still work.
+ *
+ * Investment-account mode (#32): when the target account has
+ * `is_investment=true`, expense (type='E') candidates are filtered out of
+ * BOTH the rule and history candidate pools (forex/dividend/interest rows
+ * shouldn't land in "Groceries"), an additional payee-keyword pattern pass
+ * routes common brokerage rows to "Dividends" / "Credit Interest" /
+ * "Currency Revaluation" / "Transfers", and the final fallback prefers
+ * "Transfers" / "Investment Activity" over null. Non-investment writes are
+ * unchanged. See {@link pickInvestmentCategoryByPayee} +
+ * {@link fallbackInvestmentCategory} in src/lib/auto-categorize.ts.
  */
 async function autoCategory(
   db: DbLike,
   userId: string,
   payee: string,
-  dek: Buffer | null
+  dek: Buffer | null,
+  isInvestmentAccount: boolean = false,
 ): Promise<number | null> {
   if (!payee) return null;
+
+  // Investment-account mode pre-loads (id, name, type) for every category so
+  // the rule + history loops can drop expense matches and the keyword
+  // pattern + fallback can resolve well-known names ("Dividends",
+  // "Transfers"). Names may be Stream-D-encrypted; decrypt with the same
+  // ct → plaintext-fallback ladder used elsewhere.
+  let catTypeById: Map<number, string> | null = null;
+  let investmentHints: InvestmentCategoryHint[] | null = null;
+  if (isInvestmentAccount) {
+    const rawCats = await q(db, sql`
+      SELECT id, name, name_ct, type FROM categories WHERE user_id = ${userId}
+    `);
+    catTypeById = new Map();
+    investmentHints = [];
+    for (const r of rawCats) {
+      const id = Number(r.id);
+      const type = String(r.type ?? "");
+      catTypeById.set(id, type);
+      let nm: string;
+      if (r.name_ct && dek) {
+        nm = decryptField(dek, String(r.name_ct)) ?? String(r.name ?? "");
+      } else {
+        nm = String(r.name ?? "");
+      }
+      if (nm) investmentHints.push({ id, name: nm, type });
+    }
+  }
+
   // Rule lookup — schema is (match_field, match_type, match_value), NOT a single
   // `match_payee` column. The previous code referenced a non-existent column and
   // 500'd every record_transaction call when any active rule existed for the
@@ -204,9 +314,27 @@ async function autoCategory(
     else if (type === "regex") {
       try { hit = new RegExp(value, "i").test(payee); } catch { hit = false; }
     }
-    if (hit) return Number(rule.assign_category_id);
+    if (hit) {
+      const cid = Number(rule.assign_category_id);
+      // Investment-account: skip expense rules so the next priority gets a chance.
+      if (isInvestmentAccount && catTypeById?.get(cid) === "E") continue;
+      return cid;
+    }
   }
 
+  // Investment-account: keyword pattern pass before history. Common brokerage
+  // rows ("Dividend reinvestment", "Forex Trade", "Cash Disbursement") rarely
+  // have a per-payee history yet, so the keywords beat random history matches
+  // that happen to hit an expense category.
+  if (isInvestmentAccount && investmentHints) {
+    const id = pickInvestmentCategoryByPayee(payee, investmentHints);
+    if (id !== null) return id;
+  }
+
+  // Historical-frequency match. In investment mode, expense candidates are
+  // excluded so the tally can't elect a "Groceries" winner with 10 hits over
+  // a "Transfers" runner-up with 3.
+  let histId: number | null = null;
   if (!dek) {
     // Legacy plaintext-only fallback
     const hist = await q(db, sql`
@@ -214,35 +342,50 @@ async function autoCategory(
       WHERE user_id = ${userId} AND LOWER(payee) = LOWER(${payee}) AND category_id IS NOT NULL
       GROUP BY category_id ORDER BY cnt DESC LIMIT 1
     `);
-    return hist.length ? Number(hist[0].category_id) : null;
+    if (hist.length) {
+      const cid = Number(hist[0].category_id);
+      // Investment mode: drop the top match if it's expense; fall through to
+      // the fallback below. Non-investment: original behavior.
+      if (!isInvestmentAccount || catTypeById?.get(cid) !== "E") histId = cid;
+    }
+  } else {
+    // Fetch candidate rows with category, decrypt payee, then tally.
+    const rows = await q(db, sql`
+      SELECT payee, category_id FROM transactions
+      WHERE user_id = ${userId} AND category_id IS NOT NULL AND payee IS NOT NULL AND payee <> ''
+      ORDER BY date DESC, id DESC
+      LIMIT 5000
+    `);
+    const target = payee.toLowerCase();
+    const counts = new Map<number, number>();
+    for (const r of rows) {
+      const p = decryptField(dek, String(r.payee ?? ""));
+      if (!p) continue;
+      if (p.toLowerCase() === target) {
+        const cid = Number(r.category_id);
+        if (isInvestmentAccount && catTypeById?.get(cid) === "E") continue;
+        counts.set(cid, (counts.get(cid) ?? 0) + 1);
+      }
+    }
+    let bestCnt = 0;
+    for (const [id, cnt] of counts) {
+      if (cnt > bestCnt) {
+        bestCnt = cnt;
+        histId = id;
+      }
+    }
+  }
+  if (histId !== null) return histId;
+
+  // Investment-account final fallback — a brokerage cash leg with no rule,
+  // keyword, or non-expense history match defaults to "Transfers" (or
+  // "Investment Activity") rather than landing uncategorized.
+  if (isInvestmentAccount && investmentHints) {
+    const fb = fallbackInvestmentCategory(investmentHints);
+    if (fb !== null) return fb;
   }
 
-  // Fetch candidate rows with category, decrypt payee, then tally.
-  const rows = await q(db, sql`
-    SELECT payee, category_id FROM transactions
-    WHERE user_id = ${userId} AND category_id IS NOT NULL AND payee IS NOT NULL AND payee <> ''
-    ORDER BY date DESC, id DESC
-    LIMIT 5000
-  `);
-  const target = payee.toLowerCase();
-  const counts = new Map<number, number>();
-  for (const r of rows) {
-    const p = decryptField(dek, String(r.payee ?? ""));
-    if (!p) continue;
-    if (p.toLowerCase() === target) {
-      const cid = Number(r.category_id);
-      counts.set(cid, (counts.get(cid) ?? 0) + 1);
-    }
-  }
-  let bestId: number | null = null;
-  let bestCnt = 0;
-  for (const [id, cnt] of counts) {
-    if (cnt > bestCnt) {
-      bestCnt = cnt;
-      bestId = id;
-    }
-  }
-  return bestId;
+  return null;
 }
 
 /**
@@ -539,7 +682,7 @@ export function registerPgTools(
   // ── search_transactions ────────────────────────────────────────────────────
   server.tool(
     "search_transactions",
-    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. Each row carries both entered (user-typed) and account (settlement) amounts; pass reportingCurrency to also include a converted reporting amount per row.",
+    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. Each row carries both entered (user-typed) and account (settlement) amounts; pass reportingCurrency to also include a converted reporting amount per row. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly.",
     {
       payee: z.string().optional().describe("Partial payee/merchant name match"),
       min_amount: z.number().optional().describe("Minimum amount"),
@@ -548,11 +691,12 @@ export function registerPgTools(
       end_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
       category: z.string().optional().describe("Category name (exact)"),
       tags: z.string().optional().describe("Tag to search for (partial match)"),
+      account_id: z.number().int().optional().describe("Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses)."),
       portfolio_holding_id: z.number().int().optional().describe("Filter to transactions bound to this portfolio_holdings.id (FK fast-path; cheaper than substring search)"),
       limit: z.number().optional().describe("Max results (default 50)"),
       reportingCurrency: z.string().optional().describe("ISO code; if set, each row gets a reportingAmount converted to this currency. Defaults to user's display currency."),
     },
-    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, portfolio_holding_id, limit, reportingCurrency }) => {
+    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, portfolio_holding_id, limit, reportingCurrency }) => {
       const lim = limit ?? 50;
       // Push amount/date/category to SQL; payee/tags filter must happen in memory
       // after decryption when the data is encrypted. Fetch a larger window then
@@ -566,7 +710,8 @@ export function registerPgTools(
                a.name AS account, a.name_ct AS account_ct,
                c.name AS category, c.name_ct AS category_ct, c.type AS category_type,
                t.currency, t.amount, t.entered_currency, t.entered_amount, t.entered_fx_rate,
-               t.payee, t.note, t.tags, t.portfolio_holding_id
+               t.payee, t.note, t.tags, t.portfolio_holding_id,
+               t.created_at, t.updated_at, t.source
         FROM transactions t
         LEFT JOIN accounts a ON t.account_id = a.id
         LEFT JOIN categories c ON t.category_id = c.id
@@ -575,6 +720,7 @@ export function registerPgTools(
           ${max_amount !== undefined ? sql`AND t.amount <= ${max_amount}` : sql``}
           ${start_date ? sql`AND t.date >= ${start_date}` : sql``}
           ${end_date ? sql`AND t.date <= ${end_date}` : sql``}
+          ${account_id !== undefined ? sql`AND t.account_id = ${account_id}` : sql``}
           ${portfolio_holding_id !== undefined ? sql`AND t.portfolio_holding_id = ${portfolio_holding_id}` : sql``}
           ${category
             ? categoryLookup
@@ -627,6 +773,12 @@ export function registerPgTools(
           enteredAmount: tagAmount(enteredAmt, enteredCcy, "entered"),
           accountAmount: tagAmount(accountAmt, accountCcy, "account"),
           reportingAmount: tagAmount(accountAmt * fx, reporting, "reporting"),
+          // Issue #28: surface the audit-trio so AI assistants can sort by
+          // freshness or filter by writer surface ("show me everything I
+          // entered manually this month").
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+          source: r.source,
         };
       });
 
@@ -1702,11 +1854,12 @@ export function registerPgTools(
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Account is required — ask the user which account to use if not specified; never guess. Category auto-detected from payee rules/history when omitted. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only.",
+    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns, so callers can preview routing before committing.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
       payee: z.string().describe("Payee or merchant name"),
-      account: z.string().describe("Account name or alias (required — ask the user which account if unclear; fuzzy matched against name, exact match on alias)"),
+      account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known — e.g. resolved from a prior `get_account_balances` or `search_transactions` call. If both this and `account` are passed, this wins."),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional().describe("Optional note"),
@@ -1716,8 +1869,9 @@ export function registerPgTools(
       quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move. ALWAYS pair with portfolioHolding or portfolioHoldingId — a quantity on an unbound row is invisible to the portfolio aggregator."),
       enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided."),
       enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted."),
+      dryRun: z.boolean().optional().describe("When true, run the full validation/resolution pipeline (account, holding, FX, category) and return a preview WITHOUT writing to the DB. Response carries `dryRun: true`, `wouldBeId: null`, plus the resolved* fields. Use this to confirm routing before committing — especially when fuzzy account/category matching might surprise you."),
     },
-    async ({ amount, payee, date, account, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
+    async ({ amount, payee, date, account, account_id, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, dryRun }) => {
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
@@ -1726,10 +1880,26 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create an account first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const acct: Row | null = fuzzyFind(account, allAccounts);
-      if (!acct) return err(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+      let acct: Row | null = null;
+      if (account_id != null) {
+        acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
+        if (!acct) return err(`Account #${account_id} not found or not owned by you.`);
+      } else {
+        if (!account) return err("Pass either `account_id` or `account` (name/alias).");
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+          }
+          return err(`Account "${account}" not found. Available: ${list}`);
+        }
+        acct = resolved.account;
+      }
 
-      // Resolve category (fuzzy or auto)
+      // Resolve category (fuzzy or auto). Compute is_investment once — it's
+      // also re-used by the holding-FK constraint check below.
+      const isInvestment = await isInvestmentAccountFn(userId, Number(acct.id));
       let catId: number | null = null;
       if (category) {
         const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
@@ -1738,7 +1908,7 @@ export function registerPgTools(
         if (!cat) return err(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
         catId = Number(cat.id);
       } else {
-        catId = await autoCategory(db, userId, payee, dek);
+        catId = await autoCategory(db, userId, payee, dek, isInvestment);
       }
 
       // Resolve the holding FK from either input form. Auto-create is
@@ -1769,7 +1939,7 @@ export function registerPgTools(
       // account must reference a holding. MCP tools take the strict path —
       // refuse rather than silently default — so Claude surfaces an actionable
       // error to the user instead of attributing a trade to "Cash".
-      if (resolvedHoldingId == null && (await isInvestmentAccountFn(userId, Number(acct.id)))) {
+      if (resolvedHoldingId == null && isInvestment) {
         return err(`Account "${acct.name}" is an investment account — pass portfolioHolding (e.g. the ticker, or "Cash" for a cash leg) or portfolioHoldingId. Use get_portfolio_analysis to list this account's holdings.`);
       }
 
@@ -1784,6 +1954,40 @@ export function registerPgTools(
       });
       if (!resolved.ok) return err(resolved.message);
 
+      // Look up the resolved category name once — used by both the dry-run
+      // preview and the success message.
+      const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
+      const warnings = deriveTxWriteWarnings({
+        portfolioHoldingId: resolvedHoldingId,
+        amount: resolved.amount,
+        quantity,
+      });
+      const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
+      const resolvedCategory = catId ? { id: catId, name: String(catName ?? "") } : null;
+      const resolvedHolding = resolvedHoldingId != null ? { id: resolvedHoldingId } : null;
+
+      if (dryRun) {
+        // Validation + resolution complete; no DB write, no cache invalidation.
+        // Shape mirrors the success path so callers can swap `dryRun: true`
+        // out and get the same fields back.
+        return text({
+          success: true,
+          dryRun: true,
+          wouldBeId: null,
+          resolvedAccount: resolvedAccountInfo,
+          resolvedCategory,
+          resolvedHolding,
+          amount: resolved.amount,
+          currency: resolved.currency,
+          enteredAmount: resolved.enteredAmount,
+          enteredCurrency: resolved.enteredCurrency,
+          enteredFxRate: resolved.enteredFxRate,
+          date: txDate,
+          message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
+          warnings,
+        });
+      }
+
       // Encrypt text fields when a DEK is available. Without one (legacy API
       // keys) we fall back to plaintext; the row will still be readable via
       // the legacy passthrough in decryptField.
@@ -1791,18 +1995,26 @@ export function registerPgTools(
       const encNote = dek ? encryptField(dek, note ?? "") : (note ?? "");
       const encTags = dek ? encryptField(dek, tags ?? "") : (tags ?? "");
 
+      // Issue #28: stamp source explicitly + return audit timestamps so
+      // the AI assistant can verify the write landed and self-attributed.
       const result = await q(db, sql`
-        INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
-        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null})
-        RETURNING id
+        INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
+        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null}, ${'mcp_http'})
+        RETURNING id, created_at, updated_at, source
       `);
 
-      const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
       invalidateUserTxCache(userId);
       return text({
         success: true,
         transactionId: result[0]?.id,
+        createdAt: result[0]?.created_at,
+        updatedAt: result[0]?.updated_at,
+        source: result[0]?.source,
+        resolvedAccount: resolvedAccountInfo,
+        resolvedCategory,
+        resolvedHolding,
         message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
+        warnings,
       });
     }
   );
@@ -1810,12 +2022,15 @@ export function registerPgTools(
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Each transaction must specify an account — ask the user if unclear; never guess. Category auto-detected when omitted. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch.",
     {
+      account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
+      dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`."),
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
-        account: z.string().describe("Account name or alias (required — fuzzy matched against name, exact match on alias)"),
+        account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id`. Required if neither row-level `account_id` nor top-level `account_id` is set; rejected for low-confidence fuzzy matches."),
+        account_id: z.number().int().optional().describe("Per-row account FK (accounts.id). Skips fuzzy matching; routes to the exact account. Wins over both `account` and the top-level `account_id`."),
         date: z.string().optional(),
         category: z.string().optional(),
         note: z.string().optional(),
@@ -1827,10 +2042,12 @@ export function registerPgTools(
         enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
       })).describe("Array of transactions to record"),
     },
-    async ({ transactions }) => {
+    async ({ transactions, account_id: defaultAccountId, dryRun }) => {
       const today = new Date().toISOString().split("T")[0];
-      const allAccounts = await q(db, sql`SELECT id, name, alias, currency FROM accounts WHERE user_id = ${userId}`);
+      const rawAccounts = await q(db, sql`SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
+      const allAccounts = decryptNameish(rawAccounts, dek);
       const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+      const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
       // Cache user-owned holding ids in one SELECT instead of one ownership
       // check per row.
       const ownedHoldings = await q(db, sql`SELECT id FROM portfolio_holdings WHERE user_id = ${userId}`);
@@ -1839,12 +2056,62 @@ export function registerPgTools(
       // a Set lookup, not a SELECT.
       const investmentAccountIds = await getInvestmentAccountIds(userId);
 
-      const results: { index: number; success: boolean; message: string }[] = [];
+      const accountById = new Map<number, Row>();
+      for (const a of allAccounts) accountById.set(Number(a.id), a);
+      // Validate the optional top-level fallback once. If the caller passed
+      // a bad id, fail every row that would have inherited it (rather than
+      // silently routing to fuzzy `account` per row).
+      let defaultAcct: Row | null = null;
+      let defaultAcctError: string | null = null;
+      if (defaultAccountId != null) {
+        defaultAcct = accountById.get(defaultAccountId) ?? null;
+        if (!defaultAcct) defaultAcctError = `Top-level account_id #${defaultAccountId} not found or not owned by you.`;
+      }
+
+      const results: {
+        index: number;
+        success: boolean;
+        message: string;
+        resolvedAccount?: { id: number; name: string };
+        resolvedCategory?: { id: number; name: string } | null;
+        resolvedHolding?: { id: number } | null;
+        warnings?: string[];
+        dryRun?: boolean;
+        wouldBeId?: null;
+      }[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
-          const acct = fuzzyFind(t.account, allAccounts);
-          if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
+          // Resolve account: per-row id > top-level id > strict fuzzy on name.
+          let acct: Row | null = null;
+          if (t.account_id != null) {
+            acct = accountById.get(t.account_id) ?? null;
+            if (!acct) {
+              results.push({ index: i, success: false, message: `Account #${t.account_id} not found or not owned by you.` });
+              continue;
+            }
+          } else if (t.account) {
+            const r = resolveAccountStrict(t.account, allAccounts);
+            if (!r.ok) {
+              const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+              if (r.reason === "low_confidence") {
+                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-submit with account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}` });
+              } else {
+                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Available: ${list}` });
+              }
+              continue;
+            }
+            acct = r.account;
+          } else if (defaultAcct) {
+            acct = defaultAcct;
+          } else if (defaultAcctError) {
+            results.push({ index: i, success: false, message: defaultAcctError });
+            continue;
+          } else {
+            results.push({ index: i, success: false, message: "Pass either a per-row `account_id`/`account`, or a top-level `account_id`." });
+            continue;
+          }
+          const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
 
           // Resolve holding FK from either input form. Lookup-only — see
           // record_transaction comment above for the policy.
@@ -1852,17 +2119,17 @@ export function registerPgTools(
           if (t.portfolioHolding != null) {
             const r = await resolvePortfolioHoldingByName(db, userId, t.portfolioHolding, dek, Number(acct.id));
             if (!r.ok) {
-              results.push({ index: i, success: false, message: r.error });
+              results.push({ index: i, success: false, message: r.error, resolvedAccount: resolvedAccountInfo });
               continue;
             }
             if (t.portfolioHoldingId != null && t.portfolioHoldingId !== r.id) {
-              results.push({ index: i, success: false, message: `portfolioHolding "${t.portfolioHolding}" resolves to id #${r.id}, but portfolioHoldingId=${t.portfolioHoldingId} disagrees.` });
+              results.push({ index: i, success: false, message: `portfolioHolding "${t.portfolioHolding}" resolves to id #${r.id}, but portfolioHoldingId=${t.portfolioHoldingId} disagrees.`, resolvedAccount: resolvedAccountInfo });
               continue;
             }
             rowHoldingId = r.id;
           } else if (t.portfolioHoldingId != null) {
             if (!ownedHoldingIds.has(t.portfolioHoldingId)) {
-              results.push({ index: i, success: false, message: `Portfolio holding #${t.portfolioHoldingId} not found or not owned by you.` });
+              results.push({ index: i, success: false, message: `Portfolio holding #${t.portfolioHoldingId} not found or not owned by you.`, resolvedAccount: resolvedAccountInfo });
               continue;
             }
             rowHoldingId = t.portfolioHoldingId;
@@ -1876,6 +2143,7 @@ export function registerPgTools(
               index: i,
               success: false,
               message: `Account "${acct.name}" is an investment account — set portfolioHolding (e.g. the ticker, or "Cash" for a cash leg) or portfolioHoldingId on this row.`,
+              resolvedAccount: resolvedAccountInfo,
             });
             continue;
           }
@@ -1885,7 +2153,13 @@ export function registerPgTools(
             const cat = fuzzyFind(t.category, allCats);
             catId = cat ? Number(cat.id) : null;
           } else {
-            catId = await autoCategory(db, userId, t.payee, dek);
+            catId = await autoCategory(
+              db,
+              userId,
+              t.payee,
+              dek,
+              investmentAccountIds.has(Number(acct.id)),
+            );
           }
 
           const txDate = t.date ?? today;
@@ -1898,7 +2172,33 @@ export function registerPgTools(
             enteredCurrency: t.enteredCurrency,
           });
           if (!resolved.ok) {
-            results.push({ index: i, success: false, message: resolved.message });
+            results.push({ index: i, success: false, message: resolved.message, resolvedAccount: resolvedAccountInfo });
+            continue;
+          }
+
+          const rowWarnings = deriveTxWriteWarnings({
+            portfolioHoldingId: rowHoldingId,
+            amount: resolved.amount,
+            quantity: t.quantity,
+          });
+          const rowCategory = catId != null ? { id: catId, name: catNameById.get(catId) ?? "" } : null;
+          const rowHolding = rowHoldingId != null ? { id: rowHoldingId } : null;
+
+          if (dryRun) {
+            // Skip the INSERT but report the resolved triple so the caller
+            // can verify routing for every row before re-submitting without
+            // dryRun. wouldBeId is null because we don't reserve ids.
+            results.push({
+              index: i,
+              success: true,
+              dryRun: true,
+              wouldBeId: null,
+              message: `Dry run OK — would record ${t.payee}: ${resolved.amount} ${resolved.currency}`,
+              resolvedAccount: resolvedAccountInfo,
+              resolvedCategory: rowCategory,
+              resolvedHolding: rowHolding,
+              ...(rowWarnings.length ? { warnings: rowWarnings } : {}),
+            });
             continue;
           }
 
@@ -1906,19 +2206,37 @@ export function registerPgTools(
           const encNote = dek ? encryptField(dek, t.note ?? "") : (t.note ?? "");
           const encTags = dek ? encryptField(dek, t.tags ?? "") : (t.tags ?? "");
 
+          // Issue #28: stamp source explicitly. Per-row response payloads
+          // stay terse — the AI can re-fetch via search_transactions if it
+          // needs the per-row timestamps.
           await db.execute(sql`
-            INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
-            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null})
+            INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
+            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'})
           `);
-          results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}` });
+          results.push({
+            index: i,
+            success: true,
+            message: `${t.payee}: ${resolved.amount} ${resolved.currency}`,
+            resolvedAccount: resolvedAccountInfo,
+            resolvedCategory: rowCategory,
+            resolvedHolding: rowHolding,
+            ...(rowWarnings.length ? { warnings: rowWarnings } : {}),
+          });
         } catch (e) {
           results.push({ index: i, success: false, message: String(e) });
         }
       }
 
       const ok = results.filter(r => r.success).length;
-      if (ok > 0) invalidateUserTxCache(userId);
-      return text({ imported: ok, failed: results.length - ok, results });
+      // Skip cache invalidation on dry-run — no rows touched.
+      if (!dryRun && ok > 0) invalidateUserTxCache(userId);
+      return text({
+        ...(dryRun ? { dryRun: true } : {}),
+        imported: dryRun ? 0 : ok,
+        failed: results.length - ok,
+        ...(dryRun ? { previewed: ok } : {}),
+        results,
+      });
     }
   );
 
@@ -1942,7 +2260,7 @@ export function registerPgTools(
     },
     async ({ id, date, amount, payee, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
       const existing = await q(db, sql`
-        SELECT t.id, t.account_id, t.date, a.currency AS account_currency
+        SELECT t.id, t.account_id, t.date, t.amount, a.currency AS account_currency
           FROM transactions t
           LEFT JOIN accounts a ON a.id = t.account_id
          WHERE t.user_id = ${userId} AND t.id = ${id}
@@ -1950,6 +2268,7 @@ export function registerPgTools(
       if (!existing.length) return err(`Transaction #${id} not found`);
       const accountCurrency = String(existing[0].account_currency ?? "CAD");
       const txAccountId = existing[0].account_id != null ? Number(existing[0].account_id) : undefined;
+      const existingAmount = existing[0].amount != null ? Number(existing[0].amount) : null;
 
       let catId: number | undefined;
       if (category !== undefined) {
@@ -1997,9 +2316,12 @@ export function registerPgTools(
       // Apply each field as its own parameterized UPDATE. Simpler and safer
       // than a dynamic SET clause, and the per-call latency is negligible
       // (tool is called once at a time).
+      // Issue #28: every UPDATE site appends `, updated_at = NOW()`. `source`
+      // stays untouched (INSERT-only).
       let changed = 0;
+      let postMergeAmount: number | null = existingAmount;
       if (date !== undefined) {
-        await db.execute(sql`UPDATE transactions SET date = ${date} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET date = ${date}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       // Entered-side update — re-locks the FX rate at the row's (possibly
@@ -2020,47 +2342,68 @@ export function registerPgTools(
                  currency = ${resolved.currency},
                  entered_amount = ${resolved.enteredAmount},
                  entered_currency = ${resolved.enteredCurrency},
-                 entered_fx_rate = ${resolved.enteredFxRate}
+                 entered_fx_rate = ${resolved.enteredFxRate},
+                 updated_at = NOW()
            WHERE id = ${id} AND user_id = ${userId}
         `);
         changed++;
+        postMergeAmount = resolved.amount;
       } else if (amount !== undefined) {
         // Account-side-only update: leave entered_* alone.
-        await db.execute(sql`UPDATE transactions SET amount = ${amount} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET amount = ${amount}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
+        postMergeAmount = amount;
       }
       if (catId !== undefined) {
-        await db.execute(sql`UPDATE transactions SET category_id = ${catId} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET category_id = ${catId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (payee !== undefined) {
         const v = dek ? encryptField(dek, payee) : payee;
-        await db.execute(sql`UPDATE transactions SET payee = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (note !== undefined) {
         const v = dek ? encryptField(dek, note) : note;
-        await db.execute(sql`UPDATE transactions SET note = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (tags !== undefined) {
         const v = dek ? encryptField(dek, tags) : tags;
-        await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (resolvedHoldingId !== undefined) {
-        await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolvedHoldingId} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolvedHoldingId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (quantity !== undefined) {
-        await db.execute(sql`UPDATE transactions SET quantity = ${quantity} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET quantity = ${quantity}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
 
       if (!changed) return err("No fields to update");
 
       invalidateUserTxCache(userId);
-      return text({ success: true, message: `Transaction #${id} updated (${changed} field(s))` });
+      // Issue #28: re-read the audit timestamp so the AI assistant can
+      // verify the write landed and pin the freshness.
+      const after = await q(db, sql`SELECT updated_at FROM transactions WHERE id = ${id} AND user_id = ${userId} LIMIT 1`);
+      // Warn only when the user explicitly bound a holding on this update
+      // without also passing quantity. We don't nag about every cosmetic edit
+      // (e.g. date) on a previously-bound row — that would be noise.
+      const warnings = (resolvedHoldingId != null && quantity === undefined)
+        ? deriveTxWriteWarnings({
+            portfolioHoldingId: resolvedHoldingId,
+            amount: postMergeAmount,
+            quantity: null,
+          })
+        : [];
+      return text({
+        success: true,
+        message: `Transaction #${id} updated (${changed} field(s))`,
+        updatedAt: after[0]?.updated_at,
+        warnings,
+      });
     }
   );
 
@@ -2116,21 +2459,33 @@ export function registerPgTools(
       const toAcct = fuzzyFind(toAccount, allAccounts);
       if (!toAcct) return err(`Destination account "${toAccount}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
 
-      const result = await createTransferPair({
-        userId,
-        dek,
-        fromAccountId: Number(fromAcct.id),
-        toAccountId: Number(toAcct.id),
-        enteredAmount: amount,
-        date,
-        receivedAmount,
-        holdingName: holding,
-        destHoldingName: destHolding,
-        quantity,
-        destQuantity,
-        note,
-        tags,
-      });
+      let result: Awaited<ReturnType<typeof createTransferPair>>;
+      try {
+        result = await createTransferPair({
+          userId,
+          dek,
+          fromAccountId: Number(fromAcct.id),
+          toAccountId: Number(toAcct.id),
+          enteredAmount: amount,
+          date,
+          receivedAmount,
+          holdingName: holding,
+          destHoldingName: destHolding,
+          quantity,
+          destQuantity,
+          note,
+          tags,
+          // Issue #28: MCP HTTP transport.
+          txSource: "mcp_http",
+        });
+      } catch (e) {
+        // Strict-mode investment-account guard escapes via throw rather than
+        // the helper's Result shape (issue #22). Map it to a friendly tool
+        // error pointing the user at the holding parameter so they can
+        // re-call with `holding: "Cash"` (or the symbol they meant).
+        if (e instanceof InvestmentHoldingRequiredError) return err(e.message);
+        throw e;
+      }
 
       if (!result.ok) return err(result.message);
 
@@ -2165,6 +2520,212 @@ export function registerPgTools(
         message: result.isCrossCurrency
           ? `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})${inKindNote}`
           : `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name}${inKindNote}`,
+      });
+    }
+  );
+
+  // ── record_trade ───────────────────────────────────────────────────────────
+  // High-level brokerage-trade primitive built on top of record_transfer's
+  // same-account in-kind capability. Models a stock/ETF/crypto buy or sell as
+  // a paired in-kind transfer between the account's cash sleeve and the
+  // symbol holding, so the share count + cost basis flow through the
+  // portfolio aggregator unchanged. Optional fees post as a separate expense
+  // entry on the cash sleeve. Saves the agent from having to assemble the
+  // four-parameter dance (fromAccount=toAccount, holding+destHolding,
+  // quantity+destQuantity, amount=0/cashAmount) by hand.
+  server.tool(
+    "record_trade",
+    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (auto-created if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve. Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve is created in the trade currency on first use. Optional `fees` post as a separate expense transaction on the cash sleeve. Use this instead of record_transaction for trades — record_transaction loses the holding-pair link and can't move the share count + cost basis atomically.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required if `account_id` is not provided."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching. If both this and `account` are passed, this wins."),
+      side: z.enum(["buy", "sell"]).describe("'buy' (cash → symbol) or 'sell' (symbol → cash)."),
+      symbol: z.string().min(1).max(50).describe("Ticker symbol of the security being traded (e.g. 'AAPL', 'VEQT.TO', 'BTC'). Used as both the holding name and symbol when auto-creating the position."),
+      quantity: z.number().positive().describe("Share count (always positive — `side` controls the direction)."),
+      price: z.number().positive().describe("Per-share price in `currency` (defaults to account currency)."),
+      currency: z.string().optional().describe("ISO code (USD/CAD/...) of the trade — the cash sleeve and symbol holding both inherit this. Defaults to the account's currency."),
+      fees: z.number().nonnegative().optional().describe("Optional commission/fees in `currency`. Booked as a separate negative-amount cash transaction on the cash sleeve (not part of the trade pair). Defaults to 0."),
+      fxRate: z.number().positive().optional().describe("Trade-currency → account-currency rate for cross-currency trades. REQUIRED when `currency` differs from the account's currency. Ignored when currencies match (rate=1)."),
+      date: z.string().optional().describe("Trade/settlement date YYYY-MM-DD (default: today). Applied to both legs and the optional fees row."),
+      note: z.string().optional().describe("Optional note applied to both legs."),
+    },
+    async ({ account, account_id, side, symbol, quantity, price, currency, fees, fxRate, date, note }) => {
+      if (!dek) return err("Trades require an active session DEK — log in again to encrypt the rows.");
+
+      const txDate = date ?? new Date().toISOString().split("T")[0];
+      const trimmedSymbol = symbol.trim();
+      if (!trimmedSymbol) return err("symbol cannot be empty");
+
+      const rawAccounts = await q(db, sql`
+        SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+      `);
+      if (!rawAccounts.length) return err("No accounts found — create accounts first.");
+      const allAccounts = decryptNameish(rawAccounts, dek);
+      let acct: Row | null = null;
+      if (account_id != null) {
+        acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
+        if (!acct) return err(`Account #${account_id} not found or not owned by you.`);
+      } else {
+        if (!account) return err("Pass either `account_id` or `account` (name/alias).");
+        acct = fuzzyFind(account, allAccounts);
+        if (!acct) return err(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+      }
+
+      // Trades only make sense in investment accounts. Bail early so the
+      // user gets a pointed error rather than silently writing trade rows
+      // that the portfolio aggregator can't attribute (FK constraint would
+      // also refuse, but the message would be opaque).
+      const isInvestment = await isInvestmentAccountFn(userId, Number(acct.id));
+      if (!isInvestment) {
+        return err(`Account "${acct.name}" is not an investment account — toggle is_investment first or use record_transaction for non-trade entries.`);
+      }
+
+      const acctCurrency = String(acct.currency ?? "CAD").toUpperCase();
+      const tradeCurrency = (currency ?? acctCurrency).toUpperCase();
+      const isCrossCurrency = tradeCurrency !== acctCurrency;
+      let fx = 1;
+      if (isCrossCurrency) {
+        if (fxRate == null) {
+          return err(`Trade currency ${tradeCurrency} differs from account currency ${acctCurrency} — pass fxRate (${tradeCurrency}→${acctCurrency}) so the cost-basis side can be locked.`);
+        }
+        fx = fxRate;
+      }
+
+      const cashAmountTrade = Math.round(quantity * price * 100) / 100; // 2dp in trade currency
+      const cashAmountAcct = Math.round(cashAmountTrade * fx * 100) / 100;
+
+      // Find or create the cash sleeve in this account for tradeCurrency.
+      // Match: holding in (user, account) with currency=tradeCurrency AND
+      // (symbol IS NULL OR symbol = tradeCurrency). Prefer symbol IS NULL
+      // (the account's default cash sleeve when same currency) for
+      // determinism; falls back to the foreign-currency sleeve.
+      const cashName = isCrossCurrency ? `${tradeCurrency} Cash` : "Cash";
+      const cashCandidates = await q(db, sql`
+        SELECT id, name, name_ct, symbol, currency
+          FROM portfolio_holdings
+         WHERE user_id = ${userId} AND account_id = ${acct.id}
+           AND currency = ${tradeCurrency}
+           AND (symbol IS NULL OR UPPER(symbol) = ${tradeCurrency})
+         ORDER BY (symbol IS NULL) DESC, id ASC
+         LIMIT 1
+      `);
+      let cashHoldingId: number;
+      let cashHoldingName: string;
+      if (cashCandidates.length) {
+        cashHoldingId = Number(cashCandidates[0].id);
+        // Decrypt name_ct for Stream D Phase 3 NULL-plaintext rows so
+        // createTransferPair's name-based lookup hits — without this, a
+        // Phase 3 row with a non-canonical name (e.g. "WP USD Cash") would
+        // miss on both plaintext (NULL) and HMAC ("USD Cash" ≠ row).
+        const rawName = cashCandidates[0].name as string | null | undefined;
+        const ct = cashCandidates[0].name_ct as string | null | undefined;
+        const decrypted = ct ? decryptField(dek, String(ct)) : null;
+        cashHoldingName = decrypted ?? (rawName != null ? String(rawName) : cashName);
+      } else {
+        const cashSymbol = isCrossCurrency ? tradeCurrency : null;
+        const enc = encryptName(dek, cashName);
+        const symEnc = encryptName(dek, cashSymbol);
+        const ins = await q(db, sql`
+          INSERT INTO portfolio_holdings (
+            user_id, account_id, name, symbol, currency, is_crypto, note,
+            name_ct, name_lookup, symbol_ct, symbol_lookup
+          )
+          VALUES (
+            ${userId}, ${acct.id}, ${cashName}, ${cashSymbol}, ${tradeCurrency}, 0, 'auto-created for cash sleeve',
+            ${enc.ct}, ${enc.lookup}, ${symEnc.ct}, ${symEnc.lookup}
+          )
+          RETURNING id, name
+        `);
+        cashHoldingId = Number(ins[0]?.id);
+        cashHoldingName = String(ins[0]?.name ?? cashName);
+      }
+
+      // For BUY: cash sleeve is the source (must exist — done above);
+      //          symbol holding is the destination (createTransferPair
+      //          auto-creates if missing).
+      // For SELL: symbol holding is the source — MUST exist before the
+      //          transfer call. Pre-flight the lookup so the error is
+      //          actionable ("position not found") instead of the
+      //          generic createTransferPair message.
+      if (side === "sell") {
+        const symbolHolding = await resolvePortfolioHoldingByName(db, userId, trimmedSymbol, dek, Number(acct.id));
+        if (!symbolHolding.ok) return err(`Cannot sell "${trimmedSymbol}" in "${acct.name}" — no existing position. ${symbolHolding.error}`);
+      }
+
+      const tradePayee = `${side === "buy" ? "Buy" : "Sell"} ${quantity} ${trimmedSymbol} @ ${price.toFixed(2)} ${tradeCurrency}`;
+      const sourceHolding = side === "buy" ? cashHoldingName : trimmedSymbol;
+      const destHolding = side === "buy" ? trimmedSymbol : cashHoldingName;
+      const sourceQty = side === "buy" ? cashAmountTrade : quantity;
+      const destQty = side === "buy" ? quantity : cashAmountTrade;
+
+      let transferResult: Awaited<ReturnType<typeof createTransferPair>>;
+      try {
+        transferResult = await createTransferPair({
+          userId,
+          dek,
+          fromAccountId: Number(acct.id),
+          toAccountId: Number(acct.id),
+          enteredAmount: cashAmountAcct,
+          date: txDate,
+          holdingName: sourceHolding,
+          destHoldingName: destHolding,
+          quantity: sourceQty,
+          destQuantity: destQty,
+          note: note ?? tradePayee,
+          tags: "source:record_trade",
+          // Issue #28: MCP HTTP transport.
+          txSource: "mcp_http",
+        });
+      } catch (e) {
+        // record_trade always supplies sourceHolding + destHolding, so the
+        // strict-mode guard shouldn't fire here. Defensive catch in case a
+        // future refactor removes one of those — surface the same friendly
+        // tool error rather than letting the throw escape as a 500.
+        if (e instanceof InvestmentHoldingRequiredError) return err(e.message);
+        throw e;
+      }
+      if (!transferResult.ok) return err(transferResult.message);
+
+      // Optional fees: a single negative-amount transaction on the cash
+      // sleeve. Same currency as the trade; converted to account currency
+      // via the same fx rate. Plain expense (no transfer link), categorized
+      // by the user's existing rule engine on next read. Tagged so it can be
+      // tied back to the trade pair if needed.
+      let feeTxId: number | null = null;
+      const feeAmountTrade = fees != null && fees > 0 ? Math.round(fees * 100) / 100 : 0;
+      if (feeAmountTrade > 0) {
+        const feeAmountAcct = Math.round(feeAmountTrade * fx * 100) / 100;
+        const feePayee = `Trade fee — ${trimmedSymbol}`;
+        const encPayee = encryptField(dek, feePayee);
+        const encNote = encryptField(dek, "");
+        const encTags = encryptField(dek, `source:record_trade,trade-link:${transferResult.linkId}`);
+        // Issue #28: stamp source explicitly. Fee leg shares the trade's
+        // surface attribution.
+        const feeIns = await q(db, sql`
+          INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
+          VALUES (${userId}, ${txDate}, ${acct.id}, NULL, ${acctCurrency}, ${-feeAmountAcct}, ${tradeCurrency}, ${-feeAmountTrade}, ${fx}, ${encPayee}, ${encNote}, ${encTags}, ${cashHoldingId}, NULL, ${'mcp_http'})
+          RETURNING id
+        `);
+        feeTxId = Number(feeIns[0]?.id ?? 0) || null;
+      }
+
+      invalidateUserTxCache(userId);
+      return text({
+        success: true,
+        side,
+        symbol: trimmedSymbol,
+        linkId: transferResult.linkId,
+        fromTransactionId: transferResult.fromTransactionId,
+        toTransactionId: transferResult.toTransactionId,
+        cashHoldingId,
+        symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
+        cashAmount: cashAmountTrade,
+        cashAmountAccountCurrency: cashAmountAcct,
+        tradeCurrency,
+        accountCurrency: acctCurrency,
+        fxRate: fx,
+        ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
+        message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
       });
     }
   );
@@ -2558,10 +3119,13 @@ export function registerPgTools(
               // them before writing to the encrypted transaction columns.
               const encRename = rule.rename_to && dek ? encryptField(dek, String(rule.rename_to)) : rule.rename_to;
               const encTags = rule.assign_tags && dek ? encryptField(dek, String(rule.assign_tags)) : rule.assign_tags;
+              // Issue #28: rule application is a real mutation — bump
+              // updated_at like any other UPDATE. `source` stays untouched.
               await db.execute(sql`
                 UPDATE transactions SET category_id = ${rule.assign_category_id}
                 ${rule.rename_to ? sql`, payee = ${encRename}` : sql``}
                 ${rule.assign_tags ? sql`, tags = ${encTags}` : sql``}
+                , updated_at = NOW()
                 WHERE id = ${txn.id} AND user_id = ${userId}
               `);
             }
@@ -2612,6 +3176,8 @@ export function registerPgTools(
           get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
+          record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair between two accounts. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity.",
+          record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
         };
         return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
       }
@@ -2669,6 +3235,9 @@ export function registerPgTools(
             { task: "Analyze investments", call: "get_portfolio_analysis()" },
             { task: "Rebalance vs targets", call: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}])' },
             { task: "Net worth trend", call: "get_net_worth(months=12)" },
+            { task: "Buy 10 AAPL @ $150 USD in a USD brokerage", call: 'record_trade(account="Questrade USD", side="buy", symbol="AAPL", quantity=10, price=150)' },
+            { task: "Sell 5 AAPL @ $160 USD with $4.95 commission", call: 'record_trade(account="Questrade USD", side="sell", symbol="AAPL", quantity=5, price=160, fees=4.95)' },
+            { task: "Cross-currency buy: 10 AAPL @ $150 USD in a CAD account", call: 'record_trade(account="Questrade CAD", side="buy", symbol="AAPL", quantity=10, price=150, currency="USD", fxRate=1.37)' },
           ],
         });
       }
@@ -4726,25 +5295,27 @@ export function registerPgTools(
 
     // Per-field updates: keeps the SQL simple + parameterized, and lets us
     // encrypt payee / note / tags when a DEK is present.
+    // Issue #28: every UPDATE site bumps updated_at = NOW(). `source` is
+    // INSERT-only so it stays untouched.
     if (changes.category_id !== undefined) {
-      await db.execute(sql`UPDATE transactions SET category_id = ${changes.category_id} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET category_id = ${changes.category_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.account_id !== undefined) {
-      await db.execute(sql`UPDATE transactions SET account_id = ${changes.account_id} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET account_id = ${changes.account_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.date !== undefined) {
-      await db.execute(sql`UPDATE transactions SET date = ${changes.date} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET date = ${changes.date}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.is_business !== undefined) {
-      await db.execute(sql`UPDATE transactions SET is_business = ${changes.is_business} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET is_business = ${changes.is_business}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.payee !== undefined) {
       const v = dek ? encryptField(dek, changes.payee) : changes.payee;
-      await db.execute(sql`UPDATE transactions SET payee = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.note !== undefined) {
       const v = dek ? encryptField(dek, changes.note) : changes.note;
-      await db.execute(sql`UPDATE transactions SET note = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.tags !== undefined) {
       // Tag edits need per-row merging when mode != replace (because each row
@@ -4752,7 +5323,7 @@ export function registerPgTools(
       // mutate, re-encrypt, write row-by-row. For replace we can write once.
       if (changes.tags.mode === "replace") {
         const v = dek ? encryptField(dek, changes.tags.value) : changes.tags.value;
-        await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
       } else {
         const rows = await q(db, sql`SELECT id, tags FROM transactions WHERE id IN ${idList} AND user_id = ${userId}`);
         const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
@@ -4766,7 +5337,7 @@ export function registerPgTools(
           }
           const next = Array.from(set).join(",");
           const v = dek ? encryptField(dek, next) : next;
-          await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id = ${Number(r.id)} AND user_id = ${userId}`);
+          await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id = ${Number(r.id)} AND user_id = ${userId}`);
         }
       }
     }

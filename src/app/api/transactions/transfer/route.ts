@@ -23,6 +23,7 @@ import {
   deleteTransferPair,
   type TransferPairResult,
 } from "@/lib/transfer";
+import { InvestmentHoldingRequiredError } from "@/lib/investment-account";
 import { logApiError, safeErrorMessage, validateBody } from "@/lib/validate";
 
 // ─── Zod schemas ────────────────────────────────────────────────────────────
@@ -42,6 +43,13 @@ const postSchema = z.object({
   destHoldingName: z.string().min(1).optional(),
   quantity: z.number().positive().optional(),
   destQuantity: z.number().positive().optional(),
+  // Cash-leg holding pins for investment-account transfers (issue #22).
+  // When the source/destination account is is_investment=true and the user
+  // isn't doing an in-kind move, these supply the per-account Cash holding
+  // (or any other cash-sleeve row) so the strict-mode constraint is met
+  // without forcing the user through the in-kind path.
+  fromHoldingId: z.number().int().positive().optional(),
+  toHoldingId: z.number().int().positive().optional(),
   note: z.string().optional(),
   tags: z.string().optional(),
 });
@@ -131,13 +139,23 @@ export async function POST(request: NextRequest) {
       destHoldingName: data.destHoldingName,
       quantity: data.quantity,
       destQuantity: data.destQuantity,
+      fromHoldingId: data.fromHoldingId,
+      toHoldingId: data.toHoldingId,
       note: data.note,
       tags: data.tags,
+      // Issue #28: hard-code the writer surface at the route boundary.
+      txSource: "manual",
     });
 
     if (!result.ok) return errorResponse(result);
     return NextResponse.json(result, { status: 201 });
   } catch (error: unknown) {
+    if (error instanceof InvestmentHoldingRequiredError) {
+      return NextResponse.json(
+        { error: error.message, code: error.code, accountId: error.accountId },
+        { status: 400 },
+      );
+    }
     await logApiError("POST", "/api/transactions/transfer", error, auth.userId);
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to create transfer") },
@@ -176,6 +194,12 @@ export async function PUT(request: NextRequest) {
     if (!result.ok) return errorResponse(result);
     return NextResponse.json(result);
   } catch (error: unknown) {
+    if (error instanceof InvestmentHoldingRequiredError) {
+      return NextResponse.json(
+        { error: error.message, code: error.code, accountId: error.accountId },
+        { status: 400 },
+      );
+    }
     await logApiError("PUT", "/api/transactions/transfer", error, auth.userId);
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to update transfer") },
