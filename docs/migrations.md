@@ -263,3 +263,13 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf \
 ```
 
 Inspect the SELECT preview and the encrypted-skip count, then uncomment `COMMIT;` at the bottom of the script. Idempotent on re-runs (won't double-tag rows that already contain `source:`).
+
+## holding-accounts (2026-04-30)
+
+Adds the `holding_accounts(holding_id, account_id, user_id, qty, cost_basis, is_primary, created_at)` join table — many-to-many between `portfolio_holdings` and `accounts`. Issue [#26](https://github.com/finlynq/finlynq/pull/26) (Section G). The legacy one-to-many `portfolio_holdings.account_id` column stays in place during the issue [#25](https://github.com/finlynq/finlynq/pull/25) (Section F) consumer migration; the row here whose `is_primary=true` mirrors it. Backfills from the existing single-account state — qty + cost_basis are derived from `transactions` (`SUM(quantity)` and `SUM(ABS(amount)) WHERE quantity>0`) so re-running on a fresh env produces the same numbers the aggregator computes today. Idempotent (`CREATE TABLE IF NOT EXISTS`, `ON CONFLICT DO NOTHING`). No DEK required — only ids + numbers, no encrypted columns. Run BEFORE deploying the matching code.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-holding-accounts.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-holding-accounts.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-holding-accounts.sql
+```
