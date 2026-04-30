@@ -84,6 +84,26 @@ type EnrichedHolding = {
   pctOfPortfolio: number | null;
 };
 
+type ByHoldingRow = {
+  key: string;
+  symbol: string | null;
+  name: string;
+  assetType: AssetType;
+  totalQty: number;
+  avgCostDisplay: number | null;
+  costBasisDisplay: number;
+  marketValueDisplay: number;
+  unrealizedGainDisplay: number;
+  unrealizedGainPct: number | null;
+  realizedGainDisplay: number;
+  dividendsDisplay: number;
+  totalReturnDisplay: number;
+  totalReturnPct: number | null;
+  pctOfPortfolio: number | null;
+  accountCount: number;
+  image: string | null;
+};
+
 type AggregatedStock = {
   ticker: string;
   name: string;
@@ -106,6 +126,7 @@ type EtfDetail = {
 
 type OverviewData = {
   holdings: EnrichedHolding[];
+  byHolding?: ByHoldingRow[];
   // Currency the API used for FX conversion + summary totals.
   // marketValueDisplay field on each holding is denominated in this — the
   // legacy "CAD" suffix on the field name is misleading, the value
@@ -267,6 +288,33 @@ function exportHoldingsToCSV(holdings: EnrichedHolding[], totalValueDisplay: num
 
   const csv = [header.join(","), ...rows.map(r => (r as (string | number | null)[]).join(","))].join("\n");
   downloadCSV(csv, `portfolio-holdings-${new Date().toISOString().slice(0, 10)}.csv`);
+}
+
+function exportByHoldingToCSV(rows: ByHoldingRow[], displayCurrency: string) {
+  const header = ["#", "Holding", "Symbol", "Type", "Total Qty", `Avg Cost ${displayCurrency}`, `Cost Basis ${displayCurrency}`, `Mkt Value ${displayCurrency}`, "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "Accounts", "Weight %"];
+  const out = rows.map((r, i) => [
+    i + 1,
+    `"${r.name}"`,
+    r.symbol ?? "",
+    r.assetType,
+    r.totalQty,
+    r.avgCostDisplay?.toFixed(4) ?? "",
+    r.costBasisDisplay.toFixed(2),
+    r.marketValueDisplay.toFixed(2),
+    r.unrealizedGainDisplay.toFixed(2),
+    r.unrealizedGainPct?.toFixed(2) ?? "",
+    r.realizedGainDisplay.toFixed(2),
+    r.dividendsDisplay.toFixed(2),
+    r.totalReturnDisplay.toFixed(2),
+    r.totalReturnPct?.toFixed(2) ?? "",
+    r.accountCount,
+    r.pctOfPortfolio?.toFixed(2) ?? "",
+  ]);
+  const totalMV = rows.reduce((s, r) => s + r.marketValueDisplay, 0);
+  const totalUnreal = rows.reduce((s, r) => s + r.unrealizedGainDisplay, 0);
+  out.push(["", "TOTAL", "", "", "", "", "", totalMV.toFixed(2), totalUnreal.toFixed(2), "", "", "", "", "", "", "100.00"] as unknown as string[]);
+  const csv = [header.join(","), ...out.map(r => (r as (string | number | null)[]).join(","))].join("\n");
+  downloadCSV(csv, `portfolio-by-holding-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
 // ── Skeleton ────────────────────────────────────────────────────────
@@ -1469,6 +1517,112 @@ export default function PortfolioPage() {
         </CardContent>
       </Card>}
 
+      {/* ── By Holding (Section F / issue #25) ─────────────────────
+          Pools the same canonical position across every account that holds
+          it. Key = uppercased symbol for tickered rows, currency for cash
+          sleeves, metal symbol for XAU/XAG/etc. User-edited free-text
+          names still fragment until the canonical-name backfill helper
+          ships (deferred follow-up). */}
+      {data.byHolding && data.byHolding.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Briefcase className="h-4 w-4 text-indigo-500" />
+                  <CardTitle className="text-base">By Holding</CardTitle>
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Same position pooled across {data.summary.totalAccounts} account{data.summary.totalAccounts !== 1 ? "s" : ""}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-xs gap-1.5 h-7"
+                onClick={() => exportByHoldingToCSV(data.byHolding!, displayCurrency)}
+              >
+                <Download className="h-3 w-3" />
+                CSV
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Holding</TableHead>
+                    <TableHead className="text-right">Total Qty</TableHead>
+                    <TableHead className="text-right">Avg Cost</TableHead>
+                    <TableHead className="text-right">Mkt Value</TableHead>
+                    <TableHead className="text-right">Unrealized G/L</TableHead>
+                    <TableHead className="text-right">Realized G/L</TableHead>
+                    <TableHead className="text-right">Accounts</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {data.byHolding.map(r => {
+                    const typeConf = ASSET_TYPE_CONFIG[r.assetType];
+                    return (
+                      <TableRow key={r.key} className="hover:bg-muted/30 transition-colors">
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            {r.image && <img src={r.image} alt="" className="h-5 w-5 rounded-full" />}
+                            <div>
+                              <span className="font-medium text-sm">{r.name}</span>
+                              <div className="flex items-center gap-1 mt-0.5">
+                                {r.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{r.symbol}</Badge>}
+                                <Badge variant="outline" className="text-[10px] h-4 px-1" style={{ borderColor: typeConf?.color, color: typeConf?.color }}>
+                                  {typeConf?.label ?? r.assetType}
+                                </Badge>
+                              </div>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {r.totalQty !== 0
+                            ? r.totalQty.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: r.totalQty % 1 === 0 ? 0 : 4 })
+                            : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {r.avgCostDisplay != null ? formatCurrency(r.avgCostDisplay, displayCurrency) : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm font-medium">
+                          {r.marketValueDisplay !== 0 ? formatCurrency(r.marketValueDisplay, displayCurrency) : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div>
+                            <p className={`text-sm font-mono font-medium ${r.unrealizedGainDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                              {r.unrealizedGainDisplay >= 0 ? "+" : ""}{formatCurrency(r.unrealizedGainDisplay, displayCurrency)}
+                            </p>
+                            {r.unrealizedGainPct != null && (
+                              <p className={`text-xs font-mono ${r.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                {r.unrealizedGainPct >= 0 ? "+" : ""}{r.unrealizedGainPct.toFixed(2)}%
+                              </p>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          <span className={`${r.realizedGainDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                            {r.realizedGainDisplay !== 0 ? `${r.realizedGainDisplay >= 0 ? "+" : ""}${formatCurrency(r.realizedGainDisplay, displayCurrency)}` : <span className="text-muted-foreground text-xs">--</span>}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Badge variant="outline" className="text-[10px]">
+                            {r.accountCount}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* ── Holdings by Account (Collapsible) ─────────────────── */}
       <Card>
         <CardHeader className="pb-2">
@@ -1485,6 +1639,20 @@ export default function PortfolioPage() {
             const stocks = items.filter(h => h.assetType === "stock").length;
             const cryptos = items.filter(h => h.assetType === "crypto").length;
             const cash = items.filter(h => h.assetType === "cash").length;
+            // Inline aggregate stats per account — sum the per-holding
+            // *Display fields the API already emits in displayCurrency.
+            const acctMktValue = items.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
+            const acctUnrealized = items.reduce((s, h) => s + (h.unrealizedGainDisplay ?? 0), 0);
+            // Realized + dividends are emitted in each holding's quote ccy,
+            // not display ccy — fold via marketValue/marketValueDisplay
+            // ratio (the same "implied FX" the per-row toolbar mode uses).
+            const acctRealized = items.reduce((s, h) => {
+              if (h.realizedGain == null) return s;
+              const conv = (h.marketValue && h.marketValueDisplay && h.marketValue !== 0)
+                ? h.marketValueDisplay / h.marketValue
+                : 1;
+              return s + h.realizedGain * conv;
+            }, 0);
 
             return (
               <div key={accountName} className="border rounded-lg overflow-hidden">
@@ -1492,9 +1660,9 @@ export default function PortfolioPage() {
                   className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/30 transition-colors text-left"
                   onClick={() => toggleAccount(accountName)}
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="font-medium text-sm">{accountName}</span>
-                    <Badge variant="outline" className="text-[10px]">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="font-medium text-sm truncate">{accountName}</span>
+                    <Badge variant="outline" className="text-[10px] flex-shrink-0">
                       {items.length} holding{items.length !== 1 ? "s" : ""}
                     </Badge>
                     <div className="hidden sm:flex items-center gap-1.5">
@@ -1504,7 +1672,27 @@ export default function PortfolioPage() {
                       {cash > 0 && <Badge variant="secondary" className="text-[10px] h-4" style={{ borderColor: ASSET_TYPE_CONFIG.cash.color, color: ASSET_TYPE_CONFIG.cash.color }}>{cash} Cash</Badge>}
                     </div>
                   </div>
-                  {isExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+                  <div className="flex items-center gap-4">
+                    <div className="hidden md:flex items-center gap-3 text-xs">
+                      <div className="text-right">
+                        <p className="text-muted-foreground text-[10px]">Mkt Value</p>
+                        <p className="font-mono font-medium">{formatCurrency(acctMktValue, displayCurrency)}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-muted-foreground text-[10px]">Unrealized</p>
+                        <p className={`font-mono font-medium ${acctUnrealized >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                          {acctUnrealized >= 0 ? "+" : ""}{formatCurrency(acctUnrealized, displayCurrency)}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-muted-foreground text-[10px]">Realized</p>
+                        <p className={`font-mono font-medium ${acctRealized >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                          {acctRealized !== 0 ? `${acctRealized >= 0 ? "+" : ""}${formatCurrency(acctRealized, displayCurrency)}` : "--"}
+                        </p>
+                      </div>
+                    </div>
+                    {isExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground flex-shrink-0" /> : <ChevronDown className="h-4 w-4 text-muted-foreground flex-shrink-0" />}
+                  </div>
                 </button>
                 <AnimatePresence>
                   {isExpanded && (
@@ -1526,6 +1714,7 @@ export default function PortfolioPage() {
                               <TableHead className="text-right">Mkt Value</TableHead>
                               <TableHead className="text-right">Unrealized G/L</TableHead>
                               <TableHead className="text-right">Day Chg</TableHead>
+                              <TableHead className="text-right" />
                             </TableRow>
                           </TableHeader>
                           <TableBody>
@@ -1557,7 +1746,7 @@ export default function PortfolioPage() {
                                   </TableCell>
                                   <TableCell className="text-right font-mono text-sm font-medium">
                                     {hasMetrics && h.marketValueDisplay != null
-                                      ? formatCurrency(h.marketValueDisplay, "CAD")
+                                      ? formatCurrency(h.marketValueDisplay, displayCurrency)
                                       : <span className="text-muted-foreground text-xs">--</span>}
                                   </TableCell>
                                   <TableCell className="text-right">
@@ -1576,6 +1765,16 @@ export default function PortfolioPage() {
                                   </TableCell>
                                   <TableCell className="text-right">
                                     <ChangeBadge value={h.changePct} />
+                                  </TableCell>
+                                  <TableCell className="text-right">
+                                    <Link
+                                      href={`/transactions?portfolioHolding=${encodeURIComponent(h.name)}${h.accountId ? `&accountId=${h.accountId}` : ""}`}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="text-[11px] text-primary hover:underline whitespace-nowrap"
+                                      title="View transactions for this holding in this account"
+                                    >
+                                      View txns →
+                                    </Link>
                                   </TableCell>
                                 </TableRow>
                               );
