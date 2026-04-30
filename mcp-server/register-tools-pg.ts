@@ -112,6 +112,69 @@ function fuzzyFind(input: string, options: Row[]): Row | null {
 }
 
 /**
+ * Strict resolver for write operations: same waterfall as `fuzzyFind`, but
+ * substring/reverse-substring hits are only accepted when the input and the
+ * candidate share a whitespace-separated token of length ≥3. Otherwise the
+ * substring fallback would silently route writes to a vaguely-similar account
+ * (e.g. typo-induced "Visra Card" → "Visa Card" via reverse-includes is fine,
+ * but "ar" → "Mortgage" via includes is not). Reads still use plain `fuzzyFind`
+ * — wrong filters are recoverable, wrong writes aren't.
+ *
+ * Returns:
+ *   { ok: true, account, tier }                  — caller can write safely
+ *   { ok: false, reason: "missing" }             — no candidate at all
+ *   { ok: false, reason: "low_confidence",
+ *     suggestion }                                — fuzzyFind would have matched
+ *                                                   `suggestion`, but token-overlap
+ *                                                   guard rejected it
+ */
+type AccountResolveTier = "exact" | "alias" | "startsWith" | "substring";
+type AccountResolveResult =
+  | { ok: true; account: Row; tier: AccountResolveTier }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: Row };
+function resolveAccountStrict(input: string, options: Row[]): AccountResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exact) return { ok: true, account: exact, tier: "exact" };
+  const alias = options.find(o => String(o.alias ?? "").toLowerCase() === lo);
+  if (alias) return { ok: true, account: alias, tier: "alias" };
+  const starts = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (starts) return { ok: true, account: starts, tier: "startsWith" };
+  // Substring/reverse-substring tier — gate on token overlap.
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (name: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, account: sub, tier: "substring" };
+  // No strong match. Surface what fuzzyFind WOULD have picked so the caller
+  // can include it in the error message ("did you mean …?").
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
+/**
  * Stream D: decrypt name + alias + symbol columns on a row set before
  * handing them to {@link fuzzyFind} or display code. Pre-Phase-3, rows may
  * have plaintext populated and `name_ct` null — in that case plaintext
@@ -539,7 +602,7 @@ export function registerPgTools(
   // ── search_transactions ────────────────────────────────────────────────────
   server.tool(
     "search_transactions",
-    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. Each row carries both entered (user-typed) and account (settlement) amounts; pass reportingCurrency to also include a converted reporting amount per row.",
+    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. Each row carries both entered (user-typed) and account (settlement) amounts; pass reportingCurrency to also include a converted reporting amount per row. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly.",
     {
       payee: z.string().optional().describe("Partial payee/merchant name match"),
       min_amount: z.number().optional().describe("Minimum amount"),
@@ -548,11 +611,12 @@ export function registerPgTools(
       end_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
       category: z.string().optional().describe("Category name (exact)"),
       tags: z.string().optional().describe("Tag to search for (partial match)"),
+      account_id: z.number().int().optional().describe("Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses)."),
       portfolio_holding_id: z.number().int().optional().describe("Filter to transactions bound to this portfolio_holdings.id (FK fast-path; cheaper than substring search)"),
       limit: z.number().optional().describe("Max results (default 50)"),
       reportingCurrency: z.string().optional().describe("ISO code; if set, each row gets a reportingAmount converted to this currency. Defaults to user's display currency."),
     },
-    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, portfolio_holding_id, limit, reportingCurrency }) => {
+    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, portfolio_holding_id, limit, reportingCurrency }) => {
       const lim = limit ?? 50;
       // Push amount/date/category to SQL; payee/tags filter must happen in memory
       // after decryption when the data is encrypted. Fetch a larger window then
@@ -575,6 +639,7 @@ export function registerPgTools(
           ${max_amount !== undefined ? sql`AND t.amount <= ${max_amount}` : sql``}
           ${start_date ? sql`AND t.date >= ${start_date}` : sql``}
           ${end_date ? sql`AND t.date <= ${end_date}` : sql``}
+          ${account_id !== undefined ? sql`AND t.account_id = ${account_id}` : sql``}
           ${portfolio_holding_id !== undefined ? sql`AND t.portfolio_holding_id = ${portfolio_holding_id}` : sql``}
           ${category
             ? categoryLookup
@@ -1702,11 +1767,12 @@ export function registerPgTools(
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Account is required — ask the user which account to use if not specified; never guess. Category auto-detected from payee rules/history when omitted. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only.",
+    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
       payee: z.string().describe("Payee or merchant name"),
-      account: z.string().describe("Account name or alias (required — ask the user which account if unclear; fuzzy matched against name, exact match on alias)"),
+      account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known — e.g. resolved from a prior `get_account_balances` or `search_transactions` call. If both this and `account` are passed, this wins."),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional().describe("Optional note"),
@@ -1717,7 +1783,7 @@ export function registerPgTools(
       enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided."),
       enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted."),
     },
-    async ({ amount, payee, date, account, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
+    async ({ amount, payee, date, account, account_id, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
@@ -1726,8 +1792,22 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create an account first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const acct: Row | null = fuzzyFind(account, allAccounts);
-      if (!acct) return err(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+      let acct: Row | null = null;
+      if (account_id != null) {
+        acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
+        if (!acct) return err(`Account #${account_id} not found or not owned by you.`);
+      } else {
+        if (!account) return err("Pass either `account_id` or `account` (name/alias).");
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+          }
+          return err(`Account "${account}" not found. Available: ${list}`);
+        }
+        acct = resolved.account;
+      }
 
       // Resolve category (fuzzy or auto)
       let catId: number | null = null;
@@ -1802,6 +1882,7 @@ export function registerPgTools(
       return text({
         success: true,
         transactionId: result[0]?.id,
+        resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
         message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
       });
     }
@@ -1810,12 +1891,14 @@ export function registerPgTools(
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Each transaction must specify an account — ask the user if unclear; never guess. Category auto-detected when omitted. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately.",
     {
+      account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
-        account: z.string().describe("Account name or alias (required — fuzzy matched against name, exact match on alias)"),
+        account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id`. Required if neither row-level `account_id` nor top-level `account_id` is set; rejected for low-confidence fuzzy matches."),
+        account_id: z.number().int().optional().describe("Per-row account FK (accounts.id). Skips fuzzy matching; routes to the exact account. Wins over both `account` and the top-level `account_id`."),
         date: z.string().optional(),
         category: z.string().optional(),
         note: z.string().optional(),
@@ -1827,9 +1910,10 @@ export function registerPgTools(
         enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
       })).describe("Array of transactions to record"),
     },
-    async ({ transactions }) => {
+    async ({ transactions, account_id: defaultAccountId }) => {
       const today = new Date().toISOString().split("T")[0];
-      const allAccounts = await q(db, sql`SELECT id, name, alias, currency FROM accounts WHERE user_id = ${userId}`);
+      const rawAccounts = await q(db, sql`SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
+      const allAccounts = decryptNameish(rawAccounts, dek);
       const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
       // Cache user-owned holding ids in one SELECT instead of one ownership
       // check per row.
@@ -1839,12 +1923,52 @@ export function registerPgTools(
       // a Set lookup, not a SELECT.
       const investmentAccountIds = await getInvestmentAccountIds(userId);
 
-      const results: { index: number; success: boolean; message: string }[] = [];
+      const accountById = new Map<number, Row>();
+      for (const a of allAccounts) accountById.set(Number(a.id), a);
+      // Validate the optional top-level fallback once. If the caller passed
+      // a bad id, fail every row that would have inherited it (rather than
+      // silently routing to fuzzy `account` per row).
+      let defaultAcct: Row | null = null;
+      let defaultAcctError: string | null = null;
+      if (defaultAccountId != null) {
+        defaultAcct = accountById.get(defaultAccountId) ?? null;
+        if (!defaultAcct) defaultAcctError = `Top-level account_id #${defaultAccountId} not found or not owned by you.`;
+      }
+
+      const results: { index: number; success: boolean; message: string; resolvedAccount?: { id: number; name: string } }[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
-          const acct = fuzzyFind(t.account, allAccounts);
-          if (!acct) { results.push({ index: i, success: false, message: `Account not found: "${t.account}"` }); continue; }
+          // Resolve account: per-row id > top-level id > strict fuzzy on name.
+          let acct: Row | null = null;
+          if (t.account_id != null) {
+            acct = accountById.get(t.account_id) ?? null;
+            if (!acct) {
+              results.push({ index: i, success: false, message: `Account #${t.account_id} not found or not owned by you.` });
+              continue;
+            }
+          } else if (t.account) {
+            const r = resolveAccountStrict(t.account, allAccounts);
+            if (!r.ok) {
+              const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+              if (r.reason === "low_confidence") {
+                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-submit with account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}` });
+              } else {
+                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Available: ${list}` });
+              }
+              continue;
+            }
+            acct = r.account;
+          } else if (defaultAcct) {
+            acct = defaultAcct;
+          } else if (defaultAcctError) {
+            results.push({ index: i, success: false, message: defaultAcctError });
+            continue;
+          } else {
+            results.push({ index: i, success: false, message: "Pass either a per-row `account_id`/`account`, or a top-level `account_id`." });
+            continue;
+          }
+          const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
 
           // Resolve holding FK from either input form. Lookup-only — see
           // record_transaction comment above for the policy.
@@ -1852,17 +1976,17 @@ export function registerPgTools(
           if (t.portfolioHolding != null) {
             const r = await resolvePortfolioHoldingByName(db, userId, t.portfolioHolding, dek, Number(acct.id));
             if (!r.ok) {
-              results.push({ index: i, success: false, message: r.error });
+              results.push({ index: i, success: false, message: r.error, resolvedAccount: resolvedAccountInfo });
               continue;
             }
             if (t.portfolioHoldingId != null && t.portfolioHoldingId !== r.id) {
-              results.push({ index: i, success: false, message: `portfolioHolding "${t.portfolioHolding}" resolves to id #${r.id}, but portfolioHoldingId=${t.portfolioHoldingId} disagrees.` });
+              results.push({ index: i, success: false, message: `portfolioHolding "${t.portfolioHolding}" resolves to id #${r.id}, but portfolioHoldingId=${t.portfolioHoldingId} disagrees.`, resolvedAccount: resolvedAccountInfo });
               continue;
             }
             rowHoldingId = r.id;
           } else if (t.portfolioHoldingId != null) {
             if (!ownedHoldingIds.has(t.portfolioHoldingId)) {
-              results.push({ index: i, success: false, message: `Portfolio holding #${t.portfolioHoldingId} not found or not owned by you.` });
+              results.push({ index: i, success: false, message: `Portfolio holding #${t.portfolioHoldingId} not found or not owned by you.`, resolvedAccount: resolvedAccountInfo });
               continue;
             }
             rowHoldingId = t.portfolioHoldingId;
@@ -1876,6 +2000,7 @@ export function registerPgTools(
               index: i,
               success: false,
               message: `Account "${acct.name}" is an investment account — set portfolioHolding (e.g. the ticker, or "Cash" for a cash leg) or portfolioHoldingId on this row.`,
+              resolvedAccount: resolvedAccountInfo,
             });
             continue;
           }
@@ -1898,7 +2023,7 @@ export function registerPgTools(
             enteredCurrency: t.enteredCurrency,
           });
           if (!resolved.ok) {
-            results.push({ index: i, success: false, message: resolved.message });
+            results.push({ index: i, success: false, message: resolved.message, resolvedAccount: resolvedAccountInfo });
             continue;
           }
 
@@ -1910,7 +2035,7 @@ export function registerPgTools(
             INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
             VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null})
           `);
-          results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}` });
+          results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}`, resolvedAccount: resolvedAccountInfo });
         } catch (e) {
           results.push({ index: i, success: false, message: String(e) });
         }
