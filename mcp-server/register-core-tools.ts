@@ -1019,6 +1019,160 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     }
   );
 
+  // ── record_trade ───────────────────────────────────────────────────────────
+  // Mirror of the HTTP MCP tool. Stdio writes are plaintext (no DEK in this
+  // transport — see CLAUDE.md "Stdio MCP writes are plaintext"), so the cash
+  // sleeve / symbol holding insert paths skip the *_ct columns and rely on
+  // the next-login Stream D backfill to fill them in.
+  server.tool(
+    "record_trade",
+    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (auto-created if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve. Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve is created in the trade currency on first use. Optional `fees` post as a separate negative cash transaction on the cash sleeve.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Required if `account_id` is not provided."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching."),
+      side: z.enum(["buy", "sell"]).describe("'buy' (cash → symbol) or 'sell' (symbol → cash)."),
+      symbol: z.string().min(1).max(50).describe("Ticker symbol of the security being traded."),
+      quantity: z.number().positive().describe("Share count (always positive)."),
+      price: z.number().positive().describe("Per-share price in `currency`."),
+      currency: z.string().optional().describe("ISO code (USD/CAD/...) of the trade. Defaults to account currency."),
+      fees: z.number().nonnegative().optional().describe("Optional commission/fees in `currency`. Booked as a separate negative-amount cash transaction."),
+      fxRate: z.number().positive().optional().describe("Trade-currency → account-currency rate. REQUIRED when currency differs from account currency."),
+      date: z.string().optional().describe("Trade/settlement date YYYY-MM-DD (default: today)."),
+      note: z.string().optional(),
+    },
+    async ({ account, account_id, side, symbol, quantity, price, currency, fees, fxRate, date, note }) => {
+      const txDate = date ?? new Date().toISOString().split("T")[0];
+      const trimmedSymbol = symbol.trim();
+      if (!trimmedSymbol) return sqliteErr("symbol cannot be empty");
+
+      const allAccounts = await sqlite.prepare(
+        `SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`
+      ).all(userId) as SqliteRow[];
+      if (!allAccounts.length) return sqliteErr("No accounts found — create accounts first.");
+      let acct: SqliteRow | null = null;
+      if (account_id != null) {
+        acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
+        if (!acct) return sqliteErr(`Account #${account_id} not found or not owned by you.`);
+      } else {
+        if (!account) return sqliteErr("Pass either `account_id` or `account` (name/alias).");
+        acct = fuzzyFind(account, allAccounts);
+        if (!acct) return sqliteErr(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+      }
+
+      if (!acct.is_investment) {
+        return sqliteErr(`Account "${acct.name}" is not an investment account — toggle is_investment first or use record_transaction for non-trade entries.`);
+      }
+
+      const acctCurrency = String(acct.currency ?? "CAD").toUpperCase();
+      const tradeCurrency = (currency ?? acctCurrency).toUpperCase();
+      const isCrossCurrency = tradeCurrency !== acctCurrency;
+      let fx = 1;
+      if (isCrossCurrency) {
+        if (fxRate == null) {
+          return sqliteErr(`Trade currency ${tradeCurrency} differs from account currency ${acctCurrency} — pass fxRate (${tradeCurrency}→${acctCurrency}) so the cost-basis side can be locked.`);
+        }
+        fx = fxRate;
+      }
+
+      const cashAmountTrade = Math.round(quantity * price * 100) / 100;
+      const cashAmountAcct = Math.round(cashAmountTrade * fx * 100) / 100;
+
+      // Find or create the cash sleeve in tradeCurrency. Stdio runs dek-less,
+      // so name_ct / name_lookup stay NULL (filled by next-login backfill).
+      const cashName = isCrossCurrency ? `${tradeCurrency} Cash` : "Cash";
+      const cashCandidate = await sqlite.prepare(
+        `SELECT id, name FROM portfolio_holdings
+          WHERE user_id = ? AND account_id = ? AND currency = ?
+            AND (symbol IS NULL OR UPPER(symbol) = ?)
+          ORDER BY (symbol IS NULL) DESC, id ASC
+          LIMIT 1`
+      ).get(userId, acct.id, tradeCurrency, tradeCurrency) as { id: number; name: string } | undefined;
+      let cashHoldingId: number;
+      let cashHoldingName: string;
+      if (cashCandidate) {
+        cashHoldingId = Number(cashCandidate.id);
+        cashHoldingName = String(cashCandidate.name ?? cashName);
+      } else {
+        const cashSymbol = isCrossCurrency ? tradeCurrency : null;
+        const ins = await sqlite.prepare(
+          `INSERT INTO portfolio_holdings (user_id, account_id, name, symbol, currency, is_crypto, note)
+           VALUES (?, ?, ?, ?, ?, 0, 'auto-created for cash sleeve')
+           RETURNING id, name`
+        ).get(userId, acct.id, cashName, cashSymbol, tradeCurrency) as { id: number; name: string } | undefined;
+        cashHoldingId = Number(ins?.id);
+        cashHoldingName = String(ins?.name ?? cashName);
+      }
+
+      // For SELL the symbol holding must already exist — pre-flight rather
+      // than relying on the createTransferPair message.
+      if (side === "sell") {
+        const sym = await sqlite.prepare(
+          `SELECT id FROM portfolio_holdings
+            WHERE user_id = ? AND account_id = ?
+              AND (LOWER(name) = LOWER(?) OR LOWER(symbol) = LOWER(?))
+            LIMIT 1`
+        ).get(userId, acct.id, trimmedSymbol, trimmedSymbol);
+        if (!sym) return sqliteErr(`Cannot sell "${trimmedSymbol}" in "${acct.name}" — no existing position. Use add_portfolio_holding first if you need to record an opening position.`);
+      }
+
+      const tradePayee = `${side === "buy" ? "Buy" : "Sell"} ${quantity} ${trimmedSymbol} @ ${price.toFixed(2)} ${tradeCurrency}`;
+      const sourceHolding = side === "buy" ? cashHoldingName : trimmedSymbol;
+      const destHolding = side === "buy" ? trimmedSymbol : cashHoldingName;
+      const sourceQty = side === "buy" ? cashAmountTrade : quantity;
+      const destQty = side === "buy" ? quantity : cashAmountTrade;
+
+      const { createTransferPairViaSql } = await import("../src/lib/transfer.js");
+      const transferResult = await createTransferPairViaSql(sqlite.pool, userId, null, {
+        fromAccountId: Number(acct.id),
+        toAccountId: Number(acct.id),
+        enteredAmount: cashAmountAcct,
+        date: txDate,
+        holdingName: sourceHolding,
+        destHoldingName: destHolding,
+        quantity: sourceQty,
+        destQuantity: destQty,
+        note: note ?? tradePayee,
+        tags: "source:record_trade",
+      });
+      if (!transferResult.ok) return sqliteErr(transferResult.message);
+
+      let feeTxId: number | null = null;
+      const feeAmountTrade = fees != null && fees > 0 ? Math.round(fees * 100) / 100 : 0;
+      if (feeAmountTrade > 0) {
+        const feeAmountAcct = Math.round(feeAmountTrade * fx * 100) / 100;
+        const feePayee = `Trade fee — ${trimmedSymbol}`;
+        const feeIns = await sqlite.prepare(
+          `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, '', ?, ?, NULL)
+           RETURNING id`
+        ).get(
+          userId, txDate, acct.id, acctCurrency,
+          -feeAmountAcct, tradeCurrency, -feeAmountTrade, fx,
+          feePayee, `source:record_trade,trade-link:${transferResult.linkId}`, cashHoldingId,
+        ) as { id: number } | undefined;
+        feeTxId = feeIns?.id ?? null;
+      }
+
+      return txt({
+        success: true,
+        side,
+        symbol: trimmedSymbol,
+        linkId: transferResult.linkId,
+        fromTransactionId: transferResult.fromTransactionId,
+        toTransactionId: transferResult.toTransactionId,
+        cashHoldingId,
+        symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
+        cashAmount: cashAmountTrade,
+        cashAmountAccountCurrency: cashAmountAcct,
+        tradeCurrency,
+        accountCurrency: acctCurrency,
+        fxRate: fx,
+        ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
+        message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
+      });
+    }
+  );
+
   // ── update_transfer ────────────────────────────────────────────────────────
   server.tool(
     "update_transfer",
@@ -1783,6 +1937,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?)",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark'",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
+          record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair. In-kind: holding+quantity.",
+          record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Cross-currency requires fxRate.",
         };
         return txt({ tool: tool_name, usage: docs[tool_name] ?? "Use topic='tools' for full list." });
       }
