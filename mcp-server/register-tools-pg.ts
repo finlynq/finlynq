@@ -1846,7 +1846,7 @@ export function registerPgTools(
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only.",
+    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns, so callers can preview routing before committing.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
       payee: z.string().describe("Payee or merchant name"),
@@ -1861,8 +1861,9 @@ export function registerPgTools(
       quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move. ALWAYS pair with portfolioHolding or portfolioHoldingId — a quantity on an unbound row is invisible to the portfolio aggregator."),
       enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided."),
       enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted."),
+      dryRun: z.boolean().optional().describe("When true, run the full validation/resolution pipeline (account, holding, FX, category) and return a preview WITHOUT writing to the DB. Response carries `dryRun: true`, `wouldBeId: null`, plus the resolved* fields. Use this to confirm routing before committing — especially when fuzzy account/category matching might surprise you."),
     },
-    async ({ amount, payee, date, account, account_id, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
+    async ({ amount, payee, date, account, account_id, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, dryRun }) => {
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
@@ -1945,6 +1946,40 @@ export function registerPgTools(
       });
       if (!resolved.ok) return err(resolved.message);
 
+      // Look up the resolved category name once — used by both the dry-run
+      // preview and the success message.
+      const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
+      const warnings = deriveTxWriteWarnings({
+        portfolioHoldingId: resolvedHoldingId,
+        amount: resolved.amount,
+        quantity,
+      });
+      const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
+      const resolvedCategory = catId ? { id: catId, name: String(catName ?? "") } : null;
+      const resolvedHolding = resolvedHoldingId != null ? { id: resolvedHoldingId } : null;
+
+      if (dryRun) {
+        // Validation + resolution complete; no DB write, no cache invalidation.
+        // Shape mirrors the success path so callers can swap `dryRun: true`
+        // out and get the same fields back.
+        return text({
+          success: true,
+          dryRun: true,
+          wouldBeId: null,
+          resolvedAccount: resolvedAccountInfo,
+          resolvedCategory,
+          resolvedHolding,
+          amount: resolved.amount,
+          currency: resolved.currency,
+          enteredAmount: resolved.enteredAmount,
+          enteredCurrency: resolved.enteredCurrency,
+          enteredFxRate: resolved.enteredFxRate,
+          date: txDate,
+          message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
+          warnings,
+        });
+      }
+
       // Encrypt text fields when a DEK is available. Without one (legacy API
       // keys) we fall back to plaintext; the row will still be readable via
       // the legacy passthrough in decryptField.
@@ -1958,17 +1993,13 @@ export function registerPgTools(
         RETURNING id
       `);
 
-      const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
       invalidateUserTxCache(userId);
-      const warnings = deriveTxWriteWarnings({
-        portfolioHoldingId: resolvedHoldingId,
-        amount: resolved.amount,
-        quantity,
-      });
       return text({
         success: true,
         transactionId: result[0]?.id,
-        resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
+        resolvedAccount: resolvedAccountInfo,
+        resolvedCategory,
+        resolvedHolding,
         message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
         warnings,
       });
@@ -1978,9 +2009,10 @@ export function registerPgTools(
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch.",
     {
       account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
+      dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`."),
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
@@ -1997,11 +2029,12 @@ export function registerPgTools(
         enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
       })).describe("Array of transactions to record"),
     },
-    async ({ transactions, account_id: defaultAccountId }) => {
+    async ({ transactions, account_id: defaultAccountId, dryRun }) => {
       const today = new Date().toISOString().split("T")[0];
       const rawAccounts = await q(db, sql`SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
       const allAccounts = decryptNameish(rawAccounts, dek);
       const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+      const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
       // Cache user-owned holding ids in one SELECT instead of one ownership
       // check per row.
       const ownedHoldings = await q(db, sql`SELECT id FROM portfolio_holdings WHERE user_id = ${userId}`);
@@ -2022,7 +2055,17 @@ export function registerPgTools(
         if (!defaultAcct) defaultAcctError = `Top-level account_id #${defaultAccountId} not found or not owned by you.`;
       }
 
-      const results: { index: number; success: boolean; message: string; resolvedAccount?: { id: number; name: string }; warnings?: string[] }[] = [];
+      const results: {
+        index: number;
+        success: boolean;
+        message: string;
+        resolvedAccount?: { id: number; name: string };
+        resolvedCategory?: { id: number; name: string } | null;
+        resolvedHolding?: { id: number } | null;
+        warnings?: string[];
+        dryRun?: boolean;
+        wouldBeId?: null;
+      }[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
@@ -2120,6 +2163,32 @@ export function registerPgTools(
             continue;
           }
 
+          const rowWarnings = deriveTxWriteWarnings({
+            portfolioHoldingId: rowHoldingId,
+            amount: resolved.amount,
+            quantity: t.quantity,
+          });
+          const rowCategory = catId != null ? { id: catId, name: catNameById.get(catId) ?? "" } : null;
+          const rowHolding = rowHoldingId != null ? { id: rowHoldingId } : null;
+
+          if (dryRun) {
+            // Skip the INSERT but report the resolved triple so the caller
+            // can verify routing for every row before re-submitting without
+            // dryRun. wouldBeId is null because we don't reserve ids.
+            results.push({
+              index: i,
+              success: true,
+              dryRun: true,
+              wouldBeId: null,
+              message: `Dry run OK — would record ${t.payee}: ${resolved.amount} ${resolved.currency}`,
+              resolvedAccount: resolvedAccountInfo,
+              resolvedCategory: rowCategory,
+              resolvedHolding: rowHolding,
+              ...(rowWarnings.length ? { warnings: rowWarnings } : {}),
+            });
+            continue;
+          }
+
           const encPayee = dek ? encryptField(dek, t.payee) : t.payee;
           const encNote = dek ? encryptField(dek, t.note ?? "") : (t.note ?? "");
           const encTags = dek ? encryptField(dek, t.tags ?? "") : (t.tags ?? "");
@@ -2128,16 +2197,13 @@ export function registerPgTools(
             INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
             VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null})
           `);
-          const rowWarnings = deriveTxWriteWarnings({
-            portfolioHoldingId: rowHoldingId,
-            amount: resolved.amount,
-            quantity: t.quantity,
-          });
           results.push({
             index: i,
             success: true,
             message: `${t.payee}: ${resolved.amount} ${resolved.currency}`,
             resolvedAccount: resolvedAccountInfo,
+            resolvedCategory: rowCategory,
+            resolvedHolding: rowHolding,
             ...(rowWarnings.length ? { warnings: rowWarnings } : {}),
           });
         } catch (e) {
@@ -2146,8 +2212,15 @@ export function registerPgTools(
       }
 
       const ok = results.filter(r => r.success).length;
-      if (ok > 0) invalidateUserTxCache(userId);
-      return text({ imported: ok, failed: results.length - ok, results });
+      // Skip cache invalidation on dry-run — no rows touched.
+      if (!dryRun && ok > 0) invalidateUserTxCache(userId);
+      return text({
+        ...(dryRun ? { dryRun: true } : {}),
+        imported: dryRun ? 0 : ok,
+        failed: results.length - ok,
+        ...(dryRun ? { previewed: ok } : {}),
+        results,
+      });
     }
   );
 

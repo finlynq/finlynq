@@ -346,7 +346,7 @@ describe("transformTransactions", () => {
     expect(r.errors[0].reason).toMatch(/Unmapped entry/);
   });
 
-  it("serializes tags as comma-separated string", () => {
+  it("serializes tags as comma-separated string and appends source:wealthposition", () => {
     const rbc = wpAccount("acc-rbc", "RBC Checking", "A", "CAD");
     const exp = wpCategory("cat-exp", "Misc", "E");
     const { mapping, byName } = buildMapping([rbc], [exp]);
@@ -363,8 +363,28 @@ describe("transformTransactions", () => {
       ],
     };
     const r = transformTransactions([tx], mapping, byName);
-    expect(r.flat[0].tags).toBe("morning,work");
+    expect(r.flat[0].tags).toBe("morning,work,source:wealthposition");
     expect(r.flat[0].payee).toBe("Coffee");
+  });
+
+  it("auto-tags rows with source:wealthposition even when no user tags are set", () => {
+    const rbc = wpAccount("acc-rbc", "RBC Checking", "A", "CAD");
+    const exp = wpCategory("cat-exp", "Misc", "E");
+    const { mapping, byName } = buildMapping([rbc], [exp]);
+
+    const tx: ExternalTransaction = {
+      id: "tx-no-tags",
+      date: "2026-04-20",
+      reviewed: true,
+      payee: "Latte",
+      tags: [],
+      entries: [
+        { categorization: "RBC Checking", amount: "-4", currency: "CAD", holding: null, note: "" },
+        { categorization: "Misc", amount: "-4", currency: "CAD", holding: null, note: "" },
+      ],
+    };
+    const r = transformTransactions([tx], mapping, byName);
+    expect(r.flat[0].tags).toBe("source:wealthposition");
   });
 
   it("preserves a null categoryMap value as uncategorized split row", () => {

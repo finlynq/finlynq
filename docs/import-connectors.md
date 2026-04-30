@@ -496,6 +496,22 @@ Don't regress on them without a new comment explaining the change.
    orphans; the Portfolio page renders an amber "Sign in again to
    unlock" banner when the count is non-zero. Mirror the same skip in
    any new aggregator path.
+15. **Connectors auto-tag every emitted row with `source:<connector>`**
+   (issue [#33](https://github.com/finlynq/finlynq/issues/33),
+   2026-04-30). The transform appends the tag in `buildRawTransaction`;
+   transfer-pair callers pass `source: "<connector>"` to
+   `createTransferPair*` and the `applySourceTag` helper merges it into
+   `tags` on both legs. Idempotent — re-running an import doesn't
+   duplicate the tag (case-insensitive match on the existing tags
+   string). Future statement reconciliations rely on this: when a
+   brokerage statement and the bank's WP export both contain the same
+   payroll deposit, the bank-side row's `source:wealthposition` tag is
+   the dedup key. Every new connector MUST set the tag for both flat
+   rows and any internal transfer pairs it creates. A one-off
+   parameterized SQL backfill for legacy rows lives at
+   [scripts/backfill-source-tag.sql](../scripts/backfill-source-tag.sql)
+   — handles plaintext `tags` only; encrypted `v1:%` rows need a
+   Node-side rewrite under the user's DEK.
 
 ---
 

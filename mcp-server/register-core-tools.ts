@@ -626,7 +626,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. For cross-currency entries pass enteredAmount + enteredCurrency; the server locks the FX rate at the date.",
+    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. For cross-currency entries pass enteredAmount + enteredCurrency; the server locks the FX rate at the date. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income). Use this for same-currency entries."),
       payee: z.string().describe("Payee or merchant name"),
@@ -638,8 +638,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       tags: z.string().optional().describe("Comma-separated tags"),
       enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency."),
       enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/...) of enteredAmount; defaults to account currency."),
+      dryRun: z.boolean().optional().describe("When true, run the full validation/resolution pipeline (account, FX, category) and return a preview WITHOUT writing to the DB. Response carries `dryRun: true`, `wouldBeId: null`, plus the resolved* fields."),
     },
-    async ({ amount, payee, date, account, account_id, category, note, tags, enteredAmount, enteredCurrency }) => {
+    async ({ amount, payee, date, account, account_id, category, note, tags, enteredAmount, enteredCurrency, dryRun }) => {
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
@@ -691,16 +692,40 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       });
       if (!resolved.ok) return sqliteErr(resolved.message);
 
+      // Resolve category name once — used by both dry-run preview and the
+      // success message. The lookup below skips when catId is null.
+      const catName = catId ? (await sqlite.prepare(`SELECT name FROM categories WHERE user_id = ? AND id = ?`).get(userId, catId) as { name: string } | undefined)?.name ?? "uncategorized" : "uncategorized";
+      const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
+      const resolvedCategory = catId ? { id: Number(catId), name: String(catName ?? "") } : null;
+
+      if (dryRun) {
+        // Validation + resolution complete; no DB write, no cache invalidation.
+        return txt({
+          success: true,
+          dryRun: true,
+          wouldBeId: null,
+          resolvedAccount: resolvedAccountInfo,
+          resolvedCategory,
+          amount: resolved.amount,
+          currency: resolved.currency,
+          enteredAmount: resolved.enteredAmount,
+          enteredCurrency: resolved.enteredCurrency,
+          enteredFxRate: resolved.enteredFxRate,
+          date: txDate,
+          message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})`,
+        });
+      }
+
       const result = await sqlite.prepare(
         `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       ).get(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, payee, note ?? "", tags ?? "") as { id: number };
 
-      const catName = catId ? (await sqlite.prepare(`SELECT name FROM categories WHERE user_id = ? AND id = ?`).get(userId, catId) as { name: string } | undefined)?.name ?? "uncategorized" : "uncategorized";
       invalidateUserTxCache(userId);
       return txt({
         success: true,
         transactionId: result?.id,
-        resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
+        resolvedAccount: resolvedAccountInfo,
+        resolvedCategory,
         message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})`,
       });
     }
@@ -709,9 +734,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result includes `resolvedAccount` so callers can verify routing immediately.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns.",
     {
       account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement."),
+      dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`."),
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
@@ -725,10 +751,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         enteredCurrency: z.string().optional(),
       })).describe("Array of transactions to record"),
     },
-    async ({ transactions, account_id: defaultAccountId }) => {
+    async ({ transactions, account_id: defaultAccountId, dryRun }) => {
       const today = new Date().toISOString().split("T")[0];
       const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
       const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
       const accountById = new Map<number, SqliteRow>();
@@ -740,7 +767,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         if (!defaultAcct) defaultAcctError = `Top-level account_id #${defaultAccountId} not found or not owned by you.`;
       }
 
-      const results: { index: number; success: boolean; message: string; resolvedAccount?: { id: number; name: string } }[] = [];
+      const results: {
+        index: number;
+        success: boolean;
+        message: string;
+        resolvedAccount?: { id: number; name: string };
+        resolvedCategory?: { id: number; name: string } | null;
+        dryRun?: boolean;
+        wouldBeId?: null;
+      }[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
@@ -799,15 +834,37 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             continue;
           }
 
+          const rowCategory = catId != null ? { id: Number(catId), name: catNameById.get(Number(catId)) ?? "" } : null;
+
+          if (dryRun) {
+            results.push({
+              index: i,
+              success: true,
+              dryRun: true,
+              wouldBeId: null,
+              message: `Dry run OK — would record ${t.payee}: ${resolved.amount} ${resolved.currency}`,
+              resolvedAccount: resolvedAccountInfo,
+              resolvedCategory: rowCategory,
+            });
+            continue;
+          }
+
           await stmt.run(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, t.payee, t.note ?? "", t.tags ?? "");
-          results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}`, resolvedAccount: resolvedAccountInfo });
+          results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}`, resolvedAccount: resolvedAccountInfo, resolvedCategory: rowCategory });
         } catch (e) {
           results.push({ index: i, success: false, message: String(e) });
         }
       }
       const ok = results.filter(r => r.success).length;
-      if (ok > 0) invalidateUserTxCache(userId);
-      return txt({ imported: ok, failed: results.length - ok, results });
+      // Skip cache invalidation on dry-run — no rows touched.
+      if (!dryRun && ok > 0) invalidateUserTxCache(userId);
+      return txt({
+        ...(dryRun ? { dryRun: true } : {}),
+        imported: dryRun ? 0 : ok,
+        failed: results.length - ok,
+        ...(dryRun ? { previewed: ok } : {}),
+        results,
+      });
     }
   );
 
