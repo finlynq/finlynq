@@ -143,6 +143,8 @@ export async function POST(request: NextRequest) {
       toHoldingId: data.toHoldingId,
       note: data.note,
       tags: data.tags,
+      // Issue #28: hard-code the writer surface at the route boundary.
+      txSource: "manual",
     });
 
     if (!result.ok) return errorResponse(result);

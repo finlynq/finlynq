@@ -710,7 +710,8 @@ export function registerPgTools(
                a.name AS account, a.name_ct AS account_ct,
                c.name AS category, c.name_ct AS category_ct, c.type AS category_type,
                t.currency, t.amount, t.entered_currency, t.entered_amount, t.entered_fx_rate,
-               t.payee, t.note, t.tags, t.portfolio_holding_id
+               t.payee, t.note, t.tags, t.portfolio_holding_id,
+               t.created_at, t.updated_at, t.source
         FROM transactions t
         LEFT JOIN accounts a ON t.account_id = a.id
         LEFT JOIN categories c ON t.category_id = c.id
@@ -772,6 +773,12 @@ export function registerPgTools(
           enteredAmount: tagAmount(enteredAmt, enteredCcy, "entered"),
           accountAmount: tagAmount(accountAmt, accountCcy, "account"),
           reportingAmount: tagAmount(accountAmt * fx, reporting, "reporting"),
+          // Issue #28: surface the audit-trio so AI assistants can sort by
+          // freshness or filter by writer surface ("show me everything I
+          // entered manually this month").
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+          source: r.source,
         };
       });
 
@@ -1988,16 +1995,21 @@ export function registerPgTools(
       const encNote = dek ? encryptField(dek, note ?? "") : (note ?? "");
       const encTags = dek ? encryptField(dek, tags ?? "") : (tags ?? "");
 
+      // Issue #28: stamp source explicitly + return audit timestamps so
+      // the AI assistant can verify the write landed and self-attributed.
       const result = await q(db, sql`
-        INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
-        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null})
-        RETURNING id
+        INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
+        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null}, ${'mcp_http'})
+        RETURNING id, created_at, updated_at, source
       `);
 
       invalidateUserTxCache(userId);
       return text({
         success: true,
         transactionId: result[0]?.id,
+        createdAt: result[0]?.created_at,
+        updatedAt: result[0]?.updated_at,
+        source: result[0]?.source,
         resolvedAccount: resolvedAccountInfo,
         resolvedCategory,
         resolvedHolding,
@@ -2194,9 +2206,12 @@ export function registerPgTools(
           const encNote = dek ? encryptField(dek, t.note ?? "") : (t.note ?? "");
           const encTags = dek ? encryptField(dek, t.tags ?? "") : (t.tags ?? "");
 
+          // Issue #28: stamp source explicitly. Per-row response payloads
+          // stay terse — the AI can re-fetch via search_transactions if it
+          // needs the per-row timestamps.
           await db.execute(sql`
-            INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
-            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null})
+            INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
+            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'})
           `);
           results.push({
             index: i,
@@ -2301,10 +2316,12 @@ export function registerPgTools(
       // Apply each field as its own parameterized UPDATE. Simpler and safer
       // than a dynamic SET clause, and the per-call latency is negligible
       // (tool is called once at a time).
+      // Issue #28: every UPDATE site appends `, updated_at = NOW()`. `source`
+      // stays untouched (INSERT-only).
       let changed = 0;
       let postMergeAmount: number | null = existingAmount;
       if (date !== undefined) {
-        await db.execute(sql`UPDATE transactions SET date = ${date} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET date = ${date}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       // Entered-side update — re-locks the FX rate at the row's (possibly
@@ -2325,48 +2342,52 @@ export function registerPgTools(
                  currency = ${resolved.currency},
                  entered_amount = ${resolved.enteredAmount},
                  entered_currency = ${resolved.enteredCurrency},
-                 entered_fx_rate = ${resolved.enteredFxRate}
+                 entered_fx_rate = ${resolved.enteredFxRate},
+                 updated_at = NOW()
            WHERE id = ${id} AND user_id = ${userId}
         `);
         changed++;
         postMergeAmount = resolved.amount;
       } else if (amount !== undefined) {
         // Account-side-only update: leave entered_* alone.
-        await db.execute(sql`UPDATE transactions SET amount = ${amount} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET amount = ${amount}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
         postMergeAmount = amount;
       }
       if (catId !== undefined) {
-        await db.execute(sql`UPDATE transactions SET category_id = ${catId} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET category_id = ${catId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (payee !== undefined) {
         const v = dek ? encryptField(dek, payee) : payee;
-        await db.execute(sql`UPDATE transactions SET payee = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (note !== undefined) {
         const v = dek ? encryptField(dek, note) : note;
-        await db.execute(sql`UPDATE transactions SET note = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (tags !== undefined) {
         const v = dek ? encryptField(dek, tags) : tags;
-        await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (resolvedHoldingId !== undefined) {
-        await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolvedHoldingId} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolvedHoldingId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
       if (quantity !== undefined) {
-        await db.execute(sql`UPDATE transactions SET quantity = ${quantity} WHERE id = ${id} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET quantity = ${quantity}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         changed++;
       }
 
       if (!changed) return err("No fields to update");
 
       invalidateUserTxCache(userId);
+      // Issue #28: re-read the audit timestamp so the AI assistant can
+      // verify the write landed and pin the freshness.
+      const after = await q(db, sql`SELECT updated_at FROM transactions WHERE id = ${id} AND user_id = ${userId} LIMIT 1`);
       // Warn only when the user explicitly bound a holding on this update
       // without also passing quantity. We don't nag about every cosmetic edit
       // (e.g. date) on a previously-bound row — that would be noise.
@@ -2377,7 +2398,12 @@ export function registerPgTools(
             quantity: null,
           })
         : [];
-      return text({ success: true, message: `Transaction #${id} updated (${changed} field(s))`, warnings });
+      return text({
+        success: true,
+        message: `Transaction #${id} updated (${changed} field(s))`,
+        updatedAt: after[0]?.updated_at,
+        warnings,
+      });
     }
   );
 
@@ -2449,6 +2475,8 @@ export function registerPgTools(
           destQuantity,
           note,
           tags,
+          // Issue #28: MCP HTTP transport.
+          txSource: "mcp_http",
         });
       } catch (e) {
         // Strict-mode investment-account guard escapes via throw rather than
@@ -2645,6 +2673,8 @@ export function registerPgTools(
           destQuantity: destQty,
           note: note ?? tradePayee,
           tags: "source:record_trade",
+          // Issue #28: MCP HTTP transport.
+          txSource: "mcp_http",
         });
       } catch (e) {
         // record_trade always supplies sourceHolding + destHolding, so the
@@ -2669,9 +2699,11 @@ export function registerPgTools(
         const encPayee = encryptField(dek, feePayee);
         const encNote = encryptField(dek, "");
         const encTags = encryptField(dek, `source:record_trade,trade-link:${transferResult.linkId}`);
+        // Issue #28: stamp source explicitly. Fee leg shares the trade's
+        // surface attribution.
         const feeIns = await q(db, sql`
-          INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
-          VALUES (${userId}, ${txDate}, ${acct.id}, NULL, ${acctCurrency}, ${-feeAmountAcct}, ${tradeCurrency}, ${-feeAmountTrade}, ${fx}, ${encPayee}, ${encNote}, ${encTags}, ${cashHoldingId}, NULL)
+          INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
+          VALUES (${userId}, ${txDate}, ${acct.id}, NULL, ${acctCurrency}, ${-feeAmountAcct}, ${tradeCurrency}, ${-feeAmountTrade}, ${fx}, ${encPayee}, ${encNote}, ${encTags}, ${cashHoldingId}, NULL, ${'mcp_http'})
           RETURNING id
         `);
         feeTxId = Number(feeIns[0]?.id ?? 0) || null;
@@ -3087,10 +3119,13 @@ export function registerPgTools(
               // them before writing to the encrypted transaction columns.
               const encRename = rule.rename_to && dek ? encryptField(dek, String(rule.rename_to)) : rule.rename_to;
               const encTags = rule.assign_tags && dek ? encryptField(dek, String(rule.assign_tags)) : rule.assign_tags;
+              // Issue #28: rule application is a real mutation — bump
+              // updated_at like any other UPDATE. `source` stays untouched.
               await db.execute(sql`
                 UPDATE transactions SET category_id = ${rule.assign_category_id}
                 ${rule.rename_to ? sql`, payee = ${encRename}` : sql``}
                 ${rule.assign_tags ? sql`, tags = ${encTags}` : sql``}
+                , updated_at = NOW()
                 WHERE id = ${txn.id} AND user_id = ${userId}
               `);
             }
@@ -5260,25 +5295,27 @@ export function registerPgTools(
 
     // Per-field updates: keeps the SQL simple + parameterized, and lets us
     // encrypt payee / note / tags when a DEK is present.
+    // Issue #28: every UPDATE site bumps updated_at = NOW(). `source` is
+    // INSERT-only so it stays untouched.
     if (changes.category_id !== undefined) {
-      await db.execute(sql`UPDATE transactions SET category_id = ${changes.category_id} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET category_id = ${changes.category_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.account_id !== undefined) {
-      await db.execute(sql`UPDATE transactions SET account_id = ${changes.account_id} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET account_id = ${changes.account_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.date !== undefined) {
-      await db.execute(sql`UPDATE transactions SET date = ${changes.date} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET date = ${changes.date}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.is_business !== undefined) {
-      await db.execute(sql`UPDATE transactions SET is_business = ${changes.is_business} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET is_business = ${changes.is_business}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.payee !== undefined) {
       const v = dek ? encryptField(dek, changes.payee) : changes.payee;
-      await db.execute(sql`UPDATE transactions SET payee = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.note !== undefined) {
       const v = dek ? encryptField(dek, changes.note) : changes.note;
-      await db.execute(sql`UPDATE transactions SET note = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
     if (changes.tags !== undefined) {
       // Tag edits need per-row merging when mode != replace (because each row
@@ -5286,7 +5323,7 @@ export function registerPgTools(
       // mutate, re-encrypt, write row-by-row. For replace we can write once.
       if (changes.tags.mode === "replace") {
         const v = dek ? encryptField(dek, changes.tags.value) : changes.tags.value;
-        await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id IN ${idList} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
       } else {
         const rows = await q(db, sql`SELECT id, tags FROM transactions WHERE id IN ${idList} AND user_id = ${userId}`);
         const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
@@ -5300,7 +5337,7 @@ export function registerPgTools(
           }
           const next = Array.from(set).join(",");
           const v = dek ? encryptField(dek, next) : next;
-          await db.execute(sql`UPDATE transactions SET tags = ${v} WHERE id = ${Number(r.id)} AND user_id = ${userId}`);
+          await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id = ${Number(r.id)} AND user_id = ${userId}`);
         }
       }
     }

@@ -360,7 +360,10 @@ export async function POST(request: NextRequest) {
     // of truth and the column is being dropped in a follow-up release.
     delete data.portfolioHolding;
     const encrypted = encryptTxWrite(auth.dek, data);
-    const tx = await createTransaction(auth.userId, encrypted);
+    // Issue #28: hard-code the writer surface at the route boundary rather
+    // than relying on the schema default. Defensive against a future writer
+    // path that forgets to set it — every entry point is grep-discoverable.
+    const tx = await createTransaction(auth.userId, { ...encrypted, source: "manual" });
     invalidateUserTxCache(auth.userId);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {

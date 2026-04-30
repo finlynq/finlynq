@@ -18,7 +18,7 @@ import {
 } from "@/lib/crypto/encrypted-columns";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { db, schema } from "@/db";
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, sql } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
 const { transactionSplits, transactions } = schema;
@@ -160,6 +160,14 @@ export async function POST(request: NextRequest) {
     });
 
     const inserted = await db.insert(transactionSplits).values(rows).returning().all();
+    // Issue #28: splits are part of the parent transaction's logical state,
+    // so a (re)split bumps the parent's updated_at. Lets "recently modified"
+    // sorts and the edit-dialog footer reflect split edits even though
+    // splits live on their own table.
+    await db
+      .update(transactions)
+      .set({ updatedAt: sql`NOW()` })
+      .where(and(eq(transactions.id, transactionId), eq(transactions.userId, userId)));
     invalidateUserTxCache(userId);
     return NextResponse.json(decryptSplitRows(dek, inserted), { status: 201 });
   } catch (error) {
@@ -184,6 +192,11 @@ export async function DELETE(request: NextRequest) {
   }
 
   await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId));
+  // Issue #28: clearing splits is also a logical mutation of the parent.
+  await db
+    .update(transactions)
+    .set({ updatedAt: sql`NOW()` })
+    .where(and(eq(transactions.id, transactionId), eq(transactions.userId, auth.context.userId)));
   invalidateUserTxCache(auth.context.userId);
   return NextResponse.json({ success: true });
 }

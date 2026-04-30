@@ -232,9 +232,11 @@ export function registerImportTemplateTools(
       const get = (col: string | undefined, row: Record<string, string>) =>
         col ? (row[col] ?? "") : "";
 
+      // Issue #28: stamp source as MCP-stdio so import-template flows are
+      // distinguishable from CSV/Excel uploads.
       const insertStmt = sqlite.prepare(
-        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, import_hash)
-         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, import_hash, source)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`
       );
 
       const importBatch = async () => {
@@ -272,7 +274,7 @@ export function registerImportTemplateTools(
 
             if (!dry_run) {
               // user_id is sourced from the closure — never from tool args or row data
-              await insertStmt.run(userId, rawDate, resolvedAccountId, currency, amount, payee, note, tags, hash);
+              await insertStmt.run(userId, rawDate, resolvedAccountId, currency, amount, payee, note, tags, hash, "mcp_stdio");
               existingHashes.add(hash);
             }
             imported.push({ row: i + 1, date: rawDate, amount, payee });

@@ -5,6 +5,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptField, isEncrypted } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { safeErrorMessage } from "@/lib/validate";
+import { coerceSourceForRestore } from "@/lib/tx-source";
 
 type Row = Record<string, unknown>;
 
@@ -278,12 +279,18 @@ export async function POST(request: NextRequest) {
     // passes through unchanged.
     const txnIdMap = new Map<number, number>();
     if (d.transactions?.length) {
-      const remapped = d.transactions.map(({ id: _id, userId: _uid, accountId, categoryId, ...rest }) => {
+      const remapped = d.transactions.map(({ id: _id, userId: _uid, accountId, categoryId, source: rawSource, ...rest }) => {
+        // Issue #28: a backup that pre-dates the audit-fields migration has
+        // no `source` per row — fall back to 'backup_restore'. Newer
+        // backups round-trip the original surface (CSV-imported stays
+        // 'import'). coerceSourceForRestore guards the CHECK constraint
+        // from typo'd / corrupted JSON.
         const withFks = {
           ...rest,
           userId,
           accountId: accountId != null ? (accountIdMap.get(accountId as number) ?? (accountId as number)) : null,
           categoryId: categoryId != null ? (categoryIdMap.get(categoryId as number) ?? (categoryId as number)) : null,
+          source: coerceSourceForRestore(rawSource),
         };
         return encryptRowFields(dek, withFks, TX_ENC_FIELDS);
       });

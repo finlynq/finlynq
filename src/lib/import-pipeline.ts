@@ -216,6 +216,11 @@ export async function executeImport(
   forceImportIndices: number[] = [],
   userId: string,
   userDek?: Buffer,
+  // Issue #28: writer surface for the audit column. Defaults to 'import'
+  // because every caller of this pipeline today is a CSV/Excel/PDF/OFX
+  // import flow. Connector orchestrators (WP, future brokerages) call into
+  // reconciliation.ts directly and pass 'connector' on those INSERTs.
+  txSource: "import" | "connector" = "import",
 ): Promise<ImportResult> {
   if (rows.length === 0) {
     return { total: 0, imported: 0, skippedDuplicates: 0 };
@@ -481,7 +486,11 @@ export async function executeImport(
   for (let i = 0; i < toInsert.length; i += batchSize) {
     const batch = toInsert.slice(i, i + batchSize);
     const values = batch.map(({ rowIndex: _, portfolioHolding: _ph, ...rest }) => {
-      const row = { ...rest, userId };
+      // Issue #28: stamp the writer surface explicitly. Default 'import'
+      // covers CSV/Excel/PDF/OFX/email; connector orchestrators pass
+      // 'connector' so reconciliation lineage stays distinct from
+      // user-uploaded files.
+      const row = { ...rest, userId, source: txSource };
       if (userDek) {
         row.payee = encryptField(userDek, row.payee) ?? "";
         row.note = encryptField(userDek, row.note) ?? "";

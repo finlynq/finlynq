@@ -44,6 +44,7 @@ import {
   InvestmentHoldingRequiredError,
   isInvestmentAccount,
 } from "@/lib/investment-account";
+import type { TransactionSource } from "@/lib/tx-source";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -174,8 +175,23 @@ export type CreateTransferOpts = {
    * statement reconciliations dedup against rows the bank side has already
    * imported. No-op when undefined; merged with caller-supplied tags rather
    * than replacing them.
+   *
+   * NOTE: this `source` is the connector slug for the tag merge — distinct
+   * from the audit-column `txSource` below (issue #28). The two coexist
+   * because the tag lineage is a connector-specific dedup key while the
+   * audit column is a coarse seven-value enum. Setting `source` here does
+   * NOT auto-derive `txSource`; the route handler sets both.
    */
   source?: string;
+  /**
+   * Audit-source attribution (issue #28). Hard-coded by each route handler
+   * at the boundary: 'manual' for UI POST, 'mcp_http' / 'mcp_stdio' for
+   * MCP transports, 'connector' for the WP / future-broker orchestrators.
+   * Both legs of the pair receive the same value — the surface that
+   * initiated the transfer is what matters, not the abstract concept of
+   * "transfer". Defaults to 'manual' when omitted.
+   */
+  txSource?: TransactionSource;
 };
 
 export type UpdateTransferOpts = {
@@ -589,6 +605,9 @@ export async function createTransferPair(
         tags,
       });
 
+      // Issue #28: both legs share the writer-surface attribution.
+      const txSource: TransactionSource = opts.txSource ?? "manual";
+
       const [sourceInserted] = await tx
         .insert(schema.transactions)
         .values({
@@ -605,6 +624,7 @@ export async function createTransferPair(
           // quantity stays null on pure-cash legs; only in-kind transfers
           // carry share counts. Cash sleeves track cash amount, not shares.
           quantity: holdingResolved ? -Math.abs(holdingResolved.quantity) : null,
+          source: txSource,
           ...sourceRow,
           linkId,
         })
@@ -626,6 +646,7 @@ export async function createTransferPair(
           // destQuantity may differ from source quantity (stock split,
           // merger, share-class conversion). Null on pure-cash legs.
           quantity: holdingResolved ? Math.abs(holdingResolved.destQuantity) : null,
+          source: txSource,
           ...destRow,
           linkId,
         })
@@ -1237,6 +1258,9 @@ export async function updateTransferPair(opts: UpdateTransferOpts): Promise<Tran
           enteredCurrency: fromCurrency,
           enteredAmount: -sentAmount,
           enteredFxRate: 1,
+          // Issue #28: bump audit timestamp on every transfer-leg UPDATE.
+          // `source` is preserved (INSERT-only).
+          updatedAt: sql`NOW()`,
           ...sourceHoldingPatch,
           ...sourceUpdate,
         })
@@ -1257,6 +1281,7 @@ export async function updateTransferPair(opts: UpdateTransferOpts): Promise<Tran
           enteredCurrency: fromCurrency,
           enteredAmount: sentAmount,
           enteredFxRate,
+          updatedAt: sql`NOW()`,
           ...destHoldingPatch,
           ...destUpdate,
         })
@@ -1770,19 +1795,23 @@ export async function createTransferPairViaSql(
     await withTx(pool as unknown as SqlPool, async (client) => {
       const categoryId = await resolveTransferCategoryIdViaSql(client, userId, dek);
 
+      // Issue #28: both legs share the writer-surface attribution.
+      const txSource: TransactionSource = opts.txSource ?? "manual";
       const sourceIns = await client.query<{ id: number }>(
         `INSERT INTO transactions (
             user_id, date, account_id, category_id,
             currency, amount,
             entered_currency, entered_amount, entered_fx_rate,
             payee, note, tags, link_id,
-            portfolio_holding_id, quantity
+            portfolio_holding_id, quantity,
+            source
          ) VALUES (
             $1, $2, $3, $4,
             $5, $6,
             $7, $8, $9,
             $10, $11, $12, $13,
-            $14, $15
+            $14, $15,
+            $16
          ) RETURNING id`,
         [
           userId, date, fromAcct.id, categoryId,
@@ -1791,6 +1820,7 @@ export async function createTransferPairViaSql(
           enc(sourcePayee), enc(note), enc(tags), linkId,
           fromHoldingId,
           holdingResolved ? -Math.abs(holdingResolved.quantity) : null,
+          txSource,
         ],
       );
       fromTransactionId = sourceIns.rows[0].id;
@@ -1801,13 +1831,15 @@ export async function createTransferPairViaSql(
             currency, amount,
             entered_currency, entered_amount, entered_fx_rate,
             payee, note, tags, link_id,
-            portfolio_holding_id, quantity
+            portfolio_holding_id, quantity,
+            source
          ) VALUES (
             $1, $2, $3, $4,
             $5, $6,
             $7, $8, $9,
             $10, $11, $12, $13,
-            $14, $15
+            $14, $15,
+            $16
          ) RETURNING id`,
         [
           userId, date, toAcct.id, categoryId,
@@ -1817,6 +1849,7 @@ export async function createTransferPairViaSql(
           toHoldingId,
           // destQuantity may differ from source quantity (split / merger).
           holdingResolved ? Math.abs(holdingResolved.destQuantity) : null,
+          txSource,
         ],
       );
       toTransactionId = destIns.rows[0].id;
@@ -2059,11 +2092,14 @@ export async function updateTransferPairViaSql(
 
   try {
     await withTx(pool as unknown as SqlPool, async (client) => {
+      // Issue #28: every UPDATE bumps updated_at. `source` stays untouched
+      // (INSERT-only). Both legs of the transfer pair get the same bump.
       await client.query(
         `UPDATE transactions
             SET date = $1, account_id = $2, currency = $3, amount = $4,
                 entered_currency = $5, entered_amount = $6, entered_fx_rate = $7,
-                payee = $8, note = $9, tags = $10
+                payee = $8, note = $9, tags = $10,
+                updated_at = NOW()
           WHERE id = $11 AND user_id = $12`,
         [
           date, fromAcct.id, fromCurrency, -sentAmount,
@@ -2076,7 +2112,8 @@ export async function updateTransferPairViaSql(
         `UPDATE transactions
             SET date = $1, account_id = $2, currency = $3, amount = $4,
                 entered_currency = $5, entered_amount = $6, entered_fx_rate = $7,
-                payee = $8, note = $9, tags = $10
+                payee = $8, note = $9, tags = $10,
+                updated_at = NOW()
           WHERE id = $11 AND user_id = $12`,
         [
           date, toAcct.id, toCurrency, receivedAmount,

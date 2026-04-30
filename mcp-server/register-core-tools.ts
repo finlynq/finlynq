@@ -495,9 +495,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }
 
       let applied = 0;
+      // Issue #28: stdio MCP UPDATE bumps updated_at like every other UPDATE.
+      // pg-compat shim resolves NOW() to PG, no SQLite branch needed here.
       const updateStmt = sqlite.prepare(
         `UPDATE transactions SET category_id = ?, tags = CASE WHEN ? IS NOT NULL THEN ? ELSE tags END,
-         payee = CASE WHEN ? IS NOT NULL THEN ? ELSE payee END WHERE id = ? AND user_id = ?`
+         payee = CASE WHEN ? IS NOT NULL THEN ? ELSE payee END,
+         updated_at = NOW() WHERE id = ? AND user_id = ?`
       );
 
       for (const txn of uncategorized) {
@@ -717,14 +720,18 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         });
       }
 
+      // Issue #28: stamp source explicitly + return audit timestamps.
       const result = await sqlite.prepare(
-        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
-      ).get(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, payee, note ?? "", tags ?? "") as { id: number };
+        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at, updated_at, source`
+      ).get(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, payee, note ?? "", tags ?? "", "mcp_stdio") as { id: number; created_at?: string; updated_at?: string; source?: string };
 
       invalidateUserTxCache(userId);
       return txt({
         success: true,
         transactionId: result?.id,
+        createdAt: result?.created_at,
+        updatedAt: result?.updated_at,
+        source: result?.source,
         resolvedAccount: resolvedAccountInfo,
         resolvedCategory,
         message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})`,
@@ -757,7 +764,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
       const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
-      const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      // Issue #28: stamp source explicitly so stdio-MCP rows are
+      // distinguishable from HTTP-MCP and UI rows in the audit column.
+      const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
       const accountById = new Map<number, SqliteRow>();
       for (const a of allAccounts) accountById.set(Number(a.id), a);
@@ -850,7 +859,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             continue;
           }
 
-          await stmt.run(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, t.payee, t.note ?? "", t.tags ?? "");
+          await stmt.run(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, t.payee, t.note ?? "", t.tags ?? "", "mcp_stdio");
           results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}`, resolvedAccount: resolvedAccountInfo, resolvedCategory: rowCategory });
         } catch (e) {
           results.push({ index: i, success: false, message: String(e) });
@@ -925,10 +934,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (tags !== undefined) { updates.push("tags = ?"); params.push(tags); }
       if (!updates.length) return sqliteErr("No fields to update");
 
+      // Capture the user-touched field count before appending audit bump
+      // so the success message stays accurate.
+      const userTouchedCount = updates.length;
+      // Issue #28: every UPDATE bumps updated_at. Always appended — `source`
+      // stays untouched (INSERT-only).
+      updates.push("updated_at = NOW()");
+
       params.push(id, userId);
       await sqlite.prepare(`UPDATE transactions SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
       invalidateUserTxCache(userId);
-      return txt({ success: true, message: `Transaction #${id} updated (${updates.length} field(s))` });
+      // Issue #28: re-read the audit timestamp so the AI assistant can
+      // verify the write landed.
+      const after = await sqlite.prepare(`SELECT updated_at FROM transactions WHERE id = ? AND user_id = ?`).get(id, userId) as { updated_at?: string } | undefined;
+      return txt({
+        success: true,
+        message: `Transaction #${id} updated (${userTouchedCount} field(s))`,
+        updatedAt: after?.updated_at,
+      });
     }
   );
 
@@ -991,6 +1014,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           destQuantity,
           note,
           tags,
+          // Issue #28: MCP stdio transport.
+          txSource: "mcp_stdio",
         });
       } catch (e) {
         // Strict-mode investment-account guard (issue #22). Stdio exposes a
@@ -1146,6 +1171,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           destQuantity: destQty,
           note: note ?? tradePayee,
           tags: "source:record_trade",
+          // Issue #28: MCP stdio transport.
+          txSource: "mcp_stdio",
         });
       } catch (e) {
         // record_trade always supplies sourceHolding + destHolding, so the
@@ -1161,14 +1188,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (feeAmountTrade > 0) {
         const feeAmountAcct = Math.round(feeAmountTrade * fx * 100) / 100;
         const feePayee = `Trade fee — ${trimmedSymbol}`;
+        // Issue #28: stamp source explicitly. Fee leg shares the trade's
+        // surface attribution.
         const feeIns = await sqlite.prepare(
-          `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, '', ?, ?, NULL)
+          `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, '', ?, ?, NULL, ?)
            RETURNING id`
         ).get(
           userId, txDate, acct.id, acctCurrency,
           -feeAmountAcct, tradeCurrency, -feeAmountTrade, fx,
           feePayee, `source:record_trade,trade-link:${transferResult.linkId}`, cashHoldingId,
+          "mcp_stdio",
         ) as { id: number } | undefined;
         feeTxId = feeIns?.id ?? null;
       }
@@ -2988,27 +3018,29 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     if (ids.length === 0) return 0;
     const inList = `(${ids.map(() => "?").join(",")})`;
 
+    // Issue #28: every UPDATE bumps updated_at = NOW(). pg-compat shim
+    // resolves NOW() to PG. `source` is INSERT-only, never modified here.
     if (changes.category_id !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET category_id = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.category_id, ...ids, userId);
+      await sqlite.prepare(`UPDATE transactions SET category_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.category_id, ...ids, userId);
     }
     if (changes.account_id !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET account_id = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.account_id, ...ids, userId);
+      await sqlite.prepare(`UPDATE transactions SET account_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.account_id, ...ids, userId);
     }
     if (changes.date !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET date = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.date, ...ids, userId);
+      await sqlite.prepare(`UPDATE transactions SET date = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.date, ...ids, userId);
     }
     if (changes.is_business !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET is_business = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.is_business, ...ids, userId);
+      await sqlite.prepare(`UPDATE transactions SET is_business = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.is_business, ...ids, userId);
     }
     if (changes.payee !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET payee = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.payee, ...ids, userId);
+      await sqlite.prepare(`UPDATE transactions SET payee = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.payee, ...ids, userId);
     }
     if (changes.note !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET note = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.note, ...ids, userId);
+      await sqlite.prepare(`UPDATE transactions SET note = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.note, ...ids, userId);
     }
     if (changes.tags !== undefined) {
       if (changes.tags.mode === "replace") {
-        await sqlite.prepare(`UPDATE transactions SET tags = ? WHERE id IN ${inList} AND user_id = ?`).run(changes.tags.value, ...ids, userId);
+        await sqlite.prepare(`UPDATE transactions SET tags = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.tags.value, ...ids, userId);
       } else {
         const rows = await sqlite.prepare(`SELECT id, tags FROM transactions WHERE id IN ${inList} AND user_id = ?`).all(...ids, userId) as Array<{ id: number; tags: string }>;
         const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
@@ -3017,7 +3049,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           if (changes.tags.mode === "append") { for (const t of tokens) set.add(t); }
           else { for (const t of tokens) set.delete(t); }
           const next = Array.from(set).join(",");
-          await sqlite.prepare(`UPDATE transactions SET tags = ? WHERE id = ? AND user_id = ?`).run(next, Number(r.id), userId);
+          await sqlite.prepare(`UPDATE transactions SET tags = ?, updated_at = NOW() WHERE id = ? AND user_id = ?`).run(next, Number(r.id), userId);
         }
       }
     }

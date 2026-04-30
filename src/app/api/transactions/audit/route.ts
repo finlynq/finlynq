@@ -141,6 +141,8 @@ export async function PATCH(request: NextRequest) {
         enteredCurrency: auditRow[0].recordedCurrency,
         enteredAmount: auditRow[0].recordedAmount,
         enteredFxRate: rate,
+        // Issue #28: row mutation → bump audit timestamp.
+        updatedAt: sql`NOW()`,
       })
       .where(
         and(

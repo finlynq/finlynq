@@ -210,7 +210,7 @@ export async function backfillInvestmentAccount(
   const cashHoldingId = await getOrCreateCashHolding(userId, accountId, dek);
   const result = await db
     .update(schema.transactions)
-    .set({ portfolioHoldingId: cashHoldingId })
+    .set({ portfolioHoldingId: cashHoldingId, updatedAt: sql`NOW()` })
     .where(
       and(
         eq(schema.transactions.userId, userId),

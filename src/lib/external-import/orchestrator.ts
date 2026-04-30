@@ -519,11 +519,14 @@ export async function runWealthPositionExecute(
   const syncWatermark = new Date().toISOString();
 
   // executeImport re-validates and re-hashes. It handles encrypt-at-write.
+  // Issue #28: connector orchestrators tag rows as 'connector' (vs 'import'
+  // for user-uploaded files) so future analytics can distinguish lineages.
   const importResult = await executeImport(
     pipeline.rowsForImport,
     forceImportIndices,
     userId,
     dek,
+    "connector",
   );
 
   // Now wire up splits: look up each parent row by its plaintext importHash

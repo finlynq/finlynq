@@ -79,7 +79,17 @@ export const transactions = pgTable("transactions", {
   enteredFxRate: doublePrecision("entered_fx_rate"),
   // entered_at is when the row was created — used to detect future-dated
   // entries that the nightly cron should re-rate once their date arrives.
+  // NOT a creation timestamp; the FX cron is the only consumer. The new
+  // created_at column below is the audit-grade row-creation time.
   enteredAt: timestamp("entered_at", { withTimezone: true }).notNull().defaultNow(),
+  // Audit-trio (issue #28, 2026-04-30). Application-layer maintenance —
+  // every UPDATE site bumps updated_at = NOW(); INSERT sites set source
+  // explicitly to their writer surface. CHECK constraint on `source` lives
+  // in scripts/migrate-tx-audit-fields.sql; allowed values mirror the
+  // SOURCES tuple in src/lib/tx-source.ts.
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  source: text("source").notNull().default("manual"),
   quantity: doublePrecision("quantity"),
   // FK introduced 2026-04-26. Nullable. The legacy encrypted text column
   // `portfolio_holding` was dropped in Phase 6 (2026-04-29) — the FK is
