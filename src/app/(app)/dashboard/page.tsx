@@ -288,7 +288,7 @@ export default function DashboardPage() {
           <p className="text-[13px] text-muted-foreground mt-0.5">Here&apos;s your financial overview</p>
         </div>
         <Link
-          href="/settings"
+          href="/settings/general"
           className="flex h-9 w-9 items-center justify-center rounded-full bg-muted/60 hover:bg-muted transition-colors"
           title="Settings"
         >
