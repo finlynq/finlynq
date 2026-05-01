@@ -345,13 +345,13 @@ function Combobox({
       </ComboboxTrigger>
       <ComboboxContent className={contentClassName}>
         <ComboboxInput placeholder={searchPlaceholder} />
+        <ComboboxEmpty>{emptyMessage}</ComboboxEmpty>
         <ComboboxList>
-          <ComboboxEmpty>{emptyMessage}</ComboboxEmpty>
-          {items.map((item) => (
+          {(item: ComboboxItemShape) => (
             <ComboboxItem key={item.value} value={item.value} disabled={item.disabled}>
               {renderItem ? renderItem(item) : item.label}
             </ComboboxItem>
-          ))}
+          )}
         </ComboboxList>
       </ComboboxContent>
     </ComboboxPrimitive.Root>
