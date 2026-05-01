@@ -17,11 +17,23 @@ import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle, Link2, ArrowRightLeft, Columns3 } from "lucide-react";
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle, Link2, ArrowRightLeft, Columns3, ArrowUp, ArrowDown, Filter } from "lucide-react";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./_components/split-dialog";
 import { formatAccountLabel } from "@/lib/account-label";
-import { type TransactionSource, labelForSource } from "@/lib/tx-source";
+import { type TransactionSource, labelForSource, SOURCES } from "@/lib/tx-source";
+import {
+  COLUMN_IDS as SHARED_COLUMN_IDS,
+  COLUMN_LABELS as SHARED_COLUMN_LABELS,
+  DEFAULT_COLUMNS as SHARED_DEFAULT_COLUMNS,
+  TOGGLEABLE_COLUMN_IDS as SHARED_TOGGLEABLE_COLUMN_IDS,
+  SORTABLE_COLUMN_IDS,
+  FILTER_COLUMN_TYPES,
+  isSortableColumnId,
+  type ColumnId as SharedColumnId,
+  type SortableColumnId,
+  type FilterType,
+} from "@/lib/transactions/columns";
 
 type Transaction = {
   id: number;
@@ -169,6 +181,277 @@ function SplitBadge({ transactionId }: { transactionId: number }) {
 
 const emptySplitRow = (): SplitRow => ({ categoryId: "", amount: "", note: "" });
 
+// Issue #59 — discriminated-union shape for per-column filters. Mirrors the
+// server-side zod schema in /api/settings/tx-filters; the page state holds
+// the same shape so persistence is byte-identical.
+type ColFilterShape =
+  | { type: "date"; columnId: SharedColumnId; from?: string; to?: string }
+  | { type: "text"; columnId: SharedColumnId; value: string }
+  | { type: "numeric"; columnId: SharedColumnId; op: "eq" | "gt" | "lt" | "between"; value: number; value2?: number }
+  | { type: "enum"; columnId: SharedColumnId; values: string[] };
+
+/**
+ * Per-column filter popover. Renders a small dropdown with a type-
+ * appropriate input(s) — date range / substring / numeric op / multi-
+ * select enum. The icon turns primary-colored when a filter is active.
+ *
+ * Encrypted-column substring filters route through the post-decrypt path
+ * server-side; date / numeric / id / source filters push down into SQL.
+ */
+function ColumnFilterPopover({
+  columnId,
+  filterType,
+  activeFilter,
+  onChange,
+  accounts,
+  categories,
+}: {
+  columnId: SharedColumnId;
+  filterType: FilterType;
+  activeFilter: ColFilterShape | undefined;
+  onChange: (f: ColFilterShape | null) => void;
+  accounts: Array<{ id: number; name: string; type?: string | null; alias?: string | null }>;
+  categories: Array<{ id: number; name: string }>;
+}) {
+  const isActive = !!activeFilter;
+  // Local draft state so the user can type without firing one network
+  // request per keystroke. Committed on Apply.
+  const [draft, setDraft] = useState<ColFilterShape | null>(activeFilter ?? null);
+  useEffect(() => {
+    setDraft(activeFilter ?? null);
+  }, [activeFilter]);
+
+  const initDraft = (): ColFilterShape => {
+    if (filterType === "date") return { type: "date", columnId };
+    if (filterType === "text") return { type: "text", columnId, value: "" };
+    if (filterType === "numeric") return { type: "numeric", columnId, op: "eq", value: 0 };
+    return { type: "enum", columnId, values: [] };
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className={`p-0.5 rounded hover:bg-muted transition-colors ${isActive ? "text-primary" : "text-muted-foreground/60"}`}
+            title={isActive ? "Filter active — click to edit" : "Filter column"}
+            onClick={(e) => e.stopPropagation()}
+          />
+        }
+      >
+        <Filter className="h-3 w-3" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-64 p-3 space-y-2">
+        {filterType === "date" && (
+          <>
+            <Label className="text-xs">From</Label>
+            <Input
+              type="date"
+              className="h-8 text-xs"
+              value={(draft as { from?: string } | null)?.from ?? ""}
+              onChange={(e) => {
+                const cur = (draft as ColFilterShape | null) ?? initDraft();
+                if (cur.type !== "date") return;
+                setDraft({ ...cur, from: e.target.value || undefined });
+              }}
+            />
+            <Label className="text-xs">To</Label>
+            <Input
+              type="date"
+              className="h-8 text-xs"
+              value={(draft as { to?: string } | null)?.to ?? ""}
+              onChange={(e) => {
+                const cur = (draft as ColFilterShape | null) ?? initDraft();
+                if (cur.type !== "date") return;
+                setDraft({ ...cur, to: e.target.value || undefined });
+              }}
+            />
+          </>
+        )}
+        {filterType === "text" && (
+          <>
+            <Label className="text-xs">Contains</Label>
+            <Input
+              className="h-8 text-xs"
+              placeholder="Substring…"
+              value={(draft as { value?: string } | null)?.value ?? ""}
+              onChange={(e) => setDraft({ type: "text", columnId, value: e.target.value })}
+            />
+          </>
+        )}
+        {filterType === "numeric" && (
+          <>
+            <Label className="text-xs">Operator</Label>
+            <Select
+              value={(draft as { op?: string } | null)?.op ?? "eq"}
+              onValueChange={(v) => {
+                const op = (v ?? "eq") as "eq" | "gt" | "lt" | "between";
+                const cur = draft && draft.type === "numeric" ? draft : { type: "numeric" as const, columnId, value: 0, op };
+                setDraft({ ...cur, op } as ColFilterShape);
+              }}
+            >
+              <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="eq">=</SelectItem>
+                <SelectItem value="gt">&gt;</SelectItem>
+                <SelectItem value="lt">&lt;</SelectItem>
+                <SelectItem value="between">Between</SelectItem>
+              </SelectContent>
+            </Select>
+            <Label className="text-xs">Value</Label>
+            <Input
+              type="number"
+              className="h-8 text-xs"
+              value={(draft as { value?: number } | null)?.value ?? ""}
+              onChange={(e) => {
+                const n = e.target.value === "" ? 0 : Number(e.target.value);
+                if (!Number.isFinite(n)) return;
+                const cur = draft && draft.type === "numeric" ? draft : { type: "numeric" as const, columnId, op: "eq" as const, value: 0 };
+                setDraft({ ...cur, value: n } as ColFilterShape);
+              }}
+            />
+            {draft?.type === "numeric" && draft.op === "between" && (
+              <>
+                <Label className="text-xs">Upper bound</Label>
+                <Input
+                  type="number"
+                  className="h-8 text-xs"
+                  value={draft.value2 ?? ""}
+                  onChange={(e) => {
+                    const n = e.target.value === "" ? undefined : Number(e.target.value);
+                    if (n != null && !Number.isFinite(n)) return;
+                    setDraft({ ...draft, value2: n });
+                  }}
+                />
+              </>
+            )}
+          </>
+        )}
+        {filterType === "enum" && (
+          <>
+            <Label className="text-xs">Match any of</Label>
+            <div className="max-h-48 overflow-y-auto space-y-1 border rounded p-2">
+              {columnId === "source" &&
+                SOURCES.map((s) => {
+                  const checked = draft?.type === "enum" && draft.values.includes(s);
+                  return (
+                    <label key={s} className="flex items-center gap-2 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const cur = draft && draft.type === "enum" ? draft : { type: "enum" as const, columnId, values: [] };
+                          const values = e.target.checked
+                            ? Array.from(new Set([...cur.values, s]))
+                            : cur.values.filter((v) => v !== s);
+                          setDraft({ ...cur, values });
+                        }}
+                      />
+                      {labelForSource(s)}
+                    </label>
+                  );
+                })}
+              {columnId === "category" &&
+                categories.map((cat) => {
+                  const checked = draft?.type === "enum" && draft.values.includes(String(cat.id));
+                  return (
+                    <label key={cat.id} className="flex items-center gap-2 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const cur = draft && draft.type === "enum" ? draft : { type: "enum" as const, columnId, values: [] };
+                          const values = e.target.checked
+                            ? Array.from(new Set([...cur.values, String(cat.id)]))
+                            : cur.values.filter((v) => v !== String(cat.id));
+                          setDraft({ ...cur, values });
+                        }}
+                      />
+                      {cat.name}
+                    </label>
+                  );
+                })}
+              {columnId === "account" &&
+                accounts.map((a) => {
+                  const checked = draft?.type === "enum" && draft.values.includes(String(a.id));
+                  return (
+                    <label key={a.id} className="flex items-center gap-2 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const cur = draft && draft.type === "enum" ? draft : { type: "enum" as const, columnId, values: [] };
+                          const values = e.target.checked
+                            ? Array.from(new Set([...cur.values, String(a.id)]))
+                            : cur.values.filter((v) => v !== String(a.id));
+                          setDraft({ ...cur, values });
+                        }}
+                      />
+                      {a.name}
+                    </label>
+                  );
+                })}
+              {columnId === "accountType" &&
+                Array.from(new Set(accounts.map((a) => a.type).filter(Boolean) as string[])).map((t) => {
+                  const checked = draft?.type === "enum" && draft.values.includes(t);
+                  return (
+                    <label key={t} className="flex items-center gap-2 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const cur = draft && draft.type === "enum" ? draft : { type: "enum" as const, columnId, values: [] };
+                          const values = e.target.checked
+                            ? Array.from(new Set([...cur.values, t]))
+                            : cur.values.filter((v) => v !== t);
+                          setDraft({ ...cur, values });
+                        }}
+                      />
+                      {t}
+                    </label>
+                  );
+                })}
+            </div>
+          </>
+        )}
+        <DropdownMenuSeparator />
+        <div className="flex gap-2 justify-end">
+          {isActive && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              onClick={() => onChange(null)}
+            >
+              Clear
+            </Button>
+          )}
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => {
+              if (!draft) {
+                onChange(null);
+                return;
+              }
+              // Drop empty-state filters (no values, no inputs)
+              if (draft.type === "date" && !draft.from && !draft.to) onChange(null);
+              else if (draft.type === "text" && !draft.value.trim()) onChange(null);
+              else if (draft.type === "enum" && draft.values.length === 0) onChange(null);
+              else onChange(draft);
+            }}
+          >
+            Apply
+          </Button>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 // useSearchParams requires Suspense. The inner component owns the page
 // state + side effects; the default export just wraps it.
 export default function TransactionsPage() {
@@ -211,92 +494,16 @@ function TransactionsPageInner() {
   // writer-wins is acceptable for column prefs. Migrates the legacy
   // localStorage["pf-tx-cols-v1"] blob on first load (then clears it) so
   // existing users keep their Portfolio toggle.
-  type ColumnId =
-    | "select"
-    | "date"
-    | "account"
-    | "accountType"
-    | "accountName"
-    | "accountAlias"
-    | "category"
-    | "payee"
-    | "portfolio"
-    | "portfolioTicker"
-    | "note"
-    | "tags"
-    | "quantity"
-    | "amount"
-    | "actions";
+  //
+  // Issue #59: column metadata sourced from `@/lib/transactions/columns`
+  // so the API routes, the sort whitelist, and the page client share one
+  // authority. Adding/removing a column happens there.
+  type ColumnId = SharedColumnId;
   type ColumnPref = { id: ColumnId; visible: boolean };
-  const ALL_COLUMNS: ColumnId[] = [
-    "select",
-    "date",
-    "account",
-    "accountType",
-    "accountName",
-    "accountAlias",
-    "category",
-    "payee",
-    "portfolio",
-    "portfolioTicker",
-    "note",
-    "tags",
-    "quantity",
-    "amount",
-    "actions",
-  ];
-  const COLUMN_LABELS: Record<ColumnId, string> = {
-    select: "Select",
-    date: "Date",
-    account: "Account",
-    accountType: "Account type",
-    accountName: "Account name",
-    accountAlias: "Account alias",
-    category: "Category",
-    payee: "Payee",
-    portfolio: "Portfolio",
-    portfolioTicker: "Ticker",
-    note: "Note",
-    tags: "Tags",
-    quantity: "Qty",
-    amount: "Amount",
-    actions: "Actions",
-  };
-  // select + actions are render scaffolding (checkbox column + the per-row
-  // edit/split/delete icon group). Hiding them would break bulk selection
-  // and inline editing — keep them locked on.
-  const TOGGLEABLE_COLUMNS: Set<ColumnId> = new Set([
-    "date",
-    "account",
-    "accountType",
-    "accountName",
-    "accountAlias",
-    "category",
-    "payee",
-    "portfolio",
-    "portfolioTicker",
-    "note",
-    "tags",
-    "quantity",
-    "amount",
-  ]);
-  const DEFAULT_COL_PREFS: ColumnPref[] = [
-    { id: "select", visible: true },
-    { id: "date", visible: true },
-    { id: "account", visible: true },
-    { id: "accountType", visible: false },
-    { id: "accountName", visible: false },
-    { id: "accountAlias", visible: false },
-    { id: "category", visible: true },
-    { id: "payee", visible: true },
-    { id: "portfolio", visible: false },
-    { id: "portfolioTicker", visible: false },
-    { id: "note", visible: true },
-    { id: "tags", visible: false },
-    { id: "quantity", visible: true },
-    { id: "amount", visible: true },
-    { id: "actions", visible: true },
-  ];
+  const ALL_COLUMNS = SHARED_COLUMN_IDS as readonly ColumnId[];
+  const COLUMN_LABELS = SHARED_COLUMN_LABELS;
+  const TOGGLEABLE_COLUMNS = new Set<ColumnId>(SHARED_TOGGLEABLE_COLUMN_IDS);
+  const DEFAULT_COL_PREFS = SHARED_DEFAULT_COLUMNS;
   function mergeColPrefs(saved: ColumnPref[] | null | undefined): ColumnPref[] {
     if (!saved || saved.length === 0) return DEFAULT_COL_PREFS;
     const seen = new Set<ColumnId>();
@@ -418,6 +625,97 @@ function TransactionsPageInner() {
   };
   const onColDragEnd = () => setDraggingCol(null);
 
+  // Per-user header sort (issue #59). `null` direction = unsorted (default
+  // `date DESC` server-side). Persisted via /api/settings/tx-sort. Cycles
+  // desc → asc → null on repeated clicks.
+  type SortPref = { columnId: SortableColumnId | null; direction: "asc" | "desc" | null };
+  const [sortPref, setSortPref] = useState<SortPref>({ columnId: null, direction: null });
+  const sortPrefLoaded = useRef(false);
+  const sortPrefSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/settings/tx-sort")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: SortPref | null) => {
+        if (cancelled) return;
+        if (d && (d.columnId === null || isSortableColumnId(d.columnId)) && (d.direction === null || d.direction === "asc" || d.direction === "desc")) {
+          setSortPref({ columnId: d.columnId, direction: d.direction });
+        }
+      })
+      .catch(() => { /* default = unsorted */ })
+      .finally(() => {
+        if (!cancelled) sortPrefLoaded.current = true;
+      });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!sortPrefLoaded.current) return;
+    if (sortPrefSaveTimer.current) clearTimeout(sortPrefSaveTimer.current);
+    sortPrefSaveTimer.current = setTimeout(() => {
+      fetch("/api/settings/tx-sort", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sortPref),
+      }).catch(() => { /* swallow */ });
+    }, 400);
+    return () => {
+      if (sortPrefSaveTimer.current) clearTimeout(sortPrefSaveTimer.current);
+    };
+  }, [sortPref]);
+  function cycleSort(columnId: SortableColumnId) {
+    setSortPref((prev) => {
+      if (prev.columnId !== columnId) return { columnId, direction: "desc" };
+      if (prev.direction === "desc") return { columnId, direction: "asc" };
+      return { columnId: null, direction: null };
+    });
+    setPage(0);
+  }
+
+  // Per-column filters (issue #59). Discriminated union by column type;
+  // persisted via /api/settings/tx-filters. Each column has at most one
+  // filter active at a time. Shape mirrors the server-side zod schema.
+  type ColFilter = ColFilterShape;
+  const [colFilters, setColFilters] = useState<ColFilter[]>([]);
+  const colFiltersLoaded = useRef(false);
+  const colFiltersSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/settings/tx-filters")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { filters?: ColFilter[] } | null) => {
+        if (cancelled) return;
+        if (d?.filters) setColFilters(d.filters);
+      })
+      .catch(() => { /* default = no filters */ })
+      .finally(() => {
+        if (!cancelled) colFiltersLoaded.current = true;
+      });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!colFiltersLoaded.current) return;
+    if (colFiltersSaveTimer.current) clearTimeout(colFiltersSaveTimer.current);
+    colFiltersSaveTimer.current = setTimeout(() => {
+      fetch("/api/settings/tx-filters", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filters: colFilters }),
+      }).catch(() => { /* swallow */ });
+    }, 400);
+    return () => {
+      if (colFiltersSaveTimer.current) clearTimeout(colFiltersSaveTimer.current);
+    };
+  }, [colFilters]);
+  function findColFilter(columnId: ColumnId): ColFilter | undefined {
+    return colFilters.find((f) => f.columnId === columnId);
+  }
+  function setColFilter(filter: ColFilter | null, columnId: ColumnId) {
+    setColFilters((prev) => {
+      const without = prev.filter((f) => f.columnId !== columnId);
+      return filter ? [...without, filter] : without;
+    });
+    setPage(0);
+  }
   // Add/edit dialog
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
@@ -565,6 +863,67 @@ function TransactionsPageInner() {
     if (filters.search) params.set("search", filters.search);
     if (filters.portfolioHolding) params.set("portfolioHolding", filters.portfolioHolding);
     if (filters.tag) params.set("tag", filters.tag);
+
+    // Issue #59 — sort + per-column filters. The top-bar quick filters
+    // above are URL-driven (deep links from /portfolio etc. must keep
+    // working); per-column filters are persisted server-side. Pushed as
+    // a union — both sets narrow the result.
+    if (sortPref.columnId && sortPref.direction) {
+      params.set("sort", sortPref.columnId);
+      params.set("sortDir", sortPref.direction);
+    }
+    for (const f of colFilters) {
+      if (f.type === "date") {
+        // Map column id → query param prefix that the route handler
+        // recognizes. `date` reuses the existing startDate/endDate;
+        // `createdAt`/`updatedAt` use their own pair.
+        if (f.columnId === "date") {
+          // Only set if the top-bar quick filter hasn't already.
+          if (!params.has("startDate") && f.from) params.set("startDate", f.from);
+          if (!params.has("endDate") && f.to) params.set("endDate", f.to);
+        } else if (f.columnId === "createdAt") {
+          if (f.from) params.set("createdAtFrom", f.from);
+          if (f.to) params.set("createdAtTo", f.to);
+        } else if (f.columnId === "updatedAt") {
+          if (f.from) params.set("updatedAtFrom", f.from);
+          if (f.to) params.set("updatedAtTo", f.to);
+        }
+      } else if (f.type === "text") {
+        // Encrypted-column substring filter — uses the post-decrypt path.
+        params.set(`filter_${f.columnId}`, f.value);
+      } else if (f.type === "numeric") {
+        const prefix = f.columnId === "amount" ? "amount" : f.columnId === "quantity" ? "quantity" : null;
+        if (!prefix) continue;
+        if (f.op === "eq") {
+          params.set(`${prefix}Eq`, String(f.value));
+        } else if (f.op === "gt") {
+          params.set(`${prefix}Min`, String(f.value));
+        } else if (f.op === "lt") {
+          params.set(`${prefix}Max`, String(f.value));
+        } else if (f.op === "between") {
+          params.set(`${prefix}Min`, String(f.value));
+          if (f.value2 != null) params.set(`${prefix}Max`, String(f.value2));
+        }
+      } else if (f.type === "enum") {
+        if (f.columnId === "source") {
+          params.set("sources", f.values.join(","));
+        } else if (f.columnId === "category") {
+          params.set("categoryIds", f.values.join(","));
+        } else if (f.columnId === "account" || f.columnId === "accountType") {
+          // accountType doesn't have a SQL pushdown — it's part of the
+          // account JOIN. Push the ids of accounts of that type instead.
+          if (f.columnId === "accountType") {
+            const ids = accounts
+              .filter((a) => a.type && f.values.includes(a.type))
+              .map((a) => a.id);
+            if (ids.length > 0) params.set("accountIds", ids.join(","));
+          } else {
+            params.set("accountIds", f.values.join(","));
+          }
+        }
+      }
+    }
+
     params.set("limit", String(limit));
     params.set("offset", String(page * limit));
 
@@ -575,7 +934,7 @@ function TransactionsPageInner() {
         setTotal(d.total ?? 0);
       })
       .finally(() => setLoading(false));
-  }, [filters, page]);
+  }, [filters, page, sortPref, colFilters, accounts]);
 
   useEffect(() => { loadTxns(); }, [loadTxns]);
 
@@ -752,6 +1111,10 @@ function TransactionsPageInner() {
   function clearFilters() {
     setSearchInput("");
     setFilters({ startDate: "", endDate: "", accountId: "", categoryId: "", search: "", portfolioHolding: "", tag: "" });
+    // Issue #59 — also wipe the per-column filters + sort. The chip row
+    // below the top-bar shows both, so "Clear all" should drop both.
+    setColFilters([]);
+    setSortPref({ columnId: null, direction: null });
     setPage(0);
   }
 
@@ -1371,7 +1734,13 @@ function TransactionsPageInner() {
   const splitBalanced = Math.abs(splitRemaining) < 0.01;
 
   return (
-    <div className="space-y-6">
+    /* Issue #59 — opt out of the global `max-w-7xl mx-auto` layout clamp
+       (src/app/(app)/layout.tsx:17) so the transactions table can fill
+       the viewport width. Negative margins cancel the parent's px-4/6/8;
+       an inner full-width wrapper holds the original space-y-6 + page
+       content. The card body wraps the table in `overflow-x-auto` so
+       long column lists scroll horizontally rather than truncate. */
+    <div className="-mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 space-y-6 max-w-none">
       <OnboardingTips page="transactions" />
       <div className="flex items-center justify-between">
         <div>
@@ -2496,12 +2865,72 @@ function TransactionsPageInner() {
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
-            {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search || filters.portfolioHolding || filters.tag) && (
+            {(filters.startDate || filters.endDate || filters.accountId || filters.categoryId || filters.search || filters.portfolioHolding || filters.tag || colFilters.length > 0 || sortPref.columnId) && (
               <button onClick={clearFilters} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors ml-1">
                 <X className="h-3 w-3" /> Clear all
               </button>
             )}
           </div>
+          {/* Issue #59 — per-column filter chips. Each chip drops just its
+              own filter when clicked; "Clear all" above wipes the lot. */}
+          {(colFilters.length > 0 || sortPref.columnId) && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted-foreground">Column filters:</span>
+              {sortPref.columnId && sortPref.direction && (
+                <Badge variant="outline" className="h-7 gap-1.5 pr-1 border-primary/30 bg-primary/5 text-primary">
+                  <span className="font-medium text-xs">
+                    Sort: {COLUMN_LABELS[sortPref.columnId]} {sortPref.direction === "asc" ? "↑" : "↓"}
+                  </span>
+                  <button
+                    onClick={() => setSortPref({ columnId: null, direction: null })}
+                    className="p-0.5 rounded hover:bg-primary/10 transition-colors"
+                    aria-label="Clear sort"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </Badge>
+              )}
+              {colFilters.map((f) => {
+                const label = COLUMN_LABELS[f.columnId];
+                let summary: string;
+                if (f.type === "date") {
+                  summary = `${f.from ?? "…"} → ${f.to ?? "…"}`;
+                } else if (f.type === "text") {
+                  summary = `“${f.value}”`;
+                } else if (f.type === "numeric") {
+                  if (f.op === "between") summary = `${f.value} – ${f.value2 ?? "?"}`;
+                  else summary = `${f.op === "eq" ? "=" : f.op === "gt" ? ">" : "<"} ${f.value}`;
+                } else {
+                  // enum — render labelled values where we can
+                  const labels = f.values.map((v) => {
+                    if (f.columnId === "source") return labelForSource(v as TransactionSource);
+                    if (f.columnId === "category") {
+                      const cat = categories.find((c) => String(c.id) === v);
+                      return cat?.name ?? v;
+                    }
+                    if (f.columnId === "account") {
+                      const a = accounts.find((aa) => String(aa.id) === v);
+                      return a?.name ?? v;
+                    }
+                    return v;
+                  });
+                  summary = labels.length <= 2 ? labels.join(", ") : `${labels[0]} + ${labels.length - 1} more`;
+                }
+                return (
+                  <Badge key={f.columnId} variant="outline" className="h-7 gap-1.5 pr-1">
+                    <span className="font-medium text-xs">{label}: {summary}</span>
+                    <button
+                      onClick={() => setColFilter(null, f.columnId)}
+                      className="p-0.5 rounded hover:bg-muted transition-colors"
+                      aria-label={`Clear ${label} filter`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                );
+              })}
+            </div>
+          )}
           {filters.portfolioHolding && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Holding:</span>
@@ -2625,6 +3054,7 @@ function TransactionsPageInner() {
               action={{ label: "Import data", href: "/import" }}
             />
           ) : (
+            <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -2636,10 +3066,14 @@ function TransactionsPageInner() {
                       c.id === "actions" ? "w-24" :
                       "";
                     const isDragging = draggingCol === c.id;
+                    const sortable = isSortableColumnId(c.id);
+                    const filterType = FILTER_COLUMN_TYPES[c.id];
+                    const activeFilter = findColFilter(c.id);
+                    const sortActive = sortPref.columnId === c.id ? sortPref.direction : null;
                     return (
                       <TableHead
                         key={c.id}
-                        className={`${widthClass} ${isAmount ? "text-right" : ""} ${isDraggable ? "cursor-grab select-none" : ""} ${isDragging ? "opacity-50" : ""}`}
+                        className={`${widthClass} ${isAmount ? "text-right" : ""} ${isDraggable ? "select-none" : ""} ${isDragging ? "opacity-50" : ""}`}
                         draggable={isDraggable}
                         onDragStart={isDraggable ? onColDragStart(c.id) : undefined}
                         onDragOver={isDraggable ? onColDragOver(c.id) : undefined}
@@ -2656,7 +3090,32 @@ function TransactionsPageInner() {
                         ) : c.id === "actions" ? (
                           ""
                         ) : (
-                          COLUMN_LABELS[c.id]
+                          <div className={`flex items-center gap-1 ${isAmount ? "justify-end" : ""}`}>
+                            {sortable ? (
+                              <button
+                                type="button"
+                                onClick={() => cycleSort(c.id as SortableColumnId)}
+                                className="inline-flex items-center gap-0.5 hover:text-foreground transition-colors"
+                                title="Click to sort"
+                              >
+                                <span>{COLUMN_LABELS[c.id]}</span>
+                                {sortActive === "asc" && <ArrowUp className="h-3 w-3 text-primary" />}
+                                {sortActive === "desc" && <ArrowDown className="h-3 w-3 text-primary" />}
+                              </button>
+                            ) : (
+                              <span>{COLUMN_LABELS[c.id]}</span>
+                            )}
+                            {filterType && (
+                              <ColumnFilterPopover
+                                columnId={c.id}
+                                filterType={filterType}
+                                activeFilter={activeFilter}
+                                onChange={(f) => setColFilter(f, c.id)}
+                                accounts={accounts}
+                                categories={categories}
+                              />
+                            )}
+                          </div>
                         )}
                       </TableHead>
                     );
@@ -2800,6 +3259,30 @@ function TransactionsPageInner() {
                             </TableCell>
                           );
                         }
+                        case "createdAt":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground whitespace-nowrap">
+                              {t.createdAt ? formatDate(t.createdAt.split("T")[0]) : "-"}
+                            </TableCell>
+                          );
+                        case "updatedAt":
+                          return (
+                            <TableCell key={c.id} className="text-sm text-muted-foreground whitespace-nowrap">
+                              {t.updatedAt ? formatDate(t.updatedAt.split("T")[0]) : "-"}
+                            </TableCell>
+                          );
+                        case "source":
+                          return (
+                            <TableCell key={c.id} className="text-sm">
+                              {t.source ? (
+                                <Badge variant="outline" className="text-[10px]">
+                                  {labelForSource(t.source)}
+                                </Badge>
+                              ) : (
+                                "-"
+                              )}
+                            </TableCell>
+                          );
                         case "actions":
                           return (
                             <TableCell key={c.id}>
@@ -2822,6 +3305,7 @@ function TransactionsPageInner() {
                 ))}
               </TableBody>
             </Table>
+            </div>
           )}
         </CardContent>
       </Card>
