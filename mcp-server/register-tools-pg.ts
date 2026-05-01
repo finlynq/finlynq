@@ -786,6 +786,10 @@ export function registerPgTools(
       // Stream D: category filter uses name_lookup (HMAC) when DEK present,
       // falls back to legacy plaintext name= for stdio/pre-backfill rows.
       const categoryLookup = category && dek ? nameLookup(dek, category) : null;
+      // NOTE: account_id and portfolio_holding_id are independent filters —
+      // both are valid alone or combined (e.g. "all VCN.TO dividends in IBKR
+      // TFSA"). Do not add an XOR or payee-required guard here; the stdio
+      // counterpart in tools-v2.ts mirrors this exactly (issue #80).
       const rawRows = await q(db, sql`
         SELECT t.id, t.date,
                a.name AS account, a.name_ct AS account_ct,
