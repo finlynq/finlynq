@@ -297,6 +297,8 @@ After each env, smoke-check by inserting any transaction (UI or MCP) and confirm
 
 ## portfolio-canonical-names (2026-05-01, issue #25)
 
+**Applied to prod + staging + dev on 2026-05-01.**
+
 Schema-only prep for the per-user canonical-name backfill helper at [src/lib/crypto/stream-d-canonicalize-portfolio.ts](../src/lib/crypto/stream-d-canonicalize-portfolio.ts). Adds a single column — `users.portfolio_names_canonicalized_at text` (NULL = needs canonicalization on next login, non-NULL = done). The helper is fired from the login path (sibling to `enqueuePhase3NullIfReady`); on first run it decrypts each `portfolio_holdings` row's name + symbol, classifies tickered / cash-sleeve / currency-code / user-defined, and dual-writes the canonical name + `name_ct` + `name_lookup` for the first three classes. User-defined rows are left alone. DEK-mismatch users (pathfinder per CLAUDE.md "Known open issue: pathfinder DEK mismatch") bail silently at the sample-decrypt precondition — mirrors `nullPlaintextIfReady`'s gate-check pattern. Idempotent (`ADD COLUMN IF NOT EXISTS`). Run BEFORE the matching code deploy so the helper has the column to read/write.
 
 ```sh
@@ -308,6 +310,8 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 After deploy, monitor the helper's progress via the rough check `SELECT COUNT(*) FROM users WHERE portfolio_names_canonicalized_at IS NOT NULL;` — it climbs as users log in. DEK-mismatch users keep `portfolio_names_canonicalized_at` NULL indefinitely (their plaintext fallback still renders the page correctly).
 
 ## tx-audit-indexes (2026-04-30, issue #59)
+
+**Applied to prod + staging + dev on 2026-05-01.**
 
 Index-only follow-up to `tx-audit-fields` — adds two composite indexes on the audit-trio columns so the new "Sort by Created / Updated" headers on `/transactions` don't table-scan once a user has 50k+ transactions. `source` is small-cardinality enum (7 values); the existing `(user_id)` index handles equality / IN filters fine, so no index added there. Idempotent. Run BEFORE the matching code deploy so the indexes are present when the new sort headers go live.
 
