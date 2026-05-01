@@ -16,7 +16,7 @@ import {
 import {
   TrendingUp, Wallet, BarChart3, Coins, ArrowUpRight, ArrowDownRight,
   Globe2, Building2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Layers, PieChart as PieChartIcon,
-  Briefcase, DollarSign, Flame, Snowflake, Search, Download, Pencil, Trash2, AlertTriangle,
+  Briefcase, DollarSign, Flame, Snowflake, Search, Download, Trash2, AlertTriangle,
 } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
 import { motion, AnimatePresence } from "framer-motion";
@@ -972,20 +972,21 @@ export default function PortfolioPage() {
 
                             {/* Per-account breakdown (issue #25 spec). One
                                 row per (canonical-holding, account) pair
-                                with a "View transactions" drill-down. Hidden
-                                when only one account holds the position so
-                                we don't duplicate the totals row above. */}
-                            {memberHoldings.length > 1 && (
-                              <div className="mt-3 rounded-md border border-border/50 overflow-hidden">
+                                with a "View transactions" drill-down. Always
+                                rendered — for single-account holdings it
+                                doubles as the only edit affordance, since
+                                the account-name cell opens the editor. */}
+                            {memberHoldings.length > 0 && (
+                              <div className="mt-3 rounded-md border border-border overflow-hidden">
                                 <Table>
-                                  <TableHeader>
-                                    <TableRow>
-                                      <TableHead className="text-[10px] uppercase tracking-wider">Account</TableHead>
-                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Qty</TableHead>
-                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Avg Cost</TableHead>
-                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Mkt Value</TableHead>
-                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Unrealized G/L</TableHead>
-                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Realized G/L</TableHead>
+                                  <TableHeader className="bg-muted/40">
+                                    <TableRow className="hover:bg-transparent border-border">
+                                      <TableHead className="text-[10px] uppercase tracking-wider text-muted-foreground">Account</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider text-muted-foreground">Qty</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider text-muted-foreground">Avg Cost</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider text-muted-foreground">Mkt Value</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider text-muted-foreground">Unrealized G/L</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider text-muted-foreground">Realized G/L</TableHead>
                                       <TableHead className="text-right" />
                                     </TableRow>
                                   </TableHeader>
@@ -994,7 +995,7 @@ export default function PortfolioPage() {
                                       const hasMetrics = h.quantity !== null && h.quantity !== 0;
                                       const nativeCcy = h.quoteCurrency ?? h.currency;
                                       return (
-                                        <TableRow key={h.id} className="hover:bg-muted/30">
+                                        <TableRow key={h.id} className="hover:bg-muted/30 border-border/60">
                                           <TableCell className="text-xs">
                                             <button
                                               type="button"
@@ -1053,21 +1054,14 @@ export default function PortfolioPage() {
                             )}
 
                             <div className="mt-3 pt-3 border-t border-border/50 flex justify-end gap-3">
-                              {memberHoldings.length === 1 && memberHoldings[0] ? (
-                                <button
-                                  type="button"
-                                  onClick={(e) => { e.stopPropagation(); setEditingHolding(memberHoldings[0]); }}
-                                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground font-medium"
-                                >
-                                  <Pencil className="h-3 w-3" /> Edit
-                                </button>
-                              ) : null}
                               {/* "View transactions" — same canonical
                                   holding across every account it lives in.
                                   Mirrors the existing
                                   /transactions?portfolioHolding=<name>
                                   contract; the per-account "View txns"
-                                  links above scope to a single account. */}
+                                  links above scope to a single account.
+                                  Per-account Edit lives on the account-name
+                                  cell in the breakdown table above. */}
                               <Link
                                 href={`/transactions?portfolioHolding=${encodeURIComponent(r.name)}`}
                                 onClick={(e) => e.stopPropagation()}
