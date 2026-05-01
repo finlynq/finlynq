@@ -99,7 +99,7 @@ describe("transformTransactions", () => {
       ],
     };
 
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.errors).toHaveLength(0);
     expect(r.splits).toHaveLength(0);
     expect(r.flat).toHaveLength(1);
@@ -132,7 +132,7 @@ describe("transformTransactions", () => {
       ],
     };
 
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.errors).toHaveLength(0);
     expect(r.splits).toHaveLength(0);
     expect(r.flat).toHaveLength(2);
@@ -164,7 +164,7 @@ describe("transformTransactions", () => {
         { categorization: "Cash USD Lebanon", amount: "1000", currency: "USD", holding: null },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.flat).toHaveLength(0);
     expect(r.errors).toHaveLength(1);
     expect(r.errors[0].reason).toMatch(/Transfer category/);
@@ -189,7 +189,7 @@ describe("transformTransactions", () => {
       ],
     };
 
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.errors).toHaveLength(0);
     expect(r.flat).toHaveLength(0);
     expect(r.splits).toHaveLength(1);
@@ -221,7 +221,7 @@ describe("transformTransactions", () => {
         { categorization: "Crypto purchase", amount: "50", currency: "CAD", holding: null, note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.flat[0].quantity).toBeCloseTo(0.000311, 9);
   });
 
@@ -240,7 +240,7 @@ describe("transformTransactions", () => {
         { categorization: "Crypto purchase", amount: "50", currency: "CAD", holding: null, note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.flat[0].portfolioHolding).toBe("Bitcoin");
   });
 
@@ -259,7 +259,7 @@ describe("transformTransactions", () => {
         { categorization: "Misc", amount: "-50", currency: "CAD", holding: null, note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.flat[0].portfolioHolding).toBeUndefined();
   });
 
@@ -278,7 +278,7 @@ describe("transformTransactions", () => {
         { categorization: "Misc", amount: "-50", currency: "CAD", holding: null, note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.flat[0].quantity).toBeUndefined();
   });
 
@@ -295,7 +295,7 @@ describe("transformTransactions", () => {
         { categorization: "RBC Checking", amount: "-42.50", currency: "CAD", holding: null, note: "walmart" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.errors).toHaveLength(0);
     expect(r.flat).toHaveLength(1);
     expect(r.flat[0].category).toBeUndefined();
@@ -319,7 +319,7 @@ describe("transformTransactions", () => {
         { categorization: "Fidelity - CAD", amount: "396.39", currency: "USD", holding: "543.00", note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.flat).toHaveLength(0);
     expect(r.splits).toHaveLength(0);
     expect(r.errors).toHaveLength(1);
@@ -341,12 +341,12 @@ describe("transformTransactions", () => {
         { categorization: "Some Unmapped Category", amount: "-10", currency: "CAD", holding: null, note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.errors).toHaveLength(1);
     expect(r.errors[0].reason).toMatch(/Unmapped entry/);
   });
 
-  it("serializes tags as comma-separated string and appends source:wealthposition", () => {
+  it("serializes tags as comma-separated string and appends source:<format>", () => {
     const rbc = wpAccount("acc-rbc", "RBC Checking", "A", "CAD");
     const exp = wpCategory("cat-exp", "Misc", "E");
     const { mapping, byName } = buildMapping([rbc], [exp]);
@@ -362,12 +362,12 @@ describe("transformTransactions", () => {
         { categorization: "Misc", amount: "-5", currency: "CAD", holding: null, note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
-    expect(r.flat[0].tags).toBe("morning,work,source:wealthposition");
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
+    expect(r.flat[0].tags).toBe("morning,work,source:csv");
     expect(r.flat[0].payee).toBe("Coffee");
   });
 
-  it("auto-tags rows with source:wealthposition even when no user tags are set", () => {
+  it("auto-tags rows with source:<format> even when no user tags are set", () => {
     const rbc = wpAccount("acc-rbc", "RBC Checking", "A", "CAD");
     const exp = wpCategory("cat-exp", "Misc", "E");
     const { mapping, byName } = buildMapping([rbc], [exp]);
@@ -383,8 +383,8 @@ describe("transformTransactions", () => {
         { categorization: "Misc", amount: "-4", currency: "CAD", holding: null, note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
-    expect(r.flat[0].tags).toBe("source:wealthposition");
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
+    expect(r.flat[0].tags).toBe("source:csv");
   });
 
   it("preserves a null categoryMap value as uncategorized split row", () => {
@@ -408,7 +408,7 @@ describe("transformTransactions", () => {
         { categorization: "Unknown Income", amount: "20", currency: "CAD", holding: null, note: "" },
       ],
     };
-    const r = transformTransactions([tx], mapping, byName);
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
     expect(r.errors).toHaveLength(0);
     expect(r.splits).toHaveLength(1);
     const rows = r.splits[0].splits;

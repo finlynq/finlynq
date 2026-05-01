@@ -44,7 +44,8 @@ import {
   InvestmentHoldingRequiredError,
   isInvestmentAccount,
 } from "@/lib/investment-account";
-import type { TransactionSource } from "@/lib/tx-source";
+import type { FormatTag, TransactionSource } from "@/lib/tx-source";
+import { isFormatTag } from "@/lib/tx-source";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -170,19 +171,25 @@ export type CreateTransferOpts = {
   note?: string;
   tags?: string;
   /**
-   * When set, the connector / orchestrator name (e.g. "wealthposition") is
-   * prepended to both legs' `tags` as `source:<connector>`. Lets future
-   * statement reconciliations dedup against rows the bank side has already
-   * imported. No-op when undefined; merged with caller-supplied tags rather
-   * than replacing them.
+   * When set, the file/wire format the rows arrived as (e.g. `"csv"`,
+   * `"ofx"`, `"ibkr-xml"`) is prepended to both legs' `tags` as
+   * `source:<format>`. Lets future statement reconciliations dedup against
+   * rows the bank side has already imported. No-op when undefined; merged
+   * with caller-supplied tags rather than replacing them.
    *
-   * NOTE: this `source` is the connector slug for the tag merge — distinct
-   * from the audit-column `txSource` below (issue #28). The two coexist
-   * because the tag lineage is a connector-specific dedup key while the
-   * audit column is a coarse seven-value enum. Setting `source` here does
-   * NOT auto-derive `txSource`; the route handler sets both.
+   * NOTE (issue #62): this is now a **format** name, NOT a connector or
+   * institution name. Use `"csv"` for connector-orchestrated CSV imports
+   * (WealthPosition, IBKR activity-CSV), `"ibkr-xml"` for IBKR Flex XML,
+   * etc. Institution name lives on the account; per-row tags describe
+   * shape only. Runtime-asserted via `isFormatTag()` in `applySourceTag` —
+   * unknown values throw rather than silently writing bogus tags.
+   *
+   * Distinct from the audit-column `txSource` below (issue #28). The two
+   * coexist because the tag captures file-shape provenance while the audit
+   * column captures the writer surface. Setting `source` here does NOT
+   * auto-derive `txSource`; the route handler sets both.
    */
-  source?: string;
+  source?: FormatTag;
   /**
    * Audit-source attribution (issue #28). Hard-coded by each route handler
    * at the boundary: 'manual' for UI POST, 'mcp_http' / 'mcp_stdio' for
@@ -333,15 +340,28 @@ function defaultPayee(direction: "out" | "in", otherAccountName: string | null):
 }
 
 /**
- * Merge a `source:<connector>` tag into a user-supplied tags string. Idempotent:
- * if the tag is already present (case-insensitive), the input is returned
- * unchanged so re-running an import doesn't accumulate duplicates. Empty
- * `source` is a no-op. Tags are stored comma-separated, matching what
+ * Merge a `source:<format>` tag into a user-supplied tags string (issue #62).
+ * Idempotent: if the tag is already present (case-insensitive), the input is
+ * returned unchanged so re-running an import doesn't accumulate duplicates.
+ * Empty `source` is a no-op. Tags are stored comma-separated, matching what
  * `transactions.tags` already holds.
+ *
+ * `source` is a **format** name (csv | excel | pdf | ofx | qfx | ibkr-xml |
+ * email) — NOT a connector or institution. The TypeScript signature on
+ * `CreateTransferOpts.source` is `FormatTag`, but the runtime guard below
+ * defends against JS callers passing the old `"wealthposition"` /
+ * `"ibkr"` strings — those throw rather than silently writing a bogus tag.
  */
 function applySourceTag(tags: string, source: string | undefined): string {
   if (!source || !source.trim()) return tags;
-  const tag = `source:${source.trim()}`;
+  const trimmed = source.trim();
+  if (!isFormatTag(trimmed)) {
+    throw new Error(
+      `applySourceTag: invalid format tag "${trimmed}". ` +
+        `Expected one of csv|excel|pdf|ofx|qfx|ibkr-xml|email (issue #62).`,
+    );
+  }
+  const tag = `source:${trimmed}`;
   const existing = tags
     .split(",")
     .map((t) => t.trim())

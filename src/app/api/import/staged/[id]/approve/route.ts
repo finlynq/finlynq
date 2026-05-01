@@ -25,6 +25,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { executeImport, type RawTransaction } from "@/lib/import-pipeline";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
+import { sourceTagFor } from "@/lib/tx-source";
 
 export const dynamic = "force-dynamic";
 
@@ -85,6 +86,10 @@ export async function POST(
   // Shape for executeImport. Decrypt the staging-envelope fields (Finding #9)
   // before passing to the pipeline — the pipeline expects plaintext and then
   // re-encrypts under the user's DEK inside `transactions`.
+  // Issue #62: stamp source:email so cross-source dedup can identify rows
+  // that arrived via Resend Inbound. The staged_imports/staged_transactions
+  // tables don't carry `tags`, so we apply it at materialize time.
+  const emailTag = sourceTagFor("email");
   const rows: RawTransaction[] = selected.map((r) => ({
     date: r.date,
     account: decryptStaged(r.accountName) ?? "",
@@ -93,6 +98,7 @@ export async function POST(
     category: decryptStaged(r.category) ?? undefined,
     currency: r.currency ?? undefined,
     note: decryptStaged(r.note) ?? undefined,
+    tags: emailTag,
   }));
 
   const result = await executeImport(rows, forceImportIndices, userId, dek);
