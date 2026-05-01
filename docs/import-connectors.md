@@ -546,36 +546,62 @@ Run everything: `cd pf-app && npm test`.
 | Provider | ID | Added | Paths | Reconciliation | Notes |
 |---|---|---|---|---|---|
 | WealthPosition | `wealthposition` | 2026-04-24 | ZIP + API | via API `/account_balances` | Portfolio.csv is the holding→brokerage ground truth. `#SPLIT#` sentinel preserves multi-leg shape. |
-| Interactive Brokers | `ibkr` | 2026-04-30 | XML (Flex Query) + Activity CSV | not yet — open positions infer sub-account → Finlynq mapping | Multi-account: each `<FlexStatement>` is a sub-account. Forex (`assetCategory="CASH"`) collapses to one same-account 2-leg in-kind currency conversion (NOT two cash flows). Cancellation triplets share an `actionID` and net to one row (or drop entirely if they sum to zero). XML preferred over CSV — header drift in CSV is real, XML attributes are deterministic. |
+| Interactive Brokers | `ibkr` | 2026-04-30 | ~~XML (Flex Query) + Activity CSV~~ — file upload removed 2026-04-30, replaced by the unified format-based parsers (see "Format-based parsers" below). The package directory remains for a possible future Flex Web Service live-API client. | n/a (file-upload path retired) | The connector's `parseFlexXml` / `parseFlexCsv` / `transformIbkrFile` are no longer wired into the import UI — see issue #64. |
 
-#### IBKR-specific notes
+#### Format-based investment-statement parsers (issue #64)
 
-The IBKR connector is **upload-only** (XML or activity CSV) at v1 — no live
-Flex Web Service client yet. Pipeline:
+OFX investment statements (`<INVSTMTRS>`), QFX investment exports, and IBKR
+FlexQuery XML now route through generic format parsers in the main import
+pipeline, not through the per-broker connector framework. File uploads via
+`/import/preview` dispatch by sniff (extension + first-bytes check):
+
+| Extension/sniff | Parser | Format tag |
+|---|---|---|
+| `OFXHEADER:100` (SGML) | `src/lib/external-import/parsers/ofx.ts` | `source:ofx` |
+| `<?xml … ?><OFX>` (OFX-XML) | `src/lib/external-import/parsers/ofx.ts` | `source:ofx` |
+| `.qfx` extension or QFX payload | `src/lib/external-import/parsers/qfx.ts` (delegates to OFX) | `source:qfx` |
+| `<FlexQueryResponse>` root | `src/lib/external-import/parsers/ibkr-flexquery-xml.ts` | `source:ibkr-xml` |
+| anything else with `.xml` | unknown — error | — |
+
+Each parser emits the import-pipeline's `RawTransaction[]` shape directly,
+NOT the connector's `ExternalTransaction[]` wire shape. The pipeline:
 
 ```
-fileBody (XML or CSV)
+file body
    │
-   ▼  parseFlexXml / parseFlexCsv   →  IbkrStatement[]   (per sub-account)
-   ▼  transformIbkrFile             →  ExternalAccount[] + ExternalCategory[]
-   │                                    + ExternalTransaction[]
-   ▼  transformTransactions         →  TransformResult (flat + splits + errors)
-                                       with `source:csv` or `source:ibkr-xml`
-                                       applied (issue #62 — format tag, not
-                                       institution name)
+   ▼  detectInvestmentFileFormat(name, head)  →  { format }
+   │
+   ▼  parseOfxToCanonical / parseQfxToCanonical / parseIbkrFlexXmlToCanonical
+   │      (uses parseOfxInvestments() under the hood for OFX/QFX)
+   │
+   ▼  RawTransaction[] + externalAccounts[]   (synthetic per-account-and-currency ids)
+   │
+   ▼  user binds external accounts to Finlynq accounts in the UI dialog
+   │
+   ▼  /api/import/execute  →  previewImport / executeImport (existing pipeline)
 ```
 
-Sub-account → Finlynq-account mapping is suggested by
-`inferAccountMapping()` (Jaccard similarity on held tickers from
-`<OpenPositions>`); the orchestrator on the Finlynq side surfaces this in
-the mapping dialog and lets the user override before commit.
+Buy/sell trades emit TWO rows sharing a parser-side `linkId`: a cash leg on
+the per-account Cash sleeve, plus a position leg with `quantity` (signed
+per WP convention: BUY → +qty, SELL → −qty) and `portfolioHolding` set to
+the holding NAME (looked up from `<SECLIST>` for OFX, the `symbol` attr for
+IBKR). Commissions and fees emit additional negative cash-sleeve rows
+tagged `trade-link:<linkId>`. INCOME rows and INVBANKTRAN deposits are
+single cash-sleeve rows. IBKR forex (`assetCategory="CASH"`) collapses to a
+two-leg same-account currency conversion (one row per currency), and IBKR
+cancellation triplets sharing an `actionID` net to zero or one row.
+
+The IBKR-XML path preserves the connector's load-bearing transformations —
+cancellation netting, forex collapse, sign convention — but emits to the
+unified pipeline instead of the connector's `ExternalTransaction` shape.
+The connector remains in `packages/import-connectors/src/ibkr/` only as a
+parking place for a future Flex Web Service live-API integration.
 
 The `transformTransactions()` shared helper takes a required
 `{ formatTag }` option (one of `csv | excel | pdf | ofx | qfx | ibkr-xml |
 email`) — every new connector passes the format the data arrived as so
 the auto-applied row tag (`source:<format>`) describes file shape, not
-institution. The IBKR orchestrator plumbs `csv` vs `ibkr-xml` based on
-which parser ran. See §7 invariant 15.
+institution. See §7 invariant 15.
 
 ### Candidate providers (not yet started)
 

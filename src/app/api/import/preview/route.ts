@@ -10,6 +10,10 @@ import { sourceTagFor, type FormatTag } from "@/lib/tx-source";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 import { parseCsvWithFallback } from "@/lib/external-import/parsers/csv-pipeline";
+import { detectInvestmentFileFormat } from "@/lib/external-import/parsers/detect";
+import { parseOfxToCanonical } from "@/lib/external-import/parsers/ofx";
+import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
+import { parseIbkrFlexXmlToCanonical } from "@/lib/external-import/parsers/ibkr-flexquery-xml";
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -45,8 +49,61 @@ export async function POST(request: NextRequest) {
       return await respondWithCsvResult(result, file.name, userId, auth.context.dek ?? undefined);
     }
 
-    if (ext === "ofx" || ext === "qfx") {
+    // OFX / QFX / IBKR FlexQuery XML — issue #64. The format sniffer picks
+    // the parser; bank/credit-card OFX still flows through the legacy
+    // `parseOfx()` path so the existing OfxPreview dialog keeps working
+    // unchanged. Investment statements use the canonical-row emitters and
+    // surface an `investment-statement` response shape with externalAccounts
+    // the user binds before /api/import/execute.
+    if (ext === "ofx" || ext === "qfx" || ext === "xml") {
       const text = await file.text();
+      const detected = detectInvestmentFileFormat(file.name, text);
+
+      // Investment-statement dispatch.
+      if (detected.format === "ibkr-flex") {
+        const canonical = parseIbkrFlexXmlToCanonical(text);
+        if (canonical.rows.length === 0) {
+          return NextResponse.json(
+            { error: "No transactions found in IBKR FlexQuery XML file." },
+            { status: 400 },
+          );
+        }
+        return NextResponse.json({
+          type: "investment-statement",
+          format: "ibkr-xml",
+          externalAccounts: canonical.externalAccounts,
+          dateRange: canonical.dateRange,
+          rows: canonical.rows,
+          balances: canonical.balances,
+        });
+      }
+
+      // OFX-XML / OFX-SGML / QFX paths: investment statements go to the
+      // canonical emitter; bank/CC statements stay on the legacy path so
+      // the existing OfxPreview UI continues to work.
+      const looksLikeInvestment = /<INVSTMTRS\b/i.test(text);
+      if (looksLikeInvestment) {
+        const isQfx = detected.format === "qfx" || ext === "qfx";
+        const canonical = isQfx
+          ? parseQfxToCanonical(text)
+          : parseOfxToCanonical(text, "ofx");
+        if (canonical.rows.length === 0) {
+          return NextResponse.json(
+            { error: "No transactions found in OFX/QFX investment statement." },
+            { status: 400 },
+          );
+        }
+        return NextResponse.json({
+          type: "investment-statement",
+          format: canonical.format,
+          externalAccounts: canonical.externalAccounts,
+          dateRange: canonical.dateRange,
+          rows: canonical.rows,
+          balances: canonical.balances,
+        });
+      }
+
+      // Fall through to legacy bank/CC OFX path — unchanged behavior.
       const ofxResult = parseOfx(text);
 
       if (ofxResult.transactions.length === 0) {
@@ -63,7 +120,7 @@ export async function POST(request: NextRequest) {
       // the destination account).
       return NextResponse.json({
         type: "ofx",
-        format: ext, // "ofx" | "qfx" — hint for the client to stamp `source:<ext>`
+        format: ext === "qfx" ? "qfx" : "ofx", // hint for the client to stamp source:<ext>
         account: ofxResult.account,
         balanceAmount: ofxResult.balanceAmount,
         balanceDate: ofxResult.balanceDate,
@@ -99,7 +156,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ type: "excel", sheets });
     }
 
-    return NextResponse.json({ error: "Unsupported file type. Use CSV, Excel, PDF, OFX, or QFX." }, { status: 400 });
+    return NextResponse.json({ error: "Unsupported file type. Use CSV, Excel, PDF, OFX, QFX, or XML (IBKR FlexQuery)." }, { status: 400 });
   } catch (error: unknown) {
     const message = safeErrorMessage(error, "Preview failed");
     return NextResponse.json({ error: message }, { status: 500 });
