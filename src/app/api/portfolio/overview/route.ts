@@ -176,12 +176,19 @@ export async function GET(request: NextRequest) {
     firstPurchaseDate: string | null;
   };
 
-  // Path (a): SQL aggregation on the FK + entered_currency. Sums
-  // ABS(entered_amount) so cost basis stays in the user's typed currency.
-  // COALESCE handles un-backfilled rows where entered_* are still NULL —
-  // the migration backfilled clean rows but defensive fallback is cheap.
-  // Both Finlynq-native (amt<0 + qty>0) and WP convention (amt>0 + qty>0)
-  // are handled by ABS().
+  // SQL aggregation: JOIN through `holding_accounts` (Section G's join table)
+  // so that aggregation is keyed on (holding_id, account_id, entered_currency)
+  // rather than just (portfolio_holding_id, entered_currency). Today each
+  // portfolio_holdings row maps to exactly one holding_accounts pairing
+  // (is_primary=true), so the result set is identical — but once Section G's
+  // table is consumed by writes too, a canonical position spanning multiple
+  // accounts will produce one bucket per (holding, account) here, which the
+  // post-enrichment byHolding regroup later collapses into the canonical row.
+  //
+  // CLAUDE.md "Portfolio aggregator" — qty>0 = buy regardless of amount
+  // sign. ABS(amount) covers Finlynq-native (amt<0+qty>0) and WP convention
+  // (amt>0+qty>0). entered_amount uses ABS so cost basis stays positive.
+  // COALESCE handles un-backfilled rows where entered_* are still NULL.
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
@@ -194,6 +201,14 @@ export async function GET(request: NextRequest) {
       firstPurchaseDate: sql<string | null>`MIN(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.date} END)`,
     })
     .from(schema.transactions)
+    .innerJoin(
+      schema.holdingAccounts,
+      and(
+        eq(schema.holdingAccounts.holdingId, schema.transactions.portfolioHoldingId),
+        eq(schema.holdingAccounts.accountId, schema.transactions.accountId),
+        eq(schema.holdingAccounts.userId, userId),
+      ),
+    )
     .where(and(
       eq(schema.transactions.userId, userId),
       isNotNull(schema.transactions.portfolioHoldingId),
@@ -724,8 +739,10 @@ export async function GET(request: NextRequest) {
   type ByHoldingKey = { key: string; symbol: string | null; name: string };
   const canonicalKey = (h: typeof enrichedHoldings[number]): ByHoldingKey => {
     if (h.assetType === "crypto" && h.symbol) {
-      const base = h.symbol.toUpperCase().split("-")[0];
-      return { key: `crypto:${base}`, symbol: base, name: base };
+      // Decision (issue #25, 2026-05-01): preserve the FULL crypto symbol.
+      // BTC-ETH is a distinct holding from BTC; do NOT collapse on `-`.
+      const sym = h.symbol.toUpperCase();
+      return { key: `crypto:${sym}`, symbol: sym, name: sym };
     }
     if (h.assetType === "stock" || h.assetType === "etf") {
       if (h.symbol) {
@@ -749,9 +766,9 @@ export async function GET(request: NextRequest) {
       const cur = h.currency.toUpperCase();
       return { key: `cash:${cur}`, symbol: cur, name: `Cash ${cur}` };
     }
-    // User-defined fallback (no symbol, non-cash) — fragment by name. Once
-    // canonicalization helper lands, these rows still collapse on (lowercased)
-    // free-text name within a user's portfolio.
+    // User-defined fallback (no symbol, non-cash) — fragment by name. After
+    // the canonicalization helper has run for this user, these rows still
+    // collapse on (lowercased) free-text name within a user's portfolio.
     return { key: `custom:${(h.name || "?").trim().toLowerCase()}`, symbol: null, name: h.name || "?" };
   };
 
