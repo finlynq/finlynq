@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction, getAccountById } from "@/lib/queries";
+import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction, getAccountById, type TxSortFilter } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { getDEK } from "@/lib/crypto/dek-cache";
@@ -13,6 +13,8 @@ import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
+import { isSortableColumnId } from "@/lib/transactions/columns";
+import { isTransactionSource, type TransactionSource } from "@/lib/tx-source";
 
 const postSchema = z.object({
   date: z.string(),
@@ -113,14 +115,76 @@ export async function GET(request: NextRequest) {
   // match on decrypted text would false-match (e.g. `source:X` in one tag
   // shouldn't match `source:XY` in another). Split then exact-compare each.
   const tag = params.get("tag") ?? undefined;
+
+  // Issue #59 — parse the new sort + per-column filter query params. SQL-
+  // pushdown filters (date / numeric / multi-id / enum) are wired into
+  // `getTransactions`. Substring filters on encrypted columns stay
+  // post-decryption (handled below alongside the legacy `search`).
+  const sortColumnIdRaw = params.get("sort") ?? undefined;
+  const sortDirRaw = params.get("sortDir") ?? undefined;
+  const sortColumnId = sortColumnIdRaw && isSortableColumnId(sortColumnIdRaw)
+    ? sortColumnIdRaw
+    : undefined;
+  const sortDirection: "asc" | "desc" | undefined =
+    sortDirRaw === "asc" || sortDirRaw === "desc" ? sortDirRaw : undefined;
+
+  const parseNum = (key: string): number | undefined => {
+    const v = params.get(key);
+    if (v == null || v === "") return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const parseIdList = (key: string): number[] | undefined => {
+    const v = params.get(key);
+    if (!v) return undefined;
+    const ids = v.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n) && n > 0);
+    return ids.length > 0 ? ids : undefined;
+  };
+  const parseSourcesList = (): TransactionSource[] | undefined => {
+    const v = params.get("sources");
+    if (!v) return undefined;
+    const out = v.split(",").map((s) => s.trim()).filter(isTransactionSource);
+    return out.length > 0 ? out : undefined;
+  };
+
+  // Encrypted-column substring filters — payee / note / accountName /
+  // categoryName / portfolioHolding etc. Trigger the post-decrypt widening
+  // since SQL LIKE on ciphertext returns garbage.
+  const filterPayee = params.get("filter_payee") ?? undefined;
+  const filterNote = params.get("filter_note") ?? undefined;
+  const filterAccountName = params.get("filter_accountName") ?? undefined;
+  const filterAccountAlias = params.get("filter_accountAlias") ?? undefined;
+  const filterPortfolio = params.get("filter_portfolio") ?? undefined;
+  const filterPortfolioTicker = params.get("filter_portfolioTicker") ?? undefined;
+  const filterTags = params.get("filter_tags") ?? undefined;
+  const hasEncryptedSubstringFilter = !!(
+    filterPayee || filterNote || filterAccountName || filterAccountAlias ||
+    filterPortfolio || filterPortfolioTicker || filterTags
+  );
+
   // FK filter is SQL-side, so it's NOT a postDecryptFilter — paginate normally.
-  const postDecryptFilter = search || tag;
-  const filters = {
+  const postDecryptFilter = search || tag || hasEncryptedSubstringFilter;
+  const filters: TxSortFilter = {
     startDate: params.get("startDate") ?? undefined,
     endDate: params.get("endDate") ?? undefined,
+    createdAtFrom: params.get("createdAtFrom") ?? undefined,
+    createdAtTo: params.get("createdAtTo") ?? undefined,
+    updatedAtFrom: params.get("updatedAtFrom") ?? undefined,
+    updatedAtTo: params.get("updatedAtTo") ?? undefined,
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
     categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
     portfolioHoldingId: Number.isFinite(portfolioHoldingId) ? portfolioHoldingId : undefined,
+    accountIds: parseIdList("accountIds"),
+    categoryIds: parseIdList("categoryIds"),
+    amountMin: parseNum("amountMin"),
+    amountMax: parseNum("amountMax"),
+    amountEq: parseNum("amountEq"),
+    quantityMin: parseNum("quantityMin"),
+    quantityMax: parseNum("quantityMax"),
+    quantityEq: parseNum("quantityEq"),
+    sources: parseSourcesList(),
+    sortColumnId,
+    sortDirection,
     // Search is applied after decryption, so don't push it into the SQL filter.
     // Pull a wider page when any post-decrypt filter is set so the in-memory
     // pass doesn't paginate an empty window. The client still honors the
@@ -186,6 +250,43 @@ export async function GET(request: NextRequest) {
       if (!r.tags) return false;
       return r.tags.split(",").map((t) => t.trim()).includes(tag);
     });
+  }
+
+  // Issue #59 — per-column substring filters on encrypted fields.
+  // Case-insensitive substring match against the post-decrypt value.
+  // Each filter narrows independently (AND across columns).
+  const matchSubstring = (value: string | null | undefined, needle: string) => {
+    if (!value) return false;
+    return value.toLowerCase().includes(needle.toLowerCase());
+  };
+  if (filterPayee) {
+    decrypted = decrypted.filter((r) => matchSubstring(r.payee, filterPayee));
+  }
+  if (filterNote) {
+    decrypted = decrypted.filter((r) => matchSubstring(r.note, filterNote));
+  }
+  if (filterAccountName) {
+    decrypted = decrypted.filter((r) =>
+      matchSubstring((r as { accountName?: string | null }).accountName, filterAccountName),
+    );
+  }
+  if (filterAccountAlias) {
+    decrypted = decrypted.filter((r) =>
+      matchSubstring((r as { accountAlias?: string | null }).accountAlias, filterAccountAlias),
+    );
+  }
+  if (filterPortfolio) {
+    decrypted = decrypted.filter((r) =>
+      matchSubstring((r as { portfolioHolding?: string | null }).portfolioHolding, filterPortfolio),
+    );
+  }
+  if (filterPortfolioTicker) {
+    decrypted = decrypted.filter((r) =>
+      matchSubstring((r as { portfolioHoldingSymbol?: string | null }).portfolioHoldingSymbol, filterPortfolioTicker),
+    );
+  }
+  if (filterTags) {
+    decrypted = decrypted.filter((r) => matchSubstring(r.tags, filterTags));
   }
 
   // Re-apply client-requested pagination after in-memory filters so the

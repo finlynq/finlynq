@@ -294,3 +294,15 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 ```
 
 After each env, smoke-check by inserting any transaction (UI or MCP) and confirming `created_at` / `updated_at` / `source` populate; then edit the same row and confirm `updated_at` advances while `created_at` and `source` stay frozen.
+
+## tx-audit-indexes (2026-04-30, issue #59)
+
+Index-only follow-up to `tx-audit-fields` — adds two composite indexes on the audit-trio columns so the new "Sort by Created / Updated" headers on `/transactions` don't table-scan once a user has 50k+ transactions. `source` is small-cardinality enum (7 values); the existing `(user_id)` index handles equality / IN filters fine, so no index added there. Idempotent. Run BEFORE the matching code deploy so the indexes are present when the new sort headers go live.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-tx-audit-indexes.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-tx-audit-indexes.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-tx-audit-indexes.sql
+```
+
+Verify with `\d+ transactions` — `transactions_user_updated_at_idx` and `transactions_user_created_at_idx` should both appear in the index list.

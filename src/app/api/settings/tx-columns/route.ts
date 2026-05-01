@@ -4,6 +4,11 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { db, schema } from "@/db";
 import { eq, and } from "drizzle-orm";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
+import {
+  COLUMN_IDS,
+  DEFAULT_COLUMNS,
+  type ColumnId,
+} from "@/lib/transactions/columns";
 
 /**
  * Per-user preferences for the /transactions table column layout.
@@ -16,50 +21,14 @@ import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
  * The frontend migrates the legacy `localStorage["pf-tx-cols-v1"]` value on
  * first load, then writes back to this endpoint and clears the localStorage
  * key — so column prefs follow the user across devices.
+ *
+ * Issue #59: COLUMN_IDS is now sourced from `@/lib/transactions/columns`
+ * (shared with the GET /api/transactions sort whitelist + the page client +
+ * the sibling tx-sort / tx-filters routes). Adding a new column means
+ * extending that module and the rendering branch in transactions/page.tsx.
+ * Removing one is the same in reverse — old saved blobs simply ignore
+ * unknown ids.
  */
-
-// Allowed column ids. The frontend renders columns in the order specified by
-// `order`, then filters out any whose `visible` flag is false. Adding a new
-// column means: (1) extend this enum, (2) extend DEFAULT_COLUMNS, (3) wire
-// the rendering branch in transactions/page.tsx. Removing one is the same in
-// reverse — old saved blobs simply ignore unknown ids.
-const COLUMN_IDS = [
-  "select",
-  "date",
-  "account",
-  "accountType",
-  "accountName",
-  "accountAlias",
-  "category",
-  "payee",
-  "portfolio",
-  "portfolioTicker",
-  "note",
-  "tags",
-  "quantity",
-  "amount",
-  "actions",
-] as const;
-
-type ColumnId = (typeof COLUMN_IDS)[number];
-
-const DEFAULT_COLUMNS: Array<{ id: ColumnId; visible: boolean }> = [
-  { id: "select", visible: true },
-  { id: "date", visible: true },
-  { id: "account", visible: true },
-  { id: "accountType", visible: false },
-  { id: "accountName", visible: false },
-  { id: "accountAlias", visible: false },
-  { id: "category", visible: true },
-  { id: "payee", visible: true },
-  { id: "portfolio", visible: false },
-  { id: "portfolioTicker", visible: false },
-  { id: "note", visible: true },
-  { id: "tags", visible: false },
-  { id: "quantity", visible: true },
-  { id: "amount", visible: true },
-  { id: "actions", visible: true },
-];
 
 const KEY = "tx_table_columns";
 
