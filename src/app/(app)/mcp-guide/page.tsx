@@ -381,7 +381,7 @@ export default function McpGuidePage() {
             </div>
             {!apiKey && (
               <p className="text-xs text-muted-foreground">
-                Only a hash is stored, so the raw key can&rsquo;t be re-shown. Head to <a href="/settings" className="underline underline-offset-2 hover:text-foreground">Settings → API Key</a> and click <strong>Regenerate Key</strong> to get a fresh one.
+                Only a hash is stored, so the raw key can&rsquo;t be re-shown. Head to <a href="/settings/account" className="underline underline-offset-2 hover:text-foreground">Settings → API Key</a> and click <strong>Regenerate Key</strong> to get a fresh one.
               </p>
             )}
           </div>

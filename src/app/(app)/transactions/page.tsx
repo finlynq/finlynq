@@ -1439,7 +1439,7 @@ function TransactionsPageInner() {
                   )}
                   {fxPreview.state === "needs-override" && (
                     <span className="text-amber-600 dark:text-amber-400">
-                      Rate not available — <Link href="/settings" className="underline hover:no-underline">add an override</Link>.
+                      Rate not available — <Link href="/settings/general" className="underline hover:no-underline">add an override</Link>.
                     </span>
                   )}
                   {fxPreview.state === "error" && (
@@ -1783,7 +1783,7 @@ function TransactionsPageInner() {
                 <div className="rounded-md border border-rose-300 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
                   {submitError.message}{" "}
                   {submitError.currency && (
-                    <Link href="/settings" className="underline hover:no-underline">
+                    <Link href="/settings/general" className="underline hover:no-underline">
                       Add a custom rate
                     </Link>
                   )}
@@ -2309,7 +2309,7 @@ function TransactionsPageInner() {
                     </p>
                     {transferFxPreview.state === "needs-override" && (
                       <p className="text-[11px] text-amber-700 dark:text-amber-300">
-                        No FX rate cached for this pair — <Link href="/settings" className="underline">add a custom rate</Link> or type the amount manually.
+                        No FX rate cached for this pair — <Link href="/settings/general" className="underline">add a custom rate</Link> or type the amount manually.
                       </p>
                     )}
                     {transferFxPreview.state === "error" && (
@@ -2376,7 +2376,7 @@ function TransactionsPageInner() {
                 <div className="rounded-md border border-rose-300 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
                   {submitError.message}{" "}
                   {submitError.currency && (
-                    <Link href="/settings" className="underline hover:no-underline">
+                    <Link href="/settings/general" className="underline hover:no-underline">
                       Add a custom rate
                     </Link>
                   )}
