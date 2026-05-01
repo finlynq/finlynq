@@ -755,16 +755,16 @@ function TransactionsPageInner() {
   // (always positive — the helper applies signs internally). receivedAmount
   // is only used when source.currency !== dest.currency, and is editable
   // (auto-derived from FX preview by default; user can override to capture
-  // the bank's actual landed amount). When inKind is true, holding +
-  // quantity move shares between brokerage accounts; amount may be 0 for
-  // pure in-kind moves.
+  // the bank's actual landed amount). The in-kind path (both sides are
+  // investment accounts) is now driven by account types rather than an
+  // explicit checkbox; holding + quantity move shares between brokerage
+  // accounts and amount may be 0 for pure in-kind moves.
   const [transferForm, setTransferForm] = useState({
     date: new Date().toISOString().split("T")[0],
     fromAccountId: "",
     toAccountId: "",
     amount: "",
     receivedAmount: "",
-    inKind: false,
     holdingName: "",
     // Optional override — when blank, server defaults destination-side
     // resolution to holdingName. Set to a different label when the
@@ -777,10 +777,12 @@ function TransactionsPageInner() {
     // splits / mergers / share-class conversions: source 100 of A may
     // arrive as 60 of B.
     destQuantity: "",
-    // Cash-leg holding pins for investment-account transfers (issue #22).
-    // Stored as the FK id (number-string from the picker). Sent as
-    // `fromHoldingId` / `toHoldingId` on POST when the corresponding
-    // account is is_investment AND inKind=false. Empty string = unset.
+    // Holding FK pickers for investment-account transfer legs (issue #22,
+    // #56). Used for the various cases:
+    //   inv→inv: fromHoldingId = source holding (in-kind path uses name+qty)
+    //   inv→non-inv: fromHoldingId = source holding
+    //   non-inv→inv: toHoldingId = dest holding
+    // Stored as the FK id (number-string from the picker). Empty = unset.
     fromHoldingId: "",
     toHoldingId: "",
     note: "",
@@ -1072,31 +1074,57 @@ function TransactionsPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dialogOpen, dialogMode, transferForm.fromAccountId, transferForm.toAccountId, transferForm.amount, transferForm.date, accounts]);
 
-  // Reset in-kind transfer state when the user changes accounts so neither
-  // side is an investment account (Section E #10 — the violet panel is
-  // hidden in that case). Without this, a stale `inKind: true` + holding
-  // name would silently roundtrip on submit. Only fires on the actual
-  // transition `true -> false` so a brief account swap that returns to
-  // investment doesn't lose in-flight values.
-  const prevEitherIsInvestmentRef = useRef<boolean>(false);
+  // Clear per-side holding state when an account transitions away from
+  // investment. Two separate refs track each side independently so a brief
+  // account swap that returns to investment doesn't lose in-flight values.
+  //   From true→false: clear fromHoldingId + source in-kind fields.
+  //   To true→false: clear toHoldingId + dest in-kind fields.
+  // Same-account transitions (in-kind rebalance) don't trigger clears.
+  const prevFromIsInvestmentRef = useRef<boolean>(false);
+  const prevToIsInvestmentRef = useRef<boolean>(false);
   useEffect(() => {
     const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
     const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
-    const eitherIsInvestment =
-      fromAcct?.isInvestment === true || toAcct?.isInvestment === true;
-    if (prevEitherIsInvestmentRef.current && !eitherIsInvestment) {
+    const fromIsInvestment = fromAcct?.isInvestment === true;
+    const toIsInvestment = toAcct?.isInvestment === true;
+
+    if (prevFromIsInvestmentRef.current && !fromIsInvestment) {
       setTransferForm((tf) => ({
         ...tf,
-        inKind: false,
+        fromHoldingId: "",
         holdingName: "",
-        destHoldingName: "",
         quantity: "",
+      }));
+    }
+    if (prevToIsInvestmentRef.current && !toIsInvestment) {
+      setTransferForm((tf) => ({
+        ...tf,
+        toHoldingId: "",
+        destHoldingName: "",
         destQuantity: "",
       }));
       setDestHoldingTouched(false);
       setDestQuantityTouched(false);
     }
-    prevEitherIsInvestmentRef.current = eitherIsInvestment;
+    // When neither side is investment, also clear the remaining in-kind
+    // fields that might have been set on the source side.
+    if (!fromIsInvestment && !toIsInvestment &&
+        (prevFromIsInvestmentRef.current || prevToIsInvestmentRef.current)) {
+      setTransferForm((tf) => ({
+        ...tf,
+        holdingName: "",
+        destHoldingName: "",
+        quantity: "",
+        destQuantity: "",
+        fromHoldingId: "",
+        toHoldingId: "",
+      }));
+      setDestHoldingTouched(false);
+      setDestQuantityTouched(false);
+    }
+
+    prevFromIsInvestmentRef.current = fromIsInvestment;
+    prevToIsInvestmentRef.current = toIsInvestment;
   }, [transferForm.fromAccountId, transferForm.toAccountId, accounts]);
 
   function handleSearchChange(value: string) {
@@ -1129,7 +1157,6 @@ function TransactionsPageInner() {
       toAccountId: "",
       amount: "",
       receivedAmount: "",
-      inKind: false,
       holdingName: "",
       destHoldingName: "",
       quantity: "",
@@ -1275,7 +1302,10 @@ function TransactionsPageInner() {
     }
 
     const enteredAmount = parseFloat(transferForm.amount || "0");
-    const isInKind = transferForm.inKind;
+    const fromAcctCheck = accounts.find((a) => a.id === fromAccountId);
+    const toAcctCheck = accounts.find((a) => a.id === toAccountId);
+    // Derive in-kind from account types: both sides investment = in-kind path.
+    const isInKind = fromAcctCheck?.isInvestment === true && toAcctCheck?.isInvestment === true;
     let quantityNum: number | undefined;
     let holdingName: string | undefined;
     if (isInKind) {
@@ -1302,18 +1332,18 @@ function TransactionsPageInner() {
       }
     }
 
-    const fromAcct = accounts.find((a) => a.id === fromAccountId);
-    const toAcct = accounts.find((a) => a.id === toAccountId);
+    const fromAcct = fromAcctCheck;
+    const toAcct = toAcctCheck;
     const isCrossCcy = !!fromAcct && !!toAcct && fromAcct.currency !== toAcct.currency;
 
-    // Investment-account constraint for cash transfers (issue #22).
-    // The dialog renders required pickers above; this is the matching
-    // server-side guard that blocks submission when the user blanks them
-    // out manually. In-kind path supplies the holding via name+quantity
-    // and bypasses this check.
+    // Investment-account constraint for non-in-kind transfers (issue #22, #56).
+    // The dialog renders required pickers for each investment-account leg;
+    // this is the matching guard that blocks submission when the user
+    // blanks them out. The in-kind path (both sides investment) supplies
+    // the holding via name+quantity and bypasses this check.
     let fromHoldingPin: number | undefined;
     let toHoldingPin: number | undefined;
-    if (!isInKind && !transferEdit) {
+    if (!isInKind) {
       if (fromAcct?.isInvestment === true) {
         if (!transferForm.fromHoldingId) {
           setSubmitError({ message: `Pick a source holding — ${fromAcct.name} is an investment account.` });
@@ -1525,13 +1555,12 @@ function TransactionsPageInner() {
               toAccountId: String(destAccountId),
               amount: String(sourceLegAmount),
               receivedAmount: isCrossCcy ? String(destLegAmount) : "",
-              inKind: isInKind,
               holdingName: isInKind ? inKindHolding : "",
               destHoldingName: destHoldingDiffers ? (destLegHolding ?? "") : "",
               quantity: isInKind ? String(sourceLegQty || inKindQty) : "",
               destQuantity: destQtyDiffers ? String(destLegQty) : "",
-              // Cash-leg holding pins are create-only; PUT path doesn't
-              // accept them yet, so leave blank on edit (issue #22).
+              // Holding pins are create-only; PUT path doesn't accept them,
+              // so leave blank on edit (issue #22).
               fromHoldingId: "",
               toHoldingId: "",
               note: t.note || sibling.note || "",
@@ -2238,164 +2267,209 @@ function TransactionsPageInner() {
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <Label>From account</Label>
-                  <Combobox
-                    value={transferForm.fromAccountId}
-                    onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v })}
-                    items={sortAccount(
-                      accounts
-                        .filter((a) => transferForm.inKind || String(a.id) !== transferForm.toAccountId)
-                        .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
-                      (a) => Number(a.value),
-                      (a, z) => a.label.localeCompare(z.label),
-                    )}
-                    placeholder="Source account"
-                    searchPlaceholder="Search accounts…"
-                    emptyMessage="No matches"
-                    className="w-full"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>To account</Label>
-                  <Combobox
-                    value={transferForm.toAccountId}
-                    onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v })}
-                    items={sortAccount(
-                      accounts
-                        .filter((a) => transferForm.inKind || String(a.id) !== transferForm.fromAccountId)
-                        .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
-                      (a) => Number(a.value),
-                      (a, z) => a.label.localeCompare(z.label),
-                    )}
-                    placeholder="Destination account"
-                    searchPlaceholder="Search accounts…"
-                    emptyMessage="No matches"
-                    className="w-full"
-                  />
-                </div>
-              </div>
+              {(() => {
+                const fromAcctPicker = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
+                const toAcctPicker = accounts.find((a) => String(a.id) === transferForm.toAccountId);
+                // Allow same-account when both are investment (in-kind rebalance
+                // within one brokerage). Otherwise, hide the selected opposite
+                // account from the picker to prevent trivial no-op transfers.
+                const bothInvestment =
+                  fromAcctPicker?.isInvestment === true && toAcctPicker?.isInvestment === true;
+                return (
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label>From account</Label>
+                      <Combobox
+                        value={transferForm.fromAccountId}
+                        onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v })}
+                        items={sortAccount(
+                          accounts
+                            .filter((a) => bothInvestment || String(a.id) !== transferForm.toAccountId)
+                            .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
+                          (a) => Number(a.value),
+                          (a, z) => a.label.localeCompare(z.label),
+                        )}
+                        placeholder="Source account"
+                        searchPlaceholder="Search accounts…"
+                        emptyMessage="No matches"
+                        className="w-full"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>To account</Label>
+                      <Combobox
+                        value={transferForm.toAccountId}
+                        onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v })}
+                        items={sortAccount(
+                          accounts
+                            .filter((a) => bothInvestment || String(a.id) !== transferForm.fromAccountId)
+                            .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
+                          (a) => Number(a.value),
+                          (a, z) => a.label.localeCompare(z.label),
+                        )}
+                        placeholder="Destination account"
+                        searchPlaceholder="Search accounts…"
+                        emptyMessage="No matches"
+                        className="w-full"
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
 
-              {/* In-kind / holding transfer toggle. Off → cash transfer
-                  (existing behavior). On → adds Holding + Quantity fields
-                  and allows the cash amount to be 0. The destination holding
-                  row is auto-created in the destination account if missing;
-                  the source holding MUST already exist (the resolver rejects
-                  otherwise — you can't send shares you don't have).
-
-                  Visibility (Section E #10): the entire violet block is
-                  hidden when neither the source nor destination account is
-                  flagged isInvestment. The four-rule logic:
-                    1. Both accounts cash → block hidden, pure cash transfer.
-                    2. One side investment → block visible; cash leg on the
-                       investment side defaults to that account's Cash
-                       holding via defaultHoldingForInvestmentAccount in
-                       src/lib/transfer.ts (so hiding here doesn't break
-                       the application-layer constraint).
-                    3. Both investment → block visible, dropdowns filtered
-                       per-side by accountId.
-                    4. Same-account in-kind rebalance → still investment, so
-                       the block stays visible. Section C (mandatory
-                       enforcement) is out of scope for this UI guard. */}
+              {/* Unified holding pickers — driven entirely by account types
+                  (issue #56). No checkbox; the visible fields depend on
+                  which sides are investment accounts:
+                    inv + inv  → full in-kind UI (source + qty + dest + dest qty)
+                    inv + non  → From-holding picker only (required)
+                    non + inv  → To-holding picker only (required)
+                    non + non  → nothing rendered here (pure cash transfer)
+                  Quantity starts blank; user must type explicitly.
+                  Cash sleeves appear in all pickers because they live in
+                  the holdings list filtered to the account (no sentinel). */}
               {(() => {
                 const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
-                // Filter holdings to those owned by the source account so
-                // users only see options that won't fail server-side. Match
-                // on accountId (already projected by getPortfolioHoldings)
-                // rather than name — accountName collisions could otherwise
-                // surface holdings from another account.
+                const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
+                const fromInv = fromAcct?.isInvestment === true;
+                const toInv = toAcct?.isInvestment === true;
+                if (!fromInv && !toInv) return null;
+
+                const bothInv = fromInv && toInv;
+
+                // Filter holdings per-account so pickers only show options
+                // that won't fail server-side FK checks.
                 const sourceHoldings = fromAcct
                   ? holdings.filter((h) => h.accountId === fromAcct.id)
                   : [];
-                const toAcctLocal = accounts.find((a) => String(a.id) === transferForm.toAccountId);
-                const destHoldings = toAcctLocal
-                  ? holdings.filter((h) => h.accountId === toAcctLocal.id)
+                const destHoldings = toAcct
+                  ? holdings.filter((h) => h.accountId === toAcct.id)
                   : [];
-                const eitherIsInvestment =
-                  fromAcct?.isInvestment === true || toAcctLocal?.isInvestment === true;
-                if (!eitherIsInvestment) return null;
-                // Detect whether the destination already has an exact name
-                // match for the source — if so, the "Same as source" default
-                // implicitly binds to it (server's resolver finds it before
-                // auto-creating). Surface this in the dropdown labels so the
-                // user knows up-front whether a new row will be created.
-                const sourceName = transferForm.holdingName.trim();
-                const destExactMatch =
-                  sourceName !== ""
-                    ? destHoldings.find((h) => h.name === sourceName) ?? null
-                    : null;
-                // The "destination value" the dropdown displays. Falls back
-                // to the special sentinel when the user hasn't picked an
-                // override (server uses source name in that case).
-                const destSentinel = "__same_as_source__";
-                const destSelectValue =
-                  transferForm.destHoldingName.trim() !== "" &&
-                  transferForm.destHoldingName.trim() !== sourceName
-                    ? transferForm.destHoldingName.trim()
-                    : destSentinel;
-                return (
-                  <div className="space-y-2 rounded-md border border-violet-200 dark:border-violet-900 bg-violet-50/40 dark:bg-violet-950/20 p-3">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={transferForm.inKind}
-                        onChange={(e) => {
-                          const inKind = e.target.checked;
-                          setTransferForm({
-                            ...transferForm,
-                            inKind,
-                            // Clear holding/quantity when toggling off so a
-                            // stale name doesn't roundtrip on submit.
-                            ...(inKind ? {} : { holdingName: "", destHoldingName: "", quantity: "" }),
-                          });
-                          if (!inKind) setDestHoldingTouched(false);
-                        }}
-                        className="h-4 w-4 rounded border-input"
-                      />
-                      <span className="text-sm font-medium">In-kind (transfer shares of a holding)</span>
-                    </label>
-                    {transferForm.inKind && (
-                      <>
-                        <p className="text-[11px] text-muted-foreground">
-                          Source holding must already exist. Destination defaults to the same holding name (auto-created in the destination account if missing). Cash amount may be 0 for a pure in-kind move, or non-zero to also record a cost-basis snapshot.
+
+                // Helper: build a Combobox items list from account holdings.
+                // All holdings shown (including Cash sleeve) — no sentinel.
+                const buildHoldingItems = (acctHoldings: typeof holdings): ComboboxItemShape[] =>
+                  sortHolding(
+                    acctHoldings.map((h): ComboboxItemShape => ({
+                      value: bothInv ? h.name : String(h.id),
+                      label: h.symbol
+                        ? `${h.name} (${h.symbol})`
+                        : h.name,
+                    })),
+                    (h) => acctHoldings.find((x) =>
+                      bothInv ? x.name === h.value : String(x.id) === h.value
+                    )?.id ?? h.value,
+                    (a, z) => a.label.localeCompare(z.label),
+                  );
+
+                // inv→inv: full in-kind UI with source holding, quantity,
+                // destination holding (optional override), and dest quantity.
+                if (bothInv) {
+                  const sourceName = transferForm.holdingName.trim();
+                  const destExactMatch =
+                    sourceName !== ""
+                      ? destHoldings.find((h) => h.name === sourceName) ?? null
+                      : null;
+                  const destSentinel = "__same_as_source__";
+                  const destSelectValue =
+                    transferForm.destHoldingName.trim() !== "" &&
+                    transferForm.destHoldingName.trim() !== sourceName
+                      ? transferForm.destHoldingName.trim()
+                      : destSentinel;
+                  return (
+                    <div className="space-y-3 rounded-md border border-violet-200 dark:border-violet-900 bg-violet-50/40 dark:bg-violet-950/20 p-3">
+                      <p className="text-[11px] text-muted-foreground">
+                        Both accounts are investment accounts — pick the holding to transfer and the quantity. Source holding must already exist. Destination defaults to the same holding name (auto-created if missing). Cash amount may be 0 for a pure in-kind move.
+                      </p>
+                      {fromAcct && toAcct && fromAcct.id === toAcct.id && (
+                        <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                          Same-account rebalance — pick a different destination holding to move shares between two positions in this brokerage.
                         </p>
-                        {fromAcct && toAcctLocal && fromAcct.id === toAcctLocal.id && (
-                          <p className="text-[11px] text-amber-700 dark:text-amber-300">
-                            Same-account move — pick a different destination holding to rebalance between two positions in this brokerage. The cash amount typically stays 0 for an internal swap.
-                          </p>
-                        )}
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-1">
-                            <Label className="text-xs">Source holding (in {fromAcct?.name ?? "—"})</Label>
-                            {sourceHoldings.length > 0 ? (
-                              <Select
-                                value={transferForm.holdingName || "__custom__"}
-                                onValueChange={(v) => {
-                                  const val = v ?? "";
-                                  setTransferForm({
-                                    ...transferForm,
-                                    holdingName: val === "__custom__" ? transferForm.holdingName : val,
-                                  });
-                                }}
-                              >
-                                <SelectTrigger>
-                                  <SelectValue placeholder="Pick holding">
-                                    {(v) => {
-                                      const val = v == null ? "" : String(v);
-                                      if (!val || val === "__custom__") return transferForm.holdingName || "Pick holding";
-                                      const h = sourceHoldings.find((x) => x.name === val);
-                                      // Always show share count, including 0,
-                                      // so the user sees current position even
-                                      // when the holding is empty.
-                                      const shares = Number(h?.currentShares ?? 0);
-                                      const qty = ` · ${shares.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`;
-                                      return `${val}${qty}`;
-                                    }}
-                                  </SelectValue>
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {sourceHoldings.map((h) => {
+                      )}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            Source holding (in {fromAcct?.name ?? "—"}){" "}
+                            <span className="text-rose-600">*</span>
+                          </Label>
+                          <Combobox
+                            value={transferForm.holdingName}
+                            onValueChange={(v) =>
+                              setTransferForm({ ...transferForm, holdingName: v ?? "" })
+                            }
+                            items={buildHoldingItems(sourceHoldings)}
+                            placeholder="Pick a holding"
+                            searchPlaceholder="Search holdings…"
+                            emptyMessage="No matches"
+                            size="sm"
+                            className="w-full"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            Quantity (shares) <span className="text-rose-600">*</span>
+                          </Label>
+                          <Input
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            value={transferForm.quantity}
+                            onChange={(e) => setTransferForm({ ...transferForm, quantity: e.target.value })}
+                            placeholder="e.g. 10.0000"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            Destination holding (in {toAcct?.name ?? "—"})
+                          </Label>
+                          {toAcct ? (
+                            <Select
+                              value={destSelectValue}
+                              onValueChange={(v) => {
+                                const val = v ?? destSentinel;
+                                if (val === destSentinel) {
+                                  setDestHoldingTouched(false);
+                                  setTransferForm({ ...transferForm, destHoldingName: "" });
+                                } else if (val === "__custom__") {
+                                  setDestHoldingTouched(true);
+                                } else {
+                                  setDestHoldingTouched(true);
+                                  setTransferForm({ ...transferForm, destHoldingName: val });
+                                }
+                              }}
+                            >
+                              <SelectTrigger>
+                                <SelectValue placeholder="Same as source">
+                                  {(v) => {
+                                    const val = v == null ? "" : String(v);
+                                    if (!val || val === destSentinel) {
+                                      if (!sourceName) return "Same as source";
+                                      const matchShares = Number(destExactMatch?.currentShares ?? 0);
+                                      return destExactMatch
+                                        ? `${sourceName} (existing · ${matchShares.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares)`
+                                        : `${sourceName} (will create)`;
+                                    }
+                                    if (val === "__custom__") return transferForm.destHoldingName || "Custom name";
+                                    const h = destHoldings.find((x) => x.name === val);
+                                    const shares = Number(h?.currentShares ?? 0);
+                                    return `${val} · ${shares.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`;
+                                  }}
+                                </SelectValue>
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value={destSentinel}>
+                                  {sourceName
+                                    ? destExactMatch
+                                      ? `Same as source — binds to existing "${sourceName}" (${Number(
+                                          destExactMatch.currentShares ?? 0,
+                                        ).toLocaleString(undefined, { maximumFractionDigits: 4 })} shares)`
+                                      : `Same as source — auto-create "${sourceName}"`
+                                    : "Same as source"}
+                                </SelectItem>
+                                {destHoldings
+                                  .filter((h) => h.name !== sourceName)
+                                  .map((h) => {
                                     const shares = Number(h.currentShares ?? 0);
                                     const qty = ` · ${shares.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`;
                                     return (
@@ -2404,236 +2478,111 @@ function TransactionsPageInner() {
                                       </SelectItem>
                                     );
                                   })}
-                                </SelectContent>
-                              </Select>
-                            ) : (
-                              <Input
-                                value={transferForm.holdingName}
-                                onChange={(e) => setTransferForm({ ...transferForm, holdingName: e.target.value })}
-                                placeholder={fromAcct ? `Type holding name in ${fromAcct.name}` : "Pick a source account first"}
-                                disabled={!fromAcct}
-                              />
-                            )}
-                          </div>
-                          <div className="space-y-1">
-                            <Label className="text-xs">Quantity (shares)</Label>
+                                <SelectItem value="__custom__">+ Type a different name…</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <Input value="" placeholder="Pick a destination account first" disabled />
+                          )}
+                          {destHoldingTouched && destSelectValue === "__custom__" && (
                             <Input
-                              type="number"
-                              step="0.0001"
-                              min="0"
-                              value={transferForm.quantity}
-                              onChange={(e) => setTransferForm({ ...transferForm, quantity: e.target.value })}
-                              placeholder="0.0000"
+                              value={transferForm.destHoldingName}
+                              onChange={(e) => setTransferForm({ ...transferForm, destHoldingName: e.target.value })}
+                              placeholder={`New holding name in ${toAcct?.name ?? "destination"}`}
                             />
-                          </div>
+                          )}
                         </div>
-                        {/* Destination holding picker + quantity. Defaults
-                            to "same as source" — the server's resolver binds
-                            to an existing dest row if one exists with that
-                            name, else auto-creates. The user can override
-                            either side independently:
-                              - Holding: pick an existing dest holding with a
-                                different label, or type a new name.
-                              - Quantity: defaults to source quantity but
-                                accepts a different value for stock splits,
-                                mergers, share-class conversions (10 of A →
-                                30 of A after a 3-for-1; 100 of X → 60 of Y
-                                after a merger). */}
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-1">
-                            <Label className="text-xs">
-                              Destination holding (in {toAcctLocal?.name ?? "—"})
-                            </Label>
-                            {toAcctLocal ? (
-                              <Select
-                                value={destSelectValue}
-                                onValueChange={(v) => {
-                                  const val = v ?? destSentinel;
-                                  if (val === destSentinel) {
-                                    setDestHoldingTouched(false);
-                                    setTransferForm({ ...transferForm, destHoldingName: "" });
-                                  } else if (val === "__custom__") {
-                                    setDestHoldingTouched(true);
-                                  } else {
-                                    setDestHoldingTouched(true);
-                                    setTransferForm({ ...transferForm, destHoldingName: val });
-                                  }
-                                }}
-                              >
-                                <SelectTrigger>
-                                  <SelectValue placeholder="Same as source">
-                                    {(v) => {
-                                      const val = v == null ? "" : String(v);
-                                      if (!val || val === destSentinel) {
-                                        if (!sourceName) return "Same as source";
-                                        const matchShares = Number(destExactMatch?.currentShares ?? 0);
-                                        return destExactMatch
-                                          ? `${sourceName} (existing in ${toAcctLocal.name}) · ${matchShares.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`
-                                          : `${sourceName} (will create in ${toAcctLocal.name})`;
-                                      }
-                                      if (val === "__custom__") return transferForm.destHoldingName || "Custom name";
-                                      const h = destHoldings.find((x) => x.name === val);
-                                      const shares = Number(h?.currentShares ?? 0);
-                                      const qty = ` · ${shares.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`;
-                                      return `${val}${qty}`;
-                                    }}
-                                  </SelectValue>
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value={destSentinel}>
-                                    {sourceName
-                                      ? destExactMatch
-                                        ? `Same as source — binds to existing "${sourceName}" (${Number(
-                                            destExactMatch.currentShares ?? 0,
-                                          ).toLocaleString(undefined, { maximumFractionDigits: 4 })} shares)`
-                                        : `Same as source — auto-create "${sourceName}" in ${toAcctLocal.name}`
-                                      : `Same as source`}
-                                  </SelectItem>
-                                  {destHoldings
-                                    .filter((h) => h.name !== sourceName)
-                                    .map((h) => {
-                                      const shares = Number(h.currentShares ?? 0);
-                                      const qty = ` · ${shares.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares`;
-                                      return (
-                                        <SelectItem key={h.id} value={h.name}>
-                                          {h.symbol ? `${h.name} (${h.symbol})${qty}` : `${h.name}${qty}`}
-                                        </SelectItem>
-                                      );
-                                    })}
-                                  <SelectItem value="__custom__">+ Type a different name…</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            ) : (
-                              <Input value="" placeholder="Pick a destination account first" disabled />
+                        <div className="space-y-1">
+                          <Label className="text-xs">Destination quantity</Label>
+                          {/* Mirrors source quantity unless the user types
+                              here — that indicates a split / merger /
+                              share-class conversion. */}
+                          <Input
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            value={destQuantityTouched ? transferForm.destQuantity : transferForm.quantity}
+                            onChange={(e) => {
+                              setDestQuantityTouched(true);
+                              setTransferForm({ ...transferForm, destQuantity: e.target.value });
+                            }}
+                            placeholder={transferForm.quantity || "e.g. 10.0000"}
+                          />
+                          {destQuantityTouched &&
+                            transferForm.destQuantity &&
+                            parseFloat(transferForm.destQuantity) !== parseFloat(transferForm.quantity || "0") && (
+                              <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                                Asymmetric — the destination will receive a different share count (split / merger / conversion).
+                              </p>
                             )}
-                            {destHoldingTouched &&
-                              destSelectValue === "__custom__" && (
-                                <Input
-                                  value={transferForm.destHoldingName}
-                                  onChange={(e) => setTransferForm({ ...transferForm, destHoldingName: e.target.value })}
-                                  placeholder={`New holding name in ${toAcctLocal?.name ?? "destination"}`}
-                                />
-                              )}
-                          </div>
-                          <div className="space-y-1">
-                            <Label className="text-xs">Destination quantity</Label>
-                            {/* Mirrors source quantity unless the user types
-                                in this box — that's the marker for "this is
-                                a split / merger / share-class conversion".
-                                We display the placeholder = source quantity
-                                so the default is obvious; an empty value on
-                                submit means "same as source". */}
-                            <Input
-                              type="number"
-                              step="0.0001"
-                              min="0"
-                              value={
-                                destQuantityTouched
-                                  ? transferForm.destQuantity
-                                  : transferForm.quantity
-                              }
-                              onChange={(e) => {
-                                setDestQuantityTouched(true);
-                                setTransferForm({ ...transferForm, destQuantity: e.target.value });
+                          {destQuantityTouched && (
+                            <button
+                              type="button"
+                              className="text-[11px] text-muted-foreground hover:text-foreground underline"
+                              onClick={() => {
+                                setDestQuantityTouched(false);
+                                setTransferForm({ ...transferForm, destQuantity: "" });
                               }}
-                              placeholder={transferForm.quantity || "0.0000"}
-                            />
-                            {destQuantityTouched &&
-                              transferForm.destQuantity &&
-                              parseFloat(transferForm.destQuantity) !== parseFloat(transferForm.quantity || "0") && (
-                                <p className="text-[11px] text-amber-700 dark:text-amber-300">
-                                  Asymmetric — the destination will receive a different share count than the source loses (split / merger / conversion).
-                                </p>
-                              )}
-                            {destQuantityTouched && (
-                              <button
-                                type="button"
-                                className="text-[11px] text-muted-foreground hover:text-foreground underline"
-                                onClick={() => {
-                                  setDestQuantityTouched(false);
-                                  setTransferForm({ ...transferForm, destQuantity: "" });
-                                }}
-                              >
-                                Reset to source quantity
-                              </button>
-                            )}
-                          </div>
+                            >
+                              Reset to source quantity
+                            </button>
+                          )}
                         </div>
-                      </>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {/* Cash-leg holding pins for investment-account transfers
-                  (issue #22). Only rendered for the CASH-transfer path
-                  (inKind=false) — the in-kind block above already supplies
-                  a holding via name+quantity. For each leg whose account
-                  is is_investment=true, the user must pick a holding so
-                  the strict-mode constraint is met. The per-account Cash
-                  sleeve (auto-created on is_investment toggle) is the
-                  default option for plain cash legs. NEW transfers only:
-                  the PUT path doesn't accept cash-leg pins yet, so this
-                  block is hidden when editing an existing pair. */}
-              {(() => {
-                if (transferForm.inKind) return null;
-                if (transferEdit) return null;
-                const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
-                const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
-                const fromInv = fromAcct?.isInvestment === true;
-                const toInv = toAcct?.isInvestment === true;
-                if (!fromInv && !toInv) return null;
-                const renderPicker = (
-                  side: "from" | "to",
-                  acct: Account,
-                ) => {
-                  const accountHoldings = holdings.filter((h) => h.accountId === acct.id);
-                  const cash = accountHoldings.find((h) => !h.symbol);
-                  const valueKey = side === "from" ? "fromHoldingId" : "toHoldingId";
-                  const items: ComboboxItemShape[] = [
-                    ...(cash
-                      ? [{ value: String(cash.id), label: `${cash.name} (auto) — cash sleeve` } satisfies ComboboxItemShape]
-                      : []),
-                    ...sortHolding(
-                      accountHoldings
-                        .filter((h) => h !== cash)
-                        .map((h): ComboboxItemShape => ({
-                          value: String(h.id),
-                          label: h.symbol ? `${h.name} (${h.symbol})` : h.name,
-                        })),
-                      (h) => Number(h.value),
-                      (a, z) => a.label.localeCompare(z.label),
-                    ),
-                  ];
-                  return (
-                    <div className="space-y-1">
-                      <Label className="text-xs">
-                        {side === "from" ? "Source" : "Destination"} holding in {acct.name}{" "}
-                        <span className="text-rose-600">*</span>
-                      </Label>
-                      <Combobox
-                        value={transferForm[valueKey]}
-                        onValueChange={(v) =>
-                          setTransferForm({ ...transferForm, [valueKey]: v ?? "" })
-                        }
-                        items={items}
-                        placeholder={cash ? "Cash (auto)" : "Pick a holding"}
-                        searchPlaceholder="Search holdings…"
-                        emptyMessage="No matches"
-                        size="sm"
-                        className="w-full"
-                      />
+                      </div>
                     </div>
                   );
-                };
+                }
+
+                // inv→non-inv or non-inv→inv: single holding picker on the
+                // investment side. Required on create; hidden on edit (PUT
+                // path doesn't accept holding pins yet — issue #22).
+                if (transferEdit) return null;
                 return (
                   <div className="space-y-2 rounded-md border border-violet-200 dark:border-violet-900 bg-violet-50/40 dark:bg-violet-950/20 p-3">
                     <p className="text-[11px] text-muted-foreground">
-                      Investment account leg — every transfer leg into an investment account must reference a holding. Default is the per-account Cash sleeve.
+                      Investment account leg — every transfer into an investment account must reference a holding.
                     </p>
-                    <div className="grid grid-cols-2 gap-3">
-                      {fromInv && fromAcct ? renderPicker("from", fromAcct) : <div />}
-                      {toInv && toAcct ? renderPicker("to", toAcct) : <div />}
+                    <div className={fromInv && toInv ? "grid grid-cols-2 gap-3" : ""}>
+                      {fromInv && fromAcct && (
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            Holding in {fromAcct.name}{" "}
+                            <span className="text-rose-600">*</span>
+                          </Label>
+                          <Combobox
+                            value={transferForm.fromHoldingId}
+                            onValueChange={(v) =>
+                              setTransferForm({ ...transferForm, fromHoldingId: v ?? "" })
+                            }
+                            items={buildHoldingItems(sourceHoldings)}
+                            placeholder="Pick a holding"
+                            searchPlaceholder="Search holdings…"
+                            emptyMessage="No matches"
+                            size="sm"
+                            className="w-full"
+                          />
+                        </div>
+                      )}
+                      {toInv && toAcct && (
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            Holding in {toAcct.name}{" "}
+                            <span className="text-rose-600">*</span>
+                          </Label>
+                          <Combobox
+                            value={transferForm.toHoldingId}
+                            onValueChange={(v) =>
+                              setTransferForm({ ...transferForm, toHoldingId: v ?? "" })
+                            }
+                            items={buildHoldingItems(destHoldings)}
+                            placeholder="Pick a holding"
+                            searchPlaceholder="Search holdings…"
+                            emptyMessage="No matches"
+                            size="sm"
+                            className="w-full"
+                          />
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
