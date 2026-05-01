@@ -429,11 +429,6 @@ export async function GET(request: NextRequest) {
       marketValue = price * quantity;
       const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
       marketValueDisplay = convertCurrency(marketValue, fxRate);
-    } else if (price !== null && !quantity) {
-      // No quantity data — show price as informational only
-      marketValue = price;
-      const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
-      marketValueDisplay = convertCurrency(price, fxRate);
     } else if (price === null && (symbolIsCurrency || !h.symbol) && h.isCrypto !== 1 && quantity !== null && quantity !== 0) {
       // Cash position: either no symbol OR symbol is itself a currency code
       // (USD, CAD, XAU, …). The price = 1 in the holding's own currency
