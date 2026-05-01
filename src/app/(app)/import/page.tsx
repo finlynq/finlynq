@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { FileDropZone } from "./components/file-drop-zone";
-import { ImportPreviewDialog } from "./components/import-preview-dialog";
+import { ImportPreviewDialog, type ProbableDuplicateMatch } from "./components/import-preview-dialog";
 import { OfxPreview } from "./components/ofx-preview";
 import {
   InvestmentStatementPreview,
@@ -49,6 +49,7 @@ export default function ImportPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [validRows, setValidRows] = useState<PreviewRow[]>([]);
   const [duplicateRows, setDuplicateRows] = useState<PreviewRow[]>([]);
+  const [probableDuplicates, setProbableDuplicates] = useState<ProbableDuplicateMatch[]>([]);
   const [errorRows, setErrorRows] = useState<Array<{ rowIndex: number; message: string }>>([]);
   const [isImporting, setIsImporting] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -178,6 +179,7 @@ export default function ImportPage() {
 
         setValidRows(data.valid ?? []);
         setDuplicateRows(data.duplicates ?? []);
+        setProbableDuplicates(data.probableDuplicates ?? []);
         setErrorRows(data.errors ?? []);
         setPreviewOpen(true);
       } else {
@@ -252,6 +254,7 @@ export default function ImportPage() {
         setCsvHeaders(data.headers ?? []);
         setValidRows(data.valid ?? []);
         setDuplicateRows(data.duplicates ?? []);
+        setProbableDuplicates(data.probableDuplicates ?? []);
         setErrorRows(data.errors ?? []);
         setMappingDialogOpen(false);
         setPreviewOpen(true);
@@ -327,20 +330,30 @@ export default function ImportPage() {
   const handleImportConfirm = useCallback(async (
     rows: RawTransaction[],
     forceImportIndices: number[],
+    skipIndices: number[] = [],
   ) => {
     setIsImporting(true);
     try {
+      // Issue #65: when the user marks any probable duplicates as "skip", we
+      // filter them out client-side before /execute. The server-side
+      // detector is a warning surface — it never blocks; the user's explicit
+      // choice is what removes the row.
+      const skipSet = new Set(skipIndices);
+      const filtered = skipSet.size > 0
+        ? rows.filter((_, idx) => !skipSet.has((rows[idx] as RawTransaction & { rowIndex?: number }).rowIndex ?? idx))
+        : rows;
       const res = await fetch("/api/import/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows, forceImportIndices }),
+        body: JSON.stringify({ rows: filtered, forceImportIndices }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       setPreviewOpen(false);
+      const skippedProbable = skipSet.size;
       setUploadStatus({
         type: "success",
-        message: `Imported ${data.imported} transactions (${data.skippedDuplicates ?? 0} duplicates skipped)`,
+        message: `Imported ${data.imported} transactions (${data.skippedDuplicates ?? 0} exact duplicates skipped${skippedProbable > 0 ? `, ${skippedProbable} probable duplicates skipped` : ""})`,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Import failed";
@@ -618,6 +631,7 @@ export default function ImportPage() {
         onOpenChange={setPreviewOpen}
         validRows={validRows}
         duplicateRows={duplicateRows}
+        probableDuplicates={probableDuplicates}
         errorRows={errorRows}
         onConfirm={handleImportConfirm}
         isImporting={isImporting}

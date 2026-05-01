@@ -57,6 +57,13 @@ import { parseOfx } from "../src/lib/ofx-parser";
 import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline";
 import { generateImportHash } from "../src/lib/import-hash";
 import {
+  detectProbableDuplicates,
+  type DuplicateCandidatePool,
+  type DuplicateCandidateRow,
+  type DuplicateMatch,
+} from "../src/lib/external-import/duplicate-detect";
+import { tryDecryptField } from "../src/lib/crypto/envelope";
+import {
   applyRulesToBatch,
   type TransactionRule,
   pickInvestmentCategoryByPayee,
@@ -673,6 +680,14 @@ function accumulate(
     row.dividends += amt;
   }
   out.set(name, row);
+}
+
+/** Issue #65: shift an ISO YYYY-MM-DD date by N days (UTC-safe). Returns null on parse failure. */
+function shiftIsoDate(iso: string, deltaDays: number): string | null {
+  const ms = Date.parse(iso + "T00:00:00Z");
+  if (Number.isNaN(ms)) return null;
+  const d = new Date(ms + deltaDays * 86_400_000);
+  return d.toISOString().slice(0, 10);
 }
 
 export function registerPgTools(
@@ -6027,7 +6042,7 @@ export function registerPgTools(
   // ── preview_import ─────────────────────────────────────────────────────────
   server.tool(
     "preview_import",
-    "Preview an uploaded CSV/OFX/QFX file. Returns first 20 parsed rows, dedup hit count, category auto-match coverage, unresolved accounts, and a confirmationToken for execute_import.",
+    "Preview an uploaded CSV/OFX/QFX file. Returns first 20 parsed rows, dedup hit count, category auto-match coverage, unresolved accounts, probable cross-source duplicates (FX-spread + ±7 day fuzzy match — heuristic, not exact), and a confirmationToken for execute_import.",
     {
       upload_id: z.string().describe("The id returned by POST /api/mcp/upload"),
       template_id: z.number().optional().describe("Apply a saved import template's column mapping"),
@@ -6062,12 +6077,124 @@ export function registerPgTools(
 
         let dedupHits = 0;
         const unresolvedAccounts = new Set<string>();
-        for (const r of rows) {
+        // Issue #65: collect non-exact-dedup rows so we can run probable-duplicate detection
+        // afterwards. The detector deliberately doesn't see rows that exact-match upstream.
+        const fuzzyInputs: Array<{
+          rowIndex: number;
+          date: string;
+          accountId: number;
+          amount: number;
+          payeePlain: string;
+          importHash: string;
+        }> = [];
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
           const aId = accountByName.get(r.account);
           if (!aId && r.account) unresolvedAccounts.add(r.account);
           if (aId) {
             const h = generateImportHash(r.date, aId, r.amount, r.payee);
-            if (existingHashes.has(h)) dedupHits++;
+            if (existingHashes.has(h)) {
+              dedupHits++;
+            } else {
+              fuzzyInputs.push({
+                rowIndex: i,
+                date: r.date,
+                accountId: aId,
+                amount: r.amount,
+                payeePlain: r.payee ?? "",
+                importHash: h,
+              });
+            }
+          }
+        }
+
+        // Issue #65: cross-source duplicate detection. Builds a one-shot pool
+        // over the union of touched accounts in a ±7 day window and runs the
+        // shared scoring helper. Warning surface only — never blocks the
+        // import. The helper handles the consume-once-per-existing-row
+        // invariant.
+        let probableDuplicates: DuplicateMatch[] = [];
+        if (fuzzyInputs.length > 0) {
+          try {
+            const accountIdSet = Array.from(new Set(fuzzyInputs.map((f) => f.accountId)));
+            const dates = fuzzyInputs.map((f) => f.date).sort();
+            const dateMin = shiftIsoDate(dates[0], -7);
+            const dateMax = shiftIsoDate(dates[dates.length - 1], 7);
+            if (dateMin && dateMax) {
+              const poolRows = await q(db, sql`
+                SELECT t.id, t.account_id, t.date, t.amount, t.payee, t.import_hash,
+                       t.fit_id, t.link_id, c.type AS category_type, t.source,
+                       t.portfolio_holding_id
+                  FROM transactions t
+                  LEFT JOIN categories c ON c.id = t.category_id
+                 WHERE t.user_id = ${userId}
+                   AND t.account_id = ANY(${accountIdSet}::int[])
+                   AND t.date BETWEEN ${dateMin} AND ${dateMax}
+              `);
+              const byAccount = new Map<number, DuplicateCandidateRow[]>();
+              const linkIds: string[] = [];
+              for (const p of poolRows) {
+                const accId = Number(p.account_id);
+                const payeeRaw = p.payee == null ? null : String(p.payee);
+                const payeePlain =
+                  payeeRaw && payeeRaw.startsWith("v1:")
+                    ? dek
+                      ? tryDecryptField(dek, payeeRaw, "transactions.payee")
+                      : null
+                    : payeeRaw;
+                const row: DuplicateCandidateRow = {
+                  id: Number(p.id),
+                  accountId: accId,
+                  date: String(p.date),
+                  amount: Number(p.amount),
+                  payeePlain,
+                  importHash: p.import_hash == null ? null : String(p.import_hash),
+                  fitId: p.fit_id == null ? null : String(p.fit_id),
+                  linkId: p.link_id == null ? null : String(p.link_id),
+                  categoryType: p.category_type == null ? null : String(p.category_type),
+                  source: p.source == null ? null : String(p.source),
+                  portfolioHoldingId: p.portfolio_holding_id == null ? null : Number(p.portfolio_holding_id),
+                };
+                const arr = byAccount.get(accId) ?? [];
+                arr.push(row);
+                byAccount.set(accId, arr);
+                if (row.categoryType === "R" && row.linkId) linkIds.push(row.linkId);
+              }
+
+              // Sibling-account index for transfer-pair hint.
+              const siblingAccountByLinkId = new Map<string, number>();
+              if (linkIds.length > 0) {
+                const sibRows = await q(db, sql`
+                  SELECT link_id, account_id
+                    FROM transactions
+                   WHERE user_id = ${userId}
+                     AND link_id = ANY(${linkIds}::text[])
+                `);
+                const accountSet = new Set<number>(accountIdSet);
+                const byLink = new Map<string, number[]>();
+                for (const sr of sibRows) {
+                  const lid = sr.link_id == null ? null : String(sr.link_id);
+                  const a = sr.account_id == null ? null : Number(sr.account_id);
+                  if (!lid || a == null) continue;
+                  const arr = byLink.get(lid) ?? [];
+                  arr.push(a);
+                  byLink.set(lid, arr);
+                }
+                for (const [linkId, accs] of byLink) {
+                  const sib = accs.find((a) => !accountSet.has(a));
+                  if (sib != null) siblingAccountByLinkId.set(linkId, sib);
+                }
+              }
+
+              const pool: DuplicateCandidatePool = {
+                byAccount,
+                siblingAccountByLinkId,
+              };
+              probableDuplicates = detectProbableDuplicates(fuzzyInputs, pool);
+            }
+          } catch {
+            // Heuristic — never block the preview on a detection error.
+            probableDuplicates = [];
           }
         }
 
@@ -6130,6 +6257,11 @@ export function registerPgTools(
             dedupHits,
             categoryCoveragePct: rows.length === 0 ? 0 : Math.round((matchedCat / rows.length) * 100),
             unresolvedAccounts: Array.from(unresolvedAccounts),
+            // Issue #65: warning surface only — these rows still commit on
+            // execute_import unless the user explicitly skips them. Heuristic
+            // thresholds: ±7 days, amount within ±7% OR ±$50 (whichever
+            // larger), score ≥ 0.6.
+            probableDuplicates,
             confirmationToken: token,
           },
         });
