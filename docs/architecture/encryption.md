@@ -96,15 +96,25 @@ Finlynq-native data records a buy as `amt<0 + qty>0` (paid cash, got shares); th
 
 **Every aggregator must implement the same rule** — keying on `amt<0` instead of `qty>0` silently drops every WP-imported holding leg (root cause of a 2026-04-27 prod symptom where the web Portfolio page showed `Uniswap = 1.2606` shares but MCP `analyze_holding` returned `0`; fix in commit [`8046b9b`](https://github.com/finlynq/finlynq/commit/8046b9b)).
 
-Four implementations to keep in sync:
+Four implementations to keep in sync (all four `INNER JOIN holding_accounts` as of issue #25 / 2026-05-01):
 - [/api/portfolio/overview/route.ts](../../src/app/api/portfolio/overview/route.ts) (FK SQL CASE, canonical)
 - MCP HTTP [register-tools-pg.ts](../../mcp-server/register-tools-pg.ts) `accumulate()` + `analyze_holding` loop + `recentTransactions[].type` label
 - [src/lib/holdings-value.ts](../../src/lib/holdings-value.ts) FK SQL CASE
-- MCP stdio [register-core-tools.ts](../../mcp-server/register-core-tools.ts) `analyze_holding` loop
+- MCP stdio [register-core-tools.ts](../../mcp-server/register-core-tools.ts) `get_portfolio_analysis` + `get_portfolio_performance` + `analyze_holding` loop
 
 ### Portfolio aggregation uses integer FK, not the (now-dropped) encrypted text column
 
 SQL `GROUP BY portfolio_holding_id` is the canonical and only path. `aggregateHoldings()` in `mcp-server/register-tools-pg.ts`, the `/api/portfolio/overview` route, and `src/lib/holdings-value.ts` all run a SQL aggregation on the FK plus a JOIN to `portfolio_holdings.name_ct` for the display name. The legacy `transactions.portfolio_holding` text column was retired 2026-04-29 in [#18](https://github.com/finlynq/finlynq/pull/18) (Phase 5 NULL'd it; Phase 6 dropped it); the orphan-fallback decrypt loop and the `undecryptedTxCount` "sign in again to unlock" banner are gone with it. Portfolio reads no longer need a DEK.
+
+As of issue [#25](https://github.com/finlynq/finlynq/issues/25) (2026-05-01), every aggregator additionally `INNER JOIN holding_accounts ha ON ha.holding_id = t.portfolio_holding_id AND ha.account_id = t.account_id AND ha.user_id = ?`. Today each `portfolio_holdings` row mirrors `holding_accounts` 1:1 via the `is_primary=true` row, so the join is a no-op — but it's forward-compatible with Section G's many-to-many shape, where one canonical position spans multiple `holding_accounts` rows. The JOIN keeps the (holding, account) pair as the join grain so a future split holding aggregates correctly.
+
+### Per-user canonical-name backfill (issue #25, 2026-05-01)
+
+`enqueueCanonicalizePortfolioNames` at [src/lib/crypto/stream-d-canonicalize-portfolio.ts](../../src/lib/crypto/stream-d-canonicalize-portfolio.ts) is a sibling of `enqueuePhase3NullIfReady`. Both fire on every successful login (web + MFA). The canonicalize helper checks `users.portfolio_names_canonicalized_at`, decrypts each `portfolio_holdings` row's name + symbol, classifies (tickered / cash-sleeve / currency-code / user-defined), and dual-writes a canonical name + `name_ct` + `name_lookup` for the first three classes. Tickered = uppercased symbol. Cash sleeve (`name='Cash', symbol=NULL`) keeps the canonical "Cash". Currency-code (e.g. `symbol='USD'`) becomes `Cash USD`. User-defined positions (no symbol AND `name != 'Cash'`) are left alone — the user typed it, they get to keep it.
+
+DEK-mismatch users (e.g. pathfinder per "Known open issue: pathfinder DEK mismatch" below) bail silently at the sample-decrypt precondition — same gate as `nullPlaintextIfReady`. Their plaintext fallback keeps the page functional; canonicalization is defense-in-depth and skipping it is safe.
+
+Once the helper has run for a user, the PUT handler at [/api/portfolio/route.ts](../../src/app/api/portfolio/route.ts) rejects name edits on canonical rows with HTTP 400 (`isCanonicalHolding(name, symbol)` mirrors the classifier). Symbol / currency / isCrypto / note remain editable. The `HoldingEditDialog` UI disables the Name input on canonical rows with the hint "Name is auto-managed for this holding type. Edit the symbol or currency to rename".
 
 ## Secret-derived DEK envelopes
 

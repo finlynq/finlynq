@@ -598,18 +598,26 @@ async function aggregateHoldings(
     : sql``;
   const dateFilter = opts?.since ? sql`AND t.date >= ${opts.since}` : sql``;
 
-  // FK-bound aggregation. JOIN to portfolio_holdings so we get the
-  // (encrypted) display name in the same trip; decrypt it post-query and
-  // key the aggregator by that. The decrypt cost is O(holdings) instead of
-  // O(transactions) — much cheaper than the legacy per-tx decrypt.
-  // Phase 5 (2026-04-29) removed the orphan-fallback path; every tx now
-  // has portfolio_holding_id and the legacy text column is NULL.
+  // FK-bound aggregation. JOIN through holding_accounts (Section G) on
+  // (holding_id, account_id) so the (holding, account) pair is the join
+  // grain — forward-compatible with a canonical position split across
+  // multiple accounts. JOIN to portfolio_holdings for the (encrypted)
+  // display name; decrypt post-query and key the aggregator by that.
+  // The decrypt cost is O(holdings) instead of O(transactions). Phase 5
+  // (2026-04-29) removed the orphan-fallback path; every tx now has
+  // portfolio_holding_id and the legacy text column is NULL.
+  // CLAUDE.md "Portfolio aggregator" — qty>0 = buy regardless of amount
+  // sign; preserved by `accumulate()` below.
   type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null };
   const out = new Map<string, Agg>();
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date,
            ph.name AS holding_name, ph.name_ct AS holding_name_ct
     FROM transactions t
+    INNER JOIN holding_accounts ha
+      ON ha.holding_id = t.portfolio_holding_id
+     AND ha.account_id = t.account_id
+     AND ha.user_id = ${userId}
     LEFT JOIN portfolio_holdings ph ON t.portfolio_holding_id = ph.id
     WHERE t.user_id = ${userId}
       AND t.portfolio_holding_id IS NOT NULL
@@ -3797,10 +3805,13 @@ export function registerPgTools(
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const todayStr = new Date().toISOString().split("T")[0];
       const lo = symbol.toLowerCase();
-      // Fetch every FK-bound transaction for the user, JOINing portfolio_holdings
-      // for the (encrypted) display name + symbol. Phase 6 (2026-04-29) dropped
-      // the legacy t.portfolio_holding text column; the FK is now the sole
-      // source of truth.
+      // Fetch every FK-bound transaction for the user, JOINing
+      // holding_accounts (Section G) on (holding_id, account_id) so the
+      // (holding, account) pair is the join grain, plus portfolio_holdings
+      // for the (encrypted) display name + symbol. Phase 6 (2026-04-29)
+      // dropped the legacy t.portfolio_holding text column; the FK is now
+      // the sole source of truth. CLAUDE.md "Portfolio aggregator" — qty>0
+      // = buy regardless of amount sign (preserved in the loop below).
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
                t.portfolio_holding_id,
@@ -3809,6 +3820,10 @@ export function registerPgTools(
                a.name as account_name, a.name_ct as account_name_ct, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
+        INNER JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ${userId}
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
         WHERE t.user_id = ${userId}
           AND t.portfolio_holding_id IS NOT NULL

@@ -22,7 +22,38 @@ import { formatCurrency } from "@/lib/currency";
 import { motion, AnimatePresence } from "framer-motion";
 import { useDevMode } from "@/hooks/use-dev-mode";
 import { useDisplayCurrency } from "@/components/currency-provider";
-import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
+import { SUPPORTED_FIAT_CURRENCIES, isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
+
+// Mirror of /api/portfolio/overview's `canonicalKey()`. Keep in sync with
+// the server-side function — both must produce the same key for a given
+// holding so the row-membership lookup matches the API's `byHolding` array.
+function clientCanonicalKey(h: { assetType: string; symbol: string | null; currency: string; name: string }): string {
+  const sym = h.symbol ? h.symbol.trim().toUpperCase() : "";
+  if (h.assetType === "crypto" && sym) return `crypto:${sym}`;
+  if ((h.assetType === "stock" || h.assetType === "etf") && sym) return `eq:${sym}`;
+  if (h.assetType === "cash") {
+    if (sym) {
+      if (isMetalCurrency(sym)) return `metal:${sym}`;
+      return `cash:${sym}`;
+    }
+    const cur = (h.currency || "").toUpperCase();
+    return `cash:${cur}`;
+  }
+  return `custom:${(h.name || "?").trim().toLowerCase()}`;
+}
+
+// Client-side mirror of the server's `isCanonicalHolding` helper at
+// src/app/api/portfolio/route.ts. A holding's name is auto-managed (and
+// the Name field is disabled in the edit dialog) when the row is tickered,
+// cash-as-currency, or a no-symbol "Cash" sleeve.
+function isCanonicalHolding(name: string | null, symbol: string | null): boolean {
+  const sym = (symbol ?? "").trim().toUpperCase();
+  const nm = (name ?? "").trim();
+  if (sym && /^[A-Z]{3,4}$/.test(sym) && (isSupportedCurrency(sym) || isMetalCurrency(sym))) return true;
+  if (sym) return true;
+  if (!sym && nm.toLowerCase() === "cash") return true;
+  return false;
+}
 
 // ── Colors ──────────────────────────────────────────────────────────
 const PIE_COLORS = [
@@ -260,36 +291,12 @@ function exportStocksToCSV(stocks: AggregatedStock[], etfTotalValueDisplay: numb
   downloadCSV(csv, `etf-stock-exposure-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
-function exportHoldingsToCSV(holdings: EnrichedHolding[], totalValueDisplay: number, displayCurrency: string) {
-  const header = ["#", "Account", "Name", "Symbol", "Type", "Currency", "Qty", "Avg Cost", "Price", `Mkt Value ${displayCurrency}`, "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "First Purchase", "Days Held", "Weight %"];
-  const rows = holdings.map((h, i) => [
-    i + 1,
-    `"${h.accountName}"`,
-    `"${h.name}"`,
-    h.symbol ?? "",
-    h.assetType,
-    h.currency,
-    h.quantity ?? "",
-    h.avgCostPerShare?.toFixed(4) ?? "",
-    h.price?.toFixed(4) ?? "",
-    h.marketValueDisplay?.toFixed(2) ?? "",
-    h.unrealizedGain?.toFixed(2) ?? "",
-    h.unrealizedGainPct?.toFixed(2) ?? "",
-    h.realizedGain?.toFixed(2) ?? "",
-    h.dividendsReceived?.toFixed(2) ?? "",
-    h.totalReturn?.toFixed(2) ?? "",
-    h.totalReturnPct?.toFixed(2) ?? "",
-    h.firstPurchaseDate ?? "",
-    h.daysHeld ?? "",
-    totalValueDisplay > 0 && h.marketValueDisplay ? ((h.marketValueDisplay / totalValueDisplay) * 100).toFixed(2) : "",
-  ]);
-  const totalMV = holdings.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
-  rows.push(["", "", "", "", "", "", "", "", "", totalMV.toFixed(2), "", "", "", "", "", "", "", "", "100.00"] as unknown as string[]);
-
-  const csv = [header.join(","), ...rows.map(r => (r as (string | number | null)[]).join(","))].join("\n");
-  downloadCSV(csv, `portfolio-holdings-${new Date().toISOString().slice(0, 10)}.csv`);
-}
-
+// `exportHoldingsToCSV` was removed 2026-05-01 (issue #25): the All
+// Holdings table now renders canonical-holding rows from `byHolding`,
+// not per-(account, holding) rows from `holdings`. The CSV button uses
+// `exportByHoldingToCSV` below; users who want a per-account dump can
+// use the Holdings-by-Account panel's per-row drill-down or the
+// /api/portfolio endpoint.
 function exportByHoldingToCSV(rows: ByHoldingRow[], displayCurrency: string) {
   const header = ["#", "Holding", "Symbol", "Type", "Total Qty", `Avg Cost ${displayCurrency}`, `Cost Basis ${displayCurrency}`, `Mkt Value ${displayCurrency}`, "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "Accounts", "Weight %"];
   const out = rows.map((r, i) => [
@@ -370,17 +377,19 @@ export default function PortfolioPage() {
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
-  const [sortField, setSortField] = useState<"name" | "changePct" | "price" | "account" | "marketValueDisplay" | "unrealizedGainPct">("account");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
-  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  const [sortField, setSortField] = useState<"name" | "marketValueDisplay" | "unrealizedGainPct">("marketValueDisplay");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // Tracks expanded rows by canonical-holding key (string) — issue #25
+  // restructure. Was Set<number> (portfolio_holdings.id) before the
+  // top-level All Holdings table aggregated by canonical key.
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [etfXrayTab, setEtfXrayTab] = useState<EtfXrayTab>("stocks");
   const [stocksPage, setStocksPage] = useState(1);
   const STOCKS_PER_PAGE = 25;
-  // When true, per-row Avg Cost / Price / Mkt Value / Unrealized G/L
-  // columns are rendered in the user's display currency rather than each
-  // holding's native quote currency. Convenient for comparing apples to
-  // apples across mixed-currency portfolios.
-  const [showInReporting, setShowInReporting] = useState(false);
+  // (Removed showInReporting toggle 2026-05-01: the All Holdings table
+  // now renders byHolding rows that are already in display currency, so
+  // the toggle had no effect. Per-account members in the expanded section
+  // still show native currency for clarity.)
   // Hide entries with no current position. For table rows: quantity is null
   // or 0 (matches the row's own `hasMetrics` rule below — these are the
   // rows that already render as "--" across Qty/Avg/Mkt Value). For chart
@@ -408,20 +417,20 @@ export default function PortfolioPage() {
       .catch(() => setBenchmarkLoading(false));
   }, [benchmarkPeriod, devMode]);
 
-  // Filtered & sorted holdings
+  // Issue #25 restructure: top-level All Holdings rows are canonical-
+  // holding rollups (one row per ticker / cash sleeve / currency code),
+  // not per-(account, holding) `portfolio_holdings.id` rows. Sort + filter
+  // operate on `byHolding`. Per-account members live in the expand region.
   const filteredHoldings = useMemo(() => {
-    if (!data) return [];
-    let list = data.holdings;
-    if (filter !== "all") list = list.filter(h => h.assetType === filter);
-    if (hideEmpty) list = list.filter(h => h.quantity != null && h.quantity !== 0);
+    if (!data?.byHolding) return [];
+    let list = data.byHolding;
+    if (filter !== "all") list = list.filter(r => r.assetType === filter);
+    if (hideEmpty) list = list.filter(r => r.totalQty !== 0 || r.marketValueDisplay !== 0);
 
     list = [...list].sort((a, b) => {
       let cmp = 0;
       switch (sortField) {
         case "name": cmp = a.name.localeCompare(b.name); break;
-        case "changePct": cmp = (a.changePct ?? 0) - (b.changePct ?? 0); break;
-        case "price": cmp = (a.price ?? 0) - (b.price ?? 0); break;
-        case "account": cmp = a.accountName.localeCompare(b.accountName) || a.name.localeCompare(b.name); break;
         case "marketValueDisplay": cmp = (a.marketValueDisplay ?? 0) - (b.marketValueDisplay ?? 0); break;
         case "unrealizedGainPct": cmp = (a.unrealizedGainPct ?? 0) - (b.unrealizedGainPct ?? 0); break;
       }
@@ -429,6 +438,24 @@ export default function PortfolioPage() {
     });
     return list;
   }, [data, filter, sortField, sortDir, hideEmpty]);
+
+  // Per-canonical-key list of the underlying per-(account, holding) rows
+  // — the body of the expanded section under each top-level row.
+  const holdingsByCanonicalKey = useMemo(() => {
+    if (!data?.holdings) return new Map<string, EnrichedHolding[]>();
+    const map = new Map<string, EnrichedHolding[]>();
+    for (const h of data.holdings) {
+      const k = clientCanonicalKey(h);
+      const arr = map.get(k) ?? [];
+      arr.push(h);
+      map.set(k, arr);
+    }
+    // Sort each bucket by accountName for stable rendering.
+    for (const [k, arr] of map) {
+      map.set(k, arr.slice().sort((a, b) => a.accountName.localeCompare(b.accountName)));
+    }
+    return map;
+  }, [data]);
 
   // Account groups for collapsible section
   const accountGroups = useMemo(() => {
@@ -454,10 +481,10 @@ export default function PortfolioPage() {
     else { setSortField(field); setSortDir("asc"); }
   };
 
-  const toggleRow = (id: number) => {
+  const toggleRow = (key: string) => {
     setExpandedRows(prev => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
   };
@@ -792,19 +819,10 @@ export default function PortfolioPage() {
                 {hideEmpty ? "Hiding empty" : "Showing all"}
               </Button>
               <Button
-                variant={showInReporting ? "default" : "outline"}
-                size="sm"
-                className="text-xs gap-1.5 h-7"
-                onClick={() => setShowInReporting(!showInReporting)}
-                title={`Show all values in ${data?.displayCurrency ?? displayCurrency} instead of each holding's native currency`}
-              >
-                {showInReporting ? `In ${data?.displayCurrency ?? displayCurrency}` : "Native"}
-              </Button>
-              <Button
                 variant="outline"
                 size="sm"
                 className="text-xs gap-1.5 h-7"
-                onClick={() => exportHoldingsToCSV(data.holdings, summary.totalValueDisplay, displayCurrency)}
+                onClick={() => exportByHoldingToCSV(data.byHolding ?? [], data.displayCurrency ?? displayCurrency)}
               >
                 <Download className="h-3 w-3" />
                 CSV
@@ -821,171 +839,237 @@ export default function PortfolioPage() {
                   <TableHead className="cursor-pointer select-none" onClick={() => handleSort("name")}>
                     Holding <SortIcon field="name" />
                   </TableHead>
-                  <TableHead className="cursor-pointer select-none" onClick={() => handleSort("account")}>
-                    Account <SortIcon field="account" />
-                  </TableHead>
-                  <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Total Qty</TableHead>
                   <TableHead className="text-right">Avg Cost</TableHead>
-                  <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("price")}>
-                    Price <SortIcon field="price" />
-                  </TableHead>
                   <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("marketValueDisplay")}>
                     Mkt Value <SortIcon field="marketValueDisplay" />
                   </TableHead>
                   <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("unrealizedGainPct")}>
                     Unrealized G/L <SortIcon field="unrealizedGainPct" />
                   </TableHead>
-                  <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("changePct")}>
-                    Day Chg <SortIcon field="changePct" />
-                  </TableHead>
+                  <TableHead className="text-right">Realized G/L</TableHead>
+                  <TableHead className="text-right">Accounts</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredHoldings.map(h => {
-                  const typeConf = ASSET_TYPE_CONFIG[h.assetType];
-                  const isExpanded = expandedRows.has(h.id);
-                  const hasMetrics = h.quantity !== null && h.quantity !== 0;
+                {filteredHoldings.map(r => {
+                  const typeConf = ASSET_TYPE_CONFIG[r.assetType];
+                  const isExpanded = expandedRows.has(r.key);
+                  const reportCcy = data.displayCurrency ?? displayCurrency;
+                  const memberHoldings = holdingsByCanonicalKey.get(r.key) ?? [];
+                  // Aggregate-level first-purchase / days-held are derived
+                  // from the per-account members so they reflect the
+                  // earliest buy across every account that holds this
+                  // canonical position.
+                  const earliestPurchase = memberHoldings.reduce<string | null>((acc, h) => {
+                    if (!h.firstPurchaseDate) return acc;
+                    if (!acc || h.firstPurchaseDate < acc) return h.firstPurchaseDate;
+                    return acc;
+                  }, null);
+                  const today = new Date();
+                  const daysHeld = earliestPurchase
+                    ? Math.floor((today.getTime() - new Date(earliestPurchase).getTime()) / 86400000)
+                    : null;
                   return (
                     <>
                       <TableRow
-                        key={h.id}
+                        key={r.key}
                         className="hover:bg-muted/30 transition-colors cursor-pointer"
-                        onClick={() => toggleRow(h.id)}
+                        onClick={() => toggleRow(r.key)}
                       >
                         <TableCell className="text-muted-foreground">
                           {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2">
-                            {h.image && <img src={h.image} alt="" className="h-6 w-6 rounded-full" />}
+                            {r.image && <img src={r.image} alt="" className="h-6 w-6 rounded-full" />}
                             <div>
-                              <span className="font-medium text-sm">{h.name}</span>
+                              <span className="font-medium text-sm">{r.name}</span>
                               <div className="flex items-center gap-1 mt-0.5">
-                                {h.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{h.symbol}</Badge>}
+                                {r.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{r.symbol}</Badge>}
                                 <Badge variant="outline" className="text-[10px] h-4 px-1" style={{ borderColor: typeConf?.color, color: typeConf?.color }}>
-                                  {typeConf?.label ?? h.assetType}
+                                  {typeConf?.label ?? r.assetType}
                                 </Badge>
                               </div>
                             </div>
                           </div>
                         </TableCell>
-                        <TableCell>
-                          <span className="text-xs text-muted-foreground">{h.accountName}</span>
-                        </TableCell>
                         <TableCell className="text-right font-mono text-sm">
-                          {hasMetrics && h.quantity != null
-                            ? h.quantity.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: h.quantity % 1 === 0 ? 0 : 4 })
+                          {r.totalQty !== 0
+                            ? r.totalQty.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: r.totalQty % 1 === 0 ? 0 : 4 })
                             : <span className="text-muted-foreground text-xs">--</span>}
                         </TableCell>
-                        {(() => {
-                          // Per-row currency formatting respects the toolbar toggle.
-                          // - Native mode: show in each holding's quote/price currency.
-                          // - Reporting mode: convert to display currency via marketValueDisplay
-                          //   ratio (server already converted that field; we derive a
-                          //   conversion factor from it for the per-row Avg/Price/Unrealized).
-                          const reportCcy = data.displayCurrency ?? displayCurrency;
-                          const nativeCcy = h.quoteCurrency ?? h.currency;
-                          const useReport = showInReporting;
-                          // Conversion factor native → display. When marketValue / marketValueDisplay
-                          // are both populated we derive the rate; otherwise fall back to 1.
-                          const conv = (h.marketValue != null && h.marketValueDisplay != null && h.marketValue !== 0)
-                            ? h.marketValueDisplay / h.marketValue
-                            : 1;
-                          const fmt = (v: number | null | undefined) => {
-                            if (v == null) return null;
-                            const ccy = useReport ? reportCcy : nativeCcy;
-                            const value = useReport ? v * conv : v;
-                            return formatCurrency(value, ccy);
-                          };
-                          const avgCostStr = hasMetrics ? fmt(h.avgCostPerShare) : null;
-                          const priceStr = fmt(h.price);
-                          const mktValueStr = useReport
-                            ? (hasMetrics && h.marketValueDisplay != null ? formatCurrency(h.marketValueDisplay, reportCcy) : null)
-                            : (hasMetrics && h.marketValue != null ? formatCurrency(h.marketValue, nativeCcy) : null);
-                          const unrealizedStr = hasMetrics ? fmt(h.unrealizedGain) : null;
-                          return (<>
-                            <TableCell className="text-right font-mono text-sm">
-                              {avgCostStr ?? <span className="text-muted-foreground text-xs">--</span>}
-                            </TableCell>
-                            <TableCell className="text-right font-mono text-sm">
-                              {priceStr ?? <span className="text-muted-foreground">--</span>}
-                            </TableCell>
-                            <TableCell className="text-right font-mono text-sm font-medium">
-                              {mktValueStr ?? <span className="text-muted-foreground text-xs">--</span>}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {hasMetrics && h.unrealizedGain != null && unrealizedStr ? (
-                                <div className="text-right">
-                                  <p className={`text-sm font-mono font-medium ${h.unrealizedGain >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                                    {h.unrealizedGain >= 0 ? "+" : ""}{unrealizedStr}
-                                  </p>
-                                  {h.unrealizedGainPct != null && (
-                                    <p className={`text-xs font-mono ${h.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                                      {h.unrealizedGainPct >= 0 ? "+" : ""}{h.unrealizedGainPct.toFixed(2)}%
-                                    </p>
-                                  )}
-                                </div>
-                              ) : (
-                                <span className="text-muted-foreground text-xs">--</span>
-                              )}
-                            </TableCell>
-                          </>);
-                        })()}
+                        <TableCell className="text-right font-mono text-sm">
+                          {r.avgCostDisplay != null ? formatCurrency(r.avgCostDisplay, reportCcy) : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm font-medium">
+                          {r.marketValueDisplay !== 0 ? formatCurrency(r.marketValueDisplay, reportCcy) : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
                         <TableCell className="text-right">
-                          <ChangeBadge value={h.changePct} />
+                          <div>
+                            <p className={`text-sm font-mono font-medium ${r.unrealizedGainDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                              {r.unrealizedGainDisplay >= 0 ? "+" : ""}{formatCurrency(r.unrealizedGainDisplay, reportCcy)}
+                            </p>
+                            {r.unrealizedGainPct != null && (
+                              <p className={`text-xs font-mono ${r.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                {r.unrealizedGainPct >= 0 ? "+" : ""}{r.unrealizedGainPct.toFixed(2)}%
+                              </p>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {r.realizedGainDisplay !== 0 ? (
+                            <span className={`${r.realizedGainDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                              {r.realizedGainDisplay >= 0 ? "+" : ""}{formatCurrency(r.realizedGainDisplay, reportCcy)}
+                            </span>
+                          ) : <span className="text-muted-foreground text-xs">--</span>}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Badge variant="outline" className="text-[10px]">
+                            {r.accountCount}
+                          </Badge>
                         </TableCell>
                       </TableRow>
                       {isExpanded && (
-                        <TableRow key={`${h.id}-detail`} className="bg-muted/10 border-0">
+                        <TableRow key={`${r.key}-detail`} className="bg-muted/10 border-0">
                           <TableCell />
-                          <TableCell colSpan={8} className="py-3">
+                          <TableCell colSpan={7} className="py-3">
+                            {/* Aggregate-level info grid (shared across the
+                                accounts inside this canonical position). */}
                             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-xs">
                               <div>
                                 <p className="text-muted-foreground">First Purchase</p>
-                                <p className="font-medium">{h.firstPurchaseDate ?? "--"}</p>
+                                <p className="font-medium">{earliestPurchase ?? "--"}</p>
                               </div>
                               <div>
                                 <p className="text-muted-foreground">Days Held</p>
-                                <p className="font-medium">{h.daysHeld != null ? `${h.daysHeld.toLocaleString()} days` : "--"}</p>
+                                <p className="font-medium">{daysHeld != null ? `${daysHeld.toLocaleString()} days` : "--"}</p>
                               </div>
                               <div>
                                 <p className="text-muted-foreground">% of Portfolio</p>
-                                <p className="font-medium">{h.pctOfPortfolio != null ? `${h.pctOfPortfolio.toFixed(2)}%` : "--"}</p>
+                                <p className="font-medium">{r.pctOfPortfolio != null ? `${r.pctOfPortfolio.toFixed(2)}%` : "--"}</p>
                               </div>
                               <div>
-                                <p className="text-muted-foreground">Realized G/L</p>
-                                <p className={`font-medium font-mono ${(h.realizedGain ?? 0) >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                                  {h.realizedGain != null ? `${h.realizedGain >= 0 ? "+" : ""}${formatCurrency(h.realizedGain, h.quoteCurrency ?? h.currency)}` : "--"}
-                                </p>
+                                <p className="text-muted-foreground">Cost Basis</p>
+                                <p className="font-medium font-mono">{r.costBasisDisplay !== 0 ? formatCurrency(r.costBasisDisplay, reportCcy) : "--"}</p>
                               </div>
                               <div>
                                 <p className="text-muted-foreground">Dividends</p>
                                 <p className="font-medium font-mono text-emerald-600 dark:text-emerald-400">
-                                  {h.dividendsReceived != null && h.dividendsReceived > 0
-                                    ? `+${formatCurrency(h.dividendsReceived, h.quoteCurrency ?? h.currency)}`
-                                    : "--"}
+                                  {r.dividendsDisplay > 0 ? `+${formatCurrency(r.dividendsDisplay, reportCcy)}` : "--"}
                                 </p>
                               </div>
                               <div>
                                 <p className="text-muted-foreground">Total Return</p>
-                                <p className={`font-medium font-mono ${(h.totalReturn ?? 0) >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                                  {h.totalReturn != null ? `${h.totalReturn >= 0 ? "+" : ""}${formatCurrency(h.totalReturn, h.quoteCurrency ?? h.currency)}` : "--"}
-                                  {h.totalReturnPct != null && (
-                                    <span className="ml-1 text-[10px]">({h.totalReturnPct >= 0 ? "+" : ""}{h.totalReturnPct.toFixed(1)}%)</span>
+                                <p className={`font-medium font-mono ${r.totalReturnDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                  {r.totalReturnDisplay !== 0 ? `${r.totalReturnDisplay >= 0 ? "+" : ""}${formatCurrency(r.totalReturnDisplay, reportCcy)}` : "--"}
+                                  {r.totalReturnPct != null && (
+                                    <span className="ml-1 text-[10px]">({r.totalReturnPct >= 0 ? "+" : ""}{r.totalReturnPct.toFixed(1)}%)</span>
                                   )}
                                 </p>
                               </div>
                             </div>
+
+                            {/* Per-account breakdown (issue #25 spec). One
+                                row per (canonical-holding, account) pair
+                                with a "View transactions" drill-down. Hidden
+                                when only one account holds the position so
+                                we don't duplicate the totals row above. */}
+                            {memberHoldings.length > 1 && (
+                              <div className="mt-3 rounded-md border border-border/50 overflow-hidden">
+                                <Table>
+                                  <TableHeader>
+                                    <TableRow>
+                                      <TableHead className="text-[10px] uppercase tracking-wider">Account</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Qty</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Avg Cost</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Mkt Value</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Unrealized G/L</TableHead>
+                                      <TableHead className="text-right text-[10px] uppercase tracking-wider">Realized G/L</TableHead>
+                                      <TableHead className="text-right" />
+                                    </TableRow>
+                                  </TableHeader>
+                                  <TableBody>
+                                    {memberHoldings.map(h => {
+                                      const hasMetrics = h.quantity !== null && h.quantity !== 0;
+                                      const nativeCcy = h.quoteCurrency ?? h.currency;
+                                      return (
+                                        <TableRow key={h.id} className="hover:bg-muted/30">
+                                          <TableCell className="text-xs">
+                                            <button
+                                              type="button"
+                                              className="text-left hover:underline"
+                                              onClick={(e) => { e.stopPropagation(); setEditingHolding(h); }}
+                                              title="Edit this per-account holding row"
+                                            >
+                                              {h.accountName}
+                                            </button>
+                                          </TableCell>
+                                          <TableCell className="text-right font-mono text-xs">
+                                            {hasMetrics && h.quantity != null
+                                              ? h.quantity.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: h.quantity % 1 === 0 ? 0 : 4 })
+                                              : <span className="text-muted-foreground">--</span>}
+                                          </TableCell>
+                                          <TableCell className="text-right font-mono text-xs">
+                                            {hasMetrics && h.avgCostPerShare != null
+                                              ? formatCurrency(h.avgCostPerShare, nativeCcy)
+                                              : <span className="text-muted-foreground">--</span>}
+                                          </TableCell>
+                                          <TableCell className="text-right font-mono text-xs font-medium">
+                                            {hasMetrics && h.marketValueDisplay != null
+                                              ? formatCurrency(h.marketValueDisplay, reportCcy)
+                                              : <span className="text-muted-foreground">--</span>}
+                                          </TableCell>
+                                          <TableCell className="text-right text-xs">
+                                            {hasMetrics && h.unrealizedGain != null ? (
+                                              <span className={`font-mono ${h.unrealizedGain >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                                {h.unrealizedGain >= 0 ? "+" : ""}{formatCurrency(h.unrealizedGain, nativeCcy)}
+                                              </span>
+                                            ) : <span className="text-muted-foreground">--</span>}
+                                          </TableCell>
+                                          <TableCell className="text-right text-xs">
+                                            {h.realizedGain != null && h.realizedGain !== 0 ? (
+                                              <span className={`font-mono ${h.realizedGain >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                                {h.realizedGain >= 0 ? "+" : ""}{formatCurrency(h.realizedGain, nativeCcy)}
+                                              </span>
+                                            ) : <span className="text-muted-foreground">--</span>}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            <Link
+                                              href={`/transactions?portfolioHolding=${encodeURIComponent(h.name)}${h.accountId ? `&accountId=${h.accountId}` : ""}`}
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="text-[11px] text-primary hover:underline whitespace-nowrap"
+                                              title="View transactions for this holding in this account"
+                                            >
+                                              View txns →
+                                            </Link>
+                                          </TableCell>
+                                        </TableRow>
+                                      );
+                                    })}
+                                  </TableBody>
+                                </Table>
+                              </div>
+                            )}
+
                             <div className="mt-3 pt-3 border-t border-border/50 flex justify-end gap-3">
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); setEditingHolding(h); }}
-                                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground font-medium"
-                              >
-                                <Pencil className="h-3 w-3" /> Edit
-                              </button>
+                              {memberHoldings.length === 1 && memberHoldings[0] ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); setEditingHolding(memberHoldings[0]); }}
+                                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground font-medium"
+                                >
+                                  <Pencil className="h-3 w-3" /> Edit
+                                </button>
+                              ) : null}
+                              {/* "View transactions" — same canonical
+                                  holding across every account it lives in.
+                                  Mirrors the existing
+                                  /transactions?portfolioHolding=<name>
+                                  contract; the per-account "View txns"
+                                  links above scope to a single account. */}
                               <Link
-                                href={`/transactions?portfolioHolding=${encodeURIComponent(h.name)}${h.accountId ? `&accountId=${h.accountId}` : ""}`}
+                                href={`/transactions?portfolioHolding=${encodeURIComponent(r.name)}`}
                                 onClick={(e) => e.stopPropagation()}
                                 className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
                               >
@@ -1000,7 +1084,7 @@ export default function PortfolioPage() {
                 })}
                 {filteredHoldings.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
                       No {filter === "all" ? "" : ASSET_TYPE_CONFIG[filter]?.label} holdings found.
                       {hideEmpty && data.holdings.length > 0 && (
                         <span className="block mt-1 text-xs">
@@ -1517,113 +1601,13 @@ export default function PortfolioPage() {
         </CardContent>
       </Card>}
 
-      {/* ── By Holding (Section F / issue #25) ─────────────────────
-          Pools the same canonical position across every account that holds
-          it. Key = uppercased symbol for tickered rows, currency for cash
-          sleeves, metal symbol for XAU/XAG/etc. User-edited free-text
-          names still fragment until the canonical-name backfill helper
-          ships (deferred follow-up). */}
-      {data.byHolding && data.byHolding.length > 0 && (
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <Briefcase className="h-4 w-4 text-indigo-500" />
-                  <CardTitle className="text-base">By Holding</CardTitle>
-                </div>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Same position pooled across {data.summary.totalAccounts} account{data.summary.totalAccounts !== 1 ? "s" : ""}
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs gap-1.5 h-7"
-                onClick={() => exportByHoldingToCSV(data.byHolding!, displayCurrency)}
-              >
-                <Download className="h-3 w-3" />
-                CSV
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Holding</TableHead>
-                    <TableHead className="text-right">Total Qty</TableHead>
-                    <TableHead className="text-right">Avg Cost</TableHead>
-                    <TableHead className="text-right">Mkt Value</TableHead>
-                    <TableHead className="text-right">Unrealized G/L</TableHead>
-                    <TableHead className="text-right">Realized G/L</TableHead>
-                    <TableHead className="text-right">Accounts</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {data.byHolding.map(r => {
-                    const typeConf = ASSET_TYPE_CONFIG[r.assetType];
-                    return (
-                      <TableRow key={r.key} className="hover:bg-muted/30 transition-colors">
-                        <TableCell>
-                          <div className="flex items-center gap-2">
-                            {r.image && <img src={r.image} alt="" className="h-5 w-5 rounded-full" />}
-                            <div>
-                              <span className="font-medium text-sm">{r.name}</span>
-                              <div className="flex items-center gap-1 mt-0.5">
-                                {r.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{r.symbol}</Badge>}
-                                <Badge variant="outline" className="text-[10px] h-4 px-1" style={{ borderColor: typeConf?.color, color: typeConf?.color }}>
-                                  {typeConf?.label ?? r.assetType}
-                                </Badge>
-                              </div>
-                            </div>
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm">
-                          {r.totalQty !== 0
-                            ? r.totalQty.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: r.totalQty % 1 === 0 ? 0 : 4 })
-                            : <span className="text-muted-foreground text-xs">--</span>}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm">
-                          {r.avgCostDisplay != null ? formatCurrency(r.avgCostDisplay, displayCurrency) : <span className="text-muted-foreground text-xs">--</span>}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm font-medium">
-                          {r.marketValueDisplay !== 0 ? formatCurrency(r.marketValueDisplay, displayCurrency) : <span className="text-muted-foreground text-xs">--</span>}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <div>
-                            <p className={`text-sm font-mono font-medium ${r.unrealizedGainDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                              {r.unrealizedGainDisplay >= 0 ? "+" : ""}{formatCurrency(r.unrealizedGainDisplay, displayCurrency)}
-                            </p>
-                            {r.unrealizedGainPct != null && (
-                              <p className={`text-xs font-mono ${r.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                                {r.unrealizedGainPct >= 0 ? "+" : ""}{r.unrealizedGainPct.toFixed(2)}%
-                              </p>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm">
-                          <span className={`${r.realizedGainDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                            {r.realizedGainDisplay !== 0 ? `${r.realizedGainDisplay >= 0 ? "+" : ""}${formatCurrency(r.realizedGainDisplay, displayCurrency)}` : <span className="text-muted-foreground text-xs">--</span>}
-                          </span>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Badge variant="outline" className="text-[10px]">
-                            {r.accountCount}
-                          </Badge>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* ── Holdings by Account (Collapsible) ─────────────────── */}
+      {/* ── Holdings by Account (Collapsible) ───────────────────
+          Issue #25 (decision 2026-05-01): the standalone "By Holding"
+          panel was folded into the "All Holdings" table above — each
+          top-level row there is the canonical-holding rollup, and the
+          expand region surfaces the per-account breakdown + drill-down.
+          This Holdings-by-Account panel stays as-is per the same decision
+          ("the per-account button row is unchanged"). */}
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center gap-2">
@@ -1924,7 +1908,10 @@ function HoldingEditDialog({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: holding.id,
-          name: form.name.trim() || undefined,
+          // Skip the Name field entirely on canonical rows — the PUT
+          // handler would 400 on a name edit there. Symbol / currency /
+          // isCrypto / note still flow through.
+          name: nameAutoManaged ? undefined : (form.name.trim() || undefined),
           symbol: form.symbol.trim() || null,
           currency: form.currency.trim().toUpperCase(),
           isCrypto: form.isCrypto ? 1 : 0,
@@ -1970,6 +1957,13 @@ function HoldingEditDialog({
           : `${symbolInfo.source} (${symbolInfo.kind})`)
       : null;
 
+  // Issue #25: tickered / cash-as-currency / "Cash"-sleeve rows have an
+  // auto-managed name. The PUT handler rejects name edits on these rows,
+  // so disable the input here and surface a hint instead. Reads the
+  // *next* symbol (form.symbol) so toggling between a tickered position
+  // and a free-text custom row immediately enables/disables the field.
+  const nameAutoManaged = isCanonicalHolding(form.name, form.symbol || null);
+
   return (
     <Dialog open={!!holding} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="max-w-md">
@@ -1979,7 +1973,16 @@ function HoldingEditDialog({
         <div className="space-y-4">
           <div className="space-y-1.5">
             <Label>Name</Label>
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            <Input
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              disabled={nameAutoManaged}
+            />
+            {nameAutoManaged && (
+              <p className="text-[11px] text-muted-foreground">
+                Name is auto-managed for this holding type. Edit the symbol or currency to rename.
+              </p>
+            )}
           </div>
           <div className="space-y-1.5">
             <Label>Symbol / ticker</Label>

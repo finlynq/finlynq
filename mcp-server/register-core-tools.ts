@@ -1729,18 +1729,30 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       // Phase 6 (2026-04-29): JOIN on the FK rather than the (dropped)
-      // portfolio_holding text column.
+      // portfolio_holding text column. Section F (issue #25): JOIN through
+      // holding_accounts (Section G) for transactions so the (holding,
+      // account) grain stays consistent with the HTTP MCP + REST. Today
+      // each holding has a single is_primary=true pairing, so behavior is
+      // unchanged. CLAUDE.md "Portfolio aggregator" applies (no qty>0/<0
+      // CASE here — pure SUM(quantity) / SUM(amount), so the rule is moot
+      // in this query).
       const holdings = await sqlite.prepare(`
         SELECT ph.id, ph.name, ph.symbol, ph.currency, a.name as account_name,
                COALESCE(SUM(t.quantity), 0) as total_quantity,
                COALESCE(SUM(t.amount), 0) as book_value
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
-        LEFT JOIN transactions t ON t.portfolio_holding_id = ph.id AND t.user_id = ?
+        LEFT JOIN transactions t
+          ON t.portfolio_holding_id = ph.id AND t.user_id = ?
+        LEFT JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ?
         WHERE ph.user_id = ?
+          AND (t.id IS NULL OR ha.holding_id IS NOT NULL)
         GROUP BY ph.id, ph.name, ph.symbol, ph.currency, a.name
         ORDER BY ABS(COALESCE(SUM(t.amount), 0)) DESC
-      `).all(userId, userId) as SqliteRow[];
+      `).all(userId, userId, userId) as SqliteRow[];
 
       const byCurrency: Record<string, number> = {};
       const byAccount: Record<string, number> = {};
@@ -1799,7 +1811,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const since = cutoff[period ?? "all"];
       // Phase 6 (2026-04-29): aggregate by FK + JOIN portfolio_holdings for
       // the display name. The legacy `portfolio_holding` text column was
-      // dropped; FK is the sole source of truth.
+      // dropped; FK is the sole source of truth. Section F (issue #25):
+      // JOIN through holding_accounts (Section G) on (holding_id,
+      // account_id) so the join grain matches the rest of the aggregator
+      // surface. CLAUDE.md "Portfolio aggregator" — this query keys cost
+      // basis on amt-sign (`amount<0` = buy), which is the LEGACY
+      // amt-sign convention NOT the qty>0 rule. Preserved here for
+      // backwards compat with stdio MCP consumers; the HTTP path uses the
+      // qty>0 rule.
       const perf = await sqlite.prepare(`
         SELECT ph.name as holding, COUNT(*) as tx_count,
                SUM(CASE WHEN t.amount < 0 THEN ABS(t.amount) ELSE 0 END) as cost_basis,
@@ -1807,10 +1826,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
                SUM(t.quantity) as net_quantity,
                MIN(t.date) as first_purchase, MAX(t.date) as last_activity
         FROM transactions t
+        INNER JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ?
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
         WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.date >= ?
         GROUP BY ph.id, ph.name ORDER BY cost_basis DESC
-      `).all(userId, since) as SqliteRow[];
+      `).all(userId, userId, since) as SqliteRow[];
 
       const results = perf.map(p => {
         const costBasis = Number(p.cost_basis ?? 0);
@@ -1854,6 +1877,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // Phase 6 (2026-04-29): match on the JOINed portfolio_holdings name +
       // symbol + tx payee. The legacy `t.portfolio_holding` text column was
       // dropped; FK + JOIN is the only source of truth for holding names.
+      // Section F (issue #25): JOIN through holding_accounts (Section G) on
+      // (holding_id, account_id) so the join grain matches the HTTP MCP +
+      // REST aggregator surface. CLAUDE.md "Portfolio aggregator" — qty>0
+      // = buy regardless of amount sign (preserved in the loop below).
       // Symbol gets exact case-insensitive equality (tickers are short and
       // prone to spurious substring hits — "GE" inside "ORANGE" etc.).
       const txns = await sqlite.prepare(`
@@ -1862,6 +1889,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
                a.name as account_name, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
+        INNER JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ?
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
         WHERE t.user_id = ?
           AND (
@@ -1870,7 +1901,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             OR LOWER(ph.symbol) = LOWER(?)
           )
         ORDER BY t.date ASC
-      `).all(userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
+      `).all(userId, userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
 
       if (!txns.length) return sqliteErr(`No transactions found for "${symbol}"`);
 
