@@ -2073,6 +2073,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
           record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair. In-kind: holding+quantity.",
           record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Cross-currency requires fxRate.",
+          preview_bulk_update: "preview_bulk_update(filter, changes) — stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[], confirmationToken. (HTTP transport adds quantity, portfolioHoldingId, portfolioHolding.)",
+          execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Stdio: category-by-name only (HTTP supports quantity/holding writes too).",
         };
         return txt({ tool: tool_name, usage: docs[tool_name] ?? "Use topic='tools' for full list." });
       }
@@ -3035,8 +3037,16 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   });
   type BulkFilter = z.infer<typeof bulkFilterSchema>;
 
+  // Issue #61: `.strict()` so unknown keys fail at validation time instead
+  // of silently no-op'ing. Stdio's surface is intentionally narrower than
+  // HTTP's — `category` (name) is the only addition. quantity/holding fields
+  // are HTTP-only because stdio has no holding plumbing (no DEK, no
+  // resolvePortfolioHoldingByName equivalent), mirrors the stdio
+  // `record_transaction` carve-out that already refuses investment-account
+  // writes. Callers passing `quantity` to stdio get a clean strict-mode 400.
   const bulkChangesSchema = z.object({
     category_id: z.number().nullable().optional(),
+    category: z.string().optional(),
     account_id: z.number().optional(),
     date: z.string().optional(),
     note: z.string().optional(),
@@ -3046,8 +3056,20 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       mode: z.enum(["append", "replace", "remove"]),
       value: z.string(),
     }).optional(),
-  });
+  }).strict();
   type BulkChanges = z.infer<typeof bulkChangesSchema>;
+
+  /** Issue #61: post-resolution shape — names → ids. */
+  type ResolvedChanges = {
+    category_id?: number | null;
+    account_id?: number;
+    date?: string;
+    note?: string;
+    payee?: string;
+    is_business?: number;
+    tags?: { mode: "append" | "replace" | "remove"; value: string };
+  };
+  type UnappliedChange = { key: string; reason: string };
 
   async function resolveFilterToIds(filter: BulkFilter): Promise<number[]> {
     const hasAny =
@@ -3080,57 +3102,109 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     return rows.map((r) => Number(r.id));
   }
 
-  function applyChangesToRow(row: Record<string, unknown>, changes: BulkChanges): Record<string, unknown> {
+  /**
+   * Issue #61: resolve names → ids before preview/commit. Stdio carries the
+   * narrower surface — only `category` (name) needs resolution. Mirrors the
+   * HTTP transport's helper but without DEK plumbing (stdio reads plaintext
+   * `name` directly via SQL).
+   */
+  async function resolveBulkChanges(
+    changes: BulkChanges,
+  ): Promise<{ resolved: ResolvedChanges; unapplied: UnappliedChange[]; error?: string }> {
+    const resolved: ResolvedChanges = {};
+    const unapplied: UnappliedChange[] = [];
+
+    if (changes.category_id !== undefined) resolved.category_id = changes.category_id;
+    if (changes.account_id !== undefined) resolved.account_id = changes.account_id;
+    if (changes.date !== undefined) resolved.date = changes.date;
+    if (changes.note !== undefined) resolved.note = changes.note;
+    if (changes.payee !== undefined) resolved.payee = changes.payee;
+    if (changes.is_business !== undefined) resolved.is_business = changes.is_business;
+    if (changes.tags !== undefined) resolved.tags = changes.tags;
+
+    if (changes.category !== undefined) {
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const r = resolveCategoryStrict(changes.category, allCats);
+      if (!r.ok) {
+        if (r.reason === "low_confidence") {
+          unapplied.push({
+            key: "category",
+            reason: `Category "${changes.category}" did not match strongly — did you mean "${r.suggestion.name}" (id=${Number(r.suggestion.id)})?`,
+          });
+        } else {
+          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          unapplied.push({ key: "category", reason: `Category "${changes.category}" not found. Available: ${list}` });
+        }
+      } else {
+        const resolvedId = Number(r.category.id);
+        if (changes.category_id !== undefined && changes.category_id !== null && changes.category_id !== resolvedId) {
+          return {
+            resolved,
+            unapplied,
+            error: `category "${changes.category}" resolves to id=${resolvedId}, but category_id=${changes.category_id} disagrees. Pass only one, or make them match.`,
+          };
+        }
+        resolved.category_id = resolvedId;
+      }
+    }
+
+    return { resolved, unapplied };
+  }
+
+  function applyChangesToRow(row: Record<string, unknown>, resolved: ResolvedChanges): Record<string, unknown> {
     const out = { ...row };
-    if (changes.category_id !== undefined) out.category_id = changes.category_id;
-    if (changes.account_id !== undefined) out.account_id = changes.account_id;
-    if (changes.date !== undefined) out.date = changes.date;
-    if (changes.note !== undefined) out.note = changes.note;
-    if (changes.payee !== undefined) out.payee = changes.payee;
-    if (changes.is_business !== undefined) out.is_business = changes.is_business;
-    if (changes.tags !== undefined) {
+    if (resolved.category_id !== undefined) out.category_id = resolved.category_id;
+    if (resolved.account_id !== undefined) out.account_id = resolved.account_id;
+    if (resolved.date !== undefined) out.date = resolved.date;
+    if (resolved.note !== undefined) out.note = resolved.note;
+    if (resolved.payee !== undefined) out.payee = resolved.payee;
+    if (resolved.is_business !== undefined) out.is_business = resolved.is_business;
+    if (resolved.tags !== undefined) {
       const currentSet = new Set(String(out.tags ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-      const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
-      if (changes.tags.mode === "replace") out.tags = tokens.join(",");
-      else if (changes.tags.mode === "append") { for (const t of tokens) currentSet.add(t); out.tags = Array.from(currentSet).join(","); }
+      const tokens = resolved.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+      if (resolved.tags.mode === "replace") out.tags = tokens.join(",");
+      else if (resolved.tags.mode === "append") { for (const t of tokens) currentSet.add(t); out.tags = Array.from(currentSet).join(","); }
       else { for (const t of tokens) currentSet.delete(t); out.tags = Array.from(currentSet).join(","); }
     }
     return out;
   }
 
-  async function commitBulkUpdate(ids: number[], changes: BulkChanges): Promise<number> {
+  /**
+   * Commit a bulk update. Issue #61: takes the post-resolution shape so
+   * commit only ever writes FK ints. Issue #28 audit-trio: every UPDATE
+   * here bumps `updated_at = NOW()`; `source` is INSERT-only, never modified.
+   */
+  async function commitBulkUpdate(ids: number[], resolved: ResolvedChanges): Promise<number> {
     if (ids.length === 0) return 0;
     const inList = `(${ids.map(() => "?").join(",")})`;
 
-    // Issue #28: every UPDATE bumps updated_at = NOW(). pg-compat shim
-    // resolves NOW() to PG. `source` is INSERT-only, never modified here.
-    if (changes.category_id !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET category_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.category_id, ...ids, userId);
+    if (resolved.category_id !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET category_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.category_id, ...ids, userId);
     }
-    if (changes.account_id !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET account_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.account_id, ...ids, userId);
+    if (resolved.account_id !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET account_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.account_id, ...ids, userId);
     }
-    if (changes.date !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET date = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.date, ...ids, userId);
+    if (resolved.date !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET date = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.date, ...ids, userId);
     }
-    if (changes.is_business !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET is_business = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.is_business, ...ids, userId);
+    if (resolved.is_business !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET is_business = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.is_business, ...ids, userId);
     }
-    if (changes.payee !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET payee = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.payee, ...ids, userId);
+    if (resolved.payee !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET payee = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.payee, ...ids, userId);
     }
-    if (changes.note !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET note = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.note, ...ids, userId);
+    if (resolved.note !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET note = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.note, ...ids, userId);
     }
-    if (changes.tags !== undefined) {
-      if (changes.tags.mode === "replace") {
-        await sqlite.prepare(`UPDATE transactions SET tags = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.tags.value, ...ids, userId);
+    if (resolved.tags !== undefined) {
+      if (resolved.tags.mode === "replace") {
+        await sqlite.prepare(`UPDATE transactions SET tags = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.tags.value, ...ids, userId);
       } else {
         const rows = await sqlite.prepare(`SELECT id, tags FROM transactions WHERE id IN ${inList} AND user_id = ?`).all(...ids, userId) as Array<{ id: number; tags: string }>;
-        const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+        const tokens = resolved.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
         for (const r of rows) {
           const set = new Set(String(r.tags ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-          if (changes.tags.mode === "append") { for (const t of tokens) set.add(t); }
+          if (resolved.tags.mode === "append") { for (const t of tokens) set.add(t); }
           else { for (const t of tokens) set.delete(t); }
           const next = Array.from(set).join(",");
           await sqlite.prepare(`UPDATE transactions SET tags = ?, updated_at = NOW() WHERE id = ? AND user_id = ?`).run(next, Number(r.id), userId);
@@ -3140,9 +3214,19 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     return ids.length;
   }
 
+  /**
+   * Issue #61: resolves names → ids upstream so the sample `after` reflects
+   * the post-resolution shape, AND surfaces `unappliedChanges` so identical
+   * before/after sample rows always come with a reason.
+   */
   async function previewBulk(filter: BulkFilter, changes: BulkChanges, op: string) {
     const ids = await resolveFilterToIds(filter);
-    if (ids.length === 0) return { affectedCount: 0, sampleBefore: [], sampleAfter: [], ids, confirmationToken: "" };
+    const { resolved, unapplied, error } = await resolveBulkChanges(changes);
+    if (error) throw new Error(error);
+
+    if (ids.length === 0) {
+      return { affectedCount: 0, sampleBefore: [], sampleAfter: [], unappliedChanges: unapplied, ids: [], confirmationToken: "" };
+    }
     const sampleIds = ids.slice(0, 10);
     const placeholders = sampleIds.map(() => "?").join(",");
     const before = await sqlite.prepare(
@@ -3154,20 +3238,26 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
        WHERE t.id IN (${placeholders}) AND t.user_id = ?
        ORDER BY t.id`
     ).all(...sampleIds, userId) as Record<string, unknown>[];
-    const after = before.map((r) => applyChangesToRow(r, changes));
+    const after = before.map((r) => applyChangesToRow(r, resolved));
+    // Sign the user-supplied `changes` (not the resolved form) so the token
+    // round-trips between preview and execute calls.
     const token = signConfirmationToken(userId, op, { ids, changes });
-    return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, ids, confirmationToken: token };
+    return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, unappliedChanges: unapplied, ids, confirmationToken: token };
   }
 
   // ── preview_bulk_update ────────────────────────────────────────────────────
+  // Issue #61: stdio surface accepts category_id, category (name), account_id,
+  // date, note, payee, is_business, tags. Unknown keys (incl. quantity /
+  // portfolioHoldingId / portfolioHolding) fail strictly — those are HTTP-only
+  // because stdio has no holding plumbing.
   server.tool(
     "preview_bulk_update",
-    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, and a confirmationToken (5-min TTL).",
+    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, an `unappliedChanges` array, and a confirmationToken (5-min TTL). Stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail. (HTTP transport additionally supports quantity, portfolioHoldingId, portfolioHolding.)",
     { filter: bulkFilterSchema, changes: bulkChangesSchema },
     async ({ filter, changes }) => {
       try {
-        const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_update");
-        return txt({ success: true, data: { affectedCount, sampleBefore, sampleAfter, confirmationToken } });
+        const { affectedCount, sampleBefore, sampleAfter, unappliedChanges, confirmationToken } = await previewBulk(filter, changes, "bulk_update");
+        return txt({ success: true, data: { affectedCount, sampleBefore, sampleAfter, unappliedChanges, confirmationToken } });
       } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
     }
   );
@@ -3175,16 +3265,27 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── execute_bulk_update ────────────────────────────────────────────────────
   server.tool(
     "execute_bulk_update",
-    "Commit a bulk update. Must be preceded by preview_bulk_update with the same filter+changes.",
+    "Commit a bulk update. Must be preceded by preview_bulk_update with the same filter+changes. Stdio-accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business, tags. Aborts (no commit) when ALL requested changes failed to resolve.",
     { filter: bulkFilterSchema, changes: bulkChangesSchema, confirmation_token: z.string() },
     async ({ filter, changes, confirmation_token }) => {
       try {
         const ids = await resolveFilterToIds(filter);
         const check = verifyConfirmationToken(confirmation_token, userId, "bulk_update", { ids, changes });
         if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_update.`);
-        const n = await commitBulkUpdate(ids, changes);
+
+        // Issue #61: resolve names → ids HERE; refuse if all changes failed
+        // resolution.
+        const { resolved, unapplied, error } = await resolveBulkChanges(changes);
+        if (error) return sqliteErr(error);
+        const requestedKeys = Object.keys(changes);
+        const resolvedKeys = Object.keys(resolved);
+        if (requestedKeys.length > 0 && resolvedKeys.length === 0) {
+          return sqliteErr(`No changes could be applied. Resolution failures: ${unapplied.map(u => `${u.key}: ${u.reason}`).join(" | ")}`);
+        }
+
+        const n = await commitBulkUpdate(ids, resolved);
         if (n > 0) invalidateUserTxCache(userId);
-        return txt({ success: true, data: { updated: n } });
+        return txt({ success: true, data: { updated: n, unappliedChanges: unapplied } });
       } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
     }
   );
@@ -3260,7 +3361,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         const changes: BulkChanges = { category_id };
         const check = verifyConfirmationToken(confirmation_token, userId, "bulk_categorize", { ids, changes });
         if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_categorize.`);
-        const n = await commitBulkUpdate(ids, changes);
+        // Issue #61: commit takes the resolved shape now. category_id is
+        // already an int so resolution is a no-op for this path.
+        const resolved: ResolvedChanges = { category_id };
+        const n = await commitBulkUpdate(ids, resolved);
         if (n > 0) invalidateUserTxCache(userId);
         return txt({ success: true, data: { updated: n } });
       } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
