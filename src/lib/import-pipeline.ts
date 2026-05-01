@@ -9,6 +9,11 @@ import { buildHoldingResolver } from "./external-import/portfolio-holding-resolv
 import { getInvestmentAccountIds } from "./investment-account";
 import { safeConvertToAccountCurrency } from "./currency-conversion";
 import { prewarmRates } from "./fx-service";
+import {
+  detectProbableDuplicates,
+  type DuplicateMatch,
+} from "./external-import/duplicate-detect";
+import { buildDuplicateCandidatePool } from "./external-import/duplicate-detect-pool";
 
 export interface RawTransaction {
   date: string;
@@ -45,6 +50,13 @@ export interface RawTransaction {
 export interface PreviewResult {
   valid: Array<RawTransaction & { hash: string; rowIndex: number }>;
   duplicates: Array<RawTransaction & { hash: string; rowIndex: number }>;
+  /**
+   * Issue #65: rows that survived exact-match dedup but look like a fuzzy
+   * match against an existing transaction (FX-spread + settlement-vs-posting
+   * date drift). Warning surface — these stay in `valid` and will commit
+   * unless the user explicitly skips them. Cross-reference by `rowIndex`.
+   */
+  probableDuplicates: DuplicateMatch[];
   errors: Array<{ rowIndex: number; message: string }>;
 }
 
@@ -124,7 +136,7 @@ export async function previewImport(
 
   if (rows.length === 0) {
     errors.push({ rowIndex: 0, message: "No data to import" });
-    return { valid: [], duplicates: [], errors };
+    return { valid: [], duplicates: [], probableDuplicates: [], errors };
   }
 
   if (rows.length > MAX_IMPORT_ROWS) {
@@ -132,7 +144,7 @@ export async function previewImport(
       rowIndex: 0,
       message: `File contains ${rows.length.toLocaleString()} rows, which exceeds the ${MAX_IMPORT_ROWS.toLocaleString()} row limit. Please split the file into smaller chunks.`,
     });
-    return { valid: [], duplicates: [], errors };
+    return { valid: [], duplicates: [], probableDuplicates: [], errors };
   }
 
   for (let i = 0; i < rows.length; i++) {
@@ -208,7 +220,77 @@ export async function previewImport(
     }
   }
 
-  return { valid: nonDuplicates, duplicates, errors };
+  // Issue #65: cross-source fuzzy duplicate detection. Runs AFTER exact-match
+  // dedup so it only sees rows that aren't already caught by import_hash /
+  // fitId. Pool query is one round trip scoped to the union of touched
+  // accounts and the date window; helper is pure and pre-tested.
+  const probableDuplicates = await runProbableDuplicateDetection(
+    nonDuplicates,
+    accountMap,
+    userId,
+    dek ?? null,
+  );
+
+  return { valid: nonDuplicates, duplicates, probableDuplicates, errors };
+}
+
+/**
+ * Issue #65 cross-source duplicate detection over the post-exact-dedup pool.
+ * Resolves account names → ids the same way the row's import_hash was
+ * computed, builds a one-shot candidate pool, and asks the pure scoring
+ * helper for matches. Returns [] on errors (warning surface only — never
+ * blocks the import).
+ */
+async function runProbableDuplicateDetection(
+  rows: PreviewResult["valid"],
+  accountMap: Map<string, number>,
+  userId: string,
+  dek: Buffer | null,
+): Promise<DuplicateMatch[]> {
+  if (rows.length === 0) return [];
+
+  const inputs: Array<{
+    rowIndex: number;
+    date: string;
+    accountId: number;
+    amount: number;
+    payeePlain: string;
+    importHash: string;
+  }> = [];
+  const accountIdSet = new Set<number>();
+  for (const row of rows) {
+    const accountKey = row.account ? row.account.toLowerCase().trim() : "";
+    const accountId = accountMap.get(accountKey);
+    if (accountId == null) continue;
+    accountIdSet.add(accountId);
+    inputs.push({
+      rowIndex: row.rowIndex,
+      date: row.date,
+      accountId,
+      amount: row.amount,
+      payeePlain: row.payee ?? "",
+      importHash: row.hash,
+    });
+  }
+  if (inputs.length === 0) return [];
+
+  const dates = inputs.map((r) => r.date).sort();
+  const dateMin = dates[0];
+  const dateMax = dates[dates.length - 1];
+
+  try {
+    const pool = await buildDuplicateCandidatePool({
+      userId,
+      dek,
+      accountIds: [...accountIdSet],
+      dateMin,
+      dateMax,
+    });
+    return detectProbableDuplicates(inputs, pool);
+  } catch {
+    // Warning surface — never block the import on a heuristic failure.
+    return [];
+  }
 }
 
 export async function executeImport(

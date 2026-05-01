@@ -20,7 +20,7 @@
  */
 
 import { db, schema } from "@/db";
-import { and, between, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import { generateImportHash, checkDuplicates, checkFitIdDuplicates } from "./import-hash";
 import { normalizeDate } from "./csv-parser";
 import { tryDecryptField, encryptField } from "./crypto/envelope";
@@ -29,6 +29,8 @@ import { getInvestmentAccountIds } from "./investment-account";
 import { safeConvertToAccountCurrency } from "./currency-conversion";
 import { prewarmRates } from "./fx-service";
 import { invalidateUser as invalidateUserTxCache } from "./mcp/user-tx-cache";
+import { detectProbableDuplicates } from "./external-import/duplicate-detect";
+import { buildDuplicateCandidatePool } from "./external-import/duplicate-detect-pool";
 import type { RawTransaction } from "./import-pipeline";
 
 /** Default settlement-vs-posting fuzz window. */
@@ -144,13 +146,6 @@ async function buildCategoryLookup(
     if (plainName) map.set(plainName.toLowerCase().trim(), c.id);
   }
   return map;
-}
-
-function shiftDate(iso: string, deltaDays: number): string | null {
-  const ms = Date.parse(iso + "T00:00:00Z");
-  if (Number.isNaN(ms)) return null;
-  const d = new Date(ms + deltaDays * 86_400_000);
-  return d.toISOString().slice(0, 10);
 }
 
 function daysBetween(a: string, b: string): number {
@@ -313,96 +308,98 @@ export async function classifyForReconcile(
     };
   }
 
-  // Probable-duplicate pass: rows still marked NEW with a resolved account,
-  // matched against existing tx in the same account by amount within the
-  // tolerance window. Cheap O(rows) loop because we hit the DB once per
-  // unique (accountId, amount) pair below.
+  // Probable-duplicate pass: rows still marked NEW with a resolved account.
+  // Delegates to the shared cross-source detector (issue #65) with tight
+  // reconcile semantics — exact-amount-cents (pct=0, floor=0.005), ±tolerance
+  // days, no soft hints required (threshold=0.5). The shared helper handles
+  // the consume-once-per-existing-row invariant, the import-hash skip, and
+  // the closest-date tiebreaker so the four-way classification stays
+  // consistent with the regular import preview.
   const candidates = shaped.filter(
     (r) => r.status === "new" && r.accountId !== null,
   );
   if (candidates.length > 0) {
-    // Group by (accountId, amount) — one query per unique pair, but most
-    // statements have a small number of distinct (account, amount) tuples
-    // relative to row count.
     const accountIds = Array.from(new Set(candidates.map((r) => r.accountId!)));
-    const dateMin = candidates
-      .map((r) => shiftDate(r.date, -tolerance))
-      .filter((d): d is string => !!d)
-      .sort()[0];
-    const dateMax = candidates
-      .map((r) => shiftDate(r.date, tolerance))
-      .filter((d): d is string => !!d)
-      .sort()
-      .at(-1);
-    if (dateMin && dateMax) {
-      const pool = await db
+    const dates = candidates.map((r) => r.date).sort();
+    const dateMin = dates[0];
+    const dateMax = dates[dates.length - 1];
+    const pool = await buildDuplicateCandidatePool({
+      userId,
+      dek,
+      accountIds,
+      dateMin,
+      dateMax,
+      dateToleranceDays: tolerance,
+    });
+
+    // Mark candidates already consumed by exact-match so the detector
+    // doesn't double-flag the same existing transaction.
+    const exactMatchedIds = new Set<number>();
+    for (const r of shaped) {
+      if (r.match) exactMatchedIds.add(r.match.transactionId);
+    }
+    if (exactMatchedIds.size > 0) {
+      for (const arr of pool.byAccount.values()) {
+        for (let i = arr.length - 1; i >= 0; i--) {
+          if (exactMatchedIds.has(arr[i].id)) arr.splice(i, 1);
+        }
+      }
+    }
+
+    const matches = detectProbableDuplicates(
+      candidates.map((c) => ({
+        rowIndex: c.rowIndex,
+        date: c.date,
+        accountId: c.accountId!,
+        amount: c.amount,
+        payeePlain: c.payee,
+        importHash: c.hash,
+      })),
+      pool,
+      {
+        dateToleranceDays: tolerance,
+        amountTolerancePct: 0,
+        amountToleranceFloor: 0.005,
+        scoreThreshold: 0.5, // amount + date alone (= 0.7) clears this
+      },
+    );
+    const matchByRowIndex = new Map<number, (typeof matches)[number]>();
+    for (const m of matches) matchByRowIndex.set(m.rowIndex, m);
+
+    // Pull the matched-row payees in one shot for nice display strings. The
+    // detector itself returns ids; reconcile UI wants payee text.
+    const matchedIds = matches.map((m) => m.matchedTransactionId);
+    let payeeById = new Map<number, string>();
+    if (matchedIds.length > 0) {
+      const payeeRows = await db
         .select({
           id: schema.transactions.id,
-          accountId: schema.transactions.accountId,
-          date: schema.transactions.date,
-          amount: schema.transactions.amount,
           payeeCt: schema.transactions.payee,
-          importHash: schema.transactions.importHash,
         })
         .from(schema.transactions)
         .where(
           and(
             eq(schema.transactions.userId, userId),
-            inArray(schema.transactions.accountId, accountIds),
-            between(schema.transactions.date, dateMin, dateMax),
+            inArray(schema.transactions.id, matchedIds),
           ),
         )
         .all();
-      // Index by (accountId, amount-cents) for O(1) lookup. Postgres returns
-      // amount as JS number via doublePrecision so no string parse needed.
-      const poolByKey = new Map<string, typeof pool>();
-      for (const p of pool) {
-        const key = `${p.accountId}|${Math.round(p.amount * 100)}`;
-        const arr = poolByKey.get(key) ?? [];
-        arr.push(p);
-        poolByKey.set(key, arr);
-      }
+      payeeById = new Map(
+        payeeRows.map((p) => [p.id, tryDecryptPayee(dek, p.payeeCt) ?? p.payeeCt ?? ""]),
+      );
+    }
 
-      // Track which existing rows are already exact-matched so we don't
-      // double-count them as probable duplicates of a different row.
-      const consumedIds = new Set<number>();
-      for (const r of shaped) {
-        if (r.match) consumedIds.add(r.match.transactionId);
-      }
-
-      for (const row of candidates) {
-        const key = `${row.accountId}|${Math.round(row.amount * 100)}`;
-        const pool = poolByKey.get(key);
-        if (!pool || pool.length === 0) continue;
-
-        // Pick the closest date that's not already exact-matched and not
-        // already consumed by another probable-duplicate match. Closest
-        // wins so a $50 charge on the 1st pairs with the existing $50 on
-        // the 2nd, not with a $50 on the 31st.
-        let best: (typeof pool)[number] | null = null;
-        let bestDays = Number.POSITIVE_INFINITY;
-        for (const p of pool) {
-          if (consumedIds.has(p.id)) continue;
-          if (p.importHash === row.hash) continue; // exact-hash hit handled above
-          const d = daysBetween(row.date, p.date);
-          if (d > tolerance) continue;
-          if (d < bestDays) {
-            best = p;
-            bestDays = d;
-          }
-        }
-        if (!best) continue;
-
-        consumedIds.add(best.id);
-        row.status = "probable_duplicate";
-        row.match = {
-          transactionId: best.id,
-          date: best.date,
-          amount: best.amount,
-          payee: tryDecryptPayee(dek, best.payeeCt) ?? best.payeeCt ?? "",
-          daysOff: bestDays,
-        };
-      }
+    for (const row of candidates) {
+      const m = matchByRowIndex.get(row.rowIndex);
+      if (!m) continue;
+      row.status = "probable_duplicate";
+      row.match = {
+        transactionId: m.matchedTransactionId,
+        date: m.matchedTx.date,
+        amount: m.matchedTx.amount,
+        payee: payeeById.get(m.matchedTransactionId) ?? "",
+        daysOff: m.matchedTx.daysOff,
+      };
     }
   }
 
