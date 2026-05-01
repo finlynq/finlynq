@@ -1,8 +1,9 @@
 import { db, schema, getDialect } from "@/db";
-import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
-import type { SQL } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, asc, inArray } from "drizzle-orm";
+import type { SQL, AnyColumn } from "drizzle-orm";
 import { requireHoldingForInvestmentAccount } from "@/lib/investment-account";
 import type { TransactionSource } from "@/lib/tx-source";
+import type { SortableColumnId } from "@/lib/transactions/columns";
 
 const { accounts, categories, transactions, portfolioHoldings, budgets, budgetTemplates } = schema;
 
@@ -97,27 +98,129 @@ export async function getTransactionCountByCategory(categoryId: number, userId: 
 }
 
 // Transactions
-export async function getTransactions(userId: string, filters?: {
+//
+// Issue #59 — `sort` is whitelisted at the lib boundary so the route handler
+// can't accidentally interpolate user input into SQL. The map below is the
+// SOLE authority for which Drizzle column expression backs each sortable id;
+// extending requires extending `SortableColumnId` in
+// `@/lib/transactions/columns` first. Encrypted name columns are NOT in the
+// list — sorting on them post-Phase-3 returns NULL-clustered rows.
+export type TxSortFilter = {
   startDate?: string;
   endDate?: string;
+  // Audit-trio range filters (issue #59). All ISO timestamps; gte/lte
+  // pushed straight into SQL via the (user_id, *_at DESC) composite index.
+  createdAtFrom?: string;
+  createdAtTo?: string;
+  updatedAtFrom?: string;
+  updatedAtTo?: string;
   accountId?: number;
   categoryId?: number;
   portfolioHoldingId?: number;
+  // Multi-id pushdown so the per-column enum filter UI can write
+  // (account in [...]) / (category in [...]) without firing one query
+  // per chip.
+  accountIds?: number[];
+  categoryIds?: number[];
+  // Numeric range pushdown for amount / quantity columns. Both are signed
+  // doubles; passing min and max simulates BETWEEN. Equality uses both
+  // bounds set to the same value.
+  amountMin?: number;
+  amountMax?: number;
+  amountEq?: number;
+  quantityMin?: number;
+  quantityMax?: number;
+  quantityEq?: number;
+  // Source filter (small-cardinality enum). Multi-select.
+  sources?: TransactionSource[];
   search?: string;
+  // Sort whitelist — see SORTABLE_COLUMN_IDS in
+  // `@/lib/transactions/columns`. Default = `date DESC`.
+  sortColumnId?: SortableColumnId;
+  sortDirection?: "asc" | "desc";
   limit?: number;
   offset?: number;
-}) {
+};
+
+function buildTxFilterConditions(userId: string, filters?: TxSortFilter) {
   const conditions = [eq(transactions.userId, userId)];
   if (filters?.startDate) conditions.push(gte(transactions.date, filters.startDate));
   if (filters?.endDate) conditions.push(lte(transactions.date, filters.endDate));
+  if (filters?.createdAtFrom) {
+    conditions.push(gte(transactions.createdAt, new Date(filters.createdAtFrom)));
+  }
+  if (filters?.createdAtTo) {
+    conditions.push(lte(transactions.createdAt, new Date(filters.createdAtTo)));
+  }
+  if (filters?.updatedAtFrom) {
+    conditions.push(gte(transactions.updatedAt, new Date(filters.updatedAtFrom)));
+  }
+  if (filters?.updatedAtTo) {
+    conditions.push(lte(transactions.updatedAt, new Date(filters.updatedAtTo)));
+  }
   if (filters?.accountId) conditions.push(eq(transactions.accountId, filters.accountId));
   if (filters?.categoryId) conditions.push(eq(transactions.categoryId, filters.categoryId));
   if (filters?.portfolioHoldingId) conditions.push(eq(transactions.portfolioHoldingId, filters.portfolioHoldingId));
+  if (filters?.accountIds && filters.accountIds.length > 0) {
+    conditions.push(inArray(transactions.accountId, filters.accountIds));
+  }
+  if (filters?.categoryIds && filters.categoryIds.length > 0) {
+    conditions.push(inArray(transactions.categoryId, filters.categoryIds));
+  }
+  if (filters?.amountEq != null) {
+    conditions.push(eq(transactions.amount, filters.amountEq));
+  } else {
+    if (filters?.amountMin != null) conditions.push(gte(transactions.amount, filters.amountMin));
+    if (filters?.amountMax != null) conditions.push(lte(transactions.amount, filters.amountMax));
+  }
+  if (filters?.quantityEq != null) {
+    conditions.push(eq(transactions.quantity, filters.quantityEq));
+  } else {
+    if (filters?.quantityMin != null) conditions.push(gte(transactions.quantity, filters.quantityMin));
+    if (filters?.quantityMax != null) conditions.push(lte(transactions.quantity, filters.quantityMax));
+  }
+  if (filters?.sources && filters.sources.length > 0) {
+    conditions.push(inArray(transactions.source, filters.sources));
+  }
   if (filters?.search) {
     conditions.push(
       sql`(${transactions.payee} LIKE ${'%' + filters.search + '%'} OR ${transactions.note} LIKE ${'%' + filters.search + '%'} OR ${transactions.tags} LIKE ${'%' + filters.search + '%'})`
     );
   }
+  return conditions;
+}
+
+/** Map sortable column id → Drizzle column expression. Hard-coded so user
+ * input never touches an `ORDER BY` clause directly. Returned as the
+ * generic AnyColumn shape Drizzle's `asc`/`desc` accept. */
+function txSortExpr(id: SortableColumnId): AnyColumn {
+  switch (id) {
+    case "date":
+      return transactions.date;
+    case "amount":
+      return transactions.amount;
+    case "quantity":
+      return transactions.quantity;
+    case "createdAt":
+      return transactions.createdAt;
+    case "updatedAt":
+      return transactions.updatedAt;
+    case "source":
+      return transactions.source;
+    case "accountType":
+      return accounts.type;
+  }
+}
+
+export async function getTransactions(userId: string, filters?: TxSortFilter) {
+  const conditions = buildTxFilterConditions(userId, filters);
+
+  // Default = `date DESC`. Add `transactions.id DESC` as a stable tiebreaker
+  // so paginated results don't shuffle when many rows share the same value
+  // (especially common when sorting by `source` or `accountType`).
+  const direction = filters?.sortDirection === "asc" ? asc : desc;
+  const sortCol = filters?.sortColumnId ? txSortExpr(filters.sortColumnId) : transactions.date;
+  const orderClauses = [direction(sortCol), desc(transactions.id)];
 
   const query = db
     .select({
@@ -175,32 +278,15 @@ export async function getTransactions(userId: string, filters?: {
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .leftJoin(portfolioHoldings, eq(transactions.portfolioHoldingId, portfolioHoldings.id))
     .where(and(...conditions))
-    .orderBy(desc(transactions.date))
+    .orderBy(...orderClauses)
     .limit(filters?.limit ?? 100)
     .offset(filters?.offset ?? 0);
 
   return query.all();
 }
 
-export async function getTransactionCount(userId: string, filters?: {
-  startDate?: string;
-  endDate?: string;
-  accountId?: number;
-  categoryId?: number;
-  portfolioHoldingId?: number;
-  search?: string;
-}): Promise<number> {
-  const conditions = [eq(transactions.userId, userId)];
-  if (filters?.startDate) conditions.push(gte(transactions.date, filters.startDate));
-  if (filters?.endDate) conditions.push(lte(transactions.date, filters.endDate));
-  if (filters?.accountId) conditions.push(eq(transactions.accountId, filters.accountId));
-  if (filters?.categoryId) conditions.push(eq(transactions.categoryId, filters.categoryId));
-  if (filters?.portfolioHoldingId) conditions.push(eq(transactions.portfolioHoldingId, filters.portfolioHoldingId));
-  if (filters?.search) {
-    conditions.push(
-      sql`(${transactions.payee} LIKE ${'%' + filters.search + '%'} OR ${transactions.note} LIKE ${'%' + filters.search + '%'} OR ${transactions.tags} LIKE ${'%' + filters.search + '%'})`
-    );
-  }
+export async function getTransactionCount(userId: string, filters?: TxSortFilter): Promise<number> {
+  const conditions = buildTxFilterConditions(userId, filters);
 
   const result = await db
     .select({ count: sql<number>`count(*)` })

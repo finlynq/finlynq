@@ -55,3 +55,46 @@ export function labelForSource(s: TransactionSource): string {
       return "Backup restore";
   }
 }
+
+// ─── Format tags (issue #62) ──────────────────────────────────────────────────
+//
+// Tag vocabulary written into the comma-separated `transactions.tags` column
+// as `source:<format>` to mark which file/wire format the row entered through.
+// One of these values per row at most.
+//
+// **Distinct from `SOURCES` above.** The `transactions.source` audit column
+// (above) is the writer-surface enum (`manual` / `import` / `mcp_http` / …).
+// `FORMAT_TAGS` is a tag prefix for the import file shape — a CSV upload and
+// an Excel upload both have `source='import'` in the audit column but
+// different `source:csv` / `source:excel` tags. A future "WealthPosition CSV"
+// connector and a "raw bank CSV" upload would both use `source:csv` here even
+// though the audit column distinguishes them as `connector` vs `import`.
+//
+// Kept in this file so future contributors see both tuples side-by-side and
+// don't conflate them. The two are independent — adding a new format tag does
+// NOT require an audit-column migration and vice-versa.
+//
+// The `@finlynq/import-connectors` workspace package mirrors this list in
+// `packages/import-connectors/src/types.ts`. Keep both in sync.
+export const FORMAT_TAGS = [
+  "csv",
+  "excel",
+  "pdf",
+  "ofx",
+  "qfx",
+  "ibkr-xml",
+  "email",
+] as const;
+
+export type FormatTag = (typeof FORMAT_TAGS)[number];
+
+const FORMAT_TAG_SET = new Set<string>(FORMAT_TAGS);
+
+export function isFormatTag(v: unknown): v is FormatTag {
+  return typeof v === "string" && FORMAT_TAG_SET.has(v);
+}
+
+/** Render a format tag as the literal string written into `transactions.tags`. */
+export function sourceTagFor(format: FormatTag): string {
+  return `source:${format}`;
+}

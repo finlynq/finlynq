@@ -5,10 +5,12 @@ import type {
   ConnectorMappingResolved,
   ExternalTransaction,
   ExternalTransactionEntry,
+  FormatTag,
   RawTransaction,
   TransformResult,
   TransformSplitRow,
 } from "../types";
+import { isFormatTag, sourceTagFor } from "../types";
 
 interface ClassifiedEntry {
   entry: ExternalTransactionEntry;
@@ -41,13 +43,17 @@ function parseHolding(raw: string | number | null | undefined): number | null {
  */
 export interface TransformTransactionsOptions {
   /**
-   * Connector id used for the auto-applied `source:<id>` tag on every
-   * emitted RawTransaction. Defaults to `"wealthposition"` for backward
-   * compatibility with the original single-connector caller. New connectors
-   * pass their own id (e.g. `"ibkr"`) so cross-import dedup can identify
-   * the originating provider per row.
+   * Format tag used for the auto-applied `source:<format>` tag on every
+   * emitted RawTransaction (issue #62). One of the canonical `FormatTag`
+   * values — `"csv"`, `"excel"`, `"pdf"`, `"ofx"`, `"qfx"`, `"ibkr-xml"`,
+   * `"email"`. Required: callers must specify the format the data arrived
+   * as, so downstream cross-source dedup can reason about provenance.
+   *
+   * Note this replaces the prior `sourceConnectorId` option which wrote
+   * `source:<connector>` (e.g. `source:wealthposition`). Institution name
+   * lives on the account; per-row tags now describe format only.
    */
-  sourceConnectorId?: string;
+  formatTag: FormatTag;
 }
 
 export function transformTransactions(
@@ -62,9 +68,15 @@ export function transformTransactions(
     externalAccountByName: Map<string, string>; // name → external id
     externalCategoryByName: Map<string, string>; // name → external id
   },
-  options: TransformTransactionsOptions = {},
+  options: TransformTransactionsOptions,
 ): TransformResult {
-  const sourceTag = `source:${options.sourceConnectorId ?? "wealthposition"}`;
+  if (!isFormatTag(options.formatTag)) {
+    throw new Error(
+      `transformTransactions: invalid formatTag "${String(options.formatTag)}". ` +
+        `Must be one of csv|excel|pdf|ofx|qfx|ibkr-xml|email.`,
+    );
+  }
+  const sourceTag = sourceTagFor(options.formatTag);
   const flat: RawTransaction[] = [];
   const splits: TransformResult["splits"] = [];
   const errors: TransformResult["errors"] = [];
@@ -287,15 +299,15 @@ interface BuildRawTransactionArgs {
   tags?: string[];
   category?: string;
   holding: number | null;
-  /** Full source tag string, e.g. `"source:ibkr"`. */
+  /** Full source tag string, e.g. `"source:csv"`. */
   sourceTag: string;
 }
 
 /**
- * Tag every imported row with `source:<connectorId>`. Lets future statement
- * reconciliations (or a connector whose data overlaps another's) identify
- * rows the bank side has already booked, so cross-import dedup can skip them
- * instead of double-recording. Merged into existing user/category tags
+ * Tag every imported row with `source:<format>` (issue #62). Lets future
+ * statement reconciliations (or a connector whose data overlaps another's)
+ * identify which file shape produced a row, so cross-import dedup can skip
+ * them instead of double-recording. Merged into existing user/category tags
  * rather than replacing — keeps the rule engine's `assignTags` and any
  * caller-set tags intact. Idempotent on re-imports because the
  * import-pipeline dedups on import_hash before this string ever reaches the

@@ -50,6 +50,22 @@ interface ZipPreviewResponse {
   preview: {
     valid: PreviewRow[];
     duplicates: PreviewRow[];
+    /** Issue #65: cross-source fuzzy duplicate matches. */
+    probableDuplicates?: Array<{
+      rowIndex: number;
+      matchedTransactionId: number;
+      matchScore: number;
+      matchReason: string;
+      matchedTx: {
+        id: number;
+        date: string;
+        amount: number;
+        source: string | null;
+        daysOff: number;
+        amountDeltaPct: number;
+        amountDeltaAbs: number;
+      };
+    }>;
     errors: Array<{ rowIndex: number; message: string }>;
   };
   splits: Array<{ externalId: string; parent: RawTransaction; splits: unknown[] }>;
@@ -240,7 +256,17 @@ export function ConnectorTab() {
   );
 
   const runZipExecute = useCallback(
-    async (_rows: RawTransaction[], forceImportIndices: number[]) => {
+    async (
+      _rows: RawTransaction[],
+      forceImportIndices: number[],
+      _skipIndices: number[] = [],
+    ) => {
+      // Note: the connector path commits the WHOLE preview via the
+      // confirmationToken; per-row skip on probable duplicates isn't yet
+      // wired through the zip-execute endpoint. The user can still see the
+      // flag in the dialog. Wiring skip-set into the connector commit is a
+      // follow-up.
+      void _skipIndices;
       if (!zipPreview || !zipMapping || !zipProbe || !zipFile) return;
       setZipStage("executing");
       setZipPreviewOpen(false);
@@ -535,6 +561,7 @@ export function ConnectorTab() {
           onOpenChange={setZipPreviewOpen}
           validRows={zipPreview.preview.valid}
           duplicateRows={zipPreview.preview.duplicates}
+          probableDuplicates={zipPreview.preview.probableDuplicates ?? []}
           errorRows={[
             ...zipPreview.preview.errors,
             // Surface transformErrors alongside pipeline errors so users

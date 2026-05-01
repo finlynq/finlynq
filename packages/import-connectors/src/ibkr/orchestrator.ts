@@ -67,10 +67,16 @@ export function runIbkrTransform(
     externalCategoryByName.set(c.name, c.id);
   }
 
+  // Issue #62: format-based source tag. CSV and XML take different parser
+  // paths and produce different `tags` vocabularies (`source:csv` vs
+  // `source:ibkr-xml`). Kept as a *format* tag — XML deserves its own value
+  // because the parser is fundamentally different from a generic CSV.
+  const formatTag = fmt === "xml" ? "ibkr-xml" : "csv";
+
   return transformTransactions(
     intermediate.transactions,
     mapping,
     { externalAccountByName, externalCategoryByName },
-    { sourceConnectorId: "ibkr" },
+    { formatTag },
   );
 }

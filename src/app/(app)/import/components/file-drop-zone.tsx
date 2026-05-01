@@ -9,7 +9,7 @@ interface FileDropZoneProps {
   disabled?: boolean;
 }
 
-const ACCEPT = ".csv,.ofx,.qfx";
+const ACCEPT = ".csv,.ofx,.qfx,.xml";
 
 export function FileDropZone({ onFileSelected, accept = ACCEPT, disabled }: FileDropZoneProps) {
   const [isDragging, setIsDragging] = useState(false);

@@ -26,8 +26,12 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { FileDropZone } from "./components/file-drop-zone";
-import { ImportPreviewDialog } from "./components/import-preview-dialog";
+import { ImportPreviewDialog, type ProbableDuplicateMatch } from "./components/import-preview-dialog";
 import { OfxPreview } from "./components/ofx-preview";
+import {
+  InvestmentStatementPreview,
+  type InvestmentExternalAccount,
+} from "./components/investment-statement-preview";
 import { TemplateManager } from "./components/template-manager";
 import { ColumnMappingDialog } from "./components/column-mapping-dialog";
 import { ConnectorTab } from "./components/connector-tab";
@@ -45,6 +49,7 @@ export default function ImportPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [validRows, setValidRows] = useState<PreviewRow[]>([]);
   const [duplicateRows, setDuplicateRows] = useState<PreviewRow[]>([]);
+  const [probableDuplicates, setProbableDuplicates] = useState<ProbableDuplicateMatch[]>([]);
   const [errorRows, setErrorRows] = useState<Array<{ rowIndex: number; message: string }>>([]);
   const [isImporting, setIsImporting] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -75,6 +80,22 @@ export default function ImportPage() {
   const [ofxBalanceDate, setOfxBalanceDate] = useState<string | null>(null);
   const [ofxDateRange, setOfxDateRange] = useState<{ start: string; end: string } | null>(null);
   const [ofxCurrency, setOfxCurrency] = useState("CAD");
+  // Issue #62: track which OFX flavor (ofx vs qfx) so /api/import/execute can
+  // be stamped with the right `source:<format>` tag at handleOfxConfirm time.
+  const [ofxFormat, setOfxFormat] = useState<"ofx" | "qfx">("ofx");
+
+  // Issue #64: investment-statement preview state. The investment path
+  // (OFX with INVSTMTRS, QFX, IBKR FlexQuery XML) routes through a separate
+  // dialog because the file may contain multiple brokerage sub-accounts the
+  // user must individually bind to Finlynq accounts.
+  const [investmentPreviewOpen, setInvestmentPreviewOpen] = useState(false);
+  const [investmentFormat, setInvestmentFormat] =
+    useState<"ofx" | "qfx" | "ibkr-xml">("ofx");
+  const [investmentExternalAccounts, setInvestmentExternalAccounts] =
+    useState<InvestmentExternalAccount[]>([]);
+  const [investmentRows, setInvestmentRows] = useState<RawTransaction[]>([]);
+  const [investmentDateRange, setInvestmentDateRange] =
+    useState<{ start: string; end: string } | null>(null);
 
   // Email state
   const [importEmail, setImportEmail] = useState<string | null>(null);
@@ -122,7 +143,24 @@ export default function ImportPage() {
         setOfxBalanceDate(data.balanceDate ?? null);
         setOfxDateRange(data.dateRange ?? null);
         setOfxCurrency(data.currency ?? "CAD");
+        setOfxFormat(data.format === "qfx" ? "qfx" : "ofx");
         setOfxPreviewOpen(true);
+      } else if (data.type === "investment-statement") {
+        // Issue #64: OFX/QFX investment statement OR IBKR FlexQuery XML.
+        // Rows arrive with synthetic external-id `account` values + a
+        // matching externalAccounts inventory; the dialog asks the user to
+        // bind each one to a Finlynq account before /api/import/execute.
+        const fmt: "ofx" | "qfx" | "ibkr-xml" =
+          data.format === "qfx"
+            ? "qfx"
+            : data.format === "ibkr-xml"
+              ? "ibkr-xml"
+              : "ofx";
+        setInvestmentFormat(fmt);
+        setInvestmentExternalAccounts(data.externalAccounts ?? []);
+        setInvestmentRows(data.rows ?? []);
+        setInvestmentDateRange(data.dateRange ?? null);
+        setInvestmentPreviewOpen(true);
       } else if (data.type === "csv-needs-mapping") {
         // Auto-detect failed — open the column mapping dialog.
         setMappingHeaders(data.headers ?? []);
@@ -141,10 +179,11 @@ export default function ImportPage() {
 
         setValidRows(data.valid ?? []);
         setDuplicateRows(data.duplicates ?? []);
+        setProbableDuplicates(data.probableDuplicates ?? []);
         setErrorRows(data.errors ?? []);
         setPreviewOpen(true);
       } else {
-        setUploadStatus({ type: "error", message: "Unsupported file format. Please upload a CSV or OFX/QFX file." });
+        setUploadStatus({ type: "error", message: "Unsupported file format. Please upload a CSV, Excel, PDF, OFX, QFX, or IBKR FlexQuery XML file." });
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to process file";
@@ -215,6 +254,7 @@ export default function ImportPage() {
         setCsvHeaders(data.headers ?? []);
         setValidRows(data.valid ?? []);
         setDuplicateRows(data.duplicates ?? []);
+        setProbableDuplicates(data.probableDuplicates ?? []);
         setErrorRows(data.errors ?? []);
         setMappingDialogOpen(false);
         setPreviewOpen(true);
@@ -229,14 +269,50 @@ export default function ImportPage() {
     [lastUploadedFile, mappingHeaders],
   );
 
+  // Issue #64: investment-statement confirm callback. Rows arrive with
+  // their `account` already rebound to a real Finlynq account name by the
+  // dialog. /api/import/execute reuses the same path as every other import.
+  const handleInvestmentConfirm = useCallback(
+    async (rows: RawTransaction[]) => {
+      setInvestmentPreviewOpen(false);
+      try {
+        const res = await fetch("/api/import/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rows, forceImportIndices: [] }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        const errCount = Array.isArray(data.errors) ? data.errors.length : 0;
+        const errSuffix = errCount > 0 ? `, ${errCount} errors` : "";
+        setUploadStatus({
+          type: errCount > 0 && data.imported === 0 ? "error" : "success",
+          message: `Imported ${data.imported} rows (${data.skippedDuplicates ?? 0} duplicates skipped${errSuffix})`,
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Import failed";
+        setUploadStatus({ type: "error", message });
+      }
+    },
+    [],
+  );
+
   // OFX confirm callback
   const handleOfxConfirm = useCallback(async (rows: RawTransaction[]) => {
     setOfxPreviewOpen(false);
     try {
+      // Issue #62: stamp source:ofx or source:qfx based on the file format
+      // detected at preview time.
+      const sourceTag = `source:${ofxFormat}`;
+      const taggedRows: RawTransaction[] = rows.map((r) => {
+        const existing = (r.tags ?? "").split(",").map((t) => t.trim()).filter((t) => t);
+        if (existing.some((t) => t.toLowerCase() === sourceTag.toLowerCase())) return r;
+        return { ...r, tags: existing.length ? `${existing.join(",")},${sourceTag}` : sourceTag };
+      });
       const res = await fetch("/api/import/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows, forceImportIndices: [] }),
+        body: JSON.stringify({ rows: taggedRows, forceImportIndices: [] }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -248,26 +324,36 @@ export default function ImportPage() {
       const message = err instanceof Error ? err.message : "Import failed";
       setUploadStatus({ type: "error", message });
     }
-  }, []);
+  }, [ofxFormat]);
 
   // Import confirm callback
   const handleImportConfirm = useCallback(async (
     rows: RawTransaction[],
     forceImportIndices: number[],
+    skipIndices: number[] = [],
   ) => {
     setIsImporting(true);
     try {
+      // Issue #65: when the user marks any probable duplicates as "skip", we
+      // filter them out client-side before /execute. The server-side
+      // detector is a warning surface — it never blocks; the user's explicit
+      // choice is what removes the row.
+      const skipSet = new Set(skipIndices);
+      const filtered = skipSet.size > 0
+        ? rows.filter((_, idx) => !skipSet.has((rows[idx] as RawTransaction & { rowIndex?: number }).rowIndex ?? idx))
+        : rows;
       const res = await fetch("/api/import/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows, forceImportIndices }),
+        body: JSON.stringify({ rows: filtered, forceImportIndices }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       setPreviewOpen(false);
+      const skippedProbable = skipSet.size;
       setUploadStatus({
         type: "success",
-        message: `Imported ${data.imported} transactions (${data.skippedDuplicates ?? 0} duplicates skipped)`,
+        message: `Imported ${data.imported} transactions (${data.skippedDuplicates ?? 0} exact duplicates skipped${skippedProbable > 0 ? `, ${skippedProbable} probable duplicates skipped` : ""})`,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Import failed";
@@ -545,6 +631,7 @@ export default function ImportPage() {
         onOpenChange={setPreviewOpen}
         validRows={validRows}
         duplicateRows={duplicateRows}
+        probableDuplicates={probableDuplicates}
         errorRows={errorRows}
         onConfirm={handleImportConfirm}
         isImporting={isImporting}
@@ -575,6 +662,20 @@ export default function ImportPage() {
         currency={ofxCurrency}
         accounts={accountNames}
         onConfirm={handleOfxConfirm}
+      />
+
+      {/* Issue #64: investment-statement preview (OFX INVSTMTRS / QFX
+          investment / IBKR FlexQuery XML). Multi-account file → user binds
+          each external account to a Finlynq account before import. */}
+      <InvestmentStatementPreview
+        open={investmentPreviewOpen}
+        onOpenChange={setInvestmentPreviewOpen}
+        format={investmentFormat}
+        externalAccounts={investmentExternalAccounts}
+        rows={investmentRows}
+        dateRange={investmentDateRange}
+        finlynqAccounts={accountNames}
+        onConfirm={handleInvestmentConfirm}
       />
 
       <ColumnMappingDialog

@@ -70,8 +70,10 @@ export const wealthposition: Connector<WealthPositionCredentials> = {
     for (const [id, acct] of mapping.externalAccountById) {
       byName.externalAccountByName.set(acct.name, id);
     }
+    // WealthPosition exports as CSV today (zip-of-CSVs or raw CSV).
+    // Issue #62: tag with the file format, not the institution name.
     return transformTransactions(externalTxs, mapping, byName, {
-      sourceConnectorId: "wealthposition",
+      formatTag: "csv",
     });
   },
 };

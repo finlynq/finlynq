@@ -20,12 +20,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowLeft, GripVertical, ArrowUp, ArrowDown, X, RefreshCw, Save, RotateCcw } from "lucide-react";
+import { GripVertical, ArrowUp, ArrowDown, X, RefreshCw, Save, RotateCcw } from "lucide-react";
 import {
   EMPTY_DROPDOWN_ORDER,
   parseDropdownOrder,
@@ -246,13 +245,6 @@ export default function DropdownOrderPage() {
 
   return (
     <div className="max-w-3xl space-y-6">
-      <div className="flex items-center gap-3">
-        <Link href="/settings" className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1">
-          <ArrowLeft className="h-4 w-4" />
-          Back to Settings
-        </Link>
-      </div>
-
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Dropdown Ordering</h1>

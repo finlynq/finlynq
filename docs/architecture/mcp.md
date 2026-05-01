@@ -52,6 +52,15 @@ The 6 HTTP-only tools are:
   - Optional `fees` post as a separate negative-amount transaction on the cash sleeve, tagged `source:record_trade,trade-link:<linkId>` for traceability — NOT part of the transfer pair.
   - Stdio gets the same tool — stdio's record_transaction refuses investment-account writes (no portfolioHolding plumbing), but `record_trade` carries its own holding semantics so the constraint is satisfiable on stdio too. Stdio writes stay plaintext per the existing carve-out.
   - See "Modeling brokerage statements with MCP" below for the recipe + the three statement-shape gotchas.
+- **2026-04-30 — `bulk_update` strict schema + name-resolved category/holding ([#61](https://github.com/finlynq/finlynq/issues/61))** (no tool count change):
+  - `preview_bulk_update` / `execute_bulk_update` `changes` schemas are now `.strict()` — unknown keys hard-fail at validation time. The previous behavior stripped unknown keys silently, so calls like `changes: { category: "Credit Interest" }` returned `success: true, updated: N` while writing nothing (real-world fallout: 13 IBKR Joint transactions stuck mis-categorized because the silent no-op masked every retry).
+  - **HTTP-accepted `changes` keys (now 11):** added `category` (name → `category_id`), `quantity` (nullable; `null` clears), `portfolioHoldingId` (FK with ownership pre-check), `portfolioHolding` (name/ticker → FK via the existing `resolvePortfolioHoldingByName`). All other keys unchanged. Disagreement between `category`/`category_id` or `portfolioHolding`/`portfolioHoldingId` errors out the call.
+  - **Stdio surface narrower by design.** Stdio adds only `category` (name → id). `quantity` / `portfolioHoldingId` / `portfolioHolding` stay HTTP-only because stdio has no holding plumbing — mirrors the stdio `record_transaction` carve-out that already refuses investment-account writes. A stdio caller passing `quantity` now gets a clean strict-mode 400 instead of a silent no-op.
+  - **`resolveBulkChanges` helper (new, both transports).** Resolves names → ids ONCE upstream of `previewBulk` and `commitBulkUpdate`. Returns `{ resolved, unapplied[], error? }`. `error` (id-vs-name disagreement) hard-fails the call; `unapplied[]` (e.g. ambiguous category, holding not found) flows through to `unappliedChanges` on the response so callers see WHY any sample row's before/after looks identical.
+  - **Confirmation-token stability preserved.** Token signs the user-supplied `changes` (not the resolved form) so preview→execute round-trips with the same payload still match; execute re-runs resolution.
+  - **`execute_bulk_update` aborts on empty resolved set.** Previously, a request with only an unresolvable `category` would commit zero rows and report success. Now: if every requested change failed resolution, the call errors with `Resolution failures: …` and writes nothing.
+  - **Audit-trio invariant preserved (issue #28).** Every new UPDATE branch in `commitBulkUpdate` (quantity, `portfolio_holding_id`) appends `updated_at = NOW()`; `source` is INSERT-only and never touched by `bulk_update`. `invalidateUserTxCache(userId)` continues to fire on every successful commit.
+
 - **2026-04-30 — `account_id` on transaction read/write tools, low-confidence fuzzy rejected ([#29](https://github.com/finlynq/finlynq/pull/29))** (no tool count change):
   - `search_transactions` gains `account_id?: number` (HTTP + stdio) — FK fast-path mirroring the existing `portfolio_holding_id` filter, intended for dedup workflows against blank-payee bank-imported transfers where text search misses. Bump `limit` accordingly when this is the only filter.
   - `record_transaction` and `bulk_record_transactions` gain `account_id?: number` (HTTP + stdio). On bulk it lives at both the top level (applies to every row that omits its own) and per row (wins over both name and the top-level fallback). When set, the resolver skips fuzzy matching entirely; the `account` (name) parameter is now optional but at least one of the two must be present.
@@ -164,6 +173,18 @@ Available on `record_transaction` / `bulk_record_transactions` / `update_transac
 - Single check today: `portfolioHoldingId != null && amount != 0 && quantity == null` → `"quantity not set — holding unit count was not updated"`. Centralized in [`deriveTxWriteWarnings`](../../src/lib/queries.ts) so future advisory checks land in one place.
 - `record_transaction` puts `warnings` at the top level of the success response. `bulk_record_transactions` attaches `warnings` to per-row results only when non-empty (keeps the common case unchanged for callers that don't read it). `update_transaction` warns only when the user *explicitly bound a holding on this update* without also passing `quantity` — touching unrelated fields (e.g. date) on a previously-bound row doesn't fire.
 - Stdio MCP doesn't expose `portfolioHoldingId`/`quantity` on write tools and refuses investment-account writes outright, so the warning condition can't trigger there.
+
+### `update_transaction` response shape ([#60](https://github.com/finlynq/finlynq/issues/60))
+
+`update_transaction` (HTTP + stdio) returns explicit column attribution on success instead of an opaque field count:
+
+- `fieldsUpdated: string[]` — the exact list of column names actually written (`["category_id", "payee"]`). Replaces the legacy `"updated (N field(s))"` message which masked silent category drops on Stream-D Phase-3 users (see below).
+- `resolvedCategory: { id, name }` — only present when `category` was in the input AND the resolver succeeded. Mirrors the per-row shape `bulk_record_transactions` already returns at [register-tools-pg.ts:1966](../../mcp-server/register-tools-pg.ts).
+- `updatedAt` and `warnings` unchanged.
+
+### Strict category resolver on writes ([#60](https://github.com/finlynq/finlynq/issues/60))
+
+`update_transaction` uses `resolveCategoryStrict` (analogous to `resolveAccountStrict`) instead of plain `fuzzyFind`. Substring/reverse-substring matches are gated on a length-≥3 whitespace-token overlap, so a sloppy `"Cr"` no longer routes a write to `"Credit Interest"`. On HTTP, the SELECT pulls `name_ct` and runs `decryptNameish(rawCats, dek)` before resolving — without this, Stream-D Phase-3 users (NULL plaintext `categories.name`) hit `fuzzyFind`'s reverse-includes branch (`lo.includes("")` is always true) and silently match the FIRST category in the list. Low-confidence misses return `Category "X" did not match strongly — did you mean "Y" (id=N)?` so the agent has an explicit recovery path. Stdio mirrors the strict resolver but skips the decrypt step (stdio writes are plaintext).
 
 ### Reading the id back
 

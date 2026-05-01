@@ -37,6 +37,12 @@ import {
 import { parseOfx } from "../src/lib/ofx-parser.js";
 import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline.js";
 import { generateImportHash } from "../src/lib/import-hash.js";
+import {
+  detectProbableDuplicates,
+  type DuplicateCandidatePool,
+  type DuplicateCandidateRow,
+  type DuplicateMatch,
+} from "../src/lib/external-import/duplicate-detect.js";
 
 // Helper for MCP rule matching
 function matchesRule(
@@ -171,6 +177,54 @@ function resolveAccountStrict(input: string, options: SqliteRow[]): StdioAccount
     : { ok: false, reason: "missing" };
 }
 
+/**
+ * Strict resolver for category writes — same waterfall as
+ * {@link resolveAccountStrict} minus the alias tier (categories have no
+ * aliases). Substring/reverse-substring hits gated on a length-≥3
+ * whitespace-token overlap so a sloppy "Cr" never silently routes a write
+ * to "Credit Interest". Mirrors the HTTP transport's helper so a sloppy
+ * category name fails the same way on stdio as it does on HTTP.
+ */
+type StdioCategoryResolveResult =
+  | { ok: true; category: SqliteRow; tier: "exact" | "startsWith" | "substring" }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: SqliteRow };
+function resolveCategoryStrict(input: string, options: SqliteRow[]): StdioCategoryResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exact) return { ok: true, category: exact, tier: "exact" };
+  const starts = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (starts) return { ok: true, category: starts, tier: "startsWith" };
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (name: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, category: sub, tier: "substring" };
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
 /** Auto-categorize payee: rules → historical frequency (both user-scoped) */
 async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): Promise<number | null> {
   if (!payee) return null;
@@ -193,6 +247,14 @@ function txt(data: unknown) {
 
 function sqliteErr(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
+}
+
+/** Issue #65: shift an ISO YYYY-MM-DD date by N days (UTC-safe). Returns null on parse failure. */
+function shiftIsoDate(iso: string, deltaDays: number): string | null {
+  const ms = Date.parse(iso + "T00:00:00Z");
+  if (Number.isNaN(ms)) return null;
+  const d = new Date(ms + deltaDays * 86_400_000);
+  return d.toISOString().slice(0, 10);
 }
 
 export interface CoreToolsOptions {
@@ -901,17 +963,36 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       `).get(id, userId) as { id: number; date: string; account_currency?: string } | undefined;
       if (!existing) return sqliteErr(`Transaction #${id} not found or not owned by user`);
 
+      // Issue #60: strict resolver — substring matches gated on token
+      // overlap so a sloppy "Cr" can't silently route a write to
+      // "Credit Interest". Stdio writes are plaintext (no DEK), so no
+      // decrypt step here.
       let catId: number | undefined;
+      let resolvedCategory: { id: number; name: string } | null = null;
       if (category !== undefined) {
         const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-        const cat = fuzzyFind(category, allCats);
-        if (!cat) return sqliteErr(`Category "${category}" not found`);
-        catId = Number(cat.id);
+        const resolved = resolveCategoryStrict(category, allCats);
+        if (!resolved.ok) {
+          if (resolved.reason === "low_confidence") {
+            return sqliteErr(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+          }
+          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          return sqliteErr(`Category "${category}" not found. Available: ${list}`);
+        }
+        catId = Number(resolved.category.id);
+        resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
       }
 
+      // Issue #60: track explicit column names instead of a count so the AI
+      // assistant can verify the exact write. Mirrors the HTTP transport.
+      const fieldsUpdated: string[] = [];
       const updates: string[] = [];
       const params: unknown[] = [];
-      if (date !== undefined) { updates.push("date = ?"); params.push(date); }
+      if (date !== undefined) {
+        updates.push("date = ?");
+        params.push(date);
+        fieldsUpdated.push("date");
+      }
       if (enteredAmount !== undefined) {
         const txDate = date ?? existing.date;
         const resolved = await resolveTxAmountsCore({
@@ -924,19 +1005,34 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         if (!resolved.ok) return sqliteErr(resolved.message);
         updates.push("amount = ?", "currency = ?", "entered_amount = ?", "entered_currency = ?", "entered_fx_rate = ?");
         params.push(resolved.amount, resolved.currency, resolved.enteredAmount, resolved.enteredCurrency, resolved.enteredFxRate);
+        fieldsUpdated.push("amount", "currency", "entered_amount", "entered_currency", "entered_fx_rate");
       } else if (amount !== undefined) {
         updates.push("amount = ?");
         params.push(amount);
+        fieldsUpdated.push("amount");
       }
-      if (payee !== undefined) { updates.push("payee = ?"); params.push(payee); }
-      if (catId !== undefined) { updates.push("category_id = ?"); params.push(catId); }
-      if (note !== undefined) { updates.push("note = ?"); params.push(note); }
-      if (tags !== undefined) { updates.push("tags = ?"); params.push(tags); }
+      if (payee !== undefined) {
+        updates.push("payee = ?");
+        params.push(payee);
+        fieldsUpdated.push("payee");
+      }
+      if (catId !== undefined) {
+        updates.push("category_id = ?");
+        params.push(catId);
+        fieldsUpdated.push("category_id");
+      }
+      if (note !== undefined) {
+        updates.push("note = ?");
+        params.push(note);
+        fieldsUpdated.push("note");
+      }
+      if (tags !== undefined) {
+        updates.push("tags = ?");
+        params.push(tags);
+        fieldsUpdated.push("tags");
+      }
       if (!updates.length) return sqliteErr("No fields to update");
 
-      // Capture the user-touched field count before appending audit bump
-      // so the success message stays accurate.
-      const userTouchedCount = updates.length;
       // Issue #28: every UPDATE bumps updated_at. Always appended — `source`
       // stays untouched (INSERT-only).
       updates.push("updated_at = NOW()");
@@ -949,7 +1045,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const after = await sqlite.prepare(`SELECT updated_at FROM transactions WHERE id = ? AND user_id = ?`).get(id, userId) as { updated_at?: string } | undefined;
       return txt({
         success: true,
-        message: `Transaction #${id} updated (${userTouchedCount} field(s))`,
+        message: `Transaction #${id} updated`,
+        fieldsUpdated,
+        ...(resolvedCategory ? { resolvedCategory } : {}),
         updatedAt: after?.updated_at,
       });
     }
@@ -1631,18 +1729,30 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       // Phase 6 (2026-04-29): JOIN on the FK rather than the (dropped)
-      // portfolio_holding text column.
+      // portfolio_holding text column. Section F (issue #25): JOIN through
+      // holding_accounts (Section G) for transactions so the (holding,
+      // account) grain stays consistent with the HTTP MCP + REST. Today
+      // each holding has a single is_primary=true pairing, so behavior is
+      // unchanged. CLAUDE.md "Portfolio aggregator" applies (no qty>0/<0
+      // CASE here — pure SUM(quantity) / SUM(amount), so the rule is moot
+      // in this query).
       const holdings = await sqlite.prepare(`
         SELECT ph.id, ph.name, ph.symbol, ph.currency, a.name as account_name,
                COALESCE(SUM(t.quantity), 0) as total_quantity,
                COALESCE(SUM(t.amount), 0) as book_value
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
-        LEFT JOIN transactions t ON t.portfolio_holding_id = ph.id AND t.user_id = ?
+        LEFT JOIN transactions t
+          ON t.portfolio_holding_id = ph.id AND t.user_id = ?
+        LEFT JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ?
         WHERE ph.user_id = ?
+          AND (t.id IS NULL OR ha.holding_id IS NOT NULL)
         GROUP BY ph.id, ph.name, ph.symbol, ph.currency, a.name
         ORDER BY ABS(COALESCE(SUM(t.amount), 0)) DESC
-      `).all(userId, userId) as SqliteRow[];
+      `).all(userId, userId, userId) as SqliteRow[];
 
       const byCurrency: Record<string, number> = {};
       const byAccount: Record<string, number> = {};
@@ -1701,7 +1811,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const since = cutoff[period ?? "all"];
       // Phase 6 (2026-04-29): aggregate by FK + JOIN portfolio_holdings for
       // the display name. The legacy `portfolio_holding` text column was
-      // dropped; FK is the sole source of truth.
+      // dropped; FK is the sole source of truth. Section F (issue #25):
+      // JOIN through holding_accounts (Section G) on (holding_id,
+      // account_id) so the join grain matches the rest of the aggregator
+      // surface. CLAUDE.md "Portfolio aggregator" — this query keys cost
+      // basis on amt-sign (`amount<0` = buy), which is the LEGACY
+      // amt-sign convention NOT the qty>0 rule. Preserved here for
+      // backwards compat with stdio MCP consumers; the HTTP path uses the
+      // qty>0 rule.
       const perf = await sqlite.prepare(`
         SELECT ph.name as holding, COUNT(*) as tx_count,
                SUM(CASE WHEN t.amount < 0 THEN ABS(t.amount) ELSE 0 END) as cost_basis,
@@ -1709,10 +1826,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
                SUM(t.quantity) as net_quantity,
                MIN(t.date) as first_purchase, MAX(t.date) as last_activity
         FROM transactions t
+        INNER JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ?
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
         WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.date >= ?
         GROUP BY ph.id, ph.name ORDER BY cost_basis DESC
-      `).all(userId, since) as SqliteRow[];
+      `).all(userId, userId, since) as SqliteRow[];
 
       const results = perf.map(p => {
         const costBasis = Number(p.cost_basis ?? 0);
@@ -1756,6 +1877,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // Phase 6 (2026-04-29): match on the JOINed portfolio_holdings name +
       // symbol + tx payee. The legacy `t.portfolio_holding` text column was
       // dropped; FK + JOIN is the only source of truth for holding names.
+      // Section F (issue #25): JOIN through holding_accounts (Section G) on
+      // (holding_id, account_id) so the join grain matches the HTTP MCP +
+      // REST aggregator surface. CLAUDE.md "Portfolio aggregator" — qty>0
+      // = buy regardless of amount sign (preserved in the loop below).
       // Symbol gets exact case-insensitive equality (tickers are short and
       // prone to spurious substring hits — "GE" inside "ORANGE" etc.).
       const txns = await sqlite.prepare(`
@@ -1764,6 +1889,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
                a.name as account_name, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
+        INNER JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ?
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
         WHERE t.user_id = ?
           AND (
@@ -1772,7 +1901,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             OR LOWER(ph.symbol) = LOWER(?)
           )
         ORDER BY t.date ASC
-      `).all(userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
+      `).all(userId, userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
 
       if (!txns.length) return sqliteErr(`No transactions found for "${symbol}"`);
 
@@ -1989,6 +2118,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
           record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair. In-kind: holding+quantity.",
           record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Cross-currency requires fxRate.",
+          preview_bulk_update: "preview_bulk_update(filter, changes) — stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[], confirmationToken. (HTTP transport adds quantity, portfolioHoldingId, portfolioHolding.)",
+          execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Stdio: category-by-name only (HTTP supports quantity/holding writes too).",
         };
         return txt({ tool: tool_name, usage: docs[tool_name] ?? "Use topic='tools' for full list." });
       }
@@ -2951,8 +3082,16 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   });
   type BulkFilter = z.infer<typeof bulkFilterSchema>;
 
+  // Issue #61: `.strict()` so unknown keys fail at validation time instead
+  // of silently no-op'ing. Stdio's surface is intentionally narrower than
+  // HTTP's — `category` (name) is the only addition. quantity/holding fields
+  // are HTTP-only because stdio has no holding plumbing (no DEK, no
+  // resolvePortfolioHoldingByName equivalent), mirrors the stdio
+  // `record_transaction` carve-out that already refuses investment-account
+  // writes. Callers passing `quantity` to stdio get a clean strict-mode 400.
   const bulkChangesSchema = z.object({
     category_id: z.number().nullable().optional(),
+    category: z.string().optional(),
     account_id: z.number().optional(),
     date: z.string().optional(),
     note: z.string().optional(),
@@ -2962,8 +3101,20 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       mode: z.enum(["append", "replace", "remove"]),
       value: z.string(),
     }).optional(),
-  });
+  }).strict();
   type BulkChanges = z.infer<typeof bulkChangesSchema>;
+
+  /** Issue #61: post-resolution shape — names → ids. */
+  type ResolvedChanges = {
+    category_id?: number | null;
+    account_id?: number;
+    date?: string;
+    note?: string;
+    payee?: string;
+    is_business?: number;
+    tags?: { mode: "append" | "replace" | "remove"; value: string };
+  };
+  type UnappliedChange = { key: string; reason: string };
 
   async function resolveFilterToIds(filter: BulkFilter): Promise<number[]> {
     const hasAny =
@@ -2996,57 +3147,109 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     return rows.map((r) => Number(r.id));
   }
 
-  function applyChangesToRow(row: Record<string, unknown>, changes: BulkChanges): Record<string, unknown> {
+  /**
+   * Issue #61: resolve names → ids before preview/commit. Stdio carries the
+   * narrower surface — only `category` (name) needs resolution. Mirrors the
+   * HTTP transport's helper but without DEK plumbing (stdio reads plaintext
+   * `name` directly via SQL).
+   */
+  async function resolveBulkChanges(
+    changes: BulkChanges,
+  ): Promise<{ resolved: ResolvedChanges; unapplied: UnappliedChange[]; error?: string }> {
+    const resolved: ResolvedChanges = {};
+    const unapplied: UnappliedChange[] = [];
+
+    if (changes.category_id !== undefined) resolved.category_id = changes.category_id;
+    if (changes.account_id !== undefined) resolved.account_id = changes.account_id;
+    if (changes.date !== undefined) resolved.date = changes.date;
+    if (changes.note !== undefined) resolved.note = changes.note;
+    if (changes.payee !== undefined) resolved.payee = changes.payee;
+    if (changes.is_business !== undefined) resolved.is_business = changes.is_business;
+    if (changes.tags !== undefined) resolved.tags = changes.tags;
+
+    if (changes.category !== undefined) {
+      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
+      const r = resolveCategoryStrict(changes.category, allCats);
+      if (!r.ok) {
+        if (r.reason === "low_confidence") {
+          unapplied.push({
+            key: "category",
+            reason: `Category "${changes.category}" did not match strongly — did you mean "${r.suggestion.name}" (id=${Number(r.suggestion.id)})?`,
+          });
+        } else {
+          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          unapplied.push({ key: "category", reason: `Category "${changes.category}" not found. Available: ${list}` });
+        }
+      } else {
+        const resolvedId = Number(r.category.id);
+        if (changes.category_id !== undefined && changes.category_id !== null && changes.category_id !== resolvedId) {
+          return {
+            resolved,
+            unapplied,
+            error: `category "${changes.category}" resolves to id=${resolvedId}, but category_id=${changes.category_id} disagrees. Pass only one, or make them match.`,
+          };
+        }
+        resolved.category_id = resolvedId;
+      }
+    }
+
+    return { resolved, unapplied };
+  }
+
+  function applyChangesToRow(row: Record<string, unknown>, resolved: ResolvedChanges): Record<string, unknown> {
     const out = { ...row };
-    if (changes.category_id !== undefined) out.category_id = changes.category_id;
-    if (changes.account_id !== undefined) out.account_id = changes.account_id;
-    if (changes.date !== undefined) out.date = changes.date;
-    if (changes.note !== undefined) out.note = changes.note;
-    if (changes.payee !== undefined) out.payee = changes.payee;
-    if (changes.is_business !== undefined) out.is_business = changes.is_business;
-    if (changes.tags !== undefined) {
+    if (resolved.category_id !== undefined) out.category_id = resolved.category_id;
+    if (resolved.account_id !== undefined) out.account_id = resolved.account_id;
+    if (resolved.date !== undefined) out.date = resolved.date;
+    if (resolved.note !== undefined) out.note = resolved.note;
+    if (resolved.payee !== undefined) out.payee = resolved.payee;
+    if (resolved.is_business !== undefined) out.is_business = resolved.is_business;
+    if (resolved.tags !== undefined) {
       const currentSet = new Set(String(out.tags ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-      const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
-      if (changes.tags.mode === "replace") out.tags = tokens.join(",");
-      else if (changes.tags.mode === "append") { for (const t of tokens) currentSet.add(t); out.tags = Array.from(currentSet).join(","); }
+      const tokens = resolved.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+      if (resolved.tags.mode === "replace") out.tags = tokens.join(",");
+      else if (resolved.tags.mode === "append") { for (const t of tokens) currentSet.add(t); out.tags = Array.from(currentSet).join(","); }
       else { for (const t of tokens) currentSet.delete(t); out.tags = Array.from(currentSet).join(","); }
     }
     return out;
   }
 
-  async function commitBulkUpdate(ids: number[], changes: BulkChanges): Promise<number> {
+  /**
+   * Commit a bulk update. Issue #61: takes the post-resolution shape so
+   * commit only ever writes FK ints. Issue #28 audit-trio: every UPDATE
+   * here bumps `updated_at = NOW()`; `source` is INSERT-only, never modified.
+   */
+  async function commitBulkUpdate(ids: number[], resolved: ResolvedChanges): Promise<number> {
     if (ids.length === 0) return 0;
     const inList = `(${ids.map(() => "?").join(",")})`;
 
-    // Issue #28: every UPDATE bumps updated_at = NOW(). pg-compat shim
-    // resolves NOW() to PG. `source` is INSERT-only, never modified here.
-    if (changes.category_id !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET category_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.category_id, ...ids, userId);
+    if (resolved.category_id !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET category_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.category_id, ...ids, userId);
     }
-    if (changes.account_id !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET account_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.account_id, ...ids, userId);
+    if (resolved.account_id !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET account_id = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.account_id, ...ids, userId);
     }
-    if (changes.date !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET date = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.date, ...ids, userId);
+    if (resolved.date !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET date = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.date, ...ids, userId);
     }
-    if (changes.is_business !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET is_business = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.is_business, ...ids, userId);
+    if (resolved.is_business !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET is_business = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.is_business, ...ids, userId);
     }
-    if (changes.payee !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET payee = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.payee, ...ids, userId);
+    if (resolved.payee !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET payee = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.payee, ...ids, userId);
     }
-    if (changes.note !== undefined) {
-      await sqlite.prepare(`UPDATE transactions SET note = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.note, ...ids, userId);
+    if (resolved.note !== undefined) {
+      await sqlite.prepare(`UPDATE transactions SET note = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.note, ...ids, userId);
     }
-    if (changes.tags !== undefined) {
-      if (changes.tags.mode === "replace") {
-        await sqlite.prepare(`UPDATE transactions SET tags = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(changes.tags.value, ...ids, userId);
+    if (resolved.tags !== undefined) {
+      if (resolved.tags.mode === "replace") {
+        await sqlite.prepare(`UPDATE transactions SET tags = ?, updated_at = NOW() WHERE id IN ${inList} AND user_id = ?`).run(resolved.tags.value, ...ids, userId);
       } else {
         const rows = await sqlite.prepare(`SELECT id, tags FROM transactions WHERE id IN ${inList} AND user_id = ?`).all(...ids, userId) as Array<{ id: number; tags: string }>;
-        const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+        const tokens = resolved.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
         for (const r of rows) {
           const set = new Set(String(r.tags ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-          if (changes.tags.mode === "append") { for (const t of tokens) set.add(t); }
+          if (resolved.tags.mode === "append") { for (const t of tokens) set.add(t); }
           else { for (const t of tokens) set.delete(t); }
           const next = Array.from(set).join(",");
           await sqlite.prepare(`UPDATE transactions SET tags = ?, updated_at = NOW() WHERE id = ? AND user_id = ?`).run(next, Number(r.id), userId);
@@ -3056,9 +3259,19 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     return ids.length;
   }
 
+  /**
+   * Issue #61: resolves names → ids upstream so the sample `after` reflects
+   * the post-resolution shape, AND surfaces `unappliedChanges` so identical
+   * before/after sample rows always come with a reason.
+   */
   async function previewBulk(filter: BulkFilter, changes: BulkChanges, op: string) {
     const ids = await resolveFilterToIds(filter);
-    if (ids.length === 0) return { affectedCount: 0, sampleBefore: [], sampleAfter: [], ids, confirmationToken: "" };
+    const { resolved, unapplied, error } = await resolveBulkChanges(changes);
+    if (error) throw new Error(error);
+
+    if (ids.length === 0) {
+      return { affectedCount: 0, sampleBefore: [], sampleAfter: [], unappliedChanges: unapplied, ids: [], confirmationToken: "" };
+    }
     const sampleIds = ids.slice(0, 10);
     const placeholders = sampleIds.map(() => "?").join(",");
     const before = await sqlite.prepare(
@@ -3070,20 +3283,26 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
        WHERE t.id IN (${placeholders}) AND t.user_id = ?
        ORDER BY t.id`
     ).all(...sampleIds, userId) as Record<string, unknown>[];
-    const after = before.map((r) => applyChangesToRow(r, changes));
+    const after = before.map((r) => applyChangesToRow(r, resolved));
+    // Sign the user-supplied `changes` (not the resolved form) so the token
+    // round-trips between preview and execute calls.
     const token = signConfirmationToken(userId, op, { ids, changes });
-    return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, ids, confirmationToken: token };
+    return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, unappliedChanges: unapplied, ids, confirmationToken: token };
   }
 
   // ── preview_bulk_update ────────────────────────────────────────────────────
+  // Issue #61: stdio surface accepts category_id, category (name), account_id,
+  // date, note, payee, is_business, tags. Unknown keys (incl. quantity /
+  // portfolioHoldingId / portfolioHolding) fail strictly — those are HTTP-only
+  // because stdio has no holding plumbing.
   server.tool(
     "preview_bulk_update",
-    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, and a confirmationToken (5-min TTL).",
+    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, an `unappliedChanges` array, and a confirmationToken (5-min TTL). Stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail. (HTTP transport additionally supports quantity, portfolioHoldingId, portfolioHolding.)",
     { filter: bulkFilterSchema, changes: bulkChangesSchema },
     async ({ filter, changes }) => {
       try {
-        const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_update");
-        return txt({ success: true, data: { affectedCount, sampleBefore, sampleAfter, confirmationToken } });
+        const { affectedCount, sampleBefore, sampleAfter, unappliedChanges, confirmationToken } = await previewBulk(filter, changes, "bulk_update");
+        return txt({ success: true, data: { affectedCount, sampleBefore, sampleAfter, unappliedChanges, confirmationToken } });
       } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
     }
   );
@@ -3091,16 +3310,27 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── execute_bulk_update ────────────────────────────────────────────────────
   server.tool(
     "execute_bulk_update",
-    "Commit a bulk update. Must be preceded by preview_bulk_update with the same filter+changes.",
+    "Commit a bulk update. Must be preceded by preview_bulk_update with the same filter+changes. Stdio-accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business, tags. Aborts (no commit) when ALL requested changes failed to resolve.",
     { filter: bulkFilterSchema, changes: bulkChangesSchema, confirmation_token: z.string() },
     async ({ filter, changes, confirmation_token }) => {
       try {
         const ids = await resolveFilterToIds(filter);
         const check = verifyConfirmationToken(confirmation_token, userId, "bulk_update", { ids, changes });
         if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_update.`);
-        const n = await commitBulkUpdate(ids, changes);
+
+        // Issue #61: resolve names → ids HERE; refuse if all changes failed
+        // resolution.
+        const { resolved, unapplied, error } = await resolveBulkChanges(changes);
+        if (error) return sqliteErr(error);
+        const requestedKeys = Object.keys(changes);
+        const resolvedKeys = Object.keys(resolved);
+        if (requestedKeys.length > 0 && resolvedKeys.length === 0) {
+          return sqliteErr(`No changes could be applied. Resolution failures: ${unapplied.map(u => `${u.key}: ${u.reason}`).join(" | ")}`);
+        }
+
+        const n = await commitBulkUpdate(ids, resolved);
         if (n > 0) invalidateUserTxCache(userId);
-        return txt({ success: true, data: { updated: n } });
+        return txt({ success: true, data: { updated: n, unappliedChanges: unapplied } });
       } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
     }
   );
@@ -3176,7 +3406,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         const changes: BulkChanges = { category_id };
         const check = verifyConfirmationToken(confirmation_token, userId, "bulk_categorize", { ids, changes });
         if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_categorize.`);
-        const n = await commitBulkUpdate(ids, changes);
+        // Issue #61: commit takes the resolved shape now. category_id is
+        // already an int so resolution is a no-op for this path.
+        const resolved: ResolvedChanges = { category_id };
+        const n = await commitBulkUpdate(ids, resolved);
         if (n > 0) invalidateUserTxCache(userId);
         return txt({ success: true, data: { updated: n } });
       } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
@@ -3419,7 +3652,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── preview_import ─────────────────────────────────────────────────────────
   server.tool(
     "preview_import",
-    "Preview an uploaded CSV/OFX/QFX file (or a local file path if ALLOW_LOCAL_FILE_IMPORT=1). Returns parsed rows + confirmationToken.",
+    "Preview an uploaded CSV/OFX/QFX file (or a local file path if ALLOW_LOCAL_FILE_IMPORT=1). Returns parsed rows, probable cross-source duplicates (FX-spread + ±7 day fuzzy match — heuristic, not exact), and a confirmationToken.",
     {
       upload_id: z.string().optional(),
       file_path: z.string().optional().describe("Local absolute path (stdio only, ALLOW_LOCAL_FILE_IMPORT=1)"),
@@ -3469,12 +3702,113 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
         let dedupHits = 0;
         const unresolvedAccounts = new Set<string>();
-        for (const r of rows) {
+        // Issue #65: collect rows that survived exact-dedup so the cross-source
+        // detector below has a clean pool to match against.
+        const fuzzyInputs: Array<{
+          rowIndex: number;
+          date: string;
+          accountId: number;
+          amount: number;
+          payeePlain: string;
+          importHash: string;
+        }> = [];
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
           const aId = r.account ? accountByName.get(r.account.toLowerCase().trim()) : undefined;
           if (!aId && r.account) unresolvedAccounts.add(r.account);
           if (aId) {
             const h = generateImportHash(r.date, aId, r.amount, r.payee);
-            if (existingHashes.has(h)) dedupHits++;
+            if (existingHashes.has(h)) {
+              dedupHits++;
+            } else {
+              fuzzyInputs.push({
+                rowIndex: i,
+                date: r.date,
+                accountId: aId,
+                amount: r.amount,
+                payeePlain: r.payee ?? "",
+                importHash: h,
+              });
+            }
+          }
+        }
+
+        // Issue #65: cross-source duplicate detection (heuristic — warning surface
+        // only). Stdio writes plaintext, so candidate-row payee is plaintext too —
+        // no DEK gymnastics needed here.
+        let probableDuplicates: DuplicateMatch[] = [];
+        if (fuzzyInputs.length > 0) {
+          try {
+            const accIds = Array.from(new Set(fuzzyInputs.map((f) => f.accountId)));
+            const dates = fuzzyInputs.map((f) => f.date).sort();
+            const dateMin = shiftIsoDate(dates[0], -7);
+            const dateMax = shiftIsoDate(dates[dates.length - 1], 7);
+            if (dateMin && dateMax) {
+              const placeholders = accIds.map(() => "?").join(",");
+              const poolRows = await sqlite.prepare(
+                `SELECT t.id, t.account_id, t.date, t.amount, t.payee, t.import_hash,
+                        t.fit_id, t.link_id, c.type AS category_type, t.source,
+                        t.portfolio_holding_id
+                   FROM transactions t
+                   LEFT JOIN categories c ON c.id = t.category_id
+                  WHERE t.user_id = ?
+                    AND t.account_id IN (${placeholders})
+                    AND t.date BETWEEN ? AND ?`,
+              ).all(userId, ...accIds, dateMin, dateMax) as Array<Record<string, unknown>>;
+
+              const byAccount = new Map<number, DuplicateCandidateRow[]>();
+              const linkIds: string[] = [];
+              for (const p of poolRows) {
+                const accId = Number(p.account_id);
+                const row: DuplicateCandidateRow = {
+                  id: Number(p.id),
+                  accountId: accId,
+                  date: String(p.date),
+                  amount: Number(p.amount),
+                  payeePlain: p.payee == null ? null : String(p.payee),
+                  importHash: p.import_hash == null ? null : String(p.import_hash),
+                  fitId: p.fit_id == null ? null : String(p.fit_id),
+                  linkId: p.link_id == null ? null : String(p.link_id),
+                  categoryType: p.category_type == null ? null : String(p.category_type),
+                  source: p.source == null ? null : String(p.source),
+                  portfolioHoldingId: p.portfolio_holding_id == null ? null : Number(p.portfolio_holding_id),
+                };
+                const arr = byAccount.get(accId) ?? [];
+                arr.push(row);
+                byAccount.set(accId, arr);
+                if (row.categoryType === "R" && row.linkId) linkIds.push(row.linkId);
+              }
+
+              const siblingAccountByLinkId = new Map<string, number>();
+              if (linkIds.length > 0) {
+                const sibPlaceholders = linkIds.map(() => "?").join(",");
+                const sibRows = await sqlite.prepare(
+                  `SELECT link_id, account_id
+                     FROM transactions
+                    WHERE user_id = ?
+                      AND link_id IN (${sibPlaceholders})`,
+                ).all(userId, ...linkIds) as Array<Record<string, unknown>>;
+                const accountSet = new Set<number>(accIds);
+                const byLink = new Map<string, number[]>();
+                for (const sr of sibRows) {
+                  const lid = sr.link_id == null ? null : String(sr.link_id);
+                  const a = sr.account_id == null ? null : Number(sr.account_id);
+                  if (!lid || a == null) continue;
+                  const arr = byLink.get(lid) ?? [];
+                  arr.push(a);
+                  byLink.set(lid, arr);
+                }
+                for (const [linkId, accs] of byLink) {
+                  const sib = accs.find((a) => !accountSet.has(a));
+                  if (sib != null) siblingAccountByLinkId.set(linkId, sib);
+                }
+              }
+
+              const pool: DuplicateCandidatePool = { byAccount, siblingAccountByLinkId };
+              probableDuplicates = detectProbableDuplicates(fuzzyInputs, pool);
+            }
+          } catch {
+            probableDuplicates = [];
           }
         }
 
@@ -3509,6 +3843,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             dedupHits,
             categoryCoveragePct: rows.length === 0 ? 0 : Math.round((categorizedRows / rows.length) * 100),
             unresolvedAccounts: Array.from(unresolvedAccounts),
+            // Issue #65: warning surface — heuristic flags rows that may match
+            // an existing transaction (FX-spread, settlement-vs-posting drift).
+            // Thresholds: ±7 days, amount within ±7% OR ±$50 (whichever
+            // larger), score ≥ 0.6.
+            probableDuplicates,
             confirmationToken: token,
           },
         });

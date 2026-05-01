@@ -30,6 +30,7 @@ import { deriveKEK, unwrapDEK, createWrappedDEKForPassword } from "@/lib/crypto/
 import { putDEK } from "@/lib/crypto/dek-cache";
 import { enqueueStreamDBackfill } from "@/lib/crypto/stream-d-backfill";
 import { enqueuePhase3NullIfReady } from "@/lib/crypto/stream-d-phase3-null";
+import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
 
 // Accept either {identifier, password} (preferred) OR {email, password}
 // (legacy clients). Both shapes normalise to an `identifier` string.
@@ -189,6 +190,12 @@ export async function POST(request: NextRequest) {
       // backfill above; the helper's blocking-row check naturally retries
       // on the next login if backfill is still mid-flight.
       enqueuePhase3NullIfReady(user.id, dek);
+      // Section F (issue #25) per-user lazy canonicalization: rewrites
+      // tickered / cash / currency-code holdings' names to canonical form
+      // (uppercased symbol, "Cash", "Cash <CCY>"). User-defined positions
+      // keep their free-text name. Bails silently for DEK-mismatch users
+      // — same precondition pattern as enqueuePhase3NullIfReady.
+      enqueueCanonicalizePortfolioNames(user.id, dek);
     }
 
     const response = NextResponse.json({ success: true });

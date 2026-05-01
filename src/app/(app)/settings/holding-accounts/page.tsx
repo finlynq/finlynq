@@ -38,7 +38,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, Briefcase, Plus, Trash2, Star, RefreshCw, Pencil, Check, X } from "lucide-react";
+import { Briefcase, Plus, Trash2, Star, RefreshCw, Pencil, Check, X } from "lucide-react";
 
 type Pairing = {
   holdingId: number;
@@ -327,13 +327,6 @@ export default function HoldingAccountsPage() {
 
   return (
     <div className="max-w-4xl space-y-6">
-      <div className="flex items-center gap-3">
-        <Link href="/settings" className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1">
-          <ArrowLeft className="h-4 w-4" />
-          Back to Settings
-        </Link>
-      </div>
-
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Holding ↔ Account Map</h1>

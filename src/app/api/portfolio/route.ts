@@ -6,7 +6,32 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
-import { buildNameFields, decryptNamedRows, nameLookup } from "@/lib/crypto/encrypted-columns";
+import { buildNameFields, decryptName, decryptNamedRows, nameLookup } from "@/lib/crypto/encrypted-columns";
+import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
+
+/**
+ * A row is "canonical" (its display name is auto-managed) when:
+ *   - it has a non-empty symbol that isn't a currency code → tickered;
+ *     canonical name = uppercased symbol.
+ *   - it has a currency-code symbol (CAD/USD/XAU/etc.) → cash-as-currency;
+ *     canonical name = "Cash <SYMBOL>".
+ *   - name === "Cash" with no symbol → cash sleeve; canonical name = "Cash".
+ *
+ * Editing the Name on these rows is a no-op (the canonicalize helper would
+ * rewrite it on next login) and confuses the user, so we reject it at the
+ * API. Symbol / currency / isCrypto / note remain editable; renaming a
+ * tickered position is done by changing its symbol.
+ *
+ * Mirrors the classifier in src/lib/crypto/stream-d-canonicalize-portfolio.ts.
+ */
+function isCanonicalHolding(name: string | null, symbol: string | null): boolean {
+  const sym = (symbol ?? "").trim().toUpperCase();
+  const nm = (name ?? "").trim();
+  if (sym && /^[A-Z]{3,4}$/.test(sym) && (isSupportedCurrency(sym) || isMetalCurrency(sym))) return true;
+  if (sym) return true;
+  if (!sym && nm.toLowerCase() === "cash") return true;
+  return false;
+}
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -153,7 +178,13 @@ export async function PUT(request: NextRequest) {
     const { id, ...data } = parsed.data;
 
     const existing = await db
-      .select({ id: schema.portfolioHoldings.id })
+      .select({
+        id: schema.portfolioHoldings.id,
+        name: schema.portfolioHoldings.name,
+        nameCt: schema.portfolioHoldings.nameCt,
+        symbol: schema.portfolioHoldings.symbol,
+        symbolCt: schema.portfolioHoldings.symbolCt,
+      })
       .from(schema.portfolioHoldings)
       .where(
         and(
@@ -164,6 +195,28 @@ export async function PUT(request: NextRequest) {
       .get();
     if (!existing) {
       return NextResponse.json({ error: "Holding not found" }, { status: 404 });
+    }
+
+    // Section F (issue #25): block Name edits on canonical rows. The
+    // canonicalize helper would rewrite a user-typed name back to symbol /
+    // "Cash" / "Cash <CCY>" on next login, so silently dropping the edit is
+    // worse than rejecting it up front. Symbol / currency / isCrypto / note
+    // are still editable — change the symbol to rename a tickered position.
+    if (data.name !== undefined) {
+      const currentName = decryptName(existing.nameCt, auth.dek, existing.name);
+      const currentSymbol = decryptName(existing.symbolCt, auth.dek, existing.symbol);
+      // The "next" symbol is the about-to-write value when the user is also
+      // editing symbol; otherwise the existing symbol. Likewise for the row
+      // type on cash-sleeve rows (no symbol → name "Cash" gates).
+      const nextSymbol = data.symbol !== undefined
+        ? (data.symbol && data.symbol.trim() ? data.symbol.trim() : null)
+        : currentSymbol;
+      if (isCanonicalHolding(currentName, nextSymbol)) {
+        return NextResponse.json(
+          { error: "name is auto-managed for this holding type — edit the symbol or currency to rename" },
+          { status: 400 },
+        );
+      }
     }
 
     // buildNameFields takes only the keys we want to re-encrypt — name and/or

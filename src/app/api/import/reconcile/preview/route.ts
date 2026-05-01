@@ -1,19 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  csvToRawTransactions,
-  csvToRawTransactionsWithMapping,
-} from "@/lib/csv-parser";
 import { parseOfx } from "@/lib/ofx-parser";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { classifyForReconcile, MAX_RECONCILE_ROWS } from "@/lib/reconcile";
 import { safeErrorMessage } from "@/lib/validate";
 import type { RawTransaction } from "@/lib/import-pipeline";
+import { sourceTagFor, type FormatTag } from "@/lib/tx-source";
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import {
-  deserializeTemplate,
-  type ColumnMapping,
-} from "@/lib/import-templates";
+  buildEmptyCsvError,
+  parseCsvWithFallback,
+} from "@/lib/external-import/parsers/csv-pipeline";
 
 export const dynamic = "force-dynamic";
 
@@ -109,14 +106,19 @@ export async function POST(request: NextRequest) {
       userId,
       defaultAccountName,
     );
-    if ("error" in parseResult) {
-      return NextResponse.json({ error: parseResult.error }, { status: 400 });
+    if ("status" in parseResult) {
+      return NextResponse.json(parseResult.body, { status: parseResult.status });
     }
     if (parseResult.rows.length === 0) {
-      return NextResponse.json(
-        { error: "No transactions found in file" },
-        { status: 400 },
-      );
+      // Use the richer "0 rows" message for CSVs (format / bytes / first
+      // line / separator hint) so the user can see what we actually read.
+      // OFX/QFX zero-row branches already returned their own error above.
+      const csvText = parseResult.format === "csv" ? parseResult.csvText ?? "" : "";
+      const message =
+        parseResult.format === "csv"
+          ? buildEmptyCsvError(csvText)
+          : "No transactions found in file";
+      return NextResponse.json({ error: message }, { status: 400 });
     }
     if (parseResult.rows.length > MAX_RECONCILE_ROWS) {
       return NextResponse.json(
@@ -126,6 +128,18 @@ export async function POST(request: NextRequest) {
         { status: 422 },
       );
     }
+
+    // Issue #62: stamp source:<format> on every row before classification.
+    // Use the file extension as the format hint (ofx vs qfx are distinct
+    // formats — qfx adds Quicken's <INTU.BID> block on top of OFX XML).
+    const formatTag: FormatTag =
+      ext === "qfx" ? "qfx" : ext === "ofx" ? "ofx" : "csv";
+    const sourceTagStr = sourceTagFor(formatTag);
+    parseResult.rows = parseResult.rows.map((r) => {
+      const existing = (r.tags ?? "").split(",").map((t) => t.trim()).filter((t) => t);
+      if (existing.some((t) => t.toLowerCase() === sourceTagStr.toLowerCase())) return r;
+      return { ...r, tags: existing.length ? `${existing.join(",")},${sourceTagStr}` : sourceTagStr };
+    });
 
     const classified = await classifyForReconcile(userId, dek, parseResult.rows, {
       dateToleranceDays: tolerance,
@@ -155,6 +169,13 @@ interface ParseSuccess {
   rows: RawTransaction[];
   errors: Array<{ row: number; message: string }>;
   format: "csv" | "ofx";
+  /** Verbatim CSV text — kept around so the route can build a richer 0-row error. */
+  csvText?: string;
+}
+
+interface ParseFailure {
+  status: number;
+  body: Record<string, unknown>;
 }
 
 async function parseStatement(
@@ -163,57 +184,60 @@ async function parseStatement(
   templateId: number | null,
   userId: string,
   defaultAccountName: string | null,
-): Promise<ParseSuccess | { error: string }> {
+): Promise<ParseSuccess | ParseFailure> {
   if (ext === "csv") {
     const text = await file.text();
-    let parsed: { rows: RawTransaction[]; errors: Array<{ row: number; message: string }> };
-    if (templateId !== null && !Number.isNaN(templateId)) {
-      const tplRow = await db
-        .select()
-        .from(schema.importTemplates)
-        .where(
-          and(
-            eq(schema.importTemplates.id, templateId),
-            eq(schema.importTemplates.userId, userId),
-          ),
-        )
-        .get();
-      if (!tplRow) {
-        return { error: `Template #${templateId} not found` };
-      }
-      const tpl = deserializeTemplate(tplRow);
-      parsed = csvToRawTransactionsWithMapping(
-        text,
-        tpl.columnMapping as unknown as Record<string, string>,
-      );
-      if (tpl.defaultAccount) {
-        parsed.rows = parsed.rows.map((r) => ({
-          ...r,
-          account: r.account || tpl.defaultAccount!,
-        }));
-      }
-    } else {
-      parsed = csvToRawTransactions(text);
+    const result = await parseCsvWithFallback({
+      text,
+      userId,
+      templateId,
+      defaultAccountName,
+    });
+    if (result.kind === "template-not-found") {
+      return {
+        status: 400,
+        body: { error: `Template #${result.templateId} not found` },
+      };
     }
-    if (defaultAccountName) {
-      parsed.rows = parsed.rows.map((r) => ({
-        ...r,
-        account: r.account || defaultAccountName,
-      }));
+    if (result.kind === "needs-mapping") {
+      // Surface the column-mapping payload so a future reconcile UI can
+      // show the same dialog the regular /import flow uses. Until that
+      // dialog is wired in, the human-readable `error` keeps the existing
+      // UI useful — it tells the user we couldn't auto-detect columns.
+      return {
+        status: 422,
+        body: {
+          type: "csv-needs-mapping",
+          error:
+            "We couldn't auto-detect the columns in this CSV. The reconcile flow doesn't yet support a column-mapping dialog — import the file via /import first to save a template, then re-upload here.",
+          headers: result.headers,
+          sampleRows: result.sampleRows,
+          suggestedMapping: result.suggestedMapping,
+          fileName: file.name,
+        },
+      };
     }
-    return { ...parsed, format: "csv" };
+    return {
+      rows: result.rows,
+      errors: result.errors,
+      format: "csv",
+      csvText: text,
+    };
   }
 
   if (ext === "ofx" || ext === "qfx") {
     const text = await file.text();
     const ofx = parseOfx(text);
     if (ofx.transactions.length === 0) {
-      return { error: "No transactions found in OFX/QFX file" };
+      return { status: 400, body: { error: "No transactions found in OFX/QFX file" } };
     }
     if (!defaultAccountName) {
       return {
-        error:
-          "OFX/QFX statements need an explicit accountId — pick the destination Finlynq account before uploading.",
+        status: 400,
+        body: {
+          error:
+            "OFX/QFX statements need an explicit accountId — pick the destination Finlynq account before uploading.",
+        },
       };
     }
     const rows: RawTransaction[] = ofx.transactions.map((t) => ({
@@ -229,6 +253,9 @@ async function parseStatement(
   }
 
   return {
-    error: `Unsupported file type "${ext ?? "unknown"}". Reconcile mode supports CSV, OFX, and QFX. For PDF/Excel, use the regular import flow first.`,
+    status: 400,
+    body: {
+      error: `Unsupported file type "${ext ?? "unknown"}". Reconcile mode supports CSV, OFX, and QFX. For PDF/Excel, use the regular import flow first.`,
+    },
   };
 }

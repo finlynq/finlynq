@@ -420,7 +420,11 @@ async function runPipeline(
     pfAccounts,
     pfCategories,
   );
-  const transformed = transformTransactions(externalTxs, resolved, byName);
+  // Issue #62: WealthPosition's API returns CSV-shaped data — tag the format
+  // accordingly so cross-source dedup can identify how the row arrived.
+  const transformed = transformTransactions(externalTxs, resolved, byName, {
+    formatTag: "csv",
+  });
   const rowsForImport = buildRowsForImport(transformed);
 
   return {

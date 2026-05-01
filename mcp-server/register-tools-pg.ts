@@ -57,6 +57,13 @@ import { parseOfx } from "../src/lib/ofx-parser";
 import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline";
 import { generateImportHash } from "../src/lib/import-hash";
 import {
+  detectProbableDuplicates,
+  type DuplicateCandidatePool,
+  type DuplicateCandidateRow,
+  type DuplicateMatch,
+} from "../src/lib/external-import/duplicate-detect";
+import { tryDecryptField } from "../src/lib/crypto/envelope";
+import {
   applyRulesToBatch,
   type TransactionRule,
   pickInvestmentCategoryByPayee,
@@ -171,6 +178,64 @@ function resolveAccountStrict(input: string, options: Row[]): AccountResolveResu
   if (sub) return { ok: true, account: sub, tier: "substring" };
   // No strong match. Surface what fuzzyFind WOULD have picked so the caller
   // can include it in the error message ("did you mean …?").
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
+/**
+ * Strict resolver for category writes — same waterfall as
+ * {@link resolveAccountStrict} minus the alias tier (categories have no
+ * aliases). Substring/reverse-substring hits are only accepted when the input
+ * and the candidate share a whitespace-separated token of length ≥3, so a
+ * sloppy "Cr" never silently routes a write to "Credit Interest" via
+ * `fuzzyFind`'s reverse-includes branch.
+ *
+ * The decrypt step is the caller's responsibility — pass already-decrypted
+ * rows. With NULL plaintext + NULL ciphertext (or DEK absent on stdio) the
+ * row's effective `name` is empty and is filtered out, never matched.
+ *
+ * Returns the same shape as {@link resolveAccountStrict} so the caller can
+ * format `did you mean … (id=N)?` errors uniformly.
+ */
+type CategoryResolveTier = "exact" | "startsWith" | "substring";
+type CategoryResolveResult =
+  | { ok: true; category: Row; tier: CategoryResolveTier }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: Row };
+function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exact) return { ok: true, category: exact, tier: "exact" };
+  const starts = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (starts) return { ok: true, category: starts, tier: "startsWith" };
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (name: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, category: sub, tier: "substring" };
+  // No strong match. Surface what fuzzyFind WOULD have picked so the caller
+  // can include it in the error message.
   const legacy =
     options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
     options.find(o => {
@@ -533,18 +598,26 @@ async function aggregateHoldings(
     : sql``;
   const dateFilter = opts?.since ? sql`AND t.date >= ${opts.since}` : sql``;
 
-  // FK-bound aggregation. JOIN to portfolio_holdings so we get the
-  // (encrypted) display name in the same trip; decrypt it post-query and
-  // key the aggregator by that. The decrypt cost is O(holdings) instead of
-  // O(transactions) — much cheaper than the legacy per-tx decrypt.
-  // Phase 5 (2026-04-29) removed the orphan-fallback path; every tx now
-  // has portfolio_holding_id and the legacy text column is NULL.
+  // FK-bound aggregation. JOIN through holding_accounts (Section G) on
+  // (holding_id, account_id) so the (holding, account) pair is the join
+  // grain — forward-compatible with a canonical position split across
+  // multiple accounts. JOIN to portfolio_holdings for the (encrypted)
+  // display name; decrypt post-query and key the aggregator by that.
+  // The decrypt cost is O(holdings) instead of O(transactions). Phase 5
+  // (2026-04-29) removed the orphan-fallback path; every tx now has
+  // portfolio_holding_id and the legacy text column is NULL.
+  // CLAUDE.md "Portfolio aggregator" — qty>0 = buy regardless of amount
+  // sign; preserved by `accumulate()` below.
   type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null };
   const out = new Map<string, Agg>();
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date,
            ph.name AS holding_name, ph.name_ct AS holding_name_ct
     FROM transactions t
+    INNER JOIN holding_accounts ha
+      ON ha.holding_id = t.portfolio_holding_id
+     AND ha.account_id = t.account_id
+     AND ha.user_id = ${userId}
     LEFT JOIN portfolio_holdings ph ON t.portfolio_holding_id = ph.id
     WHERE t.user_id = ${userId}
       AND t.portfolio_holding_id IS NOT NULL
@@ -615,6 +688,14 @@ function accumulate(
     row.dividends += amt;
   }
   out.set(name, row);
+}
+
+/** Issue #65: shift an ISO YYYY-MM-DD date by N days (UTC-safe). Returns null on parse failure. */
+function shiftIsoDate(iso: string, deltaDays: number): string | null {
+  const ms = Date.parse(iso + "T00:00:00Z");
+  if (Number.isNaN(ms)) return null;
+  const d = new Date(ms + deltaDays * 86_400_000);
+  return d.toISOString().slice(0, 10);
 }
 
 export function registerPgTools(
@@ -2270,12 +2351,27 @@ export function registerPgTools(
       const txAccountId = existing[0].account_id != null ? Number(existing[0].account_id) : undefined;
       const existingAmount = existing[0].amount != null ? Number(existing[0].amount) : null;
 
+      // Stream D: pull `name_ct` and decrypt before resolving. Without this,
+      // Phase-3 NULL-plaintext rows end up with `name === null` and
+      // `fuzzyFind`'s reverse-includes branch (`lo.includes(""))`) silently
+      // matches the FIRST row regardless of input — the silent-failure mode
+      // captured in issue #60. Strict resolver also gates substring matches
+      // on token overlap so "Cr" never resolves to "Credit Interest".
       let catId: number | undefined;
+      let resolvedCategory: { id: number; name: string } | null = null;
       if (category !== undefined) {
-        const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
-        const cat = fuzzyFind(category, allCats);
-        if (!cat) return err(`Category "${category}" not found`);
-        catId = Number(cat.id);
+        const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+        const allCats = decryptNameish(rawCats, dek);
+        const resolved = resolveCategoryStrict(category, allCats);
+        if (!resolved.ok) {
+          if (resolved.reason === "low_confidence") {
+            return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+          }
+          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          return err(`Category "${category}" not found. Available: ${list}`);
+        }
+        catId = Number(resolved.category.id);
+        resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
       }
 
       // Resolve the holding FK from either input form, then run the existing
@@ -2318,11 +2414,14 @@ export function registerPgTools(
       // (tool is called once at a time).
       // Issue #28: every UPDATE site appends `, updated_at = NOW()`. `source`
       // stays untouched (INSERT-only).
-      let changed = 0;
+      // Issue #60: track explicit column names instead of a count so the AI
+      // assistant can verify the exact write. Eliminates the "(1 field(s))"
+      // success-message ambiguity that masked silent category drops.
+      const fieldsUpdated: string[] = [];
       let postMergeAmount: number | null = existingAmount;
       if (date !== undefined) {
         await db.execute(sql`UPDATE transactions SET date = ${date}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("date");
       }
       // Entered-side update — re-locks the FX rate at the row's (possibly
       // updated) date. Triangulates and refuses on fallback.
@@ -2346,43 +2445,43 @@ export function registerPgTools(
                  updated_at = NOW()
            WHERE id = ${id} AND user_id = ${userId}
         `);
-        changed++;
+        fieldsUpdated.push("amount", "currency", "entered_amount", "entered_currency", "entered_fx_rate");
         postMergeAmount = resolved.amount;
       } else if (amount !== undefined) {
         // Account-side-only update: leave entered_* alone.
         await db.execute(sql`UPDATE transactions SET amount = ${amount}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("amount");
         postMergeAmount = amount;
       }
       if (catId !== undefined) {
         await db.execute(sql`UPDATE transactions SET category_id = ${catId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("category_id");
       }
       if (payee !== undefined) {
         const v = dek ? encryptField(dek, payee) : payee;
         await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("payee");
       }
       if (note !== undefined) {
         const v = dek ? encryptField(dek, note) : note;
         await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("note");
       }
       if (tags !== undefined) {
         const v = dek ? encryptField(dek, tags) : tags;
         await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("tags");
       }
       if (resolvedHoldingId !== undefined) {
         await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolvedHoldingId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("portfolio_holding_id");
       }
       if (quantity !== undefined) {
         await db.execute(sql`UPDATE transactions SET quantity = ${quantity}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("quantity");
       }
 
-      if (!changed) return err("No fields to update");
+      if (!fieldsUpdated.length) return err("No fields to update");
 
       invalidateUserTxCache(userId);
       // Issue #28: re-read the audit timestamp so the AI assistant can
@@ -2398,9 +2497,14 @@ export function registerPgTools(
             quantity: null,
           })
         : [];
+      // Issue #60: response shape — explicit `fieldsUpdated[]` replaces the
+      // ambiguous "(N field(s))" count, and `resolvedCategory` mirrors the
+      // per-row shape `bulk_record_transactions` already returns.
       return text({
         success: true,
-        message: `Transaction #${id} updated (${changed} field(s))`,
+        message: `Transaction #${id} updated`,
+        fieldsUpdated,
+        ...(resolvedCategory ? { resolvedCategory } : {}),
         updatedAt: after[0]?.updated_at,
         warnings,
       });
@@ -3178,6 +3282,8 @@ export function registerPgTools(
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
           record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair between two accounts. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity.",
           record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
+          preview_bulk_update: "preview_bulk_update(filter, changes) — accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker → id), tags ({mode: append|replace|remove, value}). Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[], confirmationToken. Stdio surface is narrower (no quantity/holding fields).",
+          execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Same `changes` keys as preview_bulk_update. Stdio: category-by-name only; quantity/holding writes refused.",
         };
         return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
       }
@@ -3699,10 +3805,13 @@ export function registerPgTools(
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const todayStr = new Date().toISOString().split("T")[0];
       const lo = symbol.toLowerCase();
-      // Fetch every FK-bound transaction for the user, JOINing portfolio_holdings
-      // for the (encrypted) display name + symbol. Phase 6 (2026-04-29) dropped
-      // the legacy t.portfolio_holding text column; the FK is now the sole
-      // source of truth.
+      // Fetch every FK-bound transaction for the user, JOINing
+      // holding_accounts (Section G) on (holding_id, account_id) so the
+      // (holding, account) pair is the join grain, plus portfolio_holdings
+      // for the (encrypted) display name + symbol. Phase 6 (2026-04-29)
+      // dropped the legacy t.portfolio_holding text column; the FK is now
+      // the sole source of truth. CLAUDE.md "Portfolio aggregator" — qty>0
+      // = buy regardless of amount sign (preserved in the loop below).
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
                t.portfolio_holding_id,
@@ -3711,6 +3820,10 @@ export function registerPgTools(
                a.name as account_name, a.name_ct as account_name_ct, a.currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
+        INNER JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ${userId}
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
         WHERE t.user_id = ${userId}
           AND t.portfolio_holding_id IS NOT NULL
@@ -5170,20 +5283,57 @@ export function registerPgTools(
 
   type BulkFilter = z.infer<typeof bulkFilterSchema>;
 
+  // Issue #61: `.strict()` so unknown keys (e.g. `quantitiy` typos) fail loudly
+  // at validation time instead of silently no-op'ing. The previous behavior
+  // stripped unknown keys → call returned `updated: N` while no rows actually
+  // changed (real-world fallout: 13 IBKR Joint transactions stuck mis-categorized
+  // because `bulk_update changes: { category: "Credit Interest" }` resolved to
+  // an empty change set under the OLD schema and reported success).
+  //
+  // NEW HTTP-only fields: `category` (name → category_id), `quantity` (nullable),
+  // `portfolioHoldingId` (FK), `portfolioHolding` (name/ticker → FK). These all
+  // resolve through the same strict-resolver pattern used by record_transaction
+  // / update_transaction. Stdio's bulkChangesSchema mirrors only `category` —
+  // stdio has no holding/quantity plumbing (see record_transaction stdio
+  // carve-out).
   const bulkChangesSchema = z.object({
     category_id: z.number().nullable().optional(),
+    category: z.string().optional().describe("Category name (resolved server-side via the strict resolver — exact / startsWith / token-overlapping substring). Errors with 'did you mean …?' on ambiguous matches."),
     account_id: z.number().optional(),
     date: z.string().optional(),
     note: z.string().optional(),
     payee: z.string().optional(),
     is_business: z.number().optional().describe("0 or 1"),
+    quantity: z.number().nullable().optional().describe("Share/unit count for portfolio rows. null clears the column."),
+    portfolioHoldingId: z.number().int().optional().describe("Portfolio holding FK (ownership-checked)."),
+    portfolioHolding: z.string().optional().describe("Holding name OR ticker symbol — resolved via the same lookup-only helper used by record_transaction (no auto-create)."),
     tags: z.object({
       mode: z.enum(["append", "replace", "remove"]),
       value: z.string(),
     }).optional().describe("Tag edit. mode=replace overwrites, append adds if not present, remove strips exact matches"),
-  });
+  }).strict();
 
   type BulkChanges = z.infer<typeof bulkChangesSchema>;
+
+  /**
+   * Issue #61: post-resolution change set written to the DB. The resolver
+   * collapses {category}→category_id and {portfolioHolding}→portfolioHoldingId
+   * before commit, so commitBulkUpdate only deals with FK ints. `unapplied[]`
+   * surfaces every requested change that didn't make it (missing category,
+   * disagreement, etc.) so previews never silently no-op.
+   */
+  type ResolvedChanges = {
+    category_id?: number | null;
+    account_id?: number;
+    date?: string;
+    note?: string;
+    payee?: string;
+    is_business?: number;
+    quantity?: number | null;
+    portfolioHoldingId?: number;
+    tags?: { mode: "append" | "replace" | "remove"; value: string };
+  };
+  type UnappliedChange = { key: string; reason: string };
 
   /**
    * Resolve a bulk filter to a list of transaction ids owned by the user.
@@ -5230,22 +5380,117 @@ export function registerPgTools(
     return out;
   }
 
-  /** Apply in-memory `changes` to a decrypted row for preview sampleAfter. */
-  function applyChangesToRow(row: Record<string, unknown>, changes: BulkChanges): Record<string, unknown> {
+  /**
+   * Issue #61: resolve names → ids and ownership-check FKs BEFORE preview/commit.
+   * Returns `{ resolved, unapplied[], error? }`:
+   *   - `resolved` is the post-resolution change set safe to write.
+   *   - `unapplied[]` lists every requested key that couldn't resolve (e.g.
+   *     category not found, holding ambiguous). The preview surfaces this so
+   *     callers don't see "updated: N" with nothing changed.
+   *   - `error` is non-null on hard conflicts (id-vs-name disagreement) — the
+   *     whole call must fail rather than partial-write.
+   */
+  async function resolveBulkChanges(
+    changes: BulkChanges,
+  ): Promise<{ resolved: ResolvedChanges; unapplied: UnappliedChange[]; error?: string }> {
+    const resolved: ResolvedChanges = {};
+    const unapplied: UnappliedChange[] = [];
+
+    // Carry over the trivially-passthrough fields. category_id is reused below
+    // when resolving `category` (id wins on conflict).
+    if (changes.category_id !== undefined) resolved.category_id = changes.category_id;
+    if (changes.account_id !== undefined) resolved.account_id = changes.account_id;
+    if (changes.date !== undefined) resolved.date = changes.date;
+    if (changes.note !== undefined) resolved.note = changes.note;
+    if (changes.payee !== undefined) resolved.payee = changes.payee;
+    if (changes.is_business !== undefined) resolved.is_business = changes.is_business;
+    if (changes.quantity !== undefined) resolved.quantity = changes.quantity;
+    if (changes.tags !== undefined) resolved.tags = changes.tags;
+
+    // ── category (name) ──────────────────────────────────────────────────
+    if (changes.category !== undefined) {
+      const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+      const allCats = decryptNameish(rawCats, dek);
+      const r = resolveCategoryStrict(changes.category, allCats);
+      if (!r.ok) {
+        if (r.reason === "low_confidence") {
+          unapplied.push({
+            key: "category",
+            reason: `Category "${changes.category}" did not match strongly — did you mean "${r.suggestion.name}" (id=${Number(r.suggestion.id)})?`,
+          });
+        } else {
+          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          unapplied.push({ key: "category", reason: `Category "${changes.category}" not found. Available: ${list}` });
+        }
+      } else {
+        const resolvedId = Number(r.category.id);
+        if (changes.category_id !== undefined && changes.category_id !== null && changes.category_id !== resolvedId) {
+          return {
+            resolved,
+            unapplied,
+            error: `category "${changes.category}" resolves to id=${resolvedId}, but category_id=${changes.category_id} disagrees. Pass only one, or make them match.`,
+          };
+        }
+        resolved.category_id = resolvedId;
+      }
+    }
+
+    // ── portfolioHoldingId (FK) ──────────────────────────────────────────
+    if (changes.portfolioHoldingId !== undefined) {
+      const ownsHolding = await q(db, sql`
+        SELECT 1 AS ok FROM portfolio_holdings WHERE id = ${changes.portfolioHoldingId} AND user_id = ${userId}
+      `);
+      if (!ownsHolding.length) {
+        return {
+          resolved,
+          unapplied,
+          error: `Portfolio holding #${changes.portfolioHoldingId} not found or not owned by you.`,
+        };
+      }
+      resolved.portfolioHoldingId = changes.portfolioHoldingId;
+    }
+
+    // ── portfolioHolding (name/ticker) ───────────────────────────────────
+    // Lookup-only — never auto-creates. Cross-account scope: holding lookup
+    // is unscoped here because bulk_update may target rows across accounts;
+    // ambiguous matches push to `unapplied` rather than rejecting outright.
+    if (changes.portfolioHolding !== undefined) {
+      const r = await resolvePortfolioHoldingByName(db, userId, changes.portfolioHolding, dek);
+      if (!r.ok) {
+        unapplied.push({ key: "portfolioHolding", reason: r.error });
+      } else {
+        if (resolved.portfolioHoldingId !== undefined && resolved.portfolioHoldingId !== r.id) {
+          return {
+            resolved,
+            unapplied,
+            error: `portfolioHolding "${changes.portfolioHolding}" resolves to id=${r.id}, but portfolioHoldingId=${resolved.portfolioHoldingId} disagrees. Pass only one, or make them match.`,
+          };
+        }
+        resolved.portfolioHoldingId = r.id;
+      }
+    }
+
+    return { resolved, unapplied };
+  }
+
+  /** Apply in-memory `resolved` changes to a decrypted row for preview sampleAfter. */
+  function applyChangesToRow(row: Record<string, unknown>, resolved: ResolvedChanges): Record<string, unknown> {
     const out = { ...row };
-    if (changes.category_id !== undefined) out.category_id = changes.category_id;
-    if (changes.account_id !== undefined) out.account_id = changes.account_id;
-    if (changes.date !== undefined) out.date = changes.date;
-    if (changes.note !== undefined) out.note = changes.note;
-    if (changes.payee !== undefined) out.payee = changes.payee;
-    if (changes.is_business !== undefined) out.is_business = changes.is_business;
-    if (changes.tags !== undefined) {
+    if (resolved.category_id !== undefined) out.category_id = resolved.category_id;
+    if (resolved.account_id !== undefined) out.account_id = resolved.account_id;
+    if (resolved.date !== undefined) out.date = resolved.date;
+    if (resolved.note !== undefined) out.note = resolved.note;
+    if (resolved.payee !== undefined) out.payee = resolved.payee;
+    if (resolved.is_business !== undefined) out.is_business = resolved.is_business;
+    if (resolved.quantity !== undefined) out.quantity = resolved.quantity;
+    if (resolved.portfolioHoldingId !== undefined) out.portfolio_holding_id = resolved.portfolioHoldingId;
+    if (resolved.tags !== undefined) {
       const current = String(out.tags ?? "");
       const currentSet = new Set(current.split(",").map((s) => s.trim()).filter(Boolean));
-      const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
-      if (changes.tags.mode === "replace") {
+      const tokens = resolved.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+      if (resolved.tags.mode === "replace") {
         out.tags = tokens.join(",");
-      } else if (changes.tags.mode === "append") {
+      } else if (resolved.tags.mode === "append") {
         for (const t of tokens) currentSet.add(t);
         out.tags = Array.from(currentSet).join(",");
       } else {
@@ -5256,16 +5501,32 @@ export function registerPgTools(
     return out;
   }
 
-  /** Shared preview helper — resolves ids + samples before/after. */
+  /**
+   * Shared preview helper — resolves ids + samples before/after. Issue #61:
+   * the resolver is called HERE (not in the tool wrapper) so the sample
+   * `after` rows reflect the post-resolution change set, AND the response
+   * carries `unappliedChanges` so a caller can see "category resolution
+   * failed" without ever seeing a `success: true, updated: N` lie. The
+   * confirmation token signs the ORIGINAL `changes` payload (not the
+   * resolved one) so the same payload round-trips between preview/execute.
+   */
   async function previewBulk(filter: BulkFilter, changes: BulkChanges, op: string) {
     const ids = await resolveFilterToIds(filter);
-    if (ids.length === 0) return { affectedCount: 0, sampleBefore: [], sampleAfter: [], confirmationToken: "" };
+
+    // Resolve names → ids up front; surface conflicts as a hard error.
+    const { resolved, unapplied, error } = await resolveBulkChanges(changes);
+    if (error) throw new Error(error);
+
+    if (ids.length === 0) {
+      return { affectedCount: 0, sampleBefore: [], sampleAfter: [], unappliedChanges: unapplied, ids: [], confirmationToken: "" };
+    }
 
     const sampleIds = ids.slice(0, 10);
     const rawRows = await q(db, sql`
       SELECT t.id, t.date, t.account_id, a.name AS account, a.name_ct AS account_ct,
              t.category_id, c.name AS category, c.name_ct AS category_ct,
-             t.currency, t.amount, t.payee, t.note, t.tags, t.is_business
+             t.currency, t.amount, t.payee, t.note, t.tags, t.is_business,
+             t.quantity, t.portfolio_holding_id
       FROM transactions t
       LEFT JOIN accounts a ON t.account_id = a.id
       LEFT JOIN categories c ON t.category_id = c.id
@@ -5281,56 +5542,74 @@ export function registerPgTools(
       };
     });
     const before = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
-    const after = before.map((r) => applyChangesToRow(r, changes));
+    const after = before.map((r) => applyChangesToRow(r, resolved));
     // The token payload encodes the resolved ids — not the filter — so Claude
-    // can't widen the scope between preview and execute.
+    // can't widen the scope between preview and execute. We sign the
+    // user-supplied `changes` (not the resolved form) so the execute caller
+    // can pass the same payload back unchanged; execute re-runs resolution.
     const token = signConfirmationToken(userId, op, { ids, changes });
-    return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, ids, confirmationToken: token };
+    return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, unappliedChanges: unapplied, ids, confirmationToken: token };
   }
 
-  /** Commit a bulk update to the resolved ids. */
-  async function commitBulkUpdate(ids: number[], changes: BulkChanges): Promise<number> {
+  /**
+   * Commit a bulk update to the resolved ids. Takes the POST-resolution
+   * `ResolvedChanges` shape (issue #61) so name → id resolution is centralized
+   * upstream and this function only ever sees FK ints.
+   *
+   * Issue #28 audit-trio invariant: every UPDATE here bumps `updated_at = NOW()`.
+   * `source` is INSERT-only and never modified — adding a `source = 'X'` clause
+   * to any branch in this function is wrong.
+   */
+  async function commitBulkUpdate(ids: number[], resolved: ResolvedChanges): Promise<number> {
     if (ids.length === 0) return 0;
     const idList = sql.raw(`(${ids.map((n) => Number(n)).join(",")})`);
 
     // Per-field updates: keeps the SQL simple + parameterized, and lets us
     // encrypt payee / note / tags when a DEK is present.
-    // Issue #28: every UPDATE site bumps updated_at = NOW(). `source` is
-    // INSERT-only so it stays untouched.
-    if (changes.category_id !== undefined) {
-      await db.execute(sql`UPDATE transactions SET category_id = ${changes.category_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+    if (resolved.category_id !== undefined) {
+      await db.execute(sql`UPDATE transactions SET category_id = ${resolved.category_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
-    if (changes.account_id !== undefined) {
-      await db.execute(sql`UPDATE transactions SET account_id = ${changes.account_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+    if (resolved.account_id !== undefined) {
+      await db.execute(sql`UPDATE transactions SET account_id = ${resolved.account_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
-    if (changes.date !== undefined) {
-      await db.execute(sql`UPDATE transactions SET date = ${changes.date}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+    if (resolved.date !== undefined) {
+      await db.execute(sql`UPDATE transactions SET date = ${resolved.date}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
-    if (changes.is_business !== undefined) {
-      await db.execute(sql`UPDATE transactions SET is_business = ${changes.is_business}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+    if (resolved.is_business !== undefined) {
+      await db.execute(sql`UPDATE transactions SET is_business = ${resolved.is_business}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
-    if (changes.payee !== undefined) {
-      const v = dek ? encryptField(dek, changes.payee) : changes.payee;
+    if (resolved.payee !== undefined) {
+      const v = dek ? encryptField(dek, resolved.payee) : resolved.payee;
       await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
-    if (changes.note !== undefined) {
-      const v = dek ? encryptField(dek, changes.note) : changes.note;
+    if (resolved.note !== undefined) {
+      const v = dek ? encryptField(dek, resolved.note) : resolved.note;
       await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
     }
-    if (changes.tags !== undefined) {
+    if (resolved.quantity !== undefined) {
+      // Issue #61: `null` clears the column; numeric writes go through directly.
+      // Source-stamping rule (issue #28): `source` is INSERT-only — never set here.
+      await db.execute(sql`UPDATE transactions SET quantity = ${resolved.quantity}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+    }
+    if (resolved.portfolioHoldingId !== undefined) {
+      // Ownership pre-checked at resolveBulkChanges time. Audit invariant:
+      // bumps updated_at; never touches `source`.
+      await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolved.portfolioHoldingId}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+    }
+    if (resolved.tags !== undefined) {
       // Tag edits need per-row merging when mode != replace (because each row
       // carries different existing tags). Fetch the current tags, decrypt,
       // mutate, re-encrypt, write row-by-row. For replace we can write once.
-      if (changes.tags.mode === "replace") {
-        const v = dek ? encryptField(dek, changes.tags.value) : changes.tags.value;
+      if (resolved.tags.mode === "replace") {
+        const v = dek ? encryptField(dek, resolved.tags.value) : resolved.tags.value;
         await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
       } else {
         const rows = await q(db, sql`SELECT id, tags FROM transactions WHERE id IN ${idList} AND user_id = ${userId}`);
-        const tokens = changes.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
+        const tokens = resolved.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
         for (const r of rows) {
           const plain = dek ? (decryptField(dek, String(r.tags ?? "")) ?? "") : String(r.tags ?? "");
           const set = new Set(plain.split(",").map((s) => s.trim()).filter(Boolean));
-          if (changes.tags.mode === "append") {
+          if (resolved.tags.mode === "append") {
             for (const t of tokens) set.add(t);
           } else {
             for (const t of tokens) set.delete(t);
@@ -5345,17 +5624,21 @@ export function registerPgTools(
   }
 
   // ── preview_bulk_update ────────────────────────────────────────────────────
+  // Issue #61: schema accepts `category` (name), `quantity`, `portfolioHoldingId`,
+  // `portfolioHolding` in addition to the original surface. Unknown keys fail
+  // strictly (no more silent no-ops). Response includes `unappliedChanges` so
+  // a caller seeing identical sampleBefore/sampleAfter knows WHY.
   server.tool(
     "preview_bulk_update",
-    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, and a confirmationToken (5-min TTL) for execute_bulk_update.",
+    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, an `unappliedChanges` array (per requested change that couldn't resolve), and a confirmationToken (5-min TTL) for execute_bulk_update. Accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker), tags ({ mode: append|replace|remove, value }). Unknown keys fail with a 400.",
     {
       filter: bulkFilterSchema,
       changes: bulkChangesSchema,
     },
     async ({ filter, changes }) => {
       try {
-        const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_update");
-        return text({ success: true, data: { affectedCount, sampleBefore, sampleAfter, confirmationToken } });
+        const { affectedCount, sampleBefore, sampleAfter, unappliedChanges, confirmationToken } = await previewBulk(filter, changes, "bulk_update");
+        return text({ success: true, data: { affectedCount, sampleBefore, sampleAfter, unappliedChanges, confirmationToken } });
       } catch (e) {
         return err(String(e instanceof Error ? e.message : e));
       }
@@ -5363,9 +5646,12 @@ export function registerPgTools(
   );
 
   // ── execute_bulk_update ────────────────────────────────────────────────────
+  // Issue #61: re-runs name→id resolution and refuses to commit when the
+  // resolved set has zero applicable changes (so a failed `category` lookup
+  // can no longer report `updated: N` while writing nothing).
   server.tool(
     "execute_bulk_update",
-    "Commit a bulk update. Must be preceded by preview_bulk_update; the same filter+changes must be passed.",
+    "Commit a bulk update. Must be preceded by preview_bulk_update; the same filter+changes must be passed. Accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker), tags. Unknown keys fail. Aborts (no commit) when ALL requested changes failed to resolve.",
     {
       filter: bulkFilterSchema,
       changes: bulkChangesSchema,
@@ -5376,9 +5662,22 @@ export function registerPgTools(
         const ids = await resolveFilterToIds(filter);
         const check = verifyConfirmationToken(confirmation_token, userId, "bulk_update", { ids, changes });
         if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_update.`);
-        const n = await commitBulkUpdate(ids, changes);
+
+        // Issue #61: resolve names → ids HERE so the commit only ever writes
+        // FK ints. Refuse hard conflicts (id-vs-name disagreement). Refuse if
+        // the resolved set is empty — silently committing zero changes was
+        // the root failure mode this issue targets.
+        const { resolved, unapplied, error } = await resolveBulkChanges(changes);
+        if (error) return err(error);
+        const requestedKeys = Object.keys(changes);
+        const resolvedKeys = Object.keys(resolved);
+        if (requestedKeys.length > 0 && resolvedKeys.length === 0) {
+          return err(`No changes could be applied. Resolution failures: ${unapplied.map(u => `${u.key}: ${u.reason}`).join(" | ")}`);
+        }
+
+        const n = await commitBulkUpdate(ids, resolved);
         if (n > 0) invalidateUserTxCache(userId);
-        return text({ success: true, data: { updated: n } });
+        return text({ success: true, data: { updated: n, unappliedChanges: unapplied } });
       } catch (e) {
         return err(String(e instanceof Error ? e.message : e));
       }
@@ -5494,7 +5793,10 @@ export function registerPgTools(
         const changes: BulkChanges = { category_id };
         const check = verifyConfirmationToken(confirmation_token, userId, "bulk_categorize", { ids, changes });
         if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_categorize.`);
-        const n = await commitBulkUpdate(ids, changes);
+        // Issue #61: commit takes the resolved shape now. category_id is
+        // already an int so resolution is a no-op for this code path.
+        const resolved: ResolvedChanges = { category_id };
+        const n = await commitBulkUpdate(ids, resolved);
         if (n > 0) invalidateUserTxCache(userId);
         return text({ success: true, data: { updated: n } });
       } catch (e) {
@@ -5755,7 +6057,7 @@ export function registerPgTools(
   // ── preview_import ─────────────────────────────────────────────────────────
   server.tool(
     "preview_import",
-    "Preview an uploaded CSV/OFX/QFX file. Returns first 20 parsed rows, dedup hit count, category auto-match coverage, unresolved accounts, and a confirmationToken for execute_import.",
+    "Preview an uploaded CSV/OFX/QFX file. Returns first 20 parsed rows, dedup hit count, category auto-match coverage, unresolved accounts, probable cross-source duplicates (FX-spread + ±7 day fuzzy match — heuristic, not exact), and a confirmationToken for execute_import.",
     {
       upload_id: z.string().describe("The id returned by POST /api/mcp/upload"),
       template_id: z.number().optional().describe("Apply a saved import template's column mapping"),
@@ -5790,12 +6092,124 @@ export function registerPgTools(
 
         let dedupHits = 0;
         const unresolvedAccounts = new Set<string>();
-        for (const r of rows) {
+        // Issue #65: collect non-exact-dedup rows so we can run probable-duplicate detection
+        // afterwards. The detector deliberately doesn't see rows that exact-match upstream.
+        const fuzzyInputs: Array<{
+          rowIndex: number;
+          date: string;
+          accountId: number;
+          amount: number;
+          payeePlain: string;
+          importHash: string;
+        }> = [];
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
           const aId = accountByName.get(r.account);
           if (!aId && r.account) unresolvedAccounts.add(r.account);
           if (aId) {
             const h = generateImportHash(r.date, aId, r.amount, r.payee);
-            if (existingHashes.has(h)) dedupHits++;
+            if (existingHashes.has(h)) {
+              dedupHits++;
+            } else {
+              fuzzyInputs.push({
+                rowIndex: i,
+                date: r.date,
+                accountId: aId,
+                amount: r.amount,
+                payeePlain: r.payee ?? "",
+                importHash: h,
+              });
+            }
+          }
+        }
+
+        // Issue #65: cross-source duplicate detection. Builds a one-shot pool
+        // over the union of touched accounts in a ±7 day window and runs the
+        // shared scoring helper. Warning surface only — never blocks the
+        // import. The helper handles the consume-once-per-existing-row
+        // invariant.
+        let probableDuplicates: DuplicateMatch[] = [];
+        if (fuzzyInputs.length > 0) {
+          try {
+            const accountIdSet = Array.from(new Set(fuzzyInputs.map((f) => f.accountId)));
+            const dates = fuzzyInputs.map((f) => f.date).sort();
+            const dateMin = shiftIsoDate(dates[0], -7);
+            const dateMax = shiftIsoDate(dates[dates.length - 1], 7);
+            if (dateMin && dateMax) {
+              const poolRows = await q(db, sql`
+                SELECT t.id, t.account_id, t.date, t.amount, t.payee, t.import_hash,
+                       t.fit_id, t.link_id, c.type AS category_type, t.source,
+                       t.portfolio_holding_id
+                  FROM transactions t
+                  LEFT JOIN categories c ON c.id = t.category_id
+                 WHERE t.user_id = ${userId}
+                   AND t.account_id = ANY(${accountIdSet}::int[])
+                   AND t.date BETWEEN ${dateMin} AND ${dateMax}
+              `);
+              const byAccount = new Map<number, DuplicateCandidateRow[]>();
+              const linkIds: string[] = [];
+              for (const p of poolRows) {
+                const accId = Number(p.account_id);
+                const payeeRaw = p.payee == null ? null : String(p.payee);
+                const payeePlain =
+                  payeeRaw && payeeRaw.startsWith("v1:")
+                    ? dek
+                      ? tryDecryptField(dek, payeeRaw, "transactions.payee")
+                      : null
+                    : payeeRaw;
+                const row: DuplicateCandidateRow = {
+                  id: Number(p.id),
+                  accountId: accId,
+                  date: String(p.date),
+                  amount: Number(p.amount),
+                  payeePlain,
+                  importHash: p.import_hash == null ? null : String(p.import_hash),
+                  fitId: p.fit_id == null ? null : String(p.fit_id),
+                  linkId: p.link_id == null ? null : String(p.link_id),
+                  categoryType: p.category_type == null ? null : String(p.category_type),
+                  source: p.source == null ? null : String(p.source),
+                  portfolioHoldingId: p.portfolio_holding_id == null ? null : Number(p.portfolio_holding_id),
+                };
+                const arr = byAccount.get(accId) ?? [];
+                arr.push(row);
+                byAccount.set(accId, arr);
+                if (row.categoryType === "R" && row.linkId) linkIds.push(row.linkId);
+              }
+
+              // Sibling-account index for transfer-pair hint.
+              const siblingAccountByLinkId = new Map<string, number>();
+              if (linkIds.length > 0) {
+                const sibRows = await q(db, sql`
+                  SELECT link_id, account_id
+                    FROM transactions
+                   WHERE user_id = ${userId}
+                     AND link_id = ANY(${linkIds}::text[])
+                `);
+                const accountSet = new Set<number>(accountIdSet);
+                const byLink = new Map<string, number[]>();
+                for (const sr of sibRows) {
+                  const lid = sr.link_id == null ? null : String(sr.link_id);
+                  const a = sr.account_id == null ? null : Number(sr.account_id);
+                  if (!lid || a == null) continue;
+                  const arr = byLink.get(lid) ?? [];
+                  arr.push(a);
+                  byLink.set(lid, arr);
+                }
+                for (const [linkId, accs] of byLink) {
+                  const sib = accs.find((a) => !accountSet.has(a));
+                  if (sib != null) siblingAccountByLinkId.set(linkId, sib);
+                }
+              }
+
+              const pool: DuplicateCandidatePool = {
+                byAccount,
+                siblingAccountByLinkId,
+              };
+              probableDuplicates = detectProbableDuplicates(fuzzyInputs, pool);
+            }
+          } catch {
+            // Heuristic — never block the preview on a detection error.
+            probableDuplicates = [];
           }
         }
 
@@ -5858,6 +6272,11 @@ export function registerPgTools(
             dedupHits,
             categoryCoveragePct: rows.length === 0 ? 0 : Math.round((matchedCat / rows.length) * 100),
             unresolvedAccounts: Array.from(unresolvedAccounts),
+            // Issue #65: warning surface only — these rows still commit on
+            // execute_import unless the user explicitly skips them. Heuristic
+            // thresholds: ±7 days, amount within ±7% OR ±$50 (whichever
+            // larger), score ≥ 0.6.
+            probableDuplicates,
             confirmationToken: token,
           },
         });

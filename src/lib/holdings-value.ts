@@ -92,13 +92,15 @@ export async function getHoldingsValueByAccount(
     symbolCt: "symbol",
   });
 
-  // Aggregate remaining quantity AND cost-basis components per holding via
-  // the integer FK. SQL-side GROUP BY runs on plaintext metadata — no
-  // per-row decryption. qty>0 contributes (Finlynq-native amt<0+qty>0 and
-  // WP convention amt>0+qty>0 are both buys); qty<0 contributes (already
-  // negative, sells); qty=0 is a dividend for share-count purposes.
-  // Mirrors /api/portfolio/overview's CASE. ABS(amount) for cost basis so
-  // both amt-sign conventions yield positive cost.
+  // Aggregate remaining quantity AND cost-basis components per (holding,
+  // account) via the integer FK + JOIN through `holding_accounts`. Today
+  // each portfolio_holdings row maps to exactly one holding_accounts
+  // pairing (is_primary=true), so the result is identical to grouping by
+  // portfolio_holding_id alone — but the JOIN is forward-compatible with
+  // Section G's many-to-many shape. CLAUDE.md "Portfolio aggregator":
+  // qty>0 = buy regardless of amount sign. ABS(amount) for cost basis so
+  // both Finlynq-native (amt<0+qty>0) and WP convention (amt>0+qty>0)
+  // yield positive cost.
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
@@ -114,6 +116,14 @@ export async function getHoldingsValueByAccount(
       totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
     })
     .from(schema.transactions)
+    .innerJoin(
+      schema.holdingAccounts,
+      and(
+        eq(schema.holdingAccounts.holdingId, schema.transactions.portfolioHoldingId),
+        eq(schema.holdingAccounts.accountId, schema.transactions.accountId),
+        eq(schema.holdingAccounts.userId, userId),
+      ),
+    )
     .where(and(
       eq(schema.transactions.userId, userId),
       isNotNull(schema.transactions.portfolioHoldingId),
