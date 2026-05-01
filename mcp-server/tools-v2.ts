@@ -29,6 +29,7 @@ type TransactionRow = {
   payee: string;
   note: string;
   tags: string;
+  quantity: number | null;
 };
 
 type BudgetRow = {
@@ -440,7 +441,7 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
 
   server.tool(
     "search_transactions",
-    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly.",
+    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly. Each row includes `quantity` (nullable; positive for buys, negative for sells; null for cash-proxy and non-investment transactions).",
     {
       payee: z.string().optional().describe("Partial payee/merchant name match"),
       min_amount: z.number().optional().describe("Minimum amount"),
@@ -454,7 +455,7 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
     },
     async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, limit }) => {
       let query = `SELECT t.id, t.date, a.name as account, c.name as category, c.type as category_type,
-                   t.currency, t.amount, t.payee, t.note, t.tags
+                   t.currency, t.amount, t.payee, t.note, t.tags, t.quantity
                    FROM transactions t
                    LEFT JOIN accounts a ON t.account_id = a.id
                    LEFT JOIN categories c ON t.category_id = c.id
