@@ -2335,13 +2335,42 @@ function TransactionsPageInner() {
                 />
               </div>
 
-              {/* On edit, surface a small metadata footer so power users
-                  can still see the underlying row IDs. */}
-              {transferEdit && (
-                <div className="text-[11px] text-muted-foreground border-t pt-2">
-                  Editing transfer — IDs #{transferEdit.fromTxId} (debit) ↔ #{transferEdit.toTxId} (credit) · linkId <span className="font-mono">{transferEdit.linkId.slice(0, 8)}…</span>
-                </div>
-              )}
+              {/* Audit-trio footer (issue #28). Only on edit — irrelevant on
+                  create. Both legs share the trio; we display the debit leg's
+                  source and the canonical earliest/latest timestamps so the
+                  user sees a single coherent line even if the legs disagree
+                  by a few ms. */}
+              {transferEdit && (() => {
+                const debit = txns.find((t) => t.id === transferEdit.fromTxId);
+                const credit = txns.find((t) => t.id === transferEdit.toTxId);
+                if (!debit && !credit) return null;
+                const createdCandidates = [debit?.createdAt, credit?.createdAt]
+                  .filter((v): v is string => !!v)
+                  .map((v) => new Date(v).getTime())
+                  .filter((v) => !Number.isNaN(v));
+                const updatedCandidates = [debit?.updatedAt, credit?.updatedAt]
+                  .filter((v): v is string => !!v)
+                  .map((v) => new Date(v).getTime())
+                  .filter((v) => !Number.isNaN(v));
+                const created = createdCandidates.length
+                  ? new Date(Math.min(...createdCandidates)).toLocaleString()
+                  : null;
+                const updated = updatedCandidates.length
+                  ? new Date(Math.max(...updatedCandidates)).toLocaleString()
+                  : null;
+                const src = debit?.source ?? credit?.source ?? null;
+                const sourceLabel = src ? labelForSource(src) : null;
+                if (!created && !updated && !sourceLabel) return null;
+                return (
+                  <div className="text-[11px] text-muted-foreground border-t pt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {created && <span>Created {created}</span>}
+                    {updated && <span>· Updated {updated}</span>}
+                    {sourceLabel && (
+                      <Badge variant="outline" className="text-[10px] py-0 px-1.5">{sourceLabel}</Badge>
+                    )}
+                  </div>
+                );
+              })()}
 
               {submitError && (
                 <div className="rounded-md border border-rose-300 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
