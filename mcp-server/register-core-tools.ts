@@ -171,6 +171,54 @@ function resolveAccountStrict(input: string, options: SqliteRow[]): StdioAccount
     : { ok: false, reason: "missing" };
 }
 
+/**
+ * Strict resolver for category writes — same waterfall as
+ * {@link resolveAccountStrict} minus the alias tier (categories have no
+ * aliases). Substring/reverse-substring hits gated on a length-≥3
+ * whitespace-token overlap so a sloppy "Cr" never silently routes a write
+ * to "Credit Interest". Mirrors the HTTP transport's helper so a sloppy
+ * category name fails the same way on stdio as it does on HTTP.
+ */
+type StdioCategoryResolveResult =
+  | { ok: true; category: SqliteRow; tier: "exact" | "startsWith" | "substring" }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: SqliteRow };
+function resolveCategoryStrict(input: string, options: SqliteRow[]): StdioCategoryResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exact) return { ok: true, category: exact, tier: "exact" };
+  const starts = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (starts) return { ok: true, category: starts, tier: "startsWith" };
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (name: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, category: sub, tier: "substring" };
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
 /** Auto-categorize payee: rules → historical frequency (both user-scoped) */
 async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): Promise<number | null> {
   if (!payee) return null;
@@ -901,17 +949,36 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       `).get(id, userId) as { id: number; date: string; account_currency?: string } | undefined;
       if (!existing) return sqliteErr(`Transaction #${id} not found or not owned by user`);
 
+      // Issue #60: strict resolver — substring matches gated on token
+      // overlap so a sloppy "Cr" can't silently route a write to
+      // "Credit Interest". Stdio writes are plaintext (no DEK), so no
+      // decrypt step here.
       let catId: number | undefined;
+      let resolvedCategory: { id: number; name: string } | null = null;
       if (category !== undefined) {
         const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-        const cat = fuzzyFind(category, allCats);
-        if (!cat) return sqliteErr(`Category "${category}" not found`);
-        catId = Number(cat.id);
+        const resolved = resolveCategoryStrict(category, allCats);
+        if (!resolved.ok) {
+          if (resolved.reason === "low_confidence") {
+            return sqliteErr(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+          }
+          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          return sqliteErr(`Category "${category}" not found. Available: ${list}`);
+        }
+        catId = Number(resolved.category.id);
+        resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
       }
 
+      // Issue #60: track explicit column names instead of a count so the AI
+      // assistant can verify the exact write. Mirrors the HTTP transport.
+      const fieldsUpdated: string[] = [];
       const updates: string[] = [];
       const params: unknown[] = [];
-      if (date !== undefined) { updates.push("date = ?"); params.push(date); }
+      if (date !== undefined) {
+        updates.push("date = ?");
+        params.push(date);
+        fieldsUpdated.push("date");
+      }
       if (enteredAmount !== undefined) {
         const txDate = date ?? existing.date;
         const resolved = await resolveTxAmountsCore({
@@ -924,19 +991,34 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         if (!resolved.ok) return sqliteErr(resolved.message);
         updates.push("amount = ?", "currency = ?", "entered_amount = ?", "entered_currency = ?", "entered_fx_rate = ?");
         params.push(resolved.amount, resolved.currency, resolved.enteredAmount, resolved.enteredCurrency, resolved.enteredFxRate);
+        fieldsUpdated.push("amount", "currency", "entered_amount", "entered_currency", "entered_fx_rate");
       } else if (amount !== undefined) {
         updates.push("amount = ?");
         params.push(amount);
+        fieldsUpdated.push("amount");
       }
-      if (payee !== undefined) { updates.push("payee = ?"); params.push(payee); }
-      if (catId !== undefined) { updates.push("category_id = ?"); params.push(catId); }
-      if (note !== undefined) { updates.push("note = ?"); params.push(note); }
-      if (tags !== undefined) { updates.push("tags = ?"); params.push(tags); }
+      if (payee !== undefined) {
+        updates.push("payee = ?");
+        params.push(payee);
+        fieldsUpdated.push("payee");
+      }
+      if (catId !== undefined) {
+        updates.push("category_id = ?");
+        params.push(catId);
+        fieldsUpdated.push("category_id");
+      }
+      if (note !== undefined) {
+        updates.push("note = ?");
+        params.push(note);
+        fieldsUpdated.push("note");
+      }
+      if (tags !== undefined) {
+        updates.push("tags = ?");
+        params.push(tags);
+        fieldsUpdated.push("tags");
+      }
       if (!updates.length) return sqliteErr("No fields to update");
 
-      // Capture the user-touched field count before appending audit bump
-      // so the success message stays accurate.
-      const userTouchedCount = updates.length;
       // Issue #28: every UPDATE bumps updated_at. Always appended — `source`
       // stays untouched (INSERT-only).
       updates.push("updated_at = NOW()");
@@ -949,7 +1031,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const after = await sqlite.prepare(`SELECT updated_at FROM transactions WHERE id = ? AND user_id = ?`).get(id, userId) as { updated_at?: string } | undefined;
       return txt({
         success: true,
-        message: `Transaction #${id} updated (${userTouchedCount} field(s))`,
+        message: `Transaction #${id} updated`,
+        fieldsUpdated,
+        ...(resolvedCategory ? { resolvedCategory } : {}),
         updatedAt: after?.updated_at,
       });
     }

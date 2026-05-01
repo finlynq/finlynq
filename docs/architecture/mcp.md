@@ -165,6 +165,18 @@ Available on `record_transaction` / `bulk_record_transactions` / `update_transac
 - `record_transaction` puts `warnings` at the top level of the success response. `bulk_record_transactions` attaches `warnings` to per-row results only when non-empty (keeps the common case unchanged for callers that don't read it). `update_transaction` warns only when the user *explicitly bound a holding on this update* without also passing `quantity` — touching unrelated fields (e.g. date) on a previously-bound row doesn't fire.
 - Stdio MCP doesn't expose `portfolioHoldingId`/`quantity` on write tools and refuses investment-account writes outright, so the warning condition can't trigger there.
 
+### `update_transaction` response shape ([#60](https://github.com/finlynq/finlynq/issues/60))
+
+`update_transaction` (HTTP + stdio) returns explicit column attribution on success instead of an opaque field count:
+
+- `fieldsUpdated: string[]` — the exact list of column names actually written (`["category_id", "payee"]`). Replaces the legacy `"updated (N field(s))"` message which masked silent category drops on Stream-D Phase-3 users (see below).
+- `resolvedCategory: { id, name }` — only present when `category` was in the input AND the resolver succeeded. Mirrors the per-row shape `bulk_record_transactions` already returns at [register-tools-pg.ts:1966](../../mcp-server/register-tools-pg.ts).
+- `updatedAt` and `warnings` unchanged.
+
+### Strict category resolver on writes ([#60](https://github.com/finlynq/finlynq/issues/60))
+
+`update_transaction` uses `resolveCategoryStrict` (analogous to `resolveAccountStrict`) instead of plain `fuzzyFind`. Substring/reverse-substring matches are gated on a length-≥3 whitespace-token overlap, so a sloppy `"Cr"` no longer routes a write to `"Credit Interest"`. On HTTP, the SELECT pulls `name_ct` and runs `decryptNameish(rawCats, dek)` before resolving — without this, Stream-D Phase-3 users (NULL plaintext `categories.name`) hit `fuzzyFind`'s reverse-includes branch (`lo.includes("")` is always true) and silently match the FIRST category in the list. Low-confidence misses return `Category "X" did not match strongly — did you mean "Y" (id=N)?` so the agent has an explicit recovery path. Stdio mirrors the strict resolver but skips the decrypt step (stdio writes are plaintext).
+
 ### Reading the id back
 
 - `get_portfolio_analysis` — exposes `id: <int>` per holding in the `holdings[]` array (HTTP + stdio).

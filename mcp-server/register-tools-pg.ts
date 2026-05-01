@@ -183,6 +183,64 @@ function resolveAccountStrict(input: string, options: Row[]): AccountResolveResu
 }
 
 /**
+ * Strict resolver for category writes — same waterfall as
+ * {@link resolveAccountStrict} minus the alias tier (categories have no
+ * aliases). Substring/reverse-substring hits are only accepted when the input
+ * and the candidate share a whitespace-separated token of length ≥3, so a
+ * sloppy "Cr" never silently routes a write to "Credit Interest" via
+ * `fuzzyFind`'s reverse-includes branch.
+ *
+ * The decrypt step is the caller's responsibility — pass already-decrypted
+ * rows. With NULL plaintext + NULL ciphertext (or DEK absent on stdio) the
+ * row's effective `name` is empty and is filtered out, never matched.
+ *
+ * Returns the same shape as {@link resolveAccountStrict} so the caller can
+ * format `did you mean … (id=N)?` errors uniformly.
+ */
+type CategoryResolveTier = "exact" | "startsWith" | "substring";
+type CategoryResolveResult =
+  | { ok: true; category: Row; tier: CategoryResolveTier }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: Row };
+function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exact) return { ok: true, category: exact, tier: "exact" };
+  const starts = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (starts) return { ok: true, category: starts, tier: "startsWith" };
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (name: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, category: sub, tier: "substring" };
+  // No strong match. Surface what fuzzyFind WOULD have picked so the caller
+  // can include it in the error message.
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
+/**
  * Stream D: decrypt name + alias + symbol columns on a row set before
  * handing them to {@link fuzzyFind} or display code. Pre-Phase-3, rows may
  * have plaintext populated and `name_ct` null — in that case plaintext
@@ -2270,12 +2328,27 @@ export function registerPgTools(
       const txAccountId = existing[0].account_id != null ? Number(existing[0].account_id) : undefined;
       const existingAmount = existing[0].amount != null ? Number(existing[0].amount) : null;
 
+      // Stream D: pull `name_ct` and decrypt before resolving. Without this,
+      // Phase-3 NULL-plaintext rows end up with `name === null` and
+      // `fuzzyFind`'s reverse-includes branch (`lo.includes(""))`) silently
+      // matches the FIRST row regardless of input — the silent-failure mode
+      // captured in issue #60. Strict resolver also gates substring matches
+      // on token overlap so "Cr" never resolves to "Credit Interest".
       let catId: number | undefined;
+      let resolvedCategory: { id: number; name: string } | null = null;
       if (category !== undefined) {
-        const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
-        const cat = fuzzyFind(category, allCats);
-        if (!cat) return err(`Category "${category}" not found`);
-        catId = Number(cat.id);
+        const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+        const allCats = decryptNameish(rawCats, dek);
+        const resolved = resolveCategoryStrict(category, allCats);
+        if (!resolved.ok) {
+          if (resolved.reason === "low_confidence") {
+            return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+          }
+          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          return err(`Category "${category}" not found. Available: ${list}`);
+        }
+        catId = Number(resolved.category.id);
+        resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
       }
 
       // Resolve the holding FK from either input form, then run the existing
@@ -2318,11 +2391,14 @@ export function registerPgTools(
       // (tool is called once at a time).
       // Issue #28: every UPDATE site appends `, updated_at = NOW()`. `source`
       // stays untouched (INSERT-only).
-      let changed = 0;
+      // Issue #60: track explicit column names instead of a count so the AI
+      // assistant can verify the exact write. Eliminates the "(1 field(s))"
+      // success-message ambiguity that masked silent category drops.
+      const fieldsUpdated: string[] = [];
       let postMergeAmount: number | null = existingAmount;
       if (date !== undefined) {
         await db.execute(sql`UPDATE transactions SET date = ${date}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("date");
       }
       // Entered-side update — re-locks the FX rate at the row's (possibly
       // updated) date. Triangulates and refuses on fallback.
@@ -2346,43 +2422,43 @@ export function registerPgTools(
                  updated_at = NOW()
            WHERE id = ${id} AND user_id = ${userId}
         `);
-        changed++;
+        fieldsUpdated.push("amount", "currency", "entered_amount", "entered_currency", "entered_fx_rate");
         postMergeAmount = resolved.amount;
       } else if (amount !== undefined) {
         // Account-side-only update: leave entered_* alone.
         await db.execute(sql`UPDATE transactions SET amount = ${amount}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("amount");
         postMergeAmount = amount;
       }
       if (catId !== undefined) {
         await db.execute(sql`UPDATE transactions SET category_id = ${catId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("category_id");
       }
       if (payee !== undefined) {
         const v = dek ? encryptField(dek, payee) : payee;
         await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("payee");
       }
       if (note !== undefined) {
         const v = dek ? encryptField(dek, note) : note;
         await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("note");
       }
       if (tags !== undefined) {
         const v = dek ? encryptField(dek, tags) : tags;
         await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("tags");
       }
       if (resolvedHoldingId !== undefined) {
         await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolvedHoldingId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("portfolio_holding_id");
       }
       if (quantity !== undefined) {
         await db.execute(sql`UPDATE transactions SET quantity = ${quantity}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        changed++;
+        fieldsUpdated.push("quantity");
       }
 
-      if (!changed) return err("No fields to update");
+      if (!fieldsUpdated.length) return err("No fields to update");
 
       invalidateUserTxCache(userId);
       // Issue #28: re-read the audit timestamp so the AI assistant can
@@ -2398,9 +2474,14 @@ export function registerPgTools(
             quantity: null,
           })
         : [];
+      // Issue #60: response shape — explicit `fieldsUpdated[]` replaces the
+      // ambiguous "(N field(s))" count, and `resolvedCategory` mirrors the
+      // per-row shape `bulk_record_transactions` already returns.
       return text({
         success: true,
-        message: `Transaction #${id} updated (${changed} field(s))`,
+        message: `Transaction #${id} updated`,
+        fieldsUpdated,
+        ...(resolvedCategory ? { resolvedCategory } : {}),
         updatedAt: after[0]?.updated_at,
         warnings,
       });
