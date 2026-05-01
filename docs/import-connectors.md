@@ -496,22 +496,36 @@ Don't regress on them without a new comment explaining the change.
    orphans; the Portfolio page renders an amber "Sign in again to
    unlock" banner when the count is non-zero. Mirror the same skip in
    any new aggregator path.
-15. **Connectors auto-tag every emitted row with `source:<connector>`**
-   (issue [#33](https://github.com/finlynq/finlynq/issues/33),
-   2026-04-30). The transform appends the tag in `buildRawTransaction`;
-   transfer-pair callers pass `source: "<connector>"` to
-   `createTransferPair*` and the `applySourceTag` helper merges it into
-   `tags` on both legs. Idempotent — re-running an import doesn't
+15. **All imports auto-tag every emitted row with `source:<format>`** (issue
+   [#33](https://github.com/finlynq/finlynq/issues/33), revised by issue
+   [#62](https://github.com/finlynq/finlynq/issues/62), 2026-04-30). The
+   tag is the **file format** the row arrived as — one of
+   `csv` / `excel` / `pdf` / `ofx` / `qfx` / `ibkr-xml` / `email` — not
+   the institution name (institution lives on the account). The canonical
+   tuple lives in [src/lib/tx-source.ts](../src/lib/tx-source.ts) as
+   `FORMAT_TAGS`, mirrored in
+   [packages/import-connectors/src/types.ts](../packages/import-connectors/src/types.ts)
+   so the connector package stays npm-publishable without depending on
+   `src/`. Connector transforms append the tag in `buildRawTransaction`
+   via the `formatTag` option on `transformTransactions()`; transfer-pair
+   callers pass `source: "<format>"` to `createTransferPair*` and the
+   `applySourceTag` helper merges it into `tags` on both legs. Direct
+   upload paths (CSV / Excel / PDF / OFX / QFX) stamp the tag at the
+   `/api/import/preview`, `/api/import/csv-map`, and
+   `/api/import/excel-map` endpoints. Email-staged rows pick up
+   `source:email` at `/api/import/staged/[id]/approve` (the staging
+   tables don't carry `tags`). Idempotent — re-running an import doesn't
    duplicate the tag (case-insensitive match on the existing tags
    string). Future statement reconciliations rely on this: when a
-   brokerage statement and the bank's WP export both contain the same
-   payroll deposit, the bank-side row's `source:wealthposition` tag is
-   the dedup key. Every new connector MUST set the tag for both flat
-   rows and any internal transfer pairs it creates. A one-off
-   parameterized SQL backfill for legacy rows lives at
+   brokerage CSV and the bank's OFX both contain the same payroll
+   deposit, the format tag identifies which side originally booked the
+   row. Every new connector MUST set the tag for both flat rows and any
+   internal transfer pairs it creates. A parameterized SQL backfill that
+   rewrites legacy `source:wealthposition` / `source:ibkr` tags to
+   format tags lives at
    [scripts/backfill-source-tag.sql](../scripts/backfill-source-tag.sql)
    — handles plaintext `tags` only; encrypted `v1:%` rows need a
-   Node-side rewrite under the user's DEK.
+   re-import or a Node-side rewrite under the user's DEK.
 
 ---
 
@@ -546,7 +560,9 @@ fileBody (XML or CSV)
    ▼  transformIbkrFile             →  ExternalAccount[] + ExternalCategory[]
    │                                    + ExternalTransaction[]
    ▼  transformTransactions         →  TransformResult (flat + splits + errors)
-                                       with `source:ibkr` tags applied
+                                       with `source:csv` or `source:ibkr-xml`
+                                       applied (issue #62 — format tag, not
+                                       institution name)
 ```
 
 Sub-account → Finlynq-account mapping is suggested by
@@ -554,10 +570,12 @@ Sub-account → Finlynq-account mapping is suggested by
 `<OpenPositions>`); the orchestrator on the Finlynq side surfaces this in
 the mapping dialog and lets the user override before commit.
 
-The `transformTransactions()` shared helper now accepts an
-`{ sourceConnectorId }` option (default `"wealthposition"`) — every new
-connector passes its own id so the auto-applied row tag (`source:<id>`)
-matches the originating provider, not WP. See §7 invariant 15.
+The `transformTransactions()` shared helper takes a required
+`{ formatTag }` option (one of `csv | excel | pdf | ofx | qfx | ibkr-xml |
+email`) — every new connector passes the format the data arrived as so
+the auto-applied row tag (`source:<format>`) describes file shape, not
+institution. The IBKR orchestrator plumbs `csv` vs `ibkr-xml` based on
+which parser ran. See §7 invariant 15.
 
 ### Candidate providers (not yet started)
 

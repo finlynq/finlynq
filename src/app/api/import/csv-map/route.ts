@@ -3,6 +3,7 @@ import { csvToRawTransactionsWithMapping, extractCsvHeaders } from "@/lib/csv-pa
 import { previewImport } from "@/lib/import-pipeline";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
+import { sourceTagFor } from "@/lib/tx-source";
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -31,9 +32,17 @@ export async function POST(request: NextRequest) {
     const { rows, errors: parseErrors } = csvToRawTransactionsWithMapping(text, mapping);
 
     // Apply default account if no account column mapped
-    const processedRows = defaultAccount
+    let processedRows = defaultAccount
       ? rows.map((r) => ({ ...r, account: r.account || defaultAccount }))
       : rows;
+
+    // Issue #62: stamp source:csv on every row.
+    const csvTag = sourceTagFor("csv");
+    processedRows = processedRows.map((r) => {
+      const existing = (r.tags ?? "").split(",").map((t) => t.trim()).filter((t) => t);
+      if (existing.some((t) => t.toLowerCase() === csvTag.toLowerCase())) return r;
+      return { ...r, tags: existing.length ? `${existing.join(",")},${csvTag}` : csvTag };
+    });
 
     if (processedRows.length === 0) {
       const msg = parseErrors.length > 0

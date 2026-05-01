@@ -8,6 +8,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { classifyForReconcile, MAX_RECONCILE_ROWS } from "@/lib/reconcile";
 import { safeErrorMessage } from "@/lib/validate";
 import type { RawTransaction } from "@/lib/import-pipeline";
+import { sourceTagFor, type FormatTag } from "@/lib/tx-source";
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import {
@@ -126,6 +127,18 @@ export async function POST(request: NextRequest) {
         { status: 422 },
       );
     }
+
+    // Issue #62: stamp source:<format> on every row before classification.
+    // Use the file extension as the format hint (ofx vs qfx are distinct
+    // formats — qfx adds Quicken's <INTU.BID> block on top of OFX XML).
+    const formatTag: FormatTag =
+      ext === "qfx" ? "qfx" : ext === "ofx" ? "ofx" : "csv";
+    const sourceTagStr = sourceTagFor(formatTag);
+    parseResult.rows = parseResult.rows.map((r) => {
+      const existing = (r.tags ?? "").split(",").map((t) => t.trim()).filter((t) => t);
+      if (existing.some((t) => t.toLowerCase() === sourceTagStr.toLowerCase())) return r;
+      return { ...r, tags: existing.length ? `${existing.join(",")},${sourceTagStr}` : sourceTagStr };
+    });
 
     const classified = await classifyForReconcile(userId, dek, parseResult.rows, {
       dateToleranceDays: tolerance,

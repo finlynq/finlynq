@@ -4,6 +4,7 @@ import { previewImport } from "@/lib/import-pipeline";
 import type { ColumnMapping } from "@/lib/excel-parser";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
+import { sourceTagFor } from "@/lib/tx-source";
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -33,6 +34,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: msg }, { status: 400 });
     }
 
+    // Issue #62: stamp source:excel on every row so cross-source dedup can
+    // identify the file shape this row arrived as.
+    const excelTag = sourceTagFor("excel");
+    result.rows = result.rows.map((r) => {
+      const existing = (r.tags ?? "").split(",").map((t) => t.trim()).filter((t) => t);
+      if (existing.some((t) => t.toLowerCase() === excelTag.toLowerCase())) return r;
+      return { ...r, tags: existing.length ? `${existing.join(",")},${excelTag}` : excelTag };
+    });
     const preview = await previewImport(result.rows, auth.context.userId, auth.context.dek ?? undefined);
     if (result.errors.length > 0) {
       preview.errors.push(...result.errors.map((e) => ({ rowIndex: e.row - 2, message: e.message })));

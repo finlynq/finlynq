@@ -84,8 +84,13 @@ export const ibkr: Connector<IbkrCredentials> = {
     for (const [id, acct] of mapping.externalAccountById) {
       byName.externalAccountByName.set(acct.name, id);
     }
+    // Generic Connector entry point — caller already turned the raw file
+    // into ExternalTransaction[]. We can't tell here whether the source was
+    // CSV or XML, so default to "csv" (the more common case in the wild per
+    // user reports). Format-aware callers should use `runIbkrTransform()` in
+    // orchestrator.ts which plumbs `csv` vs `ibkr-xml` from the parser.
     return transformTransactions(externalTxs, mapping, byName, {
-      sourceConnectorId: "ibkr",
+      formatTag: "csv",
     });
   },
 };

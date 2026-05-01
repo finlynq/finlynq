@@ -139,7 +139,10 @@ describe("transformIbkrFile (intermediate inventory)", () => {
     const categoryEntry = tx.entries[1];
     expect(accountEntry.amount).toBe(2.5);
     expect(categoryEntry.categorization).toBe(CATEGORY_DIVIDENDS);
-    expect(tx.tags).toContain("source:ibkr");
+    // Issue #62: source tag is now applied by `transformTransactions()`
+    // downstream, not baked into the intermediate ExternalTransaction. Cash
+    // entries no longer carry `source:ibkr` here.
+    expect(tx.tags).toBeUndefined();
   });
 
   it("collapses a forex pair (assetCategory='CASH') into one 2-leg tx, NOT two cash flows", () => {
@@ -442,9 +445,15 @@ describe("runIbkrTransform (full orchestrator on real-shape XML)", () => {
     const fxAccounts = new Set(fxLegs.map((r) => r.account));
     expect(fxAccounts.size).toBe(2);
 
-    // Every emitted row carries the IB source tag.
+    // Issue #62: every emitted row carries the format-based source tag
+    // (`source:ibkr-xml` for an XML file, `source:csv` for the activity-CSV
+    // path). The institution name lives on the account, not in the tag.
     for (const r of result.flat) {
-      expect(typeof r.tags === "string" && r.tags.includes("source:ibkr")).toBe(true);
+      const tagParts = (typeof r.tags === "string" ? r.tags : "")
+        .split(",")
+        .map((t) => t.trim());
+      expect(tagParts).toContain("source:ibkr-xml");
+      expect(tagParts).not.toContain("source:ibkr");
     }
   });
 

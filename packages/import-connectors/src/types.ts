@@ -69,6 +69,38 @@ export interface ExternalTransaction {
   entries: ExternalTransactionEntry[];
 }
 
+// ─── Format tags (issue #62) ──────────────────────────────────────────────────
+//
+// Vocabulary written into RawTransaction.tags as `source:<format>` so
+// downstream consumers can identify which file/wire format produced the row.
+// One tag per row.
+//
+// Mirror of `FORMAT_TAGS` in `pf-app/src/lib/tx-source.ts`. Kept here so the
+// connectors package stays npm-publishable without depending on Finlynq's
+// `src/`. Keep both lists in sync.
+export const FORMAT_TAGS = [
+  "csv",
+  "excel",
+  "pdf",
+  "ofx",
+  "qfx",
+  "ibkr-xml",
+  "email",
+] as const;
+
+export type FormatTag = (typeof FORMAT_TAGS)[number];
+
+const FORMAT_TAG_SET = new Set<string>(FORMAT_TAGS);
+
+export function isFormatTag(v: unknown): v is FormatTag {
+  return typeof v === "string" && FORMAT_TAG_SET.has(v);
+}
+
+/** Render a format tag as the literal string written into `tags`. */
+export function sourceTagFor(format: FormatTag): string {
+  return `source:${format}`;
+}
+
 export interface ConnectorListTransactionsOpts {
   /** ISO date (YYYY-MM-DD). */
   startDate?: string;

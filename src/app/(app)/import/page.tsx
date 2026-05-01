@@ -75,6 +75,9 @@ export default function ImportPage() {
   const [ofxBalanceDate, setOfxBalanceDate] = useState<string | null>(null);
   const [ofxDateRange, setOfxDateRange] = useState<{ start: string; end: string } | null>(null);
   const [ofxCurrency, setOfxCurrency] = useState("CAD");
+  // Issue #62: track which OFX flavor (ofx vs qfx) so /api/import/execute can
+  // be stamped with the right `source:<format>` tag at handleOfxConfirm time.
+  const [ofxFormat, setOfxFormat] = useState<"ofx" | "qfx">("ofx");
 
   // Email state
   const [importEmail, setImportEmail] = useState<string | null>(null);
@@ -122,6 +125,7 @@ export default function ImportPage() {
         setOfxBalanceDate(data.balanceDate ?? null);
         setOfxDateRange(data.dateRange ?? null);
         setOfxCurrency(data.currency ?? "CAD");
+        setOfxFormat(data.format === "qfx" ? "qfx" : "ofx");
         setOfxPreviewOpen(true);
       } else if (data.type === "csv-needs-mapping") {
         // Auto-detect failed — open the column mapping dialog.
@@ -233,10 +237,18 @@ export default function ImportPage() {
   const handleOfxConfirm = useCallback(async (rows: RawTransaction[]) => {
     setOfxPreviewOpen(false);
     try {
+      // Issue #62: stamp source:ofx or source:qfx based on the file format
+      // detected at preview time.
+      const sourceTag = `source:${ofxFormat}`;
+      const taggedRows: RawTransaction[] = rows.map((r) => {
+        const existing = (r.tags ?? "").split(",").map((t) => t.trim()).filter((t) => t);
+        if (existing.some((t) => t.toLowerCase() === sourceTag.toLowerCase())) return r;
+        return { ...r, tags: existing.length ? `${existing.join(",")},${sourceTag}` : sourceTag };
+      });
       const res = await fetch("/api/import/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows, forceImportIndices: [] }),
+        body: JSON.stringify({ rows: taggedRows, forceImportIndices: [] }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -248,7 +260,7 @@ export default function ImportPage() {
       const message = err instanceof Error ? err.message : "Import failed";
       setUploadStatus({ type: "error", message });
     }
-  }, []);
+  }, [ofxFormat]);
 
   // Import confirm callback
   const handleImportConfirm = useCallback(async (

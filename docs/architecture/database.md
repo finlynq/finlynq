@@ -103,3 +103,20 @@ Also keep ownership clean on the deploy host: if you ever run `sudo npm install`
 Run them per environment BEFORE pushing the matching code change. See [migrations.md](../migrations.md) for the full chronological psql playbook.
 
 All `ALTER TABLE` statements are written idempotent (`ADD COLUMN IF NOT EXISTS` / `DROP COLUMN IF EXISTS`). Safe to re-run.
+
+## `transactions.tags` — vocabulary and reserved prefixes
+
+`transactions.tags` is a **comma-separated string of free-text labels**. The same column is used for user-applied tags ("morning", "work") and a small set of system-applied tags with reserved prefixes:
+
+| Prefix | Meaning | Set by | Notes |
+|---|---|---|---|
+| `source:<format>` | File / wire format the row arrived as | All import paths (issue [#62](https://github.com/finlynq/finlynq/issues/62)) | One per row at most. Allowed values: `csv`, `excel`, `pdf`, `ofx`, `qfx`, `ibkr-xml`, `email`. Canonical list in [`src/lib/tx-source.ts`](../../src/lib/tx-source.ts) (`FORMAT_TAGS`). |
+| `trade-link:<linkId>` | Links a fee row to its parent trade | `record_trade` MCP tool | Orthogonal to `source:`. |
+| `ibkr:fx-conversion`, `ibkr:fx-translation`, `ibkr:asset:<class>` | Descriptive metadata from IBKR Flex | `transformIbkrFile` | Carries semantic info about the entry kind, not provenance. Stays alongside the format tag. |
+
+Rules:
+
+- The system never modifies the user-applied free-text tags on a row — system tags are merged in via `applySourceTag` / `withSourceTag`, which preserve the existing list.
+- Tag matching is **case-insensitive** for idempotency. Re-importing the same file does not duplicate `source:csv`.
+- The `source:<format>` tag is **distinct** from the audit-column `transactions.source` enum (`manual` / `import` / `mcp_http` / …). The audit column captures the writer surface (issue #28); the tag captures file shape. A WP-orchestrated CSV import has `source='connector'` in the audit column and `source:csv` in the tag — both pieces of information are preserved.
+- On Stream-D-encrypted deployments `tags` may live as ciphertext (`v1:%`). SQL-only backfills must skip those rows; see [`scripts/backfill-source-tag.sql`](../../scripts/backfill-source-tag.sql).
