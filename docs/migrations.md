@@ -442,3 +442,15 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 ```
 
 Post-migration verify with `SELECT COUNT(*) FROM holding_accounts ha JOIN portfolio_holdings ph ON ph.id = ha.holding_id WHERE ha.account_id != ph.account_id AND ha.is_primary = true;` — expect 0. Specifically for holding 428: `SELECT ph.account_id, ha.account_id FROM portfolio_holdings ph JOIN holding_accounts ha ON ha.holding_id = ph.id WHERE ph.id = 428;` should return `(614, 614)` post-repair.
+
+## trade-link-id (2026-05-01, issue [#96](https://github.com/finlynq/finlynq/issues/96))
+
+Adds `transactions.trade_link_id text` (nullable) + a partial index on `(user_id, trade_link_id) WHERE trade_link_id IS NOT NULL`. Used by `record_transaction` / `bulk_record_transactions` (HTTP MCP) to group the two legs of a multi-currency stock trade — cash-out leg and stock-in leg — booked as separate transactions. The four cost-basis aggregators (REST `/api/portfolio/overview`, `src/lib/holdings-value.ts`, MCP HTTP `aggregateHoldings` + `analyze_holding`, MCP stdio `get_portfolio_performance` + `analyze_holding`) LEFT JOIN to the cash leg via `trade_link_id` and use its `entered_amount` (in `entered_currency`) as cost basis for the stock leg's holding, instead of the stock leg's amount which uses Finlynq's live FX rate and under-counts the broker's spread. Legacy rows with no `trade_link_id` fall back to the stock leg's amount unchanged. `trade_link_id` is **server-generated only** (mirrors `link_id`'s pattern in `src/lib/transfer.ts:569`) — never accepted as a client-supplied UUID. Distinct from `link_id`, which the four-check transfer-pair rule reserves for `record_transfer` siblings. Idempotent (`IF NOT EXISTS`).
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-trade-link-id.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-trade-link-id.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-trade-link-id.sql
+```
+
+Post-migration verify with `SELECT column_name FROM information_schema.columns WHERE table_name='transactions' AND column_name='trade_link_id';` — expect 1 row. The aggregator LEFT JOIN is forward-compatible (no rows match until a writer stamps a UUID), so the code path is safe to deploy *before* any user has used the new `tradeGroupKey` parameter — pre-existing data routes through the fallback branch unchanged.

@@ -1952,9 +1952,27 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // amt-sign convention NOT the qty>0 rule. Preserved here for
       // backwards compat with stdio MCP consumers; the HTTP path uses the
       // qty>0 rule.
+      // Issue #96: LEFT JOIN to cash-leg sibling for multi-currency trade
+      // pairs. When a buy row (qty>0, amount<0) has a paired cash leg
+      // (same trade_link_id, qty=0), the cash leg's `amount` is the
+      // broker's actual settlement at IBKR's FX rate; the stock leg's
+      // amount is the same trade re-priced at Finlynq's live rate and
+      // under-counts the spread. Stdio refuses investment-account writes
+      // (CLAUDE.md), so it can't *create* trade_link_id rows — but it
+      // MUST read them correctly for users who created the trade via HTTP
+      // MCP. This query now picks the cash leg's amount via a CASE when
+      // present.
+      // CLAUDE.md flags this query keys cost basis on amt-sign — the
+      // legacy convention used here (NOT the qty>0 rule). Preserved for
+      // backwards compat; the HTTP path uses qty>0. Both paths apply the
+      // same #96 cash-leg substitution.
       const perf = await sqlite.prepare(`
         SELECT ph.name as holding, COUNT(*) as tx_count,
-               SUM(CASE WHEN t.amount < 0 THEN ABS(t.amount) ELSE 0 END) as cost_basis,
+               SUM(CASE
+                 WHEN t.amount < 0 AND cash.id IS NOT NULL THEN ABS(cash.amount)
+                 WHEN t.amount < 0 THEN ABS(t.amount)
+                 ELSE 0
+               END) as cost_basis,
                SUM(CASE WHEN t.amount > 0 THEN t.amount ELSE 0 END) as proceeds,
                SUM(t.quantity) as net_quantity,
                MIN(t.date) as first_purchase, MAX(t.date) as last_activity
@@ -1964,9 +1982,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
          AND ha.account_id = t.account_id
          AND ha.user_id = ?
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+        LEFT JOIN transactions cash
+          ON cash.user_id = ?
+         AND cash.trade_link_id IS NOT NULL
+         AND cash.trade_link_id = t.trade_link_id
+         AND cash.id <> t.id
+         AND COALESCE(cash.quantity, 0) = 0
         WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.date >= ?
         GROUP BY ph.id, ph.name ORDER BY cost_basis DESC
-      `).all(userId, userId, since) as SqliteRow[];
+      `).all(userId, userId, userId, since) as SqliteRow[];
 
       const results = perf.map(p => {
         const costBasis = Number(p.cost_basis ?? 0);
@@ -2022,11 +2046,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // prone to spurious substring hits — "GE" inside "ORANGE" etc.).
       // Issue #86: when holdingId is supplied, scope the query to that FK
       // exclusively (bypasses the fuzzy substring filter).
+      // Issue #96: LEFT JOIN to cash-leg sibling. cash_amount is null when
+      // no pair exists; the per-row buy loop below prefers cash_amount when
+      // present and falls back to t.amount otherwise. Stdio MCP can't
+      // *create* trade_link_id rows but must read them correctly for users
+      // who created the trade via HTTP MCP.
       const txns = holdingId != null
         ? await sqlite.prepare(`
             SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding_id,
                    ph.name as portfolio_holding,
-                   a.name as account_name, a.currency
+                   a.name as account_name, a.currency,
+                   cash.amount as cash_amount, cash.id as cash_id
             FROM transactions t
             JOIN accounts a ON a.id = t.account_id
             INNER JOIN holding_accounts ha
@@ -2034,14 +2064,21 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
              AND ha.account_id = t.account_id
              AND ha.user_id = ?
             LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+            LEFT JOIN transactions cash
+              ON cash.user_id = ?
+             AND cash.trade_link_id IS NOT NULL
+             AND cash.trade_link_id = t.trade_link_id
+             AND cash.id <> t.id
+             AND COALESCE(cash.quantity, 0) = 0
             WHERE t.user_id = ?
               AND t.portfolio_holding_id = ?
             ORDER BY t.date ASC
-          `).all(userId, userId, holdingId) as SqliteRow[]
+          `).all(userId, userId, userId, holdingId) as SqliteRow[]
         : await sqlite.prepare(`
             SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding_id,
                    ph.name as portfolio_holding,
-                   a.name as account_name, a.currency
+                   a.name as account_name, a.currency,
+                   cash.amount as cash_amount, cash.id as cash_id
             FROM transactions t
             JOIN accounts a ON a.id = t.account_id
             INNER JOIN holding_accounts ha
@@ -2049,6 +2086,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
              AND ha.account_id = t.account_id
              AND ha.user_id = ?
             LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+            LEFT JOIN transactions cash
+              ON cash.user_id = ?
+             AND cash.trade_link_id IS NOT NULL
+             AND cash.trade_link_id = t.trade_link_id
+             AND cash.id <> t.id
+             AND COALESCE(cash.quantity, 0) = 0
             WHERE t.user_id = ?
               AND (
                 LOWER(ph.name) LIKE LOWER(?)
@@ -2056,7 +2099,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
                 OR LOWER(ph.symbol) = LOWER(?)
               )
             ORDER BY t.date ASC
-          `).all(userId, userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
+          `).all(userId, userId, userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
 
       if (!txns.length) {
         return sqliteErr(holdingId != null
@@ -2108,9 +2151,18 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const purchases: SqliteRow[] = [], sales: SqliteRow[] = [];
       // qty>0 = buy (handles Finlynq-native amt<0+qty>0 and WP convention
       // amt>0+qty>0). qty<0 = sell (qty already negative). qty=0 = dividend.
+      // Issue #96: when a paired cash-leg sibling exists (multi-currency
+      // trade pair, t.cash_id != null), use the cash leg's amount as cost
+      // basis instead of the stock leg's amount.
       for (const t of txns) {
         const qty = Number(t.quantity ?? 0);
-        if (qty > 0) { totalShares += qty; totalCost += Math.abs(Number(t.amount)); purchases.push(t); }
+        if (qty > 0) {
+          totalShares += qty;
+          const cashAmt = t.cash_id != null ? Number(t.cash_amount) : NaN;
+          const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(Number(t.amount));
+          totalCost += buyCostAmt;
+          purchases.push(t);
+        }
         else if (qty < 0) { totalShares += qty; sales.push(t); }
       }
       const avgCost = purchases.length && totalCost > 0
@@ -2152,13 +2204,26 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (m === "rebalancing") {
         if (!targets?.length) return sqliteErr("targets is required when mode='rebalancing'");
         // Phase 6 (2026-04-29): aggregate by FK + JOIN.
+        // Issue #96: LEFT JOIN to cash-leg sibling. When a paired cash leg
+        // exists, prefer its amount (broker's actual settlement at IBKR's
+        // FX rate) over the stock leg's amount (Finlynq's live FX rate).
         const holdings = await sqlite.prepare(`
-          SELECT ph.name as name, SUM(ABS(t.amount)) as book_value
+          SELECT ph.name as name,
+                 SUM(CASE
+                   WHEN cash.id IS NOT NULL THEN ABS(cash.amount)
+                   ELSE ABS(t.amount)
+                 END) as book_value
           FROM transactions t
           LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+          LEFT JOIN transactions cash
+            ON cash.user_id = ?
+           AND cash.trade_link_id IS NOT NULL
+           AND cash.trade_link_id = t.trade_link_id
+           AND cash.id <> t.id
+           AND COALESCE(cash.quantity, 0) = 0
           WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.amount < 0
           GROUP BY ph.id, ph.name
-        `).all(userId) as SqliteRow[];
+        `).all(userId, userId) as SqliteRow[];
 
         const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
         if (totalBV === 0) return sqliteErr("No portfolio holdings found");

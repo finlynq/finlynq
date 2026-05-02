@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and, isNotNull, sql } from "drizzle-orm";
+import { eq, and, isNotNull, sql, ne } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { fetchMultipleQuotes, aggregatePortfolioExposure, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, getAvailableEtfSymbols, autoSeedEtfIfMissing } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, convertCurrency, getDisplayCurrency, getRate } from "@/lib/fx-service";
@@ -196,13 +197,48 @@ export async function GET(request: NextRequest) {
   // silently dropped dividend reinvestments (qty>0, amt<0) and withholding-tax
   // entries (qty=0, amt<0). When the user has no Dividends category, the
   // dividendsCategoryId is null and the CASE short-circuits to 0.
+  //
+  // Issue #96 (multi-currency trade pair): when a buy row (qty>0) has a
+  // non-null `trade_link_id`, LEFT JOIN to its cash-leg sibling (same
+  // user, same trade_link_id, qty=0 or NULL, different id). The cash
+  // leg's `entered_amount` (in `entered_currency`) is the broker's actual
+  // settlement at IBKR's FX rate; the stock leg's amount is the same trade
+  // re-priced at Finlynq's live rate, which under-counts the spread. Use
+  // the cash leg's value as the buy's cost basis when present; fall back
+  // to the stock leg's own amount otherwise (legacy data, single-currency
+  // trades). Buckets group on the *effective* entered_currency — for a
+  // paired buy that's the cash leg's currency, for everything else (sells,
+  // dividends, unpaired buys) it's the row's own currency. CLAUDE.md
+  // "Portfolio aggregator" — qty>0 = buy regardless of amount sign;
+  // preserved here.
   const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
+  // Issue #96: aliased self-join to the cash-leg sibling. Cash leg is
+  // identified by (same user, same trade_link_id, qty=0 or NULL, different
+  // id). When matched on a buy row (qty>0), we use the cash leg's
+  // entered_amount + entered_currency as cost basis instead of the stock
+  // leg's own values. The LEFT JOIN means rows without a cash-leg sibling
+  // (legacy / single-currency / non-buy rows) keep their existing behavior.
+  const cashLeg = alias(schema.transactions, "cash");
+  const isPairedBuy = sql<boolean>`(COALESCE(${schema.transactions.quantity}, 0) > 0 AND ${cashLeg.id} IS NOT NULL)`;
+  const effectiveEnteredCurrency = sql<string>`
+    CASE
+      WHEN ${isPairedBuy} THEN COALESCE(${cashLeg.enteredCurrency}, ${cashLeg.currency})
+      ELSE COALESCE(${schema.transactions.enteredCurrency}, ${schema.transactions.currency})
+    END
+  `;
+  const effectiveBuyAmount = sql<number>`
+    CASE
+      WHEN ${isPairedBuy}
+        THEN ABS(COALESCE(${cashLeg.enteredAmount}, ${cashLeg.amount}))
+      ELSE ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}))
+    END
+  `;
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
-      enteredCurrency: sql<string>`COALESCE(${schema.transactions.enteredCurrency}, ${schema.transactions.currency})`,
+      enteredCurrency: effectiveEnteredCurrency,
       totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
-      totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
+      totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
       totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
       totalSellAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
       dividendsInEntered: dividendsCategoryId !== null
@@ -219,13 +255,24 @@ export async function GET(request: NextRequest) {
         eq(schema.holdingAccounts.userId, userId),
       ),
     )
+    .leftJoin(
+      cashLeg,
+      and(
+        eq(cashLeg.userId, userId),
+        isNotNull(cashLeg.tradeLinkId),
+        isNotNull(schema.transactions.tradeLinkId),
+        eq(cashLeg.tradeLinkId, schema.transactions.tradeLinkId),
+        ne(cashLeg.id, schema.transactions.id),
+        eq(sql`COALESCE(${cashLeg.quantity}, 0)`, 0),
+      ),
+    )
     .where(and(
       eq(schema.transactions.userId, userId),
       isNotNull(schema.transactions.portfolioHoldingId),
     ))
     .groupBy(
       schema.transactions.portfolioHoldingId,
-      sql`COALESCE(${schema.transactions.enteredCurrency}, ${schema.transactions.currency})`,
+      effectiveEnteredCurrency,
     );
 
   const bucketsById = new Map<number, PerCurrencyBucket[]>();

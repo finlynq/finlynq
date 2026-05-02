@@ -55,6 +55,7 @@ import {
 } from "../src/lib/mcp/confirmation-token";
 import fs from "fs/promises";
 import path from "path";
+import { randomUUID } from "crypto";
 import {
   csvToRawTransactions,
   csvToRawTransactionsWithMapping,
@@ -649,6 +650,13 @@ async function aggregateHoldings(
   // Issue #84: t.category_id is plumbed through so accumulate() can match
   // dividends by the user's Dividends category id instead of the legacy
   // qty=0+amt>0 heuristic.
+  // Issue #96: LEFT JOIN to the cash-leg sibling for multi-currency trade
+  // pairs. SELECT cash.amount as cash_amount; accumulate() prefers it on
+  // a paired buy row. Cash leg is identified by (same user, same
+  // trade_link_id, qty=0 or NULL, different id). Both legs sit in the
+  // same brokerage account so the amount is in the same currency — no
+  // currency hop needed at this layer (the entered_currency story is
+  // identical because both legs share account_id).
   type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null };
   // Issue #86: key by holding_id (not display name) so two holdings sharing
   // a name across accounts (e.g. VUN.TO in TFSA + RRSP) stay distinct rows.
@@ -657,13 +665,20 @@ async function aggregateHoldings(
   const out = new Map<number, Agg>();
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
-           ph.name AS holding_name, ph.name_ct AS holding_name_ct
+           ph.name AS holding_name, ph.name_ct AS holding_name_ct,
+           cash.amount AS cash_amount, cash.id AS cash_id
     FROM transactions t
     INNER JOIN holding_accounts ha
       ON ha.holding_id = t.portfolio_holding_id
      AND ha.account_id = t.account_id
      AND ha.user_id = ${userId}
     LEFT JOIN portfolio_holdings ph ON t.portfolio_holding_id = ph.id
+    LEFT JOIN transactions cash
+      ON cash.user_id = ${userId}
+     AND cash.trade_link_id IS NOT NULL
+     AND cash.trade_link_id = t.trade_link_id
+     AND cash.id <> t.id
+     AND COALESCE(cash.quantity, 0) = 0
     WHERE t.user_id = ${userId}
       AND t.portfolio_holding_id IS NOT NULL
       ${buysFilter}
@@ -733,7 +748,13 @@ function accumulate(
   // branch is skipped and `dividends` sums to 0.
   if (qty > 0) {
     row.buy_qty += qty;
-    row.buy_amount += Math.abs(amt);
+    // Issue #96: when a paired cash-leg sibling is present (multi-currency
+    // trade pair), use its amount as cost basis instead of this stock leg's
+    // amount. cash_amount is null when no pair exists (legacy /
+    // single-currency trades) — fall back to the stock leg's own amount.
+    const cashAmt = r.cash_id != null ? Number(r.cash_amount) : NaN;
+    const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(amt);
+    row.buy_amount += buyCostAmt;
     row.purchases += 1;
     if (!row.first_purchase || d < row.first_purchase) row.first_purchase = d;
   } else if (qty < 0) {
@@ -2010,9 +2031,10 @@ export function registerPgTools(
       quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move. ALWAYS pair with portfolioHolding or portfolioHoldingId — a quantity on an unbound row is invisible to the portfolio aggregator."),
       enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided."),
       enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted."),
+      tradeLinkId: z.string().optional().describe("Multi-currency trade pair linker (issue #96). Pass the UUID returned in the response of a *previous* record_transaction call when binding a second leg to that trade. Server validates the UUID exists, belongs to you, and references at most one existing row before accepting it. New trades typically use bulk_record_transactions with `tradeGroupKey` per row instead — this single-row path is only for incremental binding when the cash leg was already recorded. The server stamps `trade_link_id` on the new row; the four cost-basis aggregators then prefer the cash leg's `entered_amount` over the stock leg's amount as cost basis. Distinct from `linkId` (transfer-pair rule reserves that column)."),
       dryRun: z.boolean().optional().describe("When true, run the full validation/resolution pipeline (account, holding, FX, category) and return a preview WITHOUT writing to the DB. Response carries `dryRun: true`, `wouldBeId: null`, plus the resolved* fields. Use this to confirm routing before committing — especially when fuzzy account/category matching might surprise you."),
     },
-    async ({ amount, payee, date, account, account_id, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, dryRun }) => {
+    async ({ amount, payee, date, account, account_id, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, tradeLinkId, dryRun }) => {
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
@@ -2095,6 +2117,32 @@ export function registerPgTools(
       });
       if (!resolved.ok) return err(resolved.message);
 
+      // Issue #96: validate `tradeLinkId` if present. The caller is binding
+      // this row to a previously-recorded leg of a multi-currency trade
+      // pair. Server enforces (a) the UUID belongs to this user, (b) at
+      // most one existing row references it (a trade has exactly two
+      // legs). Lightweight UUID-shape check upfront so a malformed string
+      // doesn't reach the DB. We do NOT mint a UUID here — single-row
+      // record_transaction either binds to an existing trade_link_id or
+      // doesn't set one. To create a new pair, use bulk_record_transactions
+      // with `tradeGroupKey`.
+      if (tradeLinkId !== undefined) {
+        if (typeof tradeLinkId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tradeLinkId)) {
+          return err(`tradeLinkId must be a UUID (e.g. "12345678-1234-1234-1234-123456789012"). Server-minted only — get it from a prior bulk_record_transactions response or pass it from the first leg's record_transaction response.`);
+        }
+        const existingLegs = await q(db, sql`
+          SELECT id FROM transactions
+           WHERE user_id = ${userId} AND trade_link_id = ${tradeLinkId}
+           LIMIT 2
+        `);
+        if (existingLegs.length === 0) {
+          return err(`tradeLinkId "${tradeLinkId}" not found. The pair's first leg must be inserted first; record_transaction binds the second leg only.`);
+        }
+        if (existingLegs.length >= 2) {
+          return err(`tradeLinkId "${tradeLinkId}" already has 2 legs. A multi-currency trade pair has exactly two legs (cash + stock).`);
+        }
+      }
+
       // Look up the resolved category name once — used by both the dry-run
       // preview and the success message.
       const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
@@ -2123,6 +2171,7 @@ export function registerPgTools(
           enteredAmount: resolved.enteredAmount,
           enteredCurrency: resolved.enteredCurrency,
           enteredFxRate: resolved.enteredFxRate,
+          tradeLinkId: tradeLinkId ?? null,
           date: txDate,
           message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
           warnings,
@@ -2138,10 +2187,12 @@ export function registerPgTools(
 
       // Issue #28: stamp source explicitly + return audit timestamps so
       // the AI assistant can verify the write landed and self-attributed.
+      // Issue #96: trade_link_id stamped from validated `tradeLinkId` arg
+      // (NULL when absent — legacy / unpaired rows).
       const result = await q(db, sql`
-        INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
-        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null}, ${'mcp_http'})
-        RETURNING id, created_at, updated_at, source
+        INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source, trade_link_id)
+        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null}, ${'mcp_http'}, ${tradeLinkId ?? null})
+        RETURNING id, created_at, updated_at, source, trade_link_id
       `);
 
       invalidateUserTxCache(userId);
@@ -2151,6 +2202,7 @@ export function registerPgTools(
         createdAt: result[0]?.created_at,
         updatedAt: result[0]?.updated_at,
         source: result[0]?.source,
+        tradeLinkId: result[0]?.trade_link_id ?? null,
         resolvedAccount: resolvedAccountInfo,
         resolvedCategory,
         resolvedHolding,
@@ -2181,6 +2233,7 @@ export function registerPgTools(
         quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Omit for cash-only rows. RSU vest → amount=0, quantity=+net_shares; ESPP/buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares. ALWAYS pair with portfolioHolding or portfolioHoldingId — quantity on an unbound row is invisible to the portfolio aggregator."),
         enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency. Server converts to account currency."),
         enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
+        tradeGroupKey: z.string().optional().describe("Multi-currency trade pair grouping hint (issue #96). Two rows in this batch with the same `tradeGroupKey` get the same server-minted UUID stamped into `trade_link_id`. Used to link the cash-out leg + stock-in leg of a multi-currency trade so the four cost-basis aggregators can pull the cash leg's `entered_amount` (broker's actual settlement) as cost basis instead of the stock leg's amount (Finlynq's live FX). The key itself is a per-batch label (any string — \"BNO-buy-2025\", \"trade1\", etc.); the server discards it and only the minted UUID lands in the DB. Each group must have exactly two rows: one with `quantity > 0` (stock leg) and one with `quantity == 0` or omitted (cash leg). Rows with no `tradeGroupKey` are normal single-leg inserts (current behavior)."),
       })).describe("Array of transactions to record"),
     },
     async ({ transactions, account_id: defaultAccountId, dryRun }) => {
@@ -2209,6 +2262,42 @@ export function registerPgTools(
         if (!defaultAcct) defaultAcctError = `Top-level account_id #${defaultAccountId} not found or not owned by you.`;
       }
 
+      // Issue #96: pre-pass on tradeGroupKey. Validate that each group has
+      // exactly two rows — one stock leg (qty>0) and one cash leg (qty=0
+      // or omitted). Mint one UUID per group; map keys → UUIDs so the
+      // per-row INSERT can stamp `trade_link_id`. Errors here fail the
+      // affected rows in the per-row loop (not the whole batch).
+      const tradeGroupBuckets = new Map<string, number[]>();
+      transactions.forEach((t, i) => {
+        const k = (t as { tradeGroupKey?: unknown }).tradeGroupKey;
+        if (typeof k === "string" && k.length > 0) {
+          const arr = tradeGroupBuckets.get(k) ?? [];
+          arr.push(i);
+          tradeGroupBuckets.set(k, arr);
+        }
+      });
+      const tradeGroupErrors = new Map<number, string>();
+      const tradeGroupUuid = new Map<string, string>();
+      for (const [key, indices] of tradeGroupBuckets.entries()) {
+        if (indices.length !== 2) {
+          const msg = `tradeGroupKey "${key}" must group exactly 2 rows (cash leg + stock leg). Found ${indices.length}.`;
+          for (const i of indices) tradeGroupErrors.set(i, msg);
+          continue;
+        }
+        const [a, b] = indices;
+        const qa = Number(transactions[a].quantity ?? 0);
+        const qb = Number(transactions[b].quantity ?? 0);
+        const stockCount = (qa > 0 ? 1 : 0) + (qb > 0 ? 1 : 0);
+        const cashCount = (qa === 0 ? 1 : 0) + (qb === 0 ? 1 : 0);
+        if (stockCount !== 1 || cashCount !== 1) {
+          const msg = `tradeGroupKey "${key}" requires exactly one stock leg (quantity > 0) and one cash leg (quantity omitted or 0). Got quantities ${qa}, ${qb}.`;
+          tradeGroupErrors.set(a, msg);
+          tradeGroupErrors.set(b, msg);
+          continue;
+        }
+        tradeGroupUuid.set(key, randomUUID());
+      }
+
       const results: {
         index: number;
         success: boolean;
@@ -2216,6 +2305,7 @@ export function registerPgTools(
         resolvedAccount?: { id: number; name: string };
         resolvedCategory?: { id: number; name: string } | null;
         resolvedHolding?: { id: number } | null;
+        tradeLinkId?: string | null;
         warnings?: string[];
         dryRun?: boolean;
         wouldBeId?: null;
@@ -2227,6 +2317,15 @@ export function registerPgTools(
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
+          // Issue #96: short-circuit rows whose tradeGroupKey failed the
+          // pre-pass validation. Surface the per-group error message; the
+          // valid sibling (if there's one) carries the same error so the
+          // caller sees both rows fail symmetrically.
+          const tgErr = tradeGroupErrors.get(i);
+          if (tgErr) {
+            results.push({ index: i, success: false, message: tgErr });
+            continue;
+          }
           // Resolve account: per-row id > top-level id > strict fuzzy on name.
           let acct: Row | null = null;
           if (t.account_id != null) {
@@ -2329,6 +2428,12 @@ export function registerPgTools(
           const rowCategory = catId != null ? { id: catId, name: catNameById.get(catId) ?? "" } : null;
           const rowHolding = rowHoldingId != null ? { id: rowHoldingId } : null;
 
+          // Issue #96: surface the minted trade_link_id (when this row
+          // belongs to a tradeGroupKey-validated pair) on dry-run AND
+          // success responses so callers can verify the linkage end-to-end.
+          const tgKeyForPreview = (t as { tradeGroupKey?: unknown }).tradeGroupKey;
+          const previewTradeLinkId = typeof tgKeyForPreview === "string" ? (tradeGroupUuid.get(tgKeyForPreview) ?? null) : null;
+
           if (dryRun) {
             // Skip the INSERT but report the resolved triple so the caller
             // can verify routing for every row before re-submitting without
@@ -2342,6 +2447,7 @@ export function registerPgTools(
               resolvedAccount: resolvedAccountInfo,
               resolvedCategory: rowCategory,
               resolvedHolding: rowHolding,
+              ...(previewTradeLinkId ? { tradeLinkId: previewTradeLinkId } : {}),
               ...(rowWarnings.length ? { warnings: rowWarnings } : {}),
             });
             continue;
@@ -2356,9 +2462,13 @@ export function registerPgTools(
           // needs the per-row timestamps.
           // Issue #90: RETURNING id so we can collect inserted rows for
           // the post-loop duplicate-hint scan.
+          // Issue #96: when tradeGroupKey is present and the pre-pass
+          // validated the group, stamp the minted UUID into trade_link_id.
+          const tgKey = (t as { tradeGroupKey?: unknown }).tradeGroupKey;
+          const rowTradeLinkId = typeof tgKey === "string" ? (tradeGroupUuid.get(tgKey) ?? null) : null;
           const insRows = await q(db, sql`
-            INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
-            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'})
+            INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source, trade_link_id)
+            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'}, ${rowTradeLinkId})
             RETURNING id
           `);
           const newTxId = insRows[0]?.id != null ? Number(insRows[0].id) : null;
@@ -2378,6 +2488,7 @@ export function registerPgTools(
             resolvedAccount: resolvedAccountInfo,
             resolvedCategory: rowCategory,
             resolvedHolding: rowHolding,
+            ...(rowTradeLinkId ? { tradeLinkId: rowTradeLinkId } : {}),
             ...(rowWarnings.length ? { warnings: rowWarnings } : {}),
           });
         } catch (e) {
@@ -4063,12 +4174,18 @@ export function registerPgTools(
       // on the user's Dividends category id instead of the legacy
       // qty=0+amt>0 heuristic.
       const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
+      // Issue #96: LEFT JOIN to cash-leg sibling (multi-currency trade
+      // pair). cash.amount is the broker's actual settlement value in the
+      // brokerage account's currency; we substitute it for t.amount on a
+      // paired buy row in the loop below. cash.id is null for unpaired
+      // rows (legacy / single-currency / non-buy) — fallback path.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
                t.portfolio_holding_id, t.category_id,
                ph.name_ct as ph_name_ct, ph.name as ph_name,
                ph.symbol as ph_symbol, ph.symbol_ct as ph_symbol_ct,
-               a.name as account_name, a.name_ct as account_name_ct, a.currency
+               a.name as account_name, a.name_ct as account_name_ct, a.currency,
+               cash.amount AS cash_amount, cash.id AS cash_id
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         INNER JOIN holding_accounts ha
@@ -4076,6 +4193,12 @@ export function registerPgTools(
          AND ha.account_id = t.account_id
          AND ha.user_id = ${userId}
         LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+        LEFT JOIN transactions cash
+          ON cash.user_id = ${userId}
+         AND cash.trade_link_id IS NOT NULL
+         AND cash.trade_link_id = t.trade_link_id
+         AND cash.id <> t.id
+         AND COALESCE(cash.quantity, 0) = 0
         WHERE t.user_id = ${userId}
           AND t.portfolio_holding_id IS NOT NULL
         ORDER BY t.date ASC
@@ -4193,7 +4316,10 @@ export function registerPgTools(
         const amt = Number(t.amount);
         const catId = t.category_id != null ? Number(t.category_id) : null;
         if (qty > 0) {
-          buyQty += qty; buyAmt += Math.abs(amt); purchases.push(t);
+          // Issue #96: paired cash-leg cost basis when present.
+          const cashAmt = t.cash_id != null ? Number(t.cash_amount) : NaN;
+          const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(amt);
+          buyQty += qty; buyAmt += buyCostAmt; purchases.push(t);
         } else if (qty < 0) {
           sellQty += Math.abs(qty); sellAmt += Math.abs(amt); sales.push(t);
         }

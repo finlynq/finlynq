@@ -106,6 +106,15 @@ export const transactions = pgTable("transactions", {
   importHash: text("import_hash"),
   fitId: text("fit_id"),
   linkId: text("link_id"),
+  // Issue #96 — multi-currency trade pair linker. Server-generated UUID
+  // (NEVER accepted from client) that groups the cash leg + stock leg of a
+  // multi-currency trade booked as two separate rows. The four cost-basis
+  // aggregators read the cash leg's `entered_amount` as cost basis for
+  // the stock leg's holding when this column is set; legacy rows (no
+  // `trade_link_id`) fall back to the stock leg's own amount. Distinct
+  // from `link_id`, which the four-check transfer-pair rule reserves for
+  // `record_transfer` siblings.
+  tradeLinkId: text("trade_link_id"),
 });
 
 // tx_currency_audit — flagged rows where transactions.currency != accounts.currency
