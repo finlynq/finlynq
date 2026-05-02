@@ -145,6 +145,7 @@ const toolGroups: {
       "get_portfolio_analysis",
       "get_portfolio_performance",
       "analyze_holding",
+      "trace_holding_quantity",
       "get_investment_insights",
     ],
   },

@@ -3652,7 +3652,7 @@ export function registerPgTools(
         return text({
           read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
           write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
-          portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_investment_insights"],
+          portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           trade_tools: ["record_transfer", "record_trade"],
           tip: "Use tool_name='record_transaction' for detailed usage of any tool. For brokerage buys/sells prefer record_trade; record_transfer is the manual fallback for non-trade in-kind moves (e.g. forex sleeve, ACATS).",
         });
@@ -3709,7 +3709,7 @@ export function registerPgTools(
 
       if (t === "portfolio") {
         return text({
-          tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_investment_insights"],
+          tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "All portfolio tools return a disclaimer field. Not financial advice.",
@@ -3822,17 +3822,31 @@ export function registerPgTools(
   // ── update_portfolio_holding ───────────────────────────────────────────────
   server.tool(
     "update_portfolio_holding",
-    "Update a portfolio holding's name, symbol, account, currency, isCrypto, or note. Renames cascade to all transactions automatically because the portfolio aggregators (issue #86) group by FK holdingId, not by display name — two holdings sharing a name across accounts stay distinct rows in get_portfolio_analysis output.",
+    "Update a portfolio holding's name, symbol, currency, isCrypto, or note. Renames cascade to all transactions automatically because the portfolio aggregators (issue #86) group by FK holdingId, not by display name — two holdings sharing a name across accounts stay distinct rows in get_portfolio_analysis output. NOTE: the legacy `account` parameter is REFUSED (issue #99) — moving a holding to a different account would leave stale `holding_accounts` rows and orphaned account attribution on every historical transaction. To actually move shares between accounts, use record_transfer (in-kind); to re-attribute existing transactions, update them individually.",
     {
       holding: z.string().describe("Current holding name OR symbol (fuzzy matched against decrypted name and symbol)"),
       name: z.string().min(1).max(200).optional().describe("New name"),
       symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
-      account: z.string().optional().describe("Move to a different brokerage account (name or alias, fuzzy matched)"),
+      account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) to move shares between accounts; update individual transactions to re-attribute history."),
       currency: z.enum(["CAD", "USD"]).optional(),
       isCrypto: z.boolean().optional(),
       note: z.string().max(500).optional(),
     },
     async ({ holding, name, symbol, account, currency, isCrypto, note }) => {
+      // Issue #99: refuse account-move. Updating only portfolio_holdings.account_id
+      // (the prior behavior) leaves a stale (holding, old_account) row in
+      // holding_accounts (issue #25's JOIN grain) AND broken account
+      // attribution on every prior transaction whose account_id still
+      // references the old account. Bulk-rewriting historical transaction
+      // account_ids would destroy the audit trail. The semantically correct
+      // path is record_transfer (in-kind), which atomically books the move
+      // as a transfer pair.
+      if (account !== undefined) {
+        return err(
+          `Moving a holding to a different account is no longer supported via update_portfolio_holding (issue #99). Stale aggregator state and orphaned transaction account attribution were the failure modes. Instead: use record_transfer with in-kind semantics (holding=<name>, quantity=<shares>) to move shares to a new account, OR update individual transactions' account_id with update_transaction.`
+        );
+      }
+
       const rawHoldings = await q(db, sql`
         SELECT id, account_id, name, symbol, name_ct, symbol_ct
         FROM portfolio_holdings
@@ -3853,19 +3867,6 @@ export function registerPgTools(
       }
       if (!h) return err(`Holding "${holding}" not found`);
 
-      // Resolve target account if the caller wants to move the holding.
-      let newAccountId: number | null | undefined;
-      if (account !== undefined) {
-        const rawAccounts = await q(db, sql`
-          SELECT id, name, alias, name_ct, alias_ct FROM accounts
-          WHERE user_id = ${userId} AND archived = false
-        `);
-        const allAccounts = decryptNameish(rawAccounts, dek);
-        const acct = fuzzyFind(account, allAccounts);
-        if (!acct) return err(`Account "${account}" not found`);
-        newAccountId = Number(acct.id);
-      }
-
       const updates: ReturnType<typeof sql>[] = [];
       if (name !== undefined) {
         updates.push(sql`name = ${name}`);
@@ -3883,7 +3884,6 @@ export function registerPgTools(
           updates.push(sql`symbol_ct = ${s.ct}`, sql`symbol_lookup = ${s.lookup}`);
         }
       }
-      if (newAccountId !== undefined) updates.push(sql`account_id = ${newAccountId}`);
       if (currency !== undefined) updates.push(sql`currency = ${currency}`);
       if (isCrypto !== undefined) updates.push(sql`is_crypto = ${isCrypto ? 1 : 0}`);
       if (note !== undefined) updates.push(sql`note = ${note}`);
@@ -4483,6 +4483,160 @@ export function registerPgTools(
             note: t.note || undefined,
           };
         }),
+      });
+    }
+  );
+
+  // ── trace_holding_quantity ─────────────────────────────────────────────────
+  server.tool(
+    "trace_holding_quantity",
+    "Per-transaction quantity contributions for a single holding, with running sum. Diagnostic tool for investigating quantity discrepancies (e.g. brokerage statement says 79 shares but the aggregator reports 86 — list every contributing leg to find the extra rows). Read-only. JOINs through `holding_accounts` (issue #25) so the rows match what the four portfolio aggregators see; rows whose `(holding_id, account_id)` pair is missing from `holding_accounts` are OMITTED (they're invisible to the aggregators too — surface the gap via the `unjoinedTransactionCount` field). Matches the `analyze_holding` resolution semantics: `holdingId` is preferred when present (bypasses fuzzy matching); when only `symbol` is given and it spans multiple holdings the response surfaces an `ambiguous` candidate list.",
+    {
+      symbol: z.string().optional().describe("Holding name or symbol (fuzzy matched). Required when `holdingId` is omitted."),
+      holdingId: z.number().int().optional().describe("Filter to this exact portfolio_holdings.id — bypasses fuzzy matching."),
+    },
+    async ({ symbol, holdingId }) => {
+      if (!symbol && holdingId == null) {
+        return err("trace_holding_quantity requires either `symbol` or `holdingId`");
+      }
+      const lo = (symbol ?? "").toLowerCase();
+      // Resolve the holding id when only `symbol` was supplied.
+      // Issue #99: same ambiguity handling as analyze_holding — when the
+      // substring spans multiple distinct holding ids, return the candidate
+      // list rather than averaging across them.
+      let resolvedHoldingId: number | null = holdingId ?? null;
+      if (resolvedHoldingId == null) {
+        const candidatesRaw = await q(db, sql`
+          SELECT id, name, name_ct, symbol, symbol_ct, account_id
+          FROM portfolio_holdings
+          WHERE user_id = ${userId}
+        `);
+        const candidates: Row[] = decryptNameish(candidatesRaw, dek).map((c: Row): Row => {
+          let sym: string | null = null;
+          if (c.symbol_ct && dek) {
+            try { sym = decryptField(dek, String(c.symbol_ct)) ?? null; } catch { sym = null; }
+          }
+          if (!sym && c.symbol) sym = String(c.symbol);
+          return { ...c, symbol_decrypted: sym };
+        });
+        const matches: Row[] = candidates.filter((c: Row) => {
+          const n = String(c.name ?? "").toLowerCase();
+          const s = String(c.symbol_decrypted ?? "").toLowerCase();
+          // Symbol gets exact-equality preference; name keeps substring.
+          return n.includes(lo) || s === lo;
+        });
+        if (!matches.length) {
+          return err(`No holding found matching "${symbol}"`);
+        }
+        const distinctIds = new Set<number>(matches.map((m) => Number(m.id)));
+        if (distinctIds.size > 1) {
+          // Pull account name for each candidate so the caller can disambiguate.
+          const ids = [...distinctIds];
+          const accountsRaw = await q(db, sql`
+            SELECT id, name, name_ct FROM accounts WHERE user_id = ${userId}
+          `);
+          const accountsDec = decryptNameish(accountsRaw, dek);
+          const accountNameById = new Map<number, string>();
+          for (const a of accountsDec) accountNameById.set(Number(a.id), String(a.name ?? ""));
+          const ambiguous = ids.map((id) => {
+            const m = matches.find((x: Row) => Number(x.id) === id)!;
+            return {
+              holdingId: id,
+              name: (m.name ?? null) as string | null,
+              symbol: (m.symbol_decrypted ?? null) as string | null,
+              account: accountNameById.get(Number(m.account_id)) ?? null,
+            };
+          });
+          return text({
+            ambiguous,
+            note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call trace_holding_quantity with one of these holdingId values.`,
+          });
+        }
+        resolvedHoldingId = Number(matches[0].id);
+      }
+
+      // Issue #99: count transactions that reference this holding but whose
+      // (holding_id, account_id) pair is NOT in holding_accounts — those rows
+      // are invisible to the four aggregators (issue #25's INNER JOIN through
+      // holding_accounts) and the discrepancy is exactly what users hit when
+      // they ask "why does the statement say 79 but Finlynq says 86?"
+      const unjoinedRows = await q(db, sql`
+        SELECT COUNT(*) AS cnt
+        FROM transactions t
+        WHERE t.user_id = ${userId}
+          AND t.portfolio_holding_id = ${resolvedHoldingId}
+          AND NOT EXISTS (
+            SELECT 1 FROM holding_accounts ha
+            WHERE ha.user_id = ${userId}
+              AND ha.holding_id = t.portfolio_holding_id
+              AND ha.account_id = t.account_id
+          )
+      `);
+      const unjoinedTransactionCount = Number(unjoinedRows[0]?.cnt ?? 0);
+
+      // Pull every contributing leg via the same JOIN the aggregators use.
+      const legsRaw = await q(db, sql`
+        SELECT t.id, t.date, t.account_id, t.quantity, t.amount, t.source,
+               a.name AS account_name, a.name_ct AS account_name_ct,
+               t.payee
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        INNER JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ${userId}
+        WHERE t.user_id = ${userId}
+          AND t.portfolio_holding_id = ${resolvedHoldingId}
+        ORDER BY t.date ASC, t.id ASC
+      `);
+
+      let runningSum = 0;
+      const legs = legsRaw.map((row) => {
+        const qty = Number(row.quantity ?? 0);
+        runningSum += qty;
+        const accName = row.account_name_ct && dek
+          ? (decryptField(dek, String(row.account_name_ct)) ?? row.account_name)
+          : row.account_name;
+        const pay = row.payee && dek
+          ? (decryptField(dek, String(row.payee)) ?? row.payee)
+          : row.payee;
+        return {
+          transactionId: Number(row.id),
+          date: row.date,
+          accountId: Number(row.account_id),
+          accountName: accName ?? null,
+          quantity: qty,
+          amount: Number(row.amount ?? 0),
+          source: row.source ?? null,
+          payee: pay ?? null,
+          runningSum: Math.round(runningSum * 10000) / 10000,
+        };
+      });
+
+      const totalQty = Math.round(runningSum * 10000) / 10000;
+      // Group legs by account so the caller can compare each (holding,
+      // account) pair against the brokerage statement directly.
+      const perAccount = new Map<number, { accountId: number; accountName: string | null; qty: number; legCount: number }>();
+      for (const l of legs) {
+        const e = perAccount.get(l.accountId);
+        if (e) { e.qty += l.quantity; e.legCount += 1; }
+        else perAccount.set(l.accountId, { accountId: l.accountId, accountName: l.accountName, qty: l.quantity, legCount: 1 });
+      }
+      const perAccountArr = [...perAccount.values()].map((e) => ({
+        ...e,
+        qty: Math.round(e.qty * 10000) / 10000,
+      }));
+
+      return text({
+        holdingId: resolvedHoldingId,
+        totalLegs: legs.length,
+        totalQty,
+        unjoinedTransactionCount,
+        unjoinedNote: unjoinedTransactionCount > 0
+          ? `${unjoinedTransactionCount} transaction(s) reference this holding but their (holdingId, accountId) pair is NOT in holding_accounts — they are invisible to the four portfolio aggregators (issue #25). Investigate via search_transactions(portfolio_holding_id, account_id) and either bind the (holding, account) pair (POST /api/holding-accounts) or re-attribute the transaction.`
+          : null,
+        perAccount: perAccountArr,
+        legs,
       });
     }
   );
