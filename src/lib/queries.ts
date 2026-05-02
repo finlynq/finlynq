@@ -465,6 +465,12 @@ export async function getPortfolioHoldings(userId: string) {
       symbol: portfolioHoldings.symbol,
       symbolCt: portfolioHoldings.symbolCt,
       currency: portfolioHoldings.currency,
+      // isCrypto is needed by /settings/investments and the holding-edit
+      // form so the "Crypto asset" checkbox round-trips correctly. Adding
+      // it here keeps GET /api/portfolio (the only consumer of this query)
+      // a complete edit-form payload — saves a second round-trip vs.
+      // hydrating from /api/portfolio/overview.
+      isCrypto: portfolioHoldings.isCrypto,
       note: portfolioHoldings.note,
       // Sum of every tx's quantity column for this holding. Plaintext
       // metadata, no decryption needed. NULL coalesces to 0. Cast to
