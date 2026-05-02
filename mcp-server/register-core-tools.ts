@@ -1815,17 +1815,25 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── update_portfolio_holding ───────────────────────────────────────────────
   server.tool(
     "update_portfolio_holding",
-    "Update a portfolio holding's name, symbol, account, currency, isCrypto, or note. Renames cascade to all transactions automatically because get_portfolio_analysis groups by FK, not by string.",
+    "Update a portfolio holding's name, symbol, currency, isCrypto, or note. Renames cascade to all transactions automatically because get_portfolio_analysis groups by FK, not by string. NOTE: the legacy `account` parameter is REFUSED (issue #99) — moving a holding to a different account would leave stale `holding_accounts` rows and broken transaction account attribution. To move shares between accounts use record_transfer (in-kind); to re-attribute existing transactions update them individually.",
     {
       holding: z.string().describe("Current holding name OR symbol (fuzzy matched)"),
       name: z.string().min(1).max(200).optional(),
       symbol: z.string().max(50).optional().describe("Pass empty string to clear"),
-      account: z.string().optional().describe("Move to a different brokerage account (name or alias)"),
+      account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) instead."),
       currency: z.enum(["CAD", "USD"]).optional(),
       isCrypto: z.boolean().optional(),
       note: z.string().max(500).optional(),
     },
     async ({ holding, name, symbol, account, currency, isCrypto, note }) => {
+      // Issue #99: refuse account-move (see HTTP variant for full rationale).
+      // Stdio MCP also refuses this branch — same stale-data concern applies.
+      if (account !== undefined) {
+        return sqliteErr(
+          `Moving a holding to a different account is no longer supported via update_portfolio_holding (issue #99). Stale aggregator state and orphaned transaction account attribution were the failure modes. Instead: use record_transfer with in-kind semantics, OR update individual transactions' account_id with update_transaction.`
+        );
+      }
+
       const allHoldings = await sqlite.prepare(
         `SELECT id, account_id, name, symbol FROM portfolio_holdings WHERE user_id = ?`
       ).all(userId) as SqliteRow[];
@@ -1839,16 +1847,6 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }
       if (!h) return sqliteErr(`Holding "${holding}" not found`);
 
-      let newAccountId: number | undefined;
-      if (account !== undefined) {
-        const allAccounts = await sqlite.prepare(
-          `SELECT id, name, alias FROM accounts WHERE user_id = ? AND archived = false`
-        ).all(userId) as SqliteRow[];
-        const acct = fuzzyFind(account, allAccounts);
-        if (!acct) return sqliteErr(`Account "${account}" not found`);
-        newAccountId = Number(acct.id);
-      }
-
       const updates: string[] = []; const params: unknown[] = [];
       if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
       if (symbol !== undefined) {
@@ -1856,7 +1854,6 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         if (trimmed) { updates.push(`symbol = ?`); params.push(trimmed); }
         else { updates.push(`symbol = NULL`); }
       }
-      if (newAccountId !== undefined) { updates.push(`account_id = ?`); params.push(newAccountId); }
       if (currency !== undefined) { updates.push(`currency = ?`); params.push(currency); }
       if (isCrypto !== undefined) { updates.push(`is_crypto = ?`); params.push(isCrypto ? 1 : 0); }
       if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
@@ -2245,6 +2242,135 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     }
   );
 
+  // ── trace_holding_quantity ─────────────────────────────────────────────────
+  server.tool(
+    "trace_holding_quantity",
+    "Per-transaction quantity contributions for a single holding, with running sum. Diagnostic tool for investigating quantity discrepancies. Read-only. JOINs through holding_accounts (issue #25) so the rows match what the four aggregators see; rows whose (holding_id, account_id) pair is missing from holding_accounts are OMITTED but counted in `unjoinedTransactionCount`. When `symbol` matches multiple holdings, response surfaces an `ambiguous` candidate list (re-call with `holdingId`).",
+    {
+      symbol: z.string().optional().describe("Holding name or symbol (fuzzy matched). Required when `holdingId` is omitted."),
+      holdingId: z.number().int().optional().describe("Filter to this exact portfolio_holdings.id — bypasses fuzzy matching."),
+    },
+    async ({ symbol, holdingId }) => {
+      if (!symbol && holdingId == null) {
+        return sqliteErr("trace_holding_quantity requires either `symbol` or `holdingId`");
+      }
+      // Resolve the holding id when only `symbol` was supplied. Stdio reads
+      // plaintext name/symbol (per the stdio carve-out — no DEK).
+      let resolvedHoldingId: number | null = holdingId ?? null;
+      if (resolvedHoldingId == null) {
+        const matches = await sqlite.prepare(`
+          SELECT id, name, symbol, account_id
+          FROM portfolio_holdings
+          WHERE user_id = ?
+            AND (
+              LOWER(name) LIKE LOWER(?)
+              OR LOWER(symbol) = LOWER(?)
+            )
+        `).all(userId, `%${symbol}%`, symbol) as SqliteRow[];
+
+        if (!matches.length) return sqliteErr(`No holding found matching "${symbol}"`);
+
+        const distinctIds = new Set<number>(matches.map((m) => Number(m.id)));
+        if (distinctIds.size > 1) {
+          const ids = [...distinctIds];
+          const accounts = await sqlite.prepare(
+            `SELECT id, name FROM accounts WHERE user_id = ?`
+          ).all(userId) as SqliteRow[];
+          const accountNameById = new Map<number, string>();
+          for (const a of accounts) accountNameById.set(Number(a.id), String(a.name ?? ""));
+          const ambiguous = ids.map((id) => {
+            const m = matches.find((x) => Number(x.id) === id)!;
+            return {
+              holdingId: id,
+              name: (m.name ?? null) as string | null,
+              symbol: (m.symbol ?? null) as string | null,
+              account: accountNameById.get(Number(m.account_id)) ?? null,
+            };
+          });
+          return txt({
+            ambiguous,
+            note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call trace_holding_quantity with one of these holdingId values.`,
+          });
+        }
+        resolvedHoldingId = Number(matches[0].id);
+      }
+
+      // Count transactions whose (holding_id, account_id) pair is missing
+      // from holding_accounts — these are invisible to the four aggregators.
+      const unjoinedRow = await sqlite.prepare(`
+        SELECT COUNT(*) AS cnt
+        FROM transactions t
+        WHERE t.user_id = ?
+          AND t.portfolio_holding_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM holding_accounts ha
+            WHERE ha.user_id = ?
+              AND ha.holding_id = t.portfolio_holding_id
+              AND ha.account_id = t.account_id
+          )
+      `).get(userId, resolvedHoldingId, userId) as { cnt: number };
+      const unjoinedTransactionCount = Number(unjoinedRow?.cnt ?? 0);
+
+      const legsRaw = await sqlite.prepare(`
+        SELECT t.id, t.date, t.account_id, t.quantity, t.amount, t.source, t.payee,
+               a.name AS account_name
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        INNER JOIN holding_accounts ha
+          ON ha.holding_id = t.portfolio_holding_id
+         AND ha.account_id = t.account_id
+         AND ha.user_id = ?
+        WHERE t.user_id = ?
+          AND t.portfolio_holding_id = ?
+        ORDER BY t.date ASC, t.id ASC
+      `).all(userId, userId, resolvedHoldingId) as SqliteRow[];
+
+      let runningSum = 0;
+      const legs = legsRaw.map((row) => {
+        const qty = Number(row.quantity ?? 0);
+        runningSum += qty;
+        const accountName: string | null = row.account_name == null ? null : String(row.account_name);
+        const source: string | null = row.source == null ? null : String(row.source);
+        const payee: string | null = row.payee == null ? null : String(row.payee);
+        return {
+          transactionId: Number(row.id),
+          date: row.date,
+          accountId: Number(row.account_id),
+          accountName,
+          quantity: qty,
+          amount: Number(row.amount ?? 0),
+          source,
+          payee,
+          runningSum: Math.round(runningSum * 10000) / 10000,
+        };
+      });
+
+      const totalQty = Math.round(runningSum * 10000) / 10000;
+      const perAccount = new Map<number, { accountId: number; accountName: string | null; qty: number; legCount: number }>();
+      for (const l of legs) {
+        const e = perAccount.get(l.accountId);
+        if (e) { e.qty += l.quantity; e.legCount += 1; }
+        else perAccount.set(l.accountId, { accountId: l.accountId, accountName: l.accountName, qty: l.quantity, legCount: 1 });
+      }
+      const perAccountArr = [...perAccount.values()].map((e) => ({
+        ...e,
+        qty: Math.round(e.qty * 10000) / 10000,
+      }));
+
+      return txt({
+        holdingId: resolvedHoldingId,
+        totalLegs: legs.length,
+        totalQty,
+        unjoinedTransactionCount,
+        unjoinedNote: unjoinedTransactionCount > 0
+          ? `${unjoinedTransactionCount} transaction(s) reference this holding but their (holdingId, accountId) pair is NOT in holding_accounts — invisible to the four aggregators.`
+          : null,
+        perAccount: perAccountArr,
+        legs,
+      });
+    }
+  );
+
   // ── get_investment_insights ────────────────────────────────────────────────
   server.tool(
     "get_investment_insights",
@@ -2444,7 +2570,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (t === "tools") return txt({
         read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_net_worth", "get_categories", "get_loans", "get_goals", "get_recurring_transactions", "get_income_statement", "get_spotlight_items", "get_weekly_recap", "get_transaction_rules"],
         write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
-        portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_investment_insights"],
+        portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
         trade_tools: ["record_transfer", "record_trade"],
         tip: "Use tool_name='record_transaction' for usage details. For brokerage buys/sells prefer record_trade; record_transfer is the manual fallback for non-trade in-kind moves (e.g. forex sleeve, ACATS).",
       });
@@ -2473,7 +2599,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       ]});
 
       if (t === "portfolio") return txt({
-        tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "get_investment_insights"],
+        tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
         modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
         disclaimer: PORTFOLIO_DISCLAIMER,
       });

@@ -15,7 +15,7 @@ Self-hosters using stdio MCP must add `PF_USER_ID` to their Claude Desktop confi
 
 ## Tool surface — current count
 
-**82 tools registered on HTTP / 78 on stdio** as of 2026-04-30.
+**83 tools registered on HTTP / 79 on stdio** as of 2026-05-01.
 
 The 6 HTTP-only tools are:
 - File-upload flow: `list_pending_uploads`, `preview_import`, `execute_import`, `cancel_import`
@@ -23,6 +23,12 @@ The 6 HTTP-only tools are:
 - (1 historical adjustment — see consolidation log)
 
 ### Tool surface evolution
+
+- **2026-05-01 — `trace_holding_quantity` added + `update_portfolio_holding` `account` move REFUSED ([#99](https://github.com/finlynq/finlynq/issues/99))** (82 → 83 HTTP, 78 → 79 stdio):
+  - **New read tool `trace_holding_quantity(symbol?, holdingId?)`** — diagnostic for "the brokerage statement says 79 shares but Finlynq says 86" investigations. Returns per-transaction quantity contributions for a single holding with a running sum, plus a `perAccount` rollup. Read-only; JOINs through `holding_accounts` (issue #25) so the rows match exactly what the four portfolio aggregators see. Rows whose `(holding_id, account_id)` pair is missing from `holding_accounts` are OMITTED from `legs` but counted in `unjoinedTransactionCount` — surfacing the gap that's invisible in `analyze_holding`. Same `holdingId`-disambiguation pattern as `analyze_holding`: when `symbol` spans multiple distinct holdings the response returns an `ambiguous` candidate list. Stdio reads plaintext (no DEK in that transport).
+  - **`update_portfolio_holding` (HTTP + stdio) refuses the `account` parameter** with a clear "use record_transfer (in-kind) for share moves; use update_transaction to re-attribute history" error. Prior behavior updated only `portfolio_holdings.account_id` — leaving (a) a stale `(holding, old_account)` row in `holding_accounts` (issue #25's JOIN grain) and (b) every prior `transactions.account_id` still pointing to the OLD account. The audit-correct path is `record_transfer` for actual share movements; bulk-rewriting historical transaction account_ids would destroy the audit trail of where the user actually held the position. Renames + symbol/currency/note edits remain unchanged.
+  - **One-off cleanup of stale `holding_accounts` rows from past misuse:** `DELETE FROM holding_accounts ha WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.user_id=ha.user_id AND t.portfolio_holding_id=ha.holding_id AND t.account_id=ha.account_id);` — safe (cascade only drops cached aggregates, no transactions touched). Run once per env.
+  - **Documentation invariant.** The "`holding_accounts.qty` and `cost_basis` are NOT read by any of the 4 aggregators" gotcha was already documented in CLAUDE.md (line 117) when the problem was discovered. No new gotcha needed; the schema-prep `migrate-holding-accounts.sql` columns remain as cache-for-future-use only.
 
 - **2026-04-22 — Waves 1 + 2 parity expansion** brought stdio up to match HTTP for read coverage.
 - **2026-04-23 — Consolidation:** dropped 11 redundant tools (86 → 75):

@@ -490,6 +490,7 @@ const MCP_TOOLS = [
   { name: "get_portfolio_analysis", type: "read", description: "Portfolio holdings with all metrics. Pass `symbols` to filter." },
   { name: "get_portfolio_performance", type: "read", description: "TWR, XIRR, period-filtered performance" },
   { name: "analyze_holding", type: "read", description: "Single holding metrics: cost basis, P&L, dividends" },
+  { name: "trace_holding_quantity", type: "read", description: "Per-transaction quantity contributions for one holding (diagnostic for quantity discrepancies)" },
   { name: "get_investment_insights", type: "read", description: "mode: 'patterns' | 'rebalancing' (needs targets) | 'benchmark' (SP500/TSX/MSCI_WORLD/BONDS_CA)" },
   { name: "get_weekly_recap", type: "read", description: "Weekly financial recap with top categories" },
   { name: "get_spotlight_items", type: "read", description: "Attention items for the dashboard" },
