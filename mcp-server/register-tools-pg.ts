@@ -305,14 +305,30 @@ function buildCtLookup(
  * encrypted — equality against ciphertext never hits. With no DEK the
  * history match is skipped; rule matches still work.
  *
- * Investment-account mode (#32): when the target account has
- * `is_investment=true`, expense (type='E') candidates are filtered out of
- * BOTH the rule and history candidate pools (forex/dividend/interest rows
- * shouldn't land in "Groceries"), an additional payee-keyword pattern pass
- * routes common brokerage rows to "Dividends" / "Credit Interest" /
- * "Currency Revaluation" / "Transfers", and the final fallback prefers
- * "Transfers" / "Investment Activity" over null. Non-investment writes are
- * unchanged. See {@link pickInvestmentCategoryByPayee} +
+ * Investment-account mode (#32, refined #89): when the target account has
+ * `is_investment=true`, the function runs an investment-only ladder and
+ * SHORT-CIRCUITS without ever consulting the generic history pool. The
+ * ladder is:
+ *   1. Investment-aware rules pass — expense (type='E') matches are skipped
+ *      so the next priority gets a chance. Non-expense rule matches return.
+ *   2. Keyword pattern pass via {@link pickInvestmentCategoryByPayee} —
+ *      routes "Dividend"/"Interest"/"Forex"/"Disbursement" to the user's
+ *      named buckets.
+ *   3. Fallback via {@link fallbackInvestmentCategory} — prefers
+ *      "Transfers" / "Investment Activity" when present.
+ *   4. Returns `null` (uncategorized) — does NOT touch generic history.
+ *
+ * Why short-circuit BEFORE history (#89): even with the expense-skip guard,
+ * a non-expense category that happens to share a payee with a brokerage row
+ * could still elect itself, and a category miscatTyped or with a missing
+ * `catTypeById` lookup (decryption miss) could leak an expense category
+ * through. `null` is the well-supported uncategorized convention everywhere
+ * in the codebase (chat-engine, weekly-recap, spotlight all render it as
+ * "Uncategorized"), so silent uncategorized is strictly better than a wrong
+ * guess on a brokerage cash leg.
+ *
+ * Non-investment writes are unchanged: rules → history → null, exactly as
+ * before. See {@link pickInvestmentCategoryByPayee} +
  * {@link fallbackInvestmentCategory} in src/lib/auto-categorize.ts.
  */
 async function autoCategory(
@@ -325,10 +341,10 @@ async function autoCategory(
   if (!payee) return null;
 
   // Investment-account mode pre-loads (id, name, type) for every category so
-  // the rule + history loops can drop expense matches and the keyword
-  // pattern + fallback can resolve well-known names ("Dividends",
-  // "Transfers"). Names may be Stream-D-encrypted; decrypt with the same
-  // ct → plaintext-fallback ladder used elsewhere.
+  // the rule loop can drop expense matches and the keyword pattern +
+  // fallback can resolve well-known names ("Dividends", "Transfers"). Names
+  // may be Stream-D-encrypted; decrypt with the same ct → plaintext-fallback
+  // ladder used elsewhere (Phase-3 / pathfinder DEK-mismatch resilient).
   let catTypeById: Map<number, string> | null = null;
   let investmentHints: InvestmentCategoryHint[] | null = null;
   if (isInvestmentAccount) {
@@ -370,6 +386,46 @@ async function autoCategory(
      ORDER BY priority DESC
   `);
   const payeeLower = payee.toLowerCase();
+
+  // ── Investment-account branch ────────────────────────────────────────────
+  // Run the investment-only ladder and return early. The generic history
+  // pass below NEVER runs for investment accounts (#89): a "Car Maintenance"
+  // expense category leaking through expense-skip guards is strictly worse
+  // than uncategorized for a brokerage cash leg.
+  if (isInvestmentAccount) {
+    // 1. Investment-aware rules — expense rules are skipped, next priority gets a chance.
+    for (const rule of rules) {
+      const value = String(rule.match_value ?? "");
+      const valueLower = value.toLowerCase();
+      const type = String(rule.match_type ?? "");
+      let hit = false;
+      if (type === "contains") hit = payeeLower.includes(valueLower);
+      else if (type === "exact") hit = payeeLower === valueLower;
+      else if (type === "regex") {
+        try { hit = new RegExp(value, "i").test(payee); } catch { hit = false; }
+      }
+      if (hit) {
+        const cid = Number(rule.assign_category_id);
+        if (catTypeById?.get(cid) === "E") continue;
+        return cid;
+      }
+    }
+    // 2. Keyword pattern pass (Dividend / Interest / Forex / Disbursement).
+    if (investmentHints) {
+      const id = pickInvestmentCategoryByPayee(payee, investmentHints);
+      if (id !== null) return id;
+    }
+    // 3. Fallback — prefers "Transfers" / "Investment Activity".
+    if (investmentHints) {
+      const fb = fallbackInvestmentCategory(investmentHints);
+      if (fb !== null) return fb;
+    }
+    // 4. Uncategorized (null FK is the convention — chat-engine,
+    //    weekly-recap, spotlight all render it as "Uncategorized").
+    return null;
+  }
+
+  // ── Non-investment branch (unchanged) ────────────────────────────────────
   for (const rule of rules) {
     const value = String(rule.match_value ?? "");
     const valueLower = value.toLowerCase();
@@ -381,25 +437,11 @@ async function autoCategory(
       try { hit = new RegExp(value, "i").test(payee); } catch { hit = false; }
     }
     if (hit) {
-      const cid = Number(rule.assign_category_id);
-      // Investment-account: skip expense rules so the next priority gets a chance.
-      if (isInvestmentAccount && catTypeById?.get(cid) === "E") continue;
-      return cid;
+      return Number(rule.assign_category_id);
     }
   }
 
-  // Investment-account: keyword pattern pass before history. Common brokerage
-  // rows ("Dividend reinvestment", "Forex Trade", "Cash Disbursement") rarely
-  // have a per-payee history yet, so the keywords beat random history matches
-  // that happen to hit an expense category.
-  if (isInvestmentAccount && investmentHints) {
-    const id = pickInvestmentCategoryByPayee(payee, investmentHints);
-    if (id !== null) return id;
-  }
-
-  // Historical-frequency match. In investment mode, expense candidates are
-  // excluded so the tally can't elect a "Groceries" winner with 10 hits over
-  // a "Transfers" runner-up with 3.
+  // Historical-frequency match (non-investment only).
   let histId: number | null = null;
   if (!dek) {
     // Legacy plaintext-only fallback
@@ -409,10 +451,7 @@ async function autoCategory(
       GROUP BY category_id ORDER BY cnt DESC LIMIT 1
     `);
     if (hist.length) {
-      const cid = Number(hist[0].category_id);
-      // Investment mode: drop the top match if it's expense; fall through to
-      // the fallback below. Non-investment: original behavior.
-      if (!isInvestmentAccount || catTypeById?.get(cid) !== "E") histId = cid;
+      histId = Number(hist[0].category_id);
     }
   } else {
     // Fetch candidate rows with category, decrypt payee, then tally.
@@ -429,7 +468,6 @@ async function autoCategory(
       if (!p) continue;
       if (p.toLowerCase() === target) {
         const cid = Number(r.category_id);
-        if (isInvestmentAccount && catTypeById?.get(cid) === "E") continue;
         counts.set(cid, (counts.get(cid) ?? 0) + 1);
       }
     }
@@ -442,14 +480,6 @@ async function autoCategory(
     }
   }
   if (histId !== null) return histId;
-
-  // Investment-account final fallback — a brokerage cash leg with no rule,
-  // keyword, or non-expense history match defaults to "Transfers" (or
-  // "Investment Activity") rather than landing uncategorized.
-  if (isInvestmentAccount && investmentHints) {
-    const fb = fallbackInvestmentCategory(investmentHints);
-    if (fb !== null) return fb;
-  }
 
   return null;
 }
@@ -1959,7 +1989,7 @@ export function registerPgTools(
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns, so callers can preview routing before committing.",
+    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. Investment accounts use a keyword pass (dividend/interest/forex/disbursement) plus a 'Transfers'/'Investment Activity' fallback, and default to uncategorized when none match — never a generic expense category. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns, so callers can preview routing before committing.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
       payee: z.string().describe("Payee or merchant name"),
@@ -2127,7 +2157,7 @@ export function registerPgTools(
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted; investment-account rows use a keyword pass (dividend/interest/forex/disbursement) plus a 'Transfers'/'Investment Activity' fallback, and default to uncategorized when none match — never a generic expense category. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch.",
     {
       account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
       dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`."),
