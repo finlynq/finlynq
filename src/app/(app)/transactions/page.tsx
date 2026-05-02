@@ -1316,16 +1316,25 @@ function TransactionsPageInner() {
       setSubmitError({ message: "Pick both a source and destination account" });
       return;
     }
-    if (fromAccountId === toAccountId) {
-      setSubmitError({ message: "From and To accounts must differ" });
+
+    // Hoist account lookups so the same-account relaxation can read them
+    // before the guard fires (issue #94). The bothInv path is allowed to
+    // submit with fromAccountId === toAccountId because that's an in-kind
+    // rebalance between two holdings in the same brokerage — the server's
+    // createTransferPair already supports this case (`wantsHolding=true`
+    // bypasses the same-account reject in src/lib/transfer.ts).
+    const fromAcctCheck = accounts.find((a) => a.id === fromAccountId);
+    const toAcctCheck = accounts.find((a) => a.id === toAccountId);
+    const bothInv =
+      fromAcctCheck?.isInvestment === true && toAcctCheck?.isInvestment === true;
+    if (fromAccountId === toAccountId && !bothInv) {
+      setSubmitError({ message: "From and To accounts must differ for a cash transfer" });
       return;
     }
 
     const enteredAmount = parseFloat(transferForm.amount || "0");
-    const fromAcctCheck = accounts.find((a) => a.id === fromAccountId);
-    const toAcctCheck = accounts.find((a) => a.id === toAccountId);
     // Derive in-kind from account types: both sides investment = in-kind path.
-    const isInKind = fromAcctCheck?.isInvestment === true && toAcctCheck?.isInvestment === true;
+    const isInKind = bothInv;
     let quantityNum: number | undefined;
     let holdingName: string | undefined;
     if (isInKind) {
@@ -1363,6 +1372,7 @@ function TransactionsPageInner() {
     // the holding via name+quantity and bypasses this check.
     let fromHoldingPin: number | undefined;
     let toHoldingPin: number | undefined;
+    let singleSideQuantity: number | undefined;
     if (!isInKind) {
       if (fromAcct?.isInvestment === true) {
         if (!transferForm.fromHoldingId) {
@@ -1377,6 +1387,22 @@ function TransactionsPageInner() {
           return;
         }
         toHoldingPin = Number(transferForm.toHoldingId);
+      }
+      // Single-investment-side path requires a quantity so the share count
+      // moving through the holding leg is recorded (issue #94). Only on
+      // create — edit-mode for this path is deferred (the violet block
+      // returns null when transferEdit is set), and the PUT path does not
+      // accept holding pins anyway. Skip when neither pin is set (pure
+      // cash-to-cash transfer between two non-investment accounts).
+      if (!transferEdit && (fromHoldingPin != null || toHoldingPin != null)) {
+        const q = parseFloat(transferForm.quantity);
+        if (!Number.isFinite(q) || q <= 0) {
+          setSubmitError({
+            message: "Quantity (shares) must be a positive number for an investment-account transfer",
+          });
+          return;
+        }
+        singleSideQuantity = q;
       }
     }
 
@@ -1394,6 +1420,7 @@ function TransactionsPageInner() {
       ...(receivedAmount != null ? { receivedAmount } : {}),
       ...(fromHoldingPin != null ? { fromHoldingId: fromHoldingPin } : {}),
       ...(toHoldingPin != null ? { toHoldingId: toHoldingPin } : {}),
+      ...(singleSideQuantity != null ? { quantity: singleSideQuantity } : {}),
       ...(transferForm.note ? { note: transferForm.note } : {}),
       ...(transferForm.tags ? { tags: transferForm.tags } : {}),
       ...(transferEdit ? { linkId: transferEdit.linkId } : {}),
@@ -2554,16 +2581,18 @@ function TransactionsPageInner() {
                 }
 
                 // inv→non-inv or non-inv→inv: single holding picker on the
-                // investment side. Required on create; hidden on edit (PUT
-                // path doesn't accept holding pins yet — issue #22).
+                // investment side, paired with a quantity input so the share
+                // count moving through the holding leg is recorded (issue
+                // #94). Required on create; hidden on edit (PUT path doesn't
+                // accept holding pins yet — issue #22).
                 if (transferEdit) return null;
                 return (
                   <div className="space-y-2 rounded-md border border-violet-200 dark:border-violet-900 bg-violet-50/40 dark:bg-violet-950/20 p-3">
                     <p className="text-[11px] text-muted-foreground">
-                      Investment account leg — every transfer into an investment account must reference a holding.
+                      Investment account leg — every transfer into an investment account must reference a holding and the share count moving through it.
                     </p>
-                    <div className={fromInv && toInv ? "grid grid-cols-2 gap-3" : ""}>
-                      {fromInv && fromAcct && (
+                    {fromInv && fromAcct && (
+                      <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1">
                           <Label className="text-xs">
                             Holding in {fromAcct.name}{" "}
@@ -2582,8 +2611,26 @@ function TransactionsPageInner() {
                             className="w-full"
                           />
                         </div>
-                      )}
-                      {toInv && toAcct && (
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            Quantity (shares){" "}
+                            <span className="text-rose-600">*</span>
+                          </Label>
+                          <Input
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            value={transferForm.quantity}
+                            onChange={(e) =>
+                              setTransferForm({ ...transferForm, quantity: e.target.value })
+                            }
+                            placeholder="e.g. 10.0000"
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {toInv && toAcct && (
+                      <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1">
                           <Label className="text-xs">
                             Holding in {toAcct.name}{" "}
@@ -2602,8 +2649,24 @@ function TransactionsPageInner() {
                             className="w-full"
                           />
                         </div>
-                      )}
-                    </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            Quantity (shares){" "}
+                            <span className="text-rose-600">*</span>
+                          </Label>
+                          <Input
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            value={transferForm.quantity}
+                            onChange={(e) =>
+                              setTransferForm({ ...transferForm, quantity: e.target.value })
+                            }
+                            placeholder="e.g. 10.0000"
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })()}
