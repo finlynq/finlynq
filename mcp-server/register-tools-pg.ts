@@ -2215,10 +2215,11 @@ export function registerPgTools(
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted; investment-account rows use a keyword pass (dividend/interest/forex/disbursement) plus a 'Transfers'/'Investment Activity' fallback, and default to uncategorized when none match — never a generic expense category. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch. After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null. Use these to decide whether to delete a leg.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted; investment-account rows use a keyword pass (dividend/interest/forex/disbursement) plus a 'Transfers'/'Investment Activity' fallback, and default to uncategorized when none match — never a generic expense category. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch. Pass top-level `idempotencyKey` (UUID v4) to make this batch safe to retry — if the same `(user, key)` was already committed within 72h, the original result is returned verbatim with no INSERTs (set per-call: callers should generate one fresh UUID per logical batch). After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null. Use these to decide whether to delete a leg.",
     {
       account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
       dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`."),
+      idempotencyKey: z.string().uuid().optional().describe("Optional UUID v4 the caller mints once per batch. First call with `(user, key)` writes the rows AND stashes the response JSON; any retry within 72h returns the stored response verbatim with no INSERTs and no cache invalidation. Skipped on `dryRun: true` (preview must not block a future real submit) and skipped when zero rows commit (caller should retry, not replay). Stored response has plaintext payees/account names redacted to row indices — replay messages read 'row #i: <amt> <ccy>' instead of '<payee>: <amt> <ccy>'; `transactionId` and `resolvedAccount.id` are preserved."),
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
@@ -2236,8 +2237,42 @@ export function registerPgTools(
         tradeGroupKey: z.string().optional().describe("Multi-currency trade pair grouping hint (issue #96). Two rows in this batch with the same `tradeGroupKey` get the same server-minted UUID stamped into `trade_link_id`. Used to link the cash-out leg + stock-in leg of a multi-currency trade so the four cost-basis aggregators can pull the cash leg's `entered_amount` (broker's actual settlement) as cost basis instead of the stock leg's amount (Finlynq's live FX). The key itself is a per-batch label (any string — \"BNO-buy-2025\", \"trade1\", etc.); the server discards it and only the minted UUID lands in the DB. Each group must have exactly two rows: one with `quantity > 0` (stock leg) and one with `quantity == 0` or omitted (cash leg). Rows with no `tradeGroupKey` are normal single-leg inserts (current behavior)."),
       })).describe("Array of transactions to record"),
     },
-    async ({ transactions, account_id: defaultAccountId, dryRun }) => {
+    async ({ transactions, account_id: defaultAccountId, dryRun, idempotencyKey }) => {
       const today = new Date().toISOString().split("T")[0];
+
+      // Idempotency replay (issue #98). Look up first — before any
+      // account/category/holdings prefetch — so a hit returns immediately.
+      // Scoped on `(user_id, key, tool_name)` with a 72h freshness window;
+      // older rows are GC'd by `sweepMcpIdempotencyKeys` but treat them as
+      // misses here defensively. dryRun=true skips replay AND skips storage:
+      // a preview must never block a future real submit with the same key.
+      if (idempotencyKey && !dryRun) {
+        try {
+          const hit = await q(db, sql`
+            SELECT response_json
+              FROM mcp_idempotency_keys
+             WHERE user_id = ${userId}
+               AND key = ${idempotencyKey}::uuid
+               AND tool_name = 'bulk_record_transactions'
+               AND created_at > NOW() - INTERVAL '72 hours'
+             LIMIT 1
+          `);
+          if (hit.length && hit[0].response_json) {
+            const stored = hit[0].response_json;
+            // Drizzle/pg returns jsonb as a parsed object; if a future
+            // driver returns a string, parse defensively.
+            const replay = typeof stored === "string" ? JSON.parse(stored) : stored;
+            return text({ ...replay, replayed: true });
+          }
+        } catch (e) {
+          // Lookup failure must not block the live write path — log and fall
+          // through. Worst case: the caller's retry double-inserts on the
+          // racing pair, strictly no worse than no idempotency.
+          // eslint-disable-next-line no-console
+          console.warn("[bulk_record_transactions] idempotency lookup failed:", e);
+        }
+      }
+
       const rawAccounts = await q(db, sql`SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
       const allAccounts = decryptNameish(rawAccounts, dek);
       const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
@@ -2551,14 +2586,57 @@ export function registerPgTools(
         }
       }
 
-      return text({
+      const responseBody = {
         ...(dryRun ? { dryRun: true } : {}),
         imported: dryRun ? 0 : ok,
         failed: results.length - ok,
         ...(dryRun ? { previewed: ok } : {}),
         results,
         possibleDuplicates,
-      });
+      };
+
+      // Issue #98 — persist the redacted response under the caller-supplied
+      // idempotency key. Skip on dryRun=true (preview) and on ok===0 (entire
+      // batch failed — caller should retry, not replay). The redaction
+      // strips plaintext payee from per-row `message` and account name from
+      // `resolvedAccount` so the at-rest blob doesn't regress Stream D's
+      // display-name encryption contract — `transactionId` and
+      // `resolvedAccount.id` are preserved (the load-bearing identifiers).
+      // ON CONFLICT DO NOTHING handles the concurrent-retry race: two
+      // parallel calls might both miss the lookup, but only one INSERT lands
+      // — the second's INSERT is silently dropped. The runner's row-INSERTs
+      // already happened; that's the residual race, strictly no worse than
+      // calling without an idempotency key.
+      if (idempotencyKey && !dryRun && ok > 0) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const redactedResults = (responseBody.results as any[]).map((r) => {
+            const out = { ...r };
+            if (typeof out.message === "string") {
+              out.message = `row #${out.index}: redacted on replay`;
+            }
+            if (out.resolvedAccount && typeof out.resolvedAccount === "object") {
+              out.resolvedAccount = { id: out.resolvedAccount.id, name: "[redacted]" };
+            }
+            if (out.resolvedCategory && typeof out.resolvedCategory === "object") {
+              out.resolvedCategory = { id: out.resolvedCategory.id, name: "[redacted]" };
+            }
+            return out;
+          });
+          const redactedBody = { ...responseBody, results: redactedResults };
+          await q(db, sql`
+            INSERT INTO mcp_idempotency_keys (user_id, key, tool_name, response_json)
+            VALUES (${userId}, ${idempotencyKey}::uuid, 'bulk_record_transactions', ${JSON.stringify(redactedBody)}::jsonb)
+            ON CONFLICT (user_id, key) DO NOTHING
+          `);
+        } catch (e) {
+          // Persist failure must not break the response — log and continue.
+          // eslint-disable-next-line no-console
+          console.warn("[bulk_record_transactions] idempotency persist failed:", e);
+        }
+      }
+
+      return text(responseBody);
     }
   );
 

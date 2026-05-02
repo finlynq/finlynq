@@ -263,3 +263,46 @@ DEK envelope details: see [encryption.md](encryption.md) "Secret-derived DEK env
 ## Self-hosted limitation — stdio writes are plaintext
 
 Stdio MCP (`register-core-tools.ts`, `tools-v2.ts`, `tools-import-templates.ts`) is the one write path that stays plaintext — no DEK in that transport. As of the 2026-04-22 security audit remediation, stdio tools ARE user-scoped via `PF_USER_ID`, but the data they write is still plaintext. Known self-hosted limitation; document it in any Claude Desktop setup guide.
+
+## Idempotency — `bulk_record_transactions` retry safety ([#98](https://github.com/finlynq/finlynq/issues/98))
+
+`bulk_record_transactions` (HTTP + stdio) accepts an optional `idempotencyKey: UUID` parameter. The caller mints one fresh UUID per logical batch; the server uses `(user_id, key)` as the cache scope. On the **first** call with a given pair, the server inserts the rows as today and stashes the response JSON in `mcp_idempotency_keys`. On a **retry** with the same `(user_id, key)` within 72h, the server returns the stored response verbatim with `replayed: true` appended — **no INSERTs into `transactions`, no `invalidateUserTxCache` call, no FX prefetch.**
+
+This makes large batch imports (e.g. 50–99 row IBKR statements) safe to retry on network timeouts without creating duplicates. `import_hash` covers content-hash dedup at row level; an explicit caller-supplied key covers retry safety where the caller intentionally inserts identical rows.
+
+**Storage shape** ([scripts/migrate-mcp-idempotency.sql](../../scripts/migrate-mcp-idempotency.sql)):
+
+```
+mcp_idempotency_keys (
+  id           SERIAL PRIMARY KEY,
+  user_id      TEXT NOT NULL,
+  key          UUID NOT NULL,
+  tool_name    TEXT NOT NULL,
+  response_json JSONB NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, key)
+)
+```
+
+The UNIQUE index spans the **pair**, not the key alone — two different users reusing the same UUID is a legitimate independent batch. Tested by attempting Alice's key K from Bob's session and confirming Bob's batch inserts normally.
+
+**Encryption / Stream D contract.** The response written to `response_json` is **redacted** before persisting:
+- Per-row `message` is replaced with `"row #${index}: redacted on replay"` (originally contains the plaintext payee).
+- `resolvedAccount.name` and `resolvedCategory.name` are replaced with `"[redacted]"`.
+- `transactionId`, `resolvedAccount.id`, `resolvedCategory.id`, `resolvedHolding.id`, `tradeLinkId`, `dryRun`, `wouldBeId`, `warnings` are preserved — those are the load-bearing identifiers for the caller.
+
+The replay path returns the redacted blob verbatim. Callers needing the plaintext message must `search_transactions` with the returned ids — that path is encryption-aware.
+
+**Rules:**
+- Skip replay AND skip storage on `dryRun: true` (preview must not block a future real submit with the same key).
+- Skip storage when `ok === 0` (entire batch failed — caller should retry, not replay).
+- `ON CONFLICT (user_id, key) DO NOTHING` closes the concurrent-retry race. Two parallel calls with the same key + miss could both INSERT rows on the first racing pair — that residual is no worse than calling without an idempotency key. The replay path itself is race-free (a transaction-row INSERT is the only side effect; a duplicate INSERT into `mcp_idempotency_keys` is silently dropped).
+- Lookups must filter on `(user_id, key, tool_name='bulk_record_transactions', created_at > NOW() - INTERVAL '72 hours')`.
+- Daily sweep in [src/lib/cron/sweep-mcp-idempotency.ts](../../src/lib/cron/sweep-mcp-idempotency.ts) deletes rows past 72h. The replay lookup also filters on freshness, so the cron is purely a table-growth bound.
+- `DEPLOY_GENERATION` force-logout is per-JWT, not per-key. Keys outlive a deploy generation by design — `(user_id, key)` is the cache scope, not `(jti, key)`.
+
+**Audit-trio interaction.** The replay path returns the original result and **does not touch `transactions`** at all, so `transactions.source = 'mcp_http'` (or `'mcp_stdio'`) and the original `created_at` / `updated_at` timestamps are preserved by construction. Do NOT "refresh" timestamps on replay.
+
+**Stdio lookup uses the pg-compat shim** (`?::uuid` casting works correctly via `convertPlaceholders`). Stdio writes are plaintext per the load-bearing rule, but the redaction policy on `response_json` is identical between transports so the table contract doesn't fork.
+
+**Out of scope.** Idempotency for other write tools (`record_transaction`, `update_transaction`, `delete_transaction`, `record_trade`, `record_transfer`) — lower volume / lower retry risk; revisit only after we see whether callers actually pass keys here. Content-hash-based dedup — the key is intentionally caller-supplied, never derived from the payload.
