@@ -140,8 +140,10 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
         </div>
       </aside>
 
-      {/* Content slot */}
-      <div className="flex-1 min-w-0">{children}</div>
+      {/* Content slot — `min-w-0` lets the flex item shrink below intrinsic
+          content width; `overflow-x-auto` makes wide tables (issue #88)
+          scroll inside the slot instead of pushing the page wider. */}
+      <div className="flex-1 min-w-0 overflow-x-auto">{children}</div>
     </div>
   );
 }
