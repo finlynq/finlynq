@@ -255,6 +255,14 @@ function ColumnFilterPopover({
                 if (cur.type !== "date") return;
                 setDraft({ ...cur, from: e.target.value || undefined });
               }}
+              // base-ui Menu.Root attaches keydown listeners on the menu surface
+              // for type-ahead (printable chars) and back/close (Backspace).
+              // Without this stopPropagation the input never sees its own
+              // keystrokes — the menu eats them first. Allow Escape and Tab
+              // to bubble so dropdown-close + focus traversal still work.
+              onKeyDown={(e) => {
+                if (e.key !== "Escape" && e.key !== "Tab") e.stopPropagation();
+              }}
             />
             <Label className="text-xs">To</Label>
             <Input
@@ -265,6 +273,9 @@ function ColumnFilterPopover({
                 const cur = (draft as ColFilterShape | null) ?? initDraft();
                 if (cur.type !== "date") return;
                 setDraft({ ...cur, to: e.target.value || undefined });
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape" && e.key !== "Tab") e.stopPropagation();
               }}
             />
           </>
@@ -277,6 +288,9 @@ function ColumnFilterPopover({
               placeholder="Substring…"
               value={(draft as { value?: string } | null)?.value ?? ""}
               onChange={(e) => setDraft({ type: "text", columnId, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape" && e.key !== "Tab") e.stopPropagation();
+              }}
             />
           </>
         )}
@@ -310,6 +324,9 @@ function ColumnFilterPopover({
                 const cur = draft && draft.type === "numeric" ? draft : { type: "numeric" as const, columnId, op: "eq" as const, value: 0 };
                 setDraft({ ...cur, value: n } as ColFilterShape);
               }}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape" && e.key !== "Tab") e.stopPropagation();
+              }}
             />
             {draft?.type === "numeric" && draft.op === "between" && (
               <>
@@ -322,6 +339,9 @@ function ColumnFilterPopover({
                     const n = e.target.value === "" ? undefined : Number(e.target.value);
                     if (n != null && !Number.isFinite(n)) return;
                     setDraft({ ...draft, value2: n });
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Escape" && e.key !== "Tab") e.stopPropagation();
                   }}
                 />
               </>
