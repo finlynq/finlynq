@@ -1906,12 +1906,16 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── analyze_holding ────────────────────────────────────────────────────────
   server.tool(
     "analyze_holding",
-    "Deep-dive analysis of a single holding: transaction history, avg cost, P&L. Per-row amounts stay in the transaction's account currency; reportingCurrency is surfaced for cross-currency context.",
+    "Deep-dive analysis of a single holding: transaction history, avg cost, P&L. Per-row amounts stay in the transaction's account currency; reportingCurrency is surfaced for cross-currency context. When `symbol` substring-matches multiple holdings sharing a name (TFSA + RRSP), pass `holdingId` to scope; otherwise the response includes an `ambiguous` array of candidates.",
     {
-      symbol: z.string().describe("Holding name or symbol (fuzzy matched)"),
+      symbol: z.string().optional().describe("Holding name or symbol (fuzzy matched). Required when `holdingId` is omitted."),
+      holdingId: z.number().int().optional().describe("Filter to this exact portfolio_holdings.id — bypasses fuzzy matching. Use this when `symbol` matches multiple positions sharing the same name."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ symbol, reportingCurrency }) => {
+    async ({ symbol, holdingId, reportingCurrency }) => {
+      if (!symbol && holdingId == null) {
+        return sqliteErr("analyze_holding requires either `symbol` or `holdingId`");
+      }
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       // Phase 6 (2026-04-29): match on the JOINed portfolio_holdings name +
       // symbol + tx payee. The legacy `t.portfolio_holding` text column was
@@ -1922,38 +1926,90 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // = buy regardless of amount sign (preserved in the loop below).
       // Symbol gets exact case-insensitive equality (tickers are short and
       // prone to spurious substring hits — "GE" inside "ORANGE" etc.).
-      const txns = await sqlite.prepare(`
-        SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding_id,
-               ph.name as portfolio_holding,
-               a.name as account_name, a.currency
-        FROM transactions t
-        JOIN accounts a ON a.id = t.account_id
-        INNER JOIN holding_accounts ha
-          ON ha.holding_id = t.portfolio_holding_id
-         AND ha.account_id = t.account_id
-         AND ha.user_id = ?
-        LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
-        WHERE t.user_id = ?
-          AND (
-            LOWER(ph.name) LIKE LOWER(?)
-            OR LOWER(t.payee) LIKE LOWER(?)
-            OR LOWER(ph.symbol) = LOWER(?)
-          )
-        ORDER BY t.date ASC
-      `).all(userId, userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
+      // Issue #86: when holdingId is supplied, scope the query to that FK
+      // exclusively (bypasses the fuzzy substring filter).
+      const txns = holdingId != null
+        ? await sqlite.prepare(`
+            SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding_id,
+                   ph.name as portfolio_holding,
+                   a.name as account_name, a.currency
+            FROM transactions t
+            JOIN accounts a ON a.id = t.account_id
+            INNER JOIN holding_accounts ha
+              ON ha.holding_id = t.portfolio_holding_id
+             AND ha.account_id = t.account_id
+             AND ha.user_id = ?
+            LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+            WHERE t.user_id = ?
+              AND t.portfolio_holding_id = ?
+            ORDER BY t.date ASC
+          `).all(userId, userId, holdingId) as SqliteRow[]
+        : await sqlite.prepare(`
+            SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding_id,
+                   ph.name as portfolio_holding,
+                   a.name as account_name, a.currency
+            FROM transactions t
+            JOIN accounts a ON a.id = t.account_id
+            INNER JOIN holding_accounts ha
+              ON ha.holding_id = t.portfolio_holding_id
+             AND ha.account_id = t.account_id
+             AND ha.user_id = ?
+            LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
+            WHERE t.user_id = ?
+              AND (
+                LOWER(ph.name) LIKE LOWER(?)
+                OR LOWER(t.payee) LIKE LOWER(?)
+                OR LOWER(ph.symbol) = LOWER(?)
+              )
+            ORDER BY t.date ASC
+          `).all(userId, userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
 
-      if (!txns.length) return sqliteErr(`No transactions found for "${symbol}"`);
+      if (!txns.length) {
+        return sqliteErr(holdingId != null
+          ? `No transactions found for holdingId=${holdingId}`
+          : `No transactions found for "${symbol}"`);
+      }
+
+      // Issue #86: detect cross-holding ambiguity (only when no holdingId
+      // was supplied). If multiple distinct holding ids matched, return the
+      // candidate list and require the caller to disambiguate.
+      if (holdingId == null) {
+        const distinctIds = new Set<number>();
+        for (const t of txns) {
+          if (t.portfolio_holding_id != null) distinctIds.add(Number(t.portfolio_holding_id));
+        }
+        if (distinctIds.size > 1) {
+          const ambiguous: Array<{ holdingId: number; name: string | null; account: string | null }> = [];
+          const seen = new Set<number>();
+          for (const t of txns) {
+            const hid = t.portfolio_holding_id != null ? Number(t.portfolio_holding_id) : null;
+            if (hid == null || seen.has(hid)) continue;
+            seen.add(hid);
+            ambiguous.push({
+              holdingId: hid,
+              name: (t.portfolio_holding ?? null) as string | null,
+              account: (t.account_name ?? null) as string | null,
+            });
+          }
+          return txt({
+            disclaimer: PORTFOLIO_DISCLAIMER,
+            ambiguous,
+            note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call analyze_holding with one of these holdingId values.`,
+          });
+        }
+      }
 
       const holdingName = txns[0].portfolio_holding || txns[0].payee;
       // Prefer rows whose joined portfolio_holding name equals the chosen
       // holdingName — payee-only matches could otherwise surface a different
       // holding's id.
-      const holdingId: number | null =
-        (txns.find(
+      // Issue #86: when holdingId was supplied, use it directly.
+      const resolvedHoldingId: number | null = holdingId ??
+        ((txns.find(
           (t) =>
             t.portfolio_holding_id != null &&
             String(t.portfolio_holding ?? "") === String(holdingName)
-        )?.portfolio_holding_id as number | undefined) ?? null;
+        )?.portfolio_holding_id as number | undefined) ?? null);
       let totalShares = 0, totalCost = 0;
       const purchases: SqliteRow[] = [], sales: SqliteRow[] = [];
       // qty>0 = buy (handles Finlynq-native amt<0+qty>0 and WP convention
@@ -1969,7 +2025,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       return txt({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        holdingId,
+        holdingId: resolvedHoldingId,
         holding: holdingName, totalTransactions: txns.length,
         reportingCurrency: reporting,
         purchases: purchases.length, sales: sales.length,
