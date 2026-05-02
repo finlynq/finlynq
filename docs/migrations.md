@@ -410,3 +410,35 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         ...
 After the prod fix, restart the prod systemd service (`systemctl restart finlynq-prod` or equivalent) so the MCP per-user tx cache for the affected user is dropped and Claude sees the new attribution.
 
 **Out of scope:** holding 497's separate $72,791 phantom `dividendsReceived` figure — deferred until issue [#84](https://github.com/finlynq/finlynq/issues/84) (`dividendsReceived` aggregator switch from `qty=0` heuristic to category_id match) lands. Auditing other bank-import rows that may have mis-routed onto holding 497 is a separate sweep.
+
+## holding-accounts-backfill-orphans (2026-05-01, issue [#95](https://github.com/finlynq/finlynq/issues/95))
+
+Repair pass for holdings created via MCP `add_portfolio_holding` (HTTP + stdio) before the issue #95 fix. The original code path inserted a `portfolio_holdings` row but never inserted the matching `holding_accounts` pairing — every portfolio aggregator (issue #25) JOINs through `holding_accounts` on `(holding_id, account_id, user_id)`, so any such holding is silently invisible to `get_portfolio_analysis`, `get_portfolio_performance`, and `analyze_holding`. Symptoms: a holding shows up in `/portfolio` but not in MCP analyses; transactions bound to it count toward account balance but the position itself shows no price/qty/cost in the aggregator output.
+
+The script INSERTs `holding_accounts` rows for portfolio holdings missing one, with `is_primary=true`, `qty=0`, `cost_basis=0` (matching the same defaults the original `holding-accounts (2026-04-30)` backfill used — aggregators read live qty/cost from `transactions`). Idempotent (`ON CONFLICT DO NOTHING`). Expected dev impact at minimum 3 rows (ids 539, 540, 541 from the source review). **Not auto-applied by `deploy.sh` per the standing convention** — operator runs per env BEFORE the matching code lands.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-holding-accounts-backfill-orphans.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-holding-accounts-backfill-orphans.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-holding-accounts-backfill-orphans.sql
+```
+
+Post-migration verify with `SELECT COUNT(*) FROM portfolio_holdings ph LEFT JOIN holding_accounts ha ON ha.holding_id = ph.id WHERE ha.holding_id IS NULL;` — expect 0.
+
+**Out of scope:** the wider INSERT-site audit listed in issue #95 (REST `POST /api/portfolio`, REST crypto add, backup-restore, csv-parser, the connector pipeline, `getOrCreateCashHolding`, transfer auto-create, both `record_trade` cash-sleeve auto-create branches). This script repairs existing orphans but every NEW holding from those paths still re-creates the orphan-pairing class until they're each migrated to dual-write. Re-running this script is safe and idempotent.
+
+## holding-accounts-repair-divergence (2026-05-01, issue [#95](https://github.com/finlynq/finlynq/issues/95))
+
+Companion repair pass for the second symptom in the source review: holdings where `holding_accounts.account_id` diverges from `portfolio_holdings.account_id` for the same `holding_id`. Example: holding 428 (VUN.TO) — `holding_accounts.account_id=600` (Mimi TFSA) but `portfolio_holdings.account_id=614` (IBKR TFSA), with every transaction living on 614. The aggregators JOIN on the divergent pair and the leg disappears.
+
+The fix only touches `is_primary=true` rows (the legacy `portfolio_holdings.account_id` mirror). Non-primary rows are intentional multi-account pairings (Section G future use) and must not be modified.
+
+**WARNING — composite-PK collision:** the UPDATE rewrites the `(holding_id, account_id)` PK. If a holding has BOTH a divergent primary row AND a separate non-primary row at the target `ph.account_id`, the UPDATE collides with `23505 unique_violation` and the whole BEGIN block rolls back. The script's step 1b is a pre-check — if it returns any rows, the operator must DELETE the orphan or merge `qty`/`cost_basis` manually before re-running. Run the audit blocks in dev first; expected diff for holding 428 is `ha_account_id=600 -> ph_account_id=614`. **Not auto-applied by `deploy.sh`** — operator runs per env BEFORE the matching code lands.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-holding-accounts-repair-divergence.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-holding-accounts-repair-divergence.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-holding-accounts-repair-divergence.sql
+```
+
+Post-migration verify with `SELECT COUNT(*) FROM holding_accounts ha JOIN portfolio_holdings ph ON ph.id = ha.holding_id WHERE ha.account_id != ph.account_id AND ha.is_primary = true;` — expect 0. Specifically for holding 428: `SELECT ph.account_id, ha.account_id FROM portfolio_holdings ph JOIN holding_accounts ha ON ha.holding_id = ph.id WHERE ph.id = 428;` should return `(614, 614)` post-repair.
