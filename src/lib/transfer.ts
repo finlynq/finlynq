@@ -89,6 +89,7 @@ export type TransferPairFail = {
     | "transfer-not-found"
     | "not-a-transfer-pair"
     | "holding-not-found"
+    | "no-cash-holding"
     | "invalid-holding-spec";
   /** Human-readable message. Safe to surface to end users. */
   message: string;
@@ -530,13 +531,20 @@ export async function createTransferPair(
         side: "source",
       };
     }
-    const resolver = await buildHoldingResolver(userId, dek);
-    const toHoldingId = await resolver.resolve(toAcct.id, trimmedDestName);
+    // Issue #92: strict find-only on the destination side. We previously
+    // auto-created a holding row here via buildHoldingResolver, which:
+    //   1. silently auto-created a Cash sleeve when the user typo'd or
+    //      forgot to call add_portfolio_holding first, and
+    //   2. crashed with a raw 23505 duplicate-key DB error when the partial
+    //      unique index already had a matching row.
+    // Both legs MUST already exist. The user is told exactly which
+    // add_portfolio_holding call to make if they want the row created.
+    const toHoldingId = await findHoldingIdByAccountAndName(userId, dek, toAcct.id, trimmedDestName);
     if (toHoldingId == null) {
       return {
         ok: false,
-        code: "holding-not-found",
-        message: `Could not resolve a destination holding row for "${trimmedDestName}" under "${toAcct.name}".`,
+        code: "no-cash-holding",
+        message: `No holding named "${trimmedDestName}" found in destination account "${toAcct.name}". Create it first: add_portfolio_holding(account="${toAcct.name}", name="${trimmedDestName}", currency="${toCurrency}")`,
         side: "destination",
       };
     }
@@ -1734,19 +1742,22 @@ export async function createTransferPairViaSql(
         side: "source",
       };
     }
-    const toHoldingId = await findOrCreateHoldingViaSql(
+    // Issue #92: strict find-only on the destination side (mirrors the
+    // Drizzle path). The previous findOrCreateHoldingViaSql auto-created a
+    // Cash sleeve here, which silently masked typos and surfaced a raw
+    // 23505 duplicate-key error when a partial-cash row already existed.
+    const toHoldingId = await findHoldingIdViaSql(
       pool as unknown as SqlPool,
       userId,
       dek,
       toAcct.id,
-      toCurrency,
       trimmedDestName,
     );
     if (toHoldingId == null) {
       return {
         ok: false,
-        code: "holding-not-found",
-        message: `Could not resolve a destination holding row for "${trimmedDestName}" under "${toAcct.name}".`,
+        code: "no-cash-holding",
+        message: `No holding named "${trimmedDestName}" found in destination account "${toAcct.name}". Create it first: add_portfolio_holding(account="${toAcct.name}", name="${trimmedDestName}", currency="${toCurrency}")`,
         side: "destination",
       };
     }
@@ -1967,46 +1978,11 @@ async function findHoldingIdViaSql(
   return null;
 }
 
-/**
- * Find-or-create destination holding via raw SQL. Mirrors the auto-create
- * branch of {@link buildHoldingResolver}. Concurrency note: stdio path is
- * single-user single-process; concurrent inserts are vanishingly rare and
- * the partial unique index would catch them anyway.
- */
-async function findOrCreateHoldingViaSql(
-  pool: SqlPool,
-  userId: string,
-  dek: Buffer | null,
-  accountId: number,
-  accountCurrency: string,
-  name: string,
-): Promise<number | null> {
-  const existing = await findHoldingIdViaSql(pool, userId, dek, accountId, name);
-  if (existing != null) return existing;
-  const trimmed = name.trim();
-  if (!trimmed) return null;
-  const ct = dek ? encryptField(dek, trimmed) : null;
-  const lookup = dek ? nameLookup(dek, trimmed) : null;
-  try {
-    const ins = await withClient(pool, (c) =>
-      c.query<{ id: number }>(
-        `INSERT INTO portfolio_holdings (
-            user_id, account_id, name, symbol, currency, is_crypto, note,
-            name_ct, name_lookup
-         ) VALUES ($1, $2, $3, NULL, $4, 0, 'auto-created from transfer', $5, $6)
-         RETURNING id`,
-        [userId, accountId, trimmed, accountCurrency, ct, lookup],
-      ),
-    );
-    if (ins.rows.length) return ins.rows[0].id;
-  } catch (err) {
-    const code = (err as { code?: string }).code;
-    if (code !== "23505") throw err;
-    // Concurrent writer beat us — re-select.
-    return findHoldingIdViaSql(pool, userId, dek, accountId, trimmed);
-  }
-  return null;
-}
+// Issue #92: findOrCreateHoldingViaSql was deleted. The transfer path no
+// longer auto-creates a destination holding row — both legs MUST exist via
+// add_portfolio_holding before record_transfer / record_trade. The Drizzle
+// equivalent (buildHoldingResolver's auto-create branch) is still used by
+// the import pipeline, which has its own resolver-report UX.
 
 // ─── ViaSql: update ────────────────────────────────────────────────────────
 
