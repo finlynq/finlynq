@@ -399,6 +399,8 @@ export default function HoldingAccountsPage() {
               </CardHeader>
               {g.pairings.length > 0 && (
                 <CardContent>
+                  {/* Belt-and-suspenders horizontal scroll — see issue #88. */}
+                  <div className="overflow-x-auto">
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -487,6 +489,7 @@ export default function HoldingAccountsPage() {
                       })}
                     </TableBody>
                   </Table>
+                  </div>
                   {editingKey && editError && (
                     <p className="text-xs text-rose-600 mt-2">{editError}</p>
                   )}
