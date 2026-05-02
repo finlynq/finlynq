@@ -2284,8 +2284,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
           record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair. In-kind: holding+quantity.",
           record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Cross-currency requires fxRate.",
-          preview_bulk_update: "preview_bulk_update(filter, changes) — stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[], confirmationToken. (HTTP transport adds quantity, portfolioHoldingId, portfolioHolding.)",
-          execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Stdio: category-by-name only (HTTP supports quantity/holding writes too).",
+          preview_bulk_update: "preview_bulk_update(filter, changes) — stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. (HTTP transport adds quantity, portfolioHoldingId, portfolioHolding.)",
+          execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Stdio: category-by-name only (HTTP supports quantity/holding writes too).",
         };
         return txt({ tool: tool_name, usage: docs[tool_name] ?? "Use topic='tools' for full list." });
       }
@@ -3280,8 +3280,20 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     payee?: string;
     is_business?: number;
     tags?: { mode: "append" | "replace" | "remove"; value: string };
+    /**
+     * Issue #93: when `category` (name) resolved successfully, carry the
+     * resolved display name through so `applyChangesToRow` can re-hydrate
+     * `sampleAfter.category` for preview fidelity. Not written to the DB.
+     */
+    category_name?: string;
   };
-  type UnappliedChange = { key: string; reason: string };
+  /**
+   * Issue #93: preview/execute responses surface every requested change that
+   * failed to resolve. `field` is the key the caller passed (e.g. "category");
+   * `requestedValue` is the value they sent so callers don't have to regex
+   * the reason string to recover what they tried.
+   */
+  type UnappliedChange = { field: string; requestedValue: unknown; reason: string };
 
   async function resolveFilterToIds(filter: BulkFilter): Promise<number[]> {
     const hasAny =
@@ -3340,12 +3352,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!r.ok) {
         if (r.reason === "low_confidence") {
           unapplied.push({
-            key: "category",
+            field: "category",
+            requestedValue: changes.category,
             reason: `Category "${changes.category}" did not match strongly — did you mean "${r.suggestion.name}" (id=${Number(r.suggestion.id)})?`,
           });
         } else {
           const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
-          unapplied.push({ key: "category", reason: `Category "${changes.category}" not found. Available: ${list}` });
+          unapplied.push({
+            field: "category",
+            requestedValue: changes.category,
+            reason: `Category "${changes.category}" not found. Available: ${list}`,
+          });
         }
       } else {
         const resolvedId = Number(r.category.id);
@@ -3357,6 +3374,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           };
         }
         resolved.category_id = resolvedId;
+        // Issue #93: thread the resolved display name through so
+        // `applyChangesToRow` can re-hydrate `sampleAfter.category`.
+        resolved.category_name = String(r.category.name ?? "");
       }
     }
 
@@ -3366,6 +3386,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   function applyChangesToRow(row: Record<string, unknown>, resolved: ResolvedChanges): Record<string, unknown> {
     const out = { ...row };
     if (resolved.category_id !== undefined) out.category_id = resolved.category_id;
+    // Issue #93: when `category` (name) resolved, re-hydrate the joined
+    // category display name so `sampleAfter.category` reflects the new
+    // category instead of the old one.
+    if (resolved.category_name !== undefined) out.category = resolved.category_name;
     if (resolved.account_id !== undefined) out.account_id = resolved.account_id;
     if (resolved.date !== undefined) out.date = resolved.date;
     if (resolved.note !== undefined) out.note = resolved.note;
@@ -3464,7 +3488,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // because stdio has no holding plumbing.
   server.tool(
     "preview_bulk_update",
-    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, an `unappliedChanges` array, and a confirmationToken (5-min TTL). Stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail. (HTTP transport additionally supports quantity, portfolioHoldingId, portfolioHolding.)",
+    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, an `unappliedChanges` array, and a confirmationToken (5-min TTL). Each `unappliedChanges` entry is `{ field, requestedValue, reason }` — `field` is the change key, `requestedValue` is the value you sent, `reason` explains the failure. `sampleAfter.category` reflects the resolved category display name when `category` (name) resolved. Stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail. (HTTP transport additionally supports quantity, portfolioHoldingId, portfolioHolding.)",
     { filter: bulkFilterSchema, changes: bulkChangesSchema },
     async ({ filter, changes }) => {
       try {
@@ -3477,7 +3501,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── execute_bulk_update ────────────────────────────────────────────────────
   server.tool(
     "execute_bulk_update",
-    "Commit a bulk update. Must be preceded by preview_bulk_update with the same filter+changes. Stdio-accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business, tags. Aborts (no commit) when ALL requested changes failed to resolve.",
+    "Commit a bulk update. Must be preceded by preview_bulk_update with the same filter+changes. Returns `{ updated, unappliedChanges }` where each `unappliedChanges` entry is `{ field, requestedValue, reason }`. Stdio-accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business, tags. Aborts (no commit) when ALL requested changes failed to resolve.",
     { filter: bulkFilterSchema, changes: bulkChangesSchema, confirmation_token: z.string() },
     async ({ filter, changes, confirmation_token }) => {
       try {
@@ -3490,9 +3514,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         const { resolved, unapplied, error } = await resolveBulkChanges(changes);
         if (error) return sqliteErr(error);
         const requestedKeys = Object.keys(changes);
-        const resolvedKeys = Object.keys(resolved);
+        // Issue #93: `category_name` is preview-only metadata, not a DB
+        // column. Don't count it as an "applied change" when deciding whether
+        // to abort — keeps the abort guard honest.
+        const resolvedKeys = Object.keys(resolved).filter((k) => k !== "category_name");
         if (requestedKeys.length > 0 && resolvedKeys.length === 0) {
-          return sqliteErr(`No changes could be applied. Resolution failures: ${unapplied.map(u => `${u.key}: ${u.reason}`).join(" | ")}`);
+          return sqliteErr(`No changes could be applied. Resolution failures: ${unapplied.map(u => `${u.field}: ${u.reason}`).join(" | ")}`);
         }
 
         const n = await commitBulkUpdate(ids, resolved);

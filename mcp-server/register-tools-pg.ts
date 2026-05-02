@@ -3451,8 +3451,8 @@ export function registerPgTools(
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
           record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair between two accounts. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity.",
           record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
-          preview_bulk_update: "preview_bulk_update(filter, changes) — accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker → id), tags ({mode: append|replace|remove, value}). Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[], confirmationToken. Stdio surface is narrower (no quantity/holding fields).",
-          execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Same `changes` keys as preview_bulk_update. Stdio: category-by-name only; quantity/holding writes refused.",
+          preview_bulk_update: "preview_bulk_update(filter, changes) — accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker → id), tags ({mode: append|replace|remove, value}). Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. Stdio surface is narrower (no quantity/holding fields).",
+          execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Same `changes` keys as preview_bulk_update. Stdio: category-by-name only; quantity/holding writes refused.",
         };
         return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
       }
@@ -5645,8 +5645,20 @@ export function registerPgTools(
     quantity?: number | null;
     portfolioHoldingId?: number;
     tags?: { mode: "append" | "replace" | "remove"; value: string };
+    /**
+     * Issue #93: when `category` (name) resolved successfully, carry the
+     * resolved display name through so `applyChangesToRow` can re-hydrate
+     * `sampleAfter.category` for preview fidelity. Not written to the DB.
+     */
+    category_name?: string;
   };
-  type UnappliedChange = { key: string; reason: string };
+  /**
+   * Issue #93: preview/execute responses surface every requested change that
+   * failed to resolve. `field` is the key the caller passed (e.g. "category",
+   * "portfolioHolding"); `requestedValue` is the value they sent so callers
+   * don't have to regex the reason string to recover what they tried.
+   */
+  type UnappliedChange = { field: string; requestedValue: unknown; reason: string };
 
   /**
    * Resolve a bulk filter to a list of transaction ids owned by the user.
@@ -5728,12 +5740,17 @@ export function registerPgTools(
       if (!r.ok) {
         if (r.reason === "low_confidence") {
           unapplied.push({
-            key: "category",
+            field: "category",
+            requestedValue: changes.category,
             reason: `Category "${changes.category}" did not match strongly — did you mean "${r.suggestion.name}" (id=${Number(r.suggestion.id)})?`,
           });
         } else {
           const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
-          unapplied.push({ key: "category", reason: `Category "${changes.category}" not found. Available: ${list}` });
+          unapplied.push({
+            field: "category",
+            requestedValue: changes.category,
+            reason: `Category "${changes.category}" not found. Available: ${list}`,
+          });
         }
       } else {
         const resolvedId = Number(r.category.id);
@@ -5745,6 +5762,9 @@ export function registerPgTools(
           };
         }
         resolved.category_id = resolvedId;
+        // Issue #93: thread the resolved display name through so
+        // `applyChangesToRow` can re-hydrate `sampleAfter.category`.
+        resolved.category_name = String(r.category.name ?? "");
       }
     }
 
@@ -5770,7 +5790,11 @@ export function registerPgTools(
     if (changes.portfolioHolding !== undefined) {
       const r = await resolvePortfolioHoldingByName(db, userId, changes.portfolioHolding, dek);
       if (!r.ok) {
-        unapplied.push({ key: "portfolioHolding", reason: r.error });
+        unapplied.push({
+          field: "portfolioHolding",
+          requestedValue: changes.portfolioHolding,
+          reason: r.error,
+        });
       } else {
         if (resolved.portfolioHoldingId !== undefined && resolved.portfolioHoldingId !== r.id) {
           return {
@@ -5790,6 +5814,13 @@ export function registerPgTools(
   function applyChangesToRow(row: Record<string, unknown>, resolved: ResolvedChanges): Record<string, unknown> {
     const out = { ...row };
     if (resolved.category_id !== undefined) out.category_id = resolved.category_id;
+    // Issue #93: when `category` (name) resolved, re-hydrate the joined
+    // category display name so `sampleAfter.category` reflects the new
+    // category instead of stale-looking like the old one. Resolution writes
+    // `resolved.category_name` only when the name branch succeeded; absent
+    // for `category_id`-only callers (we keep the existing joined name for
+    // those — preview is only enriched, never broken).
+    if (resolved.category_name !== undefined) out.category = resolved.category_name;
     if (resolved.account_id !== undefined) out.account_id = resolved.account_id;
     if (resolved.date !== undefined) out.date = resolved.date;
     if (resolved.note !== undefined) out.note = resolved.note;
@@ -5943,7 +5974,7 @@ export function registerPgTools(
   // a caller seeing identical sampleBefore/sampleAfter knows WHY.
   server.tool(
     "preview_bulk_update",
-    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, an `unappliedChanges` array (per requested change that couldn't resolve), and a confirmationToken (5-min TTL) for execute_bulk_update. Accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker), tags ({ mode: append|replace|remove, value }). Unknown keys fail with a 400.",
+    "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, an `unappliedChanges` array, and a confirmationToken (5-min TTL) for execute_bulk_update. Each `unappliedChanges` entry is `{ field, requestedValue, reason }` — `field` is the change key (e.g. \"category\"), `requestedValue` is the value you sent, `reason` explains the failure. `sampleAfter.category` reflects the resolved category display name when `category` (name) resolved. Accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker), tags ({ mode: append|replace|remove, value }). Unknown keys fail with a 400.",
     {
       filter: bulkFilterSchema,
       changes: bulkChangesSchema,
@@ -5964,7 +5995,7 @@ export function registerPgTools(
   // can no longer report `updated: N` while writing nothing).
   server.tool(
     "execute_bulk_update",
-    "Commit a bulk update. Must be preceded by preview_bulk_update; the same filter+changes must be passed. Accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker), tags. Unknown keys fail. Aborts (no commit) when ALL requested changes failed to resolve.",
+    "Commit a bulk update. Must be preceded by preview_bulk_update; the same filter+changes must be passed. Returns `{ updated, unappliedChanges }` where each `unappliedChanges` entry is `{ field, requestedValue, reason }`. Accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker), tags. Unknown keys fail. Aborts (no commit) when ALL requested changes failed to resolve.",
     {
       filter: bulkFilterSchema,
       changes: bulkChangesSchema,
@@ -5983,9 +6014,15 @@ export function registerPgTools(
         const { resolved, unapplied, error } = await resolveBulkChanges(changes);
         if (error) return err(error);
         const requestedKeys = Object.keys(changes);
-        const resolvedKeys = Object.keys(resolved);
+        // Issue #93: `category_name` is preview-only metadata, not a DB
+        // column. Don't count it as an "applied change" when deciding whether
+        // to abort — otherwise a resolved category name would let the abort
+        // guard pass even if every other requested change failed. (It can't
+        // happen today because `category_name` is only set alongside
+        // `category_id`, but be defensive.)
+        const resolvedKeys = Object.keys(resolved).filter((k) => k !== "category_name");
         if (requestedKeys.length > 0 && resolvedKeys.length === 0) {
-          return err(`No changes could be applied. Resolution failures: ${unapplied.map(u => `${u.key}: ${u.reason}`).join(" | ")}`);
+          return err(`No changes could be applied. Resolution failures: ${unapplied.map(u => `${u.field}: ${u.reason}`).join(" | ")}`);
         }
 
         const n = await commitBulkUpdate(ids, resolved);
