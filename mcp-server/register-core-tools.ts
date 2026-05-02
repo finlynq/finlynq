@@ -1075,10 +1075,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // inner prepare() calls each acquire their own pool client.
   server.tool(
     "record_transfer",
-    "Record a transfer between two of the user's accounts. Creates BOTH legs atomically with a shared link_id. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount. For in-kind (share) transfers between brokerage accounts, pass `holding` + `quantity`; the source holding MUST already exist, the destination holding is auto-created if missing. `amount` may be 0 for pure in-kind moves. For brokerage stock/ETF/crypto buys and sells (cash sleeve ↔ symbol holding inside one brokerage account), prefer `record_trade` — it handles the same-account in-kind dance automatically.",
+    "Record a transfer between two of the user's accounts. Creates BOTH legs atomically with a shared link_id. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over names; weak substring matches on the name path are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount. For in-kind (share) transfers between brokerage accounts, pass `holding` + `quantity`; the source holding MUST already exist, the destination holding is auto-created if missing. `amount` may be 0 for pure in-kind moves. For brokerage stock/ETF/crypto buys and sells (cash sleeve ↔ symbol holding inside one brokerage account), prefer `record_trade` — it handles the same-account in-kind dance automatically.",
     {
-      fromAccount: z.string().describe("Source account name or alias"),
-      toAccount: z.string().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected."),
+      fromAccount: z.string().optional().describe("Source account name or alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided."),
+      toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided."),
+      from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Skips fuzzy matching. If both this and `fromAccount` are passed, this wins."),
+      to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Skips fuzzy matching. If both this and `toAccount` are passed, this wins."),
       amount: z.number().nonnegative().describe("Cash amount sent, in SOURCE account's currency. > 0 for cash transfers; 0 only when `holding`+`quantity` are also set."),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
       receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination, in DESTINATION's currency."),
@@ -1089,13 +1091,40 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       note: z.string().optional(),
       tags: z.string().optional(),
     },
-    async ({ fromAccount, toAccount, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, note, tags }) => {
+    async ({ fromAccount, toAccount, from_account_id, to_account_id, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, note, tags }) => {
       const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       if (!allAccounts.length) return sqliteErr("No accounts found — create accounts first.");
-      const fromAcct = fuzzyFind(fromAccount, allAccounts);
-      if (!fromAcct) return sqliteErr(`Source account "${fromAccount}" not found.`);
-      const toAcct = fuzzyFind(toAccount, allAccounts);
-      if (!toAcct) return sqliteErr(`Destination account "${toAccount}" not found.`);
+      const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+      let fromAcct: SqliteRow | null = null;
+      if (from_account_id != null) {
+        fromAcct = allAccounts.find(a => Number(a.id) === from_account_id) ?? null;
+        if (!fromAcct) return sqliteErr(`Source account #${from_account_id} not found or not owned by you.`);
+      } else {
+        if (!fromAccount) return sqliteErr("Pass either `from_account_id` or `fromAccount` (name/alias).");
+        const r = resolveAccountStrict(fromAccount, allAccounts);
+        if (!r.ok) {
+          if (r.reason === "low_confidence") {
+            return sqliteErr(`Source account "${fromAccount}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-call with from_account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}`);
+          }
+          return sqliteErr(`Source account "${fromAccount}" not found. Available: ${list}`);
+        }
+        fromAcct = r.account;
+      }
+      let toAcct: SqliteRow | null = null;
+      if (to_account_id != null) {
+        toAcct = allAccounts.find(a => Number(a.id) === to_account_id) ?? null;
+        if (!toAcct) return sqliteErr(`Destination account #${to_account_id} not found or not owned by you.`);
+      } else {
+        if (!toAccount) return sqliteErr("Pass either `to_account_id` or `toAccount` (name/alias).");
+        const r = resolveAccountStrict(toAccount, allAccounts);
+        if (!r.ok) {
+          if (r.reason === "low_confidence") {
+            return sqliteErr(`Destination account "${toAccount}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-call with to_account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}`);
+          }
+          return sqliteErr(`Destination account "${toAccount}" not found. Available: ${list}`);
+        }
+        toAcct = r.account;
+      }
 
       const { createTransferPairViaSql } = await import("../src/lib/transfer.js");
       let result: Awaited<ReturnType<typeof createTransferPairViaSql>>;
@@ -1145,6 +1174,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         toAmount: result.toAmount,
         toCurrency: result.toCurrency,
         enteredFxRate: result.enteredFxRate,
+        resolvedFromAccount: { id: Number(fromAcct.id), name: String(fromAcct.name ?? "") },
+        resolvedToAccount: { id: Number(toAcct.id), name: String(toAcct.name ?? "") },
         ...(result.holding ? { holding: result.holding } : {}),
         message: result.isCrossCurrency
           ? `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})${inKindNote}`
@@ -1160,9 +1191,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // the next-login Stream D backfill to fill them in.
   server.tool(
     "record_trade",
-    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (auto-created if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve. Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve is created in the trade currency on first use. Optional `fees` post as a separate negative cash transaction on the cash sleeve.",
+    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (auto-created if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve. Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve is created in the trade currency on first use. Optional `fees` post as a separate negative cash transaction on the cash sleeve. PREFER `account_id` over `account` name; weak substring matches on the name path are REJECTED with a 'did you mean…' error rather than silently routing the trade to the wrong account.",
     {
-      account: z.string().optional().describe("Brokerage account name or alias. Required if `account_id` is not provided."),
+      account: z.string().optional().describe("Brokerage account name or alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
       account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching."),
       side: z.enum(["buy", "sell"]).describe("'buy' (cash → symbol) or 'sell' (symbol → cash)."),
       symbol: z.string().min(1).max(50).describe("Ticker symbol of the security being traded."),
@@ -1189,8 +1220,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         if (!acct) return sqliteErr(`Account #${account_id} not found or not owned by you.`);
       } else {
         if (!account) return sqliteErr("Pass either `account_id` or `account` (name/alias).");
-        acct = fuzzyFind(account, allAccounts);
-        if (!acct) return sqliteErr(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+        const r = resolveAccountStrict(account, allAccounts);
+        if (!r.ok) {
+          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+          if (r.reason === "low_confidence") {
+            return sqliteErr(`Account "${account}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}`);
+          }
+          return sqliteErr(`Account "${account}" not found. Available: ${list}`);
+        }
+        acct = r.account;
       }
 
       if (!acct.is_investment) {
@@ -1315,6 +1353,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         tradeCurrency,
         accountCurrency: acctCurrency,
         fxRate: fx,
+        resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
         ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
         message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
       });
