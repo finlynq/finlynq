@@ -43,6 +43,12 @@ import {
   type DuplicateCandidateRow,
   type DuplicateMatch,
 } from "../src/lib/external-import/duplicate-detect.js";
+import {
+  scanForPossibleDuplicates,
+  dateBoundsForScan,
+  type CommittedInsert,
+  type CandidateRow,
+} from "../src/lib/mcp/duplicate-hints.js";
 
 // Helper for MCP rule matching
 function matchesRule(
@@ -804,7 +810,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns. After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null.",
     {
       account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement."),
       dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`."),
@@ -828,7 +834,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
       // Issue #28: stamp source explicitly so stdio-MCP rows are
       // distinguishable from HTTP-MCP and UI rows in the audit column.
-      const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      // Issue #90: RETURNING id so the post-loop scan can collect
+      // committed rows for duplicate-hint surfacing.
+      const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`);
 
       const accountById = new Map<number, SqliteRow>();
       for (const a of allAccounts) accountById.set(Number(a.id), a);
@@ -848,6 +856,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         dryRun?: boolean;
         wouldBeId?: null;
       }[] = [];
+      // Issue #90 — capture every committed row so the post-loop scan can
+      // surface possible-duplicate hints. Stdio writes are plaintext per
+      // the load-bearing rule, so no decrypt is needed for the candidate
+      // pool either.
+      const committed: CommittedInsert[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
@@ -921,7 +934,20 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             continue;
           }
 
-          await stmt.run(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, t.payee, t.note ?? "", t.tags ?? "", "mcp_stdio");
+          // The pg-compat shim's `run()` exposes `lastInsertRowid` from
+          // RETURNING id, so this stays a simple drop-in even though
+          // sqlite-style stmts don't natively return ids.
+          const runRes = await stmt.run(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, t.payee, t.note ?? "", t.tags ?? "", "mcp_stdio");
+          const newTxId = runRes && typeof runRes.lastInsertRowid === "number" ? runRes.lastInsertRowid : null;
+          if (newTxId != null && newTxId > 0) {
+            committed.push({
+              newTransactionId: newTxId,
+              accountId: Number(acct.id),
+              date: txDate,
+              amount: resolved.amount,
+              payee: t.payee,
+            });
+          }
           results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}`, resolvedAccount: resolvedAccountInfo, resolvedCategory: rowCategory });
         } catch (e) {
           results.push({ index: i, success: false, message: String(e) });
@@ -930,12 +956,57 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const ok = results.filter(r => r.success).length;
       // Skip cache invalidation on dry-run — no rows touched.
       if (!dryRun && ok > 0) invalidateUserTxCache(userId);
+
+      // Issue #90 — post-insert duplicate-hint scan. HINTS ONLY: never
+      // blocks any row. Skipped for dry-run. One indexed query bounded by
+      // [globalMinDate-7d, globalMaxDate+7d] across affected accounts;
+      // per-row band check happens in JS via the shared helper. Stdio
+      // writes are plaintext (no DEK on this transport), so no decrypt
+      // step here — payee strings come straight out of the column.
+      let possibleDuplicates: ReturnType<typeof scanForPossibleDuplicates> = [];
+      if (!dryRun && committed.length > 0) {
+        try {
+          const bounds = dateBoundsForScan(committed);
+          if (bounds) {
+            const accountIds = Array.from(new Set(committed.map(c => c.accountId)));
+            const newTxIds = new Set<number>(committed.map(c => c.newTransactionId));
+            // Use a parameterised IN list — pg-compat shim translates `?`
+            // to `$N` so build placeholders dynamically.
+            const accPlaceholders = accountIds.map(() => "?").join(",");
+            const poolRows = (await sqlite
+              .prepare(
+                `SELECT id, account_id, date, amount, payee FROM transactions WHERE user_id = ? AND account_id IN (${accPlaceholders}) AND date BETWEEN ? AND ?`,
+              )
+              .all(userId, ...accountIds, bounds.minDate, bounds.maxDate)) as SqliteRow[];
+            const candidates: CandidateRow[] = [];
+            for (const r of poolRows) {
+              const id = Number(r.id);
+              if (newTxIds.has(id)) continue;
+              candidates.push({
+                id,
+                accountId: Number(r.account_id),
+                date: String(r.date ?? ""),
+                amount: Number(r.amount),
+                payee: String(r.payee ?? ""),
+              });
+            }
+            possibleDuplicates = scanForPossibleDuplicates(committed, candidates);
+          }
+        } catch (e) {
+          // Scan must never fail the response.
+          // eslint-disable-next-line no-console
+          console.warn("[bulk_record_transactions] duplicate-hint scan failed:", e);
+          possibleDuplicates = [];
+        }
+      }
+
       return txt({
         ...(dryRun ? { dryRun: true } : {}),
         imported: dryRun ? 0 : ok,
         failed: results.length - ok,
         ...(dryRun ? { previewed: ok } : {}),
         results,
+        possibleDuplicates,
       });
     }
   );

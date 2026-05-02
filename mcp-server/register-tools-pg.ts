@@ -39,6 +39,12 @@ import {
   getUserTransactions,
 } from "../src/lib/mcp/user-tx-cache";
 import {
+  scanForPossibleDuplicates,
+  dateBoundsForScan,
+  type CommittedInsert,
+  type CandidateRow,
+} from "../src/lib/mcp/duplicate-hints";
+import {
   isInvestmentAccount as isInvestmentAccountFn,
   getInvestmentAccountIds,
   InvestmentHoldingRequiredError,
@@ -2157,7 +2163,7 @@ export function registerPgTools(
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted; investment-account rows use a keyword pass (dividend/interest/forex/disbursement) plus a 'Transfers'/'Investment Activity' fallback, and default to uncategorized when none match — never a generic expense category. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted; investment-account rows use a keyword pass (dividend/interest/forex/disbursement) plus a 'Transfers'/'Investment Activity' fallback, and default to uncategorized when none match — never a generic expense category. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch. After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null. Use these to decide whether to delete a leg.",
     {
       account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
       dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`."),
@@ -2214,6 +2220,10 @@ export function registerPgTools(
         dryRun?: boolean;
         wouldBeId?: null;
       }[] = [];
+      // Issue #90 — capture every committed row so the post-loop scan can
+      // surface possible-duplicate hints. Plaintext payee here; the scan
+      // helper compares decoded values, not ciphertexts.
+      const committed: CommittedInsert[] = [];
       for (let i = 0; i < transactions.length; i++) {
         const t = transactions[i];
         try {
@@ -2344,10 +2354,23 @@ export function registerPgTools(
           // Issue #28: stamp source explicitly. Per-row response payloads
           // stay terse — the AI can re-fetch via search_transactions if it
           // needs the per-row timestamps.
-          await db.execute(sql`
+          // Issue #90: RETURNING id so we can collect inserted rows for
+          // the post-loop duplicate-hint scan.
+          const insRows = await q(db, sql`
             INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
             VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'})
+            RETURNING id
           `);
+          const newTxId = insRows[0]?.id != null ? Number(insRows[0].id) : null;
+          if (newTxId != null) {
+            committed.push({
+              newTransactionId: newTxId,
+              accountId: Number(acct.id),
+              date: txDate,
+              amount: resolved.amount,
+              payee: t.payee,
+            });
+          }
           results.push({
             index: i,
             success: true,
@@ -2365,12 +2388,65 @@ export function registerPgTools(
       const ok = results.filter(r => r.success).length;
       // Skip cache invalidation on dry-run — no rows touched.
       if (!dryRun && ok > 0) invalidateUserTxCache(userId);
+
+      // Issue #90 — post-insert duplicate-hint scan. HINTS ONLY: never
+      // blocks any row. Skipped for dry-run (nothing inserted, nothing to
+      // scan against). One indexed query bounded by [globalMinDate-7d,
+      // globalMaxDate+7d] across every account that received a row, then
+      // per-row ±7d/±5%/same-direction filter in JS. Encryption-aware
+      // payee decode via tryDecryptField (`?? plaintext` fallback).
+      let possibleDuplicates: ReturnType<typeof scanForPossibleDuplicates> = [];
+      if (!dryRun && committed.length > 0) {
+        try {
+          const bounds = dateBoundsForScan(committed);
+          if (bounds) {
+            const accountIdSet = new Set<number>(committed.map(c => c.accountId));
+            const accountIds = Array.from(accountIdSet);
+            const newTxIds = committed.map(c => c.newTransactionId);
+            // Single SELECT bounded by the union window across affected
+            // accounts; per-row band check happens in JS.
+            const poolRows = await q(db, sql`
+              SELECT id, account_id, date, amount, payee
+                FROM transactions
+               WHERE user_id = ${userId}
+                 AND account_id = ANY(${accountIds}::int[])
+                 AND date BETWEEN ${bounds.minDate} AND ${bounds.maxDate}
+                 AND id <> ALL(${newTxIds}::int[])
+            `);
+            const candidates: CandidateRow[] = poolRows.map((r) => {
+              const rawPayee = r.payee == null ? null : String(r.payee);
+              const plain =
+                rawPayee && rawPayee.startsWith("v1:")
+                  ? dek
+                    ? tryDecryptField(dek, rawPayee, "transactions.payee") ?? ""
+                    : ""
+                  : rawPayee ?? "";
+              return {
+                id: Number(r.id),
+                accountId: Number(r.account_id),
+                date: String(r.date ?? ""),
+                amount: Number(r.amount),
+                payee: plain,
+              };
+            });
+            possibleDuplicates = scanForPossibleDuplicates(committed, candidates);
+          }
+        } catch (e) {
+          // Scan must never fail the response. Log and surface an empty
+          // hints array so the caller still sees the imported counts.
+          // eslint-disable-next-line no-console
+          console.warn("[bulk_record_transactions] duplicate-hint scan failed:", e);
+          possibleDuplicates = [];
+        }
+      }
+
       return text({
         ...(dryRun ? { dryRun: true } : {}),
         imported: dryRun ? 0 : ok,
         failed: results.length - ok,
         ...(dryRun ? { previewed: ok } : {}),
         results,
+        possibleDuplicates,
       });
     }
   );
