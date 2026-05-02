@@ -3571,6 +3571,18 @@ export function registerPgTools(
       const cur = currency ?? String(acct.currency ?? "CAD");
 
       try {
+        // Issue #95: dual-write portfolio_holdings + holding_accounts. Every
+        // aggregator (issue #25) JOINs through holding_accounts on
+        // (holding_id, account_id, user_id); a holding without that pairing
+        // is invisible to get_portfolio_analysis, get_portfolio_performance,
+        // and analyze_holding. is_primary=true because every fresh holding
+        // starts single-account; the legacy portfolio_holdings.account_id
+        // mirror invariant (schema-pg.ts is_primary docstring) requires
+        // exactly one primary row per holding while the legacy column
+        // exists. DbLike here is `{ execute }`-only so we can't open a
+        // Drizzle transaction; instead, on holding_accounts INSERT failure
+        // we DELETE the orphan portfolio_holdings row to avoid leaving the
+        // user with an aggregator-invisible holding.
         const result = await q(db, sql`
           INSERT INTO portfolio_holdings (
             user_id, account_id, name, symbol, currency, is_crypto, note,
@@ -3582,10 +3594,29 @@ export function registerPgTools(
           )
           RETURNING id
         `);
+        const holdingId = Number(result[0]?.id);
+        if (!holdingId) {
+          return err(`Failed to create holding "${name}" in "${acct.name}"`);
+        }
+        // qty=0 / cost_basis=0 match migrate-holding-accounts.sql's fresh-row
+        // defaults; aggregators derive live qty/cost from transactions
+        // (CLAUDE.md "Portfolio aggregator" — DO NOT switch to cached cols).
+        try {
+          await q(db, sql`
+            INSERT INTO holding_accounts (holding_id, account_id, user_id, qty, cost_basis, is_primary)
+            VALUES (${holdingId}, ${acct.id}, ${userId}, 0, 0, true)
+            ON CONFLICT (holding_id, account_id) DO NOTHING
+          `);
+        } catch (pairingErr) {
+          await q(db, sql`
+            DELETE FROM portfolio_holdings WHERE id = ${holdingId} AND user_id = ${userId}
+          `);
+          throw pairingErr;
+        }
         return text({
           success: true,
-          holdingId: result[0]?.id,
-          message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${result[0]?.id} as portfolioHoldingId on record_transaction to bind transactions.`,
+          holdingId,
+          message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
         });
       } catch (e) {
         // 23505 = unique_violation on the partial index (race with another

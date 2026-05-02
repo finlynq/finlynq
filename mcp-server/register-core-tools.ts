@@ -1713,10 +1713,33 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           `INSERT INTO portfolio_holdings (user_id, account_id, name, symbol, currency, is_crypto, note)
            VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
         ).get(userId, acct.id, name, symbolValue, cur, isCrypto ? 1 : 0, note ?? "") as { id: number } | undefined;
+        const holdingId = result?.id;
+        if (!holdingId) {
+          return sqliteErr(`Failed to create holding "${name}" in "${acct.name}"`);
+        }
+        // Issue #95: dual-write the holding_accounts pairing. Every aggregator
+        // (issue #25) JOINs through holding_accounts on (holding_id,
+        // account_id, user_id); a holding without that pairing is invisible to
+        // get_portfolio_analysis. Stdio has no `db.transaction` wrapper, so on
+        // pairing-INSERT failure we DELETE the orphan portfolio_holdings row
+        // to avoid leaving the user with a holding the aggregators can't see.
+        // is_primary=true because every fresh holding starts single-account.
+        try {
+          await sqlite.prepare(
+            `INSERT INTO holding_accounts (holding_id, account_id, user_id, qty, cost_basis, is_primary)
+             VALUES (?, ?, ?, 0, 0, TRUE)
+             ON CONFLICT (holding_id, account_id) DO NOTHING`
+          ).run(holdingId, acct.id, userId);
+        } catch (pairingErr) {
+          await sqlite
+            .prepare(`DELETE FROM portfolio_holdings WHERE id = ? AND user_id = ?`)
+            .run(holdingId, userId);
+          throw pairingErr;
+        }
         return txt({
           success: true,
-          holdingId: result?.id,
-          message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${result?.id} as portfolioHoldingId on record_transaction to bind transactions.`,
+          holdingId,
+          message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
