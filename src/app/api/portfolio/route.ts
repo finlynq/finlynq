@@ -4,34 +4,13 @@ import { db, schema } from "@/db";
 import { getPortfolioHoldings } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
-import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptName, decryptNamedRows, nameLookup } from "@/lib/crypto/encrypted-columns";
-import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
-
-/**
- * A row is "canonical" (its display name is auto-managed) when:
- *   - it has a non-empty symbol that isn't a currency code → tickered;
- *     canonical name = uppercased symbol.
- *   - it has a currency-code symbol (CAD/USD/XAU/etc.) → cash-as-currency;
- *     canonical name = "Cash <SYMBOL>".
- *   - name === "Cash" with no symbol → cash sleeve; canonical name = "Cash".
- *
- * Editing the Name on these rows is a no-op (the canonicalize helper would
- * rewrite it on next login) and confuses the user, so we reject it at the
- * API. Symbol / currency / isCrypto / note remain editable; renaming a
- * tickered position is done by changing its symbol.
- *
- * Mirrors the classifier in src/lib/crypto/stream-d-canonicalize-portfolio.ts.
- */
-function isCanonicalHolding(name: string | null, symbol: string | null): boolean {
-  const sym = (symbol ?? "").trim().toUpperCase();
-  const nm = (name ?? "").trim();
-  if (sym && /^[A-Z]{3,4}$/.test(sym) && (isSupportedCurrency(sym) || isMetalCurrency(sym))) return true;
-  if (sym) return true;
-  if (!sym && nm.toLowerCase() === "cash") return true;
-  return false;
-}
+import {
+  holdingCreateSchema,
+  holdingUpdateSchema,
+  isCanonicalHolding,
+} from "@/lib/schemas/holding";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -49,24 +28,6 @@ export async function GET(request: NextRequest) {
   return NextResponse.json(data);
 }
 
-// Currency: any 3-4 letter ISO 4217 code, normalized to uppercase. Was
-// previously z.enum(["CAD","USD"]) which silently rejected EUR/GBP/BTC etc.
-// — fixed 2026-04-27 alongside the holding-currency redesign.
-const currencyCode = z
-  .string()
-  .trim()
-  .toUpperCase()
-  .regex(/^[A-Z]{3,4}$/, "Currency must be a 3-4 letter ISO 4217 code");
-
-const postSchema = z.object({
-  name: z.string().min(1).max(200),
-  accountId: z.number().int(),
-  symbol: z.string().max(50).nullable().optional(),
-  currency: currencyCode.optional(),
-  isCrypto: z.boolean().optional(),
-  note: z.string().max(500).optional(),
-});
-
 /**
  * POST /api/portfolio — create a new portfolio holding.
  *
@@ -80,7 +41,7 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   try {
     const body = await request.json();
-    const parsed = validateBody(body, postSchema);
+    const parsed = validateBody(body, holdingCreateSchema);
     if (parsed.error) return parsed.error;
     const { name, accountId, symbol, currency, isCrypto, note } = parsed.data;
 
@@ -148,15 +109,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-const putSchema = z.object({
-  id: z.number(),
-  name: z.string().min(1).max(200).optional(),
-  symbol: z.string().max(50).nullable().optional(),
-  currency: currencyCode.optional(),
-  isCrypto: z.number().int().min(0).max(1).optional(),
-  note: z.string().max(500).optional(),
-});
-
 /**
  * PUT /api/portfolio — update an existing portfolio holding.
  *
@@ -173,7 +125,7 @@ export async function PUT(request: NextRequest) {
   if (!auth.ok) return auth.response;
   try {
     const body = await request.json();
-    const parsed = validateBody(body, putSchema);
+    const parsed = validateBody(body, holdingUpdateSchema);
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
 

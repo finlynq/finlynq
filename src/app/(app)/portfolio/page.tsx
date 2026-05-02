@@ -6,8 +6,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
@@ -16,13 +14,17 @@ import {
 import {
   TrendingUp, Wallet, BarChart3, Coins, ArrowUpRight, ArrowDownRight,
   Globe2, Building2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Layers, PieChart as PieChartIcon,
-  Briefcase, DollarSign, Flame, Snowflake, Search, Download, Trash2, AlertTriangle,
+  Briefcase, DollarSign, Flame, Snowflake, Search, Download, Plus,
 } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
 import { motion, AnimatePresence } from "framer-motion";
 import { useDevMode } from "@/hooks/use-dev-mode";
 import { useDisplayCurrency } from "@/components/currency-provider";
-import { SUPPORTED_FIAT_CURRENCIES, isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
+import { isMetalCurrency } from "@/lib/fx/supported-currencies";
+import {
+  HoldingEditForm,
+  type HoldingEditFormHolding,
+} from "@/components/holdings/holding-edit-form";
 
 // Mirror of /api/portfolio/overview's `canonicalKey()`. Keep in sync with
 // the server-side function — both must produce the same key for a given
@@ -40,19 +42,6 @@ function clientCanonicalKey(h: { assetType: string; symbol: string | null; curre
     return `cash:${cur}`;
   }
   return `custom:${(h.name || "?").trim().toLowerCase()}`;
-}
-
-// Client-side mirror of the server's `isCanonicalHolding` helper at
-// src/app/api/portfolio/route.ts. A holding's name is auto-managed (and
-// the Name field is disabled in the edit dialog) when the row is tickered,
-// cash-as-currency, or a no-symbol "Cash" sleeve.
-function isCanonicalHolding(name: string | null, symbol: string | null): boolean {
-  const sym = (symbol ?? "").trim().toUpperCase();
-  const nm = (name ?? "").trim();
-  if (sym && /^[A-Z]{3,4}$/.test(sym) && (isSupportedCurrency(sym) || isMetalCurrency(sym))) return true;
-  if (sym) return true;
-  if (!sym && nm.toLowerCase() === "cash") return true;
-  return false;
 }
 
 // ── Colors ──────────────────────────────────────────────────────────
@@ -371,8 +360,10 @@ export default function PortfolioPage() {
   const [filter, setFilter] = useState<FilterType>("all");
   // Edit/delete dialog for individual portfolio holdings. Null = closed.
   const [editingHolding, setEditingHolding] = useState<EnrichedHolding | null>(null);
-  const [holdingDeleteConfirm, setHoldingDeleteConfirm] = useState(false);
-  const [holdingSaving, setHoldingSaving] = useState(false);
+  // Create-mode dialog for adding a new holding. When non-null, opens the
+  // shared <HoldingEditForm> with the dropdown defaulted to that account.
+  // {} = open with no default account (header-level "Add holding" button).
+  const [creatingHolding, setCreatingHolding] = useState<{ accountId?: number } | null>(null);
   const [benchmarks, setBenchmarks] = useState<BenchmarkData[]>([]);
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
@@ -568,11 +559,20 @@ export default function PortfolioPage() {
   return (
     <div className="space-y-6">
       {/* ── Header ────────────────────────────────────────────── */}
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Portfolio</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          {summary.totalHoldings} holdings across {summary.totalAccounts} accounts
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Portfolio</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            {summary.totalHoldings} holdings across {summary.totalAccounts} accounts
+          </p>
+        </div>
+        {/* Add holding entry point — opens the shared <HoldingEditForm>
+            in create mode. The same form lives at /settings/investments;
+            both are driven by src/components/holdings/holding-edit-form.tsx
+            so the field set never drifts between surfaces (issue #100). */}
+        <Button onClick={() => setCreatingHolding({})} size="sm">
+          <Plus className="h-4 w-4 mr-1.5" /> Add holding
+        </Button>
       </div>
 
       {/* Re-login prompt — surfaces when the server couldn't decrypt
@@ -1769,302 +1769,77 @@ export default function PortfolioPage() {
         </CardContent>
       </Card>
 
-      {/* Edit holding dialog — lets the user fix symbol/name/currency/note
-          or flag a row as crypto. Does NOT rewrite referenced transactions
-          (their portfolio_holding string is encrypted + per-row; rename here
-          orphans existing txs in the aggregator until the user re-tags). */}
-      <HoldingEditDialog
-        holding={editingHolding}
-        onClose={() => { setEditingHolding(null); setHoldingDeleteConfirm(false); }}
-        onSaved={() => {
-          setEditingHolding(null);
-          setHoldingDeleteConfirm(false);
-          setLoading(true);
-          fetch(`/api/portfolio/overview?currency=${encodeURIComponent(displayCurrency)}`).then((r) => r.json()).then((d) => { setData(d); setLoading(false); });
+      {/* Edit / create holding dialog — wraps the shared
+          <HoldingEditForm> from src/components/holdings/holding-edit-form.tsx.
+          Issue #100: the inline HoldingEditDialog that previously lived
+          here was extracted so /settings/investments can mount the SAME
+          form. Edits never silently diverge between the two surfaces
+          because there's only one component. */}
+      <Dialog
+        open={editingHolding !== null || creatingHolding !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditingHolding(null);
+            setCreatingHolding(null);
+          }
         }}
-        deleteConfirm={holdingDeleteConfirm}
-        setDeleteConfirm={setHoldingDeleteConfirm}
-        saving={holdingSaving}
-        setSaving={setHoldingSaving}
-      />
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {editingHolding ? "Edit Holding" : "Add Holding"}
+            </DialogTitle>
+          </DialogHeader>
+          {(editingHolding !== null || creatingHolding !== null) && (
+            <HoldingEditForm
+              holdingId={editingHolding?.id}
+              defaultAccountId={creatingHolding?.accountId}
+              initialHolding={
+                editingHolding
+                  ? holdingFromEnriched(editingHolding)
+                  : undefined
+              }
+              onCancel={() => {
+                setEditingHolding(null);
+                setCreatingHolding(null);
+              }}
+              onSave={() => {
+                setEditingHolding(null);
+                setCreatingHolding(null);
+                setLoading(true);
+                fetch(
+                  `/api/portfolio/overview?currency=${encodeURIComponent(displayCurrency)}`,
+                )
+                  .then((r) => r.json())
+                  .then((d) => {
+                    setData(d);
+                    setLoading(false);
+                  });
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
-function HoldingEditDialog({
-  holding,
-  onClose,
-  onSaved,
-  deleteConfirm,
-  setDeleteConfirm,
-  saving,
-  setSaving,
-}: {
-  holding: EnrichedHolding | null;
-  onClose: () => void;
-  onSaved: () => void;
-  deleteConfirm: boolean;
-  setDeleteConfirm: (v: boolean) => void;
-  saving: boolean;
-  setSaving: (v: boolean) => void;
-}) {
-  // Holding currency = the holding's price/quote currency (USD for AAPL,
-  // CAD for VCN.TO, BTC for Bitcoin, USD for a USD cash position). Default
-  // falls back to the linked account's currency for unknown / crypto.
-  const [form, setForm] = useState({ name: "", symbol: "", currency: "CAD", isCrypto: false, note: "" });
-  const [accounts, setAccounts] = useState<Array<{ id: number; name: string; currency: string }>>([]);
-  const [error, setError] = useState("");
-  // Symbol auto-detection state. Lookup runs on Symbol blur or after a
-  // 400ms debounce of typing, hits /api/portfolio/symbol-info, and populates
-  // the holding currency from Yahoo / CoinGecko / the supported currency
-  // list. The user can override the currency manually after detection.
-  const [symbolInfo, setSymbolInfo] = useState<{ kind: string; currency: string | null; label: string; source: string } | null>(null);
-  const [symbolLoading, setSymbolLoading] = useState(false);
-  const [currencyTouched, setCurrencyTouched] = useState(false);
-
-  // Load accounts so we can show "Account currency: USD" context and fall
-  // back to it when the symbol isn't recognized.
-  useEffect(() => {
-    fetch("/api/accounts").then((r) => r.ok ? r.json() : []).then(setAccounts).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    if (!holding) return;
-    setForm({
-      name: holding.name ?? "",
-      symbol: holding.symbol ?? "",
-      currency: holding.currency ?? "CAD",
-      isCrypto: (holding as unknown as { isCrypto?: number }).isCrypto === 1,
-      note: (holding as unknown as { note?: string }).note ?? "",
-    });
-    setSymbolInfo(null);
-    setError("");
-    // Treat the saved currency as a manual override on open so the symbol-info
-    // auto-fill below doesn't silently rewrite it (e.g. a holding saved with
-    // currency=USD and symbol=XAU would otherwise flip to XAU on every open
-    // because XAU is now in the supported-currency list). User can still type
-    // a new currency value in the field — `setCurrencyTouched(true)` here just
-    // protects the saved value, not the editability.
-    setCurrencyTouched(Boolean(holding.currency));
-  }, [holding]);
-
-  const accountCurrency = (accounts.find((a) => a.id === holding?.accountId)?.currency ?? "").toUpperCase();
-
-  // Look up the symbol on a debounce. Result auto-fills currency UNLESS
-  // the user has already manually touched the currency field (preserves
-  // explicit overrides).
-  useEffect(() => {
-    if (!holding) return;
-    const sym = form.symbol.trim().toUpperCase();
-    if (!sym) {
-      setSymbolInfo(null);
-      // Empty symbol → cash holding. Default currency to account currency
-      // when the user hasn't touched it.
-      if (!currencyTouched && accountCurrency) {
-        setForm((f) => f.currency === accountCurrency ? f : { ...f, currency: accountCurrency });
-      }
-      return;
-    }
-    let cancelled = false;
-    setSymbolLoading(true);
-    const t = setTimeout(async () => {
-      try {
-        const res = await fetch(`/api/portfolio/symbol-info?symbol=${encodeURIComponent(sym)}`);
-        if (!res.ok) return;
-        const info = await res.json();
-        if (cancelled) return;
-        setSymbolInfo(info);
-        // Auto-fill currency: stock/etf/crypto use the detected currency;
-        // unknown falls back to account currency. User overrides are sticky.
-        if (!currencyTouched) {
-          if (info.kind === "unknown" && accountCurrency) {
-            setForm((f) => f.currency === accountCurrency ? f : { ...f, currency: accountCurrency });
-          } else if (info.currency) {
-            setForm((f) => f.currency === info.currency ? f : { ...f, currency: info.currency, isCrypto: info.isCrypto });
-          }
-        }
-      } finally {
-        if (!cancelled) setSymbolLoading(false);
-      }
-    }, 400);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [form.symbol, accountCurrency, currencyTouched, holding]);
-
-  if (!holding) return null;
-
-  async function save() {
-    if (!holding) return;
-    setSaving(true);
-    setError("");
-    try {
-      const res = await fetch("/api/portfolio", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: holding.id,
-          // Skip the Name field entirely on canonical rows — the PUT
-          // handler would 400 on a name edit there. Symbol / currency /
-          // isCrypto / note still flow through.
-          name: nameAutoManaged ? undefined : (form.name.trim() || undefined),
-          symbol: form.symbol.trim() || null,
-          currency: form.currency.trim().toUpperCase(),
-          isCrypto: form.isCrypto ? 1 : 0,
-          note: form.note,
-        }),
-      });
-      if (res.ok) {
-        onSaved();
-      } else {
-        // Surface the failure — previously the dialog silently stayed open,
-        // which is what makes "currency doesn't save" look like a save bug.
-        const body = await res.json().catch(() => null);
-        setError(body?.error ?? `Save failed (HTTP ${res.status})`);
-      }
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleDelete() {
-    if (!holding) return;
-    setSaving(true);
-    setError("");
-    try {
-      const res = await fetch(`/api/portfolio?id=${holding.id}`, { method: "DELETE" });
-      if (res.ok) onSaved();
-      else {
-        const body = await res.json().catch(() => null);
-        setError(body?.error ?? `Delete failed (HTTP ${res.status})`);
-      }
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // Decide whether the holding-currency input is auto-derived or user-overridden.
-  const currencyAutoSource: string | null =
-    !currencyTouched && symbolInfo
-      ? (symbolInfo.kind === "unknown"
-          ? `account default (${accountCurrency})`
-          : `${symbolInfo.source} (${symbolInfo.kind})`)
-      : null;
-
-  // Issue #25: tickered / cash-as-currency / "Cash"-sleeve rows have an
-  // auto-managed name. The PUT handler rejects name edits on these rows,
-  // so disable the input here and surface a hint instead. Reads the
-  // *next* symbol (form.symbol) so toggling between a tickered position
-  // and a free-text custom row immediately enables/disables the field.
-  const nameAutoManaged = isCanonicalHolding(form.name, form.symbol || null);
-
-  return (
-    <Dialog open={!!holding} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>Edit Holding</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label>Name</Label>
-            <Input
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              disabled={nameAutoManaged}
-            />
-            {nameAutoManaged && (
-              <p className="text-[11px] text-muted-foreground">
-                Name is auto-managed for this holding type. Edit the symbol or currency to rename.
-              </p>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <Label>Symbol / ticker</Label>
-            <Input
-              value={form.symbol}
-              onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-              placeholder="e.g. VCN.TO, AAPL, BTC, or a currency code (USD, EUR, XAU)"
-              list="symbol-suggestions"
-            />
-            <datalist id="symbol-suggestions">
-              {SUPPORTED_FIAT_CURRENCIES.map((c) => (
-                <option key={c} value={c} />
-              ))}
-            </datalist>
-            <p className="text-[11px] text-muted-foreground">
-              Stock or ETF ticker (Yahoo Finance), crypto symbol, or a currency code for a cash position.
-              Custom currencies you&apos;ve added in Settings are recognized here too.
-            </p>
-            {symbolLoading ? (
-              <p className="text-[11px] text-muted-foreground">Looking up…</p>
-            ) : symbolInfo ? (
-              <p className="text-[11px] text-muted-foreground">
-                <span className="font-medium text-foreground">{symbolInfo.label}</span>
-              </p>
-            ) : null}
-          </div>
-          <div className="space-y-1.5">
-            <Label>Holding currency</Label>
-            <Input
-              value={form.currency}
-              onChange={(e) => { setForm({ ...form, currency: e.target.value.toUpperCase() }); setCurrencyTouched(true); }}
-            />
-            <p className="text-[11px] text-muted-foreground">
-              {currencyAutoSource ? (
-                <>Auto-detected from <strong>{currencyAutoSource}</strong>. {accountCurrency ? <>Account currency: <strong>{accountCurrency}</strong>.</> : null} Override if needed.</>
-              ) : (
-                <>The currency this holding trades / is denominated in. {accountCurrency ? <>Account currency: <strong>{accountCurrency}</strong>.</> : null} For cash positions, type the currency code in Symbol (USD, EUR, XAU…) and this will auto-fill.</>
-              )}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              id="is-crypto"
-              checked={form.isCrypto}
-              onChange={(e) => setForm({ ...form, isCrypto: e.target.checked })}
-              className="h-4 w-4 rounded border-input"
-            />
-            <Label htmlFor="is-crypto" className="cursor-pointer">Crypto asset</Label>
-          </div>
-          <div className="space-y-1.5">
-            <Label>Note</Label>
-            <Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
-          </div>
-
-          {error ? (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
-              {error}
-            </div>
-          ) : null}
-
-          {deleteConfirm ? (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 space-y-2">
-              <p className="text-xs text-destructive flex items-center gap-1.5">
-                <AlertTriangle className="h-3.5 w-3.5" />
-                Delete <strong>{holding.name}</strong>? Transactions that reference this holding will stay but stop aggregating here.
-              </p>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" className="flex-1" onClick={() => setDeleteConfirm(false)} disabled={saving}>Cancel</Button>
-                <Button variant="destructive" size="sm" className="flex-1" onClick={handleDelete} disabled={saving}>
-                  {saving ? "Deleting…" : "Delete holding"}
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <div className="flex gap-2 pt-1">
-              <Button variant="outline" className="text-destructive border-destructive/30" onClick={() => setDeleteConfirm(true)}>
-                <Trash2 className="h-4 w-4 mr-1.5" /> Delete
-              </Button>
-              <Button className="flex-1" onClick={save} disabled={saving}>
-                {saving ? "Saving…" : "Save"}
-              </Button>
-            </div>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
+/**
+ * Adapter from `EnrichedHolding` (the rich row type used by /portfolio)
+ * down to the small subset that the shared form needs. Skips the extra
+ * GET round-trip in the form's edit path because we already have the
+ * row hydrated in the page state.
+ */
+function holdingFromEnriched(h: EnrichedHolding): HoldingEditFormHolding {
+  return {
+    id: h.id,
+    accountId: h.accountId,
+    name: h.name,
+    symbol: h.symbol,
+    currency: h.currency,
+    isCrypto: (h as unknown as { isCrypto?: number }).isCrypto ?? null,
+    note: (h as unknown as { note?: string }).note ?? null,
+  };
 }
 
 // ── Helper ──────────────────────────────────────────────────────────
