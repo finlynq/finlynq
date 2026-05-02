@@ -614,7 +614,11 @@ async function aggregateHoldings(
   // dividends by the user's Dividends category id instead of the legacy
   // qty=0+amt>0 heuristic.
   type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null };
-  const out = new Map<string, Agg>();
+  // Issue #86: key by holding_id (not display name) so two holdings sharing
+  // a name across accounts (e.g. VUN.TO in TFSA + RRSP) stay distinct rows.
+  // Phase 6 (2026-04-29) eliminated orphan rows; t.portfolio_holding_id is
+  // never null here. Skip-and-warn any row that surprises us with a null FK.
+  const out = new Map<number, Agg>();
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
            ph.name AS holding_name, ph.name_ct AS holding_name_ct
@@ -630,6 +634,8 @@ async function aggregateHoldings(
       ${dateFilter}
   `);
   for (const r of fkRows) {
+    const hid = Number(r.portfolio_holding_id ?? 0) || null;
+    if (hid == null) continue; // shouldn't happen post-Phase-6; defensive skip
     // Prefer decrypted name_ct, fall back to plaintext name (legacy rows).
     let name = "";
     if (r.holding_name_ct && dek) {
@@ -640,18 +646,21 @@ async function aggregateHoldings(
       }
     }
     if (!name) name = String(r.holding_name ?? "");
+    // Skip rows whose holding_name_ct failed to decrypt AND has no plaintext
+    // fallback (DEK mismatch). The downstream UI relies on a non-empty name.
     if (!name || name.startsWith("v1:")) continue;
-    accumulate(out, name, Number(r.portfolio_holding_id ?? 0) || null, r, dividendsCategoryId);
+    accumulate(out, hid, name, r, dividendsCategoryId);
   }
 
   return Array.from(out.values()).sort((a, b) => b.buy_amount - a.buy_amount);
 }
 
-/** Shared accumulator used by both the FK path and the orphan-fallback path. */
+/** Shared accumulator. Keyed by holding_id (issue #86) — display name is
+ *  carried as a row field but never used for lookup. */
 function accumulate(
-  out: Map<string, HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null }>,
+  out: Map<number, HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null }>,
+  holdingId: number,
   name: string,
-  holdingId: number | null,
   r: Row,
   dividendsCategoryId: number | null,
 ): void {
@@ -659,7 +668,7 @@ function accumulate(
   const amt = Number(r.amount);
   const d = String(r.date);
   const catId = r.category_id != null ? Number(r.category_id) : null;
-  const row = out.get(name) ?? {
+  const row = out.get(holdingId) ?? {
     name,
     buy_qty: 0,
     buy_amount: 0,
@@ -673,10 +682,6 @@ function accumulate(
     last_activity: null as string | null,
     holding_id: holdingId,
   };
-  // First non-null holding_id wins — orphan rows pick up the FK once
-  // backfill catches up; in the meantime FK-bound rows for the same name
-  // populate it.
-  if (holdingId != null && row.holding_id == null) row.holding_id = holdingId;
   row.tx_count += 1;
   row.net_quantity += qty;
   if (!row.last_activity || d > row.last_activity) row.last_activity = d;
@@ -702,7 +707,7 @@ function accumulate(
   if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
     row.dividends += amt;
   }
-  out.set(name, row);
+  out.set(holdingId, row);
 }
 
 /** Issue #65: shift an ISO YYYY-MM-DD date by N days (UTC-safe). Returns null on parse failure. */
@@ -3491,7 +3496,7 @@ export function registerPgTools(
   // ── update_portfolio_holding ───────────────────────────────────────────────
   server.tool(
     "update_portfolio_holding",
-    "Update a portfolio holding's name, symbol, account, currency, isCrypto, or note. Renames cascade to all transactions automatically because get_portfolio_analysis groups by FK, not by string.",
+    "Update a portfolio holding's name, symbol, account, currency, isCrypto, or note. Renames cascade to all transactions automatically because the portfolio aggregators (issue #86) group by FK holdingId, not by display name — two holdings sharing a name across accounts stay distinct rows in get_portfolio_analysis output.",
     {
       holding: z.string().describe("Current holding name OR symbol (fuzzy matched against decrypted name and symbol)"),
       name: z.string().min(1).max(200).optional().describe("New name"),
@@ -3623,9 +3628,9 @@ export function registerPgTools(
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Per-row amounts stay in each holding's native currency; summary aggregates are converted to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter to specific holdings.",
+    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Returns one row per `holdingId` — two holdings sharing a display name across accounts (e.g. VUN.TO in TFSA + RRSP) appear as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter to specific holdings; matching is case-insensitive substring + token-overlap against name AND symbol. The response includes a `warnings` array listing any `symbols` filter entries that matched zero holdings.",
     {
-      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols (omit for all)"),
+      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols (omit for all). Matched case-insensitively against both name and symbol via substring + token-overlap (so 'VCN.TO (TFSA)' matches a holding named 'VCN.TO'). Unmatched filter entries are surfaced in the response's `warnings` array."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Used for the summary block totals."),
     },
     async ({ symbols, reportingCurrency }) => {
@@ -3646,8 +3651,11 @@ export function registerPgTools(
       const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
       const metrics = await aggregateHoldings(db, userId, dek, { dividendsCategoryId });
 
+      // Issue #86: SELECT ph.id so we can build an id-keyed phMap. Two
+      // holdings sharing a display name (TFSA + RRSP) collide in a
+      // name-keyed map; keying by id keeps them distinct.
       const phRaw = await q(db, sql`
-        SELECT ph.name, ph.name_ct, ph.symbol, ph.symbol_ct, ph.currency,
+        SELECT ph.id, ph.name, ph.name_ct, ph.symbol, ph.symbol_ct, ph.currency,
                a.name as account_name, a.name_ct as account_name_ct
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
@@ -3659,9 +3667,12 @@ export function registerPgTools(
         symbol: p.symbol_ct && dek ? decryptField(dek, p.symbol_ct) : p.symbol,
         account_name: p.account_name_ct && dek ? decryptField(dek, p.account_name_ct) : p.account_name,
       }));
-      const phMap = new Map(ph.map(p => [String(p.name), p]));
+      const phMap = new Map<number, Row>(ph.map(p => [Number(p.id), p]));
 
       const symbolFilters = symbols?.length ? symbols.map(s => s.toLowerCase()) : null;
+      // Track which filter entries matched at least one holding; unmatched
+      // ones surface in the response as warnings.
+      const matchedFilters = new Set<string>();
 
       const today = new Date();
       type HoldingResult = {
@@ -3682,11 +3693,29 @@ export function registerPgTools(
       const results: HoldingResult[] = [];
 
       for (const m of metrics) {
-        const info = phMap.get(String(m.name));
+        // Issue #86: look up the holding by FK id, not display name. Two
+        // holdings sharing a name (TFSA + RRSP) collide in a name-keyed map
+        // and silently merge into one row; an id-keyed map keeps them
+        // distinct and ensures `account` reflects the right side of the pair.
+        const info = m.holding_id != null ? phMap.get(Number(m.holding_id)) : undefined;
         if (symbolFilters) {
           const name = String(m.name).toLowerCase();
           const sym = String(info?.symbol ?? "").toLowerCase();
-          if (!symbolFilters.some(s => name.includes(s) || sym.includes(s))) continue;
+          // Token-overlap check: split filter and target on whitespace +
+          // parens + brackets and accept any shared non-empty token.
+          // Handles inputs like "VCN.TO (TFSA)" matching a holding named
+          // "VCN.TO". Falls back to substring match for the common case.
+          const matched = symbolFilters.some(s => {
+            if (name.includes(s) || sym.includes(s)) {
+              matchedFilters.add(s);
+              return true;
+            }
+            const tokens = s.split(/[\s()[\]]+/).filter(Boolean);
+            const hit = tokens.some(t => name.includes(t) || sym.includes(t));
+            if (hit) matchedFilters.add(s);
+            return hit;
+          });
+          if (!matched) continue;
         }
         const buyQty = Number(m.buy_qty ?? 0);
         const buyAmt = Number(m.buy_amount ?? 0);
@@ -3755,11 +3784,20 @@ export function registerPgTools(
       }
       const totalReturnReporting = totalRealizedReporting + totalDivsReporting;
 
+      // Issue #86: surface unmatched `symbols` filter entries as warnings so
+      // the caller can correct typos/missing positions instead of silently
+      // getting an empty result.
+      const warnings: string[] = symbolFilters
+        ? symbols!.filter(s => !matchedFilters.has(s.toLowerCase()))
+            .map(s => `${s}: no matching holding found`)
+        : [];
+
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics.",
+        note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics. Results are per-holdingId — two holdings sharing a name across accounts return as separate rows.",
         totalHoldings: results.length,
         reportingCurrency: reporting,
+        warnings,
         summary: {
           totalCostBasis: Math.round(totalCostBasis * 100) / 100,
           lifetimeCostBasis: Math.round(totalLifetime * 100) / 100,
@@ -3782,7 +3820,7 @@ export function registerPgTools(
   // ── get_portfolio_performance ──────────────────────────────────────────────
   server.tool(
     "get_portfolio_performance",
-    "Portfolio performance with avg-cost method: realized P&L, dividends, total return, days held per holding. Per-row amounts stay in each holding's own (account) currency; the response includes the resolved reportingCurrency for context.",
+    "Portfolio performance with avg-cost method: realized P&L, dividends, total return, days held per holding. Returns one row per `holdingId` (two holdings sharing a display name come through as separate rows). Per-row amounts stay in each holding's own (account) currency; the response includes the resolved reportingCurrency for context.",
     {
       period: z.enum(["1m", "3m", "6m", "1y", "all"]).optional().describe("Lookback period (default: all)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Returned in the response as context for cross-currency holdings."),
@@ -3817,6 +3855,9 @@ export function registerPgTools(
         const fpDate = p.first_purchase ?? null;
         const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
         return {
+          // Issue #86: surface the FK id so callers can disambiguate
+          // same-name holdings (e.g. VUN.TO in TFSA vs RRSP).
+          holdingId: p.holding_id ?? null,
           holding: p.name,
           txCount: Number(p.tx_count),
           quantity: Math.round(remainingQty * 10000) / 10000,
@@ -3861,15 +3902,19 @@ export function registerPgTools(
   // ── analyze_holding ────────────────────────────────────────────────────────
   server.tool(
     "analyze_holding",
-    "Deep-dive on a single holding: avg cost, realized gain, dividends, days held, full transaction history. Per-row amounts stay in the holding's account currency; aggregates also surface in reportingCurrency (defaults to user's display currency).",
+    "Deep-dive on a single holding: avg cost, realized gain, dividends, days held, full transaction history. Per-row amounts stay in the holding's account currency; aggregates also surface in reportingCurrency (defaults to user's display currency). When `symbol` substring-matches multiple holdings sharing the same name (TFSA + RRSP), pass `holdingId` to scope the analysis to a single position; otherwise the response includes an `ambiguous` array listing every candidate's `{holdingId, name, symbol, account}` and the caller must pick one.",
     {
-      symbol: z.string().describe("Holding name or symbol (fuzzy matched)"),
+      symbol: z.string().optional().describe("Holding name or symbol (fuzzy matched). Required when `holdingId` is omitted."),
+      holdingId: z.number().int().optional().describe("Filter to this exact portfolio_holdings.id — bypasses fuzzy matching. Use this when `symbol` matches multiple positions sharing the same name (resolves the ambiguity)."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ symbol, reportingCurrency }) => {
+    async ({ symbol, holdingId, reportingCurrency }) => {
+      if (!symbol && holdingId == null) {
+        return err("analyze_holding requires either `symbol` or `holdingId`");
+      }
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const todayStr = new Date().toISOString().split("T")[0];
-      const lo = symbol.toLowerCase();
+      const lo = (symbol ?? "").toLowerCase();
       // Fetch every FK-bound transaction for the user, JOINing
       // holding_accounts (Section G) on (holding_id, account_id) so the
       // (holding, account) pair is the join grain, plus portfolio_holdings
@@ -3920,17 +3965,61 @@ export function registerPgTools(
         const accName = t.account_name_ct && dek ? decryptField(dek, String(t.account_name_ct)) : t.account_name;
         return { ...t, portfolio_holding: ph, ph_symbol: ph_sym, payee: pay, note: nt, tags: tg, account_name: accName };
       });
-      const txns = decryptedAll.filter((t) => {
-        const ph = String(t.portfolio_holding ?? "").toLowerCase();
-        const sym = String(t.ph_symbol ?? "").toLowerCase();
-        const pay = String(t.payee ?? "").toLowerCase();
-        // Symbol gets exact-equality preference (tickers are short and prone
-        // to spurious substring hits — "GE" inside "ORANGE" etc.). Name and
-        // payee retain substring matching for the long-string ergonomics.
-        return ph.includes(lo) || pay.includes(lo) || sym === lo;
-      });
+      // Issue #86: when `holdingId` is provided, short-circuit the fuzzy
+      // substring filter and scope strictly to that FK id. Otherwise apply
+      // the legacy substring-on-name + payee + exact-symbol rule, then check
+      // whether the match spans multiple holding ids — if so, surface them
+      // in an `ambiguous` array so the caller can disambiguate by passing
+      // `holdingId` back.
+      const txns = holdingId != null
+        ? decryptedAll.filter((t) => Number(t.portfolio_holding_id) === holdingId)
+        : decryptedAll.filter((t) => {
+            const ph = String(t.portfolio_holding ?? "").toLowerCase();
+            const sym = String(t.ph_symbol ?? "").toLowerCase();
+            const pay = String(t.payee ?? "").toLowerCase();
+            // Symbol gets exact-equality preference (tickers are short and prone
+            // to spurious substring hits — "GE" inside "ORANGE" etc.). Name and
+            // payee retain substring matching for the long-string ergonomics.
+            return ph.includes(lo) || pay.includes(lo) || sym === lo;
+          });
 
-      if (!txns.length) return err(`No transactions found for holding matching "${symbol}"`);
+      if (!txns.length) {
+        return err(holdingId != null
+          ? `No transactions found for holdingId=${holdingId}`
+          : `No transactions found for holding matching "${symbol}"`);
+      }
+
+      // Issue #86: detect cross-holding ambiguity. When the substring match
+      // spans multiple distinct holding ids (e.g. "VUN" matching VUN.TO in
+      // both TFSA and RRSP), return the candidate list and require the
+      // caller to pick one via `holdingId`. Skipped when `holdingId` was
+      // supplied (the filter is already strict).
+      if (holdingId == null) {
+        const distinctIds = new Set<number>();
+        for (const t of txns) {
+          if (t.portfolio_holding_id != null) distinctIds.add(Number(t.portfolio_holding_id));
+        }
+        if (distinctIds.size > 1) {
+          const ambiguous: Array<{ holdingId: number; name: string | null; symbol: string | null; account: string | null }> = [];
+          const seen = new Set<number>();
+          for (const t of txns) {
+            const hid = t.portfolio_holding_id != null ? Number(t.portfolio_holding_id) : null;
+            if (hid == null || seen.has(hid)) continue;
+            seen.add(hid);
+            ambiguous.push({
+              holdingId: hid,
+              name: (t.portfolio_holding ?? null) as string | null,
+              symbol: (t.ph_symbol ?? null) as string | null,
+              account: (t.account_name ?? null) as string | null,
+            });
+          }
+          return text({
+            disclaimer: PORTFOLIO_DISCLAIMER,
+            ambiguous,
+            note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call analyze_holding with one of these holdingId values to scope the analysis.`,
+          });
+        }
+      }
 
       const holdingName = txns[0].portfolio_holding || txns[0].payee;
       // Pull the holding's FK id so the agent can pass it back on
@@ -3938,12 +4027,13 @@ export function registerPgTools(
       // holding name equals the chosen holdingName — payee-only matches
       // (e.g. "Huron Sale" payee on a non-investment cash row) could otherwise
       // surface a different holding's id and mislead the caller.
-      const holdingId: number | null =
-        (txns.find(
+      // Issue #86: when holdingId was supplied, use it directly.
+      const resolvedHoldingId: number | null = holdingId ??
+        ((txns.find(
           (t) =>
             t.portfolio_holding_id != null &&
             String(t.portfolio_holding ?? "") === holdingName
-        )?.portfolio_holding_id as number | undefined) ?? null;
+        )?.portfolio_holding_id as number | undefined) ?? null);
       const today = new Date();
 
       let buyQty = 0, buyAmt = 0, sellQty = 0, sellAmt = 0, divAmt = 0;
@@ -4000,7 +4090,7 @@ export function registerPgTools(
         // this position. Null when the matched rows are pure payee-fuzzy
         // hits with no FK yet (e.g. cash payee like "Huron Sale" with the
         // holding never bound).
-        holdingId,
+        holdingId: resolvedHoldingId,
         holding: holdingName,
         currency: holdingCurrency,
         reportingCurrency: reporting,
@@ -4098,6 +4188,12 @@ export function registerPgTools(
         // Convert each holding's book_value to reporting currency before
         // building the allocation map — otherwise mixing CAD + USD book
         // values produces nonsense percentages.
+        // Issue #86: aggregator now returns one row per holding_id, so two
+        // holdings sharing a display name (TFSA + RRSP) come through as
+        // separate rows. Sum book_value across same-name rows when building
+        // the rebalancing allocation map (rebalancing targets are
+        // user-supplied by name; a target name maps to the union of all
+        // holdings with that name).
         const holdings: Array<{ name: string; book_value: number; book_value_native: number; currency: string }> = [];
         for (const a of aggs) {
           const ccy = holdingCurrencyByName.get(String(a.name)) ?? reporting;
@@ -4113,10 +4209,27 @@ export function registerPgTools(
         const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
         if (totalBV === 0) return err("No portfolio holdings found");
 
-        const currentAlloc = new Map(holdings.map(h => [
-          String(h.name).toLowerCase(),
-          { name: h.name, value: Number(h.book_value), pct: (Number(h.book_value) / totalBV) * 100, currency: h.currency, valueNative: h.book_value_native }
-        ]));
+        // Sum across same-name holdings (post-#86 they are separate rows).
+        const currentAlloc = new Map<string, { name: string; value: number; pct: number; currency: string; valueNative: number }>();
+        for (const h of holdings) {
+          const key = String(h.name).toLowerCase();
+          const prev = currentAlloc.get(key);
+          if (prev) {
+            prev.value += Number(h.book_value);
+            prev.valueNative += Number(h.book_value_native);
+          } else {
+            currentAlloc.set(key, {
+              name: h.name,
+              value: Number(h.book_value),
+              pct: 0, // recomputed below from the summed value
+              currency: h.currency,
+              valueNative: Number(h.book_value_native),
+            });
+          }
+        }
+        for (const v of currentAlloc.values()) {
+          v.pct = (v.value / totalBV) * 100;
+        }
 
         const suggestions = targets.map(t => {
           const lo = t.holding.toLowerCase();
@@ -4254,18 +4367,32 @@ export function registerPgTools(
         .map(([month, invested]) => ({ month, invested: Math.round(invested * 100) / 100 }));
 
       const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
-      const positions: Array<{ name: string; book_value: number; book_value_native: number; currency: string; purchases: number }> = [];
+      // Issue #86: aggregator now returns one row per holding_id. For the
+      // top-positions display, sum book_value across same-name rows so
+      // VUN.TO across TFSA + RRSP shows as a single "VUN.TO" line item with
+      // the combined book_value (user-facing label is the holding name, not
+      // the per-account split).
+      const positionsByName = new Map<string, { name: string; book_value: number; book_value_native: number; currency: string; purchases: number }>();
       for (const a of aggs) {
         const ccy = holdingCurrencyByName.get(String(a.name)) ?? reporting;
         const fx = await fxFor(ccy);
-        positions.push({
-          name: a.name,
-          book_value: a.buy_amount * fx,
-          book_value_native: a.buy_amount,
-          currency: ccy,
-          purchases: a.purchases,
-        });
+        const key = String(a.name);
+        const prev = positionsByName.get(key);
+        if (prev) {
+          prev.book_value += a.buy_amount * fx;
+          prev.book_value_native += a.buy_amount;
+          prev.purchases += a.purchases;
+        } else {
+          positionsByName.set(key, {
+            name: a.name,
+            book_value: a.buy_amount * fx,
+            book_value_native: a.buy_amount,
+            currency: ccy,
+            purchases: a.purchases,
+          });
+        }
       }
+      const positions = Array.from(positionsByName.values());
       positions.sort((a, b) => b.book_value - a.book_value);
 
       const totalInvested = positions.reduce((s, p) => s + Number(p.book_value), 0);

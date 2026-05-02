@@ -197,13 +197,14 @@ Available on `record_transaction` / `bulk_record_transactions` / `update_transac
 
 ### Reading the id back
 
-- `get_portfolio_analysis` — exposes `id: <int>` per holding in the `holdings[]` array (HTTP + stdio).
-- `analyze_holding` — exposes `holdingId: <int>` at the top level (HTTP + stdio). The HTTP response uses a tightened first-non-null find (`txns.find(t => t.portfolio_holding_id != null && String(t.portfolio_holding) === holdingName)`) so payee-only fuzzy matches don't surface another holding's id when the analyzed string was a non-investment cash payee like `"Huron Sale"`.
+- `get_portfolio_analysis` — exposes `id: <int>` per holding in the `holdings[]` array (HTTP + stdio). Issue #86 (2026-05-01): the HTTP path now keys its in-memory aggregator Map by `holding_id` (not display name), so two holdings sharing a name across accounts (e.g. VUN.TO in TFSA + RRSP) come through as separate rows instead of being silently merged. The `symbols` filter matches name + symbol via substring + token-overlap (so `"VCN.TO (TFSA)"` resolves to a `"VCN.TO"`-named holding) and surfaces unmatched filter entries in a top-level `warnings: ["BNO: no matching holding found"]` array.
+- `get_portfolio_performance` — returns `holdingId: <int>` per row (issue #86) so callers can disambiguate same-name holdings without a follow-up call.
+- `analyze_holding` — exposes `holdingId: <int>` at the top level (HTTP + stdio). The HTTP response uses a tightened first-non-null find (`txns.find(t => t.portfolio_holding_id != null && String(t.portfolio_holding) === holdingName)`) so payee-only fuzzy matches don't surface another holding's id when the analyzed string was a non-investment cash payee like `"Huron Sale"`. Issue #86: gained an optional `holdingId` parameter — when provided, short-circuits the fuzzy substring filter and scopes strictly to that FK id. When `symbol` substring-matches multiple distinct holding ids, the response returns an `ambiguous` array of `{holdingId, name, symbol, account}` candidates and the caller must pick one.
 - `search_transactions` — already returned raw `portfolio_holding_id` per row; also accepts a `portfolio_holding_id` filter for FK fast-path queries (cheaper than substring search on the encrypted text column).
 
-### `analyze_holding(symbol)` — name OR ticker
+### `analyze_holding(symbol | holdingId)` — name OR ticker OR id
 
-The tool's `symbol` parameter accepts either the full holding name or the ticker. HTTP path JOINs `portfolio_holdings.symbol_ct`, decrypts per-row, and applies in-memory filtering with substring on name + payee but **exact case-insensitive equality on symbol** — tickers are short (3-4 chars) and prone to spurious substring hits like "GE" matching "ORANGE". Stdio path does the equivalent in SQL (`LEFT JOIN portfolio_holdings ph` + `OR LOWER(ph.symbol) = LOWER(?)`).
+The tool's `symbol` parameter accepts either the full holding name or the ticker. HTTP path JOINs `portfolio_holdings.symbol_ct`, decrypts per-row, and applies in-memory filtering with substring on name + payee but **exact case-insensitive equality on symbol** — tickers are short (3-4 chars) and prone to spurious substring hits like "GE" matching "ORANGE". Stdio path does the equivalent in SQL (`LEFT JOIN portfolio_holdings ph` + `OR LOWER(ph.symbol) = LOWER(?)`). Issue #86: pass `holdingId` instead to skip fuzzy matching entirely; one of `symbol` or `holdingId` is required.
 
 ## Deploy-generation force-logout
 
