@@ -322,3 +322,91 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 ```
 
 Verify with `\d+ transactions` — `transactions_user_updated_at_idx` and `transactions_user_created_at_idx` should both appear in the index list.
+
+## tx-29100-holding-reassignment (data fix, 2026-05-01, issue [#81](https://github.com/finlynq/finlynq/issues/81))
+
+One-off **data fix** (no code change, no schema change). Transaction 29100 (a +$10,000 EFT RRSP contribution) was booked by the bank-import pipeline against holding **497** ('Cash' on account 600 Mimi TFSA). It belongs on holding **425** ('TFSA-CAD' on account 614 IBKR TFSA). The fix mutates a single row's `portfolio_holding_id` and bumps `updated_at`; `source` is **deliberately preserved** to honor the CLAUDE.md audit-trio invariant (`transactions.source` is INSERT-only).
+
+**Gate:** holding 425 must already have a `holding_accounts` row matching `(holding_id=425, account_id=<tx 29100's account_id>, user_id=<owner>)`. Per CLAUDE.md, every portfolio aggregator now JOINs through `holding_accounts` on `(holding, account)`; running the UPDATE without that pairing in place silently drops the leg from the aggregator. The pre-state SELECT below catches that and aborts before the UPDATE.
+
+**Cache bust:** raw psql bypasses the MCP per-user tx cache (no `invalidateUser(userId)` call). Bounce the relevant `finlynq-*` systemd unit on each env after the fix lands so Claude reads fresh data on next request.
+
+### Pre-state verification (run on each env before the UPDATE)
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf <<'SQL'
+-- Confirm tx exists, owned by the right user, currently on 497.
+SELECT id, user_id, account_id, portfolio_holding_id, amount, payee, source, updated_at
+FROM transactions
+WHERE id = 29100;
+
+-- Confirm both holdings belong to the same user.
+SELECT id, user_id, name, symbol FROM portfolio_holdings WHERE id IN (425, 497);
+
+-- Confirm holding 425 has a holding_accounts row covering the tx's account_id.
+-- MUST return exactly 1 row. If 0, STOP — gate on issue #95 (holding_accounts integrity).
+SELECT ha.holding_id, ha.account_id, ha.user_id
+FROM holding_accounts ha
+WHERE ha.holding_id = 425
+  AND ha.user_id = (SELECT user_id FROM transactions WHERE id = 29100)
+  AND ha.account_id = (SELECT account_id FROM transactions WHERE id = 29100);
+SQL
+```
+
+### The fix (single-row UPDATE, fully scoped)
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf <<'SQL'
+BEGIN;
+
+UPDATE transactions
+SET portfolio_holding_id = 425,
+    updated_at = NOW()
+    -- source intentionally untouched (INSERT-only audit invariant)
+WHERE id = 29100
+  AND user_id = (SELECT user_id FROM transactions WHERE id = 29100)
+  AND portfolio_holding_id = 497;  -- defensive: only update if still on 497
+
+-- Verify exactly 1 row updated and source unchanged before committing.
+SELECT id, portfolio_holding_id, source, updated_at FROM transactions WHERE id = 29100;
+
+COMMIT;
+SQL
+```
+
+The `user_id = ?` and `portfolio_holding_id = 497` predicates make the statement idempotent and impossible to widen by accident. Re-running after commit returns 0 affected rows.
+
+### Post-state spot-check
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf <<'SQL'
+-- Tx now on 425 with bumped updated_at.
+SELECT id, portfolio_holding_id, account_id, source, updated_at
+FROM transactions WHERE id = 29100;
+
+-- Holding 497 no longer references tx 29100.
+SELECT COUNT(*) FROM transactions
+WHERE portfolio_holding_id = 497 AND id = 29100;  -- expect 0.
+SQL
+```
+
+Then load `/portfolio` (or call MCP `get_portfolio_analysis`) for the IBKR TFSA account and confirm the contribution is now attributed to TFSA-CAD (holding 425) instead of Mimi TFSA Cash (holding 497).
+
+### Per-env rollout
+
+Run the same three blocks (pre-state → fix → post-state) per env, replacing the connection in each:
+
+```sh
+# dev
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     ...
+
+# staging
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging ...
+
+# prod
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         ...
+```
+
+After the prod fix, restart the prod systemd service (`systemctl restart finlynq-prod` or equivalent) so the MCP per-user tx cache for the affected user is dropped and Claude sees the new attribution.
+
+**Out of scope:** holding 497's separate $72,791 phantom `dividendsReceived` figure — deferred until issue [#84](https://github.com/finlynq/finlynq/issues/84) (`dividendsReceived` aggregator switch from `qty=0` heuristic to category_id match) lands. Auditing other bank-import rows that may have mis-routed onto holding 497 is a separate sweep.
