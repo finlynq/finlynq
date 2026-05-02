@@ -379,14 +379,14 @@ export async function createTransferPair(
   const { userId, dek } = opts;
   const date = opts.date ?? todayISO();
 
-  // In-kind validation up front. Both fields move together.
+  // In-kind validation up front. The in-kind path is keyed on holdingName.
+  // Issue #94: quantity may also accompany the cash-pin path (fromHoldingId
+  // / toHoldingId set, no holdingName) — in that case quantity records the
+  // share count moving through the holding leg without auto-creating one.
+  // We validate the in-kind contract only when holdingName is present.
   const wantsHolding =
-    (opts.holdingName != null && opts.holdingName.trim() !== "") ||
-    (opts.quantity != null && opts.quantity !== 0);
+    opts.holdingName != null && opts.holdingName.trim() !== "";
   if (wantsHolding) {
-    if (!opts.holdingName || opts.holdingName.trim() === "") {
-      return { ok: false, code: "invalid-holding-spec", message: "holdingName is required when quantity is set" };
-    }
     if (opts.quantity == null || !Number.isFinite(opts.quantity) || opts.quantity <= 0) {
       return { ok: false, code: "invalid-amount", message: "quantity must be a positive number when holdingName is set" };
     }
@@ -395,6 +395,20 @@ export async function createTransferPair(
       (!Number.isFinite(opts.destQuantity) || opts.destQuantity <= 0)
     ) {
       return { ok: false, code: "invalid-amount", message: "destQuantity must be a positive number when provided" };
+    }
+  } else if (opts.quantity != null) {
+    // Cash-pin-with-quantity: legal only when at least one holding pin is
+    // supplied (fromHoldingId / toHoldingId). Otherwise the quantity has
+    // nowhere to land — refuse rather than silently dropping it.
+    if (!Number.isFinite(opts.quantity) || opts.quantity <= 0) {
+      return { ok: false, code: "invalid-amount", message: "quantity must be a positive number" };
+    }
+    if (opts.fromHoldingId == null && opts.toHoldingId == null) {
+      return {
+        ok: false,
+        code: "invalid-holding-spec",
+        message: "quantity requires either holdingName (in-kind) or fromHoldingId / toHoldingId (cash-pin)",
+      };
     }
   }
 
@@ -636,6 +650,21 @@ export async function createTransferPair(
       // Issue #28: both legs share the writer-surface attribution.
       const txSource: TransactionSource = opts.txSource ?? "manual";
 
+      // Issue #94: quantity may come from either the in-kind `holdingResolved`
+      // path or the cash-pin path (opts.quantity + opts.fromHoldingId /
+      // opts.toHoldingId set, no holdingName). Source leg gets -|q|, dest
+      // gets +|q|. When neither path supplies quantity, leg stays null.
+      const sourceQty = holdingResolved
+        ? -Math.abs(holdingResolved.quantity)
+        : opts.quantity != null && opts.fromHoldingId != null
+          ? -Math.abs(opts.quantity)
+          : null;
+      const destQty = holdingResolved
+        ? Math.abs(holdingResolved.destQuantity)
+        : opts.quantity != null && opts.toHoldingId != null
+          ? Math.abs(opts.quantity)
+          : null;
+
       const [sourceInserted] = await tx
         .insert(schema.transactions)
         .values({
@@ -649,9 +678,9 @@ export async function createTransferPair(
           enteredAmount: -sentAmount,
           enteredFxRate: 1,
           portfolioHoldingId: fromHoldingId,
-          // quantity stays null on pure-cash legs; only in-kind transfers
-          // carry share counts. Cash sleeves track cash amount, not shares.
-          quantity: holdingResolved ? -Math.abs(holdingResolved.quantity) : null,
+          // Quantity carried on legs whose holding leg is non-null; null
+          // otherwise. Cash sleeves track cash amount, not shares.
+          quantity: sourceQty,
           source: txSource,
           ...sourceRow,
           linkId,
@@ -673,7 +702,7 @@ export async function createTransferPair(
           portfolioHoldingId: toHoldingId,
           // destQuantity may differ from source quantity (stock split,
           // merger, share-class conversion). Null on pure-cash legs.
-          quantity: holdingResolved ? Math.abs(holdingResolved.destQuantity) : null,
+          quantity: destQty,
           source: txSource,
           ...destRow,
           linkId,
@@ -1613,14 +1642,12 @@ export async function createTransferPairViaSql(
   dek: Buffer | null,
   opts: Omit<CreateTransferOpts, "userId" | "dek">,
 ): Promise<TransferPairResult> {
-  // In-kind validation up front. Both fields move together.
+  // In-kind validation up front. Mirrors the Drizzle path; see issue #94
+  // for the cash-pin-with-quantity branch (quantity allowed on the cash-pin
+  // path when fromHoldingId / toHoldingId is set).
   const wantsHolding =
-    (opts.holdingName != null && opts.holdingName.trim() !== "") ||
-    (opts.quantity != null && opts.quantity !== 0);
+    opts.holdingName != null && opts.holdingName.trim() !== "";
   if (wantsHolding) {
-    if (!opts.holdingName || opts.holdingName.trim() === "") {
-      return { ok: false, code: "invalid-holding-spec", message: "holdingName is required when quantity is set" };
-    }
     if (opts.quantity == null || !Number.isFinite(opts.quantity) || opts.quantity <= 0) {
       return { ok: false, code: "invalid-amount", message: "quantity must be a positive number when holdingName is set" };
     }
@@ -1629,6 +1656,17 @@ export async function createTransferPairViaSql(
       (!Number.isFinite(opts.destQuantity) || opts.destQuantity <= 0)
     ) {
       return { ok: false, code: "invalid-amount", message: "destQuantity must be a positive number when provided" };
+    }
+  } else if (opts.quantity != null) {
+    if (!Number.isFinite(opts.quantity) || opts.quantity <= 0) {
+      return { ok: false, code: "invalid-amount", message: "quantity must be a positive number" };
+    }
+    if (opts.fromHoldingId == null && opts.toHoldingId == null) {
+      return {
+        ok: false,
+        code: "invalid-holding-spec",
+        message: "quantity requires either holdingName (in-kind) or fromHoldingId / toHoldingId (cash-pin)",
+      };
     }
   }
 
@@ -1826,6 +1864,18 @@ export async function createTransferPairViaSql(
     await withTx(pool as unknown as SqlPool, async (client) => {
       const categoryId = await resolveTransferCategoryIdViaSql(client, userId, dek);
 
+      // Issue #94: quantity may come from in-kind path or cash-pin path.
+      const sourceQty = holdingResolved
+        ? -Math.abs(holdingResolved.quantity)
+        : opts.quantity != null && opts.fromHoldingId != null
+          ? -Math.abs(opts.quantity)
+          : null;
+      const destQty = holdingResolved
+        ? Math.abs(holdingResolved.destQuantity)
+        : opts.quantity != null && opts.toHoldingId != null
+          ? Math.abs(opts.quantity)
+          : null;
+
       // Issue #28: both legs share the writer-surface attribution.
       const txSource: TransactionSource = opts.txSource ?? "manual";
       const sourceIns = await client.query<{ id: number }>(
@@ -1850,7 +1900,7 @@ export async function createTransferPairViaSql(
           fromCurrency, -sentAmount, 1,
           enc(sourcePayee), enc(note), enc(tags), linkId,
           fromHoldingId,
-          holdingResolved ? -Math.abs(holdingResolved.quantity) : null,
+          sourceQty,
           txSource,
         ],
       );
@@ -1879,7 +1929,7 @@ export async function createTransferPairViaSql(
           enc(destPayee), enc(note), enc(tags), linkId,
           toHoldingId,
           // destQuantity may differ from source quantity (split / merger).
-          holdingResolved ? Math.abs(holdingResolved.destQuantity) : null,
+          destQty,
           txSource,
         ],
       );
