@@ -326,9 +326,24 @@ function Combobox({
       items={itemsForFilter}
       disabled={disabled}
       required={required}
-      itemToStringLabel={(v) =>
-        items.find((it) => it.value === v)?.label ?? String(v ?? "")
-      }
+      itemToStringLabel={(item) => {
+        // base-ui passes the full item object from `items`
+        // (i.e. `{ value, label }`), NOT the raw string value. Pull the
+        // label off directly. Returning `String(item)` here would yield
+        // the literal "[object Object]" for every entry, which broke the
+        // filter introduced in PR #68 (issue #87).
+        if (typeof item === "object" && item !== null) {
+          return (item as { label?: string }).label ?? ""
+        }
+        // Defensive fallback for plain-string `items` arrays. The
+        // high-level <Combobox> always passes objects today, but the
+        // primitive `<ComboboxRoot>` accepts string items too — keep
+        // this branch correct for them.
+        return (
+          items.find((it) => it.value === String(item))?.label ??
+          String(item ?? "")
+        )
+      }}
     >
       <ComboboxTrigger
         id={id}
