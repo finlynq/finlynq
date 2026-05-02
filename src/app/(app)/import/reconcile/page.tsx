@@ -26,6 +26,8 @@ import {
   type HoldingOption,
   type ReconcileRow,
 } from "@/components/reconcile/preview-table";
+import { ColumnMappingDialog } from "@/app/(app)/import/components/column-mapping-dialog";
+import type { ColumnMapping, ImportTemplate } from "@/lib/import-templates";
 
 interface PreviewResponse {
   format: "csv" | "ofx";
@@ -41,10 +43,19 @@ interface CommitResponse {
   errors: string[];
 }
 
+interface UploadParams {
+  file: File;
+  accountId: number | null;
+  tolerance: number;
+  templateId: number | null;
+}
+
 export default function ReconcilePage() {
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [holdings, setHoldings] = useState<HoldingOption[]>([]);
+  const [templates, setTemplates] = useState<ImportTemplate[]>([]);
+  const [accountNames, setAccountNames] = useState<string[]>([]);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [rows, setRows] = useState<ReconcileRow[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -52,13 +63,34 @@ export default function ReconcilePage() {
   const [commitLoading, setCommitLoading] = useState(false);
   const [commitResult, setCommitResult] = useState<CommitResponse | null>(null);
 
+  // Mapping dialog state — mirrors /import page so non-canonical CSVs (IBKR
+  // etc.) can be column-mapped on the fly instead of falling back to a red
+  // error banner. After the user maps + saves the template, we re-fire the
+  // reconcile preview with the saved templateId so the classifier runs.
+  const [mappingDialogOpen, setMappingDialogOpen] = useState(false);
+  const [mappingHeaders, setMappingHeaders] = useState<string[]>([]);
+  const [mappingSampleRows, setMappingSampleRows] = useState<
+    Record<string, string>[]
+  >([]);
+  const [mappingSuggested, setMappingSuggested] = useState<ColumnMapping | null>(
+    null,
+  );
+  const [mappingFileName, setMappingFileName] = useState<string>("");
+  const [mappingSubmitting, setMappingSubmitting] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingParams, setPendingParams] = useState<{
+    accountId: number | null;
+    tolerance: number;
+  } | null>(null);
+
   useEffect(() => {
     void Promise.all([
       fetch("/api/accounts").then((r) => (r.ok ? r.json() : [])),
       fetch("/api/categories").then((r) => (r.ok ? r.json() : [])),
       fetch("/api/portfolio").then((r) => (r.ok ? r.json() : [])),
+      fetch("/api/import/templates").then((r) => (r.ok ? r.json() : [])),
     ])
-      .then(([accts, cats, hldgs]) => {
+      .then(([accts, cats, hldgs, tpls]) => {
         if (Array.isArray(accts)) {
           setAccounts(
             accts.map((a: { id: number; name: string; currency: string; isInvestment?: boolean }) => ({
@@ -68,6 +100,7 @@ export default function ReconcilePage() {
               isInvestment: !!a.isInvestment,
             })),
           );
+          setAccountNames(accts.map((a: { name: string }) => a.name));
         }
         if (Array.isArray(cats)) {
           setCategories(
@@ -88,20 +121,15 @@ export default function ReconcilePage() {
             })),
           );
         }
+        if (Array.isArray(tpls)) {
+          setTemplates(tpls);
+        }
       })
       .catch(() => {});
   }, []);
 
-  const handleUpload = useCallback(
-    async ({
-      file,
-      accountId,
-      tolerance,
-    }: {
-      file: File;
-      accountId: number | null;
-      tolerance: number;
-    }) => {
+  const runReconcilePreview = useCallback(
+    async ({ file, accountId, tolerance, templateId }: UploadParams) => {
       setError(null);
       setCommitResult(null);
       setPreview(null);
@@ -111,6 +139,7 @@ export default function ReconcilePage() {
         const fd = new FormData();
         fd.append("file", file);
         if (accountId) fd.append("accountId", String(accountId));
+        if (templateId) fd.append("templateId", String(templateId));
         fd.append("tolerance", String(tolerance));
         const res = await fetch("/api/import/reconcile/preview", {
           method: "POST",
@@ -118,6 +147,31 @@ export default function ReconcilePage() {
         });
         const json = await res.json();
         if (!res.ok) {
+          // 422 with type:"csv-needs-mapping" → open the column-mapping
+          // dialog instead of showing a red banner. The user maps columns,
+          // we POST /api/import/templates to persist the mapping, then
+          // re-fire this same preview with the new templateId.
+          if (
+            res.status === 422 &&
+            json &&
+            typeof json === "object" &&
+            json.type === "csv-needs-mapping"
+          ) {
+            setMappingHeaders(Array.isArray(json.headers) ? json.headers : []);
+            setMappingSampleRows(
+              Array.isArray(json.sampleRows) ? json.sampleRows : [],
+            );
+            setMappingSuggested(json.suggestedMapping ?? null);
+            setMappingFileName(
+              typeof json.fileName === "string" && json.fileName
+                ? json.fileName
+                : file.name,
+            );
+            setPendingFile(file);
+            setPendingParams({ accountId, tolerance });
+            setMappingDialogOpen(true);
+            return;
+          }
           throw new Error(json.error ?? `HTTP ${res.status}`);
         }
         setPreview(json as PreviewResponse);
@@ -129,6 +183,78 @@ export default function ReconcilePage() {
       }
     },
     [],
+  );
+
+  const handleUpload = useCallback(
+    (params: UploadParams) => {
+      void runReconcilePreview(params);
+    },
+    [runReconcilePreview],
+  );
+
+  // Column-mapping confirm — save the mapping as a template, then re-fire
+  // the reconcile preview using that template so the classifier (NEW /
+  // EXISTING / PROBABLE_DUPLICATE) runs end-to-end. We deliberately POST
+  // the template directly (not via /api/import/csv-map, which only returns
+  // import-pipeline preview rows, NOT reconcile classifications) so the
+  // server-side reconcile route can re-parse with the saved templateId.
+  const handleMappingConfirm = useCallback(
+    async (params: {
+      mapping: ColumnMapping;
+      defaultAccount: string | null;
+      templateName: string;
+    }) => {
+      if (!pendingFile || !pendingParams) {
+        setMappingDialogOpen(false);
+        return;
+      }
+      setMappingSubmitting(true);
+      try {
+        const tplRes = await fetch("/api/import/templates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: params.templateName,
+            fileHeaders: mappingHeaders,
+            columnMapping: params.mapping,
+            defaultAccount: params.defaultAccount ?? undefined,
+          }),
+        });
+        const saved = await tplRes.json();
+        if (!tplRes.ok || !saved?.id) {
+          throw new Error(
+            (saved && typeof saved.error === "string"
+              ? saved.error
+              : null) ?? "Failed to save template",
+          );
+        }
+        setTemplates((prev) => {
+          if (prev.find((t) => t.id === saved.id)) return prev;
+          return [...prev, saved];
+        });
+
+        setMappingDialogOpen(false);
+        const file = pendingFile;
+        const { accountId, tolerance } = pendingParams;
+        setPendingFile(null);
+        setPendingParams(null);
+
+        await runReconcilePreview({
+          file,
+          accountId,
+          tolerance,
+          templateId: saved.id as number,
+        });
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to save template";
+        setError(message);
+        setMappingDialogOpen(false);
+      } finally {
+        setMappingSubmitting(false);
+      }
+    },
+    [pendingFile, pendingParams, mappingHeaders, runReconcilePreview],
   );
 
   const handleRowChange = useCallback(
@@ -241,6 +367,11 @@ export default function ReconcilePage() {
     setError(null);
   }, []);
 
+  const templateOptions = useMemo(
+    () => templates.map((t) => ({ id: t.id, name: t.name })),
+    [templates],
+  );
+
   return (
     <div className="space-y-6 pb-12">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -292,13 +423,15 @@ export default function ReconcilePage() {
             <CardTitle>Upload statement</CardTitle>
             <CardDescription>
               Supported: CSV (with <code>Date,Account,Amount,Payee</code>{" "}
-              headers or a saved template) and OFX/QFX (single-account
-              statements — pick the destination Finlynq account below).
+              headers, a saved template, or column-mapping on the fly) and
+              OFX/QFX (single-account statements — pick the destination
+              Finlynq account below).
             </CardDescription>
           </CardHeader>
           <CardContent>
             <ReconcileUploadCard
               accounts={accounts}
+              templates={templateOptions}
               loading={previewLoading}
               onUpload={handleUpload}
             />
@@ -397,6 +530,28 @@ export default function ReconcilePage() {
           </CardContent>
         </Card>
       )}
+
+      <ColumnMappingDialog
+        open={mappingDialogOpen}
+        onOpenChange={(open) => {
+          setMappingDialogOpen(open);
+          if (!open) {
+            // User dismissed the dialog without confirming — drop the
+            // stashed file so a fresh upload doesn't accidentally inherit
+            // it. previewLoading is already false (we returned early on the
+            // 422 branch), so the upload card is interactive again.
+            setPendingFile(null);
+            setPendingParams(null);
+          }
+        }}
+        fileName={mappingFileName}
+        headers={mappingHeaders}
+        sampleRows={mappingSampleRows}
+        suggestedMapping={mappingSuggested}
+        accounts={accountNames}
+        onConfirm={handleMappingConfirm}
+        submitting={mappingSubmitting}
+      />
     </div>
   );
 }
