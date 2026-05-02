@@ -7,21 +7,43 @@ import { Loader2 } from "lucide-react";
 
 import type { AccountOption } from "./preview-table";
 
+export interface TemplateOption {
+  id: number;
+  name: string;
+}
+
 interface Props {
   accounts: AccountOption[];
+  templates?: TemplateOption[];
   loading: boolean;
-  onUpload: (params: { file: File; accountId: number | null; tolerance: number }) => void;
+  onUpload: (params: {
+    file: File;
+    accountId: number | null;
+    tolerance: number;
+    templateId: number | null;
+  }) => void;
 }
 
 const ACCEPT = ".csv,.ofx,.qfx";
 
-export function ReconcileUploadCard({ accounts, loading, onUpload }: Props) {
+export function ReconcileUploadCard({
+  accounts,
+  templates = [],
+  loading,
+  onUpload,
+}: Props) {
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [tolerance, setTolerance] = useState<string>("3");
 
   const accountItems = accounts.map((a) => ({
     value: String(a.id),
     label: `${a.name} (${a.currency})`,
+  }));
+
+  const templateItems = templates.map((t) => ({
+    value: String(t.id),
+    label: t.name,
   }));
 
   return (
@@ -56,16 +78,39 @@ export function ReconcileUploadCard({ accounts, loading, onUpload }: Props) {
         </div>
       </div>
 
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-muted-foreground">
+          CSV template (optional — for non-standard formats like IBKR)
+        </label>
+        <Combobox
+          value={selectedTemplateId}
+          onValueChange={(v) => setSelectedTemplateId(v ?? "")}
+          items={templateItems}
+          placeholder="— Auto-detect —"
+          searchPlaceholder="Search templates…"
+          emptyMessage={
+            templates.length === 0
+              ? "No saved templates yet"
+              : "No matching templates"
+          }
+          className="w-full"
+        />
+      </div>
+
       <FileDropZone
         accept={ACCEPT}
         disabled={loading}
         onFileSelected={(file) => {
           const accountId = selectedAccountId ? Number(selectedAccountId) : null;
+          const templateId = selectedTemplateId
+            ? Number(selectedTemplateId)
+            : null;
           const tol = Number.parseInt(tolerance, 10);
           onUpload({
             file,
             accountId,
             tolerance: Number.isNaN(tol) ? 3 : Math.max(0, Math.min(30, tol)),
+            templateId,
           });
         }}
       />
