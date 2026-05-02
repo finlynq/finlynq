@@ -2555,10 +2555,12 @@ export function registerPgTools(
   // /api/transactions/transfer POST handler — both call into createTransferPair().
   server.tool(
     "record_transfer",
-    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit on source, credit on destination) atomically with a shared link_id so they show up as a paired transfer in the UI. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency transfers (pass `receivedAmount` to lock the bank's landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares between brokerage accounts; `amount` may be 0 for pure in-kind moves). The destination holding row is auto-created in the destination account if missing; the source holding MUST already exist. For brokerage stock/ETF/crypto buys and sells (cash sleeve ↔ symbol holding inside one brokerage account), prefer `record_trade` — it handles the same-account in-kind dance automatically.",
+    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit on source, credit on destination) atomically with a shared link_id so they show up as a paired transfer in the UI. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over name; pass at least the name when ids aren't known. When only the names are given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency transfers (pass `receivedAmount` to lock the bank's landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares between brokerage accounts; `amount` may be 0 for pure in-kind moves). The destination holding row is auto-created in the destination account if missing; the source holding MUST already exist. For brokerage stock/ETF/crypto buys and sells (cash sleeve ↔ symbol holding inside one brokerage account), prefer `record_trade` — it handles the same-account in-kind dance automatically.",
     {
-      fromAccount: z.string().describe("Source account name or alias (fuzzy matched against name; exact match on alias)"),
-      toAccount: z.string().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected."),
+      fromAccount: z.string().optional().describe("Source account name or alias — fuzzy matched against name, exact on alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided."),
+      toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided."),
+      from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `fromAccount` are passed, this wins."),
+      to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `toAccount` are passed, this wins."),
       amount: z.number().nonnegative().describe("Cash amount the user sent, in the SOURCE account's currency. > 0 for cash transfers; 0 is allowed only when `holding` + `quantity` are also set (pure in-kind transfer)."),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
       receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination account, in DESTINATION's currency. When set, FX rate is locked to receivedAmount/amount. Ignored for same-currency transfers."),
@@ -2569,7 +2571,7 @@ export function registerPgTools(
       note: z.string().optional().describe("Optional note applied to BOTH legs"),
       tags: z.string().optional().describe("Optional comma-separated tags applied to BOTH legs"),
     },
-    async ({ fromAccount, toAccount, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, note, tags }) => {
+    async ({ fromAccount, toAccount, from_account_id, to_account_id, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, note, tags }) => {
       if (!dek) return err("Transfers require an active session DEK — log in again to encrypt the rows.");
 
       const rawAccounts = await q(db, sql`
@@ -2577,10 +2579,37 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const fromAcct = fuzzyFind(fromAccount, allAccounts);
-      if (!fromAcct) return err(`Source account "${fromAccount}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
-      const toAcct = fuzzyFind(toAccount, allAccounts);
-      if (!toAcct) return err(`Destination account "${toAccount}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+      const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+      let fromAcct: Row | null = null;
+      if (from_account_id != null) {
+        fromAcct = allAccounts.find(a => Number(a.id) === from_account_id) ?? null;
+        if (!fromAcct) return err(`Source account #${from_account_id} not found or not owned by you.`);
+      } else {
+        if (!fromAccount) return err("Pass either `from_account_id` or `fromAccount` (name/alias).");
+        const resolved = resolveAccountStrict(fromAccount, allAccounts);
+        if (!resolved.ok) {
+          if (resolved.reason === "low_confidence") {
+            return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with from_account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+          }
+          return err(`Source account "${fromAccount}" not found. Available: ${list}`);
+        }
+        fromAcct = resolved.account;
+      }
+      let toAcct: Row | null = null;
+      if (to_account_id != null) {
+        toAcct = allAccounts.find(a => Number(a.id) === to_account_id) ?? null;
+        if (!toAcct) return err(`Destination account #${to_account_id} not found or not owned by you.`);
+      } else {
+        if (!toAccount) return err("Pass either `to_account_id` or `toAccount` (name/alias).");
+        const resolved = resolveAccountStrict(toAccount, allAccounts);
+        if (!resolved.ok) {
+          if (resolved.reason === "low_confidence") {
+            return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with to_account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+          }
+          return err(`Destination account "${toAccount}" not found. Available: ${list}`);
+        }
+        toAcct = resolved.account;
+      }
 
       let result: Awaited<ReturnType<typeof createTransferPair>>;
       try {
@@ -2639,6 +2668,8 @@ export function registerPgTools(
         toAmount: result.toAmount,
         toCurrency: result.toCurrency,
         enteredFxRate: result.enteredFxRate,
+        resolvedFromAccount: { id: Number(fromAcct.id), name: String(fromAcct.name ?? "") },
+        resolvedToAccount: { id: Number(toAcct.id), name: String(toAcct.name ?? "") },
         ...(result.holding ? { holding: result.holding } : {}),
         message: result.isCrossCurrency
           ? `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})${inKindNote}`
@@ -2658,10 +2689,10 @@ export function registerPgTools(
   // quantity+destQuantity, amount=0/cashAmount) by hand.
   server.tool(
     "record_trade",
-    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (auto-created if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve. Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve is created in the trade currency on first use. Optional `fees` post as a separate expense transaction on the cash sleeve. Use this instead of record_transaction for trades — record_transaction loses the holding-pair link and can't move the share count + cost basis atomically.",
+    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (auto-created if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve. Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve is created in the trade currency on first use. Optional `fees` post as a separate expense transaction on the cash sleeve. PREFER `account_id` over `account` name; weak substring matches on the name path are REJECTED with a 'did you mean…' error rather than silently routing the trade to the wrong account. Use this instead of record_transaction for trades — record_transaction loses the holding-pair link and can't move the share count + cost basis atomically.",
     {
-      account: z.string().optional().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required if `account_id` is not provided."),
-      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching. If both this and `account` are passed, this wins."),
+      account: z.string().optional().describe("Brokerage account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. If both this and `account` are passed, this wins."),
       side: z.enum(["buy", "sell"]).describe("'buy' (cash → symbol) or 'sell' (symbol → cash)."),
       symbol: z.string().min(1).max(50).describe("Ticker symbol of the security being traded (e.g. 'AAPL', 'VEQT.TO', 'BTC'). Used as both the holding name and symbol when auto-creating the position."),
       quantity: z.number().positive().describe("Share count (always positive — `side` controls the direction)."),
@@ -2690,8 +2721,15 @@ export function registerPgTools(
         if (!acct) return err(`Account #${account_id} not found or not owned by you.`);
       } else {
         if (!account) return err("Pass either `account_id` or `account` (name/alias).");
-        acct = fuzzyFind(account, allAccounts);
-        if (!acct) return err(`Account "${account}" not found. Available: ${allAccounts.map(a => a.name).join(", ")}`);
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+          }
+          return err(`Account "${account}" not found. Available: ${list}`);
+        }
+        acct = resolved.account;
       }
 
       // Trades only make sense in investment accounts. Bail early so the
@@ -2847,6 +2885,7 @@ export function registerPgTools(
         tradeCurrency,
         accountCurrency: acctCurrency,
         fxRate: fx,
+        resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
         ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
         message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
       });
