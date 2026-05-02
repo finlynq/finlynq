@@ -8,6 +8,7 @@ import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currenc
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 
 const CRYPTO_SYMBOLS = new Set([
   "BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AAVE", "ATOM", "AVAX",
@@ -189,6 +190,13 @@ export async function GET(request: NextRequest) {
   // sign. ABS(amount) covers Finlynq-native (amt<0+qty>0) and WP convention
   // (amt>0+qty>0). entered_amount uses ABS so cost basis stays positive.
   // COALESCE handles un-backfilled rows where entered_* are still NULL.
+  //
+  // Issue #84: dividends are classified by category_id (the user's "Dividends"
+  // category), not by the legacy `qty=0 AND amount>0` heuristic. The heuristic
+  // silently dropped dividend reinvestments (qty>0, amt<0) and withholding-tax
+  // entries (qty=0, amt<0). When the user has no Dividends category, the
+  // dividendsCategoryId is null and the CASE short-circuits to 0.
+  const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
@@ -197,7 +205,9 @@ export async function GET(request: NextRequest) {
       totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
       totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
       totalSellAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
-      dividendsInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) = 0 AND ${schema.transactions.amount} > 0 THEN COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}) ELSE 0 END), 0)::float8`,
+      dividendsInEntered: dividendsCategoryId !== null
+        ? sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.categoryId} = ${dividendsCategoryId} THEN COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}) ELSE 0 END), 0)::float8`
+        : sql<number>`0::float8`,
       firstPurchaseDate: sql<string | null>`MIN(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.date} END)`,
     })
     .from(schema.transactions)

@@ -14,6 +14,7 @@ import { z } from "zod";
 import { decryptField, encryptField } from "../src/lib/crypto/envelope";
 import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
 import { encryptName, nameLookup } from "../src/lib/crypto/encrypted-columns";
+import { resolveDividendsCategoryId } from "../src/lib/dividends-category";
 import {
   generateAmortizationSchedule,
   calculateDebtPayoff,
@@ -591,12 +592,13 @@ async function aggregateHoldings(
   db: DbLike,
   userId: string,
   dek: Buffer | null,
-  opts?: { buysOnly?: boolean; since?: string }
+  opts?: { buysOnly?: boolean; since?: string; dividendsCategoryId?: number | null }
 ): Promise<(HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null })[]> {
   const buysFilter = opts?.buysOnly
     ? sql`AND t.amount < 0`
     : sql``;
   const dateFilter = opts?.since ? sql`AND t.date >= ${opts.since}` : sql``;
+  const dividendsCategoryId = opts?.dividendsCategoryId ?? null;
 
   // FK-bound aggregation. JOIN through holding_accounts (Section G) on
   // (holding_id, account_id) so the (holding, account) pair is the join
@@ -608,10 +610,13 @@ async function aggregateHoldings(
   // portfolio_holding_id and the legacy text column is NULL.
   // CLAUDE.md "Portfolio aggregator" — qty>0 = buy regardless of amount
   // sign; preserved by `accumulate()` below.
+  // Issue #84: t.category_id is plumbed through so accumulate() can match
+  // dividends by the user's Dividends category id instead of the legacy
+  // qty=0+amt>0 heuristic.
   type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null };
   const out = new Map<string, Agg>();
   const fkRows = await q(db, sql`
-    SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date,
+    SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
            ph.name AS holding_name, ph.name_ct AS holding_name_ct
     FROM transactions t
     INNER JOIN holding_accounts ha
@@ -636,7 +641,7 @@ async function aggregateHoldings(
     }
     if (!name) name = String(r.holding_name ?? "");
     if (!name || name.startsWith("v1:")) continue;
-    accumulate(out, name, Number(r.portfolio_holding_id ?? 0) || null, r);
+    accumulate(out, name, Number(r.portfolio_holding_id ?? 0) || null, r, dividendsCategoryId);
   }
 
   return Array.from(out.values()).sort((a, b) => b.buy_amount - a.buy_amount);
@@ -648,10 +653,12 @@ function accumulate(
   name: string,
   holdingId: number | null,
   r: Row,
+  dividendsCategoryId: number | null,
 ): void {
   const qty = Number(r.quantity ?? 0);
   const amt = Number(r.amount);
   const d = String(r.date);
+  const catId = r.category_id != null ? Number(r.category_id) : null;
   const row = out.get(name) ?? {
     name,
     buy_qty: 0,
@@ -674,8 +681,15 @@ function accumulate(
   row.net_quantity += qty;
   if (!row.last_activity || d > row.last_activity) row.last_activity = d;
   // qty>0 = buy (regardless of amt sign — Finlynq-native is amt<0+qty>0,
-  // WP/ZIP convention is amt>0+qty>0). qty<0 = sell. qty=0 ∧ amt>0 = dividend.
-  // Mirrors /api/portfolio/overview SQL CASE at route.ts:119-124.
+  // WP/ZIP convention is amt>0+qty>0). qty<0 = sell. The buy/sell branches
+  // come first so dividend reinvestments (qty>0, amt<0, category=Dividends)
+  // still count toward shares held.
+  //
+  // Issue #84: dividends are matched by category_id, not the legacy
+  // `qty=0 AND amt>0` heuristic. That heuristic silently dropped dividend
+  // reinvestments and withholding-tax / negative-correction rows. When the
+  // user has no Dividends category (dividendsCategoryId == null), the
+  // branch is skipped and `dividends` sums to 0.
   if (qty > 0) {
     row.buy_qty += qty;
     row.buy_amount += Math.abs(amt);
@@ -684,7 +698,8 @@ function accumulate(
   } else if (qty < 0) {
     row.sell_qty += Math.abs(qty);
     row.sell_amount += Math.abs(amt);
-  } else if (amt > 0) {
+  }
+  if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
     row.dividends += amt;
   }
   out.set(name, row);
@@ -3586,7 +3601,11 @@ export function registerPgTools(
         return r;
       };
 
-      const metrics = await aggregateHoldings(db, userId, dek);
+      // Issue #84: dividends classified by category_id, not the legacy
+      // qty=0+amt>0 heuristic. Pass the user's Dividends category id (or
+      // null if they have no such category) into the aggregator.
+      const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
+      const metrics = await aggregateHoldings(db, userId, dek, { dividendsCategoryId });
 
       const phRaw = await q(db, sql`
         SELECT ph.name, ph.name_ct, ph.symbol, ph.symbol_ct, ph.currency,
@@ -3741,7 +3760,9 @@ export function registerPgTools(
       const since = cutoff[period ?? "all"];
       const today = new Date();
 
-      const perf = await aggregateHoldings(db, userId, dek, { since });
+      // Issue #84: dividends classified by category_id (see aggregateHoldings).
+      const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
+      const perf = await aggregateHoldings(db, userId, dek, { since, dividendsCategoryId });
 
       const results = perf.map(p => {
         const buyQty = Number(p.buy_qty ?? 0);
@@ -3817,9 +3838,13 @@ export function registerPgTools(
       // dropped the legacy t.portfolio_holding text column; the FK is now
       // the sole source of truth. CLAUDE.md "Portfolio aggregator" — qty>0
       // = buy regardless of amount sign (preserved in the loop below).
+      // Issue #84: SELECT t.category_id so the dividend classifier can match
+      // on the user's Dividends category id instead of the legacy
+      // qty=0+amt>0 heuristic.
+      const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
-               t.portfolio_holding_id,
+               t.portfolio_holding_id, t.category_id,
                ph.name_ct as ph_name_ct, ph.name as ph_name,
                ph.symbol as ph_symbol, ph.symbol_ct as ph_symbol_ct,
                a.name as account_name, a.name_ct as account_name_ct, a.currency
@@ -3888,16 +3913,27 @@ export function registerPgTools(
       const dividends: typeof txns = [];
 
       // qty>0 = buy (handles Finlynq-native amt<0+qty>0 and WP convention
-      // amt>0+qty>0). qty<0 = sell. qty=0 ∧ amt>0 = dividend.
+      // amt>0+qty>0). qty<0 = sell. The buy/sell branches come first so
+      // dividend reinvestments (qty>0, amt<0, category=Dividends) still
+      // count toward shares held.
+      //
+      // Issue #84: dividends are matched by category_id (the user's Dividends
+      // category), not the legacy `qty=0 AND amt>0` heuristic. The heuristic
+      // silently dropped dividend reinvestments and withholding-tax /
+      // negative-correction rows. When the user has no Dividends category
+      // (dividendsCategoryId == null), divAmt stays 0.
       for (const t of txns) {
         const qty = Number(t.quantity ?? 0);
         const amt = Number(t.amount);
+        const catId = t.category_id != null ? Number(t.category_id) : null;
         if (qty > 0) {
           buyQty += qty; buyAmt += Math.abs(amt); purchases.push(t);
         } else if (qty < 0) {
           sellQty += Math.abs(qty); sellAmt += Math.abs(amt); sales.push(t);
-        } else if (amt > 0) {
-          divAmt += amt; dividends.push(t);
+        }
+        if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
+          divAmt += amt;
+          dividends.push(t);
         }
       }
 

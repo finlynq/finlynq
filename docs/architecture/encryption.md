@@ -92,7 +92,7 @@ The historical-frequency fallback (payee-equality against existing rows) also ru
 
 ### Portfolio aggregation — `qty>0` is a buy regardless of amount sign
 
-Finlynq-native data records a buy as `amt<0 + qty>0` (paid cash, got shares); the WP ZIP importer records it as `amt>0 + qty>0` (WP's "position balance grew by X" convention). The aggregator tolerates both. Dividends stay the fallback when `qty === 0 && amt > 0`.
+Finlynq-native data records a buy as `amt<0 + qty>0` (paid cash, got shares); the WP ZIP importer records it as `amt>0 + qty>0` (WP's "position balance grew by X" convention). The aggregator tolerates both.
 
 **Every aggregator must implement the same rule** — keying on `amt<0` instead of `qty>0` silently drops every WP-imported holding leg (root cause of a 2026-04-27 prod symptom where the web Portfolio page showed `Uniswap = 1.2606` shares but MCP `analyze_holding` returned `0`; fix in commit [`8046b9b`](https://github.com/finlynq/finlynq/commit/8046b9b)).
 
@@ -101,6 +101,21 @@ Four implementations to keep in sync (all four `INNER JOIN holding_accounts` as 
 - MCP HTTP [register-tools-pg.ts](../../mcp-server/register-tools-pg.ts) `accumulate()` + `analyze_holding` loop + `recentTransactions[].type` label
 - [src/lib/holdings-value.ts](../../src/lib/holdings-value.ts) FK SQL CASE
 - MCP stdio [register-core-tools.ts](../../mcp-server/register-core-tools.ts) `get_portfolio_analysis` + `get_portfolio_performance` + `analyze_holding` loop
+
+### Portfolio aggregation — dividends are matched by `category_id`, not by qty/amount sign
+
+Issue [#84](https://github.com/finlynq/finlynq/issues/84) (2026-05-01) replaced the legacy `qty == 0 AND amt > 0` heuristic with a category-id match. The heuristic silently dropped (a) dividend reinvestments (qty>0, amt<0, classified only as buys) and (b) withholding-tax / negative-correction entries (qty=0, amt<0, fell through every branch and disappeared from `dividendsReceived`). For TFSA-CAD holding 425, the heuristic reported $661.27 dividends while the SUM over Dividends-category transactions was ~$726.06 — $64.79 unexplained.
+
+The fix routes through [src/lib/dividends-category.ts](../../src/lib/dividends-category.ts) `resolveDividendsCategoryId(db, userId, dek)`, which looks up the user's `Dividends`/`Dividend` category id (Stream-D-aware: matches both plaintext `name` and the encrypted `name_lookup` HMAC). When the user has no Dividends category, the helper returns null and `dividendsReceived` cleanly sums to 0.
+
+**Branch ordering matters.** The buy/sell branches (qty-direction) come first to preserve "qty>0 is a buy regardless of amount sign". The dividend branch is **independent** of the buy/sell branches — a dividend reinvestment is correctly counted as both a buy (shares acquired) AND a dividend (income received).
+
+Three implementations were updated in lockstep:
+- [/api/portfolio/overview/route.ts](../../src/app/api/portfolio/overview/route.ts) — SQL CASE on `category_id`
+- MCP HTTP [register-tools-pg.ts](../../mcp-server/register-tools-pg.ts) `accumulate()` (per-row category-id match)
+- MCP HTTP [register-tools-pg.ts](../../mcp-server/register-tools-pg.ts) `analyze_holding` (in-memory loop, independent dividend bucket)
+
+MCP stdio [register-core-tools.ts](../../mcp-server/register-core-tools.ts) `analyze_holding` doesn't compute dividends today (no `divAmt` accumulator), so the heuristic-fix is a no-op there. Stdio `get_portfolio_analysis` likewise doesn't expose dividends — separate gap, not regressed.
 
 ### Portfolio aggregation uses integer FK, not the (now-dropped) encrypted text column
 
