@@ -810,10 +810,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns. After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns. Pass top-level `idempotencyKey` (UUID v4) to make this batch safe to retry — if the same `(user, key)` was already committed within 72h, the original result is returned verbatim with no INSERTs (set per-call: callers should generate one fresh UUID per logical batch). After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null.",
     {
       account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement."),
       dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`."),
+      idempotencyKey: z.string().uuid().optional().describe("Optional UUID v4 the caller mints once per batch. First call with `(user, key)` writes the rows AND stashes the response JSON; any retry within 72h returns the stored response verbatim with no INSERTs and no cache invalidation. Skipped on `dryRun: true` and skipped when zero rows commit."),
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
@@ -827,8 +828,33 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         enteredCurrency: z.string().optional(),
       })).describe("Array of transactions to record"),
     },
-    async ({ transactions, account_id: defaultAccountId, dryRun }) => {
+    async ({ transactions, account_id: defaultAccountId, dryRun, idempotencyKey }) => {
       const today = new Date().toISOString().split("T")[0];
+
+      // Idempotency replay (issue #98). Lookup BEFORE prefetching accounts /
+      // categories so a hit returns immediately. Stdio uses the pg-compat
+      // shim — `?::uuid` casting works correctly. dryRun=true skips replay
+      // and skips storage so a preview never blocks a future real submit.
+      if (idempotencyKey && !dryRun) {
+        try {
+          const hit = (await sqlite
+            .prepare(
+              `SELECT response_json FROM mcp_idempotency_keys WHERE user_id = ? AND key = ?::uuid AND tool_name = 'bulk_record_transactions' AND created_at > NOW() - INTERVAL '72 hours' LIMIT 1`,
+            )
+            .get(userId, idempotencyKey)) as SqliteRow | undefined;
+          if (hit && hit.response_json != null) {
+            const replay =
+              typeof hit.response_json === "string"
+                ? JSON.parse(hit.response_json)
+                : hit.response_json;
+            return txt({ ...replay, replayed: true });
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn("[bulk_record_transactions] idempotency lookup failed:", e);
+        }
+      }
+
       const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
       const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
       const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
@@ -1000,14 +1026,49 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         }
       }
 
-      return txt({
+      const responseBody = {
         ...(dryRun ? { dryRun: true } : {}),
         imported: dryRun ? 0 : ok,
         failed: results.length - ok,
         ...(dryRun ? { previewed: ok } : {}),
         results,
         possibleDuplicates,
-      });
+      };
+
+      // Issue #98 — persist redacted response under the caller-supplied
+      // idempotency key. Same rules as the HTTP path: skip on dryRun, skip
+      // on ok===0. Stdio writes are plaintext anyway (no DEK on this
+      // transport), but the same redaction policy applies on the at-rest
+      // response_json so the table contract is identical between transports.
+      if (idempotencyKey && !dryRun && ok > 0) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const redactedResults = (responseBody.results as any[]).map((r) => {
+            const out = { ...r };
+            if (typeof out.message === "string") {
+              out.message = `row #${out.index}: redacted on replay`;
+            }
+            if (out.resolvedAccount && typeof out.resolvedAccount === "object") {
+              out.resolvedAccount = { id: out.resolvedAccount.id, name: "[redacted]" };
+            }
+            if (out.resolvedCategory && typeof out.resolvedCategory === "object") {
+              out.resolvedCategory = { id: out.resolvedCategory.id, name: "[redacted]" };
+            }
+            return out;
+          });
+          const redactedBody = { ...responseBody, results: redactedResults };
+          await sqlite
+            .prepare(
+              `INSERT INTO mcp_idempotency_keys (user_id, key, tool_name, response_json) VALUES (?, ?::uuid, 'bulk_record_transactions', ?::jsonb) ON CONFLICT (user_id, key) DO NOTHING`,
+            )
+            .run(userId, idempotencyKey, JSON.stringify(redactedBody));
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn("[bulk_record_transactions] idempotency persist failed:", e);
+        }
+      }
+
+      return txt(responseBody);
     }
   );
 

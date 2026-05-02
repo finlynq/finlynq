@@ -454,3 +454,21 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 ```
 
 Post-migration verify with `SELECT column_name FROM information_schema.columns WHERE table_name='transactions' AND column_name='trade_link_id';` — expect 1 row. The aggregator LEFT JOIN is forward-compatible (no rows match until a writer stamps a UUID), so the code path is safe to deploy *before* any user has used the new `tradeGroupKey` parameter — pre-existing data routes through the fallback branch unchanged.
+
+## mcp-idempotency-keys (2026-05-01, issue [#98](https://github.com/finlynq/finlynq/issues/98))
+
+Adds `mcp_idempotency_keys` — a new table backing caller-supplied retry safety for `bulk_record_transactions` (HTTP + stdio MCP). Schema: `(id SERIAL, user_id TEXT, key UUID, tool_name TEXT, response_json JSONB, created_at TIMESTAMPTZ DEFAULT NOW())` plus `UNIQUE (user_id, key)` + `(created_at)` btree index for the 72h sweep. The unique index spans the **pair**, not the key alone — Alice's UUID K and Bob's UUID K are independent batches, never collide. Idempotent (`CREATE TABLE IF NOT EXISTS` / `CREATE [UNIQUE] INDEX IF NOT EXISTS`).
+
+The HTTP and stdio handlers in `bulk_record_transactions` look up `(user_id, key, tool_name='bulk_record_transactions', created_at > NOW() - INTERVAL '72 hours')` BEFORE any account/category/holdings prefetch — a hit returns the stored `response_json` verbatim, no INSERTs into `transactions`, no `invalidateUserTxCache` call. After a successful (non-dryRun, ok>0) batch they store the redacted response (plaintext payee stripped from per-row `message`, account/category names replaced with `[redacted]` — `transactionId`, `resolvedAccount.id`, `resolvedCategory.id` preserved). `ON CONFLICT (user_id, key) DO NOTHING` closes the concurrent-retry race.
+
+A daily cron in [src/lib/cron/sweep-mcp-idempotency.ts](../src/lib/cron/sweep-mcp-idempotency.ts) wired in `instrumentation.ts` deletes rows older than 72h. The replay lookup also filters on freshness, so the cron is purely a table-growth bound.
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-mcp-idempotency.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-mcp-idempotency.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-mcp-idempotency.sql
+```
+
+Post-migration verify with `\d mcp_idempotency_keys` (table + indexes present) and a smoke check from the app: pass an `idempotencyKey` UUID to `bulk_record_transactions`, confirm the rows commit, then call again with the same `(user, key)` and confirm `imported: 0`-equivalent replay (stored `response_json` returned with `replayed: true` appended). The retry path leaves `transactions.created_at` / `updated_at` untouched on the original rows — replay never re-enters the writer.
+
+**Out of scope:** idempotency for other write tools (`record_transaction`, `update_transaction`, `delete_transaction`, `record_trade`, `record_transfer`). Those are lower volume / lower retry risk; revisit only after we see whether callers actually pass keys here.

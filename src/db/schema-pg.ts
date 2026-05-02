@@ -18,6 +18,8 @@ import {
   timestamp,
   boolean,
   uniqueIndex,
+  uuid,
+  jsonb,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -629,6 +631,30 @@ export const incomingEmails = pgTable("incoming_emails", {
   triagedAt: timestamp("triaged_at", { withTimezone: true }),
   triagedBy: text("triaged_by").references(() => users.id),
 });
+
+// ─── MCP Idempotency Keys (issue [#98](https://github.com/finlynq/finlynq/issues/98)) ─────
+//
+// Caller-supplied retry safety for `bulk_record_transactions` (HTTP + stdio).
+// First call with `idempotencyKey=K` writes the rows AND stashes the response
+// JSON here keyed by `(user_id, key)`. Any retry within 72h returns the
+// stored `response_json` verbatim with no INSERTs into `transactions`. Keys
+// are scoped per user — Alice's UUID K cannot replay against Bob's row, so
+// the UNIQUE index spans the pair, not the key alone. A daily cron in
+// [src/lib/cron/sweep-mcp-idempotency.ts](../lib/cron/sweep-mcp-idempotency.ts)
+// deletes rows older than 72h. `response_json` MUST be redacted of plaintext
+// payee / account name before persisting (Stream D rule) — see the writer in
+// `register-tools-pg.ts` / `register-core-tools.ts`.
+export const mcpIdempotencyKeys = pgTable("mcp_idempotency_keys", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  key: uuid("key").notNull(),
+  toolName: text("tool_name").notNull(), // 'bulk_record_transactions' for now
+  responseJson: jsonb("response_json").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  userIdKeyUnique: uniqueIndex("mcp_idempotency_keys_user_id_key_unique")
+    .on(t.userId, t.key),
+}));
 
 // ─── Admin Audit Log (Finding #16) ──────────────────────────────────────────
 //

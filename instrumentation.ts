@@ -79,6 +79,21 @@ export async function register() {
     } catch (err) {
       console.error("[instrumentation] Failed to start settle-future-fx cron:", err);
     }
+
+    // MCP idempotency keys cleanup (issue #98). Daily sweep — delete rows
+    // older than 72h from `mcp_idempotency_keys`. The replay lookup also
+    // filters on freshness, so this is purely a table-growth bound.
+    try {
+      const { startMcpIdempotencySweepTimer, sweepMcpIdempotencyKeys } = await import(
+        "./src/lib/cron/sweep-mcp-idempotency"
+      );
+      sweepMcpIdempotencyKeys().catch((err) => {
+        console.error("[instrumentation] initial sweep-mcp-idempotency failed:", err);
+      });
+      startMcpIdempotencySweepTimer();
+    } catch (err) {
+      console.error("[instrumentation] Failed to start sweep-mcp-idempotency cron:", err);
+    }
   } catch (err) {
     // Log but don't crash the server — healthz will report degraded state
     console.error("[instrumentation] Failed to initialize PostgreSQL adapter:", err);
