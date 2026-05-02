@@ -189,6 +189,24 @@ The integer FK `transactions.portfolio_holding_id` is the canonical link between
 
 Available on `record_transaction` / `bulk_record_transactions` / `update_transaction` — HTTP only. Stdio MCP write tools still don't bind portfolio holdings per the [stdio carve-out](#self-hosted-limitation--stdio-writes-are-plaintext).
 
+### Cost basis rules
+
+For most positions, cost basis is the sum of `enteredAmount` (in `enteredCurrency`) over all `quantity > 0` rows attached to the holding. The four cost-basis aggregators (REST `/api/portfolio/overview`, `src/lib/holdings-value.ts`, MCP HTTP `aggregateHoldings` + `analyze_holding`, MCP stdio `get_portfolio_performance` + `analyze_holding` + `get_investment_insights` rebalancing) all preserve the CLAUDE.md "qty>0 = buy regardless of amount sign" rule.
+
+**Multi-currency trade exception ([#96](https://github.com/finlynq/finlynq/issues/96)).** When a stock-leg row carries a non-null `trade_link_id` matching a paired cash-leg sibling (same user, same `trade_link_id`, `quantity = 0` or NULL, different row id), the aggregators substitute the cash leg's `enteredAmount` (in `enteredCurrency`) for the stock leg's amount. The cash leg captures what actually left the account at the broker's FX rate (e.g. IBKR's blended rate); the stock leg's amount is the same trade re-priced at Finlynq's live rate, which under-counts the broker's spread. Worked example: BNO bought at USD 375.90 / CAD 514.12 has a stock leg with `enteredAmount = -509.76 CAD` (Finlynq's FX) but a cash leg with `enteredAmount = -514.12 CAD` (IBKR's actual settlement). The aggregator picks the cash leg's 514.12 as cost basis. Legacy / single-currency / unpaired rows (no `trade_link_id`) fall back to the stock leg's amount unchanged.
+
+**How to record a multi-currency trade pair via MCP HTTP:**
+
+1. **One-shot via `bulk_record_transactions`** — preferred. Pass two rows in the same batch with the same `tradeGroupKey` (any string label, e.g. `"BNO-buy-2025"`). The server validates that the group has exactly two rows, one with `quantity > 0` (stock leg) and one with `quantity = 0` or omitted (cash leg). It mints one UUID and stamps both rows' `trade_link_id`. The per-row response surfaces the minted UUID as `tradeLinkId`. Validation errors (wrong row count or bad qty distribution) fail just the affected rows, not the whole batch.
+
+2. **Incremental binding via `record_transaction`** — pass `tradeLinkId: "<uuid-from-prior-call>"` to bind a second leg to a previously-recorded first leg. Server checks the UUID exists, belongs to this user, and references at most one existing row. Use this only when you couldn't book both legs in one batch.
+
+`tradeGroupKey` is a per-batch grouping hint — the server discards the string label and only the minted UUID lands in the DB. The `tradeLinkId` parameter on `record_transaction` is the UUID itself, validated against the user's own data.
+
+**Why `trade_link_id` and not `link_id`?** `link_id` is reserved for `record_transfer` siblings under the four-check transfer-pair rule (CLAUDE.md): `link_id` + sole sibling + both `type='R'` + different accounts (relaxed for in-kind same-account rebalances). Trade pairs have looser semantics — single-account, both legs negative, asymmetric quantity — so they live on a separate column. **Do NOT reuse `linkId` for trade pairs**; that would break the transfer-pair rule.
+
+**Stdio MCP is read-only for trade pairs.** Stdio refuses investment-account writes (CLAUDE.md), so it can't *create* `trade_link_id` rows. But it MUST read them correctly for users who recorded the trade via HTTP MCP — all stdio aggregators apply the same cash-leg LEFT JOIN.
+
 ### Write-time warnings ([#31](https://github.com/finlynq/finlynq/issues/31))
 
 `record_transaction` / `bulk_record_transactions` / `update_transaction` (HTTP) include a `warnings: string[]` field on success when a row binds a `portfolioHoldingId` and moves cash (`amount != 0`) but omits `quantity`. The transaction is still written; the warning is advisory — without `quantity`, the holding's unit count doesn't move and the portfolio aggregator drifts from the cash ledger.

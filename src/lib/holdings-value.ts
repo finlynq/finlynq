@@ -11,7 +11,8 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq, isNotNull, lte, sql } from "drizzle-orm";
+import { and, eq, isNotNull, lte, ne, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { fetchMultipleQuotes, fetchMultipleQuotesAtDate } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, getRate } from "@/lib/fx-service";
@@ -101,6 +102,16 @@ export async function getHoldingsValueByAccount(
   // qty>0 = buy regardless of amount sign. ABS(amount) for cost basis so
   // both Finlynq-native (amt<0+qty>0) and WP convention (amt>0+qty>0)
   // yield positive cost.
+  //
+  // Issue #96: LEFT JOIN to the cash-leg sibling for multi-currency trade
+  // pairs. When a buy row (qty>0) has a paired cash leg (same trade_link_id,
+  // qty=0), use the cash leg's `amount` (the broker's actual settlement in
+  // account currency) instead of the stock leg's amount (which is the same
+  // trade re-priced at Finlynq's live FX rate and under-counts the broker's
+  // spread). Both legs sit in the same brokerage account, so amount is in
+  // the same currency for both — no currency hop needed at this layer.
+  const cashLeg = alias(schema.transactions, "cash");
+  const isPairedBuy = sql<boolean>`(COALESCE(${schema.transactions.quantity}, 0) > 0 AND ${cashLeg.id} IS NOT NULL)`;
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
@@ -112,7 +123,13 @@ export async function getHoldingsValueByAccount(
         END
       ), 0)::float8`,
       totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
-      totalBuyAmount: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ABS(${schema.transactions.amount}) ELSE 0 END), 0)::float8`,
+      totalBuyAmount: sql<number>`COALESCE(SUM(
+        CASE
+          WHEN ${isPairedBuy} THEN ABS(${cashLeg.amount})
+          WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ABS(${schema.transactions.amount})
+          ELSE 0
+        END
+      ), 0)::float8`,
       totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
     })
     .from(schema.transactions)
@@ -122,6 +139,17 @@ export async function getHoldingsValueByAccount(
         eq(schema.holdingAccounts.holdingId, schema.transactions.portfolioHoldingId),
         eq(schema.holdingAccounts.accountId, schema.transactions.accountId),
         eq(schema.holdingAccounts.userId, userId),
+      ),
+    )
+    .leftJoin(
+      cashLeg,
+      and(
+        eq(cashLeg.userId, userId),
+        isNotNull(cashLeg.tradeLinkId),
+        isNotNull(schema.transactions.tradeLinkId),
+        eq(cashLeg.tradeLinkId, schema.transactions.tradeLinkId),
+        ne(cashLeg.id, schema.transactions.id),
+        eq(sql`COALESCE(${cashLeg.quantity}, 0)`, 0),
       ),
     )
     .where(and(
