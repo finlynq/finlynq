@@ -2024,27 +2024,21 @@ async function findHoldingIdViaSql(
 ): Promise<number | null> {
   const trimmed = name.trim();
   if (!trimmed) return null;
-  const plain = await withClient(pool, (c) =>
+  // Stream D Phase 4 (2026-05-03): plaintext `portfolio_holdings.name` column
+  // is dropped. Lookup is HMAC-only via `name_lookup`. Without a DEK (stdio
+  // path with no key) we can't compute the HMAC, so the lookup degrades to
+  // "not found" — caller surfaces a clean error.
+  if (!dek) return null;
+  const lookup = nameLookup(dek, trimmed);
+  const enc = await withClient(pool, (c) =>
     c.query<{ id: number }>(
       `SELECT id FROM portfolio_holdings
-        WHERE user_id = $1 AND account_id = $2 AND name = $3
+        WHERE user_id = $1 AND account_id = $2 AND name_lookup = $3
         LIMIT 1`,
-      [userId, accountId, trimmed],
+      [userId, accountId, lookup],
     ),
   );
-  if (plain.rows.length) return plain.rows[0].id;
-  if (dek) {
-    const lookup = nameLookup(dek, trimmed);
-    const enc = await withClient(pool, (c) =>
-      c.query<{ id: number }>(
-        `SELECT id FROM portfolio_holdings
-          WHERE user_id = $1 AND account_id = $2 AND name_lookup = $3
-          LIMIT 1`,
-        [userId, accountId, lookup],
-      ),
-    );
-    if (enc.rows.length) return enc.rows[0].id;
-  }
+  if (enc.rows.length) return enc.rows[0].id;
   return null;
 }
 

@@ -50,12 +50,12 @@ Rotating either of these is an offline-risky operation — do NOT rotate in plac
 
 ```bash
 # prod
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-privacy-hardening.sql
-# staging
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-privacy-hardening.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     -f scripts/migrate-privacy-hardening.sql
 # dev
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-privacy-hardening.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev -f scripts/migrate-privacy-hardening.sql
 ```
+
+> Staging deprecated 2026-05-03 — no app deploys there.
 
 The migration:
 - Adds `oauth_access_tokens.dek_wrapped_refresh` (idempotent, nullable).
@@ -113,9 +113,9 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_<env> -d pf_<env> -f scripts/migra
  subscriptions      |     0 |         0 |         0
 ```
 
-**Staging + dev**: Phase 1 and Phase 3 migrations are NOT applied (user directed prod-only deploy). Run both SQL files above in sequence when bringing those envs in sync. No code changes needed — the Phase 1+2+3 code is already on main.
+**Dev**: Phase 1 and Phase 3 migrations were NOT applied at the time of the original prod deploy. Run the SQL files above in sequence to bring dev in sync. No code changes needed — the Phase 1+2+3 code is already on main. (Staging deprecated 2026-05-03.)
 
-**Why NULL-plaintext, not DROP COLUMN**: keeps Drizzle types stable, lets stdio MCP (no DEK) keep creating rows with plaintext when needed, same privacy benefit vs DB dump. The DROP variant is preserved at `scripts/migrate-stream-d-phase3.sql` for reference but should NOT be applied.
+**Phase 4 superseded the NULL-plaintext approach (2026-05-03).** The plaintext columns are now physically dropped on prod + dev. The original `migrate-stream-d-phase3.sql` (DROP variant) was deleted; the canonical migration is now [scripts/migrate-stream-d-phase4-drop-columns.sql](../scripts/migrate-stream-d-phase4-drop-columns.sql). Stdio MCP create/update tools for the 6 in-scope tables refuse the operation with a clean error (no DEK on that transport). See [migrations.md](migrations.md) "Stream D Phase 4".
 
 ## Follow-ups (not yet done)
 
