@@ -4,15 +4,17 @@ import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const data = await db
+  // Stream D Phase 4 — plaintext accountName dropped.
+  const raw = await db
     .select({
       id: schema.snapshots.id,
       accountId: schema.snapshots.accountId,
-      accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
       date: schema.snapshots.date,
       value: schema.snapshots.value,
       note: schema.snapshots.note,
@@ -22,6 +24,9 @@ export async function GET(request: NextRequest) {
     .where(eq(schema.snapshots.userId, userId))
     .orderBy(desc(schema.snapshots.date))
     .all();
+  const data = decryptNamedRows(raw, auth.context.dek, {
+    accountNameCt: "accountName",
+  });
   return NextResponse.json(data);
 }
 

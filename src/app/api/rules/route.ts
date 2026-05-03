@@ -35,7 +35,9 @@ const { transactionRules, categories } = schema;
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
-  const rules = await db
+  // Stream D Phase 4 — plaintext categories.name dropped. Return ct + the
+  // UI decrypts via the categories endpoint. Or decrypt inline here.
+  const rawRules = await db
     .select({
       id: transactionRules.id,
       name: transactionRules.name,
@@ -43,7 +45,7 @@ export async function GET(request: NextRequest) {
       matchType: transactionRules.matchType,
       matchValue: transactionRules.matchValue,
       assignCategoryId: transactionRules.assignCategoryId,
-      categoryName: categories.name,
+      categoryNameCt: categories.nameCt,
       assignTags: transactionRules.assignTags,
       renameTo: transactionRules.renameTo,
       isActive: transactionRules.isActive,
@@ -55,6 +57,11 @@ export async function GET(request: NextRequest) {
     .where(eq(transactionRules.userId, userId))
     .orderBy(asc(transactionRules.priority))
     .all();
+  const { decryptName } = await import("@/lib/crypto/encrypted-columns");
+  const rules = rawRules.map((r) => ({
+    ...r,
+    categoryName: decryptName(r.categoryNameCt, auth.context.dek, null),
+  }));
 
   return NextResponse.json(rules);
 }

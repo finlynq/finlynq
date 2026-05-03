@@ -52,10 +52,12 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
-    const { alias, ...rest } = parsed.data;
+    const { alias, name, ...rest } = parsed.data;
     const normalizedAlias = alias ? alias : null;
-    const enc = buildNameFields(auth.context.dek, { name: rest.name, alias: normalizedAlias });
-    const account = await createAccount(auth.context.userId, { ...rest, alias: normalizedAlias, ...enc });
+    const enc = buildNameFields(auth.context.dek, { name, alias: normalizedAlias });
+    // Stream D Phase 4 — plaintext `name`/`alias` columns dropped. Only the
+    // `*_ct`/`*_lookup` siblings get persisted via `enc`.
+    const account = await createAccount(auth.context.userId, { ...rest, ...enc });
     // When the user creates an account already flagged investment, ensure
     // the per-account Cash holding exists so the constraint is satisfiable
     // out of the gate. No transactions to reassign on a fresh account.
@@ -80,13 +82,15 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
-    const { id, alias, ...data } = parsed.data;
-    const normalized = alias === undefined ? data : { ...data, alias: alias ? alias : null };
-    // Only encrypt fields that were actually supplied on the PATCH.
+    const { id, alias, name, ...data } = parsed.data;
+    // Stream D Phase 4 — plaintext `name`/`alias` are NOT in the schema.
+    // Strip them from the update set; only the encrypted siblings persist.
+    const normalizedAlias = alias === undefined ? undefined : (alias ? alias : null);
     const toEncrypt: Record<string, string | null | undefined> = {};
-    if ("name" in normalized && normalized.name !== undefined) toEncrypt.name = normalized.name;
-    if ("alias" in normalized) toEncrypt.alias = normalized.alias ?? null;
+    if (name !== undefined) toEncrypt.name = name;
+    if (normalizedAlias !== undefined) toEncrypt.alias = normalizedAlias;
     const enc = buildNameFields(auth.context.dek, toEncrypt);
+    const normalized = data;
     // Detect false → true flip on isInvestment so we can run the backfill
     // (Cash holding + null-FK reassignment) in the same request.
     let needsInvestmentBackfill = false;

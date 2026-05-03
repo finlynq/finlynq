@@ -57,19 +57,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ suggestion: null });
     }
 
-    // Get category details
-    const category = await db
+    // Stream D Phase 4 — plaintext name dropped. Decrypt on the fly.
+    const rawCategory = await db
       .select({
         id: categories.id,
-        name: categories.name,
+        nameCt: categories.nameCt,
         type: categories.type,
         group: categories.group,
       })
       .from(categories)
       .where(and(eq(categories.id, suggestedCategoryId), eq(categories.userId, userId)))
       .get();
+    const { decryptName } = await import("@/lib/crypto/encrypted-columns");
+    const category = rawCategory
+      ? { ...rawCategory, name: decryptName(rawCategory.nameCt, dek, null) }
+      : null;
 
-    return NextResponse.json({ suggestion: category ?? null });
+    return NextResponse.json({ suggestion: category });
   } catch (error: unknown) {
     const message = safeErrorMessage(error, "Failed to suggest category");
     return NextResponse.json({ error: message }, { status: 500 });

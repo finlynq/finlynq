@@ -255,6 +255,28 @@ function sqliteErr(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
 }
 
+/**
+ * Stream D Phase 4 refusal helper (2026-05-03).
+ *
+ * The plaintext display-name columns on accounts/categories/goals/loans/
+ * subscriptions/portfolio_holdings were physically dropped. Writes to those
+ * tables now require the encrypted `name_ct` + `name_lookup` siblings, which
+ * can only be computed inside an authenticated session that holds the user's
+ * DEK in cache. The stdio MCP transport has no DEK (no auth on the wire,
+ * no session), so it cannot create or rename rows in those six tables.
+ *
+ * Read paths still work — the data flows through the queries.ts helpers
+ * which just return the ciphertext (decryption happens at the HTTP layer).
+ * Stdio reads of `name` will surface as `null` in the row payload.
+ *
+ * Use this helper at the very top of every gated tool's handler.
+ */
+function streamDRefuse(table: "accounts" | "categories" | "goals" | "loans" | "subscriptions" | "portfolio_holdings") {
+  return sqliteErr(
+    `Stdio MCP cannot create or update ${table} after Stream D Phase 4. The display name requires a DEK that the stdio transport doesn't carry. Use the HTTP MCP transport instead, or set the row up via the web UI.`,
+  );
+}
+
 /** Issue #65: shift an ISO YYYY-MM-DD date by N days (UTC-safe). Returns null on parse failure. */
 function shiftIsoDate(iso: string, deltaDays: number): string | null {
   const ms = Date.parse(iso + "T00:00:00Z");
@@ -479,14 +501,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
     },
     async ({ name, type, target_amount, deadline, account }) => {
-      let accountId: number | null = null;
-      if (account) {
-        const allAccounts = await sqlite.prepare("SELECT id, name, alias FROM accounts WHERE user_id = ?").all(userId) as SqliteRow[];
-        const acct = fuzzyFind(account, allAccounts);
-        accountId = acct ? Number(acct.id) : null;
-      }
-      await sqlite.prepare("INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").run(userId, name, type, target_amount, deadline ?? null, accountId);
-      return { content: [{ type: "text" as const, text: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` }] };
+      // Stream D Phase 4 — stdio cannot create goals.
+      void name; void type; void target_amount; void deadline; void account;
+      return streamDRefuse("goals");
     }
   );
 
@@ -1600,11 +1617,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },
     async ({ name, type, group, currency, note, alias }) => {
-      const existing = await sqlite.prepare(`SELECT id FROM accounts WHERE user_id = ? AND name = ?`).get(userId, name);
-      if (existing) return sqliteErr(`Account "${name}" already exists`);
-      const aliasValue = alias && alias.trim() ? alias.trim() : null;
-      const result = await sqlite.prepare(`INSERT INTO accounts (user_id, type, "group", name, currency, note, alias) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`).get(userId, type, group ?? "", name, currency ?? "CAD", note ?? "", aliasValue) as { id: number };
-      return txt({ success: true, accountId: result?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})${aliasValue ? `, alias "${aliasValue}"` : ""}` });
+      // Stream D Phase 4 — stdio cannot create accounts. See streamDRefuse.
+      void name; void type; void group; void currency; void note; void alias;
+      return streamDRefuse("accounts");
     }
   );
 
@@ -1621,23 +1636,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports. Pass an empty string to clear."),
     },
     async ({ account, name, group, currency, note, alias }) => {
-      const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return sqliteErr(`Account "${account}" not found`);
-      const updates: string[] = []; const params: unknown[] = [];
-      if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
-      if (group !== undefined) { updates.push(`"group" = ?`); params.push(group); }
-      if (currency !== undefined) { updates.push(`currency = ?`); params.push(currency); }
-      if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
-      if (alias !== undefined) {
-        const trimmed = alias.trim();
-        if (trimmed) { updates.push(`alias = ?`); params.push(trimmed); }
-        else { updates.push(`alias = NULL`); }
-      }
-      if (!updates.length) return sqliteErr("No fields to update");
-      params.push(acct.id, userId);
-      await sqlite.prepare(`UPDATE accounts SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
-      return txt({ success: true, message: `Account "${acct.name}" updated` });
+      // Stream D Phase 4 — stdio cannot update accounts (would touch the
+      // encrypted display-name columns).
+      void account; void name; void group; void currency; void note; void alias;
+      return streamDRefuse("accounts");
     }
   );
 
@@ -1672,18 +1674,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: z.string().optional().describe("Rename the goal"),
     },
     async ({ goal, target_amount, deadline, status, name }) => {
-      const allGoals = await sqlite.prepare(`SELECT id, name FROM goals WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const g = fuzzyFind(goal, allGoals);
-      if (!g) return sqliteErr(`Goal "${goal}" not found`);
-      const updates: string[] = []; const params: unknown[] = [];
-      if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
-      if (target_amount !== undefined) { updates.push(`target_amount = ?`); params.push(target_amount); }
-      if (deadline !== undefined) { updates.push(`deadline = ?`); params.push(deadline); }
-      if (status !== undefined) { updates.push(`status = ?`); params.push(status); }
-      if (!updates.length) return sqliteErr("No fields to update");
-      params.push(g.id, userId);
-      await sqlite.prepare(`UPDATE goals SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
-      return txt({ success: true, message: `Goal "${g.name}" updated` });
+      // Stream D Phase 4 — stdio cannot update goals (would touch name_ct).
+      void goal; void target_amount; void deadline; void status; void name;
+      return streamDRefuse("goals");
     }
   );
 
@@ -1712,10 +1705,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       note: z.string().optional(),
     },
     async ({ name, type, group, note }) => {
-      const existing = await sqlite.prepare(`SELECT id FROM categories WHERE user_id = ? AND name = ?`).get(userId, name);
-      if (existing) return sqliteErr(`Category "${name}" already exists`);
-      const result = await sqlite.prepare(`INSERT INTO categories (user_id, name, type, "group", note) VALUES (?, ?, ?, ?, ?) RETURNING id`).get(userId, name, type, group ?? "", note ?? "") as { id: number };
-      return txt({ success: true, categoryId: result?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` });
+      // Stream D Phase 4 — stdio cannot create categories.
+      void name; void type; void group; void note;
+      return streamDRefuse("categories");
     }
   );
 
@@ -1756,59 +1748,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       note: z.string().max(500).optional(),
     },
     async ({ name, account, symbol, currency, isCrypto, note }) => {
-      const allAccounts = await sqlite.prepare(
-        `SELECT id, name, alias, currency FROM accounts WHERE user_id = ? AND archived = false`
-      ).all(userId) as SqliteRow[];
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return sqliteErr(`Account "${account}" not found`);
-
-      const existing = await sqlite.prepare(
-        `SELECT id FROM portfolio_holdings WHERE user_id = ? AND account_id = ? AND LOWER(name) = LOWER(?)`
-      ).get(userId, acct.id, name);
-      if (existing) return sqliteErr(`Holding "${name}" already exists in account "${acct.name}"`);
-
-      const symbolValue = symbol && symbol.trim() ? symbol.trim() : null;
-      const cur = currency ?? String(acct.currency ?? "CAD");
-      try {
-        const result = await sqlite.prepare(
-          `INSERT INTO portfolio_holdings (user_id, account_id, name, symbol, currency, is_crypto, note)
-           VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
-        ).get(userId, acct.id, name, symbolValue, cur, isCrypto ? 1 : 0, note ?? "") as { id: number } | undefined;
-        const holdingId = result?.id;
-        if (!holdingId) {
-          return sqliteErr(`Failed to create holding "${name}" in "${acct.name}"`);
-        }
-        // Issue #95: dual-write the holding_accounts pairing. Every aggregator
-        // (issue #25) JOINs through holding_accounts on (holding_id,
-        // account_id, user_id); a holding without that pairing is invisible to
-        // get_portfolio_analysis. Stdio has no `db.transaction` wrapper, so on
-        // pairing-INSERT failure we DELETE the orphan portfolio_holdings row
-        // to avoid leaving the user with a holding the aggregators can't see.
-        // is_primary=true because every fresh holding starts single-account.
-        try {
-          await sqlite.prepare(
-            `INSERT INTO holding_accounts (holding_id, account_id, user_id, qty, cost_basis, is_primary)
-             VALUES (?, ?, ?, 0, 0, TRUE)
-             ON CONFLICT (holding_id, account_id) DO NOTHING`
-          ).run(holdingId, acct.id, userId);
-        } catch (pairingErr) {
-          await sqlite
-            .prepare(`DELETE FROM portfolio_holdings WHERE id = ? AND user_id = ?`)
-            .run(holdingId, userId);
-          throw pairingErr;
-        }
-        return txt({
-          success: true,
-          holdingId,
-          message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
-        });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg.includes("23505") || msg.toLowerCase().includes("unique")) {
-          return sqliteErr(`Holding "${name}" already exists in account "${acct.name}"`);
-        }
-        throw e;
-      }
+      // Stream D Phase 4 — stdio cannot create portfolio_holdings (would
+      // touch the encrypted name_ct/symbol_ct columns).
+      void name; void account; void symbol; void currency; void isCrypto; void note;
+      return streamDRefuse("portfolio_holdings");
     }
   );
 
@@ -1826,52 +1769,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       note: z.string().max(500).optional(),
     },
     async ({ holding, name, symbol, account, currency, isCrypto, note }) => {
-      // Issue #99: refuse account-move (see HTTP variant for full rationale).
-      // Stdio MCP also refuses this branch — same stale-data concern applies.
-      if (account !== undefined) {
-        return sqliteErr(
-          `Moving a holding to a different account is no longer supported via update_portfolio_holding (issue #99). Stale aggregator state and orphaned transaction account attribution were the failure modes. Instead: use record_transfer with in-kind semantics, OR update individual transactions' account_id with update_transaction.`
-        );
-      }
-
-      const allHoldings = await sqlite.prepare(
-        `SELECT id, account_id, name, symbol FROM portfolio_holdings WHERE user_id = ?`
-      ).all(userId) as SqliteRow[];
-      let h: SqliteRow | null = fuzzyFind(holding, allHoldings);
-      if (!h) {
-        const lo = holding.toLowerCase().trim();
-        h =
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase() === lo) ??
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase().startsWith(lo)) ??
-          null;
-      }
-      if (!h) return sqliteErr(`Holding "${holding}" not found`);
-
-      const updates: string[] = []; const params: unknown[] = [];
-      if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
-      if (symbol !== undefined) {
-        const trimmed = symbol.trim();
-        if (trimmed) { updates.push(`symbol = ?`); params.push(trimmed); }
-        else { updates.push(`symbol = NULL`); }
-      }
-      if (currency !== undefined) { updates.push(`currency = ?`); params.push(currency); }
-      if (isCrypto !== undefined) { updates.push(`is_crypto = ?`); params.push(isCrypto ? 1 : 0); }
-      if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
-      if (!updates.length) return sqliteErr("No fields to update");
-
-      params.push(h.id, userId);
-      try {
-        await sqlite.prepare(
-          `UPDATE portfolio_holdings SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`
-        ).run(...params);
-        return txt({ success: true, holdingId: h.id, message: `Holding "${h.name}" updated` });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg.includes("23505") || msg.toLowerCase().includes("unique")) {
-          return sqliteErr(`Another holding with name "${name ?? h.name}" already exists in this account`);
-        }
-        throw e;
-      }
+      // Stream D Phase 4 — stdio cannot update portfolio_holdings.
+      void holding; void name; void symbol; void account; void currency; void isCrypto; void note;
+      return streamDRefuse("portfolio_holdings");
     }
   );
 
@@ -2687,18 +2587,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       note: z.string().optional(),
     },
     async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
-      let accountId: number | null = null;
-      if (account) {
-        const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-        const acct = fuzzyFind(account, allAccounts);
-        if (!acct) return sqliteErr(`Account "${account}" not found`);
-        accountId = Number(acct.id);
-      }
-      const pmt = payment_amount ?? min_payment ?? null;
-      const result = await sqlite.prepare(
-        `INSERT INTO loans (user_id, name, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
-      ).get(userId, name, type, accountId, principal, annual_rate, term_months, start_date, pmt, payment_frequency ?? "monthly", extra_payment ?? 0, note ?? "") as { id: number } | undefined;
-      return txt({ success: true, data: { id: result?.id, message: `Loan "${name}" created` } });
+      // Stream D Phase 4 — stdio cannot create loans.
+      void name; void type; void principal; void annual_rate; void term_months; void start_date;
+      void account; void payment_amount; void payment_frequency; void extra_payment; void min_payment; void note;
+      return streamDRefuse("loans");
     }
   );
 
@@ -2721,37 +2613,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       note: z.string().optional(),
     },
     async ({ id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, account, note }) => {
-      const existing = await sqlite.prepare(`SELECT id FROM loans WHERE id = ? AND user_id = ?`).get(id, userId);
-      if (!existing) return sqliteErr(`Loan #${id} not found`);
-
-      let accountIdUpdate: number | null | undefined;
-      if (account !== undefined) {
-        if (account === "") accountIdUpdate = null;
-        else {
-          const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-          const acct = fuzzyFind(account, allAccounts);
-          if (!acct) return sqliteErr(`Account "${account}" not found`);
-          accountIdUpdate = Number(acct.id);
-        }
-      }
-
-      const updates: string[] = [];
-      const params: unknown[] = [];
-      if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
-      if (type !== undefined) { updates.push(`type = ?`); params.push(type); }
-      if (principal !== undefined) { updates.push(`principal = ?`); params.push(principal); }
-      if (annual_rate !== undefined) { updates.push(`annual_rate = ?`); params.push(annual_rate); }
-      if (term_months !== undefined) { updates.push(`term_months = ?`); params.push(term_months); }
-      if (start_date !== undefined) { updates.push(`start_date = ?`); params.push(start_date); }
-      if (payment_amount !== undefined) { updates.push(`payment_amount = ?`); params.push(payment_amount); }
-      if (payment_frequency !== undefined) { updates.push(`payment_frequency = ?`); params.push(payment_frequency); }
-      if (extra_payment !== undefined) { updates.push(`extra_payment = ?`); params.push(extra_payment); }
-      if (accountIdUpdate !== undefined) { updates.push(`account_id = ?`); params.push(accountIdUpdate); }
-      if (note !== undefined) { updates.push(`note = ?`); params.push(note); }
-      if (!updates.length) return sqliteErr("No fields to update");
-      params.push(id, userId);
-      await sqlite.prepare(`UPDATE loans SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
-      return txt({ success: true, data: { id, message: `Loan #${id} updated (${updates.length} field(s))` } });
+      // Stream D Phase 4 — stdio cannot update loans.
+      void id; void name; void type; void principal; void annual_rate; void term_months; void start_date;
+      void payment_amount; void payment_frequency; void extra_payment; void account; void note;
+      return streamDRefuse("loans");
     }
   );
 
@@ -2994,27 +2859,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       notes: z.string().optional(),
     },
     async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
-      const existing = await sqlite.prepare(`SELECT id FROM subscriptions WHERE user_id = ? AND name = ?`).get(userId, name);
-      if (existing) return sqliteErr(`Subscription "${name}" already exists`);
-
-      let categoryId: number | null = null;
-      if (category) {
-        const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-        const cat = fuzzyFind(category, allCats);
-        if (!cat) return sqliteErr(`Category "${category}" not found`);
-        categoryId = Number(cat.id);
-      }
-      let accountId: number | null = null;
-      if (account) {
-        const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-        const acct = fuzzyFind(account, allAccounts);
-        if (!acct) return sqliteErr(`Account "${account}" not found`);
-        accountId = Number(acct.id);
-      }
-      const result = await sqlite.prepare(
-        `INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?) RETURNING id`
-      ).get(userId, name, amount, currency ?? "CAD", cadence, categoryId, accountId, next_billing_date, notes ?? null) as { id: number } | undefined;
-      return txt({ success: true, data: { id: result?.id, message: `Subscription "${name}" created` } });
+      // Stream D Phase 4 — stdio cannot create subscriptions.
+      void name; void amount; void cadence; void next_billing_date; void currency; void category; void account; void notes;
+      return streamDRefuse("subscriptions");
     }
   );
 
@@ -3036,46 +2883,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       notes: z.string().optional(),
     },
     async ({ id, name, amount, cadence, next_billing_date, currency, category, account, status, cancel_reminder_date, notes }) => {
-      const existing = await sqlite.prepare(`SELECT id FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId);
-      if (!existing) return sqliteErr(`Subscription #${id} not found`);
-
-      let categoryIdUpdate: number | null | undefined;
-      if (category !== undefined) {
-        if (category === "") categoryIdUpdate = null;
-        else {
-          const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-          const cat = fuzzyFind(category, allCats);
-          if (!cat) return sqliteErr(`Category "${category}" not found`);
-          categoryIdUpdate = Number(cat.id);
-        }
-      }
-      let accountIdUpdate: number | null | undefined;
-      if (account !== undefined) {
-        if (account === "") accountIdUpdate = null;
-        else {
-          const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-          const acct = fuzzyFind(account, allAccounts);
-          if (!acct) return sqliteErr(`Account "${account}" not found`);
-          accountIdUpdate = Number(acct.id);
-        }
-      }
-
-      const updates: string[] = [];
-      const params: unknown[] = [];
-      if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
-      if (amount !== undefined) { updates.push(`amount = ?`); params.push(amount); }
-      if (cadence !== undefined) { updates.push(`frequency = ?`); params.push(cadence); }
-      if (next_billing_date !== undefined) { updates.push(`next_date = ?`); params.push(next_billing_date); }
-      if (currency !== undefined) { updates.push(`currency = ?`); params.push(currency); }
-      if (categoryIdUpdate !== undefined) { updates.push(`category_id = ?`); params.push(categoryIdUpdate); }
-      if (accountIdUpdate !== undefined) { updates.push(`account_id = ?`); params.push(accountIdUpdate); }
-      if (status !== undefined) { updates.push(`status = ?`); params.push(status); }
-      if (cancel_reminder_date !== undefined) { updates.push(`cancel_reminder_date = ?`); params.push(cancel_reminder_date); }
-      if (notes !== undefined) { updates.push(`notes = ?`); params.push(notes); }
-      if (!updates.length) return sqliteErr("No fields to update");
-      params.push(id, userId);
-      await sqlite.prepare(`UPDATE subscriptions SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
-      return txt({ success: true, data: { id, message: `Subscription #${id} updated (${updates.length} field(s))` } });
+      // Stream D Phase 4 — stdio cannot update subscriptions (would touch
+      // the encrypted name_ct/lookup column when name changes; refuse the
+      // whole tool to keep the contract clean).
+      void id; void name; void amount; void cadence; void next_billing_date; void currency;
+      void category; void account; void status; void cancel_reminder_date; void notes;
+      return streamDRefuse("subscriptions");
     }
   );
 
@@ -4005,19 +3818,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         return d.toISOString().split("T")[0];
       };
 
-      let created = 0;
-      const skipped: string[] = [];
-      for (const c of candidates) {
-        const existing = await sqlite.prepare(`SELECT id FROM subscriptions WHERE user_id = ? AND name = ?`).get(userId, c.payee);
-        if (existing) { skipped.push(c.payee); continue; }
-        const next = c.next_billing_date ?? addInterval(today, c.cadence);
-        await sqlite.prepare(
-          `INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes)
-           VALUES (?, ?, ?, 'CAD', ?, ?, NULL, ?, 'active', 'Auto-detected by MCP')`
-        ).run(userId, c.payee, c.amount, c.cadence, c.category_id ?? null, next);
-        created++;
-      }
-      return txt({ success: true, data: { created, skipped, message: `Created ${created} subscription(s); skipped ${skipped.length} existing` } });
+      // Stream D Phase 4 — stdio cannot bulk-insert subscriptions because
+      // each row needs `name_ct` + `name_lookup` and the stdio transport
+      // has no DEK. Refuse the whole batch.
+      void candidates; void today; void addInterval;
+      return streamDRefuse("subscriptions");
     }
   );
 

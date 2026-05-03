@@ -31,16 +31,13 @@ export async function GET(request: NextRequest) {
     ];
     if (isBusiness) conditions.push(eq(schema.transactions.isBusiness, 1));
 
+    // Stream D Phase 4 — plaintext name dropped. Group on stable id +
+    // category metadata; decrypt name_ct in-memory after aggregation.
     const rows = await db
       .select({
-        // Group on the stable id — Phase 3 NULLs `categories.name` for
-        // backfilled users, so grouping by name collapses every category
-        // into one "Uncategorized" bucket. Decrypt name_ct after the
-        // aggregation so the client still gets a human label.
         categoryId: schema.categories.id,
         categoryType: schema.categories.type,
         categoryGroup: schema.categories.group,
-        categoryName: schema.categories.name,
         categoryNameCt: schema.categories.nameCt,
         currency: schema.transactions.currency,
         total: sql<number>`SUM(${schema.transactions.amount})`,
@@ -49,7 +46,7 @@ export async function GET(request: NextRequest) {
       .from(schema.transactions)
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
       .where(and(...conditions))
-      .groupBy(schema.categories.id, schema.categories.type, schema.categories.group, schema.categories.name, schema.categories.nameCt, schema.transactions.currency)
+      .groupBy(schema.categories.id, schema.categories.type, schema.categories.group, schema.categories.nameCt, schema.transactions.currency)
       .orderBy(schema.categories.type, schema.categories.group)
       .all();
 
@@ -59,7 +56,7 @@ export async function GET(request: NextRequest) {
     for (const row of rows) {
       const catType = row.categoryType ?? "";
       const catGroup = row.categoryGroup ?? "";
-      const catName = decryptName(row.categoryNameCt, dek, row.categoryName) ?? "";
+      const catName = decryptName(row.categoryNameCt, dek, null) ?? "";
       const key = row.categoryId ?? `null:${catType}:${catGroup}:${catName}`;
       const converted = convertWithRateMap(row.total, row.currency, rateMap);
       const existing = categoryTotals.get(key);
@@ -139,12 +136,12 @@ export async function GET(request: NextRequest) {
   }
 
   if (type === "balance-sheet") {
+    // Stream D Phase 4 — plaintext name dropped.
     const balances = await db
       .select({
         accountId: schema.accounts.id,
         accountType: schema.accounts.type,
         accountGroup: schema.accounts.group,
-        accountName: schema.accounts.name,
         accountNameCt: schema.accounts.nameCt,
         currency: schema.accounts.currency,
         balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
@@ -152,7 +149,7 @@ export async function GET(request: NextRequest) {
       .from(schema.accounts)
       .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
       .where(eq(schema.accounts.userId, userId))
-      .groupBy(schema.accounts.id, schema.accounts.type, schema.accounts.group, schema.accounts.name, schema.accounts.nameCt, schema.accounts.currency)
+      .groupBy(schema.accounts.id, schema.accounts.type, schema.accounts.group, schema.accounts.nameCt, schema.accounts.currency)
       .orderBy(schema.accounts.type, schema.accounts.group)
       .all();
 
@@ -161,7 +158,7 @@ export async function GET(request: NextRequest) {
       void _ct;
       return {
         ...rest,
-        accountName: decryptName(b.accountNameCt, dek, b.accountName) ?? "",
+        accountName: decryptName(b.accountNameCt, dek, null) ?? "",
         convertedBalance: convertWithRateMap(b.balance, b.currency, rateMap),
         displayCurrency,
       };
@@ -193,11 +190,11 @@ export async function GET(request: NextRequest) {
   }
 
   if (type === "tax-summary") {
+    // Stream D Phase 4 — plaintext name dropped.
     const rows = await db
       .select({
         categoryId: schema.categories.id,
         categoryGroup: schema.categories.group,
-        categoryName: schema.categories.name,
         categoryNameCt: schema.categories.nameCt,
         currency: schema.transactions.currency,
         total: sql<number>`SUM(${schema.transactions.amount})`,
@@ -212,15 +209,14 @@ export async function GET(request: NextRequest) {
           sql`${schema.categories.type} IN ('I', 'E')`
         )
       )
-      .groupBy(schema.categories.id, schema.categories.group, schema.categories.name, schema.categories.nameCt, schema.transactions.currency)
+      .groupBy(schema.categories.id, schema.categories.group, schema.categories.nameCt, schema.transactions.currency)
       .all();
 
-    // Aggregate across currencies per category — keyed on categoryId so
-    // Phase-3-NULL'd plaintext doesn't collapse rows together.
+    // Aggregate across currencies per category — keyed on categoryId.
     const categoryTotals = new Map<string | number, { group: string; category: string; total: number; isIncome: boolean }>();
     for (const r of rows) {
       const group = r.categoryGroup ?? "";
-      const category = decryptName(r.categoryNameCt, dek, r.categoryName) ?? "";
+      const category = decryptName(r.categoryNameCt, dek, null) ?? "";
       const key = r.categoryId ?? `null:${group}:${category}`;
       const converted = convertWithRateMap(r.total, r.currency, rateMap);
       const existing = categoryTotals.get(key);

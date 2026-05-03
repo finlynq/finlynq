@@ -1,23 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
   try {
-    // Get all crypto holdings (isCrypto = 1 or detected by symbol pattern)
-    const allHoldings = await db
+    // Stream D Phase 4 — plaintext name/symbol/accountName columns dropped.
+    const allRaw = await db
       .select({
         id: schema.portfolioHoldings.id,
         accountId: schema.portfolioHoldings.accountId,
-        accountName: schema.accounts.name,
-        name: schema.portfolioHoldings.name,
-        symbol: schema.portfolioHoldings.symbol,
+        accountNameCt: schema.accounts.nameCt,
+        nameCt: schema.portfolioHoldings.nameCt,
+        symbolCt: schema.portfolioHoldings.symbolCt,
         currency: schema.portfolioHoldings.currency,
         isCrypto: schema.portfolioHoldings.isCrypto,
         note: schema.portfolioHoldings.note,
@@ -26,6 +28,11 @@ export async function GET(request: NextRequest) {
       .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
       .where(eq(schema.portfolioHoldings.userId, userId))
       .all();
+    const allHoldings = decryptNamedRows(allRaw, auth.context.dek, {
+      nameCt: "name",
+      symbolCt: "symbol",
+      accountNameCt: "accountName",
+    }) as Array<typeof allRaw[number] & { name: string | null; symbol: string | null; accountName: string | null }>;
 
     // Filter to crypto holdings
     const CRYPTO_SYMBOLS = new Set([
@@ -80,8 +87,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const userId = auth.userId;
   try {
     const body = await request.json();
 
@@ -97,16 +105,18 @@ export async function POST(request: NextRequest) {
 
     const { name, symbol, accountId, currency, note } = parsed.data;
 
+    // Stream D Phase 4 — plaintext name/symbol dropped; encrypt + dual-write
+    // ct/lookup pair via buildNameFields.
+    const enc = buildNameFields(auth.dek, { name, symbol: symbol.toUpperCase() });
     const holding = await db
       .insert(schema.portfolioHoldings)
       .values({
-        name,
-        symbol: symbol.toUpperCase(),
         accountId: accountId ?? null,
         currency: currency ?? "CAD",
         isCrypto: 1,
         note: note ?? "",
         userId,
+        ...enc,
       })
       .returning()
       .get();

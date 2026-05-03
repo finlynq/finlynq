@@ -78,11 +78,10 @@ export async function POST(request: NextRequest) {
     const enc = buildNameFields(auth.dek, { name, symbol: symbolValue });
 
     try {
+      // Stream D Phase 4 — plaintext name/symbol dropped.
       const holding = await db
         .insert(schema.portfolioHoldings)
         .values({
-          name,
-          symbol: symbolValue,
           accountId,
           currency: currency ?? acct.currency ?? "CAD",
           isCrypto: isCrypto ? 1 : 0,
@@ -129,12 +128,11 @@ export async function PUT(request: NextRequest) {
     if (parsed.error) return parsed.error;
     const { id, ...data } = parsed.data;
 
+    // Stream D Phase 4 — plaintext name/symbol dropped.
     const existing = await db
       .select({
         id: schema.portfolioHoldings.id,
-        name: schema.portfolioHoldings.name,
         nameCt: schema.portfolioHoldings.nameCt,
-        symbol: schema.portfolioHoldings.symbol,
         symbolCt: schema.portfolioHoldings.symbolCt,
       })
       .from(schema.portfolioHoldings)
@@ -155,8 +153,8 @@ export async function PUT(request: NextRequest) {
     // worse than rejecting it up front. Symbol / currency / isCrypto / note
     // are still editable — change the symbol to rename a tickered position.
     if (data.name !== undefined) {
-      const currentName = decryptName(existing.nameCt, auth.dek, existing.name);
-      const currentSymbol = decryptName(existing.symbolCt, auth.dek, existing.symbol);
+      const currentName = decryptName(existing.nameCt, auth.dek, null);
+      const currentSymbol = decryptName(existing.symbolCt, auth.dek, null);
       // The "next" symbol is the about-to-write value when the user is also
       // editing symbol; otherwise the existing symbol. Likewise for the row
       // type on cash-sleeve rows (no symbol → name "Cash" gates).
@@ -171,23 +169,24 @@ export async function PUT(request: NextRequest) {
       }
     }
 
-    // buildNameFields takes only the keys we want to re-encrypt — name and/or
-    // symbol — and returns { nameCt, nameLookup, symbolCt, symbolLookup } as
-    // appropriate. Spread alongside the plaintext UPDATE.
+    // Stream D Phase 4 — plaintext name/symbol dropped. Re-encrypt and strip
+    // the plaintext keys from the UPDATE set.
     const encFields: Record<string, string | null> = {};
     if (data.name !== undefined) {
       Object.assign(encFields, buildNameFields(auth.dek, { name: data.name }));
     }
     if (data.symbol !== undefined) {
       const symbolValue = data.symbol && data.symbol.trim() ? data.symbol.trim() : null;
-      data.symbol = symbolValue;
       Object.assign(encFields, buildNameFields(auth.dek, { symbol: symbolValue }));
     }
+    const dataNoNames = { ...data };
+    delete (dataNoNames as Record<string, unknown>).name;
+    delete (dataNoNames as Record<string, unknown>).symbol;
 
     try {
       const updated = await db
         .update(schema.portfolioHoldings)
-        .set({ ...data, ...encFields })
+        .set({ ...dataNoNames, ...encFields })
         .where(
           and(
             eq(schema.portfolioHoldings.id, id),

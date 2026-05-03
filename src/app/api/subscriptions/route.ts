@@ -29,19 +29,17 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
+  // Stream D Phase 4 — plaintext name/categoryName/accountName dropped.
   const rawSubs = await db
     .select({
       id: schema.subscriptions.id,
-      name: schema.subscriptions.name,
       nameCt: schema.subscriptions.nameCt,
       amount: schema.subscriptions.amount,
       currency: schema.subscriptions.currency,
       frequency: schema.subscriptions.frequency,
       categoryId: schema.subscriptions.categoryId,
-      categoryName: schema.categories.name,
       categoryNameCt: schema.categories.nameCt,
       accountId: schema.subscriptions.accountId,
-      accountName: schema.accounts.name,
       accountNameCt: schema.accounts.nameCt,
       nextDate: schema.subscriptions.nextDate,
       status: schema.subscriptions.status,
@@ -62,7 +60,7 @@ export async function GET(request: NextRequest) {
     nameCt: "name",
     categoryNameCt: "categoryName",
     accountNameCt: "accountName",
-  });
+  }) as Array<typeof rawSubs[number] & { name: string | null; categoryName: string | null; accountName: string | null }>;
   const subs = decrypted.sort((a, b) => {
     const s = (a.status ?? "").localeCompare(b.status ?? "");
     if (s !== 0) return s;
@@ -141,11 +139,11 @@ export async function POST(request: NextRequest) {
     if (parsed.error) return parsed.error;
     const d = parsed.data;
     const enc = buildNameFields(auth.context.dek, { name: d.name });
+    // Stream D Phase 4 — plaintext name dropped.
     const sub = await db
       .insert(schema.subscriptions)
       .values({
         userId,
-        name: d.name,
         amount: d.amount,
         currency: d.currency ?? "CAD",
         frequency: d.frequency ?? "monthly",
@@ -174,9 +172,11 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
-    const { id, ...data } = parsed.data;
-    // `data` is loose from `.passthrough()`; encrypt name if supplied.
-    const rawName = (data as Record<string, unknown>).name;
+    const { id, ...rawData } = parsed.data;
+    // Stream D Phase 4 — plaintext name dropped. Strip name from update set.
+    const rawName = (rawData as Record<string, unknown>).name;
+    const data = { ...rawData };
+    delete (data as Record<string, unknown>).name;
     const enc = typeof rawName === "string"
       ? buildNameFields(auth.context.dek, { name: rawName })
       : {};

@@ -163,10 +163,10 @@ export async function buildDuplicateCandidatePool(
     ),
   );
   if (holdingIds.length > 0) {
+    // Stream D Phase 4 — plaintext symbol dropped; ciphertext only.
     const holdings = await db
       .select({
         id: schema.portfolioHoldings.id,
-        symbol: schema.portfolioHoldings.symbol,
         symbolCt: schema.portfolioHoldings.symbolCt,
       })
       .from(schema.portfolioHoldings)
@@ -178,10 +178,10 @@ export async function buildDuplicateCandidatePool(
       )
       .all();
     for (const h of holdings) {
-      const sym =
-        h.symbolCt && input.dek
-          ? (tryDecryptField(input.dek, h.symbolCt, "portfolio_holdings.symbol_ct") ?? h.symbol)
-          : h.symbol;
+      // Stream D Phase 4 — plaintext symbol dropped; only the ciphertext.
+      const sym = h.symbolCt && input.dek
+        ? tryDecryptField(input.dek, h.symbolCt, "portfolio_holdings.symbol_ct")
+        : null;
       if (sym) holdingSymbolByHoldingId.set(h.id, sym);
     }
   }

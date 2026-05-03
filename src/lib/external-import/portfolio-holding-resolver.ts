@@ -67,11 +67,11 @@ export async function buildHoldingResolver(
   // Pre-load every holding for the user. This is bounded (typical user has
   // <100 holdings) so a single pass is cheap. We need both columns since
   // the cohort split is per-row, not per-user.
+  // Stream D Phase 4 — plaintext name dropped; ciphertext + lookup only.
   const rows = await db
     .select({
       id: schema.portfolioHoldings.id,
       accountId: schema.portfolioHoldings.accountId,
-      name: schema.portfolioHoldings.name,
       nameCt: schema.portfolioHoldings.nameCt,
       nameLookup: schema.portfolioHoldings.nameLookup,
     })
@@ -84,9 +84,9 @@ export async function buildHoldingResolver(
 
   for (const r of rows) {
     if (r.accountId == null) continue;
-    // Resolve a plaintext name to use for the byPlain map. Decryption
-    // succeeds when (a) the row has nameCt and we have the DEK, or
-    // (b) the row still has plaintext name (legacy / pre-Stream-D).
+    // Decrypt name_ct to populate the plaintext-keyed cache. Without a DEK
+    // the byPlain index stays empty for that row — only byLookup is usable
+    // and only when the caller also has a DEK to compute the lookup hash.
     let plain: string | null = null;
     if (r.nameCt && dek) {
       try {
@@ -95,7 +95,6 @@ export async function buildHoldingResolver(
         plain = null;
       }
     }
-    if (!plain) plain = r.name;
     if (plain) {
       byPlain.set(plainKey(r.accountId, plain), r.id);
     }
@@ -145,13 +144,12 @@ export async function buildHoldingResolver(
     const enc = buildNameFields(dek ?? null, { name: trimmed });
     const currency = accountCurrency.get(accountId) ?? "CAD";
     try {
+      // Stream D Phase 4 — plaintext name/symbol dropped; encrypted siblings only.
       const insertedRow = await db
         .insert(schema.portfolioHoldings)
         .values({
           userId,
           accountId,
-          name: trimmed,
-          symbol: null,
           currency,
           isCrypto: 0,
           note: "auto-created from import",

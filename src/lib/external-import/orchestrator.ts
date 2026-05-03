@@ -126,23 +126,13 @@ export async function materializeMapping(
   // Excluding archived here means a re-import after the user archived an
   // account 500s mid-batch with a UNIQUE constraint violation.
   const existingAccounts = await getAccounts(userId, { includeArchived: true });
-  // Two dedup indexes so we catch both legacy plaintext rows AND Stream D
-  // Phase 3 rows (plaintext nulled, only name_lookup populated). The DB's
-  // UNIQUE (user_id, name_lookup) partial index is the ground truth; a hit
-  // in either map means the INSERT would collide.
-  const nameKey = (n: string | null | undefined): string =>
-    typeof n === "string" ? n.trim().toLowerCase() : "";
-  const accountByName = new Map<string, (typeof existingAccounts)[number]>();
+  // Stream D Phase 4 — plaintext name dropped; lookup-only dedup against
+  // the (user_id, name_lookup) UNIQUE index.
   const accountByLookup = new Map<string, (typeof existingAccounts)[number]>();
   for (const a of existingAccounts) {
-    const key = nameKey(a.name);
-    if (key) accountByName.set(key, a);
     if (a.nameLookup) accountByLookup.set(a.nameLookup, a);
   }
   const findAccountByDesired = (desired: string) => {
-    const k = nameKey(desired);
-    const byPlain = k ? accountByName.get(k) : undefined;
-    if (byPlain) return byPlain;
     if (dek && desired) {
       const hash = computeNameLookup(dek, desired);
       return accountByLookup.get(hash);
@@ -182,32 +172,24 @@ export async function materializeMapping(
       const created = await createAccount(userId, {
         type: row.autoCreate.type,
         group: row.autoCreate.group,
-        name: desiredName,
         currency: row.autoCreate.currency,
         ...encAcc,
       });
       if (created) {
         accountMap[row.externalId] = created.id;
-        const k = nameKey(desiredName);
-        if (k) accountByName.set(k, created);
         if (dek) accountByLookup.set(computeNameLookup(dek, desiredName), created);
       }
     }
   }
 
   const externalCategoryById = new Map(externalCategories.map((c) => [c.id, c] as const));
+  // Stream D Phase 4 — plaintext name dropped; lookup-only dedup.
   const existingCategories = await getCategories(userId);
-  const categoryByName = new Map<string, (typeof existingCategories)[number]>();
   const categoryByLookup = new Map<string, (typeof existingCategories)[number]>();
   for (const c of existingCategories) {
-    const key = nameKey(c.name);
-    if (key) categoryByName.set(key, c);
     if (c.nameLookup) categoryByLookup.set(c.nameLookup, c);
   }
   const findCatByDesired = (desired: string) => {
-    const k = nameKey(desired);
-    const byPlain = k ? categoryByName.get(k) : undefined;
-    if (byPlain) return byPlain;
     if (dek && desired) {
       const hash = computeNameLookup(dek, desired);
       return categoryByLookup.get(hash);
@@ -236,13 +218,10 @@ export async function materializeMapping(
       const created = await createCategory(userId, {
         type: row.autoCreate.type,
         group: row.autoCreate.group,
-        name: desiredName,
         ...encCat,
       });
       if (created) {
         categoryMap[row.externalId] = created.id;
-        const k = nameKey(desiredName);
-        if (k) categoryByName.set(k, created);
         if (dek) categoryByLookup.set(computeNameLookup(dek, desiredName), created);
       }
     }
@@ -254,7 +233,6 @@ export async function materializeMapping(
     const created = await createCategory(userId, {
       type: "R", // revaluation/transfer — matches WP's R type
       group: input.transferCategoryAutoCreate.group,
-      name: input.transferCategoryAutoCreate.name,
       ...encT,
     });
     if (created) transferCategoryId = created.id;
@@ -266,7 +244,6 @@ export async function materializeMapping(
     const created = await createCategory(userId, {
       type: "R",
       group: input.openingBalanceCategoryAutoCreate.group,
-      name: input.openingBalanceCategoryAutoCreate.name,
       ...encO,
     });
     if (created) openingBalanceCategoryId = created.id;
@@ -288,8 +265,10 @@ function buildResolvedMapping(
   mapping: ConnectorMapping,
   externalAccounts: ExternalAccount[],
   externalCategories: ExternalCategory[],
-  pfAccounts: Array<{ id: number; name: string }>,
-  pfCategories: Array<{ id: number; name: string }>,
+  // Stream D Phase 3: name is now nullable on the row. Connector mapping
+  // accepts the relaxed shape; downstream consumers must handle null.
+  pfAccounts: Array<{ id: number; name: string | null }>,
+  pfCategories: Array<{ id: number; name: string | null }>,
 ): { resolved: ConnectorMappingResolved; byName: {
   externalAccountByName: Map<string, string>;
   externalCategoryByName: Map<string, string>;
@@ -299,8 +278,11 @@ function buildResolvedMapping(
   const categoryMap = new Map<string, number | null>();
   for (const [extId, pfId] of Object.entries(mapping.categoryMap)) categoryMap.set(extId, pfId);
 
-  const accountNameById = new Map(pfAccounts.map((a) => [a.id, a.name] as const));
-  const categoryNameById = new Map(pfCategories.map((c) => [c.id, c.name] as const));
+  // Stream D Phase 3: a.name / c.name are NULL post-cutover. The display-only
+  // map values get "" — connector mapping UI surfaces a placeholder until DEK
+  // wiring lands here.
+  const accountNameById = new Map(pfAccounts.map((a) => [a.id, a.name ?? ""] as const));
+  const categoryNameById = new Map(pfCategories.map((c) => [c.id, c.name ?? ""] as const));
   const externalAccountById = new Map(
     externalAccounts.map((a) => [a.id, a] as const),
   );
@@ -410,8 +392,13 @@ async function runPipeline(
     externalTxs.push(...page);
   }
 
-  const pfAccounts = await getAccounts(userId, { includeArchived: false });
-  const pfCategories = await getCategories(userId);
+  // Stream D Phase 4 — plaintext name dropped; decrypt to feed
+  // buildResolvedMapping (it stores names by id for display).
+  const { decryptName } = await import("../crypto/encrypted-columns");
+  const pfAccountsRaw = await getAccounts(userId, { includeArchived: false });
+  const pfCategoriesRaw = await getCategories(userId);
+  const pfAccounts = pfAccountsRaw.map((a) => ({ id: a.id, name: decryptName(a.nameCt, dek, null) }));
+  const pfCategories = pfCategoriesRaw.map((c) => ({ id: c.id, name: decryptName(c.nameCt, dek, null) }));
   const { resolved, byName } = buildResolvedMapping(
     userId,
     mapping,
@@ -542,8 +529,12 @@ export async function runWealthPositionExecute(
     const { generateImportHash } = await import("@/lib/import-hash");
 
     // Resolve account name → id from mapping to hash-match executeImport.
+    // Stream D Phase 4 — plaintext name dropped; decrypt name_ct.
+    const { decryptName } = await import("../crypto/encrypted-columns");
     const pfAccounts = await getAccounts(userId, { includeArchived: false });
-    const accountIdByName = new Map(pfAccounts.map((a) => [a.name, a.id]));
+    const accountIdByName = new Map(
+      pfAccounts.map((a) => [decryptName(a.nameCt, dek, null) ?? "", a.id] as [string, number]),
+    );
 
     const parentHashes: Array<{ hash: string; parent: (typeof pipeline.transformed.splits)[number] }> = [];
     for (const split of pipeline.transformed.splits) {

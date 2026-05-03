@@ -20,10 +20,10 @@ export async function GET(request: NextRequest) {
   // Category comparison for each year — keyed on categories.id so Phase-3
   // NULL plaintext doesn't collapse every category into a single bucket.
   async function getCategoryTotals(year: number) {
+    // Stream D Phase 4 — plaintext name dropped.
     const rows = await db
       .select({
         categoryId: schema.categories.id,
-        categoryName: schema.categories.name,
         categoryNameCt: schema.categories.nameCt,
         categoryType: schema.categories.type,
         categoryGroup: schema.categories.group,
@@ -38,11 +38,11 @@ export async function GET(request: NextRequest) {
           lte(schema.transactions.date, `${year}-12-31`)
         )
       )
-      .groupBy(schema.categories.id, schema.categories.name, schema.categories.nameCt, schema.categories.type, schema.categories.group)
+      .groupBy(schema.categories.id, schema.categories.nameCt, schema.categories.type, schema.categories.group)
       .all();
     return rows.map((r) => ({
       categoryId: r.categoryId,
-      categoryName: decryptName(r.categoryNameCt, dek, r.categoryName) ?? "",
+      categoryName: decryptName(r.categoryNameCt, dek, null) ?? "",
       categoryType: r.categoryType,
       categoryGroup: r.categoryGroup,
       total: r.total,

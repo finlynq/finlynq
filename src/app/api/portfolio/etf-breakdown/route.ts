@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import {
   getEtfTopHoldings,
   getEtfRegionBreakdown,
   getEtfSectorBreakdown,
   getAvailableEtfSymbols,
-  type EtfConstituent,
 } from "@/lib/price-service";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -18,17 +18,23 @@ export async function GET(request: NextRequest) {
 
   // If no symbol, return all ETFs in portfolio with their breakdown availability
   if (!symbol) {
-    const holdings = await db
+    // Stream D Phase 4 — plaintext name/symbol/accountName columns dropped.
+    const rawHoldings = await db
       .select({
         id: schema.portfolioHoldings.id,
-        name: schema.portfolioHoldings.name,
-        symbol: schema.portfolioHoldings.symbol,
-        accountName: schema.accounts.name,
+        nameCt: schema.portfolioHoldings.nameCt,
+        symbolCt: schema.portfolioHoldings.symbolCt,
+        accountNameCt: schema.accounts.nameCt,
       })
       .from(schema.portfolioHoldings)
       .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
       .where(eq(schema.portfolioHoldings.userId, userId))
       .all();
+    const holdings = decryptNamedRows(rawHoldings, auth.context.dek, {
+      nameCt: "name",
+      symbolCt: "symbol",
+      accountNameCt: "accountName",
+    }) as Array<typeof rawHoldings[number] & { name: string | null; symbol: string | null; accountName: string | null }>;
 
     const availableSymbols = new Set(getAvailableEtfSymbols());
 

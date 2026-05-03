@@ -355,8 +355,9 @@ async function autoCategory(
   let catTypeById: Map<number, string> | null = null;
   let investmentHints: InvestmentCategoryHint[] | null = null;
   if (isInvestmentAccount) {
+    // Stream D Phase 4 — plaintext name dropped; ciphertext only.
     const rawCats = await q(db, sql`
-      SELECT id, name, name_ct, type FROM categories WHERE user_id = ${userId}
+      SELECT id, name_ct, type FROM categories WHERE user_id = ${userId}
     `);
     catTypeById = new Map();
     investmentHints = [];
@@ -364,12 +365,7 @@ async function autoCategory(
       const id = Number(r.id);
       const type = String(r.type ?? "");
       catTypeById.set(id, type);
-      let nm: string;
-      if (r.name_ct && dek) {
-        nm = decryptField(dek, String(r.name_ct)) ?? String(r.name ?? "");
-      } else {
-        nm = String(r.name ?? "");
-      }
+      const nm: string = r.name_ct && dek ? (decryptField(dek, String(r.name_ct)) ?? "") : "";
       if (nm) investmentHints.push({ id, name: nm, type });
     }
   }
@@ -1629,13 +1625,14 @@ export function registerPgTools(
         }
       }
 
+      // Stream D Phase 4 — plaintext name dropped; ciphertext only.
       const rawSubs = await q(db, sql`
-        SELECT name, name_ct, amount, next_date, frequency FROM subscriptions
+        SELECT name_ct, amount, next_date, frequency FROM subscriptions
         WHERE user_id = ${userId} AND status = 'active' AND next_date >= ${today} AND next_date <= ${weekAhead}
-      `) as { name: string | null; name_ct: string | null; amount: number; next_date: string; frequency: string }[];
+      `) as { name_ct: string | null; amount: number; next_date: string; frequency: string }[];
       const subs = rawSubs.map((s) => ({
         ...s,
-        name: (s.name_ct && dek ? decryptField(dek, s.name_ct) : s.name) ?? "",
+        name: (s.name_ct && dek ? decryptField(dek, s.name_ct) : null) ?? "",
       }));
 
       for (const s of subs) {
@@ -1928,7 +1925,10 @@ export function registerPgTools(
       amount: z.number().describe("Budget amount (positive number)"),
     },
     async ({ category, month, amount }) => {
-      const catRows = await q(db, sql`SELECT id FROM categories WHERE user_id = ${userId} AND name = ${category}`);
+      // Stream D Phase 4 — match by name_lookup HMAC.
+      if (!dek) return err("Cannot resolve category name without an unlocked DEK (Stream D Phase 4).");
+      const catLookup = nameLookup(dek, category);
+      const catRows = await q(db, sql`SELECT id FROM categories WHERE user_id = ${userId} AND name_lookup = ${catLookup}`);
       if (!catRows.length) return err(`Category "${category}" not found`);
       const cat = catRows[0] as { id: number };
 
@@ -1957,16 +1957,17 @@ export function registerPgTools(
       let accountId: number | null = null;
       if (account) {
         const rawAccounts = await q(db, sql`
-          SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
         `);
         const allAccounts = decryptNameish(rawAccounts, dek);
         const acct = fuzzyFind(account, allAccounts);
         accountId = acct ? Number(acct.id) : null;
       }
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
+      // Stream D Phase 4 — plaintext name column dropped.
       await db.execute(sql`
-        INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, status, name_ct, name_lookup)
-        VALUES (${userId}, ${name}, ${type}, ${target_amount}, ${deadline ?? null}, ${accountId}, 'active', ${n.ct}, ${n.lookup})
+        INSERT INTO goals (user_id, type, target_amount, deadline, account_id, status, name_ct, name_lookup)
+        VALUES (${userId}, ${type}, ${target_amount}, ${deadline ?? null}, ${accountId}, 'active', ${n.ct}, ${n.lookup})
       `);
       return text({ success: true, message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` });
     }
@@ -1985,25 +1986,25 @@ export function registerPgTools(
       alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },
     async ({ name, type, group, currency, note, alias }) => {
-      // Stream D: check against both plaintext AND name_lookup for collision.
+      // Stream D Phase 4 — plaintext name dropped; lookup-only collision check.
       const lookup = dek ? nameLookup(dek, name) : null;
+      if (!lookup) return err("Cannot create account without an unlocked DEK (Stream D Phase 4).");
       const existing = await q(db, sql`
-        SELECT id FROM accounts
-        WHERE user_id = ${userId}
-          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
+        SELECT id FROM accounts WHERE user_id = ${userId} AND name_lookup = ${lookup}
       `);
       if (existing.length) return err(`Account "${name}" already exists (id: ${existing[0].id})`);
 
       const aliasValue = alias && alias.trim() ? alias.trim() : null;
       const nameEnc = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const aliasEnc = dek ? encryptName(dek, aliasValue) : { ct: null, lookup: null };
+      // Stream D Phase 4 — plaintext name/alias columns dropped.
       const result = await q(db, sql`
         INSERT INTO accounts (
-          user_id, type, "group", name, currency, note, alias,
+          user_id, type, "group", currency, note,
           name_ct, name_lookup, alias_ct, alias_lookup
         )
         VALUES (
-          ${userId}, ${type}, ${group ?? ""}, ${name}, ${currency ?? "CAD"}, ${note ?? ""}, ${aliasValue},
+          ${userId}, ${type}, ${group ?? ""}, ${currency ?? "CAD"}, ${note ?? ""},
           ${nameEnc.ct}, ${nameEnc.lookup}, ${aliasEnc.ct}, ${aliasEnc.lookup}
         )
         RETURNING id
@@ -2039,7 +2040,7 @@ export function registerPgTools(
       const txDate = date ?? today;
 
       const rawAccounts = await q(db, sql`
-        SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
       `);
       if (!rawAccounts.length) return err("No accounts found — create an account first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
@@ -2065,7 +2066,7 @@ export function registerPgTools(
       const isInvestment = await isInvestmentAccountFn(userId, Number(acct.id));
       let catId: number | null = null;
       if (category) {
-        const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+        const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
         const cat = fuzzyFind(category, allCats);
         if (!cat) return err(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
@@ -2144,8 +2145,13 @@ export function registerPgTools(
       }
 
       // Look up the resolved category name once — used by both the dry-run
-      // preview and the success message.
-      const catName = catId ? (await q(db, sql`SELECT name FROM categories WHERE id = ${catId}`))[0]?.name : "uncategorized";
+      // preview and the success message. Stream D Phase 4: decrypt name_ct.
+      let catName: string = "uncategorized";
+      if (catId) {
+        const row = (await q(db, sql`SELECT name_ct FROM categories WHERE id = ${catId}`))[0];
+        const ct = row?.name_ct as string | null | undefined;
+        catName = (ct && dek ? decryptField(dek, String(ct)) : ct ?? "") || "uncategorized";
+      }
       const warnings = deriveTxWriteWarnings({
         portfolioHoldingId: resolvedHoldingId,
         amount: resolved.amount,
@@ -2273,9 +2279,9 @@ export function registerPgTools(
         }
       }
 
-      const rawAccounts = await q(db, sql`SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
+      const rawAccounts = await q(db, sql`SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
       const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
       // Cache user-owned holding ids in one SELECT instead of one ownership
       // check per row.
@@ -2679,7 +2685,7 @@ export function registerPgTools(
       let catId: number | undefined;
       let resolvedCategory: { id: number; name: string } | null = null;
       if (category !== undefined) {
-        const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+        const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
         const resolved = resolveCategoryStrict(category, allCats);
         if (!resolved.ok) {
@@ -2875,7 +2881,7 @@ export function registerPgTools(
       if (!dek) return err("Transfers require an active session DEK — log in again to encrypt the rows.");
 
       const rawAccounts = await q(db, sql`
-        SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
@@ -3011,7 +3017,7 @@ export function registerPgTools(
       if (!trimmedSymbol) return err("symbol cannot be empty");
 
       const rawAccounts = await q(db, sql`
-        SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
@@ -3061,44 +3067,47 @@ export function registerPgTools(
       // (the account's default cash sleeve when same currency) for
       // determinism; falls back to the foreign-currency sleeve.
       const cashName = isCrossCurrency ? `${tradeCurrency} Cash` : "Cash";
+      // Stream D Phase 4 — plaintext name/symbol columns dropped. Match by
+      // currency only (the cash row has symbol_ct NULL or symbol_lookup
+      // matching the currency code via HMAC). Conservative: take any
+      // matching-currency row whose symbol_ct IS NULL OR symbol_lookup
+      // matches the currency lookup hash.
+      const tradeCurrencyLookup = nameLookup(dek, tradeCurrency);
       const cashCandidates = await q(db, sql`
-        SELECT id, name, name_ct, symbol, currency
+        SELECT id, name_ct
           FROM portfolio_holdings
          WHERE user_id = ${userId} AND account_id = ${acct.id}
            AND currency = ${tradeCurrency}
-           AND (symbol IS NULL OR UPPER(symbol) = ${tradeCurrency})
-         ORDER BY (symbol IS NULL) DESC, id ASC
+           AND (symbol_ct IS NULL OR symbol_lookup = ${tradeCurrencyLookup})
+         ORDER BY (symbol_ct IS NULL) DESC, id ASC
          LIMIT 1
       `);
       let cashHoldingId: number;
       let cashHoldingName: string;
       if (cashCandidates.length) {
         cashHoldingId = Number(cashCandidates[0].id);
-        // Decrypt name_ct for Stream D Phase 3 NULL-plaintext rows so
-        // createTransferPair's name-based lookup hits — without this, a
-        // Phase 3 row with a non-canonical name (e.g. "WP USD Cash") would
-        // miss on both plaintext (NULL) and HMAC ("USD Cash" ≠ row).
-        const rawName = cashCandidates[0].name as string | null | undefined;
+        // Stream D Phase 4 — plaintext name dropped; decrypt name_ct only.
         const ct = cashCandidates[0].name_ct as string | null | undefined;
         const decrypted = ct ? decryptField(dek, String(ct)) : null;
-        cashHoldingName = decrypted ?? (rawName != null ? String(rawName) : cashName);
+        cashHoldingName = decrypted ?? cashName;
       } else {
         const cashSymbol = isCrossCurrency ? tradeCurrency : null;
         const enc = encryptName(dek, cashName);
         const symEnc = encryptName(dek, cashSymbol);
+        // Stream D Phase 4 — plaintext name/symbol dropped.
         const ins = await q(db, sql`
           INSERT INTO portfolio_holdings (
-            user_id, account_id, name, symbol, currency, is_crypto, note,
+            user_id, account_id, currency, is_crypto, note,
             name_ct, name_lookup, symbol_ct, symbol_lookup
           )
           VALUES (
-            ${userId}, ${acct.id}, ${cashName}, ${cashSymbol}, ${tradeCurrency}, 0, 'auto-created for cash sleeve',
+            ${userId}, ${acct.id}, ${tradeCurrency}, 0, 'auto-created for cash sleeve',
             ${enc.ct}, ${enc.lookup}, ${symEnc.ct}, ${symEnc.lookup}
           )
-          RETURNING id, name
+          RETURNING id
         `);
         cashHoldingId = Number(ins[0]?.id);
-        cashHoldingName = String(ins[0]?.name ?? cashName);
+        cashHoldingName = cashName;
       }
 
       // For BUY: cash sleeve is the source (must exist — done above);
@@ -3220,7 +3229,7 @@ export function registerPgTools(
       let toAccountId: number | undefined;
       if (fromAccount || toAccount) {
         const rawAccounts = await q(db, sql`
-          SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+          SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
         `);
         const allAccounts = decryptNameish(rawAccounts, dek);
         if (fromAccount) {
@@ -3307,7 +3316,7 @@ export function registerPgTools(
       month: z.string().describe("Month (YYYY-MM)"),
     },
     async ({ category, month }) => {
-      const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
       const cat = fuzzyFind(category, allCats);
       if (!cat) return err(`Category "${category}" not found`);
 
@@ -3333,21 +3342,18 @@ export function registerPgTools(
     },
     async ({ account, name, group, currency, note, alias }) => {
       const rawAccounts = await q(db, sql`
-        SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
       `);
       const allAccounts = decryptNameish(rawAccounts, dek);
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found`);
 
-      // Build parameterized SET clauses — no sql.raw, no manual escaping.
-      // Stream D: dual-write name_ct/name_lookup/alias_ct/alias_lookup when DEK.
+      // Stream D Phase 4 — plaintext name/alias dropped; only encrypted columns.
       const updates: ReturnType<typeof sql>[] = [];
       if (name !== undefined) {
-        updates.push(sql`name = ${name}`);
-        if (dek) {
-          const n = encryptName(dek, name);
-          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
-        }
+        if (!dek) return err("Cannot rename account without an unlocked DEK (Stream D Phase 4).");
+        const n = encryptName(dek, name);
+        updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
       }
       if (group !== undefined) updates.push(sql`"group" = ${group}`);
       if (currency !== undefined) updates.push(sql`currency = ${currency}`);
@@ -3355,11 +3361,9 @@ export function registerPgTools(
       if (alias !== undefined) {
         const trimmed = alias.trim();
         const aliasValue = trimmed ? trimmed : null;
-        updates.push(aliasValue === null ? sql`alias = NULL` : sql`alias = ${aliasValue}`);
-        if (dek) {
-          const a = encryptName(dek, aliasValue);
-          updates.push(sql`alias_ct = ${a.ct}`, sql`alias_lookup = ${a.lookup}`);
-        }
+        if (!dek) return err("Cannot update alias without an unlocked DEK (Stream D Phase 4).");
+        const a = encryptName(dek, aliasValue);
+        updates.push(sql`alias_ct = ${a.ct}`, sql`alias_lookup = ${a.lookup}`);
       }
       if (!updates.length) return err("No fields to update");
 
@@ -3386,7 +3390,7 @@ export function registerPgTools(
       force: z.boolean().optional().describe("Delete even if transactions exist (moves them to uncategorized)"),
     },
     async ({ account, force }) => {
-      const allAccounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+      const allAccounts = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found`);
 
@@ -3413,19 +3417,17 @@ export function registerPgTools(
       name: z.string().optional().describe("Rename the goal"),
     },
     async ({ goal, target_amount, deadline, status, name }) => {
-      const rawGoals = await q(db, sql`SELECT id, name, name_ct FROM goals WHERE user_id = ${userId}`);
+      const rawGoals = await q(db, sql`SELECT id, name_ct FROM goals WHERE user_id = ${userId}`);
       const allGoals = decryptNameish(rawGoals, dek);
       const g = fuzzyFind(goal, allGoals);
       if (!g) return err(`Goal "${goal}" not found`);
 
-      // Build parameterized SET clauses — no sql.raw, no manual escaping.
+      // Stream D Phase 4 — plaintext name dropped.
       const updates: ReturnType<typeof sql>[] = [];
       if (name !== undefined) {
-        updates.push(sql`name = ${name}`);
-        if (dek) {
-          const n = encryptName(dek, name);
-          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
-        }
+        if (!dek) return err("Cannot rename goal without an unlocked DEK (Stream D Phase 4).");
+        const n = encryptName(dek, name);
+        updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
       }
       if (target_amount !== undefined) updates.push(sql`target_amount = ${target_amount}`);
       if (deadline !== undefined) updates.push(sql`deadline = ${deadline}`);
@@ -3452,7 +3454,7 @@ export function registerPgTools(
       goal: z.string().describe("Goal name (fuzzy matched)"),
     },
     async ({ goal }) => {
-      const rawGoals = await q(db, sql`SELECT id, name, name_ct FROM goals WHERE user_id = ${userId}`);
+      const rawGoals = await q(db, sql`SELECT id, name_ct FROM goals WHERE user_id = ${userId}`);
       const allGoals = decryptNameish(rawGoals, dek);
       const g = fuzzyFind(goal, allGoals);
       if (!g) return err(`Goal "${goal}" not found`);
@@ -3473,18 +3475,18 @@ export function registerPgTools(
       note: z.string().optional(),
     },
     async ({ name, type, group, note }) => {
+      // Stream D Phase 4 — plaintext name dropped; lookup-only collision check.
       const lookup = dek ? nameLookup(dek, name) : null;
+      if (!lookup) return err("Cannot create category without an unlocked DEK (Stream D Phase 4).");
       const existing = await q(db, sql`
-        SELECT id FROM categories
-        WHERE user_id = ${userId}
-          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
+        SELECT id FROM categories WHERE user_id = ${userId} AND name_lookup = ${lookup}
       `);
       if (existing.length) return err(`Category "${name}" already exists`);
 
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const result = await q(db, sql`
-        INSERT INTO categories (user_id, name, type, "group", note, name_ct, name_lookup)
-        VALUES (${userId}, ${name}, ${type}, ${group ?? ""}, ${note ?? ""}, ${n.ct}, ${n.lookup})
+        INSERT INTO categories (user_id, type, "group", note, name_ct, name_lookup)
+        VALUES (${userId}, ${type}, ${group ?? ""}, ${note ?? ""}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` });
@@ -3503,7 +3505,7 @@ export function registerPgTools(
       priority: z.number().optional().describe("Rule priority (higher = checked first, default 0)"),
     },
     async ({ match_payee, assign_category, rename_to, assign_tags, priority }) => {
-      const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
       const cat = fuzzyFind(assign_category, allCats);
       if (!cat) return err(`Category "${assign_category}" not found`);
 
@@ -3734,7 +3736,7 @@ export function registerPgTools(
     },
     async ({ name, account, symbol, currency, isCrypto, note }) => {
       const rawAccounts = await q(db, sql`
-        SELECT id, name, alias, currency, name_ct, alias_ct FROM accounts
+        SELECT id, currency, name_ct, alias_ct FROM accounts
         WHERE user_id = ${userId} AND archived = false
       `);
       const allAccounts = decryptNameish(rawAccounts, dek);
@@ -3772,13 +3774,14 @@ export function registerPgTools(
         // Drizzle transaction; instead, on holding_accounts INSERT failure
         // we DELETE the orphan portfolio_holdings row to avoid leaving the
         // user with an aggregator-invisible holding.
+        // Stream D Phase 4 — plaintext name/symbol dropped.
         const result = await q(db, sql`
           INSERT INTO portfolio_holdings (
-            user_id, account_id, name, symbol, currency, is_crypto, note,
+            user_id, account_id, currency, is_crypto, note,
             name_ct, name_lookup, symbol_ct, symbol_lookup
           )
           VALUES (
-            ${userId}, ${acct.id}, ${name}, ${symbolValue}, ${cur}, ${isCrypto ? 1 : 0}, ${note ?? ""},
+            ${userId}, ${acct.id}, ${cur}, ${isCrypto ? 1 : 0}, ${note ?? ""},
             ${nameEnc.ct}, ${nameEnc.lookup}, ${symbolEnc.ct}, ${symbolEnc.lookup}
           )
           RETURNING id
@@ -3867,22 +3870,19 @@ export function registerPgTools(
       }
       if (!h) return err(`Holding "${holding}" not found`);
 
+      // Stream D Phase 4 — plaintext name/symbol dropped.
       const updates: ReturnType<typeof sql>[] = [];
       if (name !== undefined) {
-        updates.push(sql`name = ${name}`);
-        if (dek) {
-          const n = encryptName(dek, name);
-          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
-        }
+        if (!dek) return err("Cannot rename holding without an unlocked DEK (Stream D Phase 4).");
+        const n = encryptName(dek, name);
+        updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
       }
       if (symbol !== undefined) {
         const trimmed = symbol.trim();
         const symbolValue = trimmed ? trimmed : null;
-        updates.push(symbolValue === null ? sql`symbol = NULL` : sql`symbol = ${symbolValue}`);
-        if (dek) {
-          const s = encryptName(dek, symbolValue);
-          updates.push(sql`symbol_ct = ${s.ct}`, sql`symbol_lookup = ${s.lookup}`);
-        }
+        if (!dek) return err("Cannot update symbol without an unlocked DEK (Stream D Phase 4).");
+        const s = encryptName(dek, symbolValue);
+        updates.push(sql`symbol_ct = ${s.ct}`, sql`symbol_lookup = ${s.lookup}`);
       }
       if (currency !== undefined) updates.push(sql`currency = ${currency}`);
       if (isCrypto !== undefined) updates.push(sql`is_crypto = ${isCrypto ? 1 : 0}`);
@@ -4532,8 +4532,9 @@ export function registerPgTools(
         if (distinctIds.size > 1) {
           // Pull account name for each candidate so the caller can disambiguate.
           const ids = [...distinctIds];
+          // Stream D Phase 4 — plaintext name dropped.
           const accountsRaw = await q(db, sql`
-            SELECT id, name, name_ct FROM accounts WHERE user_id = ${userId}
+            SELECT id, name_ct FROM accounts WHERE user_id = ${userId}
           `);
           const accountsDec = decryptNameish(accountsRaw, dek);
           const accountNameById = new Map<number, string>();
@@ -4667,13 +4668,14 @@ export function registerPgTools(
         return r;
       };
       // Per-holding currency lookup so book values can be converted to a
-      // common reporting unit before aggregation.
+      // common reporting unit before aggregation. Stream D Phase 4 — plaintext
+      // name dropped; ciphertext only.
       const phRaw = await q(db, sql`
-        SELECT name, name_ct, currency FROM portfolio_holdings WHERE user_id = ${userId}
+        SELECT name_ct, currency FROM portfolio_holdings WHERE user_id = ${userId}
       `);
       const holdingCurrencyByName = new Map<string, string>();
       for (const p of phRaw) {
-        const name = p.name_ct && dek ? decryptField(dek, p.name_ct) : p.name;
+        const name = p.name_ct && dek ? decryptField(dek, String(p.name_ct)) : null;
         if (name) holdingCurrencyByName.set(String(name), String(p.currency ?? reporting));
       }
 
@@ -5003,7 +5005,7 @@ export function registerPgTools(
       let accountId: number | null = null;
       if (account) {
         const rawAccounts = await q(db, sql`
-          SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
         `);
         const allAccounts = decryptNameish(rawAccounts, dek);
         const acct = fuzzyFind(account, allAccounts);
@@ -5012,9 +5014,10 @@ export function registerPgTools(
       }
       const pmt = payment_amount ?? min_payment ?? null;
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
+      // Stream D Phase 4 — plaintext name dropped.
       const result = await q(db, sql`
-        INSERT INTO loans (user_id, name, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note, name_ct, name_lookup)
-        VALUES (${userId}, ${name}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${note ?? ""}, ${n.ct}, ${n.lookup})
+        INSERT INTO loans (user_id, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note, name_ct, name_lookup)
+        VALUES (${userId}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${note ?? ""}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, data: { id: result[0]?.id, message: `Loan "${name}" created — $${principal} at ${annual_rate}% over ${term_months} months` } });
@@ -5049,7 +5052,7 @@ export function registerPgTools(
           accountIdUpdate = null;
         } else {
           const rawAccounts = await q(db, sql`
-            SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+            SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
           `);
           const allAccounts = decryptNameish(rawAccounts, dek);
           const acct = fuzzyFind(account, allAccounts);
@@ -5058,13 +5061,12 @@ export function registerPgTools(
         }
       }
 
+      // Stream D Phase 4 — plaintext name dropped.
       const updates: ReturnType<typeof sql>[] = [];
       if (name !== undefined) {
-        updates.push(sql`name = ${name}`);
-        if (dek) {
-          const n = encryptName(dek, name);
-          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
-        }
+        if (!dek) return err("Cannot rename loan without an unlocked DEK (Stream D Phase 4).");
+        const n = encryptName(dek, name);
+        updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
       }
       if (type !== undefined) updates.push(sql`type = ${type}`);
       if (principal !== undefined) updates.push(sql`principal = ${principal}`);
@@ -5089,7 +5091,7 @@ export function registerPgTools(
     "Delete a loan by id",
     { id: z.number().describe("Loan id to delete") },
     async ({ id }) => {
-      const existing = await q(db, sql`SELECT id, name FROM loans WHERE id = ${id} AND user_id = ${userId}`);
+      const existing = await q(db, sql`SELECT id, name_ct FROM loans WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Loan #${id} not found`);
       await db.execute(sql`DELETE FROM loans WHERE id = ${id} AND user_id = ${userId}`);
       return text({ success: true, data: { id, message: `Loan "${existing[0].name}" deleted` } });
@@ -5370,7 +5372,7 @@ export function registerPgTools(
 
       let categoryId: number | null = null;
       if (category) {
-        const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+        const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
         const cat = fuzzyFind(category, allCats);
         if (!cat) return err(`Category "${category}" not found`);
@@ -5379,7 +5381,7 @@ export function registerPgTools(
       let accountId: number | null = null;
       if (account) {
         const rawAccounts = await q(db, sql`
-          SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
         `);
         const allAccounts = decryptNameish(rawAccounts, dek);
         const acct = fuzzyFind(account, allAccounts);
@@ -5387,9 +5389,10 @@ export function registerPgTools(
         accountId = Number(acct.id);
       }
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
+      // Stream D Phase 4 — plaintext name dropped.
       const result = await q(db, sql`
-        INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
-        VALUES (${userId}, ${name}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes ?? null}, ${n.ct}, ${n.lookup})
+        INSERT INTO subscriptions (user_id, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
+        VALUES (${userId}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes ?? null}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${currency ?? "CAD"} ${amount} ${cadence}, next ${next_billing_date}` } });
@@ -5421,7 +5424,7 @@ export function registerPgTools(
       if (category !== undefined) {
         if (category === "") categoryIdUpdate = null;
         else {
-          const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+          const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
           const allCats = decryptNameish(rawCats, dek);
           const cat = fuzzyFind(category, allCats);
           if (!cat) return err(`Category "${category}" not found`);
@@ -5433,7 +5436,7 @@ export function registerPgTools(
         if (account === "") accountIdUpdate = null;
         else {
           const rawAccounts = await q(db, sql`
-            SELECT id, name, alias, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+            SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
           `);
           const allAccounts = decryptNameish(rawAccounts, dek);
           const acct = fuzzyFind(account, allAccounts);
@@ -5442,13 +5445,12 @@ export function registerPgTools(
         }
       }
 
+      // Stream D Phase 4 — plaintext name dropped.
       const updates: ReturnType<typeof sql>[] = [];
       if (name !== undefined) {
-        updates.push(sql`name = ${name}`);
-        if (dek) {
-          const n = encryptName(dek, name);
-          updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
-        }
+        if (!dek) return err("Cannot rename subscription without an unlocked DEK (Stream D Phase 4).");
+        const n = encryptName(dek, name);
+        updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
       }
       if (amount !== undefined) updates.push(sql`amount = ${amount}`);
       if (cadence !== undefined) updates.push(sql`frequency = ${cadence}`);
@@ -5472,7 +5474,7 @@ export function registerPgTools(
     "Permanently delete a subscription by id",
     { id: z.number().describe("Subscription id") },
     async ({ id }) => {
-      const existing = await q(db, sql`SELECT id, name FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
+      const existing = await q(db, sql`SELECT id, name_ct FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Subscription #${id} not found`);
       await db.execute(sql`DELETE FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
       return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" deleted` } });
@@ -5530,7 +5532,7 @@ export function registerPgTools(
       if (assign_category !== undefined) {
         if (assign_category === "") assignCategoryIdUpdate = null;
         else {
-          const allCats = await q(db, sql`SELECT id, name FROM categories WHERE user_id = ${userId}`);
+          const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
           const cat = fuzzyFind(assign_category, allCats);
           if (!cat) return err(`Category "${assign_category}" not found`);
           assignCategoryIdUpdate = Number(cat.id);
@@ -5764,14 +5766,17 @@ export function registerPgTools(
         }
       }
 
-      // Hydrate category names for the top-N counts
+      // Hydrate category names for the top-N counts. Stream D Phase 4:
+      // plaintext name dropped; decrypt name_ct.
       const topCatIds = Array.from(catCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN);
       const categoryRows = topCatIds.length
-        ? await q(db, sql`SELECT id, name, type, "group" FROM categories WHERE user_id = ${userId} AND id IN ${sql.raw(`(${topCatIds.map(([id]) => id).join(",")})`)}`)
+        ? await q(db, sql`SELECT id, name_ct, type, "group" FROM categories WHERE user_id = ${userId} AND id IN ${sql.raw(`(${topCatIds.map(([id]) => id).join(",")})`)}`)
         : [];
       const categorySuggestions = topCatIds.map(([id, count]) => {
         const c = categoryRows.find((x) => Number(x.id) === id);
-        return { id, count, name: c?.name ?? null, type: c?.type ?? null, group: c?.group ?? null };
+        const ct = c?.name_ct as string | null | undefined;
+        const name = ct && dek ? decryptField(dek, String(ct)) : null;
+        return { id, count, name, type: c?.type ?? null, group: c?.group ?? null };
       });
 
       const topTags = Array.from(tagCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN).map(([tag, count]) => ({ tag, count }));
@@ -6123,7 +6128,7 @@ export function registerPgTools(
 
     // ── category (name) ──────────────────────────────────────────────────
     if (changes.category !== undefined) {
-      const rawCats = await q(db, sql`SELECT id, name, name_ct FROM categories WHERE user_id = ${userId}`);
+      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
       const allCats = decryptNameish(rawCats, dek);
       const r = resolveCategoryStrict(changes.category, allCats);
       if (!r.ok) {
@@ -6495,16 +6500,18 @@ export function registerPgTools(
     },
     async ({ filter, category_id }) => {
       try {
-        // Validate category ownership up front so the preview is honest.
-        const cat = await q(db, sql`SELECT id, name FROM categories WHERE id = ${category_id} AND user_id = ${userId}`);
+        // Stream D Phase 4 — plaintext name dropped; decrypt name_ct.
+        const cat = await q(db, sql`SELECT id, name_ct FROM categories WHERE id = ${category_id} AND user_id = ${userId}`);
         if (!cat.length) return err(`Category #${category_id} not found`);
+        const ct = cat[0].name_ct as string | null | undefined;
+        const categoryName = ct && dek ? decryptField(dek, String(ct)) : null;
         const changes: BulkChanges = { category_id };
         const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_categorize");
         return text({
           success: true,
           data: {
             categoryId: category_id,
-            categoryName: cat[0].name,
+            categoryName,
             affectedCount,
             sampleBefore,
             sampleAfter,
@@ -6705,12 +6712,19 @@ export function registerPgTools(
       let created = 0;
       const skipped: string[] = [];
       for (const c of candidates) {
-        const existing = await q(db, sql`SELECT id FROM subscriptions WHERE user_id = ${userId} AND name = ${c.payee}`);
+        // Stream D Phase 4 — plaintext name dropped; lookup-only dedup +
+        // encrypted insert. DEK is required.
+        if (!dek) return err("Cannot create subscriptions without an unlocked DEK (Stream D Phase 4).");
+        const lookupHash = nameLookup(dek, c.payee);
+        const existing = await q(db, sql`
+          SELECT id FROM subscriptions WHERE user_id = ${userId} AND name_lookup = ${lookupHash}
+        `);
         if (existing.length) { skipped.push(c.payee); continue; }
         const next = c.next_billing_date ?? addInterval(today, c.cadence);
+        const enc = encryptName(dek, c.payee);
         await db.execute(sql`
-          INSERT INTO subscriptions (user_id, name, amount, currency, frequency, category_id, account_id, next_date, status, notes)
-          VALUES (${userId}, ${c.payee}, ${c.amount}, 'CAD', ${c.cadence}, ${c.category_id ?? null}, NULL, ${next}, 'active', 'Auto-detected by MCP')
+          INSERT INTO subscriptions (user_id, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
+          VALUES (${userId}, ${c.amount}, 'CAD', ${c.cadence}, ${c.category_id ?? null}, NULL, ${next}, 'active', 'Auto-detected by MCP', ${enc.ct}, ${enc.lookup})
         `);
         created++;
       }
@@ -6824,7 +6838,7 @@ export function registerPgTools(
 
         // Dedup via generateImportHash — runs against plaintext payee, which
         // is what we have at this boundary.
-        const accounts = await q(db, sql`SELECT id, name, alias FROM accounts WHERE user_id = ${userId}`);
+        const accounts = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
         const accountByName = new Map<string, number>(accounts.map((a) => [String(a.name), Number(a.id)]));
         const existingHashRows = await q(db, sql`SELECT import_hash FROM transactions WHERE user_id = ${userId} AND import_hash IS NOT NULL`);
         const existingHashes = new Set<string>(existingHashRows.map((r) => String(r.import_hash)));

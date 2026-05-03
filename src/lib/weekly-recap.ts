@@ -50,12 +50,10 @@ function getWeekBounds(endDate?: string): { weekStart: string; weekEnd: string; 
 }
 
 async function getSpendingForPeriod(userId: string, start: string, end: string, dek: Buffer | null) {
-  // Stream D: pull name_ct alongside name; decrypt post-query. GROUP BY c.id
-  // stays correct whether plaintext is populated or null post-cutover.
+  // Stream D Phase 4 — plaintext name dropped; ciphertext only.
   const rows = await db
     .select({
       categoryId: categories.id,
-      categoryName: categories.name,
       categoryNameCt: categories.nameCt,
       total: sql<number>`ABS(SUM(${transactions.amount}))`,
     })
@@ -69,13 +67,13 @@ async function getSpendingForPeriod(userId: string, start: string, end: string, 
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, categories.name, categories.nameCt)
+    .groupBy(categories.id, categories.nameCt)
     .all();
 
   const total = rows.reduce((s, r) => s + (r.total ?? 0), 0);
   const topCategories = rows
     .map((r) => {
-      const name = (r.categoryNameCt && dek ? (tryDecryptField(dek, r.categoryNameCt, "categories.name_ct") ?? r.categoryName) : r.categoryName) ?? "Uncategorized";
+      const name = (r.categoryNameCt && dek ? tryDecryptField(dek, r.categoryNameCt, "categories.name_ct") : null) ?? "Uncategorized";
       return { name, total: Math.round((r.total ?? 0) * 100) / 100 };
     })
     .sort((a, b) => b.total - a.total)
@@ -125,10 +123,10 @@ export async function generateWeeklyRecap(userId: string, endDate?: string, dek?
   const monthStart = `${month}-01`;
   const monthEnd = `${month}-${new Date(y, m, 0).getDate()}`;
 
+  // Stream D Phase 4 — plaintext name dropped.
   const budgetRows = await db
     .select({
       categoryId: categories.id,
-      category: categories.name,
       categoryCt: categories.nameCt,
       budget: budgets.amount,
       spent: sql<number>`COALESCE(ABS(SUM(CASE WHEN ${transactions.date} >= ${monthStart} AND ${transactions.date} <= ${monthEnd} THEN ${transactions.amount} ELSE 0 END)), 0)`,
@@ -137,24 +135,23 @@ export async function generateWeeklyRecap(userId: string, endDate?: string, dek?
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
     .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
-    .groupBy(budgets.id, categories.id, categories.name, categories.nameCt, budgets.amount)
+    .groupBy(budgets.id, categories.id, categories.nameCt, budgets.amount)
     .all();
 
   const budgetStatus = budgetRows
     .map((r) => ({
-      category: ((r.categoryCt && dek ? (tryDecryptField(dek, r.categoryCt, "categories.name_ct") ?? r.category) : r.category) ?? "Unknown"),
+      category: ((r.categoryCt && dek ? tryDecryptField(dek, r.categoryCt, "categories.name_ct") : null) ?? "Unknown"),
       budget: r.budget,
       spent: Math.round((r.spent ?? 0) * 100) / 100,
       pctUsed: r.budget > 0 ? Math.round(((r.spent ?? 0) / r.budget) * 100) : 0,
     }))
     .sort((a, b) => b.pctUsed - a.pctUsed);
 
-  // Notable transactions (largest expenses this week)
+  // Stream D Phase 4 — plaintext name dropped.
   const notable = await db
     .select({
       date: transactions.date,
       payee: transactions.payee,
-      categoryName: categories.name,
       categoryNameCt: categories.nameCt,
       amount: transactions.amount,
     })
@@ -175,7 +172,7 @@ export async function generateWeeklyRecap(userId: string, endDate?: string, dek?
   const notableTransactions = notable.map((t) => ({
     date: t.date,
     payee: (dek ? (tryDecryptField(dek, t.payee, "transactions.payee") ?? t.payee) : t.payee) ?? "",
-    category: ((t.categoryNameCt && dek ? (tryDecryptField(dek, t.categoryNameCt, "categories.name_ct") ?? t.categoryName) : t.categoryName) ?? "Uncategorized"),
+    category: ((t.categoryNameCt && dek ? tryDecryptField(dek, t.categoryNameCt, "categories.name_ct") : null) ?? "Uncategorized"),
     amount: Math.round(Math.abs(t.amount) * 100) / 100,
   }));
 
@@ -198,7 +195,7 @@ export async function generateWeeklyRecap(userId: string, endDate?: string, dek?
     .all();
 
   const upcomingBills = subs.map((s) => ({
-    name: ((s.nameCt && dek ? (tryDecryptField(dek, s.nameCt, "subscriptions.name_ct") ?? s.name) : s.name) ?? ""),
+    name: ((s.nameCt && dek ? tryDecryptField(dek, s.nameCt, "subscriptions.name_ct") : null) ?? ""),
     amount: Math.abs(s.amount),
     date: s.nextDate ?? "",
   }));

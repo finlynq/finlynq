@@ -77,6 +77,7 @@ export async function extractZipContents(buffer: Buffer): Promise<ZipContents> {
 export async function runZipProbe(
   userId: string,
   buffer: Buffer,
+  dek?: Buffer | null,
 ): Promise<{
   parsed: ParsedExport;
   finlynqAccounts: Array<{ id: number; name: string; type: string; currency: string; group: string }>;
@@ -93,18 +94,20 @@ export async function runZipProbe(
     loadConnectorMapping(userId, WEALTHPOSITION_CONNECTOR_ID),
   ]);
 
+  // Stream D Phase 4 — plaintext name dropped; decrypt for the picker UI.
+  const { decryptName } = await import("../crypto/encrypted-columns");
   return {
     parsed,
     finlynqAccounts: pfAccounts.map((a) => ({
       id: a.id,
-      name: a.name,
+      name: decryptName(a.nameCt, dek ?? null, null) ?? "",
       type: a.type,
       currency: a.currency,
       group: a.group,
     })),
     finlynqCategories: pfCategories.map((c) => ({
       id: c.id,
-      name: c.name,
+      name: decryptName(c.nameCt, dek ?? null, null) ?? "",
       type: c.type,
       group: c.group,
     })),
@@ -130,28 +133,12 @@ async function materializeZipMapping(
   // (e.g. user archived "Nissan Pathfinder", re-imports the same WP file →
   // dedup misses → INSERT collides on the archived row's name_lookup).
   const existingAccounts = await getAccounts(userId, { includeArchived: true });
-  // Dedup key matches Stream D's name_lookup (HMAC of lowercased-trimmed
-  // name). Two indexes because:
-  //   1. Legacy rows have plaintext name but no name_lookup — key by
-  //      trim+lowercase plaintext.
-  //   2. Stream D Phase 3 rows have null plaintext but populated
-  //      name_lookup — key by the HMAC (computed from desiredName via
-  //      computeNameLookup(dek, desiredName) at lookup time).
-  // The DB's UNIQUE (user_id, name_lookup) partial index is the source of
-  // truth; either map hit means the INSERT would collide.
-  const nameKey = (n: string | null | undefined): string =>
-    typeof n === "string" ? n.trim().toLowerCase() : "";
-  const accountByName = new Map<string, (typeof existingAccounts)[number]>();
+  // Stream D Phase 4 — plaintext name dropped; lookup-only dedup.
   const accountByLookup = new Map<string, (typeof existingAccounts)[number]>();
   for (const a of existingAccounts) {
-    const key = nameKey(a.name);
-    if (key) accountByName.set(key, a);
     if (a.nameLookup) accountByLookup.set(a.nameLookup, a);
   }
   const findAccountByDesired = (desired: string) => {
-    const k = nameKey(desired);
-    const byPlain = k ? accountByName.get(k) : undefined;
-    if (byPlain) return byPlain;
     if (dek && desired) {
       const hash = computeNameLookup(dek, desired);
       return accountByLookup.get(hash);
@@ -199,32 +186,24 @@ async function materializeZipMapping(
       const created = await createAccount(userId, {
         type: row.autoCreate.type,
         group: row.autoCreate.group,
-        name: desiredName,
         currency: row.autoCreate.currency,
         ...encAcc,
       });
       if (created) {
         accountMap[row.externalId] = created.id;
-        const k = nameKey(desiredName);
-        if (k) accountByName.set(k, created);
         if (dek) accountByLookup.set(computeNameLookup(dek, desiredName), created);
       }
     }
   }
 
+  // Stream D Phase 4 — plaintext name dropped; lookup-only dedup.
   const externalCategoryById = new Map(parsed.categories.map((c) => [c.id, c]));
   const existingCats = await getCategories(userId);
-  const catByName = new Map<string, (typeof existingCats)[number]>();
   const catByLookup = new Map<string, (typeof existingCats)[number]>();
   for (const c of existingCats) {
-    const key = nameKey(c.name);
-    if (key) catByName.set(key, c);
     if (c.nameLookup) catByLookup.set(c.nameLookup, c);
   }
   const findCatByDesired = (desired: string) => {
-    const k = nameKey(desired);
-    const byPlain = k ? catByName.get(k) : undefined;
-    if (byPlain) return byPlain;
     if (dek && desired) {
       const hash = computeNameLookup(dek, desired);
       return catByLookup.get(hash);
@@ -260,13 +239,10 @@ async function materializeZipMapping(
       const created = await createCategory(userId, {
         type: row.autoCreate.type,
         group: row.autoCreate.group,
-        name: desiredName,
         ...encCat,
       });
       if (created) {
         categoryMap[row.externalId] = created.id;
-        const k = nameKey(desiredName);
-        if (k) catByName.set(k, created);
         if (dek) catByLookup.set(computeNameLookup(dek, desiredName), created);
       }
     }
@@ -285,14 +261,11 @@ async function materializeZipMapping(
       const created = await createCategory(userId, {
         type: "R",
         group: input.transferCategoryAutoCreate.group,
-        name: input.transferCategoryAutoCreate.name,
         ...encT,
       });
       if (created) {
         transferCategoryId = created.id;
-        const k = nameKey(created.name);
-        if (k) catByName.set(k, created);
-        if (dek) catByLookup.set(computeNameLookup(dek, created.name ?? input.transferCategoryAutoCreate.name), created);
+        if (dek) catByLookup.set(computeNameLookup(dek, input.transferCategoryAutoCreate.name), created);
       }
     }
   }
@@ -309,14 +282,11 @@ async function materializeZipMapping(
       const created = await createCategory(userId, {
         type: "R",
         group: input.openingBalanceCategoryAutoCreate.group,
-        name: input.openingBalanceCategoryAutoCreate.name,
         ...encO,
       });
       if (created) {
         openingBalanceCategoryId = created.id;
-        const k = nameKey(created.name);
-        if (k) catByName.set(k, created);
-        if (dek) catByLookup.set(computeNameLookup(dek, created.name ?? input.openingBalanceCategoryAutoCreate.name), created);
+        if (dek) catByLookup.set(computeNameLookup(dek, input.openingBalanceCategoryAutoCreate.name), created);
       }
     }
   }
@@ -348,23 +318,22 @@ async function syncPortfolioHoldings(
 ): Promise<{ inserted: number }> {
   const accountsByName = new Map(parsed.accounts.map((a) => [a.name, a]));
 
-  // Existing holdings for this user — avoid duplicates.
+  // Stream D Phase 4 — plaintext name dropped; key dedup by name_lookup HMAC
+  // when DEK is available; otherwise dedup degrades to "always insert".
   const existing = await db
     .select({
       id: schema.portfolioHoldings.id,
       accountId: schema.portfolioHoldings.accountId,
-      name: schema.portfolioHoldings.name,
+      nameLookup: schema.portfolioHoldings.nameLookup,
     })
     .from(schema.portfolioHoldings)
     .where(eq(schema.portfolioHoldings.userId, userId))
     .all();
-  const existingKeys = new Set(existing.map((e) => `${e.accountId}|${e.name}`));
+  const existingKeys = new Set(existing.map((e) => `${e.accountId}|${e.nameLookup ?? ""}`));
 
   type HoldingInsert = {
     userId: string;
     accountId: number;
-    name: string;
-    symbol: string | null;
     currency: string;
     isCrypto: number;
     note: string;
@@ -380,8 +349,9 @@ async function syncPortfolioHoldings(
     if (!brokerageExt) continue;
     const finlynqAccountId = mapping.accountMap[brokerageExt.id];
     if (!finlynqAccountId) continue;
-    const key = `${finlynqAccountId}|${holdingName}`;
-    if (existingKeys.has(key)) continue;
+    const lookupKey = dek ? computeNameLookup(dek, holdingName) : "";
+    const key = `${finlynqAccountId}|${lookupKey}`;
+    if (lookupKey && existingKeys.has(key)) continue;
     const enc = buildNameFields(dek ?? null, {
       name: holdingName,
       symbol: info.symbol || null,
@@ -389,8 +359,6 @@ async function syncPortfolioHoldings(
     toInsert.push({
       userId,
       accountId: finlynqAccountId,
-      name: holdingName,
-      symbol: info.symbol || null,
       currency: info.currency || "CAD",
       isCrypto: 0,
       note: "",
@@ -407,8 +375,10 @@ async function syncPortfolioHoldings(
 function buildResolvedMapping(
   mapping: ConnectorMapping,
   parsed: ParsedExport,
-  pfAccounts: Array<{ id: number; name: string }>,
-  pfCategories: Array<{ id: number; name: string }>,
+  // Stream D Phase 3: name is now nullable on the row. Connector mapping
+  // accepts the relaxed shape; downstream consumers must handle null.
+  pfAccounts: Array<{ id: number; name: string | null }>,
+  pfCategories: Array<{ id: number; name: string | null }>,
 ): ConnectorMappingResolved {
   const accountMap = new Map<string, number>();
   for (const [extId, id] of Object.entries(mapping.accountMap)) accountMap.set(extId, id);
@@ -418,8 +388,9 @@ function buildResolvedMapping(
     accountMap,
     categoryMap,
     transferCategoryId: mapping.transferCategoryId,
-    accountNameById: new Map(pfAccounts.map((a) => [a.id, a.name])),
-    categoryNameById: new Map(pfCategories.map((c) => [c.id, c.name])),
+    // Stream D Phase 3: name is NULL post-cutover; display-only map gets "".
+    accountNameById: new Map(pfAccounts.map((a) => [a.id, a.name ?? ""])),
+    categoryNameById: new Map(pfCategories.map((c) => [c.id, c.name ?? ""])),
     externalAccountById: new Map(parsed.accounts.map((a) => [a.id, a])),
   };
 }
@@ -458,8 +429,12 @@ export async function runZipPreview(
   const contents = await extractZipContents(buffer);
   const parsed = parseWealthPositionExport(contents);
   const mapping = await materializeZipMapping(userId, input, parsed, dek);
-  const pfAccounts = await getAccounts(userId, { includeArchived: false });
-  const pfCategories = await getCategories(userId);
+  // Stream D Phase 4 — plaintext name dropped; decrypt before passing.
+  const { decryptName } = await import("../crypto/encrypted-columns");
+  const pfAccountsRaw = await getAccounts(userId, { includeArchived: false });
+  const pfCategoriesRaw = await getCategories(userId);
+  const pfAccounts = pfAccountsRaw.map((a) => ({ id: a.id, name: decryptName(a.nameCt, dek ?? null, null) }));
+  const pfCategories = pfCategoriesRaw.map((c) => ({ id: c.id, name: decryptName(c.nameCt, dek ?? null, null) }));
   const resolved = buildResolvedMapping(mapping, parsed, pfAccounts, pfCategories);
   const transformed = transformWealthPositionExport(parsed, resolved);
 
@@ -525,8 +500,12 @@ export async function runZipExecute(
     mapping,
     dek,
   );
-  const pfAccounts = await getAccounts(userId, { includeArchived: false });
-  const pfCategories = await getCategories(userId);
+  // Stream D Phase 4 — plaintext name dropped.
+  const { decryptName: decryptName2 } = await import("../crypto/encrypted-columns");
+  const pfAccountsRaw2 = await getAccounts(userId, { includeArchived: false });
+  const pfCategoriesRaw2 = await getCategories(userId);
+  const pfAccounts = pfAccountsRaw2.map((a) => ({ id: a.id, name: decryptName2(a.nameCt, dek, null) }));
+  const pfCategories = pfCategoriesRaw2.map((c) => ({ id: c.id, name: decryptName2(c.nameCt, dek, null) }));
   const resolved = buildResolvedMapping(mapping, parsed, pfAccounts, pfCategories);
   const transformed = transformWealthPositionExport(parsed, resolved);
 
@@ -543,8 +522,12 @@ export async function runZipExecute(
 
   if (transformed.splits.length > 0) {
     const { generateImportHash } = await import("@/lib/import-hash");
+    // Stream D Phase 4 — plaintext name dropped; decrypt name_ct.
+    const { decryptName: decryptName3 } = await import("../crypto/encrypted-columns");
     const pfAccountsNow = await getAccounts(userId, { includeArchived: false });
-    const accountIdByName = new Map(pfAccountsNow.map((a) => [a.name, a.id]));
+    const accountIdByName = new Map(
+      pfAccountsNow.map((a) => [decryptName3(a.nameCt, dek, null) ?? "", a.id] as [string, number]),
+    );
 
     const parentHashes: Array<{ hash: string; parent: (typeof transformed.splits)[number] }> = [];
     for (const split of transformed.splits) {

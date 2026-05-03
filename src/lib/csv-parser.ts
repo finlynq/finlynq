@@ -2,6 +2,7 @@ import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import { generateImportHash, checkDuplicates } from "./import-hash";
 import type { RawTransaction } from "./import-pipeline";
+import { buildNameFields, decryptName, nameLookup } from "./crypto/encrypted-columns";
 
 /**
  * Robust CSV parser that handles:
@@ -333,7 +334,7 @@ export function extractCsvHeaders(csvText: string): string[] {
   return parseCSVRow(lines[0]);
 }
 
-export async function importAccounts(csvText: string, userId: string) {
+export async function importAccounts(csvText: string, userId: string, dek: Buffer | null = null) {
   const rows = parseCSV(csvText);
   if (rows.length === 0) return { total: 0, imported: 0, errors: ["File is empty or contains only headers"] };
 
@@ -346,20 +347,25 @@ export async function importAccounts(csvText: string, userId: string) {
       continue;
     }
     try {
-      const existing = await db
-        .select()
-        .from(schema.accounts)
-        .where(and(eq(schema.accounts.name, row["Account"]), eq(schema.accounts.userId, userId)))
-        .get();
+      // Stream D Phase 4 — match by name_lookup HMAC; persist ct/lookup only.
+      const lookup = dek ? nameLookup(dek, row["Account"]) : null;
+      const existing = lookup
+        ? await db
+            .select()
+            .from(schema.accounts)
+            .where(and(eq(schema.accounts.nameLookup, lookup), eq(schema.accounts.userId, userId)))
+            .get()
+        : null;
       if (!existing) {
+        const enc = buildNameFields(dek, { name: row["Account"] });
         await db.insert(schema.accounts)
           .values({
             userId,
             type: row["Type"] || "A",
             group: row["Group"] ?? "",
-            name: row["Account"],
             currency: row["Currency"] ?? "CAD",
             note: row["Note"] ?? "",
+            ...enc,
           })
           ;
         imported++;
@@ -371,7 +377,7 @@ export async function importAccounts(csvText: string, userId: string) {
   return { total: rows.length, imported, errors: errors.length > 0 ? errors : undefined };
 }
 
-export async function importCategories(csvText: string, userId: string) {
+export async function importCategories(csvText: string, userId: string, dek: Buffer | null = null) {
   const rows = parseCSV(csvText);
   if (rows.length === 0) return { total: 0, imported: 0, errors: ["File is empty or contains only headers"] };
 
@@ -384,19 +390,24 @@ export async function importCategories(csvText: string, userId: string) {
       continue;
     }
     try {
-      const existing = await db
-        .select()
-        .from(schema.categories)
-        .where(and(eq(schema.categories.name, row["Category"]), eq(schema.categories.userId, userId)))
-        .get();
+      // Stream D Phase 4 — match by name_lookup; persist ct/lookup only.
+      const lookup = dek ? nameLookup(dek, row["Category"]) : null;
+      const existing = lookup
+        ? await db
+            .select()
+            .from(schema.categories)
+            .where(and(eq(schema.categories.nameLookup, lookup), eq(schema.categories.userId, userId)))
+            .get()
+        : null;
       if (!existing) {
+        const enc = buildNameFields(dek, { name: row["Category"] });
         await db.insert(schema.categories)
           .values({
             userId,
             type: row["Type"] || "E",
             group: row["Group"] ?? "",
-            name: row["Category"],
             note: row["Note"] ?? "",
+            ...enc,
           })
           ;
         imported++;
@@ -408,7 +419,7 @@ export async function importCategories(csvText: string, userId: string) {
   return { total: rows.length, imported, errors: errors.length > 0 ? errors : undefined };
 }
 
-export async function importPortfolio(csvText: string, userId: string) {
+export async function importPortfolio(csvText: string, userId: string, dek: Buffer | null = null) {
   const rows = parseCSV(csvText);
   if (rows.length === 0) return { total: 0, imported: 0, errors: ["File is empty or contains only headers"] };
 
@@ -417,30 +428,39 @@ export async function importPortfolio(csvText: string, userId: string) {
 
   for (const row of rows) {
     try {
-      const account = await db
-        .select()
-        .from(schema.accounts)
-        .where(and(eq(schema.accounts.name, row["Portfolio account name"]), eq(schema.accounts.userId, userId)))
-        .get();
+      const acctLookup = dek ? nameLookup(dek, row["Portfolio account name"]) : null;
+      const account = acctLookup
+        ? await db
+            .select()
+            .from(schema.accounts)
+            .where(and(eq(schema.accounts.nameLookup, acctLookup), eq(schema.accounts.userId, userId)))
+            .get()
+        : null;
       if (!account) {
         errors.push(`Account not found: "${row["Portfolio account name"]}"`);
         continue;
       }
 
-      const existing = await db
-        .select()
-        .from(schema.portfolioHoldings)
-        .where(and(eq(schema.portfolioHoldings.name, row["Portfolio holding name"]), eq(schema.portfolioHoldings.userId, userId)))
-        .get();
+      const holdingLookup = dek ? nameLookup(dek, row["Portfolio holding name"]) : null;
+      const existing = holdingLookup
+        ? await db
+            .select()
+            .from(schema.portfolioHoldings)
+            .where(and(eq(schema.portfolioHoldings.nameLookup, holdingLookup), eq(schema.portfolioHoldings.userId, userId)))
+            .get()
+        : null;
       if (!existing) {
+        const enc = buildNameFields(dek, {
+          name: row["Portfolio holding name"],
+          symbol: row["Symbol"] || null,
+        });
         await db.insert(schema.portfolioHoldings)
           .values({
             userId,
             accountId: account.id,
-            name: row["Portfolio holding name"],
-            symbol: row["Symbol"] || null,
             currency: row["Currency"] ?? "CAD",
             note: row["Note"] ?? "",
+            ...enc,
           })
           ;
         imported++;
@@ -452,7 +472,7 @@ export async function importPortfolio(csvText: string, userId: string) {
   return { total: rows.length, imported, errors: errors.length > 0 ? errors : undefined };
 }
 
-export async function importTransactions(csvText: string, userId: string) {
+export async function importTransactions(csvText: string, userId: string, dek: Buffer | null = null) {
   const { rows, errors: parseErrors } = csvToRawTransactions(csvText);
 
   if (rows.length === 0) {
@@ -470,19 +490,24 @@ export async function importTransactions(csvText: string, userId: string) {
   let skippedDuplicates = 0;
   const batchSize = 500;
 
+  // Stream D Phase 4 — match by decrypted name (or name_lookup if available).
   const allAccounts = await db
     .select()
     .from(schema.accounts)
     .where(eq(schema.accounts.userId, userId))
     .all();
-  const accountMap = new Map(allAccounts.map((a) => [a.name, a.id]));
+  const accountMap = new Map(
+    allAccounts.map((a) => [decryptName(a.nameCt, dek, null) ?? "", a.id] as [string, number]),
+  );
 
   const allCategories = await db
     .select()
     .from(schema.categories)
     .where(eq(schema.categories.userId, userId))
     .all();
-  const categoryMap = new Map(allCategories.map((c) => [c.name, c.id]));
+  const categoryMap = new Map(
+    allCategories.map((c) => [decryptName(c.nameCt, dek, null) ?? "", c.id] as [string, number]),
+  );
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);

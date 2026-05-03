@@ -8,6 +8,23 @@ Per-environment psql commands, in chronological order, for every schema change s
 
 See [database.md](architecture/database.md) for the lockfile gotcha that often surfaces during a deploy.
 
+## Stream D Phase 4 — drop plaintext display-name columns (2026-05-03)
+
+Final cutover for the Stream D encrypted-display-names work. **Drops 8 plaintext columns** from `accounts` (`name`, `alias`), `categories` (`name`), `goals` (`name`), `loans` (`name`), `subscriptions` (`name`), and `portfolio_holdings` (`name`, `symbol`). Reads now route through `name_ct` + the session DEK; writes through `buildNameFields()`. Promotes the partial unique indexes on `(user_id, name_lookup)` to full unique indexes (every row is guaranteed to have a non-null lookup post-cutover).
+
+**DEPLOY ORDER MATTERS — code FIRST, then SQL.** The Phase 4 release reads ciphertext only and refuses plaintext writes (it's backwards-compatible with the columns still being there because it just doesn't touch them). The pre-Phase-4 release READS plaintext columns and would 500 if the SQL ran first. Always: push code → confirm green → THEN apply this SQL.
+
+Stdio MCP create/update tools for the 6 in-scope tables now refuse the operation with a clean error message (no DEK on the stdio transport, can't compute the encrypted siblings). Use the HTTP MCP transport or the web UI instead.
+
+```sh
+# Apply per env AFTER the matching code release is live and stable.
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-stream-d-phase4-drop-columns.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-stream-d-phase4-drop-columns.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-stream-d-phase4-drop-columns.sql
+```
+
+Applied dev: 2026-05-03 (with code release). Staging + prod: pending — wait until the code release has been live on dev for one full deploy + rollback window.
+
 ## Phase 2 — `users.dek_wrapped` columns
 
 Already applied to prod/staging/dev.

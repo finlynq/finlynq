@@ -307,17 +307,20 @@ async function resolveTransferCategoryId(
   userId: string,
   dek: Buffer | null,
 ): Promise<number> {
+  // Stream D Phase 4 — plaintext name dropped. Match by name_lookup HMAC
+  // when DEK is available, otherwise fall back to the first 'R' row.
   const existing = await tx
-    .select({ id: schema.categories.id, name: schema.categories.name })
+    .select({ id: schema.categories.id, nameLookup: schema.categories.nameLookup })
     .from(schema.categories)
     .where(and(eq(schema.categories.userId, userId), eq(schema.categories.type, "R")))
     .orderBy(schema.categories.id);
-  // Prefer a row literally named "Transfer" (case-insensitive); fall back to
-  // the first 'R' row.
-  const preferred = existing.find(
-    (r: { name: string | null }) => (r.name ?? "").trim().toLowerCase() === "transfer",
-  );
-  if (preferred) return preferred.id as number;
+  if (dek) {
+    const transferLookup = (await import("./crypto/encrypted-columns")).nameLookup(dek, "Transfer");
+    const preferred = existing.find(
+      (r: { nameLookup: string | null }) => r.nameLookup === transferLookup,
+    );
+    if (preferred) return preferred.id as number;
+  }
   if (existing.length > 0) return existing[0].id as number;
 
   // Auto-create.
@@ -328,7 +331,6 @@ async function resolveTransferCategoryId(
       userId,
       type: "R",
       group: "Transfer",
-      name: "Transfer",
       ...enc,
     })
     .returning({ id: schema.categories.id });
@@ -455,10 +457,11 @@ export async function createTransferPair(
 
   // Pre-resolve both account currencies (ownership checks are cheap, and we
   // need the source currency to short-circuit FX before opening a tx).
-  const accounts = await db
+  // Stream D Phase 4 — plaintext name dropped; decrypt name_ct via DEK.
+  const rawAccounts = await db
     .select({
       id: schema.accounts.id,
-      name: schema.accounts.name,
+      nameCt: schema.accounts.nameCt,
       currency: schema.accounts.currency,
     })
     .from(schema.accounts)
@@ -468,6 +471,12 @@ export async function createTransferPair(
         inArray(schema.accounts.id, [opts.fromAccountId, opts.toAccountId]),
       ),
     );
+  const { decryptName } = await import("./crypto/encrypted-columns");
+  const accounts = rawAccounts.map((a) => ({
+    id: a.id,
+    name: decryptName(a.nameCt, dek, null),
+    currency: a.currency,
+  }));
   const fromAcct = accounts.find((a) => a.id === opts.fromAccountId);
   const toAcct = accounts.find((a) => a.id === opts.toAccountId);
   if (!fromAcct) {
@@ -789,20 +798,8 @@ async function findHoldingIdByAccountAndName(
 ): Promise<number | null> {
   const trimmed = name.trim();
   if (!trimmed) return null;
-  // Plaintext match first (handles legacy + dek-less rows).
-  const plain = await db
-    .select({ id: schema.portfolioHoldings.id })
-    .from(schema.portfolioHoldings)
-    .where(
-      and(
-        eq(schema.portfolioHoldings.userId, userId),
-        eq(schema.portfolioHoldings.accountId, accountId),
-        eq(schema.portfolioHoldings.name, trimmed),
-      ),
-    )
-    .limit(1);
-  if (plain.length && plain[0].id != null) return plain[0].id;
-  // Stream D Phase 3 NULL-plaintext rows: try the encrypted lookup.
+  // Stream D Phase 4 — plaintext name dropped; only the encrypted lookup
+  // survives. No DEK = no match (the row's lookup is unguessable without it).
   if (dek) {
     const lookup = nameLookup(dek, trimmed);
     const enc = await db
@@ -862,15 +859,16 @@ export async function loadTransferPair(
     return null;
   }
 
+  // Stream D Phase 4 — plaintext name columns dropped; ciphertext only.
   const rows = await db
     .select({
       id: schema.transactions.id,
       date: schema.transactions.date,
       accountId: schema.transactions.accountId,
-      accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
       accountCurrency: schema.accounts.currency,
       categoryId: schema.transactions.categoryId,
-      categoryName: schema.categories.name,
+      categoryNameCt: schema.categories.nameCt,
       categoryType: schema.categories.type,
       amount: schema.transactions.amount,
       currency: schema.transactions.currency,
@@ -882,7 +880,6 @@ export async function loadTransferPair(
       tags: schema.transactions.tags,
       linkId: schema.transactions.linkId,
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
-      portfolioHoldingName: schema.portfolioHoldings.name,
       portfolioHoldingNameCt: schema.portfolioHoldings.nameCt,
       quantity: schema.transactions.quantity,
     })
@@ -923,23 +920,39 @@ export async function loadTransferPair(
   }
 
   const toLeg = (r: typeof decrypted[number]): TransferLeg => {
-    // Stream D: holding name may be in `nameCt` (encrypted) or plain `name`.
-    let holdingName: string | null = r.portfolioHoldingName ?? null;
-    if (!holdingName && r.portfolioHoldingNameCt && dek) {
+    // Stream D Phase 4 — plaintext name dropped; decrypt ciphertext.
+    let holdingName: string | null = null;
+    if (r.portfolioHoldingNameCt && dek) {
       try {
         holdingName = decryptField(dek, r.portfolioHoldingNameCt);
       } catch {
         holdingName = null;
       }
     }
+    let accountName: string | null = null;
+    if (r.accountNameCt && dek) {
+      try {
+        accountName = decryptField(dek, r.accountNameCt);
+      } catch {
+        accountName = null;
+      }
+    }
+    let categoryName: string | null = null;
+    if (r.categoryNameCt && dek) {
+      try {
+        categoryName = decryptField(dek, r.categoryNameCt);
+      } catch {
+        categoryName = null;
+      }
+    }
     return {
       id: r.id,
       date: r.date,
       accountId: r.accountId as number,
-      accountName: r.accountName ?? null,
+      accountName,
       accountCurrency: (r.accountCurrency ?? r.currency ?? "CAD").toUpperCase(),
       categoryId: r.categoryId as number,
-      categoryName: r.categoryName ?? null,
+      categoryName,
       amount: r.amount,
       currency: r.currency,
       enteredAmount: r.enteredAmount ?? null,
@@ -1014,10 +1027,11 @@ export async function updateTransferPair(opts: UpdateTransferOpts): Promise<Tran
     return { ok: false, code: "same-account", message: "From and to accounts must differ for a cash transfer" };
   }
 
-  const accounts = await db
+  // Stream D Phase 4 — plaintext name dropped; decrypt name_ct.
+  const rawAccounts2 = await db
     .select({
       id: schema.accounts.id,
-      name: schema.accounts.name,
+      nameCt: schema.accounts.nameCt,
       currency: schema.accounts.currency,
     })
     .from(schema.accounts)
@@ -1027,6 +1041,12 @@ export async function updateTransferPair(opts: UpdateTransferOpts): Promise<Tran
         inArray(schema.accounts.id, [desiredFromId, desiredToId]),
       ),
     );
+  const { decryptName: decryptName2 } = await import("./crypto/encrypted-columns");
+  const accounts = rawAccounts2.map((a) => ({
+    id: a.id,
+    name: decryptName2(a.nameCt, dek, null),
+    currency: a.currency,
+  }));
   const fromAcct = accounts.find((a) => a.id === desiredFromId);
   const toAcct = accounts.find((a) => a.id === desiredToId);
   if (!fromAcct) {

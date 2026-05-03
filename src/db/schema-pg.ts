@@ -28,7 +28,10 @@ export const accounts = pgTable("accounts", {
   userId: text("user_id").notNull(),
   type: text("type").notNull(),
   group: text("group").notNull().default(""),
-  name: text("name").notNull(),
+  // Stream D Phase 4 (2026-05-03) — plaintext `name` and `alias` columns
+  // physically dropped. All reads route through `name_ct`/`alias_ct` + the
+  // session DEK via `decryptName()`. Lookup HMAC for exact-match queries
+  // lives in `name_lookup`/`alias_lookup`.
   currency: text("currency").notNull().default("CAD"),
   note: text("note").default(""),
   archived: boolean("archived").notNull().default(false),
@@ -39,8 +42,6 @@ export const accounts = pgTable("accounts", {
   // scripts/migrate-accounts-is-investment.sql backfills the flag from any
   // account that already has at least one portfolio_holdings row.
   isInvestment: boolean("is_investment").notNull().default(false),
-  alias: text("alias"),
-  // Stream D (2026-04-24) — dual-write: plaintext columns stay until Phase 3 cutover.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
   aliasCt: text("alias_ct"),
@@ -52,9 +53,9 @@ export const categories = pgTable("categories", {
   userId: text("user_id").notNull(),
   type: text("type").notNull(),
   group: text("group").notNull().default(""),
-  name: text("name").notNull(),
+  // Stream D Phase 4 (2026-05-03) — plaintext `name` column physically
+  // dropped. Reads via `name_ct` + DEK; exact-match queries via `name_lookup`.
   note: text("note").default(""),
-  // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
 });
@@ -140,12 +141,12 @@ export const portfolioHoldings = pgTable("portfolio_holdings", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
   accountId: integer("account_id").references(() => accounts.id),
-  name: text("name").notNull(),
-  symbol: text("symbol"),
+  // Stream D Phase 4 (2026-05-03) — plaintext `name` and `symbol` columns
+  // physically dropped. Reads via `name_ct`/`symbol_ct` + DEK; exact-match
+  // queries via `name_lookup`/`symbol_lookup`.
   currency: text("currency").notNull().default("CAD"),
   isCrypto: integer("is_crypto").default(0),
   note: text("note").default(""),
-  // Stream D (2026-04-24) — dual-write. Symbol encrypted too (VGRO.TO leaks broker + region).
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
   symbolCt: text("symbol_ct"),
@@ -212,7 +213,8 @@ export const budgets = pgTable("budgets", {
 export const loans = pgTable("loans", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
-  name: text("name").notNull(),
+  // Stream D Phase 4 (2026-05-03) — plaintext `name` column physically
+  // dropped. Reads via `name_ct` + DEK; exact-match queries via `name_lookup`.
   type: text("type").notNull(),
   accountId: integer("account_id").references(() => accounts.id),
   currency: text("currency").notNull().default("CAD"),
@@ -241,7 +243,8 @@ export const snapshots = pgTable("snapshots", {
 export const goals = pgTable("goals", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
-  name: text("name").notNull(),
+  // Stream D Phase 4 (2026-05-03) — plaintext `name` column physically
+  // dropped. Reads via `name_ct` + DEK; exact-match queries via `name_lookup`.
   type: text("type").notNull(),
   currency: text("currency").notNull().default("CAD"),
   targetAmount: doublePrecision("target_amount").notNull(),
@@ -330,7 +333,8 @@ export const notifications = pgTable("notifications", {
 export const subscriptions = pgTable("subscriptions", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
-  name: text("name").notNull(),
+  // Stream D Phase 4 (2026-05-03) — plaintext `name` column physically
+  // dropped. Reads via `name_ct` + DEK; exact-match queries via `name_lookup`.
   amount: doublePrecision("amount").notNull(),
   currency: text("currency").notNull().default("CAD"),
   frequency: text("frequency").notNull().default("monthly"),

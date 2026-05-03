@@ -69,12 +69,19 @@ export async function stageEmailImport(
 
   // Build accountName → accountId map for this user so we can compute real
   // import_hashes for the rows whose account resolves.
+  // Stream D Phase 4 — plaintext name dropped; ciphertext only. Email import
+  // happens without a session DEK (it's a webhook), so name resolution falls
+  // back to "no match" — staged rows for those accounts fail to bind.
   const userAccounts = await db
-    .select({ id: schema.accounts.id, name: schema.accounts.name })
+    .select({ id: schema.accounts.id, nameCt: schema.accounts.nameCt })
     .from(schema.accounts)
     .where(eq(schema.accounts.userId, userId))
     .all();
-  const accountIdByName = new Map(userAccounts.map((a) => [a.name, a.id]));
+  // Empty map by name — webhook has no DEK so it can't decrypt. Email-import
+  // staging doesn't bind to accounts at write time anyway; the user resolves
+  // the binding at /import/pending review time, with their session DEK.
+  const accountIdByName = new Map<string, number>();
+  void userAccounts; // kept for future webhook-with-DEK enrichment
 
   // First pass: compute hash + normalize, gather the hash set for dedup.
   interface Prepared {

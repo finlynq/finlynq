@@ -109,12 +109,9 @@ async function buildAccountLookup(
     .all();
   const map = new Map<string, AccountLookup>();
   for (const a of rows) {
-    const plainName = a.nameCt
-      ? (tryDecryptField(dek, a.nameCt, "accounts.name_ct") ?? a.name)
-      : a.name;
-    const plainAlias = a.aliasCt
-      ? (tryDecryptField(dek, a.aliasCt, "accounts.alias_ct") ?? a.alias)
-      : a.alias;
+    // Stream D Phase 4 — plaintext name/alias dropped; ciphertext only.
+    const plainName = a.nameCt ? tryDecryptField(dek, a.nameCt, "accounts.name_ct") : null;
+    const plainAlias = a.aliasCt ? tryDecryptField(dek, a.aliasCt, "accounts.alias_ct") : null;
     if (plainName) {
       const key = plainName.toLowerCase().trim();
       map.set(key, { id: a.id, currency: a.currency });
@@ -140,9 +137,8 @@ async function buildCategoryLookup(
     .all();
   const map = new Map<string, number>();
   for (const c of rows) {
-    const plainName = c.nameCt
-      ? (tryDecryptField(dek, c.nameCt, "categories.name_ct") ?? c.name)
-      : c.name;
+    // Stream D Phase 4 — plaintext name dropped.
+    const plainName = c.nameCt ? tryDecryptField(dek, c.nameCt, "categories.name_ct") : null;
     if (plainName) map.set(plainName.toLowerCase().trim(), c.id);
   }
   return map;

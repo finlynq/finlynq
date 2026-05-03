@@ -34,17 +34,17 @@ const putSchema = z.object({
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId } = auth.context;
+  // Stream D Phase 4 — plaintext `name`/`accountName` columns dropped.
+  // Read ciphertext only and decrypt below.
   const rawGoals = await db
     .select({
       id: schema.goals.id,
-      name: schema.goals.name,
       nameCt: schema.goals.nameCt,
       type: schema.goals.type,
       targetAmount: schema.goals.targetAmount,
       currency: schema.goals.currency,
       deadline: schema.goals.deadline,
       accountId: schema.goals.accountId,
-      accountName: schema.accounts.name,
       accountNameCt: schema.accounts.nameCt,
       priority: schema.goals.priority,
       status: schema.goals.status,
@@ -55,12 +55,10 @@ export async function GET(request: NextRequest) {
     .where(eq(schema.goals.userId, userId))
     .orderBy(schema.goals.priority)
     .all();
-  // Stream D: decrypt name + accountName. SQL `ORDER BY name` was dropped —
-  // sorting happens in-memory below after decrypt.
   const goalsDecrypted = decryptNamedRows(rawGoals, auth.context.dek, {
     nameCt: "name",
     accountNameCt: "accountName",
-  });
+  }) as Array<typeof rawGoals[number] & { name: string | null; accountName: string | null }>;
   const goals = goalsDecrypted.sort((a, b) => {
     const pa = a.priority ?? 1;
     const pb = b.priority ?? 1;
@@ -114,9 +112,10 @@ export async function POST(request: NextRequest) {
     if (parsed.error) return parsed.error;
     const d = parsed.data;
     const enc = buildNameFields(auth.context.dek, { name: d.name });
+    // Stream D Phase 4 — plaintext `name` column dropped; only encrypted
+    // siblings persist.
     const goal = db.insert(schema.goals).values({
       userId: auth.context.userId,
-      name: d.name,
       type: d.type,
       targetAmount: d.targetAmount,
       ...(d.currency ? { currency: d.currency.toUpperCase() } : {}),
@@ -139,11 +138,12 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
-    const { id, ...data } = parsed.data;
+    const { id, name, ...data } = parsed.data;
     const toEncrypt: Record<string, string | null | undefined> = {};
-    if ("name" in data && data.name !== undefined) toEncrypt.name = data.name;
+    if (name !== undefined) toEncrypt.name = name;
     const enc = buildNameFields(auth.context.dek, toEncrypt);
     if (data.currency) data.currency = data.currency.toUpperCase();
+    // Stream D Phase 4 — plaintext `name` dropped; only encrypted siblings persist.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const goal = db.update(schema.goals).set({ ...data, ...enc } as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).returning().get();
     return NextResponse.json(goal);

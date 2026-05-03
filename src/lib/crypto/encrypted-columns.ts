@@ -229,48 +229,50 @@ export function encryptName(
 }
 
 /**
- * Decrypt a name ciphertext back to plaintext, with a plaintext-column
- * fallback that makes migration safe. Returns:
- *   - decryptField(ct) if ct is non-null AND dek is available
- *   - fallback (plaintext) if decryption FAILS and fallback is non-null —
- *     this guards the dual-write window where a row carries both `name`
- *     (plaintext) and `name_ct` (ciphertext encrypted under a DEK that
- *     the current session can no longer reproduce, e.g. data written before
- *     a wipe-and-rewrap). Encryption is defense-in-depth; if the user's
- *     plaintext is still on disk the right thing is to show it rather than
- *     500 the dashboard.
- *   - ct as-is if ct is non-null and decrypt fails AND no plaintext
- *     fallback (shows "v1:..." so the user knows something's off)
- *   - fallback if ct is null (pre-migration row, not yet backfilled)
+ * Decrypt a name ciphertext back to plaintext.
+ *
+ * Stream D Phase 3 cutover (2026-05-03): plaintext fallback removed. Every
+ * row's plaintext column is NULL on dev; reads route through `name_ct` only.
+ * The `fallback` parameter is kept in the signature so call sites compile
+ * unchanged but it is no longer consulted on decrypt failure — returning the
+ * stale plaintext after a force-NULL would leak data we deliberately deleted.
+ *
+ * Returns:
+ *   - decryptField(ct) if ct is non-null AND dek decrypts it
+ *   - null if ct is non-null but DEK is missing OR decrypt fails — the UI
+ *     renders "—"/blank rather than reviving plaintext that was nulled on
+ *     purpose. Surfaces a warn line so DEK-mismatch users (pathfinder) are
+ *     diagnosable from the journal.
+ *   - null if ct is null (legacy stdio-write rows that never backfilled)
+ *
+ * @param fallback retained for ABI stability with pre-cutover call sites;
+ *   ignored on the decrypt failure path. Pass `null` for new code.
  */
 export function decryptName(
   ct: string | null | undefined,
   dek: Buffer | null,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   fallback: string | null | undefined
 ): string | null {
-  if (ct != null && ct !== "") {
-    if (dek) {
-      try {
-        return decryptField(dek, ct);
-      } catch (err) {
-        // Auth-tag mismatch (DEK rotation, wipe-rewrap orphan, or genuine
-        // corruption). Surface a single warn line — callers further up the
-        // stack throw away the full row map on the first error otherwise.
-        try {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "[envelope] decryptName failed; falling back to plaintext:",
-            err instanceof Error ? err.message : String(err),
-          );
-        } catch { /* ignore */ }
-        if (fallback != null && fallback !== "") return fallback;
-        return ct; // ciphertext marker so the failure isn't completely silent
-      }
-    }
-    if (fallback != null && fallback !== "") return fallback;
-    return ct; // degraded — caller's UI may show placeholder
+  if (ct == null || ct === "") return null;
+  if (!dek) {
+    // No DEK in the cache (server restart, idle timeout). Returning the
+    // ciphertext marker would render `v1:...` in the UI; null renders "—".
+    // Caller (login path) repopulates the DEK on next request.
+    return null;
   }
-  return fallback ?? null;
+  try {
+    return decryptField(dek, ct);
+  } catch (err) {
+    try {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[envelope] decryptName failed; returning null:",
+        err instanceof Error ? err.message : String(err),
+      );
+    } catch { /* ignore */ }
+    return null;
+  }
 }
 
 /**

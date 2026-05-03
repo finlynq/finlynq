@@ -35,17 +35,22 @@ export async function POST(request: NextRequest) {
   const { userId } = auth.context;
 
   try {
-    // Ensure categories exist
+    // Stream D Phase 4 — plaintext columns dropped. Use buildNameFields +
+    // decrypt for dedup. Onboarding always has a fresh DEK.
+    const { buildNameFields, decryptName } = await import("@/lib/crypto/encrypted-columns");
+    const dek = auth.context.dek;
     const existingCategories = await getCategories(userId);
     const catMap = new Map<string, number>();
 
     for (const cat of existingCategories) {
-      catMap.set(cat.name, cat.id);
+      const decryptedName = decryptName(cat.nameCt, dek, null);
+      catMap.set(decryptedName ?? "", cat.id);
     }
 
     for (const cat of SAMPLE_CATEGORIES) {
       if (!catMap.has(cat.name)) {
-        const created = await createCategory(userId, cat);
+        const enc = buildNameFields(dek, { name: cat.name });
+        const created = await createCategory(userId, { type: cat.type, group: cat.group, ...enc });
         catMap.set(cat.name, created.id);
       }
     }
@@ -59,7 +64,8 @@ export async function POST(request: NextRequest) {
     if (checking) {
       checkingId = checking.id;
     } else {
-      const created = await createAccount(userId, { type: "A", group: "Checking", name: "Checking Account", currency: "CAD" });
+      const accEnc = buildNameFields(dek, { name: "Checking Account" });
+      const created = await createAccount(userId, { type: "A", group: "Checking", currency: "CAD", ...accEnc });
       checkingId = created.id;
     }
 

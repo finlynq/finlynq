@@ -19,25 +19,18 @@ export async function GET(request: NextRequest) {
   const endDate = `${now.getFullYear()}-12-31`;
   const currentMonth = getCurrentMonth();
 
+  // Stream D Phase 4 — getMonthlySpending now returns categoryNameCt; decrypt
+  // before feeding the analyzers (they need plaintext labels).
+  const { decryptName } = await import("@/lib/crypto/encrypted-columns");
   const monthlySpending = await getMonthlySpending(userId, startDate, endDate);
-  const anomalies = detectAnomalies(
-    monthlySpending.map((r) => ({
-      month: r.month,
-      categoryName: r.categoryName ?? "",
-      categoryGroup: r.categoryGroup ?? "",
-      total: r.total,
-    })),
-    currentMonth
-  );
-
-  const trends = analyzeTrends(
-    monthlySpending.map((r) => ({
-      month: r.month,
-      categoryName: r.categoryName ?? "",
-      categoryGroup: r.categoryGroup ?? "",
-      total: r.total,
-    }))
-  );
+  const monthlyNorm = monthlySpending.map((r) => ({
+    month: r.month,
+    categoryName: decryptName(r.categoryNameCt, dek, null) ?? "",
+    categoryGroup: r.categoryGroup ?? "",
+    total: r.total,
+  }));
+  const anomalies = detectAnomalies(monthlyNorm, currentMonth);
+  const trends = analyzeTrends(monthlyNorm);
 
   // Merchant analysis (last 6 months)
   const sixMonthsAgo = new Date(now);

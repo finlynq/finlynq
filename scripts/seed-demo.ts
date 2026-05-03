@@ -16,6 +16,7 @@ import {
   createWrappedDEKForPassword,
   encryptField,
 } from "../src/lib/crypto/envelope";
+import { encryptName } from "../src/lib/crypto/encrypted-columns";
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -326,26 +327,30 @@ async function main() {
     await client.query(`DELETE FROM categories WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM accounts WHERE user_id = $1`, [userId]);
 
-    // 3. Insert accounts
+    // 3. Insert accounts. Stream D Phase 4 cutover (2026-05-03): plaintext
+    // `name` and `alias` columns physically dropped — only name_ct + name_lookup
+    // carry the display name. Demo's DEK is derivable here, so we encrypt directly.
     console.log(`[seed-demo] Inserting ${ACCOUNTS.length} accounts…`);
     const accountIds: Record<string, number> = {};
     for (const a of ACCOUNTS) {
+      const enc = encryptName(demoDek, a.name);
       const { rows } = await client.query(
-        `INSERT INTO accounts (user_id, type, "group", name, currency, note)
-         VALUES ($1, $2, $3, $4, 'CAD', '') RETURNING id`,
-        [userId, a.type, a.group, a.name]
+        `INSERT INTO accounts (user_id, type, "group", name_ct, name_lookup, currency, note)
+         VALUES ($1, $2, $3, $4, $5, 'CAD', '') RETURNING id`,
+        [userId, a.type, a.group, enc.ct, enc.lookup]
       );
       accountIds[a.name] = rows[0].id;
     }
 
-    // 4. Insert categories
+    // 4. Insert categories. Same encrypted-only contract.
     console.log(`[seed-demo] Inserting ${CATEGORIES.length} categories…`);
     const categoryIds: Record<string, number> = {};
     for (const c of CATEGORIES) {
+      const enc = encryptName(demoDek, c.name);
       const { rows } = await client.query(
-        `INSERT INTO categories (user_id, type, "group", name, note)
-         VALUES ($1, $2, $3, $4, '') RETURNING id`,
-        [userId, c.type, c.group, c.name]
+        `INSERT INTO categories (user_id, type, "group", name_ct, name_lookup, note)
+         VALUES ($1, $2, $3, $4, $5, '') RETURNING id`,
+        [userId, c.type, c.group, enc.ct, enc.lookup]
       );
       categoryIds[c.name] = rows[0].id;
     }
@@ -387,10 +392,14 @@ async function main() {
     ];
     const holdingIdsByName: Record<string, number> = {};
     for (const h of holdingsSeed) {
+      // Stream D Phase 4 cutover (2026-05-03): plaintext `name` + `symbol`
+      // physically dropped. *_ct + *_lookup are the sole storage.
+      const nameEnc = encryptName(demoDek, h.name);
+      const symbolEnc = encryptName(demoDek, h.symbol);
       const { rows } = await client.query(
-        `INSERT INTO portfolio_holdings (user_id, account_id, name, symbol, currency, is_crypto, note)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [userId, brokerageId, h.name, h.symbol, h.currency, h.isCrypto, h.note]
+        `INSERT INTO portfolio_holdings (user_id, account_id, name_ct, name_lookup, symbol_ct, symbol_lookup, currency, is_crypto, note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        [userId, brokerageId, nameEnc.ct, nameEnc.lookup, symbolEnc.ct, symbolEnc.lookup, h.currency, h.isCrypto, h.note]
       );
       holdingIdsByName[h.name] = rows[0].id;
     }
@@ -443,14 +452,16 @@ async function main() {
       );
     }
 
-    // 7. Goals
+    // 7. Goals. Phase 4: plaintext `name` dropped; encrypt the two literals.
     console.log(`[seed-demo] Inserting goals…`);
+    const efEnc = encryptName(demoDek, "Emergency fund");
+    const tjEnc = encryptName(demoDek, "Trip to Japan");
     await client.query(
-      `INSERT INTO goals (user_id, name, type, target_amount, deadline, account_id, priority, status, note)
+      `INSERT INTO goals (user_id, name_ct, name_lookup, type, target_amount, deadline, account_id, priority, status, note)
        VALUES
-         ($1, 'Emergency fund', 'savings', 10000, NULL, $2, 1, 'active', 'Three months of expenses'),
-         ($1, 'Trip to Japan', 'savings', 5000, '2027-03-01', $2, 2, 'active', '')`,
-      [userId, accountIds["Savings"]]
+         ($1, $3, $4, 'savings', 10000, NULL, $2, 1, 'active', 'Three months of expenses'),
+         ($1, $5, $6, 'savings', 5000, '2027-03-01', $2, 2, 'active', '')`,
+      [userId, accountIds["Savings"], efEnc.ct, efEnc.lookup, tjEnc.ct, tjEnc.lookup]
     );
 
     // Note: login_count and last_login_at are intentionally NOT reset here

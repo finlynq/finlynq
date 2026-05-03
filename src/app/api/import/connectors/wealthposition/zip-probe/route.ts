@@ -24,7 +24,7 @@ export async function POST(request: NextRequest) {
 
   const buffer = Buffer.from(await file.arrayBuffer());
   try {
-    const result = await runZipProbe(auth.userId, buffer);
+    const result = await runZipProbe(auth.userId, buffer, auth.dek);
     return NextResponse.json({
       external: {
         accounts: result.parsed.accounts,
