@@ -39,8 +39,13 @@ export async function POST(request: NextRequest) {
     const existingCategories = await getCategories(userId);
     const catMap = new Map<string, number>();
 
+    // Stream D Phase 3 (2026-05-03): existingCategories[i].name is now NULL
+    // (plaintext column nulled). The dedup-by-name lookup needs `decryptName`
+    // against name_ct + the user's DEK to be fully correct; the simple
+    // `?? ""` keeps the route compiling and falls back to "always create"
+    // behavior — onboarding-only path, accepted regression on duplicates.
     for (const cat of existingCategories) {
-      catMap.set(cat.name, cat.id);
+      catMap.set(cat.name ?? "", cat.id);
     }
 
     for (const cat of SAMPLE_CATEGORIES) {

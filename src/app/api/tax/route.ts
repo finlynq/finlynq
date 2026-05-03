@@ -35,7 +35,7 @@ export async function GET(request: NextRequest) {
 
   const advice = getAssetLocationAdvice(
     holdings.map((h) => ({
-      name: h.name,
+      name: h.name ?? "",
       symbol: h.symbol ?? "",
       accountName: h.accountName ?? "",
       accountType: h.accountType ?? "",

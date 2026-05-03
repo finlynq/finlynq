@@ -95,16 +95,20 @@ export async function runZipProbe(
 
   return {
     parsed,
+    // Stream D Phase 3: a.name / c.name are NULL post-cutover; the connector
+    // mapping UI needs decryptName(name_ct, dek, null) to render the picker
+    // labels. For now, fall back to "" to keep types happy — the UI will
+    // need a follow-up to wire DEK through this path.
     finlynqAccounts: pfAccounts.map((a) => ({
       id: a.id,
-      name: a.name,
+      name: a.name ?? "",
       type: a.type,
       currency: a.currency,
       group: a.group,
     })),
     finlynqCategories: pfCategories.map((c) => ({
       id: c.id,
-      name: c.name,
+      name: c.name ?? "",
       type: c.type,
       group: c.group,
     })),
@@ -407,8 +411,10 @@ async function syncPortfolioHoldings(
 function buildResolvedMapping(
   mapping: ConnectorMapping,
   parsed: ParsedExport,
-  pfAccounts: Array<{ id: number; name: string }>,
-  pfCategories: Array<{ id: number; name: string }>,
+  // Stream D Phase 3: name is now nullable on the row. Connector mapping
+  // accepts the relaxed shape; downstream consumers must handle null.
+  pfAccounts: Array<{ id: number; name: string | null }>,
+  pfCategories: Array<{ id: number; name: string | null }>,
 ): ConnectorMappingResolved {
   const accountMap = new Map<string, number>();
   for (const [extId, id] of Object.entries(mapping.accountMap)) accountMap.set(extId, id);
@@ -418,8 +424,9 @@ function buildResolvedMapping(
     accountMap,
     categoryMap,
     transferCategoryId: mapping.transferCategoryId,
-    accountNameById: new Map(pfAccounts.map((a) => [a.id, a.name])),
-    categoryNameById: new Map(pfCategories.map((c) => [c.id, c.name])),
+    // Stream D Phase 3: name is NULL post-cutover; display-only map gets "".
+    accountNameById: new Map(pfAccounts.map((a) => [a.id, a.name ?? ""])),
+    categoryNameById: new Map(pfCategories.map((c) => [c.id, c.name ?? ""])),
     externalAccountById: new Map(parsed.accounts.map((a) => [a.id, a])),
   };
 }

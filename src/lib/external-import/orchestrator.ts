@@ -288,8 +288,10 @@ function buildResolvedMapping(
   mapping: ConnectorMapping,
   externalAccounts: ExternalAccount[],
   externalCategories: ExternalCategory[],
-  pfAccounts: Array<{ id: number; name: string }>,
-  pfCategories: Array<{ id: number; name: string }>,
+  // Stream D Phase 3: name is now nullable on the row. Connector mapping
+  // accepts the relaxed shape; downstream consumers must handle null.
+  pfAccounts: Array<{ id: number; name: string | null }>,
+  pfCategories: Array<{ id: number; name: string | null }>,
 ): { resolved: ConnectorMappingResolved; byName: {
   externalAccountByName: Map<string, string>;
   externalCategoryByName: Map<string, string>;
@@ -299,8 +301,11 @@ function buildResolvedMapping(
   const categoryMap = new Map<string, number | null>();
   for (const [extId, pfId] of Object.entries(mapping.categoryMap)) categoryMap.set(extId, pfId);
 
-  const accountNameById = new Map(pfAccounts.map((a) => [a.id, a.name] as const));
-  const categoryNameById = new Map(pfCategories.map((c) => [c.id, c.name] as const));
+  // Stream D Phase 3: a.name / c.name are NULL post-cutover. The display-only
+  // map values get "" — connector mapping UI surfaces a placeholder until DEK
+  // wiring lands here.
+  const accountNameById = new Map(pfAccounts.map((a) => [a.id, a.name ?? ""] as const));
+  const categoryNameById = new Map(pfCategories.map((c) => [c.id, c.name ?? ""] as const));
   const externalAccountById = new Map(
     externalAccounts.map((a) => [a.id, a] as const),
   );

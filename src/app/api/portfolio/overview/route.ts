@@ -690,7 +690,7 @@ export async function GET(request: NextRequest) {
     if (topHoldings) {
       etfDetails.push({
         symbol: h.symbol!,
-        name: h.name,
+        name: h.name ?? "",
         account: h.accountName,
         fullName: topHoldings.fullName,
         totalHoldings: topHoldings.totalHoldings,

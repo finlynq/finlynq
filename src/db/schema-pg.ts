@@ -28,7 +28,10 @@ export const accounts = pgTable("accounts", {
   userId: text("user_id").notNull(),
   type: text("type").notNull(),
   group: text("group").notNull().default(""),
-  name: text("name").notNull(),
+  // Stream D Phase 3 (2026-05-03) — plaintext NULL on every row; reads MUST
+  // go through `name_ct` + decryptName(). Column kept nullable for backward
+  // compat with the legacy schema; no writer should ever set it.
+  name: text("name"),
   currency: text("currency").notNull().default("CAD"),
   note: text("note").default(""),
   archived: boolean("archived").notNull().default(false),
@@ -40,7 +43,6 @@ export const accounts = pgTable("accounts", {
   // account that already has at least one portfolio_holdings row.
   isInvestment: boolean("is_investment").notNull().default(false),
   alias: text("alias"),
-  // Stream D (2026-04-24) — dual-write: plaintext columns stay until Phase 3 cutover.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
   aliasCt: text("alias_ct"),
@@ -52,9 +54,9 @@ export const categories = pgTable("categories", {
   userId: text("user_id").notNull(),
   type: text("type").notNull(),
   group: text("group").notNull().default(""),
-  name: text("name").notNull(),
+  // Stream D Phase 3 (2026-05-03) — plaintext NULL on every row.
+  name: text("name"),
   note: text("note").default(""),
-  // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
 });
@@ -140,12 +142,12 @@ export const portfolioHoldings = pgTable("portfolio_holdings", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
   accountId: integer("account_id").references(() => accounts.id),
-  name: text("name").notNull(),
+  // Stream D Phase 3 (2026-05-03) — plaintext NULL on every row.
+  name: text("name"),
   symbol: text("symbol"),
   currency: text("currency").notNull().default("CAD"),
   isCrypto: integer("is_crypto").default(0),
   note: text("note").default(""),
-  // Stream D (2026-04-24) — dual-write. Symbol encrypted too (VGRO.TO leaks broker + region).
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
   symbolCt: text("symbol_ct"),
@@ -212,7 +214,8 @@ export const budgets = pgTable("budgets", {
 export const loans = pgTable("loans", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
-  name: text("name").notNull(),
+  // Stream D Phase 3 (2026-05-03) — plaintext NULL on every row.
+  name: text("name"),
   type: text("type").notNull(),
   accountId: integer("account_id").references(() => accounts.id),
   currency: text("currency").notNull().default("CAD"),
@@ -241,7 +244,8 @@ export const snapshots = pgTable("snapshots", {
 export const goals = pgTable("goals", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
-  name: text("name").notNull(),
+  // Stream D Phase 3 (2026-05-03) — plaintext NULL on every row.
+  name: text("name"),
   type: text("type").notNull(),
   currency: text("currency").notNull().default("CAD"),
   targetAmount: doublePrecision("target_amount").notNull(),
@@ -330,7 +334,8 @@ export const notifications = pgTable("notifications", {
 export const subscriptions = pgTable("subscriptions", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
-  name: text("name").notNull(),
+  // Stream D Phase 3 (2026-05-03) — plaintext NULL on every row.
+  name: text("name"),
   amount: doublePrecision("amount").notNull(),
   currency: text("currency").notNull().default("CAD"),
   frequency: text("frequency").notNull().default("monthly"),

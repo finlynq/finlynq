@@ -118,7 +118,9 @@ export async function runWealthPositionReconciliation(
     rows.push({
       externalAccountId: externalId,
       finlynqAccountId: pfAccountId,
-      accountName: pfAccount.name,
+      // Stream D Phase 3: pfAccount.name is now NULL; reconciliation UI shows
+      // ciphertext placeholder when DEK is missing. Display-only field.
+      accountName: pfAccount.name ?? "",
       currency: pfAccount.currency,
       wpBalance,
       pfBalance,
