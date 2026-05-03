@@ -106,11 +106,14 @@ export async function getOrCreateCashHolding(
     .get();
   const currency = acct?.currency ?? "CAD";
 
-  const cashFirst = sql`(lower(trim(coalesce(${schema.portfolioHoldings.name}, ''))) = 'cash') desc, ${schema.portfolioHoldings.id} asc`;
+  // Stream D Phase 4 — plaintext name/symbol dropped. Match the cash sleeve
+  // by accountId + symbol_ct IS NULL + matching currency. Identify the
+  // canonical cash row via its (currency, symbol_ct IS NULL) combo. Order
+  // is now arbitrary across multiple cash candidates — pick lowest id.
   const matchCashSleeve = and(
     eq(schema.portfolioHoldings.userId, userId),
     eq(schema.portfolioHoldings.accountId, accountId),
-    sql`${schema.portfolioHoldings.symbol} IS NULL`,
+    sql`${schema.portfolioHoldings.symbolCt} IS NULL`,
     eq(schema.portfolioHoldings.currency, currency),
   );
 
@@ -118,7 +121,7 @@ export async function getOrCreateCashHolding(
     .select({ id: schema.portfolioHoldings.id })
     .from(schema.portfolioHoldings)
     .where(matchCashSleeve)
-    .orderBy(cashFirst)
+    .orderBy(schema.portfolioHoldings.id)
     .limit(1)
     .get();
   if (existing?.id != null) return existing.id;
@@ -130,8 +133,6 @@ export async function getOrCreateCashHolding(
       .values({
         userId,
         accountId,
-        name: "Cash",
-        symbol: null,
         currency,
         isCrypto: 0,
         note: "auto-created for cash sleeve",
@@ -150,7 +151,7 @@ export async function getOrCreateCashHolding(
     .select({ id: schema.portfolioHoldings.id })
     .from(schema.portfolioHoldings)
     .where(matchCashSleeve)
-    .orderBy(cashFirst)
+    .orderBy(schema.portfolioHoldings.id)
     .limit(1)
     .get();
   if (after?.id == null) {

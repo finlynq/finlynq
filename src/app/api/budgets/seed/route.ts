@@ -10,6 +10,7 @@ import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { getCategories, createCategory, upsertBudget } from "@/lib/queries";
+import { buildNameFields, decryptName, nameLookup } from "@/lib/crypto/encrypted-columns";
 
 const schema = z.object({
   categoryName: z.string().min(1),
@@ -27,16 +28,24 @@ export async function POST(request: NextRequest) {
   const { categoryName, amount, month } = parsed.data;
 
   try {
-    // Find existing category by name or create it
+    // Stream D Phase 4 — plaintext `categories.name` was dropped. Match
+    // by `name_lookup` HMAC (computed under the user's DEK) for exact-match
+    // dedup. Falls back to a per-row decrypt if no DEK (legacy rows that
+    // never backfilled — should be rare post-cutover).
     const cats = await getCategories(userId);
-    const existing = cats.find(
-      (c: any) => c.name.toLowerCase() === categoryName.toLowerCase()
-    );
+    const dek = auth.context.dek;
+    const lookupKey = dek ? nameLookup(dek, categoryName) : null;
+    const existing = cats.find((c) => {
+      if (lookupKey && c.nameLookup) return c.nameLookup === lookupKey;
+      const plain = decryptName(c.nameCt, dek, null);
+      return (plain ?? "").toLowerCase() === categoryName.toLowerCase();
+    });
 
+    const enc = buildNameFields(dek, { name: categoryName });
     const category = existing ?? await createCategory(userId, {
       type: "expense",
       group: "Personal",
-      name: categoryName,
+      ...enc,
     });
 
     if (!category) {

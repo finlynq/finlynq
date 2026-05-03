@@ -54,9 +54,13 @@ export async function POST(request: NextRequest) {
       const startDate = `${month}-01`;
       const endDate = `${month}-${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()}`;
 
-      const budgets = await db
+      // Stream D Phase 4 — plaintext categories.name dropped. Read ct +
+      // decrypt with session DEK (auth.context.dek) before formatting the
+      // notification copy. Without a DEK the category renders as "your
+      // budget" — defense-in-depth fallback so we don't leak ciphertext.
+      const rawBudgets = await db
         .select({
-          categoryName: schema.categories.name,
+          categoryNameCt: schema.categories.nameCt,
           budgetAmount: schema.budgets.amount,
           spent: sql<number>`COALESCE(ABS(SUM(CASE WHEN ${schema.transactions.date} >= ${startDate} AND ${schema.transactions.date} <= ${endDate} THEN ${schema.transactions.amount} ELSE 0 END)), 0)`,
         })
@@ -64,18 +68,20 @@ export async function POST(request: NextRequest) {
         .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
         .leftJoin(schema.transactions, eq(schema.transactions.categoryId, schema.categories.id))
         .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId)))
-        .groupBy(schema.budgets.id)
+        .groupBy(schema.budgets.id, schema.categories.nameCt)
         .all();
+      const { decryptName } = await import("@/lib/crypto/encrypted-columns");
 
-      for (const b of budgets) {
+      for (const b of rawBudgets) {
         if (b.budgetAmount > 0) {
           const pct = (b.spent / b.budgetAmount) * 100;
+          const categoryName = decryptName(b.categoryNameCt, auth.context.dek, null) ?? "your category";
           if (pct >= 100) {
             generated.push({
               userId,
               type: "budget_exceeded",
-              title: `Budget Exceeded: ${b.categoryName}`,
-              message: `You've spent $${Number(b.spent).toFixed(2)} of your $${Number(b.budgetAmount).toFixed(2)} ${b.categoryName} budget (${Math.round(pct)}%)`,
+              title: `Budget Exceeded: ${categoryName}`,
+              message: `You've spent $${Number(b.spent).toFixed(2)} of your $${Number(b.budgetAmount).toFixed(2)} ${categoryName} budget (${Math.round(pct)}%)`,
               read: 0,
               createdAt: new Date().toISOString(),
             });
@@ -83,8 +89,8 @@ export async function POST(request: NextRequest) {
             generated.push({
               userId,
               type: "budget_warning",
-              title: `Budget Warning: ${b.categoryName}`,
-              message: `You've used ${Math.round(pct)}% of your ${b.categoryName} budget ($${Number(b.spent).toFixed(2)} / $${Number(b.budgetAmount).toFixed(2)})`,
+              title: `Budget Warning: ${categoryName}`,
+              message: `You've used ${Math.round(pct)}% of your ${categoryName} budget ($${Number(b.spent).toFixed(2)} / $${Number(b.budgetAmount).toFixed(2)})`,
               read: 0,
               createdAt: new Date().toISOString(),
             });

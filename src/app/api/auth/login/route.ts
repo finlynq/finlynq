@@ -28,8 +28,10 @@ import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { deriveKEK, unwrapDEK, createWrappedDEKForPassword } from "@/lib/crypto/envelope";
 import { putDEK } from "@/lib/crypto/dek-cache";
-import { enqueueStreamDBackfill } from "@/lib/crypto/stream-d-backfill";
-import { enqueuePhase3NullIfReady } from "@/lib/crypto/stream-d-phase3-null";
+// Stream D Phase 4 (2026-05-03): plaintext display-name columns dropped.
+// `stream-d-backfill` (encrypts plaintext into ct) and
+// `stream-d-phase3-null` (NULLs plaintext after backfill) are obsolete with
+// no plaintext source; both helpers were deleted.
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
 
 // Accept either {identifier, password} (preferred) OR {email, password}
@@ -181,20 +183,13 @@ export async function POST(request: NextRequest) {
     const { token, jti } = await createSessionToken(user.id, false);
     if (dek) {
       putDEK(jti, dek, SESSION_TTL_MS);
-      // Stream D: kick off a fire-and-forget pass over any un-encrypted
-      // display names for this user. Typical user = <200 rows = a few ms.
-      // Do NOT await — login path stays fast; backfill errors are swallowed.
-      enqueueStreamDBackfill(user.id, dek);
-      // Stream D Phase 3 (per-user lazy): NULL the plaintext name columns
-      // once backfill is complete AND a sample row decrypts. Races with
-      // backfill above; the helper's blocking-row check naturally retries
-      // on the next login if backfill is still mid-flight.
-      enqueuePhase3NullIfReady(user.id, dek);
-      // Section F (issue #25) per-user lazy canonicalization: rewrites
-      // tickered / cash / currency-code holdings' names to canonical form
-      // (uppercased symbol, "Cash", "Cash <CCY>"). User-defined positions
-      // keep their free-text name. Bails silently for DEK-mismatch users
-      // — same precondition pattern as enqueuePhase3NullIfReady.
+      // Stream D Phase 4 (2026-05-03): plaintext columns are gone, so the
+      // backfill + phase-3-null helpers no longer run on login. Only the
+      // per-user lazy canonicalization remains — it now reads `name_ct` /
+      // `symbol_ct` directly and rewrites tickered / cash / currency-code
+      // holdings' names to canonical form (uppercased symbol, "Cash",
+      // "Cash <CCY>"). User-defined positions keep their free-text name.
+      // Bails silently for DEK-mismatch users — sample-decrypt precondition.
       enqueueCanonicalizePortfolioNames(user.id, dek);
     }
 

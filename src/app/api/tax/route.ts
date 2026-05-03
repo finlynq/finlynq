@@ -12,6 +12,7 @@ import {
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { safeErrorMessage } from "@/lib/validate";
+import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -20,18 +21,23 @@ export async function GET(request: NextRequest) {
   // Get contribution room records
   const contributions = await db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)).all();
 
-  // Get holdings for asset location advice
-  const holdings = await db
+  // Stream D Phase 4 — plaintext name/symbol/accountName columns dropped.
+  const rawHoldings = await db
     .select({
-      name: schema.portfolioHoldings.name,
-      symbol: schema.portfolioHoldings.symbol,
-      accountName: schema.accounts.name,
+      nameCt: schema.portfolioHoldings.nameCt,
+      symbolCt: schema.portfolioHoldings.symbolCt,
+      accountNameCt: schema.accounts.nameCt,
       accountType: schema.accounts.type,
     })
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
     .where(eq(schema.portfolioHoldings.userId, userId))
     .all();
+  const holdings = decryptNamedRows(rawHoldings, auth.context.dek, {
+    nameCt: "name",
+    symbolCt: "symbol",
+    accountNameCt: "accountName",
+  }) as Array<typeof rawHoldings[number] & { name: string | null; symbol: string | null; accountName: string | null }>;
 
   const advice = getAssetLocationAdvice(
     holdings.map((h) => ({

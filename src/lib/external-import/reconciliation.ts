@@ -115,12 +115,12 @@ export async function runWealthPositionReconciliation(
     const pfBalance = Number(sumRow?.total ?? 0);
     const diff = wpBalance - pfBalance;
 
+    // Stream D Phase 4 — plaintext name dropped; decrypt with caller's DEK.
+    const { decryptName } = await import("../crypto/encrypted-columns");
     rows.push({
       externalAccountId: externalId,
       finlynqAccountId: pfAccountId,
-      // Stream D Phase 3: pfAccount.name is now NULL; reconciliation UI shows
-      // ciphertext placeholder when DEK is missing. Display-only field.
-      accountName: pfAccount.name ?? "",
+      accountName: decryptName(pfAccount.nameCt, dek, null) ?? "",
       currency: pfAccount.currency,
       wpBalance,
       pfBalance,

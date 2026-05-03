@@ -50,14 +50,11 @@ export async function GET(request: NextRequest) {
         costBasis: schema.holdingAccounts.costBasis,
         isPrimary: schema.holdingAccounts.isPrimary,
         createdAt: schema.holdingAccounts.createdAt,
-        // Decrypt-on-read names + symbol (Stream D Phase 3 cohorts have
-        // plaintext NULL'd on disk; ciphertext is the authoritative copy).
-        holdingName: schema.portfolioHoldings.name,
+        // Stream D Phase 4 — plaintext name/symbol/accountName columns
+        // dropped; only ciphertext is selected and decrypted below.
         holdingNameCt: schema.portfolioHoldings.nameCt,
-        holdingSymbol: schema.portfolioHoldings.symbol,
         holdingSymbolCt: schema.portfolioHoldings.symbolCt,
         holdingCurrency: schema.portfolioHoldings.currency,
-        accountName: schema.accounts.name,
         accountNameCt: schema.accounts.nameCt,
         accountIsInvestment: schema.accounts.isInvestment,
       })

@@ -16,29 +16,29 @@ function monthExpr(dateCol: typeof transactions.date | typeof transactions.date)
 
 // Accounts
 //
-// Stream D: getAccounts still ORDER BY plaintext `name` — it's the fallback
-// column during the dual-write window. Once Phase 3 nulls plaintext out, the
-// route handler must sort in memory by decrypted name (the plan calls this
-// out; see src/app/api/... handlers that already paginate after decrypt).
+// Stream D Phase 4 (2026-05-03): plaintext `name`/`alias` columns dropped.
+// ORDER BY drops the name leg — sort by (type, group) only here; the route
+// handler sorts the remaining slice in memory after decrypting `name_ct`.
 export async function getAccounts(userId: string, opts?: { includeArchived?: boolean }) {
   const conditions = [eq(accounts.userId, userId)];
   if (!opts?.includeArchived) conditions.push(eq(accounts.archived, false));
-  return db.select().from(accounts).where(and(...conditions)).orderBy(accounts.type, accounts.group, accounts.name).all();
+  return db.select().from(accounts).where(and(...conditions)).orderBy(accounts.type, accounts.group).all();
 }
 
 export async function getAccountById(id: number, userId: string) {
   return db.select().from(accounts).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).get();
 }
 
-/** CRUD write payload. `nameCt`/`nameLookup`/`aliasCt`/`aliasLookup` are set by the
- * route handler via {@link buildNameFields} when a DEK is available. */
+/** CRUD write payload. Stream D Phase 4 (2026-05-03) dropped plaintext
+ * `name`/`alias` columns — callers MUST set the encrypted columns
+ * (`nameCt`/`nameLookup`/`aliasCt`/`aliasLookup`) via {@link buildNameFields}
+ * with a DEK. Without a DEK, the row is created with NULL ct/lookup and
+ * is effectively unreadable. */
 type AccountWrite = {
   type: string;
   group: string;
-  name: string;
   currency: string;
   note?: string;
-  alias?: string | null;
   isInvestment?: boolean;
   nameCt?: string | null;
   nameLookup?: string | null;
@@ -63,8 +63,11 @@ export async function deleteAccount(id: number, userId: string) {
 }
 
 // Categories
+//
+// Stream D Phase 4 (2026-05-03): plaintext `name` column dropped. ORDER BY
+// drops the name leg — route handler sorts remaining slice after decrypt.
 export async function getCategories(userId: string) {
-  return db.select().from(categories).where(eq(categories.userId, userId)).orderBy(categories.type, categories.group, categories.name).all();
+  return db.select().from(categories).where(eq(categories.userId, userId)).orderBy(categories.type, categories.group).all();
 }
 
 export async function getCategoryById(id: number, userId: string) {
@@ -74,8 +77,9 @@ export async function getCategoryById(id: number, userId: string) {
 type CategoryWrite = {
   type: string;
   group: string;
-  name: string;
   note?: string;
+  // Stream D Phase 4 — caller supplies encrypted name fields via
+  // buildNameFields() with a DEK.
   nameCt?: string | null;
   nameLookup?: string | null;
 };
@@ -227,22 +231,15 @@ export async function getTransactions(userId: string, filters?: TxSortFilter) {
       id: transactions.id,
       date: transactions.date,
       accountId: transactions.accountId,
-      accountName: accounts.name,
-      // Stream D Phase 3 cutover NULLs `accounts.name` once a user is fully
-      // backfilled — pull the ciphertext alongside so the route handler can
-      // decrypt with the session DEK and fall back to plaintext for un-
-      // backfilled / DEK-mismatch users (decryptName ladder).
+      // Stream D Phase 4 (2026-05-03) — plaintext `accounts.name` /
+      // `categories.name` / `portfolio_holdings.name` /
+      // `portfolio_holdings.symbol` / `accounts.alias` columns dropped. Only
+      // the ciphertext is selected here; the route handler decrypts with
+      // the session DEK before serializing.
       accountNameCt: accounts.nameCt,
-      // Plaintext alias + type so the UI can build a context-rich label
-      // (e.g. "Credit Card · 609") for accounts whose name is terse/numeric.
-      accountAlias: accounts.alias,
       accountAliasCt: accounts.aliasCt,
       accountType: accounts.type,
       categoryId: transactions.categoryId,
-      categoryName: categories.name,
-      // Same Phase-3 NULL story applies to categories — without nameCt the
-      // /transactions page and the Reports endpoints render an empty
-      // Category column for every backfilled user.
       categoryNameCt: categories.nameCt,
       categoryType: categories.type,
       currency: transactions.currency,
@@ -258,9 +255,7 @@ export async function getTransactions(userId: string, filters?: TxSortFilter) {
       // Phase 5 + 6 (2026-04-29) retired the legacy text column on
       // transactions; the FK is now the sole source of truth.
       portfolioHoldingId: transactions.portfolioHoldingId,
-      portfolioHoldingName: portfolioHoldings.name,
       portfolioHoldingNameCt: portfolioHoldings.nameCt,
-      portfolioHoldingSymbol: portfolioHoldings.symbol,
       portfolioHoldingSymbolCt: portfolioHoldings.symbolCt,
       note: transactions.note,
       payee: transactions.payee,
@@ -458,11 +453,8 @@ export async function getPortfolioHoldings(userId: string) {
     .select({
       id: portfolioHoldings.id,
       accountId: portfolioHoldings.accountId,
-      accountName: accounts.name,
       accountNameCt: accounts.nameCt,
-      name: portfolioHoldings.name,
       nameCt: portfolioHoldings.nameCt,
-      symbol: portfolioHoldings.symbol,
       symbolCt: portfolioHoldings.symbolCt,
       currency: portfolioHoldings.currency,
       // isCrypto is needed by /settings/investments and the holding-edit
@@ -501,7 +493,9 @@ export async function getBudgets(userId: string, month?: string) {
     .select({
       id: budgets.id,
       categoryId: budgets.categoryId,
-      categoryName: categories.name,
+      // Stream D Phase 4 — plaintext `categories.name` dropped. Caller
+      // decrypts `categoryNameCt` with session DEK; sorts in memory.
+      categoryNameCt: categories.nameCt,
       categoryGroup: categories.group,
       month: budgets.month,
       amount: budgets.amount,
@@ -510,7 +504,7 @@ export async function getBudgets(userId: string, month?: string) {
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .where(and(...conditions))
-    .orderBy(categories.group, categories.name)
+    .orderBy(categories.group)
     .all();
 }
 
@@ -540,7 +534,8 @@ export async function getBudgetTemplates(userId: string) {
       id: budgetTemplates.id,
       name: budgetTemplates.name,
       categoryId: budgetTemplates.categoryId,
-      categoryName: categories.name,
+      // Stream D Phase 4 — plaintext `categories.name` dropped.
+      categoryNameCt: categories.nameCt,
       categoryGroup: categories.group,
       amount: budgetTemplates.amount,
       createdAt: budgetTemplates.createdAt,
@@ -590,7 +585,8 @@ export async function getBudgetRollover(userId: string, currentMonth: string) {
       const overspend = spent - b.amount;
       return {
         categoryId: b.categoryId,
-        categoryName: b.categoryName,
+        // Stream D Phase 4 — caller decrypts categoryNameCt for display.
+        categoryNameCt: b.categoryNameCt,
         budgetAmount: b.amount,
         spent,
         rolloverAmount: overspend > 0 ? overspend : 0,
@@ -601,26 +597,22 @@ export async function getBudgetRollover(userId: string, currentMonth: string) {
 
 // Dashboard aggregations
 //
-// Stream D: GROUP BY `accounts.name` + `alias` works only while plaintext
-// columns are still populated (Phase 1 + 2). Post-Phase 3 this will need to
-// GROUP BY accounts.id only and pull encrypted names via a separate lookup.
-// Until then, we keep plaintext in the GROUP BY so result shape is unchanged.
-// The returned rows carry both plaintext and *_ct columns so callers can
-// pass them through decryptNamedRows().
+// Stream D Phase 4 (2026-05-03): plaintext `accounts.name`/`alias` dropped.
+// GROUP BY drops the name leg; result rows carry only `*_ct` columns and
+// callers decrypt via the route handler. ORDER BY drops name as well —
+// route sorts in memory after decrypt.
 export async function getAccountBalances(userId: string, opts?: { includeArchived?: boolean }) {
   const conditions = [eq(accounts.userId, userId)];
   if (!opts?.includeArchived) conditions.push(eq(accounts.archived, false));
   return db
     .select({
       accountId: accounts.id,
-      accountName: accounts.name,
       accountNameCt: accounts.nameCt,
       accountType: accounts.type,
       accountGroup: accounts.group,
       currency: accounts.currency,
       archived: accounts.archived,
       isInvestment: accounts.isInvestment,
-      alias: accounts.alias,
       aliasCt: accounts.aliasCt,
       balance: sql<number>`COALESCE(SUM(${transactions.amount}), 0)`,
     })
@@ -629,42 +621,43 @@ export async function getAccountBalances(userId: string, opts?: { includeArchive
     .where(and(...conditions))
     .groupBy(
       accounts.id,
-      accounts.name,
       accounts.nameCt,
       accounts.type,
       accounts.group,
       accounts.currency,
       accounts.archived,
       accounts.isInvestment,
-      accounts.alias,
       accounts.aliasCt,
     )
-    .orderBy(accounts.type, accounts.group, accounts.name)
+    .orderBy(accounts.type, accounts.group)
     .all();
 }
 
 export async function getMonthlySpending(userId: string, startDate: string, endDate: string) {
+  // Stream D Phase 4 — plaintext `categories.name` dropped. GROUP BY drops
+  // the name leg; rows carry `categoryNameCt` for caller-side decryption.
   return db
     .select({
       month: monthExpr(transactions.date),
       categoryGroup: categories.group,
-      categoryName: categories.name,
+      categoryNameCt: categories.nameCt,
       categoryType: categories.type,
       total: sql<number>`SUM(${transactions.amount})`,
     })
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(and(eq(transactions.userId, userId), gte(transactions.date, startDate), lte(transactions.date, endDate)))
-    .groupBy(monthExpr(transactions.date), categories.name, categories.group, categories.type)
+    .groupBy(monthExpr(transactions.date), categories.nameCt, categories.group, categories.type)
     .orderBy(monthExpr(transactions.date))
     .all();
 }
 
 export async function getSpendingByCategory(userId: string, startDate: string, endDate: string) {
+  // Stream D Phase 4 — plaintext `categories.name` dropped.
   return db
     .select({
       categoryId: categories.id,
-      categoryName: categories.name,
+      categoryNameCt: categories.nameCt,
       categoryGroup: categories.group,
       categoryType: categories.type,
       total: sql<number>`SUM(${transactions.amount})`,
@@ -679,16 +672,17 @@ export async function getSpendingByCategory(userId: string, startDate: string, e
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, categories.name, categories.group, categories.type)
+    .groupBy(categories.id, categories.nameCt, categories.group, categories.type)
     .orderBy(sql`SUM(${transactions.amount})`)
     .all();
 }
 
 export async function getSpendingByCategoryAndCurrency(userId: string, startDate: string, endDate: string) {
+  // Stream D Phase 4 — plaintext `categories.name` dropped.
   return db
     .select({
       categoryId: categories.id,
-      categoryName: categories.name,
+      categoryNameCt: categories.nameCt,
       categoryGroup: categories.group,
       categoryType: categories.type,
       currency: transactions.currency,
@@ -704,7 +698,7 @@ export async function getSpendingByCategoryAndCurrency(userId: string, startDate
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, categories.name, categories.group, categories.type, transactions.currency)
+    .groupBy(categories.id, categories.nameCt, categories.group, categories.type, transactions.currency)
     .orderBy(sql`SUM(${transactions.amount})`)
     .all();
 }

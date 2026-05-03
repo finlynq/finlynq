@@ -88,15 +88,9 @@ async function buildLookups(userId: string, dek?: Buffer) {
   const accountMap = new Map<string, number>();
   const accountCurrencyMap = new Map<string, string>();
   for (const a of allAccounts) {
-    // tryDecryptField returns null on auth-tag failure (DEK mismatch). The
-    // `?? a.name` falls back to the plaintext column so the account map keys
-    // on a real name like "Mortage" rather than the unmatchable "v1:..." ct.
-    const plainName = a.nameCt && dek
-      ? (tryDecryptField(dek, a.nameCt, "accounts.name_ct") ?? a.name)
-      : a.name;
-    const plainAlias = a.aliasCt && dek
-      ? (tryDecryptField(dek, a.aliasCt, "accounts.alias_ct") ?? a.alias)
-      : a.alias;
+    // Stream D Phase 4 — plaintext name/alias dropped; ciphertext only.
+    const plainName = a.nameCt && dek ? tryDecryptField(dek, a.nameCt, "accounts.name_ct") : null;
+    const plainAlias = a.aliasCt && dek ? tryDecryptField(dek, a.aliasCt, "accounts.alias_ct") : null;
     if (plainName) {
       const nameKey = plainName.toLowerCase().trim();
       accountMap.set(nameKey, a.id);
@@ -117,9 +111,7 @@ async function buildLookups(userId: string, dek?: Buffer) {
     .all();
   const categoryMap = new Map<string, number>();
   for (const c of allCategories) {
-    const plainName = c.nameCt && dek
-      ? (tryDecryptField(dek, c.nameCt, "categories.name_ct") ?? c.name)
-      : c.name;
+    const plainName = c.nameCt && dek ? tryDecryptField(dek, c.nameCt, "categories.name_ct") : null;
     if (plainName) categoryMap.set(plainName, c.id);
   }
   return { accountMap, accountCurrencyMap, categoryMap };

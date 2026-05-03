@@ -18,18 +18,20 @@ export async function POST(request: NextRequest) {
     const text = await file.text();
     let result;
 
+    // Stream D Phase 4 — pass DEK so importers can encrypt + dedup via lookup.
+    const { dek } = auth.context;
     switch (fileType) {
       case "accounts":
-        result = await importAccounts(text, userId);
+        result = await importAccounts(text, userId, dek);
         break;
       case "categories":
-        result = await importCategories(text, userId);
+        result = await importCategories(text, userId, dek);
         break;
       case "portfolio":
-        result = await importPortfolio(text, userId);
+        result = await importPortfolio(text, userId, dek);
         break;
       case "transactions":
-        result = await importTransactions(text, userId);
+        result = await importTransactions(text, userId, dek);
         break;
       default:
         return NextResponse.json({ error: "Invalid type" }, { status: 400 });

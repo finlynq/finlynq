@@ -79,8 +79,10 @@ export async function POST(request: NextRequest) {
     // doesn't carry one (OFX single-account, CSV without an Account column).
     let defaultAccountName: string | null = null;
     if (accountId !== null) {
+      // Stream D Phase 4 — plaintext name dropped; decrypt name_ct.
+      const { decryptName } = await import("@/lib/crypto/encrypted-columns");
       const acct = await db
-        .select({ id: schema.accounts.id, name: schema.accounts.name })
+        .select({ id: schema.accounts.id, nameCt: schema.accounts.nameCt })
         .from(schema.accounts)
         .where(
           and(
@@ -95,7 +97,7 @@ export async function POST(request: NextRequest) {
           { status: 404 },
         );
       }
-      defaultAccountName = acct.name ?? "";
+      defaultAccountName = decryptName(acct.nameCt, auth.dek, null) ?? "";
     }
 
     const ext = file.name.split(".").pop()?.toLowerCase();

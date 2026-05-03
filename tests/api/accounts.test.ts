@@ -34,16 +34,25 @@ describe("API /api/accounts", () => {
     });
 
     it("returns list of accounts", async () => {
+      // Stream D Phase 4 — plaintext name dropped; route returns rows as-is
+      // and decryptNamedRows overwrites `name`/`alias` based on `*_ct` only
+      // when present. Without nameCt the decrypted name is null. Test data
+      // has no ct so we just assert the shape comes through (with name set
+      // to null by the decrypt path).
       const accounts = [
-        { id: 1, type: "A", group: "Banking", name: "Checking", currency: "CAD", note: "" },
-        { id: 2, type: "L", group: "Credit", name: "Visa", currency: "CAD", note: "" },
+        { id: 1, type: "A", group: "Banking", currency: "CAD", note: "", nameCt: null, aliasCt: null },
+        { id: 2, type: "L", group: "Credit", currency: "CAD", note: "", nameCt: null, aliasCt: null },
       ];
       mockGetAccounts.mockReturnValue(accounts);
       const req = createMockRequest("http://localhost:3000/api/accounts");
       const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
-      expect(data).toEqual(accounts);
+      expect(Array.isArray(data)).toBe(true);
+      const arr = data as Array<Record<string, unknown>>;
+      expect(arr).toHaveLength(2);
+      expect(arr[0]).toMatchObject({ id: 1, type: "A", group: "Banking", currency: "CAD" });
+      expect(arr[1]).toMatchObject({ id: 2, type: "L", group: "Credit", currency: "CAD" });
     });
 
     it("returns empty array when no accounts exist", async () => {
@@ -58,7 +67,11 @@ describe("API /api/accounts", () => {
 
   describe("POST", () => {
     it("creates a new account with valid data", async () => {
-      const newAccount = { id: 3, type: "A", group: "Banking", name: "Savings", currency: "CAD" };
+      // Stream D Phase 4 — plaintext name dropped; route handler no longer
+      // forwards `name` to createAccount, only the type/group/currency. The
+      // encrypted name siblings come from buildNameFields(); without a DEK
+      // mock those land as empty so we don't assert on them here.
+      const newAccount = { id: 3, type: "A", group: "Banking", currency: "CAD" };
       mockCreateAccount.mockReturnValue(newAccount);
       const req = createMockRequest("http://localhost:3000/api/accounts", {
         method: "POST",
@@ -68,9 +81,10 @@ describe("API /api/accounts", () => {
       const { status, data } = await parseResponse(res);
       expect(status).toBe(201);
       expect(data).toEqual(newAccount);
-      expect(mockCreateAccount).toHaveBeenCalledWith("default", {
-        name: "Savings", type: "A", group: "Banking", currency: "CAD",
-      });
+      expect(mockCreateAccount).toHaveBeenCalledWith(
+        "default",
+        expect.objectContaining({ type: "A", group: "Banking", currency: "CAD" }),
+      );
     });
 
     it("returns 400 for missing required fields", async () => {

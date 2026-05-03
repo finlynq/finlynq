@@ -1,22 +1,49 @@
 /**
- * GET /api/admin/stream-d-progress — Report how many rows still have NULL
- * `*_ct` columns across the Stream D tables. Admin-only.
+ * GET /api/admin/stream-d-progress — Stream D backfill / null progress.
  *
- * Zero across every table means Phase 3 (drop plaintext + swap unique index)
- * is safe to run. Until then, any user who hasn't logged in since the
- * Stream D deploy still has un-encrypted names — backfill happens lazily on
- * their next login (see src/lib/crypto/stream-d-backfill.ts).
+ * Stream D Phase 4 (2026-05-03) physically dropped the plaintext columns,
+ * so backfill (encrypt plaintext into `name_ct`) is no longer meaningful —
+ * there is no plaintext source to read from. This endpoint now reports the
+ * post-cutover state: how many rows are missing `name_ct` (which post-cutover
+ * means a stdio-MCP-write-style row that bypassed encryption — should be 0
+ * because stdio MCP create-paths now refuse those writes).
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/require-admin";
-import { streamDProgress } from "@/lib/crypto/stream-d-backfill";
+import { db, schema } from "@/db";
+import { isNull, sql } from "drizzle-orm";
+
+const TABLES = [
+  { name: "accounts", t: schema.accounts, ct: schema.accounts.nameCt },
+  { name: "categories", t: schema.categories, ct: schema.categories.nameCt },
+  { name: "goals", t: schema.goals, ct: schema.goals.nameCt },
+  { name: "loans", t: schema.loans, ct: schema.loans.nameCt },
+  { name: "subscriptions", t: schema.subscriptions, ct: schema.subscriptions.nameCt },
+  { name: "portfolio_holdings", t: schema.portfolioHoldings, ct: schema.portfolioHoldings.nameCt },
+] as const;
 
 export async function GET(request: NextRequest) {
   const auth = await requireAdmin(request);
   if (!auth.authenticated) return auth.response;
 
-  const rows = await streamDProgress();
+  const rows: { table: string; remaining: number; total: number }[] = [];
+  for (const { name, t, ct } of TABLES) {
+    const totalRow = await db
+      .select({ c: sql<number>`count(*)::int` })
+      .from(t)
+      .get();
+    const remRow = await db
+      .select({ c: sql<number>`count(*)::int` })
+      .from(t)
+      .where(isNull(ct))
+      .get();
+    rows.push({
+      table: name,
+      total: totalRow?.c ?? 0,
+      remaining: remRow?.c ?? 0,
+    });
+  }
   const remaining = rows.reduce((s, r) => s + r.remaining, 0);
   return NextResponse.json({
     complete: remaining === 0,

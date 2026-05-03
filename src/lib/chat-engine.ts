@@ -5,6 +5,7 @@ import { db, schema } from "@/db";
 import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { decryptField } from "@/lib/crypto/envelope";
+import { decryptName, nameLookup } from "@/lib/crypto/encrypted-columns";
 
 export type ChatResponse = {
   text: string;
@@ -75,23 +76,30 @@ function parseDateRange(msg: string): { start: string; end: string; label: strin
   return { start: startOfMonth(0), end: endOfMonth(0), label: monthLabel(0) };
 }
 
-async function findCategoryName(msg: string): Promise<string | null> {
-  const cats = await db.select({ name: schema.categories.name }).from(schema.categories).all();
+async function findCategoryName(msg: string, dek: Buffer | null): Promise<string | null> {
+  // Stream D Phase 4 — decrypt name_ct on the fly. Returns null when no DEK
+  // (chat features degrade to "I couldn't find that").
+  const cats = await db.select({ nameCt: schema.categories.nameCt }).from(schema.categories).all();
+  const decrypted = cats
+    .map((c) => decryptName(c.nameCt, dek, null))
+    .filter((n): n is string => Boolean(n));
   const lower = msg.toLowerCase();
-  // Match longest category name first to avoid partial matches
-  const sorted = cats.sort((a, b) => String(b.name).length - String(a.name).length);
-  for (const c of sorted) {
-    if (lower.includes(String(c.name).toLowerCase())) return String(c.name);
+  const sorted = decrypted.sort((a, b) => b.length - a.length);
+  for (const name of sorted) {
+    if (lower.includes(name.toLowerCase())) return name;
   }
   return null;
 }
 
-async function findAccountName(msg: string): Promise<string | null> {
-  const accs = await db.select({ name: schema.accounts.name }).from(schema.accounts).all();
+async function findAccountName(msg: string, dek: Buffer | null): Promise<string | null> {
+  const accs = await db.select({ nameCt: schema.accounts.nameCt }).from(schema.accounts).all();
+  const decrypted = accs
+    .map((a) => decryptName(a.nameCt, dek, null))
+    .filter((n): n is string => Boolean(n));
   const lower = msg.toLowerCase();
-  const sorted = accs.sort((a, b) => String(b.name).length - String(a.name).length);
-  for (const a of sorted) {
-    if (lower.includes(String(a.name).toLowerCase())) return String(a.name);
+  const sorted = decrypted.sort((a, b) => b.length - a.length);
+  for (const name of sorted) {
+    if (lower.includes(name.toLowerCase())) return name;
   }
   return null;
 }
@@ -101,10 +109,11 @@ async function findAccountName(msg: string): Promise<string | null> {
 type IntentCtx = { dek: Buffer | null };
 type IntentHandler = (msg: string, ctx: IntentCtx) => Promise<ChatResponse | null>;
 
-const handleNetWorth: IntentHandler = async () => {
+const handleNetWorth: IntentHandler = async (_msg, ctx) => {
+  // Stream D Phase 4 — plaintext name dropped; ciphertext only.
   const balances = await db
     .select({
-      accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
       accountType: schema.accounts.type,
       accountGroup: schema.accounts.group,
       currency: schema.accounts.currency,
@@ -112,7 +121,7 @@ const handleNetWorth: IntentHandler = async () => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .groupBy(schema.accounts.id, schema.accounts.name, schema.accounts.type, schema.accounts.group, schema.accounts.currency)
+    .groupBy(schema.accounts.id, schema.accounts.nameCt, schema.accounts.type, schema.accounts.group, schema.accounts.currency)
     .orderBy(schema.accounts.type, schema.accounts.group)
     .all();
 
@@ -127,7 +136,7 @@ const handleNetWorth: IntentHandler = async () => {
   const chartData = balances
     .filter((b) => Math.abs(b.balance) > 0)
     .map((b) => ({
-      name: b.accountName,
+      name: decryptName(b.accountNameCt, ctx.dek, null) ?? "Account",
       value: Math.round(Math.abs(b.balance) * 100) / 100,
       type: b.accountType === "A" ? "Asset" : "Liability",
     }));
@@ -139,13 +148,16 @@ const handleNetWorth: IntentHandler = async () => {
   };
 };
 
-const handleSpending: IntentHandler = async (msg) => {
+const handleSpending: IntentHandler = async (msg, ctx) => {
   const range = parseDateRange(msg);
-  const categoryName = await findCategoryName(msg);
+  const categoryName = await findCategoryName(msg, ctx.dek);
 
   if (categoryName) {
-    // Spending on a specific category
-    const cat = await db.select().from(schema.categories).where(eq(schema.categories.name, categoryName)).get();
+    // Stream D Phase 4 — match by name_lookup HMAC.
+    const lookup = ctx.dek ? nameLookup(ctx.dek, categoryName) : null;
+    const cat = lookup
+      ? await db.select().from(schema.categories).where(eq(schema.categories.nameLookup, lookup)).get()
+      : null;
     if (!cat) return { text: `I couldn't find a category named "${categoryName}".` };
 
     const result = await db
@@ -166,10 +178,10 @@ const handleSpending: IntentHandler = async (msg) => {
     };
   }
 
-  // Overall spending by category
-  const spending = await db
+  // Overall spending by category (Stream D Phase 4: ciphertext only)
+  const rawSpending = await db
     .select({
-      categoryName: schema.categories.name,
+      categoryNameCt: schema.categories.nameCt,
       total: sql<number>`SUM(${schema.transactions.amount})`,
     })
     .from(schema.transactions)
@@ -181,13 +193,17 @@ const handleSpending: IntentHandler = async (msg) => {
         lte(schema.transactions.date, range.end)
       )
     )
-    .groupBy(schema.categories.id, schema.categories.name)
+    .groupBy(schema.categories.id, schema.categories.nameCt)
     .orderBy(sql`SUM(${schema.transactions.amount}) ASC`)
     .all();
+  const spending = rawSpending.map((s) => ({
+    categoryName: decryptName(s.categoryNameCt, ctx.dek, null) ?? "Uncategorized",
+    total: s.total,
+  }));
 
   const total = spending.reduce((s, c) => s + Math.abs(c.total), 0);
   const chartData = spending.map((c) => ({
-    name: c.categoryName ?? "Uncategorized",
+    name: c.categoryName,
     value: Math.round(Math.abs(c.total) * 100) / 100,
   }));
 
@@ -202,11 +218,15 @@ const handleSpending: IntentHandler = async (msg) => {
   };
 };
 
-const handleBalance: IntentHandler = async (msg) => {
-  const accountName = await findAccountName(msg);
+const handleBalance: IntentHandler = async (msg, ctx) => {
+  const accountName = await findAccountName(msg, ctx.dek);
 
   if (accountName) {
-    const acc = await db.select().from(schema.accounts).where(eq(schema.accounts.name, accountName)).get();
+    // Stream D Phase 4 — match by name_lookup HMAC.
+    const lookup = ctx.dek ? nameLookup(ctx.dek, accountName) : null;
+    const acc = lookup
+      ? await db.select().from(schema.accounts).where(eq(schema.accounts.nameLookup, lookup)).get()
+      : null;
     if (!acc) return { text: `I couldn't find an account named "${accountName}".` };
 
     const result = await db
@@ -220,19 +240,25 @@ const handleBalance: IntentHandler = async (msg) => {
     };
   }
 
-  // All account balances
-  const balances = await db
+  // All account balances (Stream D Phase 4: ciphertext only)
+  const rawBalances = await db
     .select({
-      accountName: schema.accounts.name,
+      accountNameCt: schema.accounts.nameCt,
       accountType: schema.accounts.type,
       currency: schema.accounts.currency,
       balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .groupBy(schema.accounts.id, schema.accounts.name, schema.accounts.type, schema.accounts.currency)
-    .orderBy(schema.accounts.type, schema.accounts.name)
+    .groupBy(schema.accounts.id, schema.accounts.nameCt, schema.accounts.type, schema.accounts.currency)
+    .orderBy(schema.accounts.type)
     .all();
+  const balances = rawBalances.map((b) => ({
+    accountName: decryptName(b.accountNameCt, ctx.dek, null) ?? "Account",
+    accountType: b.accountType,
+    currency: b.currency,
+    balance: b.balance,
+  }));
 
   const lines = balances
     .filter((b) => Math.abs(b.balance) > 0.01)
@@ -252,20 +278,26 @@ const handleBalance: IntentHandler = async (msg) => {
   };
 };
 
-const handleBudget: IntentHandler = async (msg) => {
+const handleBudget: IntentHandler = async (msg, ctx) => {
   const month = getCurrentMonth();
-  const categoryName = await findCategoryName(msg);
+  const categoryName = await findCategoryName(msg, ctx.dek);
 
-  const budgetRows = await db
+  // Stream D Phase 4 — ciphertext only.
+  const rawBudgetRows = await db
     .select({
       categoryId: schema.budgets.categoryId,
-      categoryName: schema.categories.name,
+      categoryNameCt: schema.categories.nameCt,
       budgeted: schema.budgets.amount,
     })
     .from(schema.budgets)
     .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
     .where(eq(schema.budgets.month, month))
     .all();
+  const budgetRows = rawBudgetRows.map((b) => ({
+    categoryId: b.categoryId,
+    categoryName: decryptName(b.categoryNameCt, ctx.dek, null),
+    budgeted: b.budgeted,
+  }));
 
   if (budgetRows.length === 0) {
     return { text: `You don't have any budgets set for ${getMonthLabel(month)}.` };
@@ -345,12 +377,13 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
   // "largest expense" / "biggest purchase"
   if (lower.includes("largest") || lower.includes("biggest") || lower.includes("most expensive")) {
     const range = parseDateRange(msg);
-    const result = await db
+    // Stream D Phase 4 — ciphertext only.
+    const rawResult = await db
       .select({
         date: schema.transactions.date,
         payee: schema.transactions.payee,
         amount: schema.transactions.amount,
-        categoryName: schema.categories.name,
+        categoryNameCt: schema.categories.nameCt,
       })
       .from(schema.transactions)
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
@@ -364,6 +397,10 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
       .orderBy(asc(schema.transactions.amount))
       .limit(5)
       .all();
+    const result = rawResult.map((r) => ({
+      ...r,
+      categoryName: decryptName(r.categoryNameCt, ctx.dek, null),
+    }));
 
     if (result.length === 0) return { text: `No expenses found during ${range.label}.` };
 
@@ -402,14 +439,15 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
   // window and filter in memory after decryption when a DEK is present.
   const wideFetch = !!(searchTerm && ctx.dek);
 
-  const txns = await db
+  // Stream D Phase 4 — ciphertext only.
+  const rawTxns = await db
     .select({
       date: schema.transactions.date,
       payee: schema.transactions.payee,
       note: schema.transactions.note,
       amount: schema.transactions.amount,
-      categoryName: schema.categories.name,
-      accountName: schema.accounts.name,
+      categoryNameCt: schema.categories.nameCt,
+      accountNameCt: schema.accounts.nameCt,
     })
     .from(schema.transactions)
     .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
@@ -419,10 +457,12 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
     .limit(wideFetch ? 500 : 10)
     .all();
 
-  let decrypted = txns.map((t) => ({
+  let decrypted = rawTxns.map((t) => ({
     ...t,
     payee: safeDecrypt(ctx.dek, t.payee),
     note: safeDecrypt(ctx.dek, t.note),
+    categoryName: decryptName(t.categoryNameCt, ctx.dek, null),
+    accountName: decryptName(t.accountNameCt, ctx.dek, null),
   }));
 
   if (searchTerm) {
@@ -509,11 +549,12 @@ const handleTrends: IntentHandler = async (msg) => {
   };
 };
 
-const handleGoals: IntentHandler = async (msg) => {
-  const goals = await db
+const handleGoals: IntentHandler = async (_msg, ctx) => {
+  // Stream D Phase 4 — ciphertext only.
+  const rawGoals = await db
     .select({
       id: schema.goals.id,
-      name: schema.goals.name,
+      nameCt: schema.goals.nameCt,
       type: schema.goals.type,
       targetAmount: schema.goals.targetAmount,
       accountId: schema.goals.accountId,
@@ -523,6 +564,10 @@ const handleGoals: IntentHandler = async (msg) => {
     .from(schema.goals)
     .where(eq(schema.goals.status, "active"))
     .all();
+  const goals = rawGoals.map((g) => ({
+    ...g,
+    name: decryptName(g.nameCt, ctx.dek, null) ?? "Goal",
+  }));
 
   if (goals.length === 0) {
     return { text: "You don't have any active goals. Head to the Goals page to create one!" };

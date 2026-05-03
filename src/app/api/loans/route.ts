@@ -47,14 +47,13 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   const { userId } = auth.context;
+  // Stream D Phase 4 — plaintext name/accountName dropped.
   const rawLoans = await db
     .select({
       id: schema.loans.id,
-      name: schema.loans.name,
       nameCt: schema.loans.nameCt,
       type: schema.loans.type,
       accountId: schema.loans.accountId,
-      accountName: schema.accounts.name,
       accountNameCt: schema.accounts.nameCt,
       currency: schema.loans.currency,
       principal: schema.loans.principal,
@@ -138,9 +137,9 @@ export async function POST(request: NextRequest) {
     if (parsed.error) return parsed.error;
     const d = parsed.data;
     const enc = buildNameFields(auth.context.dek, { name: d.name });
+    // Stream D Phase 4 — plaintext name dropped.
     const loan = await db.insert(schema.loans).values({
       userId: auth.context.userId,
-      name: d.name,
       type: d.type,
       accountId: d.accountId || null,
       ...(d.currency ? { currency: d.currency.toUpperCase() } : {}),
@@ -169,9 +168,9 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, updateLoanSchema);
     if (parsed.error) return parsed.error;
-    const { id, ...data } = parsed.data;
+    const { id, name, ...data } = parsed.data;
     const toEncrypt: Record<string, string | null | undefined> = {};
-    if ("name" in data && data.name !== undefined) toEncrypt.name = data.name;
+    if (name !== undefined) toEncrypt.name = name;
     const enc = buildNameFields(auth.context.dek, toEncrypt);
     if (data.currency) data.currency = data.currency.toUpperCase();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

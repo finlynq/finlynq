@@ -6,6 +6,7 @@ import type { ExternalTransaction } from "@finlynq/import-connectors";
 import { loadConnectorCredentials } from "@/lib/external-import/credentials";
 import { getAccounts, getCategories } from "@/lib/queries";
 import { loadConnectorMapping } from "@/lib/external-import/mapping";
+import { decryptName } from "@/lib/crypto/encrypted-columns";
 
 const CONNECTOR_ID = "wealthposition";
 
@@ -65,17 +66,18 @@ export async function GET(request: NextRequest) {
       categories: wpCategories,
       sampleTransactions: samplePage,
     },
+    // Stream D Phase 4 — plaintext name dropped; decrypt for the mapping UI.
     finlynq: {
       accounts: pfAccounts.map((a) => ({
         id: a.id,
-        name: a.name,
+        name: decryptName(a.nameCt, dek, null),
         type: a.type,
         currency: a.currency,
         group: a.group,
       })),
       categories: pfCategories.map((c) => ({
         id: c.id,
-        name: c.name,
+        name: decryptName(c.nameCt, dek, null),
         type: c.type,
         group: c.group,
       })),

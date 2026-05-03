@@ -10,8 +10,9 @@
  * Why per-user (not pure SQL):
  *   - Stream D's `name_lookup` is HMAC-derived from the user's DEK, so the
  *     canonical name's lookup must be computed inside the user's session.
- *   - Stream D Phase 3 NULL'd the plaintext `name`/`symbol` on disk; reading
- *     either requires decrypting `name_ct`/`symbol_ct` first.
+ *   - Stream D Phase 4 (2026-05-03) physically DROPPED the plaintext
+ *     `name`/`symbol` columns; reading either requires decrypting
+ *     `name_ct`/`symbol_ct` first.
  *
  * Why this is safe to re-run:
  *   - Step 1 short-circuits via `users.portfolio_names_canonicalized_at`.
@@ -19,9 +20,10 @@
  *     after an admin reset of the flag produces the same canonical names.
  *
  * DEK-mismatch users (pathfinder cohort per CLAUDE.md "Known open issue:
- * pathfinder DEK mismatch") bail silently at the sample-decrypt precondition,
- * mirroring `nullPlaintextIfReady`. Their plaintext fallback keeps the page
- * functional; canonicalization is defense-in-depth and skipping it is safe.
+ * pathfinder DEK mismatch") bail silently at the sample-decrypt precondition.
+ * Post-Phase-4 there is no plaintext fallback — their rows render "—" until
+ * the DEK mismatch is resolved; canonicalization is defense-in-depth and
+ * skipping it is safe.
  *
  * Fire-and-forget on the login path — never blocks login, never throws to
  * caller. Failure modes log a single warn line and return without touching
@@ -105,10 +107,8 @@ function classify(
  * summary so callers can log or surface to admin tools.
  *
  * Operates inside one transaction so a partial failure rolls back. Each
- * row's UPDATE dual-writes name + name_ct + name_lookup per CLAUDE.md
- * "`accounts.name`-style writes must dual-write" (raw SQL because schema-pg
- * still marks `name` as `.notNull()`; the DB-level NOT NULL was already
- * relaxed by the Phase 3 prep migration).
+ * row's UPDATE writes name_ct + name_lookup (via buildNameFields). Phase 4
+ * dropped the plaintext name column; only ciphertext + lookup hash remain.
  */
 export async function canonicalizePortfolioNamesIfReady(
   userId: string,
@@ -122,16 +122,12 @@ export async function canonicalizePortfolioNamesIfReady(
     return { canonicalized: false, reason: "already-done" };
   }
 
-  // Step 2: load every holding for this user. Includes both Stream D Phase 3
-  // NULL'd rows (plaintext NULL, name_ct populated) and legacy rows
-  // (plaintext populated, name_ct NULL). The decryptName helper handles
-  // both branches via its plaintext fallback.
+  // Step 2: load every holding for this user. Phase 4 dropped the plaintext
+  // columns — we read ciphertext only and decrypt to feed the classifier.
   const rows = await db
     .select({
       id: schema.portfolioHoldings.id,
-      name: schema.portfolioHoldings.name,
       nameCt: schema.portfolioHoldings.nameCt,
-      symbol: schema.portfolioHoldings.symbol,
       symbolCt: schema.portfolioHoldings.symbolCt,
     })
     .from(schema.portfolioHoldings)
@@ -147,12 +143,10 @@ export async function canonicalizePortfolioNamesIfReady(
   }
 
   // Step 3: sample-decrypt precondition. Pick the first row whose name_ct
-  // is populated and verify decryptField succeeds — exactly the gate
-  // `nullPlaintextIfReady` uses. Without this, a DEK-mismatch user would
-  // get their canonical name encrypted under the cached DEK while their
-  // existing rows are encrypted under a different DEK, and reads would
-  // fall back to plaintext while writes would land in the cache's DEK.
-  // Bail silently and let the user keep their plaintext fallback.
+  // is populated and verify decryptField succeeds. Without this, a DEK-
+  // mismatch user would get their canonical name encrypted under the cached
+  // DEK while existing rows are encrypted under a different DEK, and the
+  // newly-written rows would be unreadable. Bail silently.
   const sample = rows.find((r) => r.nameCt && r.nameCt !== "");
   if (sample?.nameCt) {
     try {
@@ -161,37 +155,32 @@ export async function canonicalizePortfolioNamesIfReady(
       // eslint-disable-next-line no-console
       console.warn(
         `[canonicalize-portfolio] user=${userId} sample decrypt failed; ` +
-          `keeping non-canonical names. err=${err instanceof Error ? err.message : String(err)}`,
+          `keeping existing names. err=${err instanceof Error ? err.message : String(err)}`,
       );
       return { canonicalized: false, reason: "dek-decrypt-failed" };
     }
   }
 
-  // Step 4: rewrite the rows that classify as canonical. Each row's UPDATE
-  // dual-writes name + name_ct + name_lookup (via buildNameFields) so the
-  // partial UNIQUE on (user_id, account_id, name_lookup) and any plaintext
-  // reads in legacy code paths stay aligned.
+  // Step 4: rewrite rows that classify as canonical. Each row's UPDATE sets
+  // name_ct + name_lookup (via buildNameFields). Phase 4 dropped plaintext
+  // `name`/`symbol`, so the partial UNIQUE on (user_id, account_id,
+  // name_lookup) is the only collision check.
   let rewrittenCount = 0;
   await db.transaction(async (tx) => {
     for (const r of rows) {
-      // Decrypt to plaintext (with the dual-write fallback) so the
-      // classifier sees the actual user-visible name + symbol.
-      const decryptedName = decryptName(r.nameCt, dek, r.name) ?? "";
-      const decryptedSymbol = decryptName(r.symbolCt, dek, r.symbol) ?? null;
+      // Decrypt to plaintext so the classifier sees the actual user-visible
+      // name + symbol. decryptName returns null on missing-DEK / decrypt
+      // failure — the classifier treats null/empty as "no symbol".
+      const decryptedName = decryptName(r.nameCt, dek, null) ?? "";
+      const decryptedSymbol = decryptName(r.symbolCt, dek, null);
 
       const verdict = classify(decryptedName, decryptedSymbol);
       if (!verdict) continue;
 
       const enc = buildNameFields(dek, { name: verdict.canonicalName });
-      // Raw SQL — schema-pg.ts marks `name` as `.notNull()` even though
-      // Phase 3 prep dropped the DB-level NOT NULL. Drizzle's typed update
-      // would refuse a non-null write of arbitrary string here only if the
-      // schema typed it as nullable; rewriting the plaintext is safe via
-      // either path. We use Drizzle's update for clarity.
       await tx
         .update(schema.portfolioHoldings)
         .set({
-          name: verdict.canonicalName,
           nameCt: (enc.nameCt as string | null) ?? null,
           nameLookup: (enc.nameLookup as string | null) ?? null,
         })
@@ -214,11 +203,10 @@ export async function canonicalizePortfolioNamesIfReady(
 }
 
 /**
- * Fire-and-forget wrapper for login paths. Mirrors enqueuePhase3NullIfReady —
- * never blocks login, swallows all errors. Logs a one-liner on success or
- * unexpected error; expected failure modes (already-done, no-rows,
- * dek-decrypt-failed) are silent (the helper warns on dek-decrypt-failed
- * inside).
+ * Fire-and-forget wrapper for login paths. Never blocks login, swallows all
+ * errors. Logs a one-liner on success or unexpected error; expected failure
+ * modes (already-done, no-rows, dek-decrypt-failed) are silent (the helper
+ * warns on dek-decrypt-failed inside).
  */
 export function enqueueCanonicalizePortfolioNames(userId: string, dek: Buffer): void {
   void (async () => {
@@ -237,4 +225,3 @@ export function enqueueCanonicalizePortfolioNames(userId: string, dek: Buffer): 
     }
   })();
 }
-

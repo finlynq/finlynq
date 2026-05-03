@@ -68,13 +68,12 @@ export async function getHoldingsValueByAccount(
 ): Promise<Map<number, AccountHoldingsValue>> {
   const asOfDate = opts?.asOfDate ?? todayISO();
   const isToday = asOfDate >= todayISO();
+  // Stream D Phase 4 — plaintext name/symbol dropped; ciphertext only.
   const rawHoldings = await db
     .select({
       id: schema.portfolioHoldings.id,
       accountId: schema.portfolioHoldings.accountId,
-      name: schema.portfolioHoldings.name,
       nameCt: schema.portfolioHoldings.nameCt,
-      symbol: schema.portfolioHoldings.symbol,
       symbolCt: schema.portfolioHoldings.symbolCt,
       currency: schema.portfolioHoldings.currency,
       isCrypto: schema.portfolioHoldings.isCrypto,
@@ -86,12 +85,12 @@ export async function getHoldingsValueByAccount(
 
   if (rawHoldings.length === 0) return new Map();
 
-  // Decrypt name + symbol — both are NULL plaintext on prod for Stream-D-
-  // encrypted rows. Without this, the symbol-keyed price lookup misses.
+  // Stream D Phase 4 — plaintext columns dropped, decrypt the ciphertext.
+  // Without this, the symbol-keyed price lookup misses.
   const holdings = decryptNamedRows(rawHoldings, dek ?? null, {
     nameCt: "name",
     symbolCt: "symbol",
-  });
+  }) as Array<typeof rawHoldings[number] & { name: string | null; symbol: string | null }>;
 
   // Aggregate remaining quantity AND cost-basis components per (holding,
   // account) via the integer FK + JOIN through `holding_accounts`. Today

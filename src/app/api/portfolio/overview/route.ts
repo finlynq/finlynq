@@ -51,17 +51,15 @@ export async function GET(request: NextRequest) {
     return /^[A-Z]{3,4}$/.test(s) && (isSupportedCurrency(s) || activeCurrencies.includes(s));
   };
 
-  // 1. Get all holdings with account info. Stream D: pull the *_ct columns
-  // alongside plaintext; decrypt in-memory before any name/symbol lookup.
+  // 1. Get all holdings with account info. Stream D Phase 4: plaintext
+  // name/symbol/accountName columns dropped; read ciphertext only and
+  // decrypt in-memory before any name/symbol lookup.
   const rawHoldings = await db
     .select({
       id: schema.portfolioHoldings.id,
       accountId: schema.portfolioHoldings.accountId,
-      accountName: schema.accounts.name,
       accountNameCt: schema.accounts.nameCt,
-      name: schema.portfolioHoldings.name,
       nameCt: schema.portfolioHoldings.nameCt,
-      symbol: schema.portfolioHoldings.symbol,
       symbolCt: schema.portfolioHoldings.symbolCt,
       currency: schema.portfolioHoldings.currency,
       isCrypto: schema.portfolioHoldings.isCrypto,
@@ -74,7 +72,7 @@ export async function GET(request: NextRequest) {
     nameCt: "name",
     symbolCt: "symbol",
     accountNameCt: "accountName",
-  });
+  }) as Array<typeof rawHoldings[number] & { name: string | null; symbol: string | null; accountName: string | null }>;
 
   // 2. Classify holdings.
   //

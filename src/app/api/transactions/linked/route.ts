@@ -38,37 +38,24 @@ export async function GET(request: NextRequest) {
   ];
   if (excludeId) conditions.push(ne(schema.transactions.id, excludeId));
 
+  // Stream D Phase 4 — plaintext name columns dropped; only ciphertext.
   const rows = await db
     .select({
       id: schema.transactions.id,
       date: schema.transactions.date,
       accountId: schema.transactions.accountId,
-      accountName: schema.accounts.name,
-      // Stream D Phase 3 cutover NULLs `accounts.name` — pull the ciphertext
-      // alongside so we can decrypt with the session DEK below.
       accountNameCt: schema.accounts.nameCt,
       accountCurrency: schema.accounts.currency,
       categoryId: schema.transactions.categoryId,
-      categoryName: schema.categories.name,
       categoryNameCt: schema.categories.nameCt,
-      // categoryType lets the client run the "transfer pair" four-check rule
-      // (link_id non-null + 1 sibling + both type='R' + different accounts)
-      // and decide whether to render the unified Transfer edit view or the
-      // legacy linked-siblings panel for non-symmetric multi-leg imports.
       categoryType: schema.categories.type,
       currency: schema.transactions.currency,
       amount: schema.transactions.amount,
-      // Surface entered-side fields so the unified edit view can pre-fill
-      // the "Amount received" override box for cross-currency pairs without
-      // a second round-trip.
       enteredAmount: schema.transactions.enteredAmount,
       enteredCurrency: schema.transactions.enteredCurrency,
       enteredFxRate: schema.transactions.enteredFxRate,
       quantity: schema.transactions.quantity,
-      // Holding name comes from a JOIN to portfolio_holdings via the FK.
-      // Phase 5 (2026-04-29) NULL'd the legacy text column on every row.
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
-      portfolioHoldingNameJoined: schema.portfolioHoldings.name,
       portfolioHoldingNameCt: schema.portfolioHoldings.nameCt,
       note: schema.transactions.note,
       payee: schema.transactions.payee,
@@ -91,15 +78,11 @@ export async function GET(request: NextRequest) {
     rows as Array<Parameters<typeof decryptTxRows>[1][number]>,
   ) as Array<typeof rows[number]>;
 
-  // Resolve the holding name with a fallback ladder:
-  //   1. JOINed plaintext (Stream D legacy or pre-Phase-3 row)
-  //   2. JOINed nameCt decrypted with the session DEK (Phase 3 NULL'd row)
-  // The first non-empty wins. We surface this as a single `portfolioHolding`
-  // string so the client can ignore the underlying source. Same ladder runs
-  // for accountName + categoryName via decryptName().
+  // Stream D Phase 4 — plaintext name columns dropped. Decrypt name_ct and
+  // surface as `accountName` / `categoryName` / `portfolioHolding`.
   const enriched = decrypted.map((r) => {
-    let resolvedName = r.portfolioHoldingNameJoined ?? null;
-    if (!resolvedName && r.portfolioHoldingNameCt && dek) {
+    let resolvedName: string | null = null;
+    if (r.portfolioHoldingNameCt && dek) {
       try {
         resolvedName = decryptField(dek, r.portfolioHoldingNameCt);
       } catch {
@@ -108,14 +91,11 @@ export async function GET(request: NextRequest) {
     }
     return {
       ...r,
-      accountName: decryptName(r.accountNameCt, dek, r.accountName),
-      categoryName: decryptName(r.categoryNameCt, dek, r.categoryName),
+      accountName: decryptName(r.accountNameCt, dek, null),
+      categoryName: decryptName(r.categoryNameCt, dek, null),
       portfolioHolding: resolvedName,
-      // Strip the JOIN fields from the response shape — the client uses
-      // the resolved `portfolioHolding` / `accountName` / `categoryName`.
       accountNameCt: undefined,
       categoryNameCt: undefined,
-      portfolioHoldingNameJoined: undefined,
       portfolioHoldingNameCt: undefined,
     };
   });

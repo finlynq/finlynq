@@ -109,7 +109,6 @@ export async function GET(request: NextRequest) {
           period: periodCol,
           categoryType: schema.categories.type,
           categoryId: schema.categories.id,
-          categoryName: schema.categories.name,
           categoryNameCt: schema.categories.nameCt,
           categoryGroup: schema.categories.group,
           total: sql<number>`SUM(${schema.transactions.amount})`,
@@ -121,7 +120,6 @@ export async function GET(request: NextRequest) {
         .groupBy(
           periodCol,
           schema.categories.id,
-          schema.categories.name,
           schema.categories.nameCt,
           schema.categories.type,
           schema.categories.group,
@@ -133,7 +131,6 @@ export async function GET(request: NextRequest) {
           period: periodCol,
           categoryType: schema.categories.type,
           categoryId: sql<number | null>`NULL`,
-          categoryName: schema.categories.group,
           categoryNameCt: sql<string | null>`NULL`,
           categoryGroup: schema.categories.group,
           total: sql<number>`SUM(${schema.transactions.amount})`,
@@ -153,9 +150,11 @@ export async function GET(request: NextRequest) {
   const expenseGroups = new Map<string, { group: string; total: number; count: number; periods: Record<string, number> }>();
 
   for (const row of breakdownRows) {
+    // group-mode rows already have group as the display label (no encryption);
+    // category-mode decrypts name_ct.
     const resolvedName = isCategoryMode
-      ? decryptName(row.categoryNameCt, dek, row.categoryName)
-      : row.categoryName;
+      ? decryptName(row.categoryNameCt, dek, null)
+      : row.categoryGroup;
     const name = resolvedName && resolvedName !== "" ? resolvedName : "Uncategorized";
     const catGroup = row.categoryGroup ?? "";
     const target = row.categoryType === "I" ? incomeGroups : expenseGroups;

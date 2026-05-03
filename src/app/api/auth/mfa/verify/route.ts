@@ -19,8 +19,9 @@ import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { getDEK, putDEK, deleteDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
-import { enqueueStreamDBackfill } from "@/lib/crypto/stream-d-backfill";
-import { enqueuePhase3NullIfReady } from "@/lib/crypto/stream-d-phase3-null";
+// Stream D Phase 4 (2026-05-03): plaintext display-name columns dropped;
+// stream-d-backfill + stream-d-phase3-null helpers deleted. Canonicalize
+// remains and reads ciphertext directly.
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
 
 const verifySchema = z.object({
@@ -100,11 +101,7 @@ export async function POST(request: NextRequest) {
     if (pendingDek) {
       putDEK(jti, pendingDek, SESSION_TTL_MS);
       if (pendingJti) deleteDEK(pendingJti);
-      // Stream D lazy backfill — same pattern as the non-MFA login path.
-      enqueueStreamDBackfill(user.id, pendingDek);
-      // Phase 3 per-user plaintext NULL — same pattern as the non-MFA path.
-      enqueuePhase3NullIfReady(user.id, pendingDek);
-      // Section F canonicalization — same pattern as the non-MFA path.
+      // Stream D Phase 4: only canonicalization remains. See login route.
       enqueueCanonicalizePortfolioNames(user.id, pendingDek);
     }
 
