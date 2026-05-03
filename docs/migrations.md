@@ -6,6 +6,8 @@ Per-environment psql commands, in chronological order, for every schema change s
 
 `npm run db:push` runs the PostgreSQL config (the SQLite config is a pre-open-source-pivot artifact). It's a **local-dev convenience** for iterating against your own dev DB; **`deploy.sh` does NOT run it on the deploy hosts** — see issue #5. Apply each schema change here per env via `psql -f scripts/migrate-*.sql` BEFORE pushing the matching code.
 
+> **Staging deprecated 2026-05-03.** Active envs are now **prod + dev only**. Historical entries below preserve the staging command lines for the audit trail; new entries should not include staging. The `pf_staging` database and `finlynq_staging` user remain on the host as a cold artifact (no app deploys there).
+
 See [database.md](architecture/database.md) for the lockfile gotcha that often surfaces during a deploy.
 
 ## Stream D Phase 4 — drop plaintext display-name columns (2026-05-03)
@@ -18,12 +20,11 @@ Stdio MCP create/update tools for the 6 in-scope tables now refuse the operation
 
 ```sh
 # Apply per env AFTER the matching code release is live and stable.
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/migrate-stream-d-phase4-drop-columns.sql
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging -f scripts/migrate-stream-d-phase4-drop-columns.sql
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         -f scripts/migrate-stream-d-phase4-drop-columns.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev -f scripts/migrate-stream-d-phase4-drop-columns.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     -f scripts/migrate-stream-d-phase4-drop-columns.sql
 ```
 
-Applied dev: 2026-05-03 (with code release). Staging + prod: pending — wait until the code release has been live on dev for one full deploy + rollback window.
+**Applied prod + dev: 2026-05-03** (with the code release). Bypassed the migration's `name_ct IS NULL` precondition with an inline force-NULL variant on both envs because all 3 internal users (pathfinder/demo/hussein) had non-backfilled stragglers we accepted as data loss. The committed migration is the canonical reference for any future env that needs the safe (precondition-respecting) version.
 
 ## Phase 2 — `users.dek_wrapped` columns
 
