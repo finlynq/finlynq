@@ -28,10 +28,10 @@ type DbLike = { execute: (q: ReturnType<typeof sql>) => Promise<any> };
  * Look up the user's "Dividends" category id. Returns `null` if the user has
  * no such category — aggregators then sum `dividendsReceived` to 0.
  *
- * Stream D-aware: when a DEK is supplied, the lookup matches both the legacy
- * plaintext `name` column AND the encrypted `name_lookup` HMAC. Without a DEK
- * (e.g. stdio MCP), only plaintext is matched — which is fine because stdio
- * writes are plaintext anyway.
+ * Stream D Phase 4 (2026-05-03): the plaintext `categories.name` column is
+ * physically dropped. Lookup is HMAC-only via `name_lookup`. Without a DEK
+ * (e.g. stdio MCP) the function returns `null` — aggregators degrade to 0
+ * dividends (acceptable, since stdio can't compute the HMAC anyway).
  *
  * Returns the first matching id from candidates `["Dividends", "Dividend"]`
  * in that order — same fallback ladder as `pickInvestmentCategoryByPayee()`.
@@ -41,16 +41,14 @@ export async function resolveDividendsCategoryId(
   userId: string,
   dek: Buffer | null,
 ): Promise<number | null> {
+  if (!dek) return null;
   const candidates = ["Dividends", "Dividend"];
   for (const name of candidates) {
-    const lookup = dek ? nameLookup(dek, name) : null;
+    const lookup = nameLookup(dek, name);
     const result = await db.execute(sql`
       SELECT id FROM categories
       WHERE user_id = ${userId}
-        AND (
-          name = ${name}
-          ${lookup ? sql`OR name_lookup = ${lookup}` : sql``}
-        )
+        AND name_lookup = ${lookup}
       LIMIT 1
     `);
     // Normalize result shape (pg drivers return { rows: [...] }, some adapters
