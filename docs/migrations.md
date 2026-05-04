@@ -355,9 +355,9 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 
 Verify with `\d+ transactions` — `transactions_user_updated_at_idx` and `transactions_user_created_at_idx` should both appear in the index list.
 
-## tx-29100-holding-reassignment (data fix, 2026-05-01, issue [#81](https://github.com/finlynq/finlynq/issues/81))
+## tx-29100-holding-reassignment (data fix, applied prod + dev 2026-05-04, issue [#81](https://github.com/finlynq/finlynq/issues/81))
 
-One-off **data fix** (no code change, no schema change). Transaction 29100 (a +$10,000 EFT RRSP contribution) was booked by the bank-import pipeline against holding **497** ('Cash' on account 600 Mimi TFSA). It belongs on holding **425** ('TFSA-CAD' on account 614 IBKR TFSA). The fix mutates a single row's `portfolio_holding_id` and bumps `updated_at`; `source` is **deliberately preserved** to honor the CLAUDE.md audit-trio invariant (`transactions.source` is INSERT-only).
+One-off **data fix** (no code change, no schema change). Transaction 29100 (a +$10,000 contribution) was booked by the bank-import pipeline against the wrong cash-sleeve holding **497** in a TFSA account. It belongs on the TFSA CAD cash holding **425** in a different TFSA account (account_id=614). The fix mutates a single row's `portfolio_holding_id` and bumps `updated_at`; `source` is **deliberately preserved** to honor the CLAUDE.md audit-trio invariant (`transactions.source` is INSERT-only).
 
 **Gate:** holding 425 must already have a `holding_accounts` row matching `(holding_id=425, account_id=<tx 29100's account_id>, user_id=<owner>)`. Per CLAUDE.md, every portfolio aggregator now JOINs through `holding_accounts` on `(holding, account)`; running the UPDATE without that pairing in place silently drops the leg from the aggregator. The pre-state SELECT below catches that and aborts before the UPDATE.
 
@@ -422,26 +422,27 @@ WHERE portfolio_holding_id = 497 AND id = 29100;  -- expect 0.
 SQL
 ```
 
-Then load `/portfolio` (or call MCP `get_portfolio_analysis`) for the IBKR TFSA account and confirm the contribution is now attributed to TFSA-CAD (holding 425) instead of Mimi TFSA Cash (holding 497).
+Then load `/portfolio` (or call MCP `get_portfolio_analysis`) for the destination TFSA account and confirm the contribution is now attributed to holding 425 (the TFSA CAD cash sleeve) instead of holding 497.
 
 ### Per-env rollout
 
-Run the same three blocks (pre-state → fix → post-state) per env, replacing the connection in each:
+Run the same three blocks (pre-state → fix → post-state) per env, replacing the connection in each. Staging is deprecated (2026-05-03) so only dev + prod apply.
 
 ```sh
 # dev
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     ...
-
-# staging
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging ...
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev ...
 
 # prod
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         ...
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     ...
 ```
 
-After the prod fix, restart the prod systemd service (`systemctl restart finlynq-prod` or equivalent) so the MCP per-user tx cache for the affected user is dropped and Claude sees the new attribution.
+After each env's fix, restart the matching systemd service (`systemctl restart pf-dev.service` for dev, `systemctl restart pf.service` for prod) so the MCP per-user tx cache for the affected user is dropped and Claude sees the new attribution.
 
-**Out of scope:** holding 497's separate $72,791 phantom `dividendsReceived` figure — deferred until issue [#84](https://github.com/finlynq/finlynq/issues/84) (`dividendsReceived` aggregator switch from `qty=0` heuristic to category_id match) lands. Auditing other bank-import rows that may have mis-routed onto holding 497 is a separate sweep.
+**Applied dev: 2026-05-04** — pre-state confirmed tx 29100 on holding 497 / account 614, both holdings owned by the same user, `holding_accounts` row for `(425, 614, owner)` present. UPDATE returned 1 row; `source='manual'` preserved, `updated_at` bumped to `2026-05-04 18:50:17.120195+00`. Post-state confirmed `portfolio_holding_id=425`, count of tx 29100 still on holding 497 = 0. `pf-dev.service` restarted.
+
+**Applied prod: 2026-05-04** — pre-state matched dev (`source='manual'`, holding 497, account 614). UPDATE returned 1 row; `source='manual'` preserved, `updated_at` bumped to `2026-05-04 18:50:43.904344+00`. Post-state confirmed `portfolio_holding_id=425`, count of tx 29100 still on holding 497 = 0. `pf.service` restarted.
+
+**Out of scope:** holding 497's separate $72,791 phantom `dividendsReceived` figure was tracked under issue [#84](https://github.com/finlynq/finlynq/issues/84) (`dividendsReceived` aggregator switch from `qty=0` heuristic to `category_id` match), now shipped. Auditing other bank-import rows that may have mis-routed onto holding 497 is a separate sweep.
 
 ## holding-accounts-backfill-orphans (2026-05-01, issue [#95](https://github.com/finlynq/finlynq/issues/95))
 
