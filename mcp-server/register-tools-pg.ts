@@ -256,6 +256,76 @@ function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveRe
 }
 
 /**
+ * Strict resolver for portfolio_holdings DELETE/destructive operations
+ * (issue #127). Same waterfall as {@link fuzzyFind} but:
+ *   1. Searches both `name` and `symbol`.
+ *   2. Substring/reverse-substring hits require token overlap with the input
+ *      (using the same length-≥3 tokenization as {@link resolveCategoryStrict}).
+ *      This gates the silent reverse-includes match where a 1-char holding
+ *      name like "S" would silently match any longer input like "TESTV"
+ *      (because "testv".includes("s") is true) — and proceed to DELETE the
+ *      wrong holding.
+ *   3. On `low_confidence` returns the candidate the caller would have hit
+ *      under loose matching, so the error message can read "did you mean …?"
+ *
+ * Pass already-decrypted rows ({@link decryptNameish}). With `dek === null`
+ * (stdio post Phase 4) the rows' `name`/`symbol` will be raw ciphertext
+ * (`v1:...`) and the matcher will simply not find anything — the caller
+ * surfaces "not found" cleanly rather than 500'ing.
+ */
+type HoldingResolveTier = "exact-name" | "exact-symbol" | "startsWith-name" | "startsWith-symbol" | "substring";
+type HoldingResolveResult =
+  | { ok: true; holding: Row; tier: HoldingResolveTier }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: Row };
+function resolvePortfolioHoldingStrict(input: string, options: Row[]): HoldingResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exactName = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exactName) return { ok: true, holding: exactName, tier: "exact-name" };
+  const exactSymbol = options.find(o => String(o.symbol ?? "").toLowerCase() === lo);
+  if (exactSymbol) return { ok: true, holding: exactSymbol, tier: "exact-symbol" };
+  const startsName = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (startsName) return { ok: true, holding: startsName, tier: "startsWith-name" };
+  const startsSymbol = options.find(o => {
+    const s = String(o.symbol ?? "").toLowerCase();
+    return s !== "" && s.startsWith(lo);
+  });
+  if (startsSymbol) return { ok: true, holding: startsSymbol, tier: "startsWith-symbol" };
+  // Substring / reverse-substring tier — gate on token overlap so a 1-2 char
+  // holding name can't silently swallow a longer destructive input.
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (text: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(text)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, holding: sub, tier: "substring" };
+  // No safe match. Surface what loose matching WOULD have picked so the
+  // caller can render a "did you mean …?" message.
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
+/**
  * Stream D: decrypt name + alias + symbol columns on a row set before
  * handing them to {@link fuzzyFind} or display code. Pre-Phase-3, rows may
  * have plaintext populated and `name_ct` null — in that case plaintext
@@ -3920,20 +3990,27 @@ export function registerPgTools(
     },
     async ({ holding }) => {
       const rawHoldings = await q(db, sql`
-        SELECT id, name, symbol, name_ct, symbol_ct
+        SELECT id, name_ct, symbol_ct
         FROM portfolio_holdings
         WHERE user_id = ${userId}
       `);
       const allHoldings = decryptNameish(rawHoldings, dek);
-      let h: Row | null = fuzzyFind(holding, allHoldings);
-      if (!h) {
-        const lo = holding.toLowerCase().trim();
-        h =
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase() === lo) ??
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase().startsWith(lo)) ??
-          null;
+      // Issue #127: resolve via strict matcher gated on token overlap so a
+      // tiny-named holding (e.g. "S") cannot silently swallow a longer input
+      // (e.g. "TESTV") via fuzzyFind's reverse-includes branch and DELETE
+      // the wrong row. Reads still tolerate fuzziness; destructive paths do not.
+      const resolved = resolvePortfolioHoldingStrict(holding, allHoldings);
+      if (!resolved.ok) {
+        if (resolved.reason === "low_confidence") {
+          const sName = String(resolved.suggestion.name ?? "");
+          return err(`Holding "${holding}" did not match strongly — did you mean "${sName}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+        }
+        return err(`Holding "${holding}" not found`);
       }
-      if (!h) return err(`Holding "${holding}" not found`);
+      const h = resolved.holding;
+      // Capture decrypted name BEFORE the DELETE so the response renders
+      // truthful state, not whatever the matcher landed on after a stale read.
+      const matchedName = String(h.name ?? "");
 
       const txnCount = await q(db, sql`
         SELECT COUNT(*) AS cnt FROM transactions
@@ -3942,11 +4019,15 @@ export function registerPgTools(
       const count = Number(txnCount[0]?.cnt ?? 0);
 
       await db.execute(sql`DELETE FROM portfolio_holdings WHERE id = ${h.id} AND user_id = ${userId}`);
+      // Per CLAUDE.md "Every MCP tx-mutating write must call invalidateUser":
+      // FK ON DELETE SET NULL mutates linked transactions' portfolio_holding_id,
+      // so the per-user tx cache must be invalidated.
+      invalidateUserTxCache(userId);
       return text({
         success: true,
         message: count > 0
-          ? `Holding "${h.name}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
-          : `Holding "${h.name}" deleted.`,
+          ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
+          : `Holding "${matchedName}" deleted.`,
       });
     }
   );
