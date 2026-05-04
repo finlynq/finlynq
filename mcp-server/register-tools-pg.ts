@@ -1284,15 +1284,18 @@ export function registerPgTools(
     if (!goalsRaw.length) return text([]);
     const goalIds = goalsRaw.map((g) => Number(g.id));
     // Pull every (goal_id, account_id, account_name_ct) link in one query.
-    // Note: cast to int[] because Drizzle's `sql` tag interpolates a JS array
-    // as separate scalar params (`ANY(($2, $3))`), which Postgres parses as
-    // `ANY(ROW(...))` and rejects. The explicit cast forces a single int[]
-    // bind matching the surrounding convention (lines 2709, 7136, 7176).
+    // Note: Drizzle's `sql` tag interpolates a JS array as separate scalar
+    // params (`($2, $3)`), so the previous `ANY(${goalIds}::int[])` shape
+    // rendered as `ANY(($2, $3)::int[])` — Postgres parsed `($2, $3)` as a
+    // ROW literal and rejected the row→array cast (PR #142 follow-up). Use
+    // `ARRAY[...]::int[]` with `sql.join` so the cast wraps a real array
+    // constructor.
+    const goalIdsExpr = sql.join(goalIds.map((id) => sql`${id}`), sql`, `);
     const linksRaw = await q(db, sql`
       SELECT ga.goal_id, ga.account_id, a.name_ct AS account_name_ct
       FROM goal_accounts ga
       LEFT JOIN accounts a ON ga.account_id = a.id
-      WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(${goalIds}::int[])
+      WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(ARRAY[${goalIdsExpr}]::int[])
     `);
     const linksByGoal = new Map<number, { ids: number[]; names: string[] }>();
     for (const l of linksRaw) {
@@ -2081,10 +2084,12 @@ export function registerPgTools(
         if (acct) resolvedIds = [Number(acct.id)];
       }
       // Verify ownership for every supplied id.
-      // Cast to int[] (drizzle expands a JS array as separate scalars otherwise).
+      // Drizzle expands a JS array as separate scalars, so wrap in
+      // `ARRAY[...]::int[]` (not `(${arr})::int[]` — that's a row-cast).
       if (resolvedIds.length > 0) {
+        const idsExpr = sql.join(resolvedIds.map((id) => sql`${id}`), sql`, `);
         const owned = await q(db, sql`
-          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(${resolvedIds}::int[])
+          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(ARRAY[${idsExpr}]::int[])
         `);
         if (owned.length !== new Set(resolvedIds).size) {
           return err(`One or more account_ids are not owned by you.`);
@@ -2706,14 +2711,18 @@ export function registerPgTools(
             const accountIds = Array.from(accountIdSet);
             const newTxIds = committed.map(c => c.newTransactionId);
             // Single SELECT bounded by the union window across affected
-            // accounts; per-row band check happens in JS.
+            // accounts; per-row band check happens in JS. `ARRAY[...]::int[]`
+            // (not `(...)::int[]` — that's a row-cast) because Drizzle expands
+            // each JS array element as a separate scalar param.
+            const accountIdsExpr = sql.join(accountIds.map((id) => sql`${id}`), sql`, `);
+            const newTxIdsExpr = sql.join(newTxIds.map((id) => sql`${id}`), sql`, `);
             const poolRows = await q(db, sql`
               SELECT id, account_id, date, amount, payee
                 FROM transactions
                WHERE user_id = ${userId}
-                 AND account_id = ANY(${accountIds}::int[])
+                 AND account_id = ANY(ARRAY[${accountIdsExpr}]::int[])
                  AND date BETWEEN ${bounds.minDate} AND ${bounds.maxDate}
-                 AND id <> ALL(${newTxIds}::int[])
+                 AND id <> ALL(ARRAY[${newTxIdsExpr}]::int[])
             `);
             const candidates: CandidateRow[] = poolRows.map((r) => {
               const rawPayee = r.payee == null ? null : String(r.payee);
@@ -3574,10 +3583,12 @@ export function registerPgTools(
       if (!g) return err(`Goal "${goal}" not found`);
 
       // Verify account ownership upfront so we don't half-apply.
-      // Cast to int[] (drizzle expands a JS array as separate scalars otherwise).
+      // Drizzle expands a JS array as separate scalars, so wrap in
+      // `ARRAY[...]::int[]` (not `(${arr})::int[]` — that's a row-cast).
       if (account_ids && account_ids.length > 0) {
+        const idsExpr = sql.join(account_ids.map((id) => sql`${id}`), sql`, `);
         const owned = await q(db, sql`
-          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(${account_ids}::int[])
+          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(ARRAY[${idsExpr}]::int[])
         `);
         if (owned.length !== new Set(account_ids).size) {
           return err(`One or more account_ids are not owned by you.`);
@@ -7132,6 +7143,10 @@ export function registerPgTools(
             const dateMin = shiftIsoDate(dates[0], -7);
             const dateMax = shiftIsoDate(dates[dates.length - 1], 7);
             if (dateMin && dateMax) {
+              // `ARRAY[...]::int[]` (not `(${arr})::int[]` — Drizzle expands
+              // each element as a scalar param, so the latter parses as a
+              // row-cast). PR #142 follow-up.
+              const accountIdSetExpr = sql.join(accountIdSet.map((id) => sql`${id}`), sql`, `);
               const poolRows = await q(db, sql`
                 SELECT t.id, t.account_id, t.date, t.amount, t.payee, t.import_hash,
                        t.fit_id, t.link_id, c.type AS category_type, t.source,
@@ -7139,7 +7154,7 @@ export function registerPgTools(
                   FROM transactions t
                   LEFT JOIN categories c ON c.id = t.category_id
                  WHERE t.user_id = ${userId}
-                   AND t.account_id = ANY(${accountIdSet}::int[])
+                   AND t.account_id = ANY(ARRAY[${accountIdSetExpr}]::int[])
                    AND t.date BETWEEN ${dateMin} AND ${dateMax}
               `);
               const byAccount = new Map<number, DuplicateCandidateRow[]>();
@@ -7175,11 +7190,14 @@ export function registerPgTools(
               // Sibling-account index for transfer-pair hint.
               const siblingAccountByLinkId = new Map<string, number>();
               if (linkIds.length > 0) {
+                // `ARRAY[...]::text[]` for the same Drizzle-expansion reason
+                // documented above (PR #142 follow-up).
+                const linkIdsExpr = sql.join(linkIds.map((id) => sql`${id}`), sql`, `);
                 const sibRows = await q(db, sql`
                   SELECT link_id, account_id
                     FROM transactions
                    WHERE user_id = ${userId}
-                     AND link_id = ANY(${linkIds}::text[])
+                     AND link_id = ANY(ARRAY[${linkIdsExpr}]::text[])
                 `);
                 const accountSet = new Set<number>(accountIdSet);
                 const byLink = new Map<string, number[]>();
