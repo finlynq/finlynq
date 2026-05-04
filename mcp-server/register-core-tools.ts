@@ -231,6 +231,68 @@ function resolveCategoryStrict(input: string, options: SqliteRow[]): StdioCatego
     : { ok: false, reason: "missing" };
 }
 
+/**
+ * Strict resolver for portfolio_holdings DELETE/destructive operations
+ * (issue #127). Mirrors `resolvePortfolioHoldingStrict` in
+ * register-tools-pg.ts — searches both `name` and `symbol`, then gates the
+ * substring/reverse-substring tier on a length-≥3 token overlap. Without
+ * the gate, a 1-char holding name like "S" silently wins against any
+ * longer input ("testv".includes("s") is true) and the destructive call
+ * deletes the wrong row.
+ *
+ * On stdio post Stream D Phase 4 the rows' decrypted name/symbol fields
+ * carry raw `v1:...` ciphertext (no DEK on this transport). The matcher
+ * simply finds nothing and the caller surfaces "not found" — that's the
+ * documented stdio-Phase-4 degradation; callers should use HTTP MCP or
+ * the web UI for destructive holding ops.
+ */
+type StdioHoldingResolveResult =
+  | { ok: true; holding: SqliteRow; tier: "exact-name" | "exact-symbol" | "startsWith-name" | "startsWith-symbol" | "substring" }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: SqliteRow };
+function resolvePortfolioHoldingStrict(input: string, options: SqliteRow[]): StdioHoldingResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exactName = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exactName) return { ok: true, holding: exactName, tier: "exact-name" };
+  const exactSymbol = options.find(o => String(o.symbol ?? "").toLowerCase() === lo);
+  if (exactSymbol) return { ok: true, holding: exactSymbol, tier: "exact-symbol" };
+  const startsName = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (startsName) return { ok: true, holding: startsName, tier: "startsWith-name" };
+  const startsSymbol = options.find(o => {
+    const s = String(o.symbol ?? "").toLowerCase();
+    return s !== "" && s.startsWith(lo);
+  });
+  if (startsSymbol) return { ok: true, holding: startsSymbol, tier: "startsWith-symbol" };
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (text: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(text)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, holding: sub, tier: "substring" };
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
 /** Auto-categorize payee: rules → historical frequency (both user-scoped) */
 async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): Promise<number | null> {
   if (!payee) return null;
@@ -1783,29 +1845,51 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       holding: z.string().describe("Holding name OR symbol (fuzzy matched)"),
     },
     async ({ holding }) => {
-      const allHoldings = await sqlite.prepare(
-        `SELECT id, name, symbol FROM portfolio_holdings WHERE user_id = ?`
+      // Stream D Phase 4 (2026-05-03): plaintext `name`/`symbol` columns
+      // were physically dropped on dev. Read the ciphertext siblings; with
+      // no DEK on stdio, the row's effective `name`/`symbol` are the raw
+      // `v1:...` strings. The strict matcher will simply not find a hit
+      // for plaintext user input (e.g. "TESTV") — graceful degradation
+      // (call returns "not found" rather than 500'ing on a missing column).
+      const rawHoldings = await sqlite.prepare(
+        `SELECT id, name_ct, symbol_ct FROM portfolio_holdings WHERE user_id = ?`
       ).all(userId) as SqliteRow[];
-      let h: SqliteRow | null = fuzzyFind(holding, allHoldings);
-      if (!h) {
-        const lo = holding.toLowerCase().trim();
-        h =
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase() === lo) ??
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase().startsWith(lo)) ??
-          null;
+      const allHoldings: SqliteRow[] = rawHoldings.map((r) => {
+        const out: SqliteRow = { ...r };
+        const nameCt = (r.name_ct ?? r.nameCt) as string | null | undefined;
+        const symbolCt = (r.symbol_ct ?? r.symbolCt) as string | null | undefined;
+        if (nameCt) out.name = nameCt;
+        if (symbolCt) out.symbol = symbolCt;
+        return out;
+      });
+      // Issue #127: strict matcher gated on token overlap so a 1-char
+      // holding name (e.g. decrypted "S") cannot silently swallow a longer
+      // input (e.g. "TESTV") via reverse-includes and DELETE the wrong row.
+      const resolved = resolvePortfolioHoldingStrict(holding, allHoldings);
+      if (!resolved.ok) {
+        if (resolved.reason === "low_confidence") {
+          const sName = String(resolved.suggestion.name ?? "");
+          return sqliteErr(`Holding "${holding}" did not match strongly — did you mean "${sName}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+        }
+        return sqliteErr(`Holding "${holding}" not found`);
       }
-      if (!h) return sqliteErr(`Holding "${holding}" not found`);
+      const h = resolved.holding;
+      const matchedName = String(h.name ?? "");
 
       const count = (await sqlite.prepare(
         `SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND portfolio_holding_id = ?`
       ).get(userId, h.id) as { cnt: number }).cnt;
 
       await sqlite.prepare(`DELETE FROM portfolio_holdings WHERE id = ? AND user_id = ?`).run(h.id, userId);
+      // Per CLAUDE.md "Every MCP tx-mutating write must call invalidateUser":
+      // FK ON DELETE SET NULL mutates linked transactions' portfolio_holding_id,
+      // so the per-user tx cache must be invalidated.
+      invalidateUserTxCache(userId);
       return txt({
         success: true,
         message: count > 0
-          ? `Holding "${h.name}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
-          : `Holding "${h.name}" deleted.`,
+          ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
+          : `Holding "${matchedName}" deleted.`,
       });
     }
   );
