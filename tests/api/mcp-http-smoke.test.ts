@@ -207,3 +207,75 @@ describe("MCP HTTP read-tool smoke (Stream D Phase 4 cleanup gate)", () => {
     expect(bootstrapped.queries.length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * PR #142 follow-up — multi-element array binding regression gate.
+ *
+ * The original §B fix wrapped `ANY(${array}::int[])` thinking the cast applied
+ * to the bound parameter. Drizzle expands a JS array as separate scalar
+ * params, so it actually rendered `ANY(($2, $3)::int[])` — Postgres parsed
+ * `($2, $3)` as a ROW literal and rejected the row→array cast.
+ *
+ * Single-element arrays coincidentally rendered `($2)` which Postgres parses
+ * as just `$2` (parenthesised scalar). That's why the existing smoke test
+ * above missed the bug — every handler runs against an empty fake DB so
+ * `get_goals.goalIds` was always `[]` (skip path) or never multi-element.
+ *
+ * This test seeds a 2-row goals result so `goalIds.length === 2` and asserts
+ * the rendered SQL contains the correct `ARRAY[...]::int[]` constructor (not
+ * the broken `($N, $M)::int[]` row-cast shape).
+ */
+describe("MCP HTTP get_goals — multi-element array binding (PR #142 follow-up)", () => {
+  it("renders ANY(ARRAY[...]::int[]), not ANY((...)::int[]), when there are >=2 goals", async () => {
+    type CapturedQ = { text: string };
+    const queries: CapturedQ[] = [];
+    let goalsFetchCount = 0;
+    const db = {
+      execute: async (q: unknown) => {
+        const text = serializeSqlTemplate(q);
+        queries.push({ text });
+        // First SELECT in get_goals fetches the user's goals; return two
+        // rows so the follow-up goal_accounts JOIN exercises the
+        // multi-element ARRAY[...] path.
+        if (/FROM\s+goals\s+g\b/i.test(text) && goalsFetchCount === 0) {
+          goalsFetchCount++;
+          return {
+            rows: [
+              { id: 29, name_ct: null, type: "savings", target_amount: "1000", saved_amount: "0", deadline: null, account_id: null, status: "active", priority: 0 },
+              { id: 52, name_ct: null, type: "savings", target_amount: "2000", saved_amount: "0", deadline: null, account_id: null, status: "active", priority: 1 },
+            ],
+            rowCount: 2,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    const server = new McpServer({ name: "smoke-test-multielem", version: "0.0.0" });
+    const dek = randomBytes(32);
+    registerPgTools(server, db, "test-user-id", dek);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tools = (server as any)._registeredTools as Record<string, { handler: (args: unknown, extra: unknown) => Promise<unknown> }>;
+    const tool = tools["get_goals"];
+    expect(tool, "tool get_goals is registered").toBeDefined();
+
+    let threw: unknown = null;
+    try {
+      await tool.handler({}, {});
+    } catch (e) {
+      threw = e;
+    }
+    // The handler must NOT throw — that was the live regression on dev.
+    expect(threw, threw ? `get_goals handler threw: ${threw instanceof Error ? threw.message : String(threw)}` : "ok").toBeNull();
+
+    // Find the goal_accounts JOIN query and assert its shape.
+    const joinQ = queries.find((q) => /goal_accounts/i.test(q.text));
+    expect(joinQ, "goal_accounts JOIN query was issued").toBeDefined();
+    if (joinQ) {
+      // Must use ARRAY[...]::int[] — the correct Postgres array constructor.
+      expect(joinQ.text).toMatch(/ANY\s*\(\s*ARRAY\s*\[/i);
+      // Must NOT use the broken `(${array})::int[]` row-cast shape that
+      // Drizzle expansion produces from `ANY(${arr}::int[])`.
+      expect(joinQ.text).not.toMatch(/ANY\s*\(\s*\(\s*\?\s*,/);
+    }
+  });
+});
