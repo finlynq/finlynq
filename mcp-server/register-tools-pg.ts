@@ -731,10 +731,11 @@ async function aggregateHoldings(
   const out = new Map<number, Agg>();
   // Issue #128: SELECT t.trade_link_id so accumulate() can skip paired
   // cash-leg rows from the realized-gain sell branch.
+  // Stream D Phase 4: ph.name dropped — read ph.name_ct only.
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
            t.trade_link_id,
-           ph.name AS holding_name, ph.name_ct AS holding_name_ct,
+           ph.name_ct AS holding_name_ct,
            cash.amount AS cash_amount, cash.id AS cash_id
     FROM transactions t
     INNER JOIN holding_accounts ha
@@ -756,7 +757,7 @@ async function aggregateHoldings(
   for (const r of fkRows) {
     const hid = Number(r.portfolio_holding_id ?? 0) || null;
     if (hid == null) continue; // shouldn't happen post-Phase-6; defensive skip
-    // Prefer decrypted name_ct, fall back to plaintext name (legacy rows).
+    // Stream D Phase 4: only the ciphertext column remains. Decrypt or skip.
     let name = "";
     if (r.holding_name_ct && dek) {
       try {
@@ -765,9 +766,9 @@ async function aggregateHoldings(
         name = "";
       }
     }
-    if (!name) name = String(r.holding_name ?? "");
-    // Skip rows whose holding_name_ct failed to decrypt AND has no plaintext
-    // fallback (DEK mismatch). The downstream UI relies on a non-empty name.
+    // Skip rows whose holding_name_ct failed to decrypt or DEK is missing
+    // (stdio transport, or a DEK mismatch). The downstream UI relies on a
+    // non-empty name.
     if (!name || name.startsWith("v1:")) continue;
     accumulate(out, hid, name, r, dividendsCategoryId);
   }
@@ -873,13 +874,13 @@ export function registerPgTools(
     },
     async ({ currency, reportingCurrency }) => {
       const raw = await q(db, sql`
-        SELECT a.id, a.name, a.name_ct, a.alias, a.alias_ct, a.type, a."group", a.currency,
+        SELECT a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency,
                COALESCE(SUM(t.amount), 0) AS balance
         FROM accounts a
         LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
         WHERE a.user_id = ${userId}
           ${currency && currency !== "all" ? sql`AND a.currency = ${currency}` : sql``}
-        GROUP BY a.id, a.name, a.name_ct, a.alias, a.alias_ct, a.type, a."group", a.currency
+        GROUP BY a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency
         ORDER BY a.type, a."group"
       `);
       // Stream D: decrypt name + alias before returning. Drop the internal
@@ -941,8 +942,10 @@ export function registerPgTools(
       // after decryption when the data is encrypted. Fetch a larger window then
       // trim to lim after filtering.
       const fetchCap = payee || tags ? Math.max(lim * 10, 500) : lim;
-      // Stream D: category filter uses name_lookup (HMAC) when DEK present,
-      // falls back to legacy plaintext name= for stdio/pre-backfill rows.
+      // Stream D Phase 4: plaintext c.name was dropped on 2026-05-03. The
+      // category filter must go through name_lookup (HMAC) — there is no
+      // plaintext fallback. Without a DEK we cannot compute the lookup, so
+      // the filter is dropped (no false matches better than 500).
       const categoryLookup = category && dek ? nameLookup(dek, category) : null;
       // NOTE: account_id and portfolio_holding_id are independent filters —
       // both are valid alone or combined (e.g. "all VCN.TO dividends in IBKR
@@ -950,8 +953,8 @@ export function registerPgTools(
       // counterpart in tools-v2.ts mirrors this exactly (issue #80).
       const rawRows = await q(db, sql`
         SELECT t.id, t.date,
-               a.name AS account, a.name_ct AS account_ct,
-               c.name AS category, c.name_ct AS category_ct, c.type AS category_type,
+               a.name_ct AS account_ct,
+               c.name_ct AS category_ct, c.type AS category_type,
                t.currency, t.amount, t.entered_currency, t.entered_amount, t.entered_fx_rate,
                t.payee, t.note, t.tags, t.portfolio_holding_id, t.quantity,
                t.created_at, t.updated_at, t.source
@@ -965,11 +968,7 @@ export function registerPgTools(
           ${end_date ? sql`AND t.date <= ${end_date}` : sql``}
           ${account_id !== undefined ? sql`AND t.account_id = ${account_id}` : sql``}
           ${portfolio_holding_id !== undefined ? sql`AND t.portfolio_holding_id = ${portfolio_holding_id}` : sql``}
-          ${category
-            ? categoryLookup
-              ? sql`AND (c.name = ${category} OR c.name_lookup = ${categoryLookup})`
-              : sql`AND c.name = ${category}`
-            : sql``}
+          ${category && categoryLookup ? sql`AND c.name_lookup = ${categoryLookup}` : sql``}
         ORDER BY t.date DESC
         LIMIT ${fetchCap}
       `);
@@ -977,8 +976,8 @@ export function registerPgTools(
         const { account_ct, category_ct, ...rest } = r;
         return {
           ...rest,
-          account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
-          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          account: account_ct && dek ? decryptField(dek, account_ct) : null,
+          category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
       let decrypted = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
@@ -1044,21 +1043,21 @@ export function registerPgTools(
       const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
       // Stream D: GROUP BY c.id so encrypted rows don't bucket together.
       const rawRows = await q(db, sql`
-        SELECT b.id, c.name AS category, c.name_ct AS category_ct, c."group" AS category_group,
+        SELECT b.id, c.name_ct AS category_ct, c."group" AS category_group,
                b.amount AS budget,
                COALESCE(ABS(SUM(CASE WHEN t.date >= ${startDate} AND t.date <= ${endDate} THEN t.amount ELSE 0 END)), 0) AS spent
         FROM budgets b
         JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
         LEFT JOIN transactions t ON t.category_id = c.id AND t.user_id = ${userId}
         WHERE b.month = ${month} AND b.user_id = ${userId}
-        GROUP BY b.id, c.id, c.name, c.name_ct, c."group", b.amount
+        GROUP BY b.id, c.id, c.name_ct, c."group", b.amount
         ORDER BY c."group"
       `);
       const rows = rawRows.map((r) => {
         const { category_ct, ...rest } = r;
         return {
           ...rest,
-          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
       return text({ rows, reportingCurrency: reporting });
@@ -1087,22 +1086,24 @@ export function registerPgTools(
         ? sql`TO_CHAR(t.date::date, 'YYYY')`
         : sql`TO_CHAR(t.date::date, 'YYYY-MM')`;
 
-      // Stream D: GROUP BY c.id + c.name_ct so encrypted rows don't merge.
+      // Stream D Phase 4: c.name dropped — read c.name_ct only and decrypt
+      // post-query. GROUP BY c.id + c.name_ct keeps encrypted-only rows
+      // distinct without depending on the dropped column.
       const rawRows = await q(db, sql`
         SELECT ${truncExpr} AS period, c.id AS category_id,
-               c.name AS category, c.name_ct AS category_ct,
+               c.name_ct AS category_ct,
                c."group" AS category_group, SUM(t.amount) AS total
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId} AND t.date >= ${startDate} AND c.type = 'E'
-        GROUP BY ${truncExpr}, c.id, c.name, c.name_ct, c."group"
+        GROUP BY ${truncExpr}, c.id, c.name_ct, c."group"
         ORDER BY period, total
       `);
       const rows = rawRows.map((r) => {
         const { category_ct, ...rest } = r;
         return {
           ...rest,
-          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
       return text({ rows, reportingCurrency: reporting });
@@ -1120,10 +1121,10 @@ export function registerPgTools(
     },
     async ({ start_date, end_date, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
-      // Stream D: include c.name_ct for in-memory decrypt.
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const rawRows = await q(db, sql`
         SELECT c.id AS category_id, c.type AS category_type, c."group" AS category_group,
-               c.name AS category, c.name_ct AS category_ct,
+               c.name_ct AS category_ct,
                SUM(t.amount) AS total, COUNT(*) AS count
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
@@ -1131,14 +1132,14 @@ export function registerPgTools(
           AND t.date >= ${start_date}
           AND t.date <= ${end_date}
           AND c.type IN ('I','E')
-        GROUP BY c.id, c.type, c."group", c.name, c.name_ct
+        GROUP BY c.id, c.type, c."group", c.name_ct
         ORDER BY c.type, c."group"
       `);
       const rows = rawRows.map((r) => {
         const { category_ct, ...rest } = r;
         return {
           ...rest,
-          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
       // Unrealized P&L: valuation G/L (asset price moves) + FX G/L (account
@@ -1283,11 +1284,15 @@ export function registerPgTools(
     if (!goalsRaw.length) return text([]);
     const goalIds = goalsRaw.map((g) => Number(g.id));
     // Pull every (goal_id, account_id, account_name_ct) link in one query.
+    // Note: cast to int[] because Drizzle's `sql` tag interpolates a JS array
+    // as separate scalar params (`ANY(($2, $3))`), which Postgres parses as
+    // `ANY(ROW(...))` and rejects. The explicit cast forces a single int[]
+    // bind matching the surrounding convention (lines 2709, 7136, 7176).
     const linksRaw = await q(db, sql`
       SELECT ga.goal_id, ga.account_id, a.name_ct AS account_name_ct
       FROM goal_accounts ga
       LEFT JOIN accounts a ON ga.account_id = a.id
-      WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(${goalIds})
+      WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(${goalIds}::int[])
     `);
     const linksByGoal = new Map<number, { ids: number[]; names: string[] }>();
     for (const l of linksRaw) {
@@ -1315,12 +1320,12 @@ export function registerPgTools(
   // ── get_categories ─────────────────────────────────────────────────────────
   server.tool("get_categories", "List all available transaction categories", {}, async () => {
     const raw = await q(db, sql`
-      SELECT name, name_ct, type, "group"
+      SELECT id, name_ct, type, "group"
       FROM categories
       WHERE user_id = ${userId}
       ORDER BY type, "group"
     `);
-    // Stream D: decrypt name; drop internal _ct column from output.
+    // Stream D Phase 4: decrypt name_ct; drop internal _ct column from output.
     const rows = decryptNameish(raw, dek).map((r) => {
       const { name_ct, ...rest } = r;
       void name_ct;
@@ -1332,7 +1337,7 @@ export function registerPgTools(
   // ── get_loans ─────────────────────────────────────────────────────────────
   server.tool("get_loans", "Get all loans with amortization summary", {}, async () => {
     const raw = await q(db, sql`
-      SELECT id, name, name_ct, type, principal, annual_rate, term_months, start_date,
+      SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
              payment_frequency, extra_payment
       FROM loans
       WHERE user_id = ${userId}
@@ -1354,8 +1359,8 @@ export function registerPgTools(
     },
     async ({ reportingCurrency }) => {
       const rawSubs = await q(db, sql`
-        SELECT s.id, s.name, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
-               c.name AS category_name, c.name_ct AS category_name_ct
+        SELECT s.id, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
+               c.name_ct AS category_name_ct
         FROM subscriptions s
         LEFT JOIN categories c ON s.category_id = c.id
         WHERE s.user_id = ${userId}
@@ -1363,8 +1368,8 @@ export function registerPgTools(
       `);
       const subs: Row[] = rawSubs.map((r) => ({
         ...r,
-        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
-        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : r.category_name,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
+        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
       }));
 
       const active = subs.filter(s => s.status === "active");
@@ -1626,19 +1631,19 @@ export function registerPgTools(
       const sixAgo = new Date(now); sixAgo.setMonth(sixAgo.getMonth() - 6);
       const startDate = `${sixAgo.getFullYear()}-${String(sixAgo.getMonth() + 1).padStart(2, "0")}-01`;
 
-      // Stream D: GROUP BY c.id so encrypted rows don't merge; decrypt in memory.
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const rawRows = await q(db, sql`
         SELECT TO_CHAR(t.date::date, 'YYYY-MM') AS month, c.id AS cat_id,
-               c.name AS category, c.name_ct AS category_ct,
+               c.name_ct AS category_ct,
                COALESCE(t.currency, a.currency) AS currency,
                SUM(t.amount) AS total
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND t.date >= ${startDate} AND c.type = 'E'
-        GROUP BY TO_CHAR(t.date::date, 'YYYY-MM'), c.id, c.name, c.name_ct, COALESCE(t.currency, a.currency)
+        GROUP BY TO_CHAR(t.date::date, 'YYYY-MM'), c.id, c.name_ct, COALESCE(t.currency, a.currency)
         ORDER BY month
-      `) as { month: string; cat_id: number; category: string | null; category_ct: string | null; currency: string | null; total: number }[];
+      `) as { month: string; cat_id: number; category_ct: string | null; currency: string | null; total: number }[];
 
       // Convert each (month, category, currency) bucket to reporting and
       // collapse to (month, category) so anomaly detection works on a
@@ -1646,7 +1651,7 @@ export function registerPgTools(
       const collapsed = new Map<string, { month: string; category: string; total: number }>();
       for (const r of rawRows) {
         const fx = await fxFor(String(r.currency ?? reporting));
-        const cat = (r.category_ct && dek ? decryptField(dek, r.category_ct) : r.category) ?? "";
+        const cat = (r.category_ct && dek ? decryptField(dek, r.category_ct) : null) ?? "";
         const key = `${r.month}|${cat}`;
         const converted = Number(r.total) * fx;
         const existing = collapsed.get(key);
@@ -1708,16 +1713,17 @@ export function registerPgTools(
 
       const items: { type: string; severity: string; title: string; description: string; amount?: number }[] = [];
 
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const budgetRawRows = await q(db, sql`
-        SELECT c.id AS cat_id, c.name AS cat, c.name_ct AS cat_ct, b.amount AS budget,
+        SELECT c.id AS cat_id, c.name_ct AS cat_ct, b.amount AS budget,
                COALESCE(ABS(SUM(CASE WHEN t.date >= ${monthStart} AND t.date <= ${monthEnd} THEN t.amount ELSE 0 END)), 0) AS spent
         FROM budgets b LEFT JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
         LEFT JOIN transactions t ON t.category_id = b.category_id AND t.user_id = ${userId}
         WHERE b.month = ${month} AND b.user_id = ${userId}
-        GROUP BY c.id, c.name, c.name_ct, b.amount
-      `) as { cat_id: number; cat: string | null; cat_ct: string | null; budget: number; spent: number }[];
+        GROUP BY c.id, c.name_ct, b.amount
+      `) as { cat_id: number; cat_ct: string | null; budget: number; spent: number }[];
       const budgetRows: { cat: string; budget: number; spent: number }[] = budgetRawRows.map((r) => ({
-        cat: (r.cat_ct && dek ? decryptField(dek, r.cat_ct) : r.cat) ?? "",
+        cat: (r.cat_ct && dek ? decryptField(dek, r.cat_ct) : null) ?? "",
         budget: r.budget,
         spent: r.spent,
       }));
@@ -1793,23 +1799,24 @@ export function registerPgTools(
       const ps = prevStart.toISOString().split("T")[0];
       const pe = prevEnd.toISOString().split("T")[0];
 
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const spendingRaw = await q(db, sql`
-        SELECT c.id AS cat_id, c.name, c.name_ct,
+        SELECT c.id AS cat_id, c.name_ct,
                COALESCE(t.currency, a.currency) AS currency,
                ABS(SUM(t.amount)) AS total
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND c.type = 'E' AND t.date >= ${ws} AND t.date <= ${we}
-        GROUP BY c.id, c.name, c.name_ct, COALESCE(t.currency, a.currency)
+        GROUP BY c.id, c.name_ct, COALESCE(t.currency, a.currency)
         ORDER BY total DESC
-      `) as { cat_id: number; name: string | null; name_ct: string | null; currency: string | null; total: number }[];
+      `) as { cat_id: number; name_ct: string | null; currency: string | null; total: number }[];
 
       // Collapse cross-currency category buckets to a single reporting total.
       const spendingByCat = new Map<string, number>();
       for (const r of spendingRaw) {
         const fx = await fxFor(String(r.currency ?? reporting));
-        const name = (r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name) ?? "";
+        const name = (r.name_ct && dek ? decryptField(dek, r.name_ct) : null) ?? "";
         const converted = Number(r.total) * fx;
         spendingByCat.set(name, (spendingByCat.get(name) ?? 0) + converted);
       }
@@ -1848,8 +1855,9 @@ export function registerPgTools(
         income += Number(r.total) * fx;
       }
 
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const notableRaw = await q(db, sql`
-        SELECT t.date, t.payee, c.name AS category, c.name_ct AS category_ct,
+        SELECT t.date, t.payee, c.name_ct AS category_ct,
                COALESCE(t.currency, a.currency) AS currency, ABS(t.amount) AS amt
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
@@ -1865,7 +1873,7 @@ export function registerPgTools(
         return {
           ...rest,
           payee: dek ? (decryptField(dek, String(n.payee ?? "")) ?? "") : n.payee,
-          category: category_ct && dek ? decryptField(dek, String(category_ct)) : rest.category,
+          category: category_ct && dek ? decryptField(dek, String(category_ct)) : null,
           currency: ccy,
           amtTagged: tagAmount(amt, ccy, "account"),
           amtReporting: tagAmount(amt * fx, reporting, "reporting"),
@@ -2073,9 +2081,10 @@ export function registerPgTools(
         if (acct) resolvedIds = [Number(acct.id)];
       }
       // Verify ownership for every supplied id.
+      // Cast to int[] (drizzle expands a JS array as separate scalars otherwise).
       if (resolvedIds.length > 0) {
         const owned = await q(db, sql`
-          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(${resolvedIds})
+          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(${resolvedIds}::int[])
         `);
         if (owned.length !== new Set(resolvedIds).size) {
           return err(`One or more account_ids are not owned by you.`);
@@ -2416,7 +2425,13 @@ export function registerPgTools(
 
       const rawAccounts = await q(db, sql`SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      // Stream D Phase 4: c.name dropped — must decrypt c.name_ct via decryptNameish
+      // before reading c.name. Pre-Phase-4 the SELECT-only-name_ct + reading-c.name
+      // accidentally worked because Postgres still had the column; now `c.name` is
+      // undefined and the map produced empty strings (resolvedCategory.name was ""
+      // in every per-row response — issue #93 follow-up).
+      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const allCats = decryptNameish(rawCats, dek);
       const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
       // Cache user-owned holding ids in one SELECT instead of one ownership
       // check per row.
@@ -3559,9 +3574,10 @@ export function registerPgTools(
       if (!g) return err(`Goal "${goal}" not found`);
 
       // Verify account ownership upfront so we don't half-apply.
+      // Cast to int[] (drizzle expands a JS array as separate scalars otherwise).
       if (account_ids && account_ids.length > 0) {
         const owned = await q(db, sql`
-          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(${account_ids})
+          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(${account_ids}::int[])
         `);
         if (owned.length !== new Set(account_ids).size) {
           return err(`One or more account_ids are not owned by you.`);
@@ -3913,17 +3929,20 @@ export function registerPgTools(
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found`);
 
-      // Stream D: check duplicate against both plaintext name AND name_lookup
-      // (HMAC). The partial UNIQUE on (user_id, account_id, name_lookup) is
-      // the DB backstop, but a friendly pre-check beats raising 23505.
+      // Stream D Phase 4: portfolio_holdings.name plaintext column dropped —
+      // uniqueness gate now relies on name_lookup HMAC. No DEK ⇒ no lookup ⇒
+      // we cannot run the pre-check, so let the DB UNIQUE backstop raise
+      // 23505 (caught below as `unique`) instead of silently inserting a dup.
       const lookup = dek ? nameLookup(dek, name) : null;
-      const existing = await q(db, sql`
-        SELECT id FROM portfolio_holdings
-        WHERE user_id = ${userId} AND account_id = ${acct.id}
-          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
-      `);
-      if (existing.length) {
-        return err(`Holding "${name}" already exists in account "${acct.name}" (id: ${existing[0].id})`);
+      if (lookup) {
+        const existing = await q(db, sql`
+          SELECT id FROM portfolio_holdings
+          WHERE user_id = ${userId} AND account_id = ${acct.id}
+            AND name_lookup = ${lookup}
+        `);
+        if (existing.length) {
+          return err(`Holding "${name}" already exists in account "${acct.name}" (id: ${existing[0].id})`);
+        }
       }
 
       const symbolValue = symbol && symbol.trim() ? symbol.trim() : null;
@@ -4021,7 +4040,7 @@ export function registerPgTools(
       }
 
       const rawHoldings = await q(db, sql`
-        SELECT id, account_id, name, symbol, name_ct, symbol_ct
+        SELECT id, account_id, name_ct, symbol_ct
         FROM portfolio_holdings
         WHERE user_id = ${userId}
       `);
@@ -4161,18 +4180,19 @@ export function registerPgTools(
       // Issue #86: SELECT ph.id so we can build an id-keyed phMap. Two
       // holdings sharing a display name (TFSA + RRSP) collide in a
       // name-keyed map; keying by id keeps them distinct.
+      // Stream D Phase 4: ph.name, ph.symbol, a.name dropped — read *_ct only.
       const phRaw = await q(db, sql`
-        SELECT ph.id, ph.name, ph.name_ct, ph.symbol, ph.symbol_ct, ph.currency,
-               a.name as account_name, a.name_ct as account_name_ct
+        SELECT ph.id, ph.name_ct, ph.symbol_ct, ph.currency,
+               a.name_ct as account_name_ct
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
         WHERE ph.user_id = ${userId}
       `);
       const ph: Row[] = phRaw.map((p) => ({
         ...p,
-        name: p.name_ct && dek ? decryptField(dek, p.name_ct) : p.name,
-        symbol: p.symbol_ct && dek ? decryptField(dek, p.symbol_ct) : p.symbol,
-        account_name: p.account_name_ct && dek ? decryptField(dek, p.account_name_ct) : p.account_name,
+        name: p.name_ct && dek ? decryptField(dek, p.name_ct) : null,
+        symbol: p.symbol_ct && dek ? decryptField(dek, p.symbol_ct) : null,
+        account_name: p.account_name_ct && dek ? decryptField(dek, p.account_name_ct) : null,
       }));
       const phMap = new Map<number, Row>(ph.map(p => [Number(p.id), p]));
 
@@ -4454,12 +4474,13 @@ export function registerPgTools(
       // rows (legacy / single-currency / non-buy) — fallback path.
       // Issue #128: SELECT t.trade_link_id so the per-row loop below can skip
       // paired cash-leg rows from the realized-gain sell branch.
+      // Stream D Phase 4: ph.name, ph.symbol, a.name dropped — read *_ct only.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
                t.portfolio_holding_id, t.category_id, t.trade_link_id,
-               ph.name_ct as ph_name_ct, ph.name as ph_name,
-               ph.symbol as ph_symbol, ph.symbol_ct as ph_symbol_ct,
-               a.name as account_name, a.name_ct as account_name_ct, a.currency,
+               ph.name_ct as ph_name_ct,
+               ph.symbol_ct as ph_symbol_ct,
+               a.name_ct as account_name_ct, a.currency,
                cash.amount AS cash_amount, cash.id AS cash_id
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
@@ -4480,24 +4501,19 @@ export function registerPgTools(
       `);
 
       const decryptedAll: Row[] = rawTxns.map((t) => {
-        // Decrypt the JOINed holding's name (ph_name_ct preferred, plaintext
-        // ph_name fallback for legacy rows pre-Stream-D).
+        // Stream D Phase 4: only ciphertext sources remain. Decrypt or null.
         let ph: string | null = null;
         if (t.ph_name_ct && dek) {
           try { ph = decryptField(dek, String(t.ph_name_ct)) ?? null; } catch { ph = null; }
         }
-        if (!ph && t.ph_name) ph = String(t.ph_name);
-        // Same fallback ladder for the symbol — tool's "fuzzy match on name
-        // OR symbol" contract relies on exact equality on this.
         let ph_sym: string | null = null;
         if (t.ph_symbol_ct && dek) {
           try { ph_sym = decryptField(dek, String(t.ph_symbol_ct)) ?? null; } catch { ph_sym = null; }
         }
-        if (!ph_sym && t.ph_symbol) ph_sym = String(t.ph_symbol);
         const pay = dek ? decryptField(dek, String(t.payee ?? "")) : t.payee;
         const nt = dek ? decryptField(dek, String(t.note ?? "")) : t.note;
         const tg = dek ? decryptField(dek, String(t.tags ?? "")) : t.tags;
-        const accName = t.account_name_ct && dek ? decryptField(dek, String(t.account_name_ct)) : t.account_name;
+        const accName = t.account_name_ct && dek ? decryptField(dek, String(t.account_name_ct)) : null;
         return { ...t, portfolio_holding: ph, ph_symbol: ph_sym, payee: pay, note: nt, tags: tg, account_name: accName };
       });
       // Issue #86: when `holdingId` is provided, short-circuit the fuzzy
@@ -4714,8 +4730,9 @@ export function registerPgTools(
       // list rather than averaging across them.
       let resolvedHoldingId: number | null = holdingId ?? null;
       if (resolvedHoldingId == null) {
+        // Stream D Phase 4: name + symbol plaintext columns dropped.
         const candidatesRaw = await q(db, sql`
-          SELECT id, name, name_ct, symbol, symbol_ct, account_id
+          SELECT id, name_ct, symbol_ct, account_id
           FROM portfolio_holdings
           WHERE user_id = ${userId}
         `);
@@ -4724,7 +4741,6 @@ export function registerPgTools(
           if (c.symbol_ct && dek) {
             try { sym = decryptField(dek, String(c.symbol_ct)) ?? null; } catch { sym = null; }
           }
-          if (!sym && c.symbol) sym = String(c.symbol);
           return { ...c, symbol_decrypted: sym };
         });
         const matches: Row[] = candidates.filter((c: Row) => {
@@ -4784,9 +4800,10 @@ export function registerPgTools(
       const unjoinedTransactionCount = Number(unjoinedRows[0]?.cnt ?? 0);
 
       // Pull every contributing leg via the same JOIN the aggregators use.
+      // Stream D Phase 4: a.name dropped — read a.name_ct only.
       const legsRaw = await q(db, sql`
         SELECT t.id, t.date, t.account_id, t.quantity, t.amount, t.source,
-               a.name AS account_name, a.name_ct AS account_name_ct,
+               a.name_ct AS account_name_ct,
                t.payee
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
@@ -5149,10 +5166,11 @@ export function registerPgTools(
     "List all loans with balance, rate, payment, payoff date, and linked account",
     {},
     async () => {
+      // Stream D Phase 4: l.name + a.name dropped — read *_ct only.
       const rawRows = await q(db, sql`
-        SELECT l.id, l.name, l.name_ct, l.type, l.principal, l.annual_rate, l.term_months,
+        SELECT l.id, l.name_ct, l.type, l.principal, l.annual_rate, l.term_months,
                l.start_date, l.payment_amount, l.payment_frequency, l.extra_payment,
-               l.note, l.account_id, a.name AS account_name, a.name_ct AS account_name_ct
+               l.note, l.account_id, a.name_ct AS account_name_ct
         FROM loans l
         LEFT JOIN accounts a ON a.id = l.account_id
         WHERE l.user_id = ${userId}
@@ -5160,8 +5178,8 @@ export function registerPgTools(
       `);
       const rows: Row[] = rawRows.map((r) => ({
         ...r,
-        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
-        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : r.account_name,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
+        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : null,
       }));
       const today = new Date().toISOString().split("T")[0];
       const enriched = rows.map((r) => {
@@ -5317,13 +5335,14 @@ export function registerPgTools(
     },
     async ({ loan_id, as_of_date, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
+      // Stream D Phase 4: l.name dropped — read l.name_ct only.
       const rows = await q(db, sql`
-        SELECT id, name, principal, annual_rate, term_months, start_date,
+        SELECT id, name_ct, principal, annual_rate, term_months, start_date,
                payment_frequency, extra_payment, currency
         FROM loans WHERE id = ${loan_id} AND user_id = ${userId}
       `);
       if (!rows.length) return err(`Loan #${loan_id} not found`);
-      const loan = rows[0];
+      const loan = decryptNameish(rows, dek)[0];
       const summary = generateAmortizationSchedule(
         Number(loan.principal),
         Number(loan.annual_rate),
@@ -5372,12 +5391,14 @@ export function registerPgTools(
     },
     async ({ strategy, extra_payment, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
-      const loans = await q(db, sql`
-        SELECT id, name, principal, annual_rate, term_months, start_date,
+      // Stream D Phase 4: l.name dropped — read l.name_ct only.
+      const loansRaw = await q(db, sql`
+        SELECT id, name_ct, principal, annual_rate, term_months, start_date,
                payment_amount, payment_frequency, extra_payment
         FROM loans WHERE user_id = ${userId}
       `);
-      if (!loans.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
+      if (!loansRaw.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
+      const loans = decryptNameish(loansRaw, dek);
       const today = new Date().toISOString().split("T")[0];
       const debts: Debt[] = loans.map((l) => {
         const summary = generateAmortizationSchedule(
@@ -5532,11 +5553,12 @@ export function registerPgTools(
     "List all subscriptions with full detail (status, next billing, category, account, notes)",
     { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
     async ({ status }) => {
+      // Stream D Phase 4: s.name + c.name + a.name dropped — read *_ct only.
       const raw = await q(db, sql`
-        SELECT s.id, s.name, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
+        SELECT s.id, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
                s.cancel_reminder_date, s.notes,
-               s.category_id, c.name AS category_name, c.name_ct AS category_name_ct,
-               s.account_id, a.name AS account_name, a.name_ct AS account_name_ct
+               s.category_id, c.name_ct AS category_name_ct,
+               s.account_id, a.name_ct AS account_name_ct
         FROM subscriptions s
         LEFT JOIN categories c ON c.id = s.category_id
         LEFT JOIN accounts a ON a.id = s.account_id
@@ -5544,12 +5566,11 @@ export function registerPgTools(
           ${status && status !== "all" ? sql`AND s.status = ${status}` : sql``}
         ORDER BY s.status
       `);
-      // Stream D: decrypt name + joined category_name + account_name.
       const rows = raw.map((r) => ({
         ...r,
-        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
-        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : r.category_name,
-        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : r.account_name,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
+        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
+        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : null,
       }));
       return text({ success: true, data: rows });
     }
@@ -5570,11 +5591,13 @@ export function registerPgTools(
       notes: z.string().optional(),
     },
     async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
-      const lookup = dek ? nameLookup(dek, name) : null;
+      // Stream D Phase 4: subscriptions.name plaintext column dropped — uniqueness
+      // gate now relies on name_lookup HMAC. No DEK ⇒ no lookup ⇒ refuse cleanly.
+      if (!dek) return err("Cannot create subscription without an unlocked DEK (Stream D Phase 4).");
+      const lookup = nameLookup(dek, name);
       const existing = await q(db, sql`
         SELECT id FROM subscriptions
-        WHERE user_id = ${userId}
-          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
+        WHERE user_id = ${userId} AND name_lookup = ${lookup}
       `);
       if (existing.length) return err(`Subscription "${name}" already exists (id: ${existing[0].id})`);
 
@@ -5684,8 +5707,10 @@ export function registerPgTools(
     async ({ id }) => {
       const existing = await q(db, sql`SELECT id, name_ct FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Subscription #${id} not found`);
+      // Stream D Phase 4: name plaintext dropped — decrypt name_ct via DEK.
+      const decryptedName = existing[0].name_ct && dek ? decryptField(dek, String(existing[0].name_ct)) : null;
       await db.execute(sql`DELETE FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" deleted` } });
+      return text({ success: true, data: { id, message: `Subscription "${decryptedName ?? `#${id}`}" deleted` } });
     }
   );
 
@@ -5695,9 +5720,11 @@ export function registerPgTools(
     "List all auto-categorization rules with their match patterns and target categories",
     {},
     async () => {
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
+      // r.name is on transaction_rules, NOT in the Phase-4 drop scope.
       const rawRows = await q(db, sql`
         SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
-               r.assign_category_id, c.name AS category_name, c.name_ct AS category_name_ct,
+               r.assign_category_id, c.name_ct AS category_name_ct,
                r.assign_tags, r.rename_to, r.is_active, r.priority, r.created_at
         FROM transaction_rules r
         LEFT JOIN categories c ON c.id = r.assign_category_id
@@ -5708,7 +5735,7 @@ export function registerPgTools(
         const { category_name_ct, ...rest } = r;
         return {
           ...rest,
-          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : null,
         };
       });
       return text({ success: true, data: rows });
@@ -5740,7 +5767,8 @@ export function registerPgTools(
       if (assign_category !== undefined) {
         if (assign_category === "") assignCategoryIdUpdate = null;
         else {
-          const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+          const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+          const allCats = decryptNameish(rawCats, dek);
           const cat = fuzzyFind(assign_category, allCats);
           if (!cat) return err(`Category "${assign_category}" not found`);
           assignCategoryIdUpdate = Number(cat.id);
@@ -5809,10 +5837,11 @@ export function registerPgTools(
       if (!value && field !== "amount") return err("match_value or match_payee is required");
       const limit = sample_size ?? 5000;
 
+      // Stream D Phase 4: c.name + a.name dropped — read *_ct only.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.payee, t.tags, t.amount, t.category_id,
-               c.name AS category_name, c.name_ct AS category_name_ct,
-               t.account_id, a.name AS account_name, a.name_ct AS account_name_ct
+               c.name_ct AS category_name_ct,
+               t.account_id, a.name_ct AS account_name_ct
         FROM transactions t
         LEFT JOIN categories c ON c.id = t.category_id
         LEFT JOIN accounts a ON a.id = t.account_id
@@ -5824,8 +5853,8 @@ export function registerPgTools(
         const { category_name_ct, account_name_ct, ...rest } = r;
         return {
           ...rest,
-          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
-          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account_name,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : null,
+          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : null,
         };
       });
 
@@ -6010,10 +6039,11 @@ export function registerPgTools(
     async ({ transaction_id }) => {
       const owner = await q(db, sql`SELECT id FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
+      // Stream D Phase 4: c.name + a.name dropped — read *_ct only.
       const rawSplits = await q(db, sql`
         SELECT s.id, s.transaction_id, s.category_id,
-               c.name AS category_name, c.name_ct AS category_name_ct,
-               s.account_id, a.name AS account_name, a.name_ct AS account_name_ct,
+               c.name_ct AS category_name_ct,
+               s.account_id, a.name_ct AS account_name_ct,
                s.amount, s.note, s.description, s.tags
         FROM transaction_splits s
         LEFT JOIN categories c ON c.id = s.category_id
@@ -6025,8 +6055,8 @@ export function registerPgTools(
         const { category_name_ct, account_name_ct, ...rest } = r;
         return {
           ...rest,
-          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
-          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account_name,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : null,
+          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : null,
         };
       });
       const decrypted = rows.map((r) => {
@@ -6468,9 +6498,10 @@ export function registerPgTools(
     }
 
     const sampleIds = ids.slice(0, 10);
+    // Stream D Phase 4: a.name + c.name dropped — read *_ct only.
     const rawRows = await q(db, sql`
-      SELECT t.id, t.date, t.account_id, a.name AS account, a.name_ct AS account_ct,
-             t.category_id, c.name AS category, c.name_ct AS category_ct,
+      SELECT t.id, t.date, t.account_id, a.name_ct AS account_ct,
+             t.category_id, c.name_ct AS category_ct,
              t.currency, t.amount, t.payee, t.note, t.tags, t.is_business,
              t.quantity, t.portfolio_holding_id
       FROM transactions t
@@ -6483,8 +6514,8 @@ export function registerPgTools(
       const { account_ct, category_ct, ...rest } = r;
       return {
         ...rest,
-        account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
-        category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+        account: account_ct && dek ? decryptField(dek, account_ct) : null,
+        category: category_ct && dek ? decryptField(dek, category_ct) : null,
       };
     });
     const before = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
@@ -6648,9 +6679,10 @@ export function registerPgTools(
           return text({ success: true, data: { affectedCount: 0, sample: [], confirmationToken: "" } });
         }
         const sampleIds = ids.slice(0, 10);
+        // Stream D Phase 4: a.name + c.name dropped — read *_ct only.
         const rawRows = await q(db, sql`
-          SELECT t.id, t.date, a.name AS account, a.name_ct AS account_ct,
-                 c.name AS category, c.name_ct AS category_ct,
+          SELECT t.id, t.date, a.name_ct AS account_ct,
+                 c.name_ct AS category_ct,
                  t.currency, t.amount, t.payee, t.note, t.tags
           FROM transactions t
           LEFT JOIN accounts a ON t.account_id = a.id
@@ -6662,8 +6694,8 @@ export function registerPgTools(
           const { account_ct, category_ct, ...rest } = r;
           return {
             ...rest,
-            account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
-            category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+            account: account_ct && dek ? decryptField(dek, account_ct) : null,
+            category: category_ct && dek ? decryptField(dek, category_ct) : null,
           };
         });
         const sample = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
@@ -7046,8 +7078,11 @@ export function registerPgTools(
 
         // Dedup via generateImportHash — runs against plaintext payee, which
         // is what we have at this boundary.
-        const accounts = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
-        const accountByName = new Map<string, number>(accounts.map((a) => [String(a.name), Number(a.id)]));
+        // Stream D Phase 4: a.name dropped — decrypt name_ct via decryptNameish
+        // before building the lookup map.
+        const accountsRaw = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
+        const accounts = decryptNameish(accountsRaw, dek);
+        const accountByName = new Map<string, number>(accounts.map((a) => [String(a.name ?? ""), Number(a.id)]));
         const existingHashRows = await q(db, sql`SELECT import_hash FROM transactions WHERE user_id = ${userId} AND import_hash IS NOT NULL`);
         const existingHashes = new Set<string>(existingHashRows.map((r) => String(r.import_hash)));
 

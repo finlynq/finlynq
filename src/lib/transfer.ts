@@ -1631,10 +1631,10 @@ export async function loadTransferPairViaSql(
     id: number;
     date: string;
     account_id: number;
-    account_name: string | null;
+    account_name_ct: string | null;
     account_currency: string | null;
     category_id: number;
-    category_name: string | null;
+    category_name_ct: string | null;
     category_type: string | null;
     amount: number;
     currency: string;
@@ -1648,10 +1648,14 @@ export async function loadTransferPairViaSql(
     portfolio_holding_id: number | null;
   };
 
+  // Stream D Phase 4: a.name + c.name dropped — read *_ct only and decrypt
+  // at the JS boundary. The Drizzle path elsewhere in this file is already
+  // Phase-4-safe; this raw-SQL fallback (used as a Postgres-only path) was
+  // missed in PR #131.
   const rs = await withClient(pool as unknown as SqlPool, (c) =>
     c.query<Row>(
-      `SELECT t.id, t.date, t.account_id, a.name AS account_name, a.currency AS account_currency,
-              t.category_id, c.name AS category_name, c.type AS category_type,
+      `SELECT t.id, t.date, t.account_id, a.name_ct AS account_name_ct, a.currency AS account_currency,
+              t.category_id, c.name_ct AS category_name_ct, c.type AS category_type,
               t.amount, t.currency,
               t.entered_amount, t.entered_currency, t.entered_fx_rate,
               t.payee, t.note, t.tags, t.link_id, t.portfolio_holding_id
@@ -1687,8 +1691,21 @@ export async function loadTransferPairViaSql(
     }
   };
 
+  // Stream D Phase 4: account_name_ct / category_name_ct are the only
+  // viable sources for the joined display names. Decrypt or leave null.
+  const decName = (ct: string | null): string | null => {
+    if (ct == null || !dek) return null;
+    try {
+      return decryptField(dek, ct);
+    } catch {
+      return null;
+    }
+  };
+
   const decoded = rows.map((r) => ({
     ...r,
+    account_name: decName(r.account_name_ct),
+    category_name: decName(r.category_name_ct),
     payee: dec(r.payee),
     note: dec(r.note),
     tags: dec(r.tags),
