@@ -586,7 +586,49 @@ export async function createTransferPair(
             : `Source and destination resolve to the same holding row — pick a different destination holding name.`,
       };
     }
-    const destQty = opts.destQuantity != null ? opts.destQuantity : opts.quantity!;
+    // Issue #125 — same-account cross-currency cash-sleeve heuristic.
+    // When both the source and destination resolve to cash sleeves
+    // (`symbol_ct IS NULL`) inside the SAME account (parent currency
+    // matches), and the holding names carry divergent ISO-4217 suffixes
+    // (e.g. "Cash - USD" vs "Cash - CAD"), the move is conceptually a
+    // cross-currency transfer even though `isCrossCurrency` (which keys
+    // on account currencies) reads false.
+    //
+    // In that narrow case, when the caller passed `receivedAmount` and
+    // omitted `destQuantity`:
+    //   - Default `destQty` to `receivedAmount` (cash sleeves track
+    //     quantity = amount in the conceptual currency).
+    //   - Override the cash leg below: dest leg's `amount` = receivedAmount,
+    //     `enteredFxRate` = receivedAmount / sentAmount.
+    //
+    // The four-check transfer-pair rule already relaxes the "different
+    // accounts" requirement for same-account in-kind moves, so this stays
+    // inside the existing exception envelope.
+    let destQty = opts.destQuantity != null ? opts.destQuantity : opts.quantity!;
+    let cashSleeveCrossCurrency = false;
+    if (
+      fromAcct.id === toAcct.id &&
+      !isCrossCurrency &&
+      opts.receivedAmount !== undefined &&
+      opts.destQuantity == null
+    ) {
+      const [fromIsCash, toIsCash] = await Promise.all([
+        isCashSleeve(userId, fromHoldingId),
+        isCashSleeve(userId, toHoldingId),
+      ]);
+      if (fromIsCash && toIsCash) {
+        const fromConceptual = extractConceptualCurrencyFromCashSleeveName(trimmedName);
+        const toConceptual = extractConceptualCurrencyFromCashSleeveName(trimmedDestName);
+        if (
+          fromConceptual != null &&
+          toConceptual != null &&
+          fromConceptual !== toConceptual
+        ) {
+          cashSleeveCrossCurrency = true;
+          destQty = round2(opts.receivedAmount);
+        }
+      }
+    }
     holdingResolved = {
       fromHoldingId,
       toHoldingId,
@@ -595,6 +637,13 @@ export async function createTransferPair(
       name: trimmedName,
       destName: trimmedDestName,
     };
+    if (cashSleeveCrossCurrency) {
+      // Override the cash-leg derivation that the L504 short-circuit set up.
+      // sentAmount has already been computed; receivedAmount and
+      // enteredFxRate need to reflect the user's explicit override.
+      receivedAmount = round2(opts.receivedAmount!);
+      enteredFxRate = sentAmount === 0 ? 1 : receivedAmount / sentAmount;
+    }
   }
 
   const linkId = randomUUID();
@@ -816,6 +865,49 @@ async function findHoldingIdByAccountAndName(
     if (enc.length && enc[0].id != null) return enc[0].id;
   }
   return null;
+}
+
+/**
+ * Issue #125 — same-account cross-currency cash-sleeve heuristic.
+ *
+ * Cash sleeves inside one investment account share the parent account's
+ * currency at the schema level (`portfolio_holdings.currency`), so the
+ * `isCrossCurrency` short-circuit in `createTransferPair` (which keys on
+ * account currencies) treats a USD-pool ↔ CAD-pool sleeve move as same-
+ * currency and silently coerces `receivedAmount` to `sentAmount`.
+ *
+ * The conceptual currency lives ONLY in the holding's display name suffix
+ * (e.g. "Cash - USD" vs "Cash - CAD"). We parse the trailing 3-letter ISO
+ * code to disambiguate. False positives are gated by the caller — this
+ * helper only runs after both sides are confirmed cash sleeves
+ * (`symbol_ct IS NULL`).
+ *
+ * Returns null when no `... - XXX` suffix is present (e.g. plain "Cash").
+ */
+export function extractConceptualCurrencyFromCashSleeveName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const m = name.trim().match(/[\s\-_]([A-Z]{3})$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Issue #125 helper — does this holding have a NULL symbol (i.e. is it a
+ * cash sleeve)? `portfolio_holdings.symbol_ct` is the post-Phase-4 column;
+ * its NULLness is preserved across the symbol/symbol_ct cutover.
+ */
+async function isCashSleeve(userId: string, holdingId: number): Promise<boolean> {
+  const row = await db
+    .select({ symbolCt: schema.portfolioHoldings.symbolCt })
+    .from(schema.portfolioHoldings)
+    .where(
+      and(
+        eq(schema.portfolioHoldings.userId, userId),
+        eq(schema.portfolioHoldings.id, holdingId),
+      ),
+    )
+    .limit(1);
+  if (!row.length) return false;
+  return row[0].symbolCt == null;
 }
 
 // ─── Load ───────────────────────────────────────────────────────────────────
