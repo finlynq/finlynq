@@ -1813,11 +1813,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with allocation breakdown by asset class and currency. Per-row amounts are in each holding's own currency; reportingCurrency is surfaced for cross-currency context.",
+    "Portfolio holdings with allocation breakdown by asset class and currency. Per-row amounts are in each holding's own currency; reportingCurrency is surfaced for cross-currency context. Pass `symbols` to filter to specific holdings; matching is case-insensitive substring against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND); across multiple entries the result is the union (OR). Unmatched filter entries surface in the response's `warnings` array.",
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
+      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols/accounts (omit for all). Substring match against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND) — so 'VCN.TO (TFSA)' matches only holdings whose combined name/symbol/account contains both 'vcn.to' and 'tfsa'. Across multiple entries the result is the union (OR). Unmatched entries surface in `warnings`."),
     },
-    async ({ reportingCurrency }) => {
+    async ({ reportingCurrency, symbols }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       // Phase 6 (2026-04-29): JOIN on the FK rather than the (dropped)
       // portfolio_holding text column. Section F (issue #25): JOIN through
@@ -1845,10 +1846,50 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         ORDER BY ABS(COALESCE(SUM(t.amount), 0)) DESC
       `).all(userId, userId, userId) as SqliteRow[];
 
+      // Issue #124: in-process `symbols` filter, mirrored from HTTP. AND
+      // within an entry across name + symbol + account; OR across entries.
+      // Empty/whitespace-only entries (e.g. "()" tokenizes to []) are
+      // skipped and surface as warnings rather than vacuously matching every
+      // row. The full-string substring fast path handles single-token cases
+      // (like "VCN.TO") cheaply. Stdio reads `h.name`/`h.symbol`/
+      // `h.account_name` directly off the SELECT — once issue #131 lands the
+      // upstream query will populate those from `name_ct`/`symbol_ct` via
+      // decryption; this filter is field-shape agnostic.
+      const symbolFilters = symbols?.length ? symbols.map(s => s.toLowerCase()) : null;
+      const symbolTokens = symbolFilters
+        ? symbolFilters.map(s => ({
+            raw: s,
+            tokens: s.split(/[\s()[\]]+/).filter(Boolean),
+          }))
+        : null;
+      const matchedFilters = new Set<string>();
+      const filteredHoldings = symbolTokens
+        ? holdings.filter(h => {
+            const name = String(h.name ?? "").toLowerCase();
+            const sym = String(h.symbol ?? "").toLowerCase();
+            const acct = String(h.account_name ?? "").toLowerCase();
+            const haystack = `${name} ${sym} ${acct}`;
+            return symbolTokens.some(({ raw, tokens }) => {
+              if (tokens.length === 0) return false;
+              if (haystack.includes(raw)) {
+                matchedFilters.add(raw);
+                return true;
+              }
+              const hit = tokens.every(t => haystack.includes(t));
+              if (hit) matchedFilters.add(raw);
+              return hit;
+            });
+          })
+        : holdings;
+      const warnings: string[] = symbolFilters
+        ? symbols!.filter(s => !matchedFilters.has(s.toLowerCase()))
+            .map(s => `${s}: no matching holding found`)
+        : [];
+
       const byCurrency: Record<string, number> = {};
       const byAccount: Record<string, number> = {};
       let totalBV = 0;
-      for (const h of holdings) {
+      for (const h of filteredHoldings) {
         const bv = Math.abs(Number(h.book_value));
         byCurrency[String(h.currency)] = (byCurrency[String(h.currency)] ?? 0) + bv;
         byAccount[String(h.account_name)] = (byAccount[String(h.account_name)] ?? 0) + bv;
@@ -1858,9 +1899,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       return txt({
         disclaimer: PORTFOLIO_DISCLAIMER,
         reportingCurrency: reporting,
-        totalHoldings: holdings.length,
+        totalHoldings: filteredHoldings.length,
         totalBookValue: Math.round(totalBV * 100) / 100,
-        holdings: holdings.map(h => ({
+        warnings,
+        holdings: filteredHoldings.map(h => ({
           // FK to portfolio_holdings.id — pass as portfolioHoldingId on
           // record_transaction / update_transaction in the HTTP MCP. (Stdio
           // MCP write tools don't currently bind to portfolio_holdings.)
