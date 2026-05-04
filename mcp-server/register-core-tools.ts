@@ -2050,6 +2050,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // legacy convention used here (NOT the qty>0 rule). Preserved for
       // backwards compat; the HTTP path uses qty>0. Both paths apply the
       // same #96 cash-leg substitution.
+      //
+      // Issue #128 (verify-only, no fix needed): the phantom-realized-loss
+      // bug is structurally absent here. Both `cost_basis` and `proceeds`
+      // gate on `t.amount` sign — `amount<0` for cost_basis, `amount>0` for
+      // proceeds. A paired cash-leg sibling has `amount=0` (issue #96
+      // tradeGroupKey validation: cash leg is qty=0/null + zero-amount), so
+      // it contributes 0 to both columns and `realizedPnL = proceeds -
+      // costBasis = 0` on the cash sleeve. No skip predicate required.
       const perf = await sqlite.prepare(`
         SELECT ph.name as holding, COUNT(*) as tx_count,
                SUM(CASE
@@ -2238,6 +2246,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // Issue #96: when a paired cash-leg sibling exists (multi-currency
       // trade pair, t.cash_id != null), use the cash leg's amount as cost
       // basis instead of the stock leg's amount.
+      //
+      // Issue #128 (verify-only, no fix needed): no realized-gain computed
+      // here — the qty<0 branch only adjusts `totalShares`, never derives a
+      // P&L number. The phantom-realized-loss symptom can't surface in this
+      // tool. The cash sleeve's `currentShares` correctly nets cash deposits
+      // and debits regardless of whether a row carries a `trade_link_id`.
       for (const t of txns) {
         const qty = Number(t.quantity ?? 0);
         if (qty > 0) {
