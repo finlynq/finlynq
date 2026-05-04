@@ -11,6 +11,8 @@ import {
   buildEmptyCsvError,
   parseCsvWithFallback,
 } from "@/lib/external-import/parsers/csv-pipeline";
+import { parseOfxToCanonical } from "@/lib/external-import/parsers/ofx";
+import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
 
 export const dynamic = "force-dynamic";
 
@@ -229,10 +231,6 @@ async function parseStatement(
 
   if (ext === "ofx" || ext === "qfx") {
     const text = await file.text();
-    const ofx = parseOfx(text);
-    if (ofx.transactions.length === 0) {
-      return { status: 400, body: { error: "No transactions found in OFX/QFX file" } };
-    }
     if (!defaultAccountName) {
       return {
         status: 400,
@@ -241,6 +239,52 @@ async function parseStatement(
             "OFX/QFX statements need an explicit accountId — pick the destination Finlynq account before uploading.",
         },
       };
+    }
+    // Investment-statement dispatch (issue #126). Mirrors the same
+    // detect-and-route the regular /api/import/preview route uses around
+    // line 84. The legacy `parseOfx()` path returns zero rows for an
+    // <INVSTMTRS> file, so we need to detect investment files BEFORE the
+    // legacy parser and route them through the canonical investment
+    // emitter (which handles BUYSTOCK / SELLSTOCK / INCOME / TRANSFER /
+    // INVBANKTRAN constructs).
+    //
+    // The reconcile flow is single-account: the user picks one Finlynq
+    // account at upload time. The canonical emitter sets `account` to a
+    // synthetic external id (`ofx:invacct:broker:acct`) per brokerage
+    // statement found in the file, so we rewrite every emitted row's
+    // `account` to the user-bound `defaultAccountName` — same as the
+    // legacy bank/CC branch does. The classifier resolves accounts by
+    // lowercase-name lookup (`buildAccountLookup` in src/lib/reconcile.ts),
+    // so the rewrite is sufficient. Per-row `portfolioHolding` (e.g.
+    // "Cash" or the security name) is preserved on the row; the UI is
+    // expected to bind it to a `portfolioHoldingId` before commit, which
+    // `commitReconcile()` enforces for investment accounts.
+    const looksLikeInvestment = /<INVSTMTRS\b/i.test(text);
+    if (looksLikeInvestment) {
+      const isQfx = ext === "qfx";
+      const canonical = isQfx
+        ? parseQfxToCanonical(text)
+        : parseOfxToCanonical(text, "ofx");
+      if (canonical.rows.length === 0) {
+        return {
+          status: 400,
+          body: {
+            error: "No transactions found in OFX/QFX investment statement.",
+          },
+        };
+      }
+      const rows: RawTransaction[] = canonical.rows.map((r) => ({
+        ...r,
+        account: defaultAccountName,
+      }));
+      return { rows, errors: [], format: "ofx" };
+    }
+
+    // Legacy bank/CC path — unchanged behavior. parseOfx() handles SGML
+    // and XML forms of OFX/QFX with bank or credit-card statements.
+    const ofx = parseOfx(text);
+    if (ofx.transactions.length === 0) {
+      return { status: 400, body: { error: "No transactions found in OFX/QFX file" } };
     }
     const rows: RawTransaction[] = ofx.transactions.map((t) => ({
       date: t.date,
