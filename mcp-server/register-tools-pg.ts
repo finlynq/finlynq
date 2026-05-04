@@ -3954,9 +3954,9 @@ export function registerPgTools(
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Returns one row per `holdingId` — two holdings sharing a display name across accounts (e.g. VUN.TO in TFSA + RRSP) appear as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter to specific holdings; matching is case-insensitive substring + token-overlap against name AND symbol. The response includes a `warnings` array listing any `symbols` filter entries that matched zero holdings.",
+    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Returns one row per `holdingId` — two holdings sharing a display name across accounts (e.g. VUN.TO in TFSA + RRSP) appear as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter to specific holdings; matching is case-insensitive substring against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND); across multiple entries the result is the union (OR). The response includes a `warnings` array listing any `symbols` filter entries that matched zero holdings.",
     {
-      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols (omit for all). Matched case-insensitively against both name and symbol via substring + token-overlap (so 'VCN.TO (TFSA)' matches a holding named 'VCN.TO'). Unmatched filter entries are surfaced in the response's `warnings` array."),
+      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols/accounts (omit for all). Substring match against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND) — so 'VCN.TO (TFSA)' matches only holdings whose combined name/symbol/account contains both 'vcn.to' and 'tfsa'. Across multiple entries the result is the union (OR). Unmatched entries surface in `warnings`."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Used for the summary block totals."),
     },
     async ({ symbols, reportingCurrency }) => {
@@ -3999,6 +3999,16 @@ export function registerPgTools(
       // Track which filter entries matched at least one holding; unmatched
       // ones surface in the response as warnings.
       const matchedFilters = new Set<string>();
+      // Issue #124: pre-tokenize each filter entry once. Empty/whitespace-only
+      // entries (e.g. "()" tokenizes to []) would vacuously match every row
+      // under `tokens.every(...)` — guard them here and let them surface as
+      // unmatched warnings instead.
+      const symbolTokens = symbolFilters
+        ? symbolFilters.map(s => ({
+            raw: s,
+            tokens: s.split(/[\s()[\]]+/).filter(Boolean),
+          }))
+        : null;
 
       const today = new Date();
       type HoldingResult = {
@@ -4024,21 +4034,25 @@ export function registerPgTools(
         // and silently merge into one row; an id-keyed map keeps them
         // distinct and ensures `account` reflects the right side of the pair.
         const info = m.holding_id != null ? phMap.get(Number(m.holding_id)) : undefined;
-        if (symbolFilters) {
-          const name = String(m.name).toLowerCase();
+        if (symbolTokens) {
+          const name = String(m.name ?? "").toLowerCase();
           const sym = String(info?.symbol ?? "").toLowerCase();
-          // Token-overlap check: split filter and target on whitespace +
-          // parens + brackets and accept any shared non-empty token.
-          // Handles inputs like "VCN.TO (TFSA)" matching a holding named
-          // "VCN.TO". Falls back to substring match for the common case.
-          const matched = symbolFilters.some(s => {
-            if (name.includes(s) || sym.includes(s)) {
-              matchedFilters.add(s);
+          const acct = String(info?.account_name ?? "").toLowerCase();
+          // Issue #124: AND-within-entry semantic. Build a single haystack
+          // covering name + symbol + account, and require every token in a
+          // filter entry to appear in it. Across entries the semantic is OR.
+          // Full-string substring fast path stays for the cheap single-token
+          // case. Skip empty-token entries (e.g. "()" → [tokens=[]]) so they
+          // surface as warnings rather than vacuously matching every row.
+          const haystack = `${name} ${sym} ${acct}`;
+          const matched = symbolTokens.some(({ raw, tokens }) => {
+            if (tokens.length === 0) return false;
+            if (haystack.includes(raw)) {
+              matchedFilters.add(raw);
               return true;
             }
-            const tokens = s.split(/[\s()[\]]+/).filter(Boolean);
-            const hit = tokens.some(t => name.includes(t) || sym.includes(t));
-            if (hit) matchedFilters.add(s);
+            const hit = tokens.every(t => haystack.includes(t));
+            if (hit) matchedFilters.add(raw);
             return hit;
           });
           if (!matched) continue;
