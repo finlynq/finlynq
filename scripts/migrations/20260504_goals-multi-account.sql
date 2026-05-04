@@ -1,4 +1,4 @@
--- Goals multi-account linking (issue #130, 2026-05-03).
+-- Goals multi-account linking (issue #130, 2026-05-04).
 --
 -- Adds the `goal_accounts` join table so a single goal can be tied to N
 -- accounts (e.g. an emergency fund spanning Chequing + Savings). Backfills
@@ -9,9 +9,9 @@
 -- fallback / backup-restore safety net; a follow-up issue will drop it once
 -- every code path round-trips through the join table.
 --
--- Idempotent: safe to re-run.
-
-BEGIN;
+-- Idempotent: safe to re-run. The runner in deploy.sh wraps the whole file
+-- in a transaction with the schema_migrations bookkeeping insert — do NOT
+-- add a BEGIN/COMMIT block here, it would commit the outer txn early.
 
 CREATE TABLE IF NOT EXISTS goal_accounts (
   id SERIAL PRIMARY KEY,
@@ -30,5 +30,3 @@ SELECT user_id, id, account_id
 FROM goals
 WHERE account_id IS NOT NULL
 ON CONFLICT (goal_id, account_id, user_id) DO NOTHING;
-
-COMMIT;

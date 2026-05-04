@@ -2,24 +2,39 @@
 
 Per-environment psql commands, in chronological order, for every schema change since the open-source pivot. Pulled out of CLAUDE.md on 2026-04-28.
 
-**Important:** schema migrations are NOT part of `npm run build`. Run them per environment BEFORE pushing the matching code change. All `ALTER TABLE` statements are idempotent (`ADD COLUMN IF NOT EXISTS` / `DROP COLUMN IF EXISTS`). Safe to re-run.
+## Automated migrations (since 2026-05-04)
 
-`npm run db:push` runs the PostgreSQL config (the SQLite config is a pre-open-source-pivot artifact). It's a **local-dev convenience** for iterating against your own dev DB; **`deploy.sh` does NOT run it on the deploy hosts** — see issue #5. Apply each schema change here per env via `psql -f scripts/migrate-*.sql` BEFORE pushing the matching code.
+`deploy.sh` now runs every file in **`scripts/migrations/*.sql`** exactly once per env. Bookkeeping lives in a `schema_migrations(version PK, applied_at)` table on each DB. Each migration is applied inside a single transaction together with the bookkeeping INSERT, so a partial failure rolls everything back and the next deploy retries cleanly. Run order is `git pull → npm install → backup → migrations → build → restart`, so a failed migration leaves the OLD service still running on the OLD schema with a known-good DB snapshot taken seconds earlier.
+
+**For new schema changes:** drop a single SQL file at `scripts/migrations/YYYYMMDD_<slug>.sql`. The next `deploy.sh` run picks it up. Do NOT include `BEGIN;` / `COMMIT;` inside the file — the runner wraps it. Filename charset is `[A-Za-z0-9_-]` (the runner rejects anything else). Migration content should still be idempotent (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `ON CONFLICT DO NOTHING`) so a one-off manual re-run during incident recovery stays safe.
+
+**Historical migrations** (everything below this section) live as `scripts/migrate-*.sql` (loose, not in the tracked dir) and are already applied to prod + dev — they remain in the repo as the canonical record for spinning up a fresh env. New self-hosters apply them in the order documented here, then `deploy.sh` takes over from `scripts/migrations/` onward.
+
+**Order-of-deploy edge cases:** for **destructive** migrations (e.g. `DROP COLUMN`) the rule is still "code FIRST, then SQL" — DON'T put those in `scripts/migrations/`. Apply them manually per env after the matching code release is live. The runner is for additive migrations that are safe to apply BEFORE the matching code lands.
+
+`npm run db:push` runs the PostgreSQL config (the SQLite config is a pre-open-source-pivot artifact). It's a **local-dev convenience** for iterating against your own dev DB; **`deploy.sh` does NOT run it on the deploy hosts** — see issue #5. New schema changes go through `scripts/migrations/` instead.
 
 > **Staging deprecated 2026-05-03.** Active envs are now **prod + dev only**. Historical entries below preserve the staging command lines for the audit trail; new entries should not include staging. The `pf_staging` database and `finlynq_staging` user remain on the host as a cold artifact (no app deploys there).
 
 See [database.md](architecture/database.md) for the lockfile gotcha that often surfaces during a deploy.
 
-## Goals: multi-account linking via `goal_accounts` (2026-05-04, issue #130)
+## Goals: multi-account linking via `goal_accounts` (2026-05-04, issue #130) — **first tracked migration**
 
-Adds the `goal_accounts` join table so a goal can span N accounts. Backfills existing single-account links from `goals.account_id` (legacy column kept for one release cycle as a fallback). The migration is idempotent (`CREATE TABLE IF NOT EXISTS` + `ON CONFLICT DO NOTHING` on the backfill) so it's safe to re-run.
+Adds the `goal_accounts` join table so a goal can span N accounts. Backfills existing single-account links from `goals.account_id` (legacy column kept for one release cycle as a fallback). Idempotent (`CREATE TABLE IF NOT EXISTS` + `ON CONFLICT DO NOTHING` on the backfill).
 
-**DEPLOY ORDER MATTERS — SQL FIRST, then code.** The new release reads `FROM goal_accounts` in `/api/goals`, MCP HTTP `get_goals`, and MCP stdio `get_goals`. If the SQL hasn't run, those calls 500 with `relation "goal_accounts" does not exist`. Apply this SQL per env BEFORE pushing the matching code release.
+**Lives at [scripts/migrations/20260504_goals-multi-account.sql](../scripts/migrations/20260504_goals-multi-account.sql)** — the first migration applied via the new automated runner (see "Automated migrations" above). It runs automatically on the next `deploy.sh` invocation per env; no manual psql step required.
+
+If you need to apply it out-of-band (e.g. dev was deployed with the broken release before the runner landed), run:
 
 ```sh
-# Apply per env BEFORE the matching code release deploys.
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev -f scripts/migrate-goals-multi-account.sql
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     -f scripts/migrate-goals-multi-account.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev -f scripts/migrations/20260504_goals-multi-account.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     -f scripts/migrations/20260504_goals-multi-account.sql
+```
+
+…then mark it as already-applied so the runner skips it on the next deploy:
+
+```sh
+psql "$DATABASE_URL" -c "INSERT INTO schema_migrations (version) VALUES ('20260504_goals-multi-account') ON CONFLICT DO NOTHING;"
 ```
 
 `goals.account_id` is NOT dropped here — it stays as a single-account fallback for one release cycle. A separate follow-up issue will drop it once every read path round-trips through the join exclusively.
