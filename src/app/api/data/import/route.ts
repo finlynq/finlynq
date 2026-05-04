@@ -42,6 +42,7 @@ interface BackupData {
     budgetTemplates?: Row[];
     loans?: Row[];
     goals?: Row[];
+    goalAccounts?: Row[]; // issue #130 — multi-account goal join rows
     snapshots?: Row[];
     targetAllocations?: Row[];
     recurringTransactions?: Row[];
@@ -73,7 +74,11 @@ interface BackupData {
 function strip(
   rows: Row[] | undefined,
   userId: string,
-  remap: { accountIdMap?: Map<number, number>; categoryIdMap?: Map<number, number> } = {},
+  remap: {
+    accountIdMap?: Map<number, number>;
+    categoryIdMap?: Map<number, number>;
+    goalIdMap?: Map<number, number>;
+  } = {},
 ): Row[] {
   return (rows ?? []).map((row) => {
     const { id: _id, userId: _uid, ...rest } = row;
@@ -92,6 +97,22 @@ function strip(
         }
         out.accountId = newId;
       }
+    }
+
+    // Issue #130 — goal_accounts.goal_id remap. The join table is the only
+    // restore consumer of this map today.
+    if (remap.goalIdMap && Object.prototype.hasOwnProperty.call(rest, "goalId")) {
+      const oldId = (rest as { goalId: unknown }).goalId;
+      if (oldId === null || oldId === undefined) {
+        throw new Error("goal_accounts row missing goalId");
+      }
+      const newId = remap.goalIdMap.get(oldId as number);
+      if (newId == null) {
+        throw new Error(
+          `Backup references unknown goalId=${String(oldId)} — goals section missing or inconsistent`,
+        );
+      }
+      out.goalId = newId;
     }
 
     if (remap.categoryIdMap && Object.prototype.hasOwnProperty.call(rest, "categoryId")) {
@@ -190,6 +211,7 @@ export async function POST(request: NextRequest) {
     budgetTemplates: d.budgetTemplates?.length ?? 0,
     loans: d.loans?.length ?? 0,
     goals: d.goals?.length ?? 0,
+    goalAccounts: d.goalAccounts?.length ?? 0,
     snapshots: d.snapshots?.length ?? 0,
     targetAllocations: d.targetAllocations?.length ?? 0,
     recurringTransactions: d.recurringTransactions?.length ?? 0,
@@ -220,6 +242,11 @@ export async function POST(request: NextRequest) {
     await db.delete(schema.fxOverrides).where(eq(schema.fxOverrides.userId, userId));
     await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId));
     await db.delete(schema.snapshots).where(eq(schema.snapshots.userId, userId));
+    // Issue #130 — explicit goal_accounts wipe before goals. ON DELETE
+    // CASCADE on goal_accounts.goal_id would also handle this, but explicit
+    // sequencing keeps the wipe predictable inside the single-transaction
+    // flow.
+    await db.delete(schema.goalAccounts).where(eq(schema.goalAccounts.userId, userId));
     await db.delete(schema.goals).where(eq(schema.goals.userId, userId));
     await db.delete(schema.loans).where(eq(schema.loans.userId, userId));
     await db.delete(schema.budgets).where(eq(schema.budgets.userId, userId));
@@ -336,8 +363,23 @@ export async function POST(request: NextRequest) {
     if (d.loans?.length) {
       await db.insert(schema.loans).values(strip(d.loans, userId, { accountIdMap }) as (typeof schema.loans.$inferInsert)[]);
     }
+    // Insert goals, capture old→new id map for `goal_accounts` restore.
+    const goalIdMap = new Map<number, number>();
     if (d.goals?.length) {
-      await db.insert(schema.goals).values(strip(d.goals, userId, { accountIdMap }) as (typeof schema.goals.$inferInsert)[]);
+      const inserted = await db
+        .insert(schema.goals)
+        .values(strip(d.goals, userId, { accountIdMap }) as (typeof schema.goals.$inferInsert)[])
+        .returning({ id: schema.goals.id });
+      d.goals.forEach((old, i) => {
+        if (inserted[i]) goalIdMap.set(old.id as number, inserted[i].id);
+      });
+    }
+    // Issue #130 — multi-account goal links. Insert AFTER goals so goalIdMap
+    // is populated. accountIdMap remap handles cross-tenant FK safety.
+    if (d.goalAccounts?.length) {
+      await db
+        .insert(schema.goalAccounts)
+        .values(strip(d.goalAccounts, userId, { accountIdMap, goalIdMap }) as (typeof schema.goalAccounts.$inferInsert)[]);
     }
     if (d.snapshots?.length) {
       await db.insert(schema.snapshots).values(strip(d.snapshots, userId, { accountIdMap }) as (typeof schema.snapshots.$inferInsert)[]);

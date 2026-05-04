@@ -249,6 +249,10 @@ export const goals = pgTable("goals", {
   currency: text("currency").notNull().default("CAD"),
   targetAmount: doublePrecision("target_amount").notNull(),
   deadline: text("deadline"),
+  // Issue #130 (2026-05-03) — `goals.account_id` is being deprecated in
+  // favor of the `goal_accounts` join table. It stays as a single-account
+  // fallback for one release cycle while every read path migrates to the
+  // join. Writes dual-write the legacy column (first id only) AND the join.
   accountId: integer("account_id").references(() => accounts.id),
   priority: integer("priority").default(1),
   status: text("status").notNull().default("active"),
@@ -256,6 +260,17 @@ export const goals = pgTable("goals", {
   // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
+});
+
+// Multi-account goal linking (issue #130, 2026-05-03). JOIN grain is
+// `(goal_id, account_id, user_id)` — mirror the holding_accounts pattern
+// in CLAUDE.md. ON DELETE CASCADE on both FKs so deleting a goal or an
+// account cleans the join automatically.
+export const goalAccounts = pgTable("goal_accounts", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  goalId: integer("goal_id").notNull().references(() => goals.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
 });
 
 export const targetAllocations = pgTable("target_allocations", {

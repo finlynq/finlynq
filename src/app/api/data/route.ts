@@ -19,6 +19,9 @@ export async function DELETE(request: NextRequest) {
     await db.delete(schema.fxOverrides).where(eq(schema.fxOverrides.userId, userId));
     await db.delete(schema.targetAllocations).where(eq(schema.targetAllocations.userId, userId));
     await db.delete(schema.snapshots).where(eq(schema.snapshots.userId, userId));
+    // Issue #130 — goal_accounts FK references goals; wipe before parent.
+    // (ON DELETE CASCADE would handle it, but explicit is safer.)
+    await db.delete(schema.goalAccounts).where(eq(schema.goalAccounts.userId, userId));
     await db.delete(schema.goals).where(eq(schema.goals.userId, userId));
     await db.delete(schema.loans).where(eq(schema.loans.userId, userId));
     await db.delete(schema.budgets).where(eq(schema.budgets.userId, userId));

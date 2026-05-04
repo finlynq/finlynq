@@ -479,9 +479,32 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
   });
 
-  server.tool("get_goals", "Get all financial goals with progress", {}, async () => {
-    const goals = await sqlite.prepare(`SELECT g.id, g.name, g.type, g.target_amount, g.deadline, g.status, g.priority, a.name as account FROM goals g LEFT JOIN accounts a ON g.account_id = a.id WHERE g.user_id = ? ORDER BY g.priority`).all(userId);
-    return { content: [{ type: "text" as const, text: JSON.stringify(goals, null, 2) }] };
+  server.tool("get_goals", "Get all financial goals with progress. Stdio cannot decrypt names (no DEK on this transport) — `name` and per-account display names come back null. Each goal carries `accountIds: number[]` (issue #130 multi-account linking) — use HTTP MCP or the web UI to see the decrypted names.", {}, async () => {
+    // Stream D Phase 4 — plaintext g.name and a.name dropped. Stdio has no
+    // DEK, so we can't decrypt name_ct. Return ids only and let the caller
+    // hop to HTTP MCP / web UI for names.
+    const goals = await sqlite.prepare(`SELECT g.id, g.type, g.target_amount, g.deadline, g.status, g.priority FROM goals g WHERE g.user_id = ? ORDER BY g.priority`).all(userId) as Array<{ id: number }>;
+    if (!goals.length) {
+      return { content: [{ type: "text" as const, text: JSON.stringify([], null, 2) }] };
+    }
+    // Issue #130 — JOIN through goal_accounts. Don't decrypt account names.
+    const goalIds = goals.map((g) => g.id);
+    const placeholders = goalIds.map(() => "?").join(",");
+    const links = await sqlite.prepare(
+      `SELECT goal_id, account_id FROM goal_accounts WHERE user_id = ? AND goal_id IN (${placeholders})`
+    ).all(userId, ...goalIds) as Array<{ goal_id: number; account_id: number }>;
+    const linksByGoal = new Map<number, number[]>();
+    for (const l of links) {
+      const list = linksByGoal.get(l.goal_id) ?? [];
+      list.push(l.account_id);
+      linksByGoal.set(l.goal_id, list);
+    }
+    const out = goals.map((g) => ({
+      ...g,
+      name: null,
+      accountIds: linksByGoal.get(g.id) ?? [],
+    }));
+    return { content: [{ type: "text" as const, text: JSON.stringify(out, null, 2) }] };
   });
 
   server.tool(
@@ -554,17 +577,18 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
   server.tool(
     "add_goal",
-    "Create a new financial goal",
+    "Create a new financial goal. Refused on stdio (Stream D Phase 4 — no DEK).",
     {
       name: z.string().describe("Goal name"),
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
       target_amount: z.number().describe("Target amount"),
       deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
+      account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). Use HTTP MCP for multi-account."),
+      account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Refused on stdio — use HTTP MCP."),
     },
-    async ({ name, type, target_amount, deadline, account }) => {
+    async ({ name, type, target_amount, deadline, account, account_ids }) => {
       // Stream D Phase 4 — stdio cannot create goals.
-      void name; void type; void target_amount; void deadline; void account;
+      void name; void type; void target_amount; void deadline; void account; void account_ids;
       return streamDRefuse("goals");
     }
   );
@@ -1727,17 +1751,18 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── update_goal ────────────────────────────────────────────────────────────
   server.tool(
     "update_goal",
-    "Update a financial goal's target, deadline, or status",
+    "Update a financial goal's target, deadline, status, or linked accounts. Refused on stdio (Stream D Phase 4 — no DEK).",
     {
       goal: z.string().describe("Goal name (fuzzy matched)"),
       target_amount: z.number().optional(),
       deadline: z.string().optional(),
       status: z.enum(["active", "completed", "paused"]).optional(),
       name: z.string().optional().describe("Rename the goal"),
+      account_ids: z.array(z.number().int()).optional().describe("Replace linked accounts (issue #130). Refused on stdio — use HTTP MCP."),
     },
-    async ({ goal, target_amount, deadline, status, name }) => {
+    async ({ goal, target_amount, deadline, status, name, account_ids }) => {
       // Stream D Phase 4 — stdio cannot update goals (would touch name_ct).
-      void goal; void target_amount; void deadline; void status; void name;
+      void goal; void target_amount; void deadline; void status; void name; void account_ids;
       return streamDRefuse("goals");
     }
   );
