@@ -729,8 +729,11 @@ async function aggregateHoldings(
   // Phase 6 (2026-04-29) eliminated orphan rows; t.portfolio_holding_id is
   // never null here. Skip-and-warn any row that surprises us with a null FK.
   const out = new Map<number, Agg>();
+  // Issue #128: SELECT t.trade_link_id so accumulate() can skip paired
+  // cash-leg rows from the realized-gain sell branch.
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
+           t.trade_link_id,
            ph.name AS holding_name, ph.name_ct AS holding_name_ct,
            cash.amount AS cash_amount, cash.id AS cash_id
     FROM transactions t
@@ -824,8 +827,20 @@ function accumulate(
     row.purchases += 1;
     if (!row.first_purchase || d < row.first_purchase) row.first_purchase = d;
   } else if (qty < 0) {
-    row.sell_qty += Math.abs(qty);
-    row.sell_amount += Math.abs(amt);
+    // Issue #128: skip paired cash-leg rows (`trade_link_id IS NOT NULL AND
+    // amount = 0`). These are the cash-side sibling of a tradeGroupKey-paired
+    // buy (issue #96); the stock leg captures the trade economics. Counting
+    // them as "sells" on the cash sleeve produced a phantom realized loss
+    // (sellAmt=0, sellQty=N, avgCost~=1 → realizedGain ~= -N) even though no
+    // cash position was sold. Conjunctive predicate leaves legitimate cash
+    // withdrawals (`trade_link_id NULL`, `amount<0`) untouched.
+    const tradeLinkId = r.trade_link_id ?? null;
+    if (tradeLinkId != null && amt === 0) {
+      // Paired cash-leg sibling — skip the sell branch.
+    } else {
+      row.sell_qty += Math.abs(qty);
+      row.sell_amount += Math.abs(amt);
+    }
   }
   if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
     row.dividends += amt;
@@ -4352,9 +4367,11 @@ export function registerPgTools(
       // brokerage account's currency; we substitute it for t.amount on a
       // paired buy row in the loop below. cash.id is null for unpaired
       // rows (legacy / single-currency / non-buy) — fallback path.
+      // Issue #128: SELECT t.trade_link_id so the per-row loop below can skip
+      // paired cash-leg rows from the realized-gain sell branch.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
-               t.portfolio_holding_id, t.category_id,
+               t.portfolio_holding_id, t.category_id, t.trade_link_id,
                ph.name_ct as ph_name_ct, ph.name as ph_name,
                ph.symbol as ph_symbol, ph.symbol_ct as ph_symbol_ct,
                a.name as account_name, a.name_ct as account_name_ct, a.currency,
@@ -4494,7 +4511,18 @@ export function registerPgTools(
           const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(amt);
           buyQty += qty; buyAmt += buyCostAmt; purchases.push(t);
         } else if (qty < 0) {
-          sellQty += Math.abs(qty); sellAmt += Math.abs(amt); sales.push(t);
+          // Issue #128: skip paired cash-leg rows (`trade_link_id IS NOT NULL
+          // AND amount = 0`) from the realized-gain sell branch. These are
+          // the cash-side sibling of a tradeGroupKey-paired buy (issue #96);
+          // counting them as sells produced a phantom realized loss on the
+          // cash sleeve. Conjunctive predicate leaves legitimate cash
+          // withdrawals untouched.
+          const tradeLinkId = t.trade_link_id ?? null;
+          if (tradeLinkId != null && amt === 0) {
+            // Paired cash-leg sibling — skip sell-branch contribution.
+          } else {
+            sellQty += Math.abs(qty); sellAmt += Math.abs(amt); sales.push(t);
+          }
         }
         if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
           divAmt += amt;

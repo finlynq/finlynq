@@ -237,8 +237,17 @@ export async function GET(request: NextRequest) {
       enteredCurrency: effectiveEnteredCurrency,
       totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
       totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
-      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
-      totalSellAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
+      // Issue #128: exclude paired cash-leg rows (`trade_link_id IS NOT NULL
+      // AND amount = 0`) from the realized-gain sell branch. These are the
+      // cash-side sibling of a `tradeGroupKey`-paired buy (issue #96); the
+      // stock leg captures the trade economics. Counting them as "sells" on
+      // the cash sleeve produced a phantom realized loss equal to roughly
+      // `sellQty * avgCost` even though no cash position was sold and no
+      // proceeds were received. Predicate is conjunctive (both required) so
+      // legitimate cash withdrawals (`trade_link_id NULL`, `amount<0`) keep
+      // their existing realized-gain treatment.
+      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT (${schema.transactions.tradeLinkId} IS NOT NULL AND ${schema.transactions.amount} = 0) THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
+      totalSellAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT (${schema.transactions.tradeLinkId} IS NOT NULL AND ${schema.transactions.amount} = 0) THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
       dividendsInEntered: dividendsCategoryId !== null
         ? sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.categoryId} = ${dividendsCategoryId} THEN COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}) ELSE 0 END), 0)::float8`
         : sql<number>`0::float8`,
