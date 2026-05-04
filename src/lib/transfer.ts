@@ -899,7 +899,18 @@ export async function loadTransferPair(
 
   // Three-check rule (categoryType==='R' relaxed in #8).
   if (rows.length !== 2) return null;
-  if (rows[0].accountId === rows[1].accountId) return null;
+  // Same-account exception (issue #122) — mirror the create path's
+  // relaxation. record_transfer allows same-account in-kind rebalances
+  // when the two legs reference DIFFERENT non-null portfolio_holding_id
+  // values; loadTransferPair must accept the same shape so delete_transfer
+  // and update_transfer can act on those pairs. Reject only the degenerate
+  // case (same account AND same holding, or same account AND both holdings
+  // null) where the pair would be a true no-op.
+  if (rows[0].accountId === rows[1].accountId) {
+    const h0 = rows[0].portfolioHoldingId;
+    const h1 = rows[1].portfolioHoldingId;
+    if (h0 == null || h1 == null || h0 === h1) return null;
+  }
 
   // Decrypt payee/note/tags so the caller can render or pre-fill the form.
   const decrypted = decryptTxRows(
@@ -1542,6 +1553,7 @@ export async function loadTransferPairViaSql(
     note: string | null;
     tags: string | null;
     link_id: string | null;
+    portfolio_holding_id: number | null;
   };
 
   const rs = await withClient(pool as unknown as SqlPool, (c) =>
@@ -1550,7 +1562,7 @@ export async function loadTransferPairViaSql(
               t.category_id, c.name AS category_name, c.type AS category_type,
               t.amount, t.currency,
               t.entered_amount, t.entered_currency, t.entered_fx_rate,
-              t.payee, t.note, t.tags, t.link_id
+              t.payee, t.note, t.tags, t.link_id, t.portfolio_holding_id
          FROM transactions t
          LEFT JOIN accounts a   ON a.id = t.account_id
          LEFT JOIN categories c ON c.id = t.category_id
@@ -1562,7 +1574,15 @@ export async function loadTransferPairViaSql(
   const rows = rs.rows;
   if (rows.length !== 2) return null;
   if (!rows.every((r) => r.category_type === "R")) return null;
-  if (rows[0].account_id === rows[1].account_id) return null;
+  // Same-account exception (issue #122) — mirror the Drizzle loader's
+  // relaxation so stdio MCP delete_transfer / update_transfer can act on
+  // same-account in-kind rebalance pairs. Reject only the degenerate case
+  // (same account AND same holding, or same account AND both holdings null).
+  if (rows[0].account_id === rows[1].account_id) {
+    const h0 = rows[0].portfolio_holding_id;
+    const h1 = rows[1].portfolio_holding_id;
+    if (h0 == null || h1 == null || h0 === h1) return null;
+  }
 
   // Decrypt encrypted text fields. Soft-fallback when DEK is null.
   const dec = (v: string | null): string | null => {
@@ -1607,11 +1627,14 @@ export async function loadTransferPairViaSql(
     note: r.note,
     tags: r.tags,
     linkId: r.link_id ?? "",
-    // Stdio path doesn't query the holding JOIN — leave these null. The
-    // stdio update_transfer tool doesn't expose holding mutation in v1, so
-    // the only consumer that would care (the unified UI's edit-pair path)
-    // never goes through ViaSql.
-    portfolioHoldingId: null,
+    // Stdio path doesn't JOIN portfolio_holdings for the name — leave that
+    // null. The stdio update_transfer tool doesn't expose holding mutation
+    // in v1, so the only consumer that would care for the name (the unified
+    // UI's edit-pair path) never goes through ViaSql. We DO project the
+    // raw portfolio_holding_id (issue #122) so the same-account-pair
+    // detection in the loader and any downstream delete/update paths can
+    // distinguish a same-account in-kind rebalance from a degenerate pair.
+    portfolioHoldingId: r.portfolio_holding_id,
     portfolioHoldingName: null,
     quantity: null,
   });
