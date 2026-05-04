@@ -4165,13 +4165,53 @@ export function registerPgTools(
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Returns one row per `holdingId` — two holdings sharing a display name across accounts (e.g. VUN.TO in TFSA + RRSP) appear as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter to specific holdings; matching is case-insensitive substring against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND); across multiple entries the result is the union (OR). The response includes a `warnings` array listing any `symbols` filter entries that matched zero holdings.",
+    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Returns one row per `holdingId` — two holdings sharing a display name across accounts (e.g. VUN.TO in TFSA + RRSP) appear as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter to specific holdings; matching is case-insensitive substring against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND); across multiple entries the result is the union (OR). Pass `account_id` (FK fast-path) or `account` (fuzzy name/alias) to scope results to a single account — `account_id` wins when both are passed. The response includes a `warnings` array listing any `symbols` / `account` filter entries that matched zero rows.",
     {
       symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols/accounts (omit for all). Substring match against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND) — so 'VCN.TO (TFSA)' matches only holdings whose combined name/symbol/account contains both 'vcn.to' and 'tfsa'. Across multiple entries the result is the union (OR). Unmatched entries surface in `warnings`."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching; scopes results to holdings in this account only. Wins over `account` if both are passed. Bad/foreign id returns empty `holdings` plus a warning entry."),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched, low-confidence rejected — issue #123). PREFER `account_id` when known. Unmatched/low-confidence entries surface in `warnings` with empty holdings."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Used for the summary block totals."),
     },
-    async ({ symbols, reportingCurrency }) => {
+    async ({ symbols, account_id, account, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
+
+      // Issue #123: scope to a single account when account_id or account is
+      // passed. account_id wins (mirrors record_transaction's precedence).
+      // Filter rides the existing holding_accounts JOIN grain (issue #25 —
+      // (holding_id, account_id, user_id)) so this is just an additional
+      // WHERE on portfolio_holdings; no new joins. On rejection (bad id /
+      // unknown name / low confidence) we short-circuit to empty holdings +
+      // a warning, matching the symbols-warnings contract from issue #86.
+      const accountWarnings: string[] = [];
+      let scopeAccountId: number | null = null;
+      let scopeRejected = false;
+      if (account_id != null) {
+        const ownsRow = await q(db, sql`
+          SELECT 1 AS ok FROM accounts WHERE id = ${account_id} AND user_id = ${userId}
+        `);
+        if (!ownsRow.length) {
+          accountWarnings.push(`account_id=${account_id}: not found`);
+          scopeRejected = true;
+        } else {
+          scopeAccountId = account_id;
+        }
+      } else if (account != null) {
+        const rawAccounts = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          if (resolved.reason === "low_confidence") {
+            accountWarnings.push(`${account}: no matching account (did you mean ${resolved.suggestion.name} id=${Number(resolved.suggestion.id)}?)`);
+          } else {
+            accountWarnings.push(`${account}: no matching account`);
+          }
+          scopeRejected = true;
+        } else {
+          scopeAccountId = Number(resolved.account.id);
+        }
+      }
       const todayStr = new Date().toISOString().split("T")[0];
       const fxCache = new Map<string, number>();
       const fxFor = async (ccy: string): Promise<number> => {
@@ -4182,6 +4222,34 @@ export function registerPgTools(
         return r;
       };
 
+      // Issue #123: when the caller passed an account scope and it failed to
+      // resolve, short-circuit to empty holdings + the warnings array. Same
+      // shape as a successful empty result (no error) so callers stay
+      // monomorphic — mirrors the symbols-all-unmatched warnings contract.
+      if (scopeRejected) {
+        return text({
+          disclaimer: PORTFOLIO_DISCLAIMER,
+          note: "Account scope did not resolve — no holdings returned. See `warnings` for details.",
+          totalHoldings: 0,
+          reportingCurrency: reporting,
+          warnings: accountWarnings,
+          summary: {
+            totalCostBasis: 0,
+            lifetimeCostBasis: 0,
+            totalRealizedGain: 0,
+            totalDividends: 0,
+            totalReturn: 0,
+            totalReturnPct: null,
+            lifetimeCostBasisReporting: tagAmount(0, reporting, "reporting"),
+            totalRealizedGainReporting: tagAmount(0, reporting, "reporting"),
+            totalDividendsReporting: tagAmount(0, reporting, "reporting"),
+            totalReturnReporting: tagAmount(0, reporting, "reporting"),
+            totalReturnPctReporting: null,
+          },
+          holdings: [],
+        });
+      }
+
       // Issue #84: dividends classified by category_id, not the legacy
       // qty=0+amt>0 heuristic. Pass the user's Dividends category id (or
       // null if they have no such category) into the aggregator.
@@ -4191,13 +4259,18 @@ export function registerPgTools(
       // Issue #86: SELECT ph.id so we can build an id-keyed phMap. Two
       // holdings sharing a display name (TFSA + RRSP) collide in a
       // name-keyed map; keying by id keeps them distinct.
+      // Issue #123: SELECT ph.account_id so we can guard rows in the per-row
+      // loop below when an account scope is active. The filter rides the
+      // existing holding_accounts JOIN grain (issue #25); we don't add a new
+      // join — just an extra WHERE predicate.
       // Stream D Phase 4: ph.name, ph.symbol, a.name dropped — read *_ct only.
       const phRaw = await q(db, sql`
-        SELECT ph.id, ph.name_ct, ph.symbol_ct, ph.currency,
+        SELECT ph.id, ph.account_id, ph.name_ct, ph.symbol_ct, ph.currency,
                a.name_ct as account_name_ct
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
         WHERE ph.user_id = ${userId}
+          ${scopeAccountId != null ? sql`AND ph.account_id = ${scopeAccountId}` : sql``}
       `);
       const ph: Row[] = phRaw.map((p) => ({
         ...p,
@@ -4246,6 +4319,13 @@ export function registerPgTools(
         // and silently merge into one row; an id-keyed map keeps them
         // distinct and ensures `account` reflects the right side of the pair.
         const info = m.holding_id != null ? phMap.get(Number(m.holding_id)) : undefined;
+        // Issue #123: when an account scope is active, phMap only contains
+        // matching-account holdings. metrics covers ALL user holdings, so
+        // skip rows whose info is missing under that scope. Without a scope
+        // we still tolerate missing info (defensive — an aggregator row
+        // without a phMap match falls through to the existing null/empty
+        // handling below).
+        if (scopeAccountId != null && !info) continue;
         if (symbolTokens) {
           const name = String(m.name ?? "").toLowerCase();
           const sym = String(info?.symbol ?? "").toLowerCase();
@@ -4339,10 +4419,16 @@ export function registerPgTools(
       // Issue #86: surface unmatched `symbols` filter entries as warnings so
       // the caller can correct typos/missing positions instead of silently
       // getting an empty result.
-      const warnings: string[] = symbolFilters
-        ? symbols!.filter(s => !matchedFilters.has(s.toLowerCase()))
-            .map(s => `${s}: no matching holding found`)
-        : [];
+      // Issue #123: merge any account-scope warnings (e.g. account_id not
+      // owned, or low-confidence fuzzy account match) into the same array.
+      // The contract is strings only — no objects — to keep callers simple.
+      const warnings: string[] = [
+        ...accountWarnings,
+        ...(symbolFilters
+          ? symbols!.filter(s => !matchedFilters.has(s.toLowerCase()))
+              .map(s => `${s}: no matching holding found`)
+          : []),
+      ];
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,

@@ -1428,14 +1428,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   );
 
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
+  // Issue #123: schema kept symmetric with HTTP (account_id / account filters
+  // accepted) so a single client can target either transport with the same
+  // payload. Stdio still refuses the call wholesale under Stream D Phase 4
+  // because account + holding names are encrypted and there's no DEK on this
+  // transport — the params are documented as accepted-but-unused.
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with allocation breakdown. Stream D Phase 4: stdio cannot decrypt holding/account names — use HTTP MCP or the web UI for this query.",
+    "Portfolio holdings with allocation breakdown. Stream D Phase 4: stdio cannot decrypt holding/account names — use HTTP MCP or the web UI for this query. Schema includes `account_id` / `account` filters for parity with HTTP, but they are unused on this transport.",
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
       symbols: z.array(z.string()).optional(),
+      account_id: z.number().int().optional().describe("Account FK (parity with HTTP transport — unused on stdio under Stream D Phase 4)."),
+      account: z.string().optional().describe("Account name/alias (parity with HTTP — unused on stdio under Stream D Phase 4)."),
     },
-    async () => streamDRefuseRead("get_portfolio_analysis", "portfolio_holdings"),
+    async ({ account_id, account }) => {
+      void account_id; void account;
+      return streamDRefuseRead("get_portfolio_analysis", "portfolio_holdings");
+    },
   );
 
   // ── get_portfolio_performance ──────────────────────────────────────────────
