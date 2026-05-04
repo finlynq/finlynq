@@ -1,0 +1,39 @@
+name: Guard claude-ready label
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  guard:
+    if: github.event.label.name == 'claude-ready'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce guardian allowlist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          GUARDIANS: ${{ vars.CLAUDE_READY_GUARDIANS }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          allowed=$(printf '%s' "${GUARDIANS:-}" | tr ',' '\n' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' | grep -v '^$' | sort -u || true)
+          actor_lc=$(printf '%s' "$ACTOR" | tr '[:upper:]' '[:lower:]')
+
+          if [ -n "$allowed" ] && printf '%s\n' "$allowed" | grep -qx "$actor_lc"; then
+            echo "Actor $ACTOR is a guardian; claude-ready allowed."
+            exit 0
+          fi
+
+          if [ -z "$allowed" ]; then
+            reason="the \`CLAUDE_READY_GUARDIANS\` allowlist is not configured"
+          else
+            reason="\`$ACTOR\` is not in the maintainer allowlist"
+          fi
+
+          gh issue edit "$ISSUE" --repo "$REPO" --remove-label "claude-ready"
+          gh issue comment "$ISSUE" --repo "$REPO" --body "Removed \`claude-ready\`: $reason. A maintainer will review and re-label if appropriate."
