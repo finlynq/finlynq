@@ -696,7 +696,7 @@ async function aggregateHoldings(
   userId: string,
   dek: Buffer | null,
   opts?: { buysOnly?: boolean; since?: string; dividendsCategoryId?: number | null }
-): Promise<(HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null })[]> {
+): Promise<(HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null; currency: string })[]> {
   const buysFilter = opts?.buysOnly
     ? sql`AND t.amount < 0`
     : sql``;
@@ -719,11 +719,14 @@ async function aggregateHoldings(
   // Issue #96: LEFT JOIN to the cash-leg sibling for multi-currency trade
   // pairs. SELECT cash.amount as cash_amount; accumulate() prefers it on
   // a paired buy row. Cash leg is identified by (same user, same
-  // trade_link_id, qty=0 or NULL, different id). Both legs sit in the
-  // same brokerage account so the amount is in the same currency — no
-  // currency hop needed at this layer (the entered_currency story is
-  // identical because both legs share account_id).
-  type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null };
+  // trade_link_id, qty=0 or NULL, different id).
+  // Issue #129: SELECT t.entered_amount, t.entered_currency, ph.currency
+  // (holding currency), cash.entered_amount, cash.entered_currency, and
+  // a.currency (account currency) so accumulate() can normalize each
+  // row's amount into the holding's own currency. Without this, a USD
+  // ETF held inside a CAD account summed cost basis in CAD and tagged
+  // it USD, producing a double-FX inflation downstream.
+  type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null; currency: string };
   // Issue #86: key by holding_id (not display name) so two holdings sharing
   // a name across accounts (e.g. VUN.TO in TFSA + RRSP) stay distinct rows.
   // Phase 6 (2026-04-29) eliminated orphan rows; t.portfolio_holding_id is
@@ -735,13 +738,20 @@ async function aggregateHoldings(
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
            t.trade_link_id,
+           t.entered_amount, t.entered_currency, t.currency AS row_currency,
+           a.currency AS account_currency,
            ph.name_ct AS holding_name_ct,
-           cash.amount AS cash_amount, cash.id AS cash_id
+           ph.currency AS holding_currency,
+           cash.amount AS cash_amount, cash.id AS cash_id,
+           cash.entered_amount AS cash_entered_amount,
+           cash.entered_currency AS cash_entered_currency,
+           cash.currency AS cash_row_currency
     FROM transactions t
     INNER JOIN holding_accounts ha
       ON ha.holding_id = t.portfolio_holding_id
      AND ha.account_id = t.account_id
      AND ha.user_id = ${userId}
+    INNER JOIN accounts a ON a.id = t.account_id
     LEFT JOIN portfolio_holdings ph ON t.portfolio_holding_id = ph.id
     LEFT JOIN transactions cash
       ON cash.user_id = ${userId}
@@ -754,6 +764,44 @@ async function aggregateHoldings(
       ${buysFilter}
       ${dateFilter}
   `);
+
+  // Issue #129: pre-resolve every (entered_currency → holding_currency) FX
+  // hop into a synchronous cache so accumulate() can stay synchronous.
+  // getRate is awaited once per distinct cross-currency pair.
+  const todayStr = new Date().toISOString().split("T")[0];
+  const fxCache = new Map<string, number>();
+  const fxKey = (from: string, to: string) => `${from.toUpperCase()}->${to.toUpperCase()}`;
+  const neededPairs = new Set<string>();
+  for (const r of fkRows) {
+    const holdingCcy = String(r.holding_currency ?? "").toUpperCase();
+    if (!holdingCcy) continue;
+    const qty = Number(r.quantity ?? 0);
+    // Buy-side: entered_currency from this row OR cash leg if paired.
+    if (qty > 0) {
+      const isPaired = r.cash_id != null;
+      const enteredCcy = isPaired
+        ? String(r.cash_entered_currency ?? r.cash_row_currency ?? r.account_currency ?? "").toUpperCase()
+        : String(r.entered_currency ?? r.row_currency ?? r.account_currency ?? "").toUpperCase();
+      if (enteredCcy && enteredCcy !== holdingCcy) neededPairs.add(fxKey(enteredCcy, holdingCcy));
+    } else if (qty < 0) {
+      const enteredCcy = String(r.entered_currency ?? r.row_currency ?? r.account_currency ?? "").toUpperCase();
+      if (enteredCcy && enteredCcy !== holdingCcy) neededPairs.add(fxKey(enteredCcy, holdingCcy));
+    }
+    // Dividends: entered_currency on the row.
+    const enteredCcy = String(r.entered_currency ?? r.row_currency ?? r.account_currency ?? "").toUpperCase();
+    if (enteredCcy && enteredCcy !== holdingCcy) neededPairs.add(fxKey(enteredCcy, holdingCcy));
+  }
+  for (const key of neededPairs) {
+    const [from, to] = key.split("->");
+    fxCache.set(key, await getRate(from, to, todayStr, userId));
+  }
+  const fxLookup = (from: string, to: string): number => {
+    const f = (from || "").toUpperCase();
+    const t = (to || "").toUpperCase();
+    if (!f || !t || f === t) return 1;
+    return fxCache.get(fxKey(f, t)) ?? 1;
+  };
+
   for (const r of fkRows) {
     const hid = Number(r.portfolio_holding_id ?? 0) || null;
     if (hid == null) continue; // shouldn't happen post-Phase-6; defensive skip
@@ -770,25 +818,43 @@ async function aggregateHoldings(
     // (stdio transport, or a DEK mismatch). The downstream UI relies on a
     // non-empty name.
     if (!name || name.startsWith("v1:")) continue;
-    accumulate(out, hid, name, r, dividendsCategoryId);
+    accumulate(out, hid, name, r, dividendsCategoryId, fxLookup);
   }
 
   return Array.from(out.values()).sort((a, b) => b.buy_amount - a.buy_amount);
 }
 
 /** Shared accumulator. Keyed by holding_id (issue #86) — display name is
- *  carried as a row field but never used for lookup. */
+ *  carried as a row field but never used for lookup.
+ *
+ *  Issue #129: cost basis (buy_amount, sell_amount, dividends) is normalized
+ *  into the holding's own currency (`r.holding_currency`). Cross-currency
+ *  rows (e.g. a USD ETF inside a CAD account where `entered_currency=USD`
+ *  and `account_currency=CAD`) are FX-converted via `fxLookup`. Same-currency
+ *  rows pass through untouched (fxLookup returns 1). The output is then
+ *  consistently in `holding_currency`, so callers can `tagAmount(buyAmt,
+ *  holding.currency, "account")` correctly. */
 function accumulate(
-  out: Map<number, HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null }>,
+  out: Map<number, HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null; currency: string }>,
   holdingId: number,
   name: string,
   r: Row,
   dividendsCategoryId: number | null,
+  fxLookup: (from: string, to: string) => number,
 ): void {
   const qty = Number(r.quantity ?? 0);
   const amt = Number(r.amount);
   const d = String(r.date);
   const catId = r.category_id != null ? Number(r.category_id) : null;
+  // Issue #129: holding currency is the canonical accounting unit for this
+  // aggregator's per-holding totals. Falls back to the row's account
+  // currency only as a last resort (no portfolio_holdings join, e.g.
+  // legacy data) — never to USD/CAD silently.
+  const holdingCcy = String(r.holding_currency ?? r.account_currency ?? r.row_currency ?? "").toUpperCase();
+  const accountCcy = String(r.account_currency ?? r.row_currency ?? "").toUpperCase();
+  const enteredCcy = String(r.entered_currency ?? r.row_currency ?? accountCcy).toUpperCase();
+  const cashEnteredCcy = String(r.cash_entered_currency ?? r.cash_row_currency ?? accountCcy).toUpperCase();
+
   const row = out.get(holdingId) ?? {
     name,
     buy_qty: 0,
@@ -802,6 +868,7 @@ function accumulate(
     net_quantity: 0,
     last_activity: null as string | null,
     holding_id: holdingId,
+    currency: holdingCcy || "CAD",
   };
   row.tx_count += 1;
   row.net_quantity += qty;
@@ -819,12 +886,27 @@ function accumulate(
   if (qty > 0) {
     row.buy_qty += qty;
     // Issue #96: when a paired cash-leg sibling is present (multi-currency
-    // trade pair), use its amount as cost basis instead of this stock leg's
-    // amount. cash_amount is null when no pair exists (legacy /
+    // trade pair), use its entered_amount as cost basis instead of this
+    // stock leg's amount. cash_amount is null when no pair exists (legacy /
     // single-currency trades) — fall back to the stock leg's own amount.
-    const cashAmt = r.cash_id != null ? Number(r.cash_amount) : NaN;
-    const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(amt);
-    row.buy_amount += buyCostAmt;
+    // Issue #129: prefer entered_amount (in entered_currency) so the
+    // cross-currency normalization below applies; entered_amount falls
+    // back to amount when it's null (un-backfilled legacy rows).
+    const isPaired = r.cash_id != null;
+    let buyCostInEntered: number;
+    let buyCostCcy: string;
+    if (isPaired) {
+      const cashEnteredAmt = r.cash_entered_amount != null ? Number(r.cash_entered_amount) : NaN;
+      const cashAmt = Number.isFinite(cashEnteredAmt) ? cashEnteredAmt : Number(r.cash_amount ?? 0);
+      buyCostInEntered = Math.abs(cashAmt);
+      buyCostCcy = cashEnteredCcy;
+    } else {
+      const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
+      buyCostInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+      buyCostCcy = enteredCcy;
+    }
+    const fx = holdingCcy ? fxLookup(buyCostCcy, holdingCcy) : 1;
+    row.buy_amount += buyCostInEntered * fx;
     row.purchases += 1;
     if (!row.first_purchase || d < row.first_purchase) row.first_purchase = d;
   } else if (qty < 0) {
@@ -840,11 +922,22 @@ function accumulate(
       // Paired cash-leg sibling — skip the sell branch.
     } else {
       row.sell_qty += Math.abs(qty);
-      row.sell_amount += Math.abs(amt);
+      // Issue #129: sell amount in entered_currency, FX-normalized to
+      // holding currency.
+      const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
+      const sellAmtInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+      const fx = holdingCcy ? fxLookup(enteredCcy, holdingCcy) : 1;
+      row.sell_amount += sellAmtInEntered * fx;
     }
   }
   if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
-    row.dividends += amt;
+    // Issue #129: dividends in entered_currency, FX-normalized to holding
+    // currency. Sign preserved (dividends contribute positive; withholding-
+    // tax / corrections contribute negative — see issue #84).
+    const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
+    const divInEntered = Number.isFinite(enteredAmt) ? enteredAmt : amt;
+    const fx = holdingCcy ? fxLookup(enteredCcy, holdingCcy) : 1;
+    row.dividends += divInEntered * fx;
   }
   out.set(holdingId, row);
 }
@@ -4565,20 +4658,31 @@ export function registerPgTools(
       // qty=0+amt>0 heuristic.
       const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
       // Issue #96: LEFT JOIN to cash-leg sibling (multi-currency trade
-      // pair). cash.amount is the broker's actual settlement value in the
-      // brokerage account's currency; we substitute it for t.amount on a
-      // paired buy row in the loop below. cash.id is null for unpaired
-      // rows (legacy / single-currency / non-buy) — fallback path.
+      // pair). cash.entered_amount is the broker's actual settlement value
+      // in cash.entered_currency; we substitute it for t.amount on a paired
+      // buy row in the loop below. cash.id is null for unpaired rows
+      // (legacy / single-currency / non-buy) — fallback path.
       // Issue #128: SELECT t.trade_link_id so the per-row loop below can skip
       // paired cash-leg rows from the realized-gain sell branch.
+      // Issue #129: SELECT ph.currency, t.entered_amount, t.entered_currency,
+      // and the cash leg's entered_*; the per-row loop normalizes amounts
+      // into the holding's own currency. Without this, cross-currency
+      // holdings (USD ETF inside CAD account) summed amounts in account
+      // currency and labeled them holding currency, producing inflated
+      // numbers and a downstream double-FX bug in reporting.
       // Stream D Phase 4: ph.name, ph.symbol, a.name dropped — read *_ct only.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
                t.portfolio_holding_id, t.category_id, t.trade_link_id,
+               t.entered_amount, t.entered_currency, t.currency AS row_currency,
                ph.name_ct as ph_name_ct,
                ph.symbol_ct as ph_symbol_ct,
+               ph.currency as holding_currency,
                a.name_ct as account_name_ct, a.currency,
-               cash.amount AS cash_amount, cash.id AS cash_id
+               cash.amount AS cash_amount, cash.id AS cash_id,
+               cash.entered_amount AS cash_entered_amount,
+               cash.entered_currency AS cash_entered_currency,
+               cash.currency AS cash_row_currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         INNER JOIN holding_accounts ha
@@ -4684,6 +4788,41 @@ export function registerPgTools(
         )?.portfolio_holding_id as number | undefined) ?? null);
       const today = new Date();
 
+      // Issue #129: holding currency is sourced from `ph.currency` (the
+      // JOINed portfolio_holdings currency), NOT `a.currency` (account
+      // currency). Cross-currency holdings (e.g. USD ETF in a CAD account)
+      // had their cost basis previously labeled with the account currency;
+      // the fix re-labels with the actual holding currency AND normalizes
+      // the per-row amount into that currency. Falls back to account
+      // currency only if ph.currency is null (legacy data with broken FK).
+      const holdingCurrency = String(
+        txns[0]?.holding_currency ?? txns[0]?.currency ?? reporting
+      ).toUpperCase();
+
+      // Pre-resolve every (entered_currency → holding_currency) FX hop
+      // into a synchronous cache.
+      const fxCache = new Map<string, number>();
+      const fxPair = (from: string, to: string) => `${from.toUpperCase()}->${to.toUpperCase()}`;
+      const neededPairs = new Set<string>();
+      for (const t of txns) {
+        const enteredCcy = String(t.entered_currency ?? t.row_currency ?? t.currency ?? "").toUpperCase();
+        if (enteredCcy && enteredCcy !== holdingCurrency) neededPairs.add(fxPair(enteredCcy, holdingCurrency));
+        if (t.cash_id != null) {
+          const cashCcy = String(t.cash_entered_currency ?? t.cash_row_currency ?? t.currency ?? "").toUpperCase();
+          if (cashCcy && cashCcy !== holdingCurrency) neededPairs.add(fxPair(cashCcy, holdingCurrency));
+        }
+      }
+      for (const key of neededPairs) {
+        const [from, to] = key.split("->");
+        fxCache.set(key, await getRate(from, to, todayStr, userId));
+      }
+      const fxLookup = (from: string, to: string): number => {
+        const f = (from || "").toUpperCase();
+        const t2 = (to || "").toUpperCase();
+        if (!f || !t2 || f === t2) return 1;
+        return fxCache.get(fxPair(f, t2)) ?? 1;
+      };
+
       let buyQty = 0, buyAmt = 0, sellQty = 0, sellAmt = 0, divAmt = 0;
       const purchases: typeof txns = [];
       const sales: typeof txns = [];
@@ -4699,15 +4838,37 @@ export function registerPgTools(
       // silently dropped dividend reinvestments and withholding-tax /
       // negative-correction rows. When the user has no Dividends category
       // (dividendsCategoryId == null), divAmt stays 0.
+      //
+      // Issue #129: every per-row amount is normalized into the holding's
+      // own currency. entered_amount + entered_currency is the truth
+      // source; falls back to amount + account-currency for un-backfilled
+      // legacy rows. For paired buys (issue #96) the cash leg's
+      // entered_amount/currency wins. The previous code summed amounts in
+      // account currency and labeled them with the holding currency,
+      // producing inflated cost basis on every cross-currency holding.
       for (const t of txns) {
         const qty = Number(t.quantity ?? 0);
         const amt = Number(t.amount);
         const catId = t.category_id != null ? Number(t.category_id) : null;
+        const enteredCcy = String(t.entered_currency ?? t.row_currency ?? t.currency ?? "").toUpperCase();
         if (qty > 0) {
           // Issue #96: paired cash-leg cost basis when present.
-          const cashAmt = t.cash_id != null ? Number(t.cash_amount) : NaN;
-          const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(amt);
-          buyQty += qty; buyAmt += buyCostAmt; purchases.push(t);
+          // Issue #129: prefer cash.entered_amount in cash.entered_currency,
+          // FX-converted into holding currency; falls back to cash.amount in
+          // the cash row's currency, then to the stock leg's
+          // entered_amount/amount.
+          let buyCostInHolding: number;
+          if (t.cash_id != null) {
+            const cashEnteredAmt = t.cash_entered_amount != null ? Number(t.cash_entered_amount) : NaN;
+            const cashAmt = Number.isFinite(cashEnteredAmt) ? cashEnteredAmt : Number(t.cash_amount ?? 0);
+            const cashCcy = String(t.cash_entered_currency ?? t.cash_row_currency ?? t.currency ?? "").toUpperCase();
+            buyCostInHolding = Math.abs(cashAmt) * fxLookup(cashCcy, holdingCurrency);
+          } else {
+            const enteredAmt = t.entered_amount != null ? Number(t.entered_amount) : NaN;
+            const buyCostInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+            buyCostInHolding = buyCostInEntered * fxLookup(enteredCcy, holdingCurrency);
+          }
+          buyQty += qty; buyAmt += buyCostInHolding; purchases.push(t);
         } else if (qty < 0) {
           // Issue #128: skip paired cash-leg rows (`trade_link_id IS NOT NULL
           // AND amount = 0`) from the realized-gain sell branch. These are
@@ -4719,11 +4880,20 @@ export function registerPgTools(
           if (tradeLinkId != null && amt === 0) {
             // Paired cash-leg sibling — skip sell-branch contribution.
           } else {
-            sellQty += Math.abs(qty); sellAmt += Math.abs(amt); sales.push(t);
+            // Issue #129: sell amount in entered_currency, FX-converted.
+            const enteredAmt = t.entered_amount != null ? Number(t.entered_amount) : NaN;
+            const sellAmtInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+            const sellAmtInHolding = sellAmtInEntered * fxLookup(enteredCcy, holdingCurrency);
+            sellQty += Math.abs(qty); sellAmt += sellAmtInHolding; sales.push(t);
           }
         }
         if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
-          divAmt += amt;
+          // Issue #129: dividend amount in entered_currency, FX-converted.
+          // Sign preserved (dividends contribute positive; withholding-
+          // tax / corrections contribute negative — see issue #84).
+          const enteredAmt = t.entered_amount != null ? Number(t.entered_amount) : NaN;
+          const divInEntered = Number.isFinite(enteredAmt) ? enteredAmt : amt;
+          divAmt += divInEntered * fxLookup(enteredCcy, holdingCurrency);
           dividends.push(t);
         }
       }
@@ -4738,10 +4908,6 @@ export function registerPgTools(
         ? Math.floor((today.getTime() - new Date(String(firstDate)).getTime()) / 86400000)
         : null;
 
-      // Holding currency: sourced from the dominant account currency in
-      // the txn set (a.currency joined above). Falls back to reporting if
-      // every row has it null.
-      const holdingCurrency = String(txns[0]?.currency ?? reporting);
       const fxToReporting = await getRate(holdingCurrency, reporting, todayStr, userId);
 
       return text({
