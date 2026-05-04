@@ -562,25 +562,25 @@ async function autoCategory(
  * user. Lookup-only — NEVER auto-creates (auto-create is the import pipeline's
  * job; MCP callers use add_portfolio_holding for that).
  *
- * Matching ladder (case-insensitive, exact):
- *   - plaintext `name` (legacy + dual-write rows)
- *   - plaintext `symbol` (e.g. "HURN" → "Huron Consulting Group Inc.")
- *   - HMAC `name_lookup`   match when DEK is available (Phase-3 NULL'd rows)
- *   - HMAC `symbol_lookup` match when DEK is available
+ * Matching is HMAC-only after Stream D Phase 4 (2026-05-03) physically dropped
+ * the plaintext `name`/`symbol` columns:
+ *   - HMAC `name_lookup`   match (covers both "Acme Corp" and "ACME")
+ *   - HMAC `symbol_lookup` match (covers ticker-style input)
  *
  * The same `nameLookup(dek, trimmed)` HMAC value is checked against both
  * `name_lookup` and `symbol_lookup` columns since the HMAC is computed over
  * trimmed-lowercase input regardless of whether that input is a name or
- * ticker. Phase-1 helper, ergonomic for write tools where users naturally
- * say "HURN" instead of the full company name.
+ * ticker. Ergonomic for write tools where users naturally say "HURN"
+ * instead of the full company name.
  *
  * When `accountId` is set, the lookup is scoped to that account — disambiguates
  * the same name/ticker in two brokerages. The `(user_id, account_id, name_lookup)`
  * partial UNIQUE makes per-account matches unambiguous; without scoping, two
  * accounts with the same-named holding return an ambiguity error.
  *
- * Mirrors the dual-cohort handling in portfolio-holding-resolver.ts but
- * single-shot — no map pre-build, no auto-create.
+ * Requires `dek` (HTTP MCP is auth-gated; DEK is always present). Returns
+ * a clean error if `dek` is null rather than running a query that would
+ * never match.
  */
 async function resolvePortfolioHoldingByName(
   db: DbLike,
@@ -592,27 +592,29 @@ async function resolvePortfolioHoldingByName(
   const trimmed = name.trim();
   if (!trimmed) return { ok: false, error: "portfolioHolding cannot be empty" };
 
-  const lookup = dek ? nameLookup(dek, trimmed) : null;
+  if (!dek) {
+    return {
+      ok: false,
+      error: `Cannot resolve holding "${trimmed}" without an unlocked DEK. Pass portfolioHoldingId directly, or unlock the session.`,
+    };
+  }
+
+  const lookup = nameLookup(dek, trimmed);
   const accountFilter = accountId ? sql`AND account_id = ${accountId}` : sql``;
   const matches = await q(db, sql`
     SELECT id
       FROM portfolio_holdings
      WHERE user_id = ${userId}
-       AND (
-         LOWER(name) = LOWER(${trimmed})
-         OR LOWER(symbol) = LOWER(${trimmed})
-         ${lookup ? sql`OR name_lookup = ${lookup} OR symbol_lookup = ${lookup}` : sql``}
-       )
+       AND (name_lookup = ${lookup} OR symbol_lookup = ${lookup})
        ${accountFilter}
      LIMIT 5
   `);
 
   if (matches.length === 0) {
     // Surface candidate "name (TICKER)" entries so the agent can retry with a
-    // valid identifier. Decrypt name_ct + symbol_ct under DEK; fall back to
-    // plaintext columns for legacy rows.
+    // valid identifier. Decrypt name_ct + symbol_ct under DEK.
     const allRaw = await q(db, sql`
-      SELECT id, name, name_ct, symbol, symbol_ct
+      SELECT id, name_ct, symbol_ct
         FROM portfolio_holdings
        WHERE user_id = ${userId}
        ${accountFilter}
@@ -621,16 +623,14 @@ async function resolvePortfolioHoldingByName(
     const candidates = allRaw
       .map((r) => {
         let nm: string | null = null;
-        if (r.name_ct && dek) {
+        if (r.name_ct) {
           try { nm = decryptField(dek, String(r.name_ct)); } catch { nm = null; }
         }
-        if (!nm && r.name) nm = String(r.name);
         if (!nm) return null;
         let sym: string | null = null;
-        if (r.symbol_ct && dek) {
+        if (r.symbol_ct) {
           try { sym = decryptField(dek, String(r.symbol_ct)); } catch { sym = null; }
         }
-        if (!sym && r.symbol) sym = String(r.symbol);
         return sym ? `${nm} (${sym})` : nm;
       })
       .filter((n): n is string => Boolean(n));

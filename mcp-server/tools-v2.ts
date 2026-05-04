@@ -79,260 +79,24 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
 
   server.tool(
     "get_financial_health_score",
-    "Calculate a financial health score 0-100 with breakdown by component (savings rate, debt-to-income, emergency fund, net worth trend, budget adherence)",
+    "Calculate a financial health score. Stream D Phase 4: stdio cannot decrypt category names (used by the budget-adherence component) — use HTTP MCP at /mcp or the web UI.",
     {},
-    async () => {
-      const now = new Date();
-      const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      const threeMonthsAgo = new Date(now);
-      threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-      const twelveMonthsAgo = new Date(now);
-      twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
-      const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
-
-      // Income vs expenses over past 12 months
-      const incomeExpenses = await sqlite.prepare(
-        `SELECT strftime('%Y-%m', t.date) as month, c.type as category_type, SUM(t.amount) as total
-         FROM transactions t LEFT JOIN categories c ON t.category_id = c.id
-         WHERE t.user_id = ? AND t.date >= ? AND t.date <= ? AND c.type IN ('E','I')
-         GROUP BY strftime('%Y-%m', t.date), c.type
-         ORDER BY month`
-      ).all(userId, fmt(twelveMonthsAgo), `${currentMonth}-31`) as { month: string; category_type: string; total: number }[];
-
-      const monthIncome = new Map<string, number>();
-      const monthExpenses = new Map<string, number>();
-      const allMonths = new Set<string>();
-
-      for (const row of incomeExpenses) {
-        allMonths.add(row.month);
-        if (row.category_type === "I") monthIncome.set(row.month, (monthIncome.get(row.month) ?? 0) + row.total);
-        if (row.category_type === "E") monthExpenses.set(row.month, (monthExpenses.get(row.month) ?? 0) + Math.abs(row.total));
-      }
-
-      const sortedMonths = Array.from(allMonths).sort().slice(-3);
-      let totalIncome = 0, totalExpenses = 0;
-      for (const m of sortedMonths) {
-        totalIncome += monthIncome.get(m) ?? 0;
-        totalExpenses += monthExpenses.get(m) ?? 0;
-      }
-
-      // 1. Savings Rate (30%)
-      let savingsRateScore = 0, savingsRateDetail = "No income data";
-      if (totalIncome > 0) {
-        const rate = (totalIncome - totalExpenses) / totalIncome;
-        savingsRateScore = Math.min(100, Math.max(0, rate * 500));
-        savingsRateDetail = `${Math.round(rate * 100)}% savings rate`;
-      }
-
-      // 2. Debt-to-Income (20%)
-      const balances = await sqlite.prepare(
-        `SELECT a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) as balance
-         FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ?
-         WHERE a.user_id = ?
-         GROUP BY a.id`
-      ).all(userId, userId) as { type: string; group: string; currency: string; balance: number }[];
-
-      const totalLiabilities = balances.filter(b => b.type === "L").reduce((s, b) => s + Math.abs(b.balance), 0);
-      const annualIncome = totalIncome > 0 ? (totalIncome / sortedMonths.length) * 12 : 0;
-
-      let dtiScore = 0, dtiDetail = "No income data";
-      if (annualIncome > 0) {
-        const dtiRatio = totalLiabilities / annualIncome;
-        dtiScore = Math.min(100, Math.max(0, (1 - dtiRatio) * 100));
-        dtiDetail = `${Math.round(dtiRatio * 100)}% debt-to-income`;
-      } else if (totalLiabilities === 0) {
-        dtiScore = 100;
-        dtiDetail = "No debt";
-      }
-
-      // 3. Emergency Fund (20%)
-      const avgMonthlyExpenses = sortedMonths.length > 0 ? totalExpenses / sortedMonths.length : 0;
-      const liquidAssets = balances
-        .filter(b => b.type === "A" && !b.group.toLowerCase().includes("investment") && !b.group.toLowerCase().includes("portfolio") && !b.group.toLowerCase().includes("retirement"))
-        .reduce((s, b) => s + b.balance, 0);
-
-      let emergencyScore = 0, emergencyDetail = "No expense data";
-      if (avgMonthlyExpenses > 0) {
-        const monthsCovered = liquidAssets / avgMonthlyExpenses;
-        emergencyScore = Math.min(100, Math.max(0, (monthsCovered / 6) * 100));
-        emergencyDetail = `${monthsCovered.toFixed(1)} months covered`;
-      } else if (liquidAssets > 0) {
-        emergencyScore = 50;
-        emergencyDetail = "Has liquid assets";
-      }
-
-      // 4. Net Worth Trend (15%)
-      const nwData = await sqlite.prepare(
-        `SELECT strftime('%Y-%m', t.date) as month, SUM(t.amount) as total
-         FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id
-         WHERE t.user_id = ? AND a.currency = 'CAD'
-         GROUP BY strftime('%Y-%m', t.date)
-         ORDER BY month`
-      ).all(userId) as { month: string; total: number }[];
-
-      let running = 0;
-      const nwByMonth: [string, number][] = [];
-      for (const row of nwData) { running += row.total; nwByMonth.push([row.month, running]); }
-
-      let nwTrendScore = 50, nwTrendDetail = "Insufficient data";
-      if (nwByMonth.length >= 3) {
-        const recent = nwByMonth.slice(-3);
-        const older = nwByMonth.slice(-6, -3);
-        const recentAvg = recent.reduce((s, [, v]) => s + v, 0) / recent.length;
-        const olderAvg = older.length > 0 ? older.reduce((s, [, v]) => s + v, 0) / older.length : recentAvg;
-        if (olderAvg !== 0) {
-          const growthPct = ((recentAvg - olderAvg) / Math.abs(olderAvg)) * 100;
-          nwTrendScore = Math.min(100, Math.max(0, 50 + growthPct * 10));
-          nwTrendDetail = growthPct >= 0 ? `Growing ${growthPct.toFixed(1)}%` : `Declining ${Math.abs(growthPct).toFixed(1)}%`;
-        }
-      }
-
-      // 5. Budget Adherence (15%)
-      const budgetsData = await sqlite.prepare(
-        `SELECT b.id, c.name as category, b.amount as budget,
-         COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? AND t.user_id = ? THEN t.amount ELSE 0 END)), 0) as spent
-         FROM budgets b JOIN categories c ON b.category_id = c.id
-         LEFT JOIN transactions t ON t.category_id = c.id
-         WHERE b.user_id = ? AND b.month = ?
-         GROUP BY b.id`
-      ).all(`${currentMonth}-01`, `${currentMonth}-31`, userId, userId, currentMonth) as BudgetRow[];
-
-      let budgetScore = 50, budgetDetail = "No budgets set";
-      if (budgetsData.length > 0) {
-        const onTrack = budgetsData.filter(b => b.spent <= Math.abs(b.budget)).length;
-        budgetScore = Math.round((onTrack / budgetsData.length) * 100);
-        budgetDetail = `${onTrack}/${budgetsData.length} budgets on track`;
-      }
-
-      // Composite
-      const components = [
-        { name: "Savings Rate", score: Math.round(savingsRateScore), weight: 0.3, weighted: Math.round(savingsRateScore * 0.3), detail: savingsRateDetail },
-        { name: "Debt-to-Income", score: Math.round(dtiScore), weight: 0.2, weighted: Math.round(dtiScore * 0.2), detail: dtiDetail },
-        { name: "Emergency Fund", score: Math.round(emergencyScore), weight: 0.2, weighted: Math.round(emergencyScore * 0.2), detail: emergencyDetail },
-        { name: "Net Worth Trend", score: Math.round(nwTrendScore), weight: 0.15, weighted: Math.round(nwTrendScore * 0.15), detail: nwTrendDetail },
-        { name: "Budget Adherence", score: Math.round(budgetScore), weight: 0.15, weighted: Math.round(budgetScore * 0.15), detail: budgetDetail },
-      ];
-
-      const totalScore = components.reduce((s, c) => s + c.weighted, 0);
-      const grade = totalScore >= 80 ? "Excellent" : totalScore >= 60 ? "Good" : totalScore >= 40 ? "Fair" : "Needs Work";
-
-      return mcpText({ score: Math.min(100, Math.max(0, totalScore)), grade, components });
-    }
+    async () => mcpError("get_financial_health_score requires an unlocked DEK to decrypt category names after Stream D Phase 4. Stdio MCP cannot decrypt — use the HTTP MCP transport at /mcp or the web UI for this query.")
   );
+
 
   server.tool(
     "get_spending_anomalies",
-    "Find spending categories with >30% deviation from their 3-month average. Highlights unusual spending patterns.",
+    "Find spending categories with >30% deviation from their 3-month average. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP at /mcp or the web UI.",
     {},
-    async () => {
-      const now = new Date();
-      const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      const sixMonthsAgo = new Date(now);
-      sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-      const startDate = `${sixMonthsAgo.getFullYear()}-${String(sixMonthsAgo.getMonth() + 1).padStart(2, "0")}-01`;
-
-      const rows = await sqlite.prepare(
-        `SELECT strftime('%Y-%m', t.date) as month, c.name as category, SUM(t.amount) as total
-         FROM transactions t LEFT JOIN categories c ON t.category_id = c.id
-         WHERE t.user_id = ? AND t.date >= ? AND c.type = 'E'
-         GROUP BY strftime('%Y-%m', t.date), c.name
-         ORDER BY month`
-      ).all(userId, startDate) as MonthlySpendRow[];
-
-      const byCategory = new Map<string, MonthlySpendRow[]>();
-      for (const row of rows) {
-        byCategory.set(row.category, [...(byCategory.get(row.category) ?? []), row]);
-      }
-
-      const anomalies = [];
-      for (const [category, catRows] of byCategory) {
-        const current = catRows.find(r => r.month === currentMonth);
-        if (!current) continue;
-
-        const previous = catRows.filter(r => r.month !== currentMonth && r.month < currentMonth).slice(-3);
-        if (previous.length < 2) continue;
-
-        const avg = previous.reduce((s, r) => s + Math.abs(r.total), 0) / previous.length;
-        const currentAbs = Math.abs(current.total);
-
-        if (avg > 0) {
-          const pctAbove = ((currentAbs - avg) / avg) * 100;
-          if (Math.abs(pctAbove) > 30) {
-            anomalies.push({
-              category,
-              currentMonthSpend: Math.round(currentAbs * 100) / 100,
-              threeMonthAvg: Math.round(avg * 100) / 100,
-              percentDeviation: Math.round(pctAbove),
-              direction: pctAbove > 0 ? "above_average" : "below_average",
-              severity: Math.abs(pctAbove) > 75 ? "alert" : "warning",
-            });
-          }
-        }
-      }
-
-      anomalies.sort((a, b) => Math.abs(b.percentDeviation) - Math.abs(a.percentDeviation));
-      return mcpText({ month: currentMonth, anomalies, count: anomalies.length });
-    }
+    async () => mcpError("get_spending_anomalies requires an unlocked DEK to decrypt category names after Stream D Phase 4. Stdio MCP cannot decrypt — use the HTTP MCP transport at /mcp or the web UI for this query."),
   );
 
   server.tool(
     "get_subscription_summary",
-    "Get all tracked subscriptions with total monthly cost and upcoming renewals",
+    "Get all tracked subscriptions with total monthly cost and upcoming renewals. Stream D Phase 4: stdio cannot decrypt subscription/category names — use HTTP MCP at /mcp or the web UI for this query.",
     {},
-    async () => {
-      const subs = await sqlite.prepare(
-        `SELECT s.id, s.name, s.amount, s.currency, s.frequency, s.next_date, s.status,
-         c.name as category_name
-         FROM subscriptions s
-         LEFT JOIN categories c ON s.category_id = c.id
-         WHERE s.user_id = ?
-         ORDER BY s.status, s.name`
-      ).all(userId) as SubscriptionRow[];
-
-      const active = subs.filter(s => s.status === "active");
-
-      // Calculate monthly cost (normalize all frequencies to monthly)
-      const freqMultiplier: Record<string, number> = {
-        weekly: 4.33,
-        monthly: 1,
-        quarterly: 1 / 3,
-        annual: 1 / 12,
-        yearly: 1 / 12,
-      };
-
-      const totalMonthlyCost = active.reduce((sum, s) => {
-        const mult = freqMultiplier[s.frequency] ?? 1;
-        return sum + s.amount * mult;
-      }, 0);
-
-      const totalAnnualCost = totalMonthlyCost * 12;
-
-      // Upcoming renewals (next 30 days)
-      const today = new Date().toISOString().split("T")[0];
-      const thirtyDaysLater = new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0];
-      const upcoming = active
-        .filter(s => s.next_date && s.next_date >= today && s.next_date <= thirtyDaysLater)
-        .map(s => ({ name: s.name, amount: s.amount, date: s.next_date, currency: s.currency }))
-        .sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
-
-      return mcpText({
-        totalMonthlyCost: Math.round(totalMonthlyCost * 100) / 100,
-        totalAnnualCost: Math.round(totalAnnualCost * 100) / 100,
-        activeCount: active.length,
-        totalCount: subs.length,
-        upcomingRenewals: upcoming,
-        subscriptions: subs.map(s => ({
-          id: s.id,
-          name: s.name,
-          amount: s.amount,
-          currency: s.currency,
-          frequency: s.frequency,
-          status: s.status,
-          nextDate: s.next_date,
-          category: s.category_name,
-        })),
-      });
-    }
+    async () => mcpError("get_subscription_summary requires an unlocked DEK to decrypt subscriptions/categories names after Stream D Phase 4. Stdio MCP cannot decrypt — use the HTTP MCP transport at /mcp or the web UI for this query."),
   );
 
   server.tool(
@@ -441,77 +205,34 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
 
   server.tool(
     "search_transactions",
-    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly. `account_id` and `portfolio_holding_id` are independent filters and may be combined to narrow to one holding in one account (e.g. all VCN.TO dividends in IBKR TFSA). Each row includes `quantity` (nullable; positive for buys, negative for sells; null for cash-proxy and non-investment transactions).",
+    "Flexible transaction search. Stream D Phase 4: stdio cannot decrypt account/category names — `account` and `category` (name) filters and the joined name fields are unavailable. Use HTTP MCP at /mcp or the web UI for full search.",
     {
-      payee: z.string().optional().describe("Partial payee/merchant name match"),
-      min_amount: z.number().optional().describe("Minimum amount"),
-      max_amount: z.number().optional().describe("Maximum amount"),
-      start_date: z.string().optional().describe("Start date (YYYY-MM-DD)"),
-      end_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
-      category: z.string().optional().describe("Category name (exact)"),
-      tags: z.string().optional().describe("Tag to search for (partial match)"),
-      account_id: z.number().int().optional().describe("Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses)."),
-      portfolio_holding_id: z.number().int().optional().describe("Filter to transactions bound to this portfolio_holdings.id (FK fast-path; cheaper than substring search). Combine with account_id to narrow to one holding in one account."),
-      limit: z.number().optional().describe("Max results (default 50)"),
+      payee: z.string().optional(),
+      min_amount: z.number().optional(),
+      max_amount: z.number().optional(),
+      start_date: z.string().optional(),
+      end_date: z.string().optional(),
+      category: z.string().optional(),
+      tags: z.string().optional(),
+      account_id: z.number().int().optional(),
+      portfolio_holding_id: z.number().int().optional(),
+      limit: z.number().optional(),
     },
-    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, portfolio_holding_id, limit }) => {
-      let query = `SELECT t.id, t.date, a.name as account, c.name as category, c.type as category_type,
-                   t.currency, t.amount, t.payee, t.note, t.tags, t.quantity
-                   FROM transactions t
-                   LEFT JOIN accounts a ON t.account_id = a.id
-                   LEFT JOIN categories c ON t.category_id = c.id
-                   WHERE t.user_id = ?`;
-      const params: (string | number)[] = [userId];
-
-      // NOTE: account_id and portfolio_holding_id are independent filters.
-      // Both are valid alone or combined; do not add an XOR or
-      // payee-required guard. HTTP behaves identically — keep parity.
-      if (payee) { query += " AND t.payee LIKE ?"; params.push(`%${payee}%`); }
-      if (min_amount !== undefined) { query += " AND t.amount >= ?"; params.push(min_amount); }
-      if (max_amount !== undefined) { query += " AND t.amount <= ?"; params.push(max_amount); }
-      if (start_date) { query += " AND t.date >= ?"; params.push(start_date); }
-      if (end_date) { query += " AND t.date <= ?"; params.push(end_date); }
-      if (category) { query += " AND c.name = ?"; params.push(category); }
-      if (tags) { query += " AND t.tags LIKE ?"; params.push(`%${tags}%`); }
-      if (account_id !== undefined) { query += " AND t.account_id = ?"; params.push(account_id); }
-      if (portfolio_holding_id !== undefined) { query += " AND t.portfolio_holding_id = ?"; params.push(portfolio_holding_id); }
-
-      query += ` ORDER BY t.date DESC LIMIT ?`;
-      params.push(limit ?? 50);
-
-      const rows = await sqlite.prepare(query).all(...params) as TransactionRow[];
-      return mcpText({ results: rows, count: rows.length });
-    }
+    async () => mcpError("search_transactions requires an unlocked DEK to decrypt account/category names after Stream D Phase 4. Stdio MCP cannot decrypt — use the HTTP MCP transport at /mcp or the web UI for this query."),
   );
 
   // ---- WRITE TOOLS ----
 
   server.tool(
     "add_account",
-    "Create a new financial account (bank, investment, credit card, etc.)",
+    "Create a new financial account. Stream D Phase 4: stdio cannot create accounts (would require writing the encrypted name siblings). Use HTTP MCP at /mcp or the web UI.",
     {
       name: z.string().describe("Account name (must be unique)"),
       type: z.enum(["A", "L"]).describe("Account type: 'A' for asset, 'L' for liability"),
-      group: z.string().optional().describe("Account group (e.g. 'Banks', 'Credit Cards', 'Investment')"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("Currency (default CAD)"),
-      note: z.string().optional().describe("Optional note"),
+      group: z.string().optional(),
+      currency: z.enum(["CAD", "USD"]).optional(),
+      note: z.string().optional(),
     },
-    async ({ name, type, group, currency, note }) => {
-      // Check for duplicate name (per-user)
-      const existing = await sqlite.prepare(
-        "SELECT id FROM accounts WHERE user_id = ? AND name = ?"
-      ).get(userId, name) as { id: number } | undefined;
-      if (existing) return mcpError(`Account "${name}" already exists (id: ${existing.id})`);
-
-      const result = await sqlite.prepare(
-        "INSERT INTO accounts (user_id, type, \"group\", name, currency, note) VALUES (?, ?, ?, ?, ?, ?)"
-      ).run(userId, type, group ?? "", name, currency ?? "CAD", note ?? "");
-
-      return mcpText({
-        success: true,
-        accountId: result.lastInsertRowid,
-        message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})`,
-      });
-    }
+    async () => mcpError("add_account requires an unlocked DEK to write the encrypted accounts.name_ct/name_lookup columns after Stream D Phase 4. Stdio MCP cannot encrypt — use the HTTP MCP transport at /mcp or the web UI."),
   );
 }
