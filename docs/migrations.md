@@ -10,6 +10,20 @@ Per-environment psql commands, in chronological order, for every schema change s
 
 See [database.md](architecture/database.md) for the lockfile gotcha that often surfaces during a deploy.
 
+## Goals: multi-account linking via `goal_accounts` (2026-05-04, issue #130)
+
+Adds the `goal_accounts` join table so a goal can span N accounts. Backfills existing single-account links from `goals.account_id` (legacy column kept for one release cycle as a fallback). The migration is idempotent (`CREATE TABLE IF NOT EXISTS` + `ON CONFLICT DO NOTHING` on the backfill) so it's safe to re-run.
+
+**DEPLOY ORDER MATTERS — SQL FIRST, then code.** The new release reads `FROM goal_accounts` in `/api/goals`, MCP HTTP `get_goals`, and MCP stdio `get_goals`. If the SQL hasn't run, those calls 500 with `relation "goal_accounts" does not exist`. Apply this SQL per env BEFORE pushing the matching code release.
+
+```sh
+# Apply per env BEFORE the matching code release deploys.
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev -f scripts/migrate-goals-multi-account.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     -f scripts/migrate-goals-multi-account.sql
+```
+
+`goals.account_id` is NOT dropped here — it stays as a single-account fallback for one release cycle. A separate follow-up issue will drop it once every read path round-trips through the join exclusively.
+
 ## Stream D Phase 4 — drop plaintext display-name columns (2026-05-03)
 
 Final cutover for the Stream D encrypted-display-names work. **Drops 8 plaintext columns** from `accounts` (`name`, `alias`), `categories` (`name`), `goals` (`name`), `loans` (`name`), `subscriptions` (`name`), and `portfolio_holdings` (`name`, `symbol`). Reads now route through `name_ct` + the session DEK; writes through `buildNameFields()`. Promotes the partial unique indexes on `(user_id, name_lookup)` to full unique indexes (every row is guaranteed to have a non-null lookup post-cutover).

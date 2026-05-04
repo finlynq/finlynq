@@ -1273,21 +1273,40 @@ export function registerPgTools(
   );
 
   // ── get_goals ─────────────────────────────────────────────────────────────
-  server.tool("get_goals", "Get all financial goals with progress", {}, async () => {
-    const raw = await q(db, sql`
-      SELECT g.id, g.name, g.name_ct, g.type, g.target_amount, g.deadline, g.status, g.priority,
-             a.name AS account, a.name_ct AS account_name_ct
+  server.tool("get_goals", "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking.", {}, async () => {
+    const goalsRaw = await q(db, sql`
+      SELECT g.id, g.name_ct, g.type, g.target_amount, g.deadline, g.status, g.priority
       FROM goals g
-      LEFT JOIN accounts a ON g.account_id = a.id
       WHERE g.user_id = ${userId}
       ORDER BY g.priority
     `);
-    const rows = raw.map((r) => {
-      const { name_ct, account_name_ct, ...rest } = r;
+    if (!goalsRaw.length) return text([]);
+    const goalIds = goalsRaw.map((g) => Number(g.id));
+    // Pull every (goal_id, account_id, account_name_ct) link in one query.
+    const linksRaw = await q(db, sql`
+      SELECT ga.goal_id, ga.account_id, a.name_ct AS account_name_ct
+      FROM goal_accounts ga
+      LEFT JOIN accounts a ON ga.account_id = a.id
+      WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(${goalIds})
+    `);
+    const linksByGoal = new Map<number, { ids: number[]; names: string[] }>();
+    for (const l of linksRaw) {
+      const goalId = Number(l.goal_id);
+      const accountId = Number(l.account_id);
+      const acctName = l.account_name_ct && dek ? decryptField(dek, l.account_name_ct) : null;
+      const entry = linksByGoal.get(goalId) ?? { ids: [], names: [] };
+      entry.ids.push(accountId);
+      entry.names.push(acctName ?? "");
+      linksByGoal.set(goalId, entry);
+    }
+    const rows = goalsRaw.map((r) => {
+      const { name_ct, ...rest } = r;
+      const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [] };
       return {
         ...rest,
-        name: name_ct && dek ? decryptField(dek, name_ct) : rest.name,
-        account: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account,
+        name: name_ct && dek ? decryptField(dek, name_ct) : null,
+        accountIds: links.ids,
+        accounts: links.names,
       };
     });
     return text(rows);
@@ -2030,31 +2049,62 @@ export function registerPgTools(
   // ── add_goal ───────────────────────────────────────────────────────────────
   server.tool(
     "add_goal",
-    "Create a new financial goal",
+    "Create a new financial goal. `account_ids` (issue #130) accepts 0..N account ids — the goal's progress sums across all linked accounts. Legacy single `account` (fuzzy-matched name) is still accepted as a single-element list. Pass `account_ids: []` for a manual-tracking goal.",
     {
       name: z.string().describe("Goal name"),
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
       target_amount: z.number().describe("Target amount"),
       deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
+      account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). Prefer `account_ids` for multi-account goals."),
+      account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking)."),
     },
-    async ({ name, type, target_amount, deadline, account }) => {
-      let accountId: number | null = null;
-      if (account) {
+    async ({ name, type, target_amount, deadline, account, account_ids }) => {
+      // Resolve the canonical id list. account_ids wins; fall back to fuzzy-match
+      // on the legacy single `account` argument.
+      let resolvedIds: number[] = [];
+      if (account_ids !== undefined) {
+        resolvedIds = account_ids;
+      } else if (account) {
         const rawAccounts = await q(db, sql`
           SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
         `);
         const allAccounts = decryptNameish(rawAccounts, dek);
         const acct = fuzzyFind(account, allAccounts);
-        accountId = acct ? Number(acct.id) : null;
+        if (acct) resolvedIds = [Number(acct.id)];
+      }
+      // Verify ownership for every supplied id.
+      if (resolvedIds.length > 0) {
+        const owned = await q(db, sql`
+          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(${resolvedIds})
+        `);
+        if (owned.length !== new Set(resolvedIds).size) {
+          return err(`One or more account_ids are not owned by you.`);
+        }
       }
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
-      // Stream D Phase 4 — plaintext name column dropped.
-      await db.execute(sql`
+      // Stream D Phase 4 — plaintext name column dropped. Issue #130 — dual-write
+      // the legacy `goals.account_id` (first id only) AND the goal_accounts join.
+      const inserted = await q(db, sql`
         INSERT INTO goals (user_id, type, target_amount, deadline, account_id, status, name_ct, name_lookup)
-        VALUES (${userId}, ${type}, ${target_amount}, ${deadline ?? null}, ${accountId}, 'active', ${n.ct}, ${n.lookup})
+        VALUES (${userId}, ${type}, ${target_amount}, ${deadline ?? null}, ${resolvedIds[0] ?? null}, 'active', ${n.ct}, ${n.lookup})
+        RETURNING id
       `);
-      return text({ success: true, message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` });
+      const goalId = Number(inserted[0]?.id);
+      if (goalId && resolvedIds.length > 0) {
+        for (const accountId of resolvedIds) {
+          await db.execute(sql`
+            INSERT INTO goal_accounts (user_id, goal_id, account_id)
+            VALUES (${userId}, ${goalId}, ${accountId})
+            ON CONFLICT (goal_id, account_id, user_id) DO NOTHING
+          `);
+        }
+      }
+      return text({
+        success: true,
+        goalId,
+        accountIds: resolvedIds,
+        message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}${resolvedIds.length > 0 ? ` linked to ${resolvedIds.length} account(s)` : ""}`,
+      });
     }
   );
 
@@ -3493,19 +3543,30 @@ export function registerPgTools(
   // ── update_goal ────────────────────────────────────────────────────────────
   server.tool(
     "update_goal",
-    "Update a financial goal's target, deadline, or status",
+    "Update a financial goal's target, deadline, status, or linked accounts. `account_ids` (issue #130) replaces the existing account-link set atomically — pass `[]` to unlink all, or omit to leave links unchanged.",
     {
       goal: z.string().describe("Goal name (fuzzy matched)"),
       target_amount: z.number().optional(),
       deadline: z.string().optional().describe("YYYY-MM-DD"),
       status: z.enum(["active", "completed", "paused"]).optional(),
       name: z.string().optional().describe("Rename the goal"),
+      account_ids: z.array(z.number().int()).optional().describe("Replace the goal's linked accounts (issue #130). When supplied, the existing goal_accounts rows are deleted and replaced with the new set in a single transaction. Pass `[]` to unlink all. Omit to leave links unchanged."),
     },
-    async ({ goal, target_amount, deadline, status, name }) => {
+    async ({ goal, target_amount, deadline, status, name, account_ids }) => {
       const rawGoals = await q(db, sql`SELECT id, name_ct FROM goals WHERE user_id = ${userId}`);
       const allGoals = decryptNameish(rawGoals, dek);
       const g = fuzzyFind(goal, allGoals);
       if (!g) return err(`Goal "${goal}" not found`);
+
+      // Verify account ownership upfront so we don't half-apply.
+      if (account_ids && account_ids.length > 0) {
+        const owned = await q(db, sql`
+          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(${account_ids})
+        `);
+        if (owned.length !== new Set(account_ids).size) {
+          return err(`One or more account_ids are not owned by you.`);
+        }
+      }
 
       // Stream D Phase 4 — plaintext name dropped.
       const updates: ReturnType<typeof sql>[] = [];
@@ -3517,6 +3578,10 @@ export function registerPgTools(
       if (target_amount !== undefined) updates.push(sql`target_amount = ${target_amount}`);
       if (deadline !== undefined) updates.push(sql`deadline = ${deadline}`);
       if (status !== undefined) updates.push(sql`status = ${status}`);
+      // Mirror the legacy single-account column (issue #130) — first id only.
+      if (account_ids !== undefined) {
+        updates.push(sql`account_id = ${account_ids[0] ?? null}`);
+      }
       if (!updates.length) return err("No fields to update");
 
       const result = await db.execute(
@@ -3527,7 +3592,27 @@ export function registerPgTools(
           ? (result as { rowCount: number }).rowCount
           : null;
       if (affected === 0) return err(`Goal "${g.name}" not found or not owned by this user`);
-      return text({ success: true, message: `Goal "${g.name}" updated` });
+
+      // Replace the join (DELETE existing + INSERT new). When the caller didn't
+      // supply `account_ids`, leave the join untouched.
+      if (account_ids !== undefined) {
+        await db.execute(sql`
+          DELETE FROM goal_accounts WHERE goal_id = ${g.id} AND user_id = ${userId}
+        `);
+        for (const accountId of account_ids) {
+          await db.execute(sql`
+            INSERT INTO goal_accounts (user_id, goal_id, account_id)
+            VALUES (${userId}, ${g.id}, ${accountId})
+            ON CONFLICT (goal_id, account_id, user_id) DO NOTHING
+          `);
+        }
+      }
+
+      return text({
+        success: true,
+        accountIds: account_ids ?? null,
+        message: `Goal "${g.name}" updated`,
+      });
     }
   );
 
@@ -3716,8 +3801,8 @@ export function registerPgTools(
           add_account: "add_account(name, type, group?, currency?, note?, alias?) — type: 'A'=asset, 'L'=liability. alias is a short shorthand (e.g. last 4 digits of a card) used when receipts/imports reference the account by a non-canonical name.",
           update_account: "update_account(account, name?, group?, currency?, note?, alias?) — Fuzzy account name or alias. Pass empty alias to clear.",
           delete_account: "delete_account(account, force?) — force=true to delete with transactions.",
-          add_goal: "add_goal(name, type, target_amount, deadline?, account?) — type: savings|debt_payoff|investment|emergency_fund.",
-          update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?) — status: active|completed|paused.",
+          add_goal: "add_goal(name, type, target_amount, deadline?, account?, account_ids?) — type: savings|debt_payoff|investment|emergency_fund. account_ids: number[] for multi-account linking (issue #130).",
+          update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?, account_ids?) — status: active|completed|paused. account_ids: replace linked-account set ([] = unlink all).",
           delete_goal: "delete_goal(goal) — Fuzzy goal name.",
           create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'T'=transfer.",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?) — match_payee supports % wildcards.",

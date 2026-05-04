@@ -406,6 +406,8 @@ export async function wipeUserDataAndRewrap(
     await tx.delete(s.fxOverrides).where(eq(s.fxOverrides.userId, userId));
     await tx.delete(s.targetAllocations).where(eq(s.targetAllocations.userId, userId));
     await tx.delete(s.snapshots).where(eq(s.snapshots.userId, userId));
+    // Issue #130 — goal_accounts FK references goals; wipe before parent.
+    await tx.delete(s.goalAccounts).where(eq(s.goalAccounts.userId, userId));
     await tx.delete(s.goals).where(eq(s.goals.userId, userId));
     await tx.delete(s.loans).where(eq(s.loans.userId, userId));
     await tx.delete(s.budgets).where(eq(s.budgets.userId, userId));
