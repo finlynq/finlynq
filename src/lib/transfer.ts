@@ -586,7 +586,49 @@ export async function createTransferPair(
             : `Source and destination resolve to the same holding row — pick a different destination holding name.`,
       };
     }
-    const destQty = opts.destQuantity != null ? opts.destQuantity : opts.quantity!;
+    // Issue #125 — same-account cross-currency cash-sleeve heuristic.
+    // When both the source and destination resolve to cash sleeves
+    // (`symbol_ct IS NULL`) inside the SAME account (parent currency
+    // matches), and the holding names carry divergent ISO-4217 suffixes
+    // (e.g. "Cash - USD" vs "Cash - CAD"), the move is conceptually a
+    // cross-currency transfer even though `isCrossCurrency` (which keys
+    // on account currencies) reads false.
+    //
+    // In that narrow case, when the caller passed `receivedAmount` and
+    // omitted `destQuantity`:
+    //   - Default `destQty` to `receivedAmount` (cash sleeves track
+    //     quantity = amount in the conceptual currency).
+    //   - Override the cash leg below: dest leg's `amount` = receivedAmount,
+    //     `enteredFxRate` = receivedAmount / sentAmount.
+    //
+    // The four-check transfer-pair rule already relaxes the "different
+    // accounts" requirement for same-account in-kind moves, so this stays
+    // inside the existing exception envelope.
+    let destQty = opts.destQuantity != null ? opts.destQuantity : opts.quantity!;
+    let cashSleeveCrossCurrency = false;
+    if (
+      fromAcct.id === toAcct.id &&
+      !isCrossCurrency &&
+      opts.receivedAmount !== undefined &&
+      opts.destQuantity == null
+    ) {
+      const [fromIsCash, toIsCash] = await Promise.all([
+        isCashSleeve(userId, fromHoldingId),
+        isCashSleeve(userId, toHoldingId),
+      ]);
+      if (fromIsCash && toIsCash) {
+        const fromConceptual = extractConceptualCurrencyFromCashSleeveName(trimmedName);
+        const toConceptual = extractConceptualCurrencyFromCashSleeveName(trimmedDestName);
+        if (
+          fromConceptual != null &&
+          toConceptual != null &&
+          fromConceptual !== toConceptual
+        ) {
+          cashSleeveCrossCurrency = true;
+          destQty = round2(opts.receivedAmount);
+        }
+      }
+    }
     holdingResolved = {
       fromHoldingId,
       toHoldingId,
@@ -595,6 +637,13 @@ export async function createTransferPair(
       name: trimmedName,
       destName: trimmedDestName,
     };
+    if (cashSleeveCrossCurrency) {
+      // Override the cash-leg derivation that the L504 short-circuit set up.
+      // sentAmount has already been computed; receivedAmount and
+      // enteredFxRate need to reflect the user's explicit override.
+      receivedAmount = round2(opts.receivedAmount!);
+      enteredFxRate = sentAmount === 0 ? 1 : receivedAmount / sentAmount;
+    }
   }
 
   const linkId = randomUUID();
@@ -818,6 +867,49 @@ async function findHoldingIdByAccountAndName(
   return null;
 }
 
+/**
+ * Issue #125 — same-account cross-currency cash-sleeve heuristic.
+ *
+ * Cash sleeves inside one investment account share the parent account's
+ * currency at the schema level (`portfolio_holdings.currency`), so the
+ * `isCrossCurrency` short-circuit in `createTransferPair` (which keys on
+ * account currencies) treats a USD-pool ↔ CAD-pool sleeve move as same-
+ * currency and silently coerces `receivedAmount` to `sentAmount`.
+ *
+ * The conceptual currency lives ONLY in the holding's display name suffix
+ * (e.g. "Cash - USD" vs "Cash - CAD"). We parse the trailing 3-letter ISO
+ * code to disambiguate. False positives are gated by the caller — this
+ * helper only runs after both sides are confirmed cash sleeves
+ * (`symbol_ct IS NULL`).
+ *
+ * Returns null when no `... - XXX` suffix is present (e.g. plain "Cash").
+ */
+export function extractConceptualCurrencyFromCashSleeveName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const m = name.trim().match(/[\s\-_]([A-Z]{3})$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Issue #125 helper — does this holding have a NULL symbol (i.e. is it a
+ * cash sleeve)? `portfolio_holdings.symbol_ct` is the post-Phase-4 column;
+ * its NULLness is preserved across the symbol/symbol_ct cutover.
+ */
+async function isCashSleeve(userId: string, holdingId: number): Promise<boolean> {
+  const row = await db
+    .select({ symbolCt: schema.portfolioHoldings.symbolCt })
+    .from(schema.portfolioHoldings)
+    .where(
+      and(
+        eq(schema.portfolioHoldings.userId, userId),
+        eq(schema.portfolioHoldings.id, holdingId),
+      ),
+    )
+    .limit(1);
+  if (!row.length) return false;
+  return row[0].symbolCt == null;
+}
+
 // ─── Load ───────────────────────────────────────────────────────────────────
 
 /**
@@ -899,7 +991,18 @@ export async function loadTransferPair(
 
   // Three-check rule (categoryType==='R' relaxed in #8).
   if (rows.length !== 2) return null;
-  if (rows[0].accountId === rows[1].accountId) return null;
+  // Same-account exception (issue #122) — mirror the create path's
+  // relaxation. record_transfer allows same-account in-kind rebalances
+  // when the two legs reference DIFFERENT non-null portfolio_holding_id
+  // values; loadTransferPair must accept the same shape so delete_transfer
+  // and update_transfer can act on those pairs. Reject only the degenerate
+  // case (same account AND same holding, or same account AND both holdings
+  // null) where the pair would be a true no-op.
+  if (rows[0].accountId === rows[1].accountId) {
+    const h0 = rows[0].portfolioHoldingId;
+    const h1 = rows[1].portfolioHoldingId;
+    if (h0 == null || h1 == null || h0 === h1) return null;
+  }
 
   // Decrypt payee/note/tags so the caller can render or pre-fill the form.
   const decrypted = decryptTxRows(
@@ -1528,10 +1631,10 @@ export async function loadTransferPairViaSql(
     id: number;
     date: string;
     account_id: number;
-    account_name: string | null;
+    account_name_ct: string | null;
     account_currency: string | null;
     category_id: number;
-    category_name: string | null;
+    category_name_ct: string | null;
     category_type: string | null;
     amount: number;
     currency: string;
@@ -1542,15 +1645,20 @@ export async function loadTransferPairViaSql(
     note: string | null;
     tags: string | null;
     link_id: string | null;
+    portfolio_holding_id: number | null;
   };
 
+  // Stream D Phase 4: a.name + c.name dropped — read *_ct only and decrypt
+  // at the JS boundary. The Drizzle path elsewhere in this file is already
+  // Phase-4-safe; this raw-SQL fallback (used as a Postgres-only path) was
+  // missed in PR #131.
   const rs = await withClient(pool as unknown as SqlPool, (c) =>
     c.query<Row>(
-      `SELECT t.id, t.date, t.account_id, a.name AS account_name, a.currency AS account_currency,
-              t.category_id, c.name AS category_name, c.type AS category_type,
+      `SELECT t.id, t.date, t.account_id, a.name_ct AS account_name_ct, a.currency AS account_currency,
+              t.category_id, c.name_ct AS category_name_ct, c.type AS category_type,
               t.amount, t.currency,
               t.entered_amount, t.entered_currency, t.entered_fx_rate,
-              t.payee, t.note, t.tags, t.link_id
+              t.payee, t.note, t.tags, t.link_id, t.portfolio_holding_id
          FROM transactions t
          LEFT JOIN accounts a   ON a.id = t.account_id
          LEFT JOIN categories c ON c.id = t.category_id
@@ -1562,7 +1670,15 @@ export async function loadTransferPairViaSql(
   const rows = rs.rows;
   if (rows.length !== 2) return null;
   if (!rows.every((r) => r.category_type === "R")) return null;
-  if (rows[0].account_id === rows[1].account_id) return null;
+  // Same-account exception (issue #122) — mirror the Drizzle loader's
+  // relaxation so stdio MCP delete_transfer / update_transfer can act on
+  // same-account in-kind rebalance pairs. Reject only the degenerate case
+  // (same account AND same holding, or same account AND both holdings null).
+  if (rows[0].account_id === rows[1].account_id) {
+    const h0 = rows[0].portfolio_holding_id;
+    const h1 = rows[1].portfolio_holding_id;
+    if (h0 == null || h1 == null || h0 === h1) return null;
+  }
 
   // Decrypt encrypted text fields. Soft-fallback when DEK is null.
   const dec = (v: string | null): string | null => {
@@ -1575,8 +1691,21 @@ export async function loadTransferPairViaSql(
     }
   };
 
+  // Stream D Phase 4: account_name_ct / category_name_ct are the only
+  // viable sources for the joined display names. Decrypt or leave null.
+  const decName = (ct: string | null): string | null => {
+    if (ct == null || !dek) return null;
+    try {
+      return decryptField(dek, ct);
+    } catch {
+      return null;
+    }
+  };
+
   const decoded = rows.map((r) => ({
     ...r,
+    account_name: decName(r.account_name_ct),
+    category_name: decName(r.category_name_ct),
     payee: dec(r.payee),
     note: dec(r.note),
     tags: dec(r.tags),
@@ -1607,11 +1736,14 @@ export async function loadTransferPairViaSql(
     note: r.note,
     tags: r.tags,
     linkId: r.link_id ?? "",
-    // Stdio path doesn't query the holding JOIN — leave these null. The
-    // stdio update_transfer tool doesn't expose holding mutation in v1, so
-    // the only consumer that would care (the unified UI's edit-pair path)
-    // never goes through ViaSql.
-    portfolioHoldingId: null,
+    // Stdio path doesn't JOIN portfolio_holdings for the name — leave that
+    // null. The stdio update_transfer tool doesn't expose holding mutation
+    // in v1, so the only consumer that would care for the name (the unified
+    // UI's edit-pair path) never goes through ViaSql. We DO project the
+    // raw portfolio_holding_id (issue #122) so the same-account-pair
+    // detection in the loader and any downstream delete/update paths can
+    // distinguish a same-account in-kind rebalance from a degenerate pair.
+    portfolioHoldingId: r.portfolio_holding_id,
     portfolioHoldingName: null,
     quantity: null,
   });

@@ -117,6 +117,23 @@ Three implementations were updated in lockstep:
 
 MCP stdio [register-core-tools.ts](../../mcp-server/register-core-tools.ts) `analyze_holding` doesn't compute dividends today (no `divAmt` accumulator), so the heuristic-fix is a no-op there. Stdio `get_portfolio_analysis` likewise doesn't expose dividends — separate gap, not regressed.
 
+### Portfolio aggregation — cross-currency cost basis bucketed by `entered_currency` (issue #129)
+
+Issue [#129](https://github.com/finlynq/finlynq/issues/129) (2026-05-04) ports the per-currency bucketing pattern from REST `/api/portfolio/overview` to the other read-side aggregators. For a holding whose `currency` differs from its parent `accounts.currency` (e.g. a USD ETF inside a CAD brokerage account), the legacy code summed `transactions.amount` (account currency) and tagged the total with the holding's currency. A USD position with a single buy of 10 shares for `entered_amount=2,819.64 USD` / `account_amount=3,839.38 CAD` returned `avgCostPerShare=$383.94 USD` (wrong, that's the CAD figure mislabeled) instead of `$281.96 USD`. The downstream `*Reporting` field then re-FXed the already-account-currency value, producing inflated nonsense.
+
+The pattern, mirroring REST overview's: SELECT `entered_amount`, `entered_currency`, `ph.currency` (holding ccy), `a.currency` (account ccy), and the cash leg's `entered_amount`/`entered_currency` for issue [#96](https://github.com/finlynq/finlynq/issues/96) trade pairs. Pre-resolve every distinct `(entered_currency → holding_currency)` FX pair into a sync `Map` cache (one `getRate` call per pair). Per-row buy / sell / dividend amount = `ABS(entered_amount) × fx(entered → holding)`. The output is consistently in holding currency, so `tagAmount(buyAmt, ph.currency, "account")` is correct and `lifetimeCostBasisReporting = buyAmt × fx(holding → reporting)` is a single hop instead of double.
+
+Three aggregators in sync:
+- [/api/portfolio/overview/route.ts](../../src/app/api/portfolio/overview/route.ts) — already canonical (the reference implementation since it shipped).
+- MCP HTTP [register-tools-pg.ts](../../mcp-server/register-tools-pg.ts) `accumulate()` (consumed by `get_portfolio_analysis` + `get_portfolio_performance`) and `analyze_holding` (independent loop).
+- [src/lib/holdings-value.ts](../../src/lib/holdings-value.ts) — GROUP BY `(holding_id, entered_currency)`, post-query loop folds buckets into holding currency, then back into account currency for the `AccountHoldingsValue` contract.
+
+MCP stdio aggregators (`get_portfolio_analysis`, `get_portfolio_performance`, `analyze_holding`) all `streamDRefuseRead` post Stream D Phase 4 because stdio has no DEK to decrypt holding names — the bug never manifested there.
+
+**`analyze_holding` had two related bugs in one tool.** Pre-fix, `holdingCurrency = txns[0]?.currency` read `a.currency` (account ccy from the JOIN), not `ph.currency`. So the response was self-consistent (label and value both wrong but matching) but inconsistent with `get_portfolio_analysis` for the same holding. The fix sources `holdingCurrency` from the new `ph.currency` SELECT AND applies per-row FX normalization in the loop. Without both, the tool would still look right in isolation.
+
+CAD/CAD same-currency holdings are unaffected (FX hop is `1.0`). Issue #96 cash-leg substitution composes (cash leg's `entered_amount` and `entered_currency` are used; the FX hop into holding currency follows). Issue #128 paired-cash-leg sell-branch skip is preserved.
+
 ### Portfolio aggregation uses integer FK, not the (now-dropped) encrypted text column
 
 SQL `GROUP BY portfolio_holding_id` is the canonical and only path. `aggregateHoldings()` in `mcp-server/register-tools-pg.ts`, the `/api/portfolio/overview` route, and `src/lib/holdings-value.ts` all run a SQL aggregation on the FK plus a JOIN to `portfolio_holdings.name_ct` for the display name. The legacy `transactions.portfolio_holding` text column was retired 2026-04-29 in [#18](https://github.com/finlynq/finlynq/pull/18) (Phase 5 NULL'd it; Phase 6 dropped it); the orphan-fallback decrypt loop and the `undecryptedTxCount` "sign in again to unlock" banner are gone with it. Portfolio reads no longer need a DEK.

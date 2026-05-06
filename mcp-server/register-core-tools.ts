@@ -231,6 +231,68 @@ function resolveCategoryStrict(input: string, options: SqliteRow[]): StdioCatego
     : { ok: false, reason: "missing" };
 }
 
+/**
+ * Strict resolver for portfolio_holdings DELETE/destructive operations
+ * (issue #127). Mirrors `resolvePortfolioHoldingStrict` in
+ * register-tools-pg.ts — searches both `name` and `symbol`, then gates the
+ * substring/reverse-substring tier on a length-≥3 token overlap. Without
+ * the gate, a 1-char holding name like "S" silently wins against any
+ * longer input ("testv".includes("s") is true) and the destructive call
+ * deletes the wrong row.
+ *
+ * On stdio post Stream D Phase 4 the rows' decrypted name/symbol fields
+ * carry raw `v1:...` ciphertext (no DEK on this transport). The matcher
+ * simply finds nothing and the caller surfaces "not found" — that's the
+ * documented stdio-Phase-4 degradation; callers should use HTTP MCP or
+ * the web UI for destructive holding ops.
+ */
+type StdioHoldingResolveResult =
+  | { ok: true; holding: SqliteRow; tier: "exact-name" | "exact-symbol" | "startsWith-name" | "startsWith-symbol" | "substring" }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: SqliteRow };
+function resolvePortfolioHoldingStrict(input: string, options: SqliteRow[]): StdioHoldingResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exactName = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exactName) return { ok: true, holding: exactName, tier: "exact-name" };
+  const exactSymbol = options.find(o => String(o.symbol ?? "").toLowerCase() === lo);
+  if (exactSymbol) return { ok: true, holding: exactSymbol, tier: "exact-symbol" };
+  const startsName = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (startsName) return { ok: true, holding: startsName, tier: "startsWith-name" };
+  const startsSymbol = options.find(o => {
+    const s = String(o.symbol ?? "").toLowerCase();
+    return s !== "" && s.startsWith(lo);
+  });
+  if (startsSymbol) return { ok: true, holding: startsSymbol, tier: "startsWith-symbol" };
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (text: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(text)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, holding: sub, tier: "substring" };
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
 /** Auto-categorize payee: rules → historical frequency (both user-scoped) */
 async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): Promise<number | null> {
   if (!payee) return null;
@@ -265,15 +327,28 @@ function sqliteErr(msg: string) {
  * DEK in cache. The stdio MCP transport has no DEK (no auth on the wire,
  * no session), so it cannot create or rename rows in those six tables.
  *
- * Read paths still work — the data flows through the queries.ts helpers
- * which just return the ciphertext (decryption happens at the HTTP layer).
- * Stdio reads of `name` will surface as `null` in the row payload.
- *
  * Use this helper at the very top of every gated tool's handler.
  */
 function streamDRefuse(table: "accounts" | "categories" | "goals" | "loans" | "subscriptions" | "portfolio_holdings") {
   return sqliteErr(
     `Stdio MCP cannot create or update ${table} after Stream D Phase 4. The display name requires a DEK that the stdio transport doesn't carry. Use the HTTP MCP transport instead, or set the row up via the web UI.`,
+  );
+}
+
+/**
+ * Stream D Phase 4 refusal helper for READ tools (issue #131, 2026-05-04).
+ *
+ * Phase 4 dropped the plaintext `name`/`alias`/`symbol` columns on the 6
+ * in-scope tables. Stdio MCP read tools that SELECT those columns or rely on
+ * them for fuzzy-matching now 500 with `column "name" does not exist`.
+ *
+ * Without a DEK on the stdio transport, these tools cannot decrypt `name_ct`
+ * or compute the `name_lookup` HMAC, so the entire query is unimplementable
+ * here. Refuse cleanly and point the user at HTTP MCP / the web UI.
+ */
+function streamDRefuseRead(tool: string, table: "accounts" | "categories" | "goals" | "loans" | "subscriptions" | "portfolio_holdings") {
+  return sqliteErr(
+    `${tool} requires an unlocked DEK to decrypt ${table} names after Stream D Phase 4. Stdio MCP cannot decrypt — use the HTTP MCP transport at /mcp or the web UI for this query.`,
   );
 }
 
@@ -299,55 +374,33 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
   server.tool(
     "get_account_balances",
-    "Get current balances for all accounts, grouped by type (asset/liability). Each balance is in its own (account) currency; the response surfaces reportingCurrency for cross-currency context.",
+    "Get current balances for all accounts, grouped by type (asset/liability). Each balance is in its own (account) currency; the response surfaces reportingCurrency for cross-currency context. Stream D Phase 4: stdio cannot decrypt account names — use HTTP MCP or the web UI for this query.",
     {
       currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Returned as response metadata for cross-currency aggregation context."),
     },
-    async ({ currency, reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      let query = `SELECT a.id, a.name, a.alias, a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) as balance FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ? WHERE a.user_id = ?`;
-      const params: (string | number)[] = [userId, userId];
-      if (currency && currency !== "all") { query += ` AND a.currency = ?`; params.push(currency); }
-      query += ` GROUP BY a.id ORDER BY a.type, a."group", a.name`;
-      const rows = await sqlite.prepare(query).all(...params);
-      return { content: [{ type: "text" as const, text: JSON.stringify({ accounts: rows, reportingCurrency: reporting }, null, 2) }] };
-    }
+    async () => streamDRefuseRead("get_account_balances", "accounts"),
   );
 
   server.tool(
     "get_budget_summary",
-    "Get budget vs actual spending for a specific month. Amounts are in the user's display currency (default reporting); pass reportingCurrency to override the surfaced metadata.",
+    "Get budget vs actual spending for a specific month. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP or the web UI for this query.",
     {
       month: z.string().describe("Month in YYYY-MM format"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ month, reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      const [y, m] = month.split("-").map(Number);
-      const startDate = `${month}-01`;
-      const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
-      const rows = await sqlite.prepare(`SELECT b.id, c.name as category, c."group" as category_group, b.amount as budget, COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? AND t.user_id = ? THEN t.amount ELSE 0 END)), 0) as spent FROM budgets b JOIN categories c ON b.category_id = c.id LEFT JOIN transactions t ON t.category_id = c.id WHERE b.user_id = ? AND b.month = ? GROUP BY b.id ORDER BY c."group", c.name`).all(startDate, endDate, userId, userId, month);
-      return { content: [{ type: "text" as const, text: JSON.stringify({ rows, reportingCurrency: reporting }, null, 2) }] };
-    }
+    async () => streamDRefuseRead("get_budget_summary", "categories"),
   );
 
   server.tool(
     "get_spending_trends",
-    "Get spending trends over time grouped by category. Totals are in the user's display currency (default reporting); pass reportingCurrency to override the surfaced metadata.",
+    "Get spending trends over time grouped by category. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP or the web UI for this query.",
     {
       period: z.enum(["weekly", "monthly", "yearly"]).describe("Aggregation period"),
       months: z.number().optional().describe("Months to look back (default 12)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ period, months, reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      const lookback = months ?? 12;
-      const startDate = new Date(new Date().getFullYear(), new Date().getMonth() - lookback, 1).toISOString().split("T")[0];
-      const groupExpr = period === "weekly" ? "strftime('%Y-W%W', t.date)" : period === "yearly" ? "strftime('%Y', t.date)" : "strftime('%Y-%m', t.date)";
-      const rows = await sqlite.prepare(`SELECT ${groupExpr} as period, c.name as category, c."group" as category_group, SUM(t.amount) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND t.date >= ? AND c.type = 'E' GROUP BY ${groupExpr}, c.name ORDER BY ${groupExpr}, total`).all(userId, startDate);
-      return { content: [{ type: "text" as const, text: JSON.stringify({ rows, reportingCurrency: reporting }, null, 2) }] };
-    }
+    async () => streamDRefuseRead("get_spending_trends", "categories"),
   );
 
   server.tool(
@@ -407,19 +460,46 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     }
   );
 
-  server.tool("get_categories", "List all available transaction categories", {}, async () => {
-    const rows = await sqlite.prepare(`SELECT name, type, "group" FROM categories WHERE user_id = ? ORDER BY type, "group", name`).all(userId);
-    return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
-  });
+  server.tool(
+    "get_categories",
+    "List all available transaction categories. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP or the web UI for this query.",
+    {},
+    async () => streamDRefuseRead("get_categories", "categories"),
+  );
 
-  server.tool("get_loans", "Get all loans with amortization summary", {}, async () => {
-    const rows = await sqlite.prepare(`SELECT id, name, type, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment FROM loans WHERE user_id = ?`).all(userId);
-    return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
-  });
+  server.tool(
+    "get_loans",
+    "Get all loans with amortization summary. Stream D Phase 4: stdio cannot decrypt loan names — use HTTP MCP or the web UI for this query.",
+    {},
+    async () => streamDRefuseRead("get_loans", "loans"),
+  );
 
-  server.tool("get_goals", "Get all financial goals with progress", {}, async () => {
-    const goals = await sqlite.prepare(`SELECT g.id, g.name, g.type, g.target_amount, g.deadline, g.status, g.priority, a.name as account FROM goals g LEFT JOIN accounts a ON g.account_id = a.id WHERE g.user_id = ? ORDER BY g.priority`).all(userId);
-    return { content: [{ type: "text" as const, text: JSON.stringify(goals, null, 2) }] };
+  server.tool("get_goals", "Get all financial goals with progress. Stdio cannot decrypt names (no DEK on this transport) — `name` and per-account display names come back null. Each goal carries `accountIds: number[]` (issue #130 multi-account linking) — use HTTP MCP or the web UI to see the decrypted names.", {}, async () => {
+    // Stream D Phase 4 — plaintext g.name and a.name dropped. Stdio has no
+    // DEK, so we can't decrypt name_ct. Return ids only and let the caller
+    // hop to HTTP MCP / web UI for names.
+    const goals = await sqlite.prepare(`SELECT g.id, g.type, g.target_amount, g.deadline, g.status, g.priority FROM goals g WHERE g.user_id = ? ORDER BY g.priority`).all(userId) as Array<{ id: number }>;
+    if (!goals.length) {
+      return { content: [{ type: "text" as const, text: JSON.stringify([], null, 2) }] };
+    }
+    // Issue #130 — JOIN through goal_accounts. Don't decrypt account names.
+    const goalIds = goals.map((g) => g.id);
+    const placeholders = goalIds.map(() => "?").join(",");
+    const links = await sqlite.prepare(
+      `SELECT goal_id, account_id FROM goal_accounts WHERE user_id = ? AND goal_id IN (${placeholders})`
+    ).all(userId, ...goalIds) as Array<{ goal_id: number; account_id: number }>;
+    const linksByGoal = new Map<number, number[]>();
+    for (const l of links) {
+      const list = linksByGoal.get(l.goal_id) ?? [];
+      list.push(l.account_id);
+      linksByGoal.set(l.goal_id, list);
+    }
+    const out = goals.map((g) => ({
+      ...g,
+      name: null,
+      accountIds: linksByGoal.get(g.id) ?? [],
+    }));
+    return { content: [{ type: "text" as const, text: JSON.stringify(out, null, 2) }] };
   });
 
   server.tool(
@@ -453,92 +533,70 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
   server.tool(
     "get_income_statement",
-    "Generate income statement for a period. Totals are in the user's display currency by default; pass reportingCurrency to override the surfaced metadata.",
+    "Generate income statement for a period. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP or the web UI for this query.",
     {
       start_date: z.string().describe("Start date"),
       end_date: z.string().describe("End date"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ start_date, end_date, reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      const rows = await sqlite.prepare(`SELECT c.type as category_type, c."group" as category_group, c.name as category, SUM(t.amount) as total, COUNT(*) as count FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND t.date >= ? AND t.date <= ? AND c.type IN ('I','E') GROUP BY c.id, c.type, c."group", c.name ORDER BY c.type, c."group"`).all(userId, start_date, end_date);
-      return { content: [{ type: "text" as const, text: JSON.stringify({ rows, reportingCurrency: reporting }, null, 2) }] };
-    }
+    async () => streamDRefuseRead("get_income_statement", "categories"),
   );
 
   // ============ WRITE TOOLS ============
 
   server.tool(
     "set_budget",
-    "Set or update a budget for a category in a specific month",
+    "Set or update a budget for a category in a specific month. Stream D Phase 4: stdio cannot resolve category names — pass the category id via HTTP MCP, or use the web UI.",
     {
-      category: z.string().describe("Category name"),
+      category: z.string().describe("Category name (refused on stdio — Stream D Phase 4)"),
       month: z.string().describe("Month (YYYY-MM)"),
       amount: z.number().describe("Budget amount (positive number)"),
     },
-    async ({ category, month, amount }) => {
-      const cat = await sqlite.prepare("SELECT id FROM categories WHERE user_id = ? AND name = ?").get(userId, category) as { id: number } | undefined;
-      if (!cat) return sqliteErr(`Category "${category}" not found`);
-
-      const existing = await sqlite.prepare("SELECT id FROM budgets WHERE user_id = ? AND category_id = ? AND month = ?").get(userId, cat.id, month) as { id: number } | undefined;
-      if (existing) {
-        await sqlite.prepare("UPDATE budgets SET amount = ? WHERE id = ? AND user_id = ?").run(amount, existing.id, userId);
-      } else {
-        await sqlite.prepare("INSERT INTO budgets (user_id, category_id, month, amount) VALUES (?, ?, ?, ?)").run(userId, cat.id, month, amount);
-      }
-      return { content: [{ type: "text" as const, text: `Budget set: ${category} = $${amount} for ${month}` }] };
-    }
+    async () => streamDRefuseRead("set_budget", "categories"),
   );
 
   server.tool(
     "add_goal",
-    "Create a new financial goal",
+    "Create a new financial goal. Refused on stdio (Stream D Phase 4 — no DEK).",
     {
       name: z.string().describe("Goal name"),
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
       target_amount: z.number().describe("Target amount"),
       deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
+      account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). Use HTTP MCP for multi-account."),
+      account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Refused on stdio — use HTTP MCP."),
     },
-    async ({ name, type, target_amount, deadline, account }) => {
+    async ({ name, type, target_amount, deadline, account, account_ids }) => {
       // Stream D Phase 4 — stdio cannot create goals.
-      void name; void type; void target_amount; void deadline; void account;
+      void name; void type; void target_amount; void deadline; void account; void account_ids;
       return streamDRefuse("goals");
     }
   );
 
   server.tool(
     "add_snapshot",
-    "Record a net worth snapshot for an asset (e.g. house value, car value)",
+    "Record a net worth snapshot for an asset (e.g. house value, car value). Stream D Phase 4: stdio cannot resolve account names — use HTTP MCP or the web UI.",
     {
-      account: z.string().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
+      account: z.string().describe("Account name or alias (refused on stdio — Stream D Phase 4)"),
       value: z.number().describe("Current value"),
       date: z.string().optional().describe("Snapshot date (defaults to today)"),
       note: z.string().optional().describe("Optional note"),
     },
-    async ({ account, value, date, note }) => {
-      const allAccounts = await sqlite.prepare("SELECT id, name, alias FROM accounts WHERE user_id = ?").all(userId) as SqliteRow[];
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return sqliteErr(`Account "${account}" not found`);
-      const d = date ?? new Date().toISOString().split("T")[0];
-      await sqlite.prepare("INSERT INTO snapshots (user_id, account_id, date, value, note) VALUES (?, ?, ?, ?, ?)").run(userId, acct.id, d, value, note ?? "");
-      return { content: [{ type: "text" as const, text: `Snapshot recorded: ${account} = $${value} on ${d}` }] };
-    }
+    async () => streamDRefuseRead("add_snapshot", "accounts"),
   );
 
   // ============ TRANSACTION RULES TOOLS ============
 
   server.tool(
     "get_transaction_rules",
-    "List all transaction auto-categorization rules",
+    "List all transaction auto-categorization rules. Stream D Phase 4: stdio cannot decrypt the joined category name — `category_name` field is omitted; `assign_category_id` is still returned.",
     {},
     async () => {
       const rows = await sqlite.prepare(
         `SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
-                r.assign_category_id, c.name as category_name,
+                r.assign_category_id,
                 r.assign_tags, r.rename_to, r.is_active, r.priority
          FROM transaction_rules r
-         LEFT JOIN categories c ON r.assign_category_id = c.id
          WHERE r.user_id = ?
          ORDER BY r.priority DESC`
       ).all(userId);
@@ -619,153 +677,75 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
   server.tool(
     "get_spotlight_items",
-    "Get current attention items — overspent budgets, upcoming bills, goal deadlines, spending anomalies, uncategorized transactions, low balances, subscription renewals. Sorted by severity (critical first). reportingCurrency surfaced for cross-currency context.",
+    "Get current attention items. Stream D Phase 4: stdio cannot decrypt category/subscription names — use HTTP MCP or the web UI for this query.",
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      const today = new Date().toISOString().split("T")[0];
-      const now = new Date();
-      const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      const [y, m] = [now.getFullYear(), now.getMonth() + 1];
-      const monthStart = `${month}-01`;
-      const monthEnd = `${month}-${new Date(y, m, 0).getDate()}`;
-      const weekAhead = new Date(now.getTime() + 7 * 86400000).toISOString().split("T")[0];
-
-      const items: { type: string; severity: string; title: string; description: string; amount?: number }[] = [];
-
-      const budgetRows = await sqlite.prepare(`
-        SELECT b.id, c.name as cat, b.amount as budget,
-          COALESCE(ABS(SUM(CASE WHEN t.date >= ? AND t.date <= ? AND t.user_id = ? THEN t.amount ELSE 0 END)), 0) as spent
-        FROM budgets b LEFT JOIN categories c ON b.category_id = c.id
-        LEFT JOIN transactions t ON t.category_id = b.category_id
-        WHERE b.user_id = ? AND b.month = ? GROUP BY b.id, c.name, b.amount
-      `).all(monthStart, monthEnd, userId, userId, month) as { id: number; cat: string; budget: number; spent: number }[];
-      for (const r of budgetRows) {
-        if (r.budget > 0 && r.spent > r.budget) {
-          const pct = Math.round(((r.spent - r.budget) / r.budget) * 100);
-          items.push({ type: "overspent_budget", severity: pct > 20 ? "critical" : "warning", title: `${r.cat} over budget`, description: `$${r.spent.toFixed(2)} of $${r.budget.toFixed(2)} (${pct}% over)`, amount: r.spent - r.budget });
-        }
-      }
-
-      const subs = await sqlite.prepare(`SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' AND next_date >= ? AND next_date <= ?`).all(userId, today, weekAhead) as { id: number; name: string; amount: number; next_date: string; frequency: string }[];
-      for (const s of subs) {
-        if (Math.abs(s.amount) >= 100) {
-          items.push({ type: "large_bill", severity: "warning", title: `${s.name} due soon`, description: `$${Math.abs(s.amount).toFixed(2)} ${s.frequency}`, amount: Math.abs(s.amount) });
-        }
-      }
-
-      const uncat = await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND date >= ? AND date <= ? AND category_id IS NULL`).get(userId, monthStart, monthEnd) as { cnt: number };
-      if (uncat.cnt > 0) {
-        items.push({ type: "uncategorized", severity: uncat.cnt > 10 ? "warning" : "info", title: `${uncat.cnt} uncategorized transaction(s)`, description: "Categorize for better tracking" });
-      }
-
-      const order: Record<string, number> = { critical: 0, warning: 1, info: 2 };
-      items.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
-
-      return { content: [{ type: "text" as const, text: JSON.stringify({ items, reportingCurrency: reporting }, null, 2) }] };
-    }
+    async () => streamDRefuseRead("get_spotlight_items", "categories"),
   );
 
   server.tool(
     "get_weekly_recap",
-    "Get a weekly financial recap: spending summary (total + vs previous week + top categories), income, net cash flow, budget status, notable transactions, upcoming bills, net worth change. reportingCurrency surfaced for cross-currency context.",
+    "Get a weekly financial recap. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP or the web UI for this query.",
     {
       date: z.string().optional().describe("End date for the week (YYYY-MM-DD). Defaults to current week."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ date, reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      const end = date ? new Date(date + "T00:00:00") : new Date();
-      const dayOfWeek = end.getDay();
-      const weekEnd = new Date(end); weekEnd.setDate(weekEnd.getDate() + (6 - dayOfWeek));
-      const weekStart = new Date(weekEnd); weekStart.setDate(weekStart.getDate() - 6);
-      const prevEnd = new Date(weekStart); prevEnd.setDate(prevEnd.getDate() - 1);
-      const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - 6);
-
-      const ws = weekStart.toISOString().split("T")[0];
-      const we = weekEnd.toISOString().split("T")[0];
-      const ps = prevStart.toISOString().split("T")[0];
-      const pe = prevEnd.toISOString().split("T")[0];
-
-      const spending = await sqlite.prepare(`SELECT c.name, ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND c.type = 'E' AND t.date >= ? AND t.date <= ? GROUP BY c.id, c.name ORDER BY total DESC`).all(userId, ws, we) as { name: string; total: number }[];
-      const totalSpent = spending.reduce((s, r) => s + r.total, 0);
-      const prevSpending = await sqlite.prepare(`SELECT ABS(SUM(t.amount)) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND c.type = 'E' AND t.date >= ? AND t.date <= ?`).get(userId, ps, pe) as { total: number } | undefined;
-      const prevTotal = prevSpending?.total ?? 0;
-      const changePct = prevTotal > 0 ? Math.round(((totalSpent - prevTotal) / prevTotal) * 100) : 0;
-
-      const inc = await sqlite.prepare(`SELECT COALESCE(SUM(t.amount), 0) as total FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND c.type = 'I' AND t.date >= ? AND t.date <= ?`).get(userId, ws, we) as { total: number };
-
-      const notable = await sqlite.prepare(`SELECT t.date, t.payee, c.name as category, ABS(t.amount) as amt FROM transactions t LEFT JOIN categories c ON t.category_id = c.id WHERE t.user_id = ? AND c.type = 'E' AND t.date >= ? AND t.date <= ? ORDER BY ABS(t.amount) DESC LIMIT 5`).all(userId, ws, we);
-
-      const recap = {
-        weekStart: ws, weekEnd: we,
-        reportingCurrency: reporting,
-        spending: { total: Math.round(totalSpent * 100) / 100, previousWeekTotal: Math.round(prevTotal * 100) / 100, changePercent: changePct, topCategories: spending.slice(0, 3) },
-        income: Math.round(inc.total * 100) / 100,
-        netCashFlow: Math.round((inc.total - totalSpent) * 100) / 100,
-        notableTransactions: notable,
-      };
-
-      return { content: [{ type: "text" as const, text: JSON.stringify(recap, null, 2) }] };
-    }
+    async () => streamDRefuseRead("get_weekly_recap", "categories"),
   );
 
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. For cross-currency entries pass enteredAmount + enteredCurrency; the server locks the FX rate at the date. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns.",
+    "Record a transaction. Stream D Phase 4 (stdio): pass `account_id` (numeric) — `account` (name) is refused because stdio has no DEK to resolve names. `category` (name) is also refused; pass `category_id` instead, or omit for auto-detection. For cross-currency entries pass enteredAmount + enteredCurrency. Pass `dryRun: true` to validate + resolve without writing.",
     {
-      amount: z.number().describe("Amount in account currency (negative=expense, positive=income). Use this for same-currency entries."),
+      amount: z.number().describe("Amount in account currency (negative=expense, positive=income)."),
       payee: z.string().describe("Payee or merchant name"),
-      account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
-      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `account` are passed, this wins."),
+      account: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `account_id` instead."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Required on stdio."),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
-      category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
+      category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `category_id` instead, or omit for auto-detection."),
+      category_id: z.number().int().optional().describe("Category FK (categories.id). Use this instead of `category` on stdio."),
       note: z.string().optional(),
       tags: z.string().optional().describe("Comma-separated tags"),
       enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency."),
       enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/...) of enteredAmount; defaults to account currency."),
-      dryRun: z.boolean().optional().describe("When true, run the full validation/resolution pipeline (account, FX, category) and return a preview WITHOUT writing to the DB. Response carries `dryRun: true`, `wouldBeId: null`, plus the resolved* fields."),
+      dryRun: z.boolean().optional().describe("When true, run validation/resolution and return a preview WITHOUT writing."),
     },
-    async ({ amount, payee, date, account, account_id, category, note, tags, enteredAmount, enteredCurrency, dryRun }) => {
+    async ({ amount, payee, date, account, account_id, category, category_id, note, tags, enteredAmount, enteredCurrency, dryRun }) => {
+      // Stream D Phase 4: name-fuzzy paths refused — DEK is not available on stdio.
+      if (account != null) {
+        return sqliteErr("`account` (name) is refused on stdio after Stream D Phase 4. Pass `account_id` instead, or use HTTP MCP / the web UI.");
+      }
+      if (category != null) {
+        return sqliteErr("`category` (name) is refused on stdio after Stream D Phase 4. Pass `category_id` instead, or omit for auto-detection.");
+      }
+      if (account_id == null) {
+        return sqliteErr("Pass `account_id` (numeric). Stdio cannot resolve account names after Stream D Phase 4.");
+      }
+
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
-      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-      if (!allAccounts.length) return sqliteErr("No accounts found — create an account first.");
-      let acct: SqliteRow | null = null;
-      if (account_id != null) {
-        acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
-        if (!acct) return sqliteErr(`Account #${account_id} not found or not owned by you.`);
-      } else {
-        if (!account) return sqliteErr("Pass either `account_id` or `account` (name/alias).");
-        const r = resolveAccountStrict(account, allAccounts);
-        if (!r.ok) {
-          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
-          if (r.reason === "low_confidence") {
-            return sqliteErr(`Account "${account}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}`);
-          }
-          return sqliteErr(`Account "${account}" not found. Available: ${list}`);
-        }
-        acct = r.account;
-      }
+      // Stream D Phase 4: SELECT only ciphertext-free columns (id/currency/is_investment).
+      const acct = await sqlite.prepare(
+        `SELECT id, currency, is_investment FROM accounts WHERE user_id = ? AND id = ?`
+      ).get(userId, account_id) as SqliteRow | undefined;
+      if (!acct) return sqliteErr(`Account #${account_id} not found or not owned by you.`);
 
       // Investment-account constraint: stdio MCP record_transaction has no
       // portfolio-holding parameter, so it can't satisfy the FK requirement.
-      // Refuse with a pointer to the HTTP MCP / web UI rather than silently
-      // writing a row that the aggregator can't attribute. Stdio MCP is a
-      // self-hosted-only path; the HTTP MCP at /mcp does support holdings.
       if (acct.is_investment) {
-        return sqliteErr(`Account "${acct.name}" is an investment account — record_transaction over stdio MCP can't bind to a portfolio holding. Use the HTTP MCP at /mcp (record_transaction has portfolioHolding/portfolioHoldingId there) or the web app to record transactions in this account.`);
+        return sqliteErr(`Account #${account_id} is an investment account — record_transaction over stdio MCP can't bind to a portfolio holding. Use the HTTP MCP at /mcp (record_transaction has portfolioHolding/portfolioHoldingId there) or the web app to record transactions in this account.`);
       }
 
       let catId: number | null = null;
-      if (category) {
-        const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-        const cat = fuzzyFind(category, allCats);
-        if (!cat) return sqliteErr(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
+      if (category_id != null) {
+        // Validate ownership cheaply via id-only lookup; no plaintext name needed.
+        const cat = await sqlite.prepare(
+          `SELECT id FROM categories WHERE user_id = ? AND id = ?`
+        ).get(userId, category_id) as { id: number } | undefined;
+        if (!cat) return sqliteErr(`Category #${category_id} not found or not owned by you.`);
         catId = Number(cat.id);
       } else {
         catId = await autoCategory(sqlite, userId, payee);
@@ -781,14 +761,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       });
       if (!resolved.ok) return sqliteErr(resolved.message);
 
-      // Resolve category name once — used by both dry-run preview and the
-      // success message. The lookup below skips when catId is null.
-      const catName = catId ? (await sqlite.prepare(`SELECT name FROM categories WHERE user_id = ? AND id = ?`).get(userId, catId) as { name: string } | undefined)?.name ?? "uncategorized" : "uncategorized";
-      const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
-      const resolvedCategory = catId ? { id: Number(catId), name: String(catName ?? "") } : null;
+      const resolvedAccountInfo = { id: Number(acct.id) };
+      const resolvedCategory = catId != null ? { id: Number(catId) } : null;
 
       if (dryRun) {
-        // Validation + resolution complete; no DB write, no cache invalidation.
         return txt({
           success: true,
           dryRun: true,
@@ -801,7 +777,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           enteredCurrency: resolved.enteredCurrency,
           enteredFxRate: resolved.enteredFxRate,
           date: txDate,
-          message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})`,
+          message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → account #${Number(acct.id)}${catId != null ? ` (category #${catId})` : ""}`,
         });
       }
 
@@ -819,7 +795,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         source: result?.source,
         resolvedAccount: resolvedAccountInfo,
         resolvedCategory,
-        message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})`,
+        message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → account #${Number(acct.id)}${catId != null ? ` (category #${catId})` : ""}`,
       });
     }
   );
@@ -827,16 +803,16 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns. Pass top-level `idempotencyKey` (UUID v4) to make this batch safe to retry — if the same `(user, key)` was already committed within 72h, the original result is returned verbatim with no INSERTs (set per-call: callers should generate one fresh UUID per logical batch). After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null.",
+    "Record multiple transactions at once. Stream D Phase 4: stdio cannot resolve account/category names without a DEK and the helper SELECTs that fuzzy-match names hit dropped plaintext columns — refused entirely. Use HTTP MCP at /mcp (full feature set) or the web UI.",
     {
-      account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement."),
-      dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`."),
-      idempotencyKey: z.string().uuid().optional().describe("Optional UUID v4 the caller mints once per batch. First call with `(user, key)` writes the rows AND stashes the response JSON; any retry within 72h returns the stored response verbatim with no INSERTs and no cache invalidation. Skipped on `dryRun: true` and skipped when zero rows commit."),
+      account_id: z.number().int().optional(),
+      dryRun: z.boolean().optional(),
+      idempotencyKey: z.string().uuid().optional(),
       transactions: z.array(z.object({
         amount: z.number(),
         payee: z.string(),
-        account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id`. Required if neither row-level `account_id` nor top-level `account_id` is set."),
-        account_id: z.number().int().optional().describe("Per-row account FK (accounts.id). Skips fuzzy matching; routes to the exact account. Wins over both `account` and the top-level `account_id`."),
+        account: z.string().optional(),
+        account_id: z.number().int().optional(),
         date: z.string().optional(),
         category: z.string().optional(),
         note: z.string().optional(),
@@ -846,265 +822,31 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       })).describe("Array of transactions to record"),
     },
     async ({ transactions, account_id: defaultAccountId, dryRun, idempotencyKey }) => {
-      const today = new Date().toISOString().split("T")[0];
-
-      // Idempotency replay (issue #98). Lookup BEFORE prefetching accounts /
-      // categories so a hit returns immediately. Stdio uses the pg-compat
-      // shim — `?::uuid` casting works correctly. dryRun=true skips replay
-      // and skips storage so a preview never blocks a future real submit.
-      if (idempotencyKey && !dryRun) {
-        try {
-          const hit = (await sqlite
-            .prepare(
-              `SELECT response_json FROM mcp_idempotency_keys WHERE user_id = ? AND key = ?::uuid AND tool_name = 'bulk_record_transactions' AND created_at > NOW() - INTERVAL '72 hours' LIMIT 1`,
-            )
-            .get(userId, idempotencyKey)) as SqliteRow | undefined;
-          if (hit && hit.response_json != null) {
-            const replay =
-              typeof hit.response_json === "string"
-                ? JSON.parse(hit.response_json)
-                : hit.response_json;
-            return txt({ ...replay, replayed: true });
-          }
-        } catch (e) {
-          // eslint-disable-next-line no-console
-          console.warn("[bulk_record_transactions] idempotency lookup failed:", e);
-        }
-      }
-
-      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
-      // Issue #28: stamp source explicitly so stdio-MCP rows are
-      // distinguishable from HTTP-MCP and UI rows in the audit column.
-      // Issue #90: RETURNING id so the post-loop scan can collect
-      // committed rows for duplicate-hint surfacing.
-      const stmt = sqlite.prepare(`INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`);
-
-      const accountById = new Map<number, SqliteRow>();
-      for (const a of allAccounts) accountById.set(Number(a.id), a);
-      let defaultAcct: SqliteRow | null = null;
-      let defaultAcctError: string | null = null;
-      if (defaultAccountId != null) {
-        defaultAcct = accountById.get(defaultAccountId) ?? null;
-        if (!defaultAcct) defaultAcctError = `Top-level account_id #${defaultAccountId} not found or not owned by you.`;
-      }
-
-      const results: {
-        index: number;
-        success: boolean;
-        message: string;
-        resolvedAccount?: { id: number; name: string };
-        resolvedCategory?: { id: number; name: string } | null;
-        dryRun?: boolean;
-        wouldBeId?: null;
-      }[] = [];
-      // Issue #90 — capture every committed row so the post-loop scan can
-      // surface possible-duplicate hints. Stdio writes are plaintext per
-      // the load-bearing rule, so no decrypt is needed for the candidate
-      // pool either.
-      const committed: CommittedInsert[] = [];
-      for (let i = 0; i < transactions.length; i++) {
-        const t = transactions[i];
-        try {
-          // Resolve account: per-row id > top-level id > strict fuzzy on name.
-          let acct: SqliteRow | null = null;
-          if (t.account_id != null) {
-            acct = accountById.get(t.account_id) ?? null;
-            if (!acct) {
-              results.push({ index: i, success: false, message: `Account #${t.account_id} not found or not owned by you.` });
-              continue;
-            }
-          } else if (t.account) {
-            const r = resolveAccountStrict(t.account, allAccounts);
-            if (!r.ok) {
-              const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
-              if (r.reason === "low_confidence") {
-                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-submit with account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}` });
-              } else {
-                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Available: ${list}` });
-              }
-              continue;
-            }
-            acct = r.account;
-          } else if (defaultAcct) {
-            acct = defaultAcct;
-          } else if (defaultAcctError) {
-            results.push({ index: i, success: false, message: defaultAcctError });
-            continue;
-          } else {
-            results.push({ index: i, success: false, message: "Pass either a per-row `account_id`/`account`, or a top-level `account_id`." });
-            continue;
-          }
-          const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
-          // Investment-account constraint — stdio MCP can't bind holdings,
-          // so investment-account rows fail individually. See the same
-          // check in record_transaction for rationale.
-          if (acct.is_investment) {
-            results.push({ index: i, success: false, message: `Account "${acct.name}" is an investment account — stdio MCP can't bind portfolio holdings. Use the HTTP MCP at /mcp or the web app for this account.`, resolvedAccount: resolvedAccountInfo });
-            continue;
-          }
-          let catId: number | null = null;
-          if (t.category) { const cat = fuzzyFind(t.category, allCats); catId = cat ? Number(cat.id) : null; }
-          else catId = await autoCategory(sqlite, userId, t.payee);
-
-          const txDate = t.date ?? today;
-          const resolved = await resolveTxAmountsCore({
-            accountCurrency: String(acct.currency),
-            date: txDate,
-            userId,
-            amount: t.enteredAmount != null ? undefined : t.amount,
-            enteredAmount: t.enteredAmount,
-            enteredCurrency: t.enteredCurrency,
-          });
-          if (!resolved.ok) {
-            results.push({ index: i, success: false, message: resolved.message, resolvedAccount: resolvedAccountInfo });
-            continue;
-          }
-
-          const rowCategory = catId != null ? { id: Number(catId), name: catNameById.get(Number(catId)) ?? "" } : null;
-
-          if (dryRun) {
-            results.push({
-              index: i,
-              success: true,
-              dryRun: true,
-              wouldBeId: null,
-              message: `Dry run OK — would record ${t.payee}: ${resolved.amount} ${resolved.currency}`,
-              resolvedAccount: resolvedAccountInfo,
-              resolvedCategory: rowCategory,
-            });
-            continue;
-          }
-
-          // The pg-compat shim's `run()` exposes `lastInsertRowid` from
-          // RETURNING id, so this stays a simple drop-in even though
-          // sqlite-style stmts don't natively return ids.
-          const runRes = await stmt.run(userId, txDate, acct.id, catId, resolved.currency, resolved.amount, resolved.enteredCurrency, resolved.enteredAmount, resolved.enteredFxRate, t.payee, t.note ?? "", t.tags ?? "", "mcp_stdio");
-          const newTxId = runRes && typeof runRes.lastInsertRowid === "number" ? runRes.lastInsertRowid : null;
-          if (newTxId != null && newTxId > 0) {
-            committed.push({
-              newTransactionId: newTxId,
-              accountId: Number(acct.id),
-              date: txDate,
-              amount: resolved.amount,
-              payee: t.payee,
-            });
-          }
-          results.push({ index: i, success: true, message: `${t.payee}: ${resolved.amount} ${resolved.currency}`, resolvedAccount: resolvedAccountInfo, resolvedCategory: rowCategory });
-        } catch (e) {
-          results.push({ index: i, success: false, message: String(e) });
-        }
-      }
-      const ok = results.filter(r => r.success).length;
-      // Skip cache invalidation on dry-run — no rows touched.
-      if (!dryRun && ok > 0) invalidateUserTxCache(userId);
-
-      // Issue #90 — post-insert duplicate-hint scan. HINTS ONLY: never
-      // blocks any row. Skipped for dry-run. One indexed query bounded by
-      // [globalMinDate-7d, globalMaxDate+7d] across affected accounts;
-      // per-row band check happens in JS via the shared helper. Stdio
-      // writes are plaintext (no DEK on this transport), so no decrypt
-      // step here — payee strings come straight out of the column.
-      let possibleDuplicates: ReturnType<typeof scanForPossibleDuplicates> = [];
-      if (!dryRun && committed.length > 0) {
-        try {
-          const bounds = dateBoundsForScan(committed);
-          if (bounds) {
-            const accountIds = Array.from(new Set(committed.map(c => c.accountId)));
-            const newTxIds = new Set<number>(committed.map(c => c.newTransactionId));
-            // Use a parameterised IN list — pg-compat shim translates `?`
-            // to `$N` so build placeholders dynamically.
-            const accPlaceholders = accountIds.map(() => "?").join(",");
-            const poolRows = (await sqlite
-              .prepare(
-                `SELECT id, account_id, date, amount, payee FROM transactions WHERE user_id = ? AND account_id IN (${accPlaceholders}) AND date BETWEEN ? AND ?`,
-              )
-              .all(userId, ...accountIds, bounds.minDate, bounds.maxDate)) as SqliteRow[];
-            const candidates: CandidateRow[] = [];
-            for (const r of poolRows) {
-              const id = Number(r.id);
-              if (newTxIds.has(id)) continue;
-              candidates.push({
-                id,
-                accountId: Number(r.account_id),
-                date: String(r.date ?? ""),
-                amount: Number(r.amount),
-                payee: String(r.payee ?? ""),
-              });
-            }
-            possibleDuplicates = scanForPossibleDuplicates(committed, candidates);
-          }
-        } catch (e) {
-          // Scan must never fail the response.
-          // eslint-disable-next-line no-console
-          console.warn("[bulk_record_transactions] duplicate-hint scan failed:", e);
-          possibleDuplicates = [];
-        }
-      }
-
-      const responseBody = {
-        ...(dryRun ? { dryRun: true } : {}),
-        imported: dryRun ? 0 : ok,
-        failed: results.length - ok,
-        ...(dryRun ? { previewed: ok } : {}),
-        results,
-        possibleDuplicates,
-      };
-
-      // Issue #98 — persist redacted response under the caller-supplied
-      // idempotency key. Same rules as the HTTP path: skip on dryRun, skip
-      // on ok===0. Stdio writes are plaintext anyway (no DEK on this
-      // transport), but the same redaction policy applies on the at-rest
-      // response_json so the table contract is identical between transports.
-      if (idempotencyKey && !dryRun && ok > 0) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const redactedResults = (responseBody.results as any[]).map((r) => {
-            const out = { ...r };
-            if (typeof out.message === "string") {
-              out.message = `row #${out.index}: redacted on replay`;
-            }
-            if (out.resolvedAccount && typeof out.resolvedAccount === "object") {
-              out.resolvedAccount = { id: out.resolvedAccount.id, name: "[redacted]" };
-            }
-            if (out.resolvedCategory && typeof out.resolvedCategory === "object") {
-              out.resolvedCategory = { id: out.resolvedCategory.id, name: "[redacted]" };
-            }
-            return out;
-          });
-          const redactedBody = { ...responseBody, results: redactedResults };
-          await sqlite
-            .prepare(
-              `INSERT INTO mcp_idempotency_keys (user_id, key, tool_name, response_json) VALUES (?, ?::uuid, 'bulk_record_transactions', ?::jsonb) ON CONFLICT (user_id, key) DO NOTHING`,
-            )
-            .run(userId, idempotencyKey, JSON.stringify(redactedBody));
-        } catch (e) {
-          // eslint-disable-next-line no-console
-          console.warn("[bulk_record_transactions] idempotency persist failed:", e);
-        }
-      }
-
-      return txt(responseBody);
+      void transactions; void defaultAccountId; void dryRun; void idempotencyKey;
+      return streamDRefuseRead("bulk_record_transactions", "accounts");
     }
   );
 
   // ── update_transaction ─────────────────────────────────────────────────────
   server.tool(
     "update_transaction",
-    "Update fields of an existing transaction by ID. Pass enteredAmount + enteredCurrency to re-lock cross-currency rate; passing only `amount` updates the account-side without touching entered_*.",
+    "Update fields of an existing transaction by ID. Stream D Phase 4 (stdio): pass `category_id` (numeric) — `category` (name) is refused because stdio cannot resolve names. Pass enteredAmount + enteredCurrency to re-lock cross-currency rate; passing only `amount` updates the account-side without touching entered_*.",
     {
       id: z.number().describe("Transaction ID"),
       date: z.string().optional(),
       amount: z.number().optional().describe("Amount in account currency. Doesn't touch entered_* side."),
       payee: z.string().optional(),
-      category: z.string().optional().describe("Category name (fuzzy matched)"),
+      category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `category_id` instead."),
+      category_id: z.number().int().optional().describe("Category FK (categories.id). Use this instead of `category` on stdio."),
       note: z.string().optional(),
       tags: z.string().optional(),
       enteredAmount: z.number().optional(),
       enteredCurrency: z.string().optional(),
     },
-    async ({ id, date, amount, payee, category, note, tags, enteredAmount, enteredCurrency }) => {
+    async ({ id, date, amount, payee, category, category_id, note, tags, enteredAmount, enteredCurrency }) => {
+      if (category !== undefined) {
+        return sqliteErr("`category` (name) is refused on stdio after Stream D Phase 4. Pass `category_id` instead.");
+      }
       const existing = await sqlite.prepare(`
         SELECT t.id, t.account_id, t.date, a.currency AS account_currency
           FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id
@@ -1112,24 +854,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       `).get(id, userId) as { id: number; date: string; account_currency?: string } | undefined;
       if (!existing) return sqliteErr(`Transaction #${id} not found or not owned by user`);
 
-      // Issue #60: strict resolver — substring matches gated on token
-      // overlap so a sloppy "Cr" can't silently route a write to
-      // "Credit Interest". Stdio writes are plaintext (no DEK), so no
-      // decrypt step here.
       let catId: number | undefined;
-      let resolvedCategory: { id: number; name: string } | null = null;
-      if (category !== undefined) {
-        const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-        const resolved = resolveCategoryStrict(category, allCats);
-        if (!resolved.ok) {
-          if (resolved.reason === "low_confidence") {
-            return sqliteErr(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
-          }
-          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
-          return sqliteErr(`Category "${category}" not found. Available: ${list}`);
-        }
-        catId = Number(resolved.category.id);
-        resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
+      let resolvedCategory: { id: number } | null = null;
+      if (category_id !== undefined) {
+        const cat = await sqlite.prepare(
+          `SELECT id FROM categories WHERE user_id = ? AND id = ?`
+        ).get(userId, category_id) as { id: number } | undefined;
+        if (!cat) return sqliteErr(`Category #${category_id} not found or not owned by you.`);
+        catId = Number(cat.id);
+        resolvedCategory = { id: catId };
       }
 
       // Issue #60: track explicit column names instead of a count so the AI
@@ -1224,56 +957,42 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // inner prepare() calls each acquire their own pool client.
   server.tool(
     "record_transfer",
-    "Record a transfer between two of the user's accounts. Creates BOTH legs atomically with a shared link_id. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over names; weak substring matches on the name path are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount. For in-kind (share) transfers between brokerage accounts, pass `holding` + `quantity`; BOTH the source and destination holdings MUST already exist in their respective accounts. Investment accounts require a cash holding for the transaction currency — if one is missing, call `add_portfolio_holding` first. `amount` may be 0 for pure in-kind moves. For brokerage stock/ETF/crypto buys and sells (cash sleeve ↔ symbol holding inside one brokerage account), prefer `record_trade` — it handles the same-account in-kind dance automatically.",
+    "Record a transfer between two of the user's accounts. Stream D Phase 4 (stdio): pass `from_account_id` and `to_account_id` (numeric) — the `fromAccount`/`toAccount`/`holding`/`destHolding` name fields are refused because stdio cannot resolve names. Use `record_trade` only on HTTP MCP. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount.",
     {
-      fromAccount: z.string().optional().describe("Source account name or alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided."),
-      toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided."),
-      from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Skips fuzzy matching. If both this and `fromAccount` are passed, this wins."),
-      to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Skips fuzzy matching. If both this and `toAccount` are passed, this wins."),
-      amount: z.number().nonnegative().describe("Cash amount sent, in SOURCE account's currency. > 0 for cash transfers; 0 only when `holding`+`quantity` are also set."),
+      fromAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `from_account_id` instead."),
+      toAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `to_account_id` instead."),
+      from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Required on stdio."),
+      to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Required on stdio."),
+      amount: z.number().nonnegative().describe("Cash amount sent, in SOURCE account's currency."),
       date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
-      receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination, in DESTINATION's currency."),
-      holding: z.string().optional().describe("Source-side holding name for an in-kind (share) transfer."),
-      destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding`. Use when destination uses a different label."),
-      quantity: z.number().positive().optional().describe("Positive share count LEAVING source. Required when `holding` is set."),
-      destQuantity: z.number().positive().optional().describe("Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ — stock split, merger, share-class conversion."),
+      receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination."),
+      holding: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). In-kind transfers require name resolution — use HTTP MCP."),
+      destHolding: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4)."),
+      quantity: z.number().positive().optional().describe("REFUSED on stdio when paired with `holding`."),
+      destQuantity: z.number().positive().optional(),
       note: z.string().optional(),
       tags: z.string().optional(),
     },
     async ({ fromAccount, toAccount, from_account_id, to_account_id, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, note, tags }) => {
-      const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-      if (!allAccounts.length) return sqliteErr("No accounts found — create accounts first.");
-      const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
-      let fromAcct: SqliteRow | null = null;
-      if (from_account_id != null) {
-        fromAcct = allAccounts.find(a => Number(a.id) === from_account_id) ?? null;
-        if (!fromAcct) return sqliteErr(`Source account #${from_account_id} not found or not owned by you.`);
-      } else {
-        if (!fromAccount) return sqliteErr("Pass either `from_account_id` or `fromAccount` (name/alias).");
-        const r = resolveAccountStrict(fromAccount, allAccounts);
-        if (!r.ok) {
-          if (r.reason === "low_confidence") {
-            return sqliteErr(`Source account "${fromAccount}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-call with from_account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}`);
-          }
-          return sqliteErr(`Source account "${fromAccount}" not found. Available: ${list}`);
-        }
-        fromAcct = r.account;
+      if (fromAccount != null || toAccount != null) {
+        return sqliteErr("`fromAccount`/`toAccount` (names) are refused on stdio after Stream D Phase 4. Pass `from_account_id` and `to_account_id` instead.");
       }
-      let toAcct: SqliteRow | null = null;
-      if (to_account_id != null) {
-        toAcct = allAccounts.find(a => Number(a.id) === to_account_id) ?? null;
-        if (!toAcct) return sqliteErr(`Destination account #${to_account_id} not found or not owned by you.`);
-      } else {
-        if (!toAccount) return sqliteErr("Pass either `to_account_id` or `toAccount` (name/alias).");
-        const r = resolveAccountStrict(toAccount, allAccounts);
-        if (!r.ok) {
-          if (r.reason === "low_confidence") {
-            return sqliteErr(`Destination account "${toAccount}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-call with to_account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}`);
-          }
-          return sqliteErr(`Destination account "${toAccount}" not found. Available: ${list}`);
-        }
-        toAcct = r.account;
+      if (holding != null || destHolding != null) {
+        return sqliteErr("In-kind (share) transfers require resolving holding names, which is not available on stdio after Stream D Phase 4. Use HTTP MCP at /mcp or the web UI.");
       }
+      if (from_account_id == null || to_account_id == null) {
+        return sqliteErr("Pass both `from_account_id` and `to_account_id` (numeric). Stdio cannot resolve account names after Stream D Phase 4.");
+      }
+
+      // Stream D Phase 4: SELECT only ciphertext-free columns to validate ownership.
+      const fromAcct = await sqlite.prepare(
+        `SELECT id, currency FROM accounts WHERE user_id = ? AND id = ?`
+      ).get(userId, from_account_id) as { id: number; currency: string } | undefined;
+      if (!fromAcct) return sqliteErr(`Source account #${from_account_id} not found or not owned by you.`);
+      const toAcct = await sqlite.prepare(
+        `SELECT id, currency FROM accounts WHERE user_id = ? AND id = ?`
+      ).get(userId, to_account_id) as { id: number; currency: string } | undefined;
+      if (!toAcct) return sqliteErr(`Destination account #${to_account_id} not found or not owned by you.`);
 
       const { createTransferPairViaSql } = await import("../src/lib/transfer.js");
       let result: Awaited<ReturnType<typeof createTransferPairViaSql>>;
@@ -1284,35 +1003,21 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           enteredAmount: amount,
           date,
           receivedAmount,
-          holdingName: holding,
-          destHoldingName: destHolding,
-          quantity,
-          destQuantity,
+          holdingName: undefined,
+          destHoldingName: undefined,
+          quantity: undefined,
+          destQuantity: undefined,
           note,
           tags,
           // Issue #28: MCP stdio transport.
           txSource: "mcp_stdio",
         });
+        void quantity; void destQuantity;
       } catch (e) {
-        // Strict-mode investment-account guard (issue #22). Stdio exposes a
-        // `holding` parameter so the user can satisfy the constraint by
-        // re-calling with `holding: "Cash"`. Map the throw to a friendly
-        // tool error rather than crashing the stdio process.
         if (e instanceof InvestmentHoldingRequiredError) return sqliteErr(e.message);
         throw e;
       }
       if (!result.ok) return sqliteErr(result.message);
-      const inKindNote = result.holding
-        ? (() => {
-            const h = result.holding;
-            const qtyChanged = h.quantity !== h.destQuantity;
-            const nameChanged = h.destName !== h.name;
-            if (qtyChanged && nameChanged) return ` · in-kind: ${h.quantity} × ${h.name} → ${h.destQuantity} × ${h.destName}`;
-            if (qtyChanged) return ` · in-kind: ${h.quantity} → ${h.destQuantity} × ${h.name}`;
-            if (nameChanged) return ` · in-kind: ${h.quantity} × ${h.name} → ${h.destName}`;
-            return ` · in-kind: ${h.quantity} × ${h.name}`;
-          })()
-        : "";
       return txt({
         success: true,
         linkId: result.linkId,
@@ -1323,12 +1028,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         toAmount: result.toAmount,
         toCurrency: result.toCurrency,
         enteredFxRate: result.enteredFxRate,
-        resolvedFromAccount: { id: Number(fromAcct.id), name: String(fromAcct.name ?? "") },
-        resolvedToAccount: { id: Number(toAcct.id), name: String(toAcct.name ?? "") },
-        ...(result.holding ? { holding: result.holding } : {}),
+        resolvedFromAccount: { id: Number(fromAcct.id) },
+        resolvedToAccount: { id: Number(toAcct.id) },
         message: result.isCrossCurrency
-          ? `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})${inKindNote}`
-          : `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name}${inKindNote}`,
+          ? `Transferred ${amount} ${result.fromCurrency} from account #${Number(fromAcct.id)} to account #${Number(toAcct.id)} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})`
+          : `Transferred ${amount} ${result.fromCurrency} from account #${Number(fromAcct.id)} to account #${Number(toAcct.id)}`,
       });
     }
   );
@@ -1340,207 +1044,60 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // the next-login Stream D backfill to fill them in.
   server.tool(
     "record_trade",
-    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (must already exist — call `add_portfolio_holding` first if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve (must already exist for the trade currency — call `add_portfolio_holding` first if missing). Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve for the trade currency is auto-managed on first use within record_trade itself. Optional `fees` post as a separate negative cash transaction on the cash sleeve. PREFER `account_id` over `account` name; weak substring matches on the name path are REJECTED with a 'did you mean…' error rather than silently routing the trade to the wrong account.",
+    "Record a stock/ETF/crypto buy or sell. Stream D Phase 4: refused entirely on stdio. The cash-sleeve auto-create path INSERTs plaintext name+symbol (Phase-4 dropped) and the symbol pre-flight does LOWER(name)/LOWER(symbol). Use HTTP MCP at /mcp or the web UI.",
     {
-      account: z.string().optional().describe("Brokerage account name or alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
-      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching."),
-      side: z.enum(["buy", "sell"]).describe("'buy' (cash → symbol) or 'sell' (symbol → cash)."),
-      symbol: z.string().min(1).max(50).describe("Ticker symbol of the security being traded."),
-      quantity: z.number().positive().describe("Share count (always positive)."),
-      price: z.number().positive().describe("Per-share price in `currency`."),
-      currency: z.string().optional().describe("ISO code (USD/CAD/...) of the trade. Defaults to account currency."),
-      fees: z.number().nonnegative().optional().describe("Optional commission/fees in `currency`. Booked as a separate negative-amount cash transaction."),
-      fxRate: z.number().positive().optional().describe("Trade-currency → account-currency rate. REQUIRED when currency differs from account currency."),
-      date: z.string().optional().describe("Trade/settlement date YYYY-MM-DD (default: today)."),
+      account: z.string().optional(),
+      account_id: z.number().int().optional(),
+      side: z.enum(["buy", "sell"]),
+      symbol: z.string().min(1).max(50),
+      quantity: z.number().positive(),
+      price: z.number().positive(),
+      currency: z.string().optional(),
+      fees: z.number().nonnegative().optional(),
+      fxRate: z.number().positive().optional(),
+      date: z.string().optional(),
       note: z.string().optional(),
     },
-    async ({ account, account_id, side, symbol, quantity, price, currency, fees, fxRate, date, note }) => {
-      const txDate = date ?? new Date().toISOString().split("T")[0];
-      const trimmedSymbol = symbol.trim();
-      if (!trimmedSymbol) return sqliteErr("symbol cannot be empty");
-
-      const allAccounts = await sqlite.prepare(
-        `SELECT id, name, alias, currency, is_investment FROM accounts WHERE user_id = ?`
-      ).all(userId) as SqliteRow[];
-      if (!allAccounts.length) return sqliteErr("No accounts found — create accounts first.");
-      let acct: SqliteRow | null = null;
-      if (account_id != null) {
-        acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
-        if (!acct) return sqliteErr(`Account #${account_id} not found or not owned by you.`);
-      } else {
-        if (!account) return sqliteErr("Pass either `account_id` or `account` (name/alias).");
-        const r = resolveAccountStrict(account, allAccounts);
-        if (!r.ok) {
-          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
-          if (r.reason === "low_confidence") {
-            return sqliteErr(`Account "${account}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}`);
-          }
-          return sqliteErr(`Account "${account}" not found. Available: ${list}`);
-        }
-        acct = r.account;
-      }
-
-      if (!acct.is_investment) {
-        return sqliteErr(`Account "${acct.name}" is not an investment account — toggle is_investment first or use record_transaction for non-trade entries.`);
-      }
-
-      const acctCurrency = String(acct.currency ?? "CAD").toUpperCase();
-      const tradeCurrency = (currency ?? acctCurrency).toUpperCase();
-      const isCrossCurrency = tradeCurrency !== acctCurrency;
-      let fx = 1;
-      if (isCrossCurrency) {
-        if (fxRate == null) {
-          return sqliteErr(`Trade currency ${tradeCurrency} differs from account currency ${acctCurrency} — pass fxRate (${tradeCurrency}→${acctCurrency}) so the cost-basis side can be locked.`);
-        }
-        fx = fxRate;
-      }
-
-      const cashAmountTrade = Math.round(quantity * price * 100) / 100;
-      const cashAmountAcct = Math.round(cashAmountTrade * fx * 100) / 100;
-
-      // Find or create the cash sleeve in tradeCurrency. Stdio runs dek-less,
-      // so name_ct / name_lookup stay NULL (filled by next-login backfill).
-      const cashName = isCrossCurrency ? `${tradeCurrency} Cash` : "Cash";
-      const cashCandidate = await sqlite.prepare(
-        `SELECT id, name FROM portfolio_holdings
-          WHERE user_id = ? AND account_id = ? AND currency = ?
-            AND (symbol IS NULL OR UPPER(symbol) = ?)
-          ORDER BY (symbol IS NULL) DESC, id ASC
-          LIMIT 1`
-      ).get(userId, acct.id, tradeCurrency, tradeCurrency) as { id: number; name: string } | undefined;
-      let cashHoldingId: number;
-      let cashHoldingName: string;
-      if (cashCandidate) {
-        cashHoldingId = Number(cashCandidate.id);
-        cashHoldingName = String(cashCandidate.name ?? cashName);
-      } else {
-        const cashSymbol = isCrossCurrency ? tradeCurrency : null;
-        const ins = await sqlite.prepare(
-          `INSERT INTO portfolio_holdings (user_id, account_id, name, symbol, currency, is_crypto, note)
-           VALUES (?, ?, ?, ?, ?, 0, 'auto-created for cash sleeve')
-           RETURNING id, name`
-        ).get(userId, acct.id, cashName, cashSymbol, tradeCurrency) as { id: number; name: string } | undefined;
-        cashHoldingId = Number(ins?.id);
-        cashHoldingName = String(ins?.name ?? cashName);
-      }
-
-      // For SELL the symbol holding must already exist — pre-flight rather
-      // than relying on the createTransferPair message.
-      if (side === "sell") {
-        const sym = await sqlite.prepare(
-          `SELECT id FROM portfolio_holdings
-            WHERE user_id = ? AND account_id = ?
-              AND (LOWER(name) = LOWER(?) OR LOWER(symbol) = LOWER(?))
-            LIMIT 1`
-        ).get(userId, acct.id, trimmedSymbol, trimmedSymbol);
-        if (!sym) return sqliteErr(`Cannot sell "${trimmedSymbol}" in "${acct.name}" — no existing position. Use add_portfolio_holding first if you need to record an opening position.`);
-      }
-
-      const tradePayee = `${side === "buy" ? "Buy" : "Sell"} ${quantity} ${trimmedSymbol} @ ${price.toFixed(2)} ${tradeCurrency}`;
-      const sourceHolding = side === "buy" ? cashHoldingName : trimmedSymbol;
-      const destHolding = side === "buy" ? trimmedSymbol : cashHoldingName;
-      const sourceQty = side === "buy" ? cashAmountTrade : quantity;
-      const destQty = side === "buy" ? quantity : cashAmountTrade;
-
-      const { createTransferPairViaSql } = await import("../src/lib/transfer.js");
-      let transferResult: Awaited<ReturnType<typeof createTransferPairViaSql>>;
-      try {
-        transferResult = await createTransferPairViaSql(sqlite.pool, userId, null, {
-          fromAccountId: Number(acct.id),
-          toAccountId: Number(acct.id),
-          enteredAmount: cashAmountAcct,
-          date: txDate,
-          holdingName: sourceHolding,
-          destHoldingName: destHolding,
-          quantity: sourceQty,
-          destQuantity: destQty,
-          note: note ?? tradePayee,
-          tags: "source:record_trade",
-          // Issue #28: MCP stdio transport.
-          txSource: "mcp_stdio",
-        });
-      } catch (e) {
-        // record_trade always supplies sourceHolding + destHolding, so the
-        // strict-mode guard shouldn't fire. Defensive map in case a future
-        // refactor removes one of those.
-        if (e instanceof InvestmentHoldingRequiredError) return sqliteErr(e.message);
-        throw e;
-      }
-      if (!transferResult.ok) return sqliteErr(transferResult.message);
-
-      let feeTxId: number | null = null;
-      const feeAmountTrade = fees != null && fees > 0 ? Math.round(fees * 100) / 100 : 0;
-      if (feeAmountTrade > 0) {
-        const feeAmountAcct = Math.round(feeAmountTrade * fx * 100) / 100;
-        const feePayee = `Trade fee — ${trimmedSymbol}`;
-        // Issue #28: stamp source explicitly. Fee leg shares the trade's
-        // surface attribution.
-        const feeIns = await sqlite.prepare(
-          `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, '', ?, ?, NULL, ?)
-           RETURNING id`
-        ).get(
-          userId, txDate, acct.id, acctCurrency,
-          -feeAmountAcct, tradeCurrency, -feeAmountTrade, fx,
-          feePayee, `source:record_trade,trade-link:${transferResult.linkId}`, cashHoldingId,
-          "mcp_stdio",
-        ) as { id: number } | undefined;
-        feeTxId = feeIns?.id ?? null;
-      }
-
-      return txt({
-        success: true,
-        side,
-        symbol: trimmedSymbol,
-        linkId: transferResult.linkId,
-        fromTransactionId: transferResult.fromTransactionId,
-        toTransactionId: transferResult.toTransactionId,
-        cashHoldingId,
-        symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
-        cashAmount: cashAmountTrade,
-        cashAmountAccountCurrency: cashAmountAcct,
-        tradeCurrency,
-        accountCurrency: acctCurrency,
-        fxRate: fx,
-        resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
-        ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
-        message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
-      });
-    }
+    async () => streamDRefuseRead("record_trade", "portfolio_holdings"),
   );
 
   // ── update_transfer ────────────────────────────────────────────────────────
   server.tool(
     "update_transfer",
-    "Update both legs of an existing transfer pair atomically. Identify by linkId OR by either leg's transaction id. Refuses if the rows don't form a clean transfer pair.",
+    "Update both legs of an existing transfer pair atomically. Stream D Phase 4 (stdio): pass `from_account_id`/`to_account_id` (numeric) — `fromAccount`/`toAccount` (names) are refused. Identify pair by linkId OR by either leg's transaction id.",
     {
       linkId: z.string().optional(),
       transactionId: z.number().int().optional(),
-      fromAccount: z.string().optional(),
-      toAccount: z.string().optional(),
+      fromAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `from_account_id` instead."),
+      toAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `to_account_id` instead."),
+      from_account_id: z.number().int().optional(),
+      to_account_id: z.number().int().optional(),
       amount: z.number().positive().optional(),
       date: z.string().optional(),
       receivedAmount: z.number().positive().optional(),
       note: z.string().optional(),
       tags: z.string().optional(),
     },
-    async ({ linkId, transactionId, fromAccount, toAccount, amount, date, receivedAmount, note, tags }) => {
+    async ({ linkId, transactionId, fromAccount, toAccount, from_account_id, to_account_id, amount, date, receivedAmount, note, tags }) => {
       if (linkId == null && transactionId == null) return sqliteErr("Either linkId or transactionId is required");
 
-      let fromAccountId: number | undefined;
-      let toAccountId: number | undefined;
-      if (fromAccount || toAccount) {
-        const allAccounts = await sqlite.prepare(`SELECT id, name, alias, currency FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-        if (fromAccount) {
-          const acct = fuzzyFind(fromAccount, allAccounts);
-          if (!acct) return sqliteErr(`Source account "${fromAccount}" not found.`);
-          fromAccountId = Number(acct.id);
-        }
-        if (toAccount) {
-          const acct = fuzzyFind(toAccount, allAccounts);
-          if (!acct) return sqliteErr(`Destination account "${toAccount}" not found.`);
-          toAccountId = Number(acct.id);
-        }
+      if (fromAccount != null || toAccount != null) {
+        return sqliteErr("`fromAccount`/`toAccount` (names) are refused on stdio after Stream D Phase 4. Pass `from_account_id`/`to_account_id` instead.");
+      }
+
+      let fromAccountId: number | undefined = from_account_id ?? undefined;
+      let toAccountId: number | undefined = to_account_id ?? undefined;
+      if (fromAccountId != null) {
+        const acct = await sqlite.prepare(
+          `SELECT id FROM accounts WHERE user_id = ? AND id = ?`
+        ).get(userId, fromAccountId) as { id: number } | undefined;
+        if (!acct) return sqliteErr(`Source account #${fromAccountId} not found or not owned by you.`);
+      }
+      if (toAccountId != null) {
+        const acct = await sqlite.prepare(
+          `SELECT id FROM accounts WHERE user_id = ? AND id = ?`
+        ).get(userId, toAccountId) as { id: number } | undefined;
+        if (!acct) return sqliteErr(`Destination account #${toAccountId} not found or not owned by you.`);
       }
 
       const { updateTransferPairViaSql } = await import("../src/lib/transfer.js");
@@ -1591,16 +1148,27 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── delete_budget ──────────────────────────────────────────────────────────
   server.tool(
     "delete_budget",
-    "Delete a budget entry for a category/month",
-    { category: z.string().describe("Category name"), month: z.string().describe("Month (YYYY-MM)") },
-    async ({ category, month }) => {
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const cat = fuzzyFind(category, allCats);
-      if (!cat) return sqliteErr(`Category "${category}" not found`);
+    "Delete a budget entry for a category/month. Stream D Phase 4 (stdio): pass `category_id` (numeric) — `category` (name) is refused.",
+    {
+      category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `category_id` instead."),
+      category_id: z.number().int().optional().describe("Category FK (categories.id)."),
+      month: z.string().describe("Month (YYYY-MM)"),
+    },
+    async ({ category, category_id, month }) => {
+      if (category != null) {
+        return sqliteErr("`category` (name) is refused on stdio after Stream D Phase 4. Pass `category_id` instead.");
+      }
+      if (category_id == null) {
+        return sqliteErr("Pass `category_id` (numeric).");
+      }
+      const cat = await sqlite.prepare(
+        `SELECT id FROM categories WHERE user_id = ? AND id = ?`
+      ).get(userId, category_id) as { id: number } | undefined;
+      if (!cat) return sqliteErr(`Category #${category_id} not found or not owned by you.`);
       const existing = await sqlite.prepare(`SELECT id FROM budgets WHERE user_id = ? AND category_id = ? AND month = ?`).get(userId, cat.id, month) as { id: number } | undefined;
-      if (!existing) return sqliteErr(`No budget for "${cat.name}" in ${month}`);
+      if (!existing) return sqliteErr(`No budget for category #${Number(cat.id)} in ${month}`);
       await sqlite.prepare(`DELETE FROM budgets WHERE id = ? AND user_id = ?`).run(existing.id, userId);
-      return txt({ success: true, message: `Budget deleted: ${cat.name} for ${month}` });
+      return txt({ success: true, message: `Budget deleted: category #${Number(cat.id)} for ${month}` });
     }
   );
 
@@ -1646,36 +1214,45 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── delete_account ─────────────────────────────────────────────────────────
   server.tool(
     "delete_account",
-    "Delete an account (only if it has no transactions, unless force=true)",
+    "Delete an account by id (only if it has no transactions, unless force=true). Stream D Phase 4 (stdio): pass `account_id` (numeric) — `account` (name) is refused.",
     {
-      account: z.string().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
+      account: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `account_id` instead."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id)."),
       force: z.boolean().optional(),
     },
-    async ({ account, force }) => {
-      const allAccounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return sqliteErr(`Account "${account}" not found`);
+    async ({ account, account_id, force }) => {
+      if (account != null) {
+        return sqliteErr("`account` (name) is refused on stdio after Stream D Phase 4. Pass `account_id` instead.");
+      }
+      if (account_id == null) {
+        return sqliteErr("Pass `account_id` (numeric).");
+      }
+      const acct = await sqlite.prepare(
+        `SELECT id FROM accounts WHERE user_id = ? AND id = ?`
+      ).get(userId, account_id) as { id: number } | undefined;
+      if (!acct) return sqliteErr(`Account #${account_id} not found or not owned by you.`);
       const count = (await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND account_id = ?`).get(userId, acct.id) as { cnt: number }).cnt;
-      if (count > 0 && !force) return sqliteErr(`Account "${acct.name}" has ${count} transaction(s). Pass force=true to delete.`);
+      if (count > 0 && !force) return sqliteErr(`Account #${Number(acct.id)} has ${count} transaction(s). Pass force=true to delete.`);
       await sqlite.prepare(`DELETE FROM accounts WHERE id = ? AND user_id = ?`).run(acct.id, userId);
-      return txt({ success: true, message: `Account "${acct.name}" deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` });
+      return txt({ success: true, message: `Account #${Number(acct.id)} deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` });
     }
   );
 
   // ── update_goal ────────────────────────────────────────────────────────────
   server.tool(
     "update_goal",
-    "Update a financial goal's target, deadline, or status",
+    "Update a financial goal's target, deadline, status, or linked accounts. Refused on stdio (Stream D Phase 4 — no DEK).",
     {
       goal: z.string().describe("Goal name (fuzzy matched)"),
       target_amount: z.number().optional(),
       deadline: z.string().optional(),
       status: z.enum(["active", "completed", "paused"]).optional(),
       name: z.string().optional().describe("Rename the goal"),
+      account_ids: z.array(z.number().int()).optional().describe("Replace linked accounts (issue #130). Refused on stdio — use HTTP MCP."),
     },
-    async ({ goal, target_amount, deadline, status, name }) => {
+    async ({ goal, target_amount, deadline, status, name, account_ids }) => {
       // Stream D Phase 4 — stdio cannot update goals (would touch name_ct).
-      void goal; void target_amount; void deadline; void status; void name;
+      void goal; void target_amount; void deadline; void status; void name; void account_ids;
       return streamDRefuse("goals");
     }
   );
@@ -1683,14 +1260,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── delete_goal ────────────────────────────────────────────────────────────
   server.tool(
     "delete_goal",
-    "Delete a financial goal by name",
-    { goal: z.string().describe("Goal name (fuzzy matched)") },
-    async ({ goal }) => {
-      const allGoals = await sqlite.prepare(`SELECT id, name FROM goals WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const g = fuzzyFind(goal, allGoals);
-      if (!g) return sqliteErr(`Goal "${goal}" not found`);
+    "Delete a financial goal by id. Stream D Phase 4 (stdio): pass `goal_id` (numeric) — `goal` (name) is refused.",
+    {
+      goal: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `goal_id` instead."),
+      goal_id: z.number().int().optional().describe("Goal FK (goals.id)."),
+    },
+    async ({ goal, goal_id }) => {
+      if (goal != null) {
+        return sqliteErr("`goal` (name) is refused on stdio after Stream D Phase 4. Pass `goal_id` instead.");
+      }
+      if (goal_id == null) {
+        return sqliteErr("Pass `goal_id` (numeric).");
+      }
+      const g = await sqlite.prepare(
+        `SELECT id FROM goals WHERE user_id = ? AND id = ?`
+      ).get(userId, goal_id) as { id: number } | undefined;
+      if (!g) return sqliteErr(`Goal #${goal_id} not found or not owned by you.`);
       await sqlite.prepare(`DELETE FROM goals WHERE id = ? AND user_id = ?`).run(g.id, userId);
-      return txt({ success: true, message: `Goal "${g.name}" deleted` });
+      return txt({ success: true, message: `Goal #${Number(g.id)} deleted` });
     }
   );
 
@@ -1714,22 +1301,30 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── create_rule ────────────────────────────────────────────────────────────
   server.tool(
     "create_rule",
-    "Create an auto-categorization rule for future imports",
+    "Create an auto-categorization rule for future imports. Stream D Phase 4 (stdio): pass `assign_category_id` (numeric) — `assign_category` (name) is refused.",
     {
       match_payee: z.string().describe("Payee pattern (supports % wildcards)"),
-      assign_category: z.string().describe("Category name to assign (fuzzy matched)"),
+      assign_category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `assign_category_id` instead."),
+      assign_category_id: z.number().int().optional().describe("Category FK (categories.id)."),
       rename_to: z.string().optional(),
       assign_tags: z.string().optional(),
       priority: z.number().optional().describe("Default 0"),
     },
-    async ({ match_payee, assign_category, rename_to, assign_tags, priority }) => {
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const cat = fuzzyFind(assign_category, allCats);
-      if (!cat) return sqliteErr(`Category "${assign_category}" not found`);
+    async ({ match_payee, assign_category, assign_category_id, rename_to, assign_tags, priority }) => {
+      if (assign_category != null) {
+        return sqliteErr("`assign_category` (name) is refused on stdio after Stream D Phase 4. Pass `assign_category_id` instead.");
+      }
+      if (assign_category_id == null) {
+        return sqliteErr("Pass `assign_category_id` (numeric).");
+      }
+      const cat = await sqlite.prepare(
+        `SELECT id FROM categories WHERE user_id = ? AND id = ?`
+      ).get(userId, assign_category_id) as { id: number } | undefined;
+      if (!cat) return sqliteErr(`Category #${assign_category_id} not found or not owned by you.`);
       await sqlite.prepare(
         `INSERT INTO transaction_rules (user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)`
       ).run(userId, match_payee, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0);
-      return txt({ success: true, message: `Rule created: "${match_payee}" → ${cat.name}` });
+      return txt({ success: true, message: `Rule created: "${match_payee}" → category #${Number(cat.id)}` });
     }
   );
 
@@ -1783,417 +1378,123 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       holding: z.string().describe("Holding name OR symbol (fuzzy matched)"),
     },
     async ({ holding }) => {
-      const allHoldings = await sqlite.prepare(
-        `SELECT id, name, symbol FROM portfolio_holdings WHERE user_id = ?`
+      // Stream D Phase 4 (2026-05-03): plaintext `name`/`symbol` columns
+      // were physically dropped on dev. Read the ciphertext siblings; with
+      // no DEK on stdio, the row's effective `name`/`symbol` are the raw
+      // `v1:...` strings. The strict matcher will simply not find a hit
+      // for plaintext user input (e.g. "TESTV") — graceful degradation
+      // (call returns "not found" rather than 500'ing on a missing column).
+      const rawHoldings = await sqlite.prepare(
+        `SELECT id, name_ct, symbol_ct FROM portfolio_holdings WHERE user_id = ?`
       ).all(userId) as SqliteRow[];
-      let h: SqliteRow | null = fuzzyFind(holding, allHoldings);
-      if (!h) {
-        const lo = holding.toLowerCase().trim();
-        h =
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase() === lo) ??
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase().startsWith(lo)) ??
-          null;
+      const allHoldings: SqliteRow[] = rawHoldings.map((r) => {
+        const out: SqliteRow = { ...r };
+        const nameCt = (r.name_ct ?? r.nameCt) as string | null | undefined;
+        const symbolCt = (r.symbol_ct ?? r.symbolCt) as string | null | undefined;
+        if (nameCt) out.name = nameCt;
+        if (symbolCt) out.symbol = symbolCt;
+        return out;
+      });
+      // Issue #127: strict matcher gated on token overlap so a 1-char
+      // holding name (e.g. decrypted "S") cannot silently swallow a longer
+      // input (e.g. "TESTV") via reverse-includes and DELETE the wrong row.
+      const resolved = resolvePortfolioHoldingStrict(holding, allHoldings);
+      if (!resolved.ok) {
+        if (resolved.reason === "low_confidence") {
+          const sName = String(resolved.suggestion.name ?? "");
+          return sqliteErr(`Holding "${holding}" did not match strongly — did you mean "${sName}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+        }
+        return sqliteErr(`Holding "${holding}" not found`);
       }
-      if (!h) return sqliteErr(`Holding "${holding}" not found`);
+      const h = resolved.holding;
+      const matchedName = String(h.name ?? "");
 
       const count = (await sqlite.prepare(
         `SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND portfolio_holding_id = ?`
       ).get(userId, h.id) as { cnt: number }).cnt;
 
       await sqlite.prepare(`DELETE FROM portfolio_holdings WHERE id = ? AND user_id = ?`).run(h.id, userId);
+      // Per CLAUDE.md "Every MCP tx-mutating write must call invalidateUser":
+      // FK ON DELETE SET NULL mutates linked transactions' portfolio_holding_id,
+      // so the per-user tx cache must be invalidated.
+      invalidateUserTxCache(userId);
       return txt({
         success: true,
         message: count > 0
-          ? `Holding "${h.name}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
-          : `Holding "${h.name}" deleted.`,
+          ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
+          : `Holding "${matchedName}" deleted.`,
       });
     }
   );
 
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
+  // Issue #123: schema kept symmetric with HTTP (account_id / account filters
+  // accepted) so a single client can target either transport with the same
+  // payload. Stdio still refuses the call wholesale under Stream D Phase 4
+  // because account + holding names are encrypted and there's no DEK on this
+  // transport — the params are documented as accepted-but-unused.
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with allocation breakdown by asset class and currency. Per-row amounts are in each holding's own currency; reportingCurrency is surfaced for cross-currency context.",
+    "Portfolio holdings with allocation breakdown. Stream D Phase 4: stdio cannot decrypt holding/account names — use HTTP MCP or the web UI for this query. Schema includes `account_id` / `account` filters for parity with HTTP, but they are unused on this transport.",
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
+      symbols: z.array(z.string()).optional(),
+      account_id: z.number().int().optional().describe("Account FK (parity with HTTP transport — unused on stdio under Stream D Phase 4)."),
+      account: z.string().optional().describe("Account name/alias (parity with HTTP — unused on stdio under Stream D Phase 4)."),
     },
-    async ({ reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      // Phase 6 (2026-04-29): JOIN on the FK rather than the (dropped)
-      // portfolio_holding text column. Section F (issue #25): JOIN through
-      // holding_accounts (Section G) for transactions so the (holding,
-      // account) grain stays consistent with the HTTP MCP + REST. Today
-      // each holding has a single is_primary=true pairing, so behavior is
-      // unchanged. CLAUDE.md "Portfolio aggregator" applies (no qty>0/<0
-      // CASE here — pure SUM(quantity) / SUM(amount), so the rule is moot
-      // in this query).
-      const holdings = await sqlite.prepare(`
-        SELECT ph.id, ph.name, ph.symbol, ph.currency, a.name as account_name,
-               COALESCE(SUM(t.quantity), 0) as total_quantity,
-               COALESCE(SUM(t.amount), 0) as book_value
-        FROM portfolio_holdings ph
-        JOIN accounts a ON a.id = ph.account_id
-        LEFT JOIN transactions t
-          ON t.portfolio_holding_id = ph.id AND t.user_id = ?
-        LEFT JOIN holding_accounts ha
-          ON ha.holding_id = t.portfolio_holding_id
-         AND ha.account_id = t.account_id
-         AND ha.user_id = ?
-        WHERE ph.user_id = ?
-          AND (t.id IS NULL OR ha.holding_id IS NOT NULL)
-        GROUP BY ph.id, ph.name, ph.symbol, ph.currency, a.name
-        ORDER BY ABS(COALESCE(SUM(t.amount), 0)) DESC
-      `).all(userId, userId, userId) as SqliteRow[];
-
-      const byCurrency: Record<string, number> = {};
-      const byAccount: Record<string, number> = {};
-      let totalBV = 0;
-      for (const h of holdings) {
-        const bv = Math.abs(Number(h.book_value));
-        byCurrency[String(h.currency)] = (byCurrency[String(h.currency)] ?? 0) + bv;
-        byAccount[String(h.account_name)] = (byAccount[String(h.account_name)] ?? 0) + bv;
-        totalBV += bv;
-      }
-
-      return txt({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        reportingCurrency: reporting,
-        totalHoldings: holdings.length,
-        totalBookValue: Math.round(totalBV * 100) / 100,
-        holdings: holdings.map(h => ({
-          // FK to portfolio_holdings.id — pass as portfolioHoldingId on
-          // record_transaction / update_transaction in the HTTP MCP. (Stdio
-          // MCP write tools don't currently bind to portfolio_holdings.)
-          id: Number(h.id),
-          name: h.name, symbol: h.symbol, account: h.account_name, currency: h.currency,
-          quantity: Number(h.total_quantity),
-          bookValue: Math.round(Math.abs(Number(h.book_value)) * 100) / 100,
-          pct: totalBV > 0 ? Math.round((Math.abs(Number(h.book_value)) / totalBV) * 1000) / 10 : 0,
-        })),
-        allocationByCurrency: Object.entries(byCurrency).map(([currency, value]) => ({
-          currency, value: Math.round(value * 100) / 100,
-          pct: totalBV > 0 ? Math.round((value / totalBV) * 1000) / 10 : 0,
-        })),
-        allocationByAccount: Object.entries(byAccount).map(([account, value]) => ({
-          account, value: Math.round(value * 100) / 100,
-          pct: totalBV > 0 ? Math.round((value / totalBV) * 1000) / 10 : 0,
-        })),
-      });
-    }
+    async ({ account_id, account }) => {
+      void account_id; void account;
+      return streamDRefuseRead("get_portfolio_analysis", "portfolio_holdings");
+    },
   );
 
   // ── get_portfolio_performance ──────────────────────────────────────────────
   server.tool(
     "get_portfolio_performance",
-    "Portfolio performance: cost basis and realized P&L by holding. Per-row amounts stay in each holding's own (account) currency; reportingCurrency is surfaced for cross-currency context.",
+    "Portfolio performance: cost basis and realized P&L by holding. Stream D Phase 4: stdio cannot decrypt holding names — use HTTP MCP or the web UI for this query.",
     {
       period: z.enum(["1m", "3m", "6m", "1y", "all"]).optional(),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ period, reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      const cutoff: Record<string, string> = {
-        "1m": new Date(Date.now() - 30 * 86400000).toISOString().split("T")[0],
-        "3m": new Date(Date.now() - 90 * 86400000).toISOString().split("T")[0],
-        "6m": new Date(Date.now() - 180 * 86400000).toISOString().split("T")[0],
-        "1y": new Date(Date.now() - 365 * 86400000).toISOString().split("T")[0],
-        "all": "1900-01-01",
-      };
-      const since = cutoff[period ?? "all"];
-      // Phase 6 (2026-04-29): aggregate by FK + JOIN portfolio_holdings for
-      // the display name. The legacy `portfolio_holding` text column was
-      // dropped; FK is the sole source of truth. Section F (issue #25):
-      // JOIN through holding_accounts (Section G) on (holding_id,
-      // account_id) so the join grain matches the rest of the aggregator
-      // surface. CLAUDE.md "Portfolio aggregator" — this query keys cost
-      // basis on amt-sign (`amount<0` = buy), which is the LEGACY
-      // amt-sign convention NOT the qty>0 rule. Preserved here for
-      // backwards compat with stdio MCP consumers; the HTTP path uses the
-      // qty>0 rule.
-      // Issue #96: LEFT JOIN to cash-leg sibling for multi-currency trade
-      // pairs. When a buy row (qty>0, amount<0) has a paired cash leg
-      // (same trade_link_id, qty=0), the cash leg's `amount` is the
-      // broker's actual settlement at IBKR's FX rate; the stock leg's
-      // amount is the same trade re-priced at Finlynq's live rate and
-      // under-counts the spread. Stdio refuses investment-account writes
-      // (CLAUDE.md), so it can't *create* trade_link_id rows — but it
-      // MUST read them correctly for users who created the trade via HTTP
-      // MCP. This query now picks the cash leg's amount via a CASE when
-      // present.
-      // CLAUDE.md flags this query keys cost basis on amt-sign — the
-      // legacy convention used here (NOT the qty>0 rule). Preserved for
-      // backwards compat; the HTTP path uses qty>0. Both paths apply the
-      // same #96 cash-leg substitution.
-      const perf = await sqlite.prepare(`
-        SELECT ph.name as holding, COUNT(*) as tx_count,
-               SUM(CASE
-                 WHEN t.amount < 0 AND cash.id IS NOT NULL THEN ABS(cash.amount)
-                 WHEN t.amount < 0 THEN ABS(t.amount)
-                 ELSE 0
-               END) as cost_basis,
-               SUM(CASE WHEN t.amount > 0 THEN t.amount ELSE 0 END) as proceeds,
-               SUM(t.quantity) as net_quantity,
-               MIN(t.date) as first_purchase, MAX(t.date) as last_activity
-        FROM transactions t
-        INNER JOIN holding_accounts ha
-          ON ha.holding_id = t.portfolio_holding_id
-         AND ha.account_id = t.account_id
-         AND ha.user_id = ?
-        LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
-        LEFT JOIN transactions cash
-          ON cash.user_id = ?
-         AND cash.trade_link_id IS NOT NULL
-         AND cash.trade_link_id = t.trade_link_id
-         AND cash.id <> t.id
-         AND COALESCE(cash.quantity, 0) = 0
-        WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.date >= ?
-        GROUP BY ph.id, ph.name ORDER BY cost_basis DESC
-      `).all(userId, userId, userId, since) as SqliteRow[];
-
-      const results = perf.map(p => {
-        const costBasis = Number(p.cost_basis ?? 0);
-        const proceeds = Number(p.proceeds ?? 0);
-        const pnl = proceeds - costBasis;
-        return {
-          holding: p.holding, txCount: Number(p.tx_count),
-          costBasis: Math.round(costBasis * 100) / 100,
-          proceeds: Math.round(proceeds * 100) / 100,
-          realizedPnL: Math.round(pnl * 100) / 100,
-          realizedPnLPct: costBasis > 0 ? Math.round((pnl / costBasis) * 1000) / 10 : null,
-          netQuantity: Number(p.net_quantity ?? 0),
-          firstPurchase: p.first_purchase, lastActivity: p.last_activity,
-        };
-      });
-
-      return txt({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        period: period ?? "all",
-        reportingCurrency: reporting,
-        summary: {
-          holdings: results.length,
-          totalCostBasis: Math.round(results.reduce((s, r) => s + r.costBasis, 0) * 100) / 100,
-          totalRealizedPnL: Math.round(results.reduce((s, r) => s + r.realizedPnL, 0) * 100) / 100,
-        },
-        holdings: results,
-      });
-    }
+    async () => streamDRefuseRead("get_portfolio_performance", "portfolio_holdings"),
   );
 
   // ── analyze_holding ────────────────────────────────────────────────────────
   server.tool(
     "analyze_holding",
-    "Deep-dive analysis of a single holding: transaction history, avg cost, P&L. Per-row amounts stay in the transaction's account currency; reportingCurrency is surfaced for cross-currency context. When `symbol` substring-matches multiple holdings sharing a name (TFSA + RRSP), pass `holdingId` to scope; otherwise the response includes an `ambiguous` array of candidates.",
+    "Deep-dive analysis of a single holding. Stream D Phase 4: stdio cannot decrypt holding/account names — use HTTP MCP or the web UI for this query.",
     {
-      symbol: z.string().optional().describe("Holding name or symbol (fuzzy matched). Required when `holdingId` is omitted."),
-      holdingId: z.number().int().optional().describe("Filter to this exact portfolio_holdings.id — bypasses fuzzy matching. Use this when `symbol` matches multiple positions sharing the same name."),
-      reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
+      symbol: z.string().optional(),
+      holdingId: z.number().int().optional(),
+      reportingCurrency: z.string().optional(),
     },
     async ({ symbol, holdingId, reportingCurrency }) => {
-      if (!symbol && holdingId == null) {
-        return sqliteErr("analyze_holding requires either `symbol` or `holdingId`");
-      }
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      // Phase 6 (2026-04-29): match on the JOINed portfolio_holdings name +
-      // symbol + tx payee. The legacy `t.portfolio_holding` text column was
-      // dropped; FK + JOIN is the only source of truth for holding names.
-      // Section F (issue #25): JOIN through holding_accounts (Section G) on
-      // (holding_id, account_id) so the join grain matches the HTTP MCP +
-      // REST aggregator surface. CLAUDE.md "Portfolio aggregator" — qty>0
-      // = buy regardless of amount sign (preserved in the loop below).
-      // Symbol gets exact case-insensitive equality (tickers are short and
-      // prone to spurious substring hits — "GE" inside "ORANGE" etc.).
-      // Issue #86: when holdingId is supplied, scope the query to that FK
-      // exclusively (bypasses the fuzzy substring filter).
-      // Issue #96: LEFT JOIN to cash-leg sibling. cash_amount is null when
-      // no pair exists; the per-row buy loop below prefers cash_amount when
-      // present and falls back to t.amount otherwise. Stdio MCP can't
-      // *create* trade_link_id rows but must read them correctly for users
-      // who created the trade via HTTP MCP.
-      const txns = holdingId != null
-        ? await sqlite.prepare(`
-            SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding_id,
-                   ph.name as portfolio_holding,
-                   a.name as account_name, a.currency,
-                   cash.amount as cash_amount, cash.id as cash_id
-            FROM transactions t
-            JOIN accounts a ON a.id = t.account_id
-            INNER JOIN holding_accounts ha
-              ON ha.holding_id = t.portfolio_holding_id
-             AND ha.account_id = t.account_id
-             AND ha.user_id = ?
-            LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
-            LEFT JOIN transactions cash
-              ON cash.user_id = ?
-             AND cash.trade_link_id IS NOT NULL
-             AND cash.trade_link_id = t.trade_link_id
-             AND cash.id <> t.id
-             AND COALESCE(cash.quantity, 0) = 0
-            WHERE t.user_id = ?
-              AND t.portfolio_holding_id = ?
-            ORDER BY t.date ASC
-          `).all(userId, userId, userId, holdingId) as SqliteRow[]
-        : await sqlite.prepare(`
-            SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.portfolio_holding_id,
-                   ph.name as portfolio_holding,
-                   a.name as account_name, a.currency,
-                   cash.amount as cash_amount, cash.id as cash_id
-            FROM transactions t
-            JOIN accounts a ON a.id = t.account_id
-            INNER JOIN holding_accounts ha
-              ON ha.holding_id = t.portfolio_holding_id
-             AND ha.account_id = t.account_id
-             AND ha.user_id = ?
-            LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
-            LEFT JOIN transactions cash
-              ON cash.user_id = ?
-             AND cash.trade_link_id IS NOT NULL
-             AND cash.trade_link_id = t.trade_link_id
-             AND cash.id <> t.id
-             AND COALESCE(cash.quantity, 0) = 0
-            WHERE t.user_id = ?
-              AND (
-                LOWER(ph.name) LIKE LOWER(?)
-                OR LOWER(t.payee) LIKE LOWER(?)
-                OR LOWER(ph.symbol) = LOWER(?)
-              )
-            ORDER BY t.date ASC
-          `).all(userId, userId, userId, `%${symbol}%`, `%${symbol}%`, symbol) as SqliteRow[];
-
-      if (!txns.length) {
-        return sqliteErr(holdingId != null
-          ? `No transactions found for holdingId=${holdingId}`
-          : `No transactions found for "${symbol}"`);
-      }
-
-      // Issue #86: detect cross-holding ambiguity (only when no holdingId
-      // was supplied). If multiple distinct holding ids matched, return the
-      // candidate list and require the caller to disambiguate.
-      if (holdingId == null) {
-        const distinctIds = new Set<number>();
-        for (const t of txns) {
-          if (t.portfolio_holding_id != null) distinctIds.add(Number(t.portfolio_holding_id));
-        }
-        if (distinctIds.size > 1) {
-          const ambiguous: Array<{ holdingId: number; name: string | null; account: string | null }> = [];
-          const seen = new Set<number>();
-          for (const t of txns) {
-            const hid = t.portfolio_holding_id != null ? Number(t.portfolio_holding_id) : null;
-            if (hid == null || seen.has(hid)) continue;
-            seen.add(hid);
-            ambiguous.push({
-              holdingId: hid,
-              name: (t.portfolio_holding ?? null) as string | null,
-              account: (t.account_name ?? null) as string | null,
-            });
-          }
-          return txt({
-            disclaimer: PORTFOLIO_DISCLAIMER,
-            ambiguous,
-            note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call analyze_holding with one of these holdingId values.`,
-          });
-        }
-      }
-
-      const holdingName = txns[0].portfolio_holding || txns[0].payee;
-      // Prefer rows whose joined portfolio_holding name equals the chosen
-      // holdingName — payee-only matches could otherwise surface a different
-      // holding's id.
-      // Issue #86: when holdingId was supplied, use it directly.
-      const resolvedHoldingId: number | null = holdingId ??
-        ((txns.find(
-          (t) =>
-            t.portfolio_holding_id != null &&
-            String(t.portfolio_holding ?? "") === String(holdingName)
-        )?.portfolio_holding_id as number | undefined) ?? null);
-      let totalShares = 0, totalCost = 0;
-      const purchases: SqliteRow[] = [], sales: SqliteRow[] = [];
-      // qty>0 = buy (handles Finlynq-native amt<0+qty>0 and WP convention
-      // amt>0+qty>0). qty<0 = sell (qty already negative). qty=0 = dividend.
-      // Issue #96: when a paired cash-leg sibling exists (multi-currency
-      // trade pair, t.cash_id != null), use the cash leg's amount as cost
-      // basis instead of the stock leg's amount.
-      for (const t of txns) {
-        const qty = Number(t.quantity ?? 0);
-        if (qty > 0) {
-          totalShares += qty;
-          const cashAmt = t.cash_id != null ? Number(t.cash_amount) : NaN;
-          const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(Number(t.amount));
-          totalCost += buyCostAmt;
-          purchases.push(t);
-        }
-        else if (qty < 0) { totalShares += qty; sales.push(t); }
-      }
-      const avgCost = purchases.length && totalCost > 0
-        ? totalCost / purchases.reduce((s, t) => s + Number(t.quantity ?? 0), 0)
-        : null;
-
-      return txt({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        holdingId: resolvedHoldingId,
-        holding: holdingName, totalTransactions: txns.length,
-        reportingCurrency: reporting,
-        purchases: purchases.length, sales: sales.length,
-        currentShares: Math.round(totalShares * 10000) / 10000,
-        totalCostBasis: Math.round(totalCost * 100) / 100,
-        avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
-        firstPurchase: txns[0].date, lastActivity: txns[txns.length - 1].date,
-        recentTransactions: txns.slice(-5).map(t => ({ date: t.date, amount: t.amount, quantity: t.quantity, account: t.account_name })),
-      });
+      void symbol; void holdingId; void reportingCurrency;
+      return streamDRefuseRead("analyze_holding", "portfolio_holdings");
     }
   );
 
   // ── trace_holding_quantity ─────────────────────────────────────────────────
   server.tool(
     "trace_holding_quantity",
-    "Per-transaction quantity contributions for a single holding, with running sum. Diagnostic tool for investigating quantity discrepancies. Read-only. JOINs through holding_accounts (issue #25) so the rows match what the four aggregators see; rows whose (holding_id, account_id) pair is missing from holding_accounts are OMITTED but counted in `unjoinedTransactionCount`. When `symbol` matches multiple holdings, response surfaces an `ambiguous` candidate list (re-call with `holdingId`).",
+    "Per-transaction quantity contributions for a single holding. Stream D Phase 4 (stdio): pass `holdingId` (numeric) — `symbol` (name) is refused because stdio cannot decrypt names.",
     {
-      symbol: z.string().optional().describe("Holding name or symbol (fuzzy matched). Required when `holdingId` is omitted."),
-      holdingId: z.number().int().optional().describe("Filter to this exact portfolio_holdings.id — bypasses fuzzy matching."),
+      symbol: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `holdingId` instead."),
+      holdingId: z.number().int().optional().describe("Filter to this exact portfolio_holdings.id."),
     },
     async ({ symbol, holdingId }) => {
-      if (!symbol && holdingId == null) {
-        return sqliteErr("trace_holding_quantity requires either `symbol` or `holdingId`");
+      if (symbol != null) {
+        return sqliteErr("`symbol` (name) is refused on stdio after Stream D Phase 4. Pass `holdingId` instead.");
       }
-      // Resolve the holding id when only `symbol` was supplied. Stdio reads
-      // plaintext name/symbol (per the stdio carve-out — no DEK).
-      let resolvedHoldingId: number | null = holdingId ?? null;
-      if (resolvedHoldingId == null) {
-        const matches = await sqlite.prepare(`
-          SELECT id, name, symbol, account_id
-          FROM portfolio_holdings
-          WHERE user_id = ?
-            AND (
-              LOWER(name) LIKE LOWER(?)
-              OR LOWER(symbol) = LOWER(?)
-            )
-        `).all(userId, `%${symbol}%`, symbol) as SqliteRow[];
-
-        if (!matches.length) return sqliteErr(`No holding found matching "${symbol}"`);
-
-        const distinctIds = new Set<number>(matches.map((m) => Number(m.id)));
-        if (distinctIds.size > 1) {
-          const ids = [...distinctIds];
-          const accounts = await sqlite.prepare(
-            `SELECT id, name FROM accounts WHERE user_id = ?`
-          ).all(userId) as SqliteRow[];
-          const accountNameById = new Map<number, string>();
-          for (const a of accounts) accountNameById.set(Number(a.id), String(a.name ?? ""));
-          const ambiguous = ids.map((id) => {
-            const m = matches.find((x) => Number(x.id) === id)!;
-            return {
-              holdingId: id,
-              name: (m.name ?? null) as string | null,
-              symbol: (m.symbol ?? null) as string | null,
-              account: accountNameById.get(Number(m.account_id)) ?? null,
-            };
-          });
-          return txt({
-            ambiguous,
-            note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call trace_holding_quantity with one of these holdingId values.`,
-          });
-        }
-        resolvedHoldingId = Number(matches[0].id);
+      if (holdingId == null) {
+        return sqliteErr("Pass `holdingId` (numeric).");
       }
+
+      // Validate ownership without reading dropped columns.
+      const owns = await sqlite.prepare(
+        `SELECT id FROM portfolio_holdings WHERE user_id = ? AND id = ?`
+      ).get(userId, holdingId) as { id: number } | undefined;
+      if (!owns) return sqliteErr(`Holding #${holdingId} not found or not owned by you.`);
 
       // Count transactions whose (holding_id, account_id) pair is missing
       // from holding_accounts — these are invisible to the four aggregators.
@@ -2208,14 +1509,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
               AND ha.holding_id = t.portfolio_holding_id
               AND ha.account_id = t.account_id
           )
-      `).get(userId, resolvedHoldingId, userId) as { cnt: number };
+      `).get(userId, holdingId, userId) as { cnt: number };
       const unjoinedTransactionCount = Number(unjoinedRow?.cnt ?? 0);
 
+      // Stream D Phase 4: SELECT only ciphertext-free columns from accounts.
       const legsRaw = await sqlite.prepare(`
-        SELECT t.id, t.date, t.account_id, t.quantity, t.amount, t.source, t.payee,
-               a.name AS account_name
+        SELECT t.id, t.date, t.account_id, t.quantity, t.amount, t.source, t.payee
         FROM transactions t
-        JOIN accounts a ON a.id = t.account_id
         INNER JOIN holding_accounts ha
           ON ha.holding_id = t.portfolio_holding_id
          AND ha.account_id = t.account_id
@@ -2223,20 +1523,18 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         WHERE t.user_id = ?
           AND t.portfolio_holding_id = ?
         ORDER BY t.date ASC, t.id ASC
-      `).all(userId, userId, resolvedHoldingId) as SqliteRow[];
+      `).all(userId, userId, holdingId) as SqliteRow[];
 
       let runningSum = 0;
       const legs = legsRaw.map((row) => {
         const qty = Number(row.quantity ?? 0);
         runningSum += qty;
-        const accountName: string | null = row.account_name == null ? null : String(row.account_name);
         const source: string | null = row.source == null ? null : String(row.source);
         const payee: string | null = row.payee == null ? null : String(row.payee);
         return {
           transactionId: Number(row.id),
           date: row.date,
           accountId: Number(row.account_id),
-          accountName,
           quantity: qty,
           amount: Number(row.amount ?? 0),
           source,
@@ -2246,11 +1544,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       });
 
       const totalQty = Math.round(runningSum * 10000) / 10000;
-      const perAccount = new Map<number, { accountId: number; accountName: string | null; qty: number; legCount: number }>();
+      const perAccount = new Map<number, { accountId: number; qty: number; legCount: number }>();
       for (const l of legs) {
         const e = perAccount.get(l.accountId);
         if (e) { e.qty += l.quantity; e.legCount += 1; }
-        else perAccount.set(l.accountId, { accountId: l.accountId, accountName: l.accountName, qty: l.quantity, legCount: 1 });
+        else perAccount.set(l.accountId, { accountId: l.accountId, qty: l.quantity, legCount: 1 });
       }
       const perAccountArr = [...perAccount.values()].map((e) => ({
         ...e,
@@ -2258,7 +1556,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }));
 
       return txt({
-        holdingId: resolvedHoldingId,
+        holdingId,
         totalLegs: legs.length,
         totalQty,
         unjoinedTransactionCount,
@@ -2274,160 +1572,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── get_investment_insights ────────────────────────────────────────────────
   server.tool(
     "get_investment_insights",
-    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, top positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`. `mode: 'benchmark'` compares growth vs a reference index.",
+    "Portfolio-level investment analytics. Stream D Phase 4: stdio cannot decrypt holding names — use HTTP MCP or the web UI for this query.",
     {
       mode: z.enum(["patterns", "rebalancing", "benchmark"]).optional(),
       targets: z.array(z.object({
         holding: z.string(),
-        target_pct: z.number().describe("Target allocation % (0-100)"),
-      })).optional().describe("Required when mode='rebalancing'"),
-      benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional().describe("Benchmark for mode='benchmark'"),
-      reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
+        target_pct: z.number(),
+      })).optional(),
+      benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional(),
+      reportingCurrency: z.string().optional(),
     },
-    async ({ mode, targets, benchmark, reportingCurrency }) => {
-      const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
-      const m = mode ?? "patterns";
-
-      if (m === "rebalancing") {
-        if (!targets?.length) return sqliteErr("targets is required when mode='rebalancing'");
-        // Phase 6 (2026-04-29): aggregate by FK + JOIN.
-        // Issue #96: LEFT JOIN to cash-leg sibling. When a paired cash leg
-        // exists, prefer its amount (broker's actual settlement at IBKR's
-        // FX rate) over the stock leg's amount (Finlynq's live FX rate).
-        const holdings = await sqlite.prepare(`
-          SELECT ph.name as name,
-                 SUM(CASE
-                   WHEN cash.id IS NOT NULL THEN ABS(cash.amount)
-                   ELSE ABS(t.amount)
-                 END) as book_value
-          FROM transactions t
-          LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
-          LEFT JOIN transactions cash
-            ON cash.user_id = ?
-           AND cash.trade_link_id IS NOT NULL
-           AND cash.trade_link_id = t.trade_link_id
-           AND cash.id <> t.id
-           AND COALESCE(cash.quantity, 0) = 0
-          WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.amount < 0
-          GROUP BY ph.id, ph.name
-        `).all(userId, userId) as SqliteRow[];
-
-        const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
-        if (totalBV === 0) return sqliteErr("No portfolio holdings found");
-
-        const currentMap = new Map(holdings.map(h => [String(h.name).toLowerCase(), { name: h.name, value: Number(h.book_value) }]));
-        const suggestions = targets.map(t => {
-          const lo = t.holding.toLowerCase();
-          const current = [...currentMap.entries()].find(([k]) => k.includes(lo) || lo.includes(k))?.[1];
-          const currValue = current?.value ?? 0;
-          const targetValue = (t.target_pct / 100) * totalBV;
-          const diff = targetValue - currValue;
-          return {
-            holding: t.holding,
-            currentPct: Math.round((currValue / totalBV) * 1000) / 10,
-            targetPct: t.target_pct,
-            currentValue: Math.round(currValue * 100) / 100,
-            targetValue: Math.round(targetValue * 100) / 100,
-            action: diff > 0 ? "BUY" : diff < 0 ? "SELL" : "HOLD",
-            amount: Math.round(Math.abs(diff) * 100) / 100,
-          };
-        });
-
-        return txt({
-          disclaimer: PORTFOLIO_DISCLAIMER,
-          mode: "rebalancing",
-          reportingCurrency: reporting,
-          totalPortfolioValue: Math.round(totalBV * 100) / 100,
-          suggestions,
-          note: "Based on book cost, not market price.",
-        });
-      }
-
-      if (m === "benchmark") {
-        const bm = benchmark ?? "SP500";
-        const bmInfo: Record<string, { label: string; annualizedReturn: number; description: string }> = {
-          SP500:      { label: "S&P 500",            annualizedReturn: 10.5, description: "US large-cap equities (USD)" },
-          TSX:        { label: "S&P/TSX Composite",   annualizedReturn: 8.2,  description: "Canadian equities (CAD)" },
-          MSCI_WORLD: { label: "MSCI World",           annualizedReturn: 9.4,  description: "Global developed markets (USD)" },
-          BONDS_CA:   { label: "Canadian Bonds",       annualizedReturn: 3.8,  description: "Canadian aggregate bonds (CAD)" },
-        };
-        const info = bmInfo[bm];
-
-        // Phase 6 (2026-04-29): FK filter replaces legacy text-column check.
-        const row = await sqlite.prepare(`
-          SELECT MIN(date) as first_date, MAX(date) as last_date, SUM(ABS(amount)) as total_invested
-          FROM transactions WHERE user_id = ? AND portfolio_holding_id IS NOT NULL AND amount < 0
-        `).get(userId) as { first_date: string | null; last_date: string; total_invested: number } | undefined;
-
-        if (!row?.first_date) return txt({ disclaimer: PORTFOLIO_DISCLAIMER, mode: "benchmark", reportingCurrency: reporting, message: "No investment transactions found" });
-
-        const yearsHeld = Math.max(0.1, (new Date(row.last_date).getTime() - new Date(row.first_date).getTime()) / (365.25 * 86400000));
-        const benchFinal = row.total_invested * Math.pow(1 + info.annualizedReturn / 100, yearsHeld);
-        const benchGain = benchFinal - row.total_invested;
-
-        return txt({
-          disclaimer: PORTFOLIO_DISCLAIMER,
-          mode: "benchmark",
-          reportingCurrency: reporting,
-          note: "Uses book cost, not market value. Illustrative only.",
-          yourPortfolio: { totalInvested: Math.round(row.total_invested * 100) / 100, investingSince: row.first_date, yearsInvesting: Math.round(yearsHeld * 10) / 10 },
-          benchmark: { name: info.label, description: info.description, historicalAnnualizedReturn: `${info.annualizedReturn}%`, period: "10-year historical average (approximate)" },
-          hypothetical: {
-            message: `If $${Math.round(row.total_invested)} invested over ${Math.round(yearsHeld * 10) / 10} years earned ${info.annualizedReturn}% annually:`,
-            finalValue: Math.round(benchFinal * 100) / 100,
-            gain: Math.round(benchGain * 100) / 100,
-            gainPct: Math.round((benchGain / row.total_invested) * 1000) / 10,
-          },
-          limitations: [
-            "Book cost ≠ market value — add current prices for real comparison",
-            "Dollar-cost averaging timing not accounted for precisely",
-            "Benchmark returns exclude fees, taxes, and currency conversion",
-          ],
-        });
-      }
-
-      // Default: mode === "patterns"
-      // Phase 6 (2026-04-29): aggregate by FK + JOIN.
-      const positions = await sqlite.prepare(`
-        SELECT ph.name as name, SUM(ABS(t.amount)) as book_value, COUNT(*) as purchases
-        FROM transactions t
-        LEFT JOIN portfolio_holdings ph ON ph.id = t.portfolio_holding_id
-        WHERE t.user_id = ? AND t.portfolio_holding_id IS NOT NULL AND t.amount < 0
-        GROUP BY ph.id, ph.name ORDER BY book_value DESC
-      `).all(userId) as SqliteRow[];
-
-      const contributions = await sqlite.prepare(`
-        SELECT strftime('%Y-%m', date) as month, SUM(ABS(amount)) as invested
-        FROM transactions WHERE user_id = ? AND portfolio_holding_id IS NOT NULL AND amount < 0
-        GROUP BY strftime('%Y-%m', date) ORDER BY month DESC LIMIT 12
-      `).all(userId) as SqliteRow[];
-
-      const totalInvested = positions.reduce((s, p) => s + Number(p.book_value), 0);
-      const top3 = positions.slice(0, 3).reduce((s, p) => s + Number(p.book_value), 0) / (totalInvested || 1);
-      const diversScore = Math.max(0, Math.round((1 - top3) * 100));
-      const avgMonthly = contributions.length > 0 ? contributions.reduce((s, c) => s + Number(c.invested), 0) / contributions.length : 0;
-
-      return txt({
-        disclaimer: PORTFOLIO_DISCLAIMER,
-        mode: "patterns",
-        reportingCurrency: reporting,
-        summary: {
-          totalPositions: positions.length,
-          totalInvested: Math.round(totalInvested * 100) / 100,
-          avgMonthlyContribution: Math.round(avgMonthly * 100) / 100,
-          diversificationScore: diversScore,
-          diversificationLabel: diversScore > 70 ? "Well diversified" : diversScore > 40 ? "Moderately diversified" : "Concentrated",
-          concentration: `Top 3 = ${Math.round(top3 * 1000) / 10}% of portfolio`,
-        },
-        topPositions: positions.slice(0, 5).map(p => ({
-          name: p.name,
-          bookValue: Math.round(Number(p.book_value) * 100) / 100,
-          pct: Math.round((Number(p.book_value) / totalInvested) * 1000) / 10,
-          purchases: Number(p.purchases),
-        })),
-        monthlyContributions: contributions.slice(0, 6).map(c => ({ month: c.month, invested: Math.round(Number(c.invested) * 100) / 100 })),
-      });
-    }
+    async () => streamDRefuseRead("get_investment_insights", "portfolio_holdings"),
   );
 
   // ── finlynq_help ───────────────────────────────────────────────────────────
@@ -2530,42 +1685,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── list_loans ────────────────────────────────────────────────────────────
   server.tool(
     "list_loans",
-    "List all loans with balance, rate, payment, payoff date, and linked account",
+    "List all loans. Stream D Phase 4: stdio cannot decrypt loan / linked-account names — use HTTP MCP or the web UI for this query.",
     {},
-    async () => {
-      const rows = await sqlite.prepare(`
-        SELECT l.id, l.name, l.type, l.principal, l.annual_rate, l.term_months,
-               l.start_date, l.payment_amount, l.payment_frequency, l.extra_payment,
-               l.note, l.account_id, a.name AS account_name
-        FROM loans l LEFT JOIN accounts a ON a.id = l.account_id
-        WHERE l.user_id = ? ORDER BY l.start_date DESC, l.id
-      `).all(userId) as SqliteRow[];
-      const today = new Date().toISOString().split("T")[0];
-      const enriched = rows.map((r) => {
-        const summary = generateAmortizationSchedule(
-          Number(r.principal),
-          Number(r.annual_rate),
-          Number(r.term_months),
-          String(r.start_date),
-          Number(r.extra_payment ?? 0),
-          String(r.payment_frequency ?? "monthly"),
-        );
-        const paid = summary.schedule.filter((x) => x.date <= today);
-        const principalPaid = paid.reduce((s, x) => s + x.principal, 0);
-        const interestPaid = paid.reduce((s, x) => s + x.interest, 0);
-        return {
-          ...r,
-          monthlyPayment: summary.monthlyPayment,
-          totalInterest: summary.totalInterest,
-          payoffDate: summary.payoffDate,
-          remainingBalance: Math.max(Number(r.principal) - principalPaid, 0),
-          principalPaid: Math.round(principalPaid * 100) / 100,
-          interestPaid: Math.round(interestPaid * 100) / 100,
-          periodsRemaining: summary.schedule.length - paid.length,
-        };
-      });
-      return txt({ success: true, data: enriched });
-    }
+    async () => streamDRefuseRead("list_loans", "loans"),
   );
 
   // ── add_loan ──────────────────────────────────────────────────────────────
@@ -2626,10 +1748,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "Delete a loan by id",
     { id: z.number() },
     async ({ id }) => {
-      const existing = await sqlite.prepare(`SELECT id, name FROM loans WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
+      const existing = await sqlite.prepare(`SELECT id FROM loans WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number } | undefined;
       if (!existing) return sqliteErr(`Loan #${id} not found`);
       await sqlite.prepare(`DELETE FROM loans WHERE id = ? AND user_id = ?`).run(id, userId);
-      return txt({ success: true, data: { id, message: `Loan "${existing.name}" deleted` } });
+      return txt({ success: true, data: { id, message: `Loan #${id} deleted` } });
     }
   );
 
@@ -2645,7 +1767,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ loan_id, as_of_date, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       const loan = await sqlite.prepare(
-        `SELECT id, name, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment, currency FROM loans WHERE id = ? AND user_id = ?`
+        `SELECT id, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment, currency FROM loans WHERE id = ? AND user_id = ?`
       ).get(loan_id, userId) as SqliteRow | undefined;
       if (!loan) return sqliteErr(`Loan #${loan_id} not found`);
       const summary = generateAmortizationSchedule(
@@ -2664,7 +1786,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         success: true,
         data: {
           loanId: loan_id,
-          loanName: loan.name,
+          // Stream D Phase 4: loanName omitted on stdio (cannot decrypt name_ct).
           loanCurrency: loan.currency ?? "CAD",
           reportingCurrency: reporting,
           asOfDate: cutoff,
@@ -2697,7 +1819,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ strategy, extra_payment, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       const loans = await sqlite.prepare(
-        `SELECT id, name, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment FROM loans WHERE user_id = ?`
+        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment FROM loans WHERE user_id = ?`
       ).all(userId) as SqliteRow[];
       if (!loans.length) return txt({ success: true, data: { message: "No loans found", strategies: {} } });
       const today = new Date().toISOString().split("T")[0];
@@ -2716,7 +1838,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         const minPayment = Number(l.payment_amount ?? summary.monthlyPayment);
         return {
           id: Number(l.id),
-          name: String(l.name),
+          // Stream D Phase 4: stdio cannot decrypt loan name — surface id only.
+          name: `Loan #${Number(l.id)}`,
           balance: Math.round(balance * 100) / 100,
           rate: Number(l.annual_rate),
           minPayment,
@@ -2826,22 +1949,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── list_subscriptions ────────────────────────────────────────────────────
   server.tool(
     "list_subscriptions",
-    "List all subscriptions with status, next billing, category, account, notes",
+    "List all subscriptions. Stream D Phase 4: stdio cannot decrypt subscription/category/account names — use HTTP MCP or the web UI for this query.",
     { status: z.enum(["active", "paused", "cancelled", "all"]).optional() },
-    async ({ status }) => {
-      let query = `SELECT s.id, s.name, s.amount, s.currency, s.frequency, s.next_date, s.status,
-                          s.cancel_reminder_date, s.notes, s.category_id, c.name AS category_name,
-                          s.account_id, a.name AS account_name
-                   FROM subscriptions s
-                   LEFT JOIN categories c ON c.id = s.category_id
-                   LEFT JOIN accounts a ON a.id = s.account_id
-                   WHERE s.user_id = ?`;
-      const params: unknown[] = [userId];
-      if (status && status !== "all") { query += ` AND s.status = ?`; params.push(status); }
-      query += ` ORDER BY s.status, s.name`;
-      const rows = await sqlite.prepare(query).all(...params);
-      return txt({ success: true, data: rows });
-    }
+    async () => streamDRefuseRead("list_subscriptions", "subscriptions"),
   );
 
   // ── add_subscription ──────────────────────────────────────────────────────
@@ -2898,24 +2008,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "Permanently delete a subscription by id",
     { id: z.number() },
     async ({ id }) => {
-      const existing = await sqlite.prepare(`SELECT id, name FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; name: string } | undefined;
+      const existing = await sqlite.prepare(`SELECT id FROM subscriptions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number } | undefined;
       if (!existing) return sqliteErr(`Subscription #${id} not found`);
       await sqlite.prepare(`DELETE FROM subscriptions WHERE id = ? AND user_id = ?`).run(id, userId);
-      return txt({ success: true, data: { id, message: `Subscription "${existing.name}" deleted` } });
+      return txt({ success: true, data: { id, message: `Subscription #${id} deleted` } });
     }
   );
 
   // ── list_rules ────────────────────────────────────────────────────────────
   server.tool(
     "list_rules",
-    "List all auto-categorization rules",
+    "List all auto-categorization rules. Stream D Phase 4: `category_name` is omitted on stdio (cannot decrypt categories.name_ct); `assign_category_id` is still returned.",
     {},
     async () => {
       const rows = await sqlite.prepare(
         `SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
-                r.assign_category_id, c.name AS category_name,
+                r.assign_category_id,
                 r.assign_tags, r.rename_to, r.is_active, r.priority, r.created_at
-         FROM transaction_rules r LEFT JOIN categories c ON c.id = r.assign_category_id
+         FROM transaction_rules r
          WHERE r.user_id = ? ORDER BY r.priority DESC, r.id`
       ).all(userId);
       return txt({ success: true, data: rows });
@@ -2925,7 +2035,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── update_rule ───────────────────────────────────────────────────────────
   server.tool(
     "update_rule",
-    "Update any field of an existing transaction rule",
+    "Update any field of an existing transaction rule. Stream D Phase 4 (stdio): pass `assign_category_id` (numeric) — `assign_category` (name) is refused.",
     {
       id: z.number(),
       name: z.string().optional(),
@@ -2933,23 +2043,28 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       match_type: z.enum(["contains", "exact", "regex", "greater_than", "less_than"]).optional(),
       match_value: z.string().optional(),
       match_payee: z.string().optional(),
-      assign_category: z.string().optional(),
+      assign_category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `assign_category_id` instead."),
+      assign_category_id: z.number().int().nullable().optional().describe("Category FK (categories.id). Pass null to clear."),
       assign_tags: z.string().optional(),
       rename_to: z.string().optional(),
       is_active: z.boolean().optional(),
       priority: z.number().optional(),
     },
-    async ({ id, name, match_field, match_type, match_value, match_payee, assign_category, assign_tags, rename_to, is_active, priority }) => {
+    async ({ id, name, match_field, match_type, match_value, match_payee, assign_category, assign_category_id, assign_tags, rename_to, is_active, priority }) => {
+      if (assign_category !== undefined) {
+        return sqliteErr("`assign_category` (name) is refused on stdio after Stream D Phase 4. Pass `assign_category_id` instead.");
+      }
       const existing = await sqlite.prepare(`SELECT id FROM transaction_rules WHERE id = ? AND user_id = ?`).get(id, userId);
       if (!existing) return sqliteErr(`Rule #${id} not found`);
 
       let assignCategoryIdUpdate: number | null | undefined;
-      if (assign_category !== undefined) {
-        if (assign_category === "") assignCategoryIdUpdate = null;
+      if (assign_category_id !== undefined) {
+        if (assign_category_id === null) assignCategoryIdUpdate = null;
         else {
-          const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-          const cat = fuzzyFind(assign_category, allCats);
-          if (!cat) return sqliteErr(`Category "${assign_category}" not found`);
+          const cat = await sqlite.prepare(
+            `SELECT id FROM categories WHERE user_id = ? AND id = ?`
+          ).get(userId, assign_category_id) as { id: number } | undefined;
+          if (!cat) return sqliteErr(`Category #${assign_category_id} not found or not owned by you.`);
           assignCategoryIdUpdate = Number(cat.id);
         }
       }
@@ -2999,7 +2114,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // straight SQL+memory against plaintext columns.
   server.tool(
     "test_rule",
-    "Dry-run a rule pattern against the user's existing transactions. Returns matched rows without writing.",
+    "Dry-run a rule pattern against the user's existing transactions. Stream D Phase 4: stdio cannot decrypt category/account names — use HTTP MCP or the web UI for this query.",
     {
       match_payee: z.string().optional(),
       match_field: z.enum(["payee", "amount", "tags"]).optional(),
@@ -3008,71 +2123,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       match_amount: z.number().optional(),
       sample_size: z.number().optional(),
     },
-    async ({ match_payee, match_field, match_type, match_value, match_amount, sample_size }) => {
-      const field = match_field ?? "payee";
-      const type = match_type ?? "contains";
-      const value =
-        match_value !== undefined ? match_value :
-        match_amount !== undefined ? String(match_amount) :
-        match_payee ?? "";
-      if (!value && field !== "amount") return sqliteErr("match_value or match_payee is required");
-      const limit = sample_size ?? 5000;
-      const raw = await sqlite.prepare(
-        `SELECT t.id, t.date, t.payee, t.tags, t.amount, t.category_id, c.name AS category_name,
-                t.account_id, a.name AS account_name
-         FROM transactions t
-         LEFT JOIN categories c ON c.id = t.category_id
-         LEFT JOIN accounts a ON a.id = t.account_id
-         WHERE t.user_id = ? ORDER BY t.date DESC, t.id DESC LIMIT ?`
-      ).all(userId, limit) as SqliteRow[];
-
-      let regex: RegExp | null = null;
-      if (type === "regex") {
-        try { regex = new RegExp(value, "i"); }
-        catch { return sqliteErr(`Invalid regex: ${value}`); }
-      }
-      const ruleAmount = field === "amount" ? parseFloat(value) : NaN;
-      const valueLower = value.toLowerCase();
-      const matched: Record<string, unknown>[] = [];
-      for (const r of raw) {
-        const payee = String(r.payee ?? "");
-        const tags = String(r.tags ?? "");
-        let hit = false;
-        if (field === "amount") {
-          if (isNaN(ruleAmount)) continue;
-          const amt = Number(r.amount);
-          if (type === "greater_than") hit = amt > ruleAmount;
-          else if (type === "less_than") hit = amt < ruleAmount;
-          else if (type === "exact") hit = Math.abs(amt - ruleAmount) < 0.01;
-        } else {
-          const fieldVal = (field === "payee" ? payee : tags).toLowerCase();
-          if (type === "contains") hit = fieldVal.includes(valueLower);
-          else if (type === "exact") hit = fieldVal === valueLower;
-          else if (type === "regex" && regex) hit = regex.test(field === "payee" ? payee : tags);
-        }
-        if (hit) {
-          matched.push({
-            id: Number(r.id),
-            date: r.date,
-            payee,
-            tags,
-            amount: Number(r.amount),
-            category: r.category_name,
-            account: r.account_name,
-          });
-        }
-      }
-      return txt({
-        success: true,
-        data: {
-          scanned: raw.length,
-          matchedCount: matched.length,
-          matches: matched.slice(0, 50),
-          rulePreview: { field, type, value },
-          note: matched.length > 50 ? `Showing 50 of ${matched.length} matches` : undefined,
-        },
-      });
-    }
+    async () => streamDRefuseRead("test_rule", "categories"),
   );
 
   // ── reorder_rules ─────────────────────────────────────────────────────────
@@ -3098,112 +2149,31 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   );
 
   // ── suggest_transaction_details ───────────────────────────────────────────
-  // stdio plaintext: straightforward SQL match against plaintext payee/tags.
   server.tool(
     "suggest_transaction_details",
-    "Suggest category + tags for a transaction based on rule matches and historical frequency",
+    "Suggest category + tags for a transaction. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP at /mcp or the web UI.",
     {
       payee: z.string(),
       amount: z.number().optional(),
       account_id: z.number().optional(),
       top_n: z.number().optional(),
     },
-    async ({ payee, amount, top_n }) => {
-      const topN = top_n ?? 3;
-      if (!payee.trim()) return sqliteErr("payee is required");
-
-      const rules = await sqlite.prepare(
-        `SELECT id, name, match_field, match_type, match_value, assign_category_id, assign_tags, rename_to, priority
-         FROM transaction_rules WHERE user_id = ? AND is_active = 1 ORDER BY priority DESC, id`
-      ).all(userId) as SqliteRow[];
-      const payeeLower = payee.toLowerCase();
-      const matchedRules: Record<string, unknown>[] = [];
-      for (const r of rules) {
-        const field = String(r.match_field ?? "payee");
-        const type = String(r.match_type ?? "contains");
-        const value = String(r.match_value ?? "");
-        let hit = false;
-        if (field === "payee") {
-          const valLower = value.toLowerCase();
-          if (type === "contains") hit = payeeLower.includes(valLower) || valLower.includes(payeeLower);
-          else if (type === "exact") hit = payeeLower === valLower;
-          else if (type === "regex") {
-            try { hit = new RegExp(value, "i").test(payee); } catch { /* ignore */ }
-          }
-        } else if (field === "amount" && amount !== undefined) {
-          const ruleAmt = parseFloat(value);
-          if (!isNaN(ruleAmt)) {
-            if (type === "greater_than") hit = amount > ruleAmt;
-            else if (type === "less_than") hit = amount < ruleAmt;
-            else if (type === "exact") hit = Math.abs(amount - ruleAmt) < 0.01;
-          }
-        }
-        if (hit) matchedRules.push(r);
-      }
-
-      const historyRows = await sqlite.prepare(
-        `SELECT category_id, tags, COUNT(*) AS cnt
-         FROM transactions
-         WHERE user_id = ? AND LOWER(payee) = LOWER(?) AND category_id IS NOT NULL
-         GROUP BY category_id, tags
-         ORDER BY cnt DESC LIMIT 20`
-      ).all(userId, payee) as SqliteRow[];
-
-      const catCounts = new Map<number, number>();
-      const tagCounts = new Map<string, number>();
-      let historicalMatches = 0;
-      for (const r of historyRows) {
-        const cnt = Number(r.cnt);
-        historicalMatches += cnt;
-        if (r.category_id) catCounts.set(Number(r.category_id), (catCounts.get(Number(r.category_id)) ?? 0) + cnt);
-        const t = String(r.tags ?? "");
-        for (const tag of t.split(",").map((x) => x.trim()).filter(Boolean)) {
-          tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + cnt);
-        }
-      }
-
-      const topCatIds = Array.from(catCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN);
-      let categoryRows: SqliteRow[] = [];
-      if (topCatIds.length) {
-        const ph = topCatIds.map(() => "?").join(",");
-        categoryRows = await sqlite.prepare(
-          `SELECT id, name, type, "group" FROM categories WHERE user_id = ? AND id IN (${ph})`
-        ).all(userId, ...topCatIds.map(([id]) => id)) as SqliteRow[];
-      }
-      const categorySuggestions = topCatIds.map(([id, count]) => {
-        const c = categoryRows.find((x) => Number(x.id) === id);
-        return { id, count, name: c?.name ?? null, type: c?.type ?? null, group: c?.group ?? null };
-      });
-      const topTags = Array.from(tagCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN).map(([tag, count]) => ({ tag, count }));
-
-      return txt({
-        success: true,
-        data: {
-          payee,
-          rules: matchedRules.map((r) => ({ id: Number(r.id), name: r.name, assignCategoryId: r.assign_category_id, assignTags: r.assign_tags, renameTo: r.rename_to })),
-          categories: categorySuggestions,
-          tags: topTags,
-          historicalMatches,
-        },
-      });
-    }
+    async () => streamDRefuseRead("suggest_transaction_details", "categories"),
   );
 
   // ── list_splits ───────────────────────────────────────────────────────────
   server.tool(
     "list_splits",
-    "List all splits for a transaction",
+    "List all splits for a transaction. Stream D Phase 4 (stdio): `category_name` / `account_name` are omitted (cannot decrypt name_ct); ids are still returned.",
     { transaction_id: z.number() },
     async ({ transaction_id }) => {
       const owner = await sqlite.prepare(`SELECT id FROM transactions WHERE id = ? AND user_id = ?`).get(transaction_id, userId);
       if (!owner) return sqliteErr(`Transaction #${transaction_id} not found`);
       const rows = await sqlite.prepare(
-        `SELECT s.id, s.transaction_id, s.category_id, c.name AS category_name,
-                s.account_id, a.name AS account_name,
+        `SELECT s.id, s.transaction_id, s.category_id,
+                s.account_id,
                 s.amount, s.note, s.description, s.tags
          FROM transaction_splits s
-         LEFT JOIN categories c ON c.id = s.category_id
-         LEFT JOIN accounts a ON a.id = s.account_id
          WHERE s.transaction_id = ? ORDER BY s.id`
       ).all(transaction_id);
       return txt({ success: true, data: rows });
@@ -3435,37 +2405,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     if (changes.tags !== undefined) resolved.tags = changes.tags;
 
     if (changes.category !== undefined) {
-      const allCats = await sqlite.prepare(`SELECT id, name FROM categories WHERE user_id = ?`).all(userId) as SqliteRow[];
-      const r = resolveCategoryStrict(changes.category, allCats);
-      if (!r.ok) {
-        if (r.reason === "low_confidence") {
-          unapplied.push({
-            field: "category",
-            requestedValue: changes.category,
-            reason: `Category "${changes.category}" did not match strongly — did you mean "${r.suggestion.name}" (id=${Number(r.suggestion.id)})?`,
-          });
-        } else {
-          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
-          unapplied.push({
-            field: "category",
-            requestedValue: changes.category,
-            reason: `Category "${changes.category}" not found. Available: ${list}`,
-          });
-        }
-      } else {
-        const resolvedId = Number(r.category.id);
-        if (changes.category_id !== undefined && changes.category_id !== null && changes.category_id !== resolvedId) {
-          return {
-            resolved,
-            unapplied,
-            error: `category "${changes.category}" resolves to id=${resolvedId}, but category_id=${changes.category_id} disagrees. Pass only one, or make them match.`,
-          };
-        }
-        resolved.category_id = resolvedId;
-        // Issue #93: thread the resolved display name through so
-        // `applyChangesToRow` can re-hydrate `sampleAfter.category`.
-        resolved.category_name = String(r.category.name ?? "");
-      }
+      // Stream D Phase 4: stdio cannot resolve category names without a DEK.
+      // Refuse the `category` (name) path; callers must pass `category_id` instead.
+      unapplied.push({
+        field: "category",
+        requestedValue: changes.category,
+        reason: "`category` (name) is refused on stdio after Stream D Phase 4. Pass `category_id` instead.",
+      });
     }
 
     return { resolved, unapplied };
@@ -3553,12 +2499,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     }
     const sampleIds = ids.slice(0, 10);
     const placeholders = sampleIds.map(() => "?").join(",");
+    // Stream D Phase 4: stdio cannot decrypt account/category names — surface ids only.
     const before = await sqlite.prepare(
-      `SELECT t.id, t.date, t.account_id, a.name AS account, t.category_id, c.name AS category,
+      `SELECT t.id, t.date, t.account_id, t.category_id,
               t.currency, t.amount, t.payee, t.note, t.tags, t.is_business
        FROM transactions t
-       LEFT JOIN accounts a ON t.account_id = a.id
-       LEFT JOIN categories c ON t.category_id = c.id
        WHERE t.id IN (${placeholders}) AND t.user_id = ?
        ORDER BY t.id`
     ).all(...sampleIds, userId) as Record<string, unknown>[];
@@ -3628,11 +2573,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         if (ids.length === 0) return txt({ success: true, data: { affectedCount: 0, sample: [], confirmationToken: "" } });
         const sampleIds = ids.slice(0, 10);
         const placeholders = sampleIds.map(() => "?").join(",");
+        // Stream D Phase 4: stdio cannot decrypt account/category names — surface ids only.
         const sample = await sqlite.prepare(
-          `SELECT t.id, t.date, a.name AS account, c.name AS category, t.currency, t.amount, t.payee, t.note, t.tags
+          `SELECT t.id, t.date, t.account_id, t.category_id, t.currency, t.amount, t.payee, t.note, t.tags
            FROM transactions t
-           LEFT JOIN accounts a ON t.account_id = a.id
-           LEFT JOIN categories c ON t.category_id = c.id
            WHERE t.id IN (${placeholders}) AND t.user_id = ?
            ORDER BY t.id`
         ).all(...sampleIds, userId);
@@ -3668,11 +2612,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     { filter: bulkFilterSchema, category_id: z.number() },
     async ({ filter, category_id }) => {
       try {
-        const cat = await sqlite.prepare(`SELECT id, name FROM categories WHERE id = ? AND user_id = ?`).get(category_id, userId) as { id: number; name: string } | undefined;
+        const cat = await sqlite.prepare(`SELECT id FROM categories WHERE id = ? AND user_id = ?`).get(category_id, userId) as { id: number } | undefined;
         if (!cat) return sqliteErr(`Category #${category_id} not found`);
         const changes: BulkChanges = { category_id };
         const { affectedCount, sampleBefore, sampleAfter, confirmationToken } = await previewBulk(filter, changes, "bulk_categorize");
-        return txt({ success: true, data: { categoryId: category_id, categoryName: cat.name, affectedCount, sampleBefore, sampleAfter, confirmationToken } });
+        // Stream D Phase 4: stdio cannot decrypt category name — surface id only.
+        return txt({ success: true, data: { categoryId: category_id, affectedCount, sampleBefore, sampleAfter, confirmationToken } });
       } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
     }
   );
@@ -3926,213 +2871,28 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── preview_import ─────────────────────────────────────────────────────────
   server.tool(
     "preview_import",
-    "Preview an uploaded CSV/OFX/QFX file (or a local file path if ALLOW_LOCAL_FILE_IMPORT=1). Returns parsed rows, probable cross-source duplicates (FX-spread + ±7 day fuzzy match — heuristic, not exact), and a confirmationToken.",
+    "Preview an uploaded CSV/OFX/QFX file. Stream D Phase 4: stdio cannot resolve account names from the import file (cannot decrypt accounts.name_ct) — use HTTP MCP or the web UI for imports.",
     {
       upload_id: z.string().optional(),
-      file_path: z.string().optional().describe("Local absolute path (stdio only, ALLOW_LOCAL_FILE_IMPORT=1)"),
+      file_path: z.string().optional(),
       template_id: z.number().optional(),
       column_mapping: z.record(z.string(), z.string()).optional(),
     },
     async ({ upload_id, file_path, template_id, column_mapping }) => {
-      try {
-        if (!upload_id && !file_path) return sqliteErr("Provide upload_id or file_path");
-        if (file_path && !allowLocalFile) return sqliteErr("Local-file import disabled — set ALLOW_LOCAL_FILE_IMPORT=1");
-
-        let mapping: Record<string, string> | undefined = column_mapping;
-        if (template_id !== undefined && !mapping) {
-          const tpl = await sqlite.prepare(`SELECT column_mapping FROM import_templates WHERE id = ? AND user_id = ?`).get(template_id, userId) as { column_mapping: string } | undefined;
-          if (!tpl) return sqliteErr(`Import template #${template_id} not found`);
-          try { mapping = JSON.parse(tpl.column_mapping) as Record<string, string>; }
-          catch { return sqliteErr("Import template has invalid column_mapping JSON"); }
-        }
-
-        let rows: RawTransaction[] = [];
-        let errors: Array<{ row: number; message: string }> = [];
-        let format = "csv";
-
-        if (upload_id) {
-          const loaded = await loadRowsFromUpload(upload_id, mapping);
-          rows = loaded.rows; errors = loaded.errors;
-          format = String(loaded.upload.format);
-        } else if (file_path) {
-          const loaded = await loadRowsFromPath(file_path);
-          rows = loaded.rows; errors = loaded.errors;
-          format = loaded.format;
-        }
-
-        const accounts = await sqlite.prepare(`SELECT id, name, alias FROM accounts WHERE user_id = ?`).all(userId) as Array<{ id: number; name: string; alias: string | null }>;
-        const accountByName = new Map<string, number>();
-        for (const a of accounts) {
-          const nameKey = a.name.toLowerCase().trim();
-          accountByName.set(nameKey, a.id);
-          if (a.alias) {
-            const aliasKey = a.alias.toLowerCase().trim();
-            // name wins on collision — don't overwrite.
-            if (!accountByName.has(aliasKey)) accountByName.set(aliasKey, a.id);
-          }
-        }
-        const existingHashRows = await sqlite.prepare(`SELECT import_hash FROM transactions WHERE user_id = ? AND import_hash IS NOT NULL`).all(userId) as Array<{ import_hash: string }>;
-        const existingHashes = new Set<string>(existingHashRows.map((r) => r.import_hash));
-
-        let dedupHits = 0;
-        const unresolvedAccounts = new Set<string>();
-        // Issue #65: collect rows that survived exact-dedup so the cross-source
-        // detector below has a clean pool to match against.
-        const fuzzyInputs: Array<{
-          rowIndex: number;
-          date: string;
-          accountId: number;
-          amount: number;
-          payeePlain: string;
-          importHash: string;
-        }> = [];
-        for (let i = 0; i < rows.length; i++) {
-          const r = rows[i];
-          const aId = r.account ? accountByName.get(r.account.toLowerCase().trim()) : undefined;
-          if (!aId && r.account) unresolvedAccounts.add(r.account);
-          if (aId) {
-            const h = generateImportHash(r.date, aId, r.amount, r.payee);
-            if (existingHashes.has(h)) {
-              dedupHits++;
-            } else {
-              fuzzyInputs.push({
-                rowIndex: i,
-                date: r.date,
-                accountId: aId,
-                amount: r.amount,
-                payeePlain: r.payee ?? "",
-                importHash: h,
-              });
-            }
-          }
-        }
-
-        // Issue #65: cross-source duplicate detection (heuristic — warning surface
-        // only). Stdio writes plaintext, so candidate-row payee is plaintext too —
-        // no DEK gymnastics needed here.
-        let probableDuplicates: DuplicateMatch[] = [];
-        if (fuzzyInputs.length > 0) {
-          try {
-            const accIds = Array.from(new Set(fuzzyInputs.map((f) => f.accountId)));
-            const dates = fuzzyInputs.map((f) => f.date).sort();
-            const dateMin = shiftIsoDate(dates[0], -7);
-            const dateMax = shiftIsoDate(dates[dates.length - 1], 7);
-            if (dateMin && dateMax) {
-              const placeholders = accIds.map(() => "?").join(",");
-              const poolRows = await sqlite.prepare(
-                `SELECT t.id, t.account_id, t.date, t.amount, t.payee, t.import_hash,
-                        t.fit_id, t.link_id, c.type AS category_type, t.source,
-                        t.portfolio_holding_id
-                   FROM transactions t
-                   LEFT JOIN categories c ON c.id = t.category_id
-                  WHERE t.user_id = ?
-                    AND t.account_id IN (${placeholders})
-                    AND t.date BETWEEN ? AND ?`,
-              ).all(userId, ...accIds, dateMin, dateMax) as Array<Record<string, unknown>>;
-
-              const byAccount = new Map<number, DuplicateCandidateRow[]>();
-              const linkIds: string[] = [];
-              for (const p of poolRows) {
-                const accId = Number(p.account_id);
-                const row: DuplicateCandidateRow = {
-                  id: Number(p.id),
-                  accountId: accId,
-                  date: String(p.date),
-                  amount: Number(p.amount),
-                  payeePlain: p.payee == null ? null : String(p.payee),
-                  importHash: p.import_hash == null ? null : String(p.import_hash),
-                  fitId: p.fit_id == null ? null : String(p.fit_id),
-                  linkId: p.link_id == null ? null : String(p.link_id),
-                  categoryType: p.category_type == null ? null : String(p.category_type),
-                  source: p.source == null ? null : String(p.source),
-                  portfolioHoldingId: p.portfolio_holding_id == null ? null : Number(p.portfolio_holding_id),
-                };
-                const arr = byAccount.get(accId) ?? [];
-                arr.push(row);
-                byAccount.set(accId, arr);
-                if (row.categoryType === "R" && row.linkId) linkIds.push(row.linkId);
-              }
-
-              const siblingAccountByLinkId = new Map<string, number>();
-              if (linkIds.length > 0) {
-                const sibPlaceholders = linkIds.map(() => "?").join(",");
-                const sibRows = await sqlite.prepare(
-                  `SELECT link_id, account_id
-                     FROM transactions
-                    WHERE user_id = ?
-                      AND link_id IN (${sibPlaceholders})`,
-                ).all(userId, ...linkIds) as Array<Record<string, unknown>>;
-                const accountSet = new Set<number>(accIds);
-                const byLink = new Map<string, number[]>();
-                for (const sr of sibRows) {
-                  const lid = sr.link_id == null ? null : String(sr.link_id);
-                  const a = sr.account_id == null ? null : Number(sr.account_id);
-                  if (!lid || a == null) continue;
-                  const arr = byLink.get(lid) ?? [];
-                  arr.push(a);
-                  byLink.set(lid, arr);
-                }
-                for (const [linkId, accs] of byLink) {
-                  const sib = accs.find((a) => !accountSet.has(a));
-                  if (sib != null) siblingAccountByLinkId.set(linkId, sib);
-                }
-              }
-
-              const pool: DuplicateCandidatePool = { byAccount, siblingAccountByLinkId };
-              probableDuplicates = detectProbableDuplicates(fuzzyInputs, pool);
-            }
-          } catch {
-            probableDuplicates = [];
-          }
-        }
-
-        let categorizedRows = 0;
-        for (const r of rows) if (r.category) categorizedRows++;
-        // A deeper rules-based pass costs an extra DB read; stdio is hot-path,
-        // keep this lightweight.
-
-        if (upload_id) {
-          await sqlite.prepare(
-            `UPDATE mcp_uploads SET status = 'previewed', row_count = ? WHERE id = ? AND user_id = ?`
-          ).run(rows.length, upload_id, userId);
-        }
-
-        const tokenPayload = {
-          uploadId: upload_id ?? null,
-          filePath: file_path ?? null,
-          templateId: template_id ?? null,
-          columnMapping: mapping ?? null,
-        };
-        const token = signConfirmationToken(userId, "execute_import", tokenPayload);
-
-        return txt({
-          success: true,
-          data: {
-            uploadId: upload_id ?? null,
-            filePath: file_path ?? null,
-            format,
-            parsedRows: rows.length,
-            sampleRows: rows.slice(0, 20),
-            parseErrors: errors.slice(0, 20),
-            dedupHits,
-            categoryCoveragePct: rows.length === 0 ? 0 : Math.round((categorizedRows / rows.length) * 100),
-            unresolvedAccounts: Array.from(unresolvedAccounts),
-            // Issue #65: warning surface — heuristic flags rows that may match
-            // an existing transaction (FX-spread, settlement-vs-posting drift).
-            // Thresholds: ±7 days, amount within ±7% OR ±$50 (whichever
-            // larger), score ≥ 0.6.
-            probableDuplicates,
-            confirmationToken: token,
-          },
-        });
-      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
+      void upload_id; void file_path; void template_id; void column_mapping;
+      return streamDRefuseRead("preview_import", "accounts");
     }
   );
+
+  // Stream D Phase 4 — the original preview_import body has been deleted.
+  // It fuzzy-matched account names from CSV against the (dropped) plaintext
+  // accounts.name column. The HTTP MCP at /mcp continues to support imports
+  // with full DEK-backed name resolution.
 
   // ── execute_import ─────────────────────────────────────────────────────────
   server.tool(
     "execute_import",
-    "Commit an uploaded file (or local file if ALLOW_LOCAL_FILE_IMPORT=1). Requires the token from preview_import.",
+    "Commit an uploaded file. Stream D Phase 4: stdio cannot resolve account/category names without a DEK — refused entirely. Use HTTP MCP at /mcp or the web UI.",
     {
       upload_id: z.string().optional(),
       file_path: z.string().optional(),
@@ -4140,39 +2900,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       template_id: z.number().optional(),
       column_mapping: z.record(z.string(), z.string()).optional(),
     },
-    async ({ upload_id, file_path, confirmation_token, template_id, column_mapping }) => {
-      if (!upload_id && !file_path) return sqliteErr("Provide upload_id or file_path");
-      if (file_path && !allowLocalFile) return sqliteErr("Local-file import disabled — set ALLOW_LOCAL_FILE_IMPORT=1");
-
-      const check = verifyConfirmationToken(confirmation_token, userId, "execute_import", {
-        uploadId: upload_id ?? null,
-        filePath: file_path ?? null,
-        templateId: template_id ?? null,
-        columnMapping: column_mapping ?? null,
-      });
-      if (!check.valid) return sqliteErr(`Confirmation token invalid: ${check.reason}. Re-run preview_import.`);
-
-      try {
-        let mapping: Record<string, string> | undefined = column_mapping;
-        if (template_id !== undefined && !mapping) {
-          const tpl = await sqlite.prepare(`SELECT column_mapping FROM import_templates WHERE id = ? AND user_id = ?`).get(template_id, userId) as { column_mapping: string } | undefined;
-          if (tpl) { try { mapping = JSON.parse(tpl.column_mapping) as Record<string, string>; } catch { /* ignore */ } }
-        }
-
-        let rows: RawTransaction[] = [];
-        if (upload_id) rows = (await loadRowsFromUpload(upload_id, mapping)).rows;
-        else if (file_path) rows = (await loadRowsFromPath(file_path)).rows;
-
-        // stdio has no DEK — pipelineExecute will store plaintext.
-        const result = await pipelineExecute(rows, [], userId);
-
-        if (upload_id) {
-          await sqlite.prepare(`UPDATE mcp_uploads SET status = 'executed' WHERE id = ? AND user_id = ?`).run(upload_id, userId);
-        }
-        invalidateUserTxCache(userId);
-        return txt({ success: true, data: result });
-      } catch (e) { return sqliteErr(String(e instanceof Error ? e.message : e)); }
-    }
+    async () => streamDRefuseRead("execute_import", "accounts"),
   );
 
   // ── cancel_import ──────────────────────────────────────────────────────────

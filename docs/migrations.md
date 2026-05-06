@@ -2,13 +2,42 @@
 
 Per-environment psql commands, in chronological order, for every schema change since the open-source pivot. Pulled out of CLAUDE.md on 2026-04-28.
 
-**Important:** schema migrations are NOT part of `npm run build`. Run them per environment BEFORE pushing the matching code change. All `ALTER TABLE` statements are idempotent (`ADD COLUMN IF NOT EXISTS` / `DROP COLUMN IF EXISTS`). Safe to re-run.
+## Automated migrations (since 2026-05-04)
 
-`npm run db:push` runs the PostgreSQL config (the SQLite config is a pre-open-source-pivot artifact). It's a **local-dev convenience** for iterating against your own dev DB; **`deploy.sh` does NOT run it on the deploy hosts** — see issue #5. Apply each schema change here per env via `psql -f scripts/migrate-*.sql` BEFORE pushing the matching code.
+`deploy.sh` now runs every file in **`scripts/migrations/*.sql`** exactly once per env. Bookkeeping lives in a `schema_migrations(version PK, applied_at)` table on each DB. Each migration is applied inside a single transaction together with the bookkeeping INSERT, so a partial failure rolls everything back and the next deploy retries cleanly. Run order is `git pull → npm install → backup → migrations → build → restart`, so a failed migration leaves the OLD service still running on the OLD schema with a known-good DB snapshot taken seconds earlier.
+
+**For new schema changes:** drop a single SQL file at `scripts/migrations/YYYYMMDD_<slug>.sql`. The next `deploy.sh` run picks it up. Do NOT include `BEGIN;` / `COMMIT;` inside the file — the runner wraps it. Filename charset is `[A-Za-z0-9_-]` (the runner rejects anything else). Migration content should still be idempotent (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `ON CONFLICT DO NOTHING`) so a one-off manual re-run during incident recovery stays safe.
+
+**Historical migrations** (everything below this section) live as `scripts/migrate-*.sql` (loose, not in the tracked dir) and are already applied to prod + dev — they remain in the repo as the canonical record for spinning up a fresh env. New self-hosters apply them in the order documented here, then `deploy.sh` takes over from `scripts/migrations/` onward.
+
+**Order-of-deploy edge cases:** for **destructive** migrations (e.g. `DROP COLUMN`) the rule is still "code FIRST, then SQL" — DON'T put those in `scripts/migrations/`. Apply them manually per env after the matching code release is live. The runner is for additive migrations that are safe to apply BEFORE the matching code lands.
+
+`npm run db:push` runs the PostgreSQL config (the SQLite config is a pre-open-source-pivot artifact). It's a **local-dev convenience** for iterating against your own dev DB; **`deploy.sh` does NOT run it on the deploy hosts** — see issue #5. New schema changes go through `scripts/migrations/` instead.
 
 > **Staging deprecated 2026-05-03.** Active envs are now **prod + dev only**. Historical entries below preserve the staging command lines for the audit trail; new entries should not include staging. The `pf_staging` database and `finlynq_staging` user remain on the host as a cold artifact (no app deploys there).
 
 See [database.md](architecture/database.md) for the lockfile gotcha that often surfaces during a deploy.
+
+## Goals: multi-account linking via `goal_accounts` (2026-05-04, issue #130) — **first tracked migration**
+
+Adds the `goal_accounts` join table so a goal can span N accounts. Backfills existing single-account links from `goals.account_id` (legacy column kept for one release cycle as a fallback). Idempotent (`CREATE TABLE IF NOT EXISTS` + `ON CONFLICT DO NOTHING` on the backfill).
+
+**Lives at [scripts/migrations/20260504_goals-multi-account.sql](../scripts/migrations/20260504_goals-multi-account.sql)** — the first migration applied via the new automated runner (see "Automated migrations" above). It runs automatically on the next `deploy.sh` invocation per env; no manual psql step required.
+
+If you need to apply it out-of-band (e.g. dev was deployed with the broken release before the runner landed), run:
+
+```sh
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev -f scripts/migrations/20260504_goals-multi-account.sql
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     -f scripts/migrations/20260504_goals-multi-account.sql
+```
+
+…then mark it as already-applied so the runner skips it on the next deploy:
+
+```sh
+psql "$DATABASE_URL" -c "INSERT INTO schema_migrations (version) VALUES ('20260504_goals-multi-account') ON CONFLICT DO NOTHING;"
+```
+
+`goals.account_id` is NOT dropped here — it stays as a single-account fallback for one release cycle. A separate follow-up issue will drop it once every read path round-trips through the join exclusively.
 
 ## Stream D Phase 4 — drop plaintext display-name columns (2026-05-03)
 
@@ -341,9 +370,9 @@ PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     -f scripts/m
 
 Verify with `\d+ transactions` — `transactions_user_updated_at_idx` and `transactions_user_created_at_idx` should both appear in the index list.
 
-## tx-29100-holding-reassignment (data fix, 2026-05-01, issue [#81](https://github.com/finlynq/finlynq/issues/81))
+## tx-29100-holding-reassignment (data fix, applied prod + dev 2026-05-04, issue [#81](https://github.com/finlynq/finlynq/issues/81))
 
-One-off **data fix** (no code change, no schema change). Transaction 29100 (a +$10,000 EFT RRSP contribution) was booked by the bank-import pipeline against holding **497** ('Cash' on account 600 Mimi TFSA). It belongs on holding **425** ('TFSA-CAD' on account 614 IBKR TFSA). The fix mutates a single row's `portfolio_holding_id` and bumps `updated_at`; `source` is **deliberately preserved** to honor the CLAUDE.md audit-trio invariant (`transactions.source` is INSERT-only).
+One-off **data fix** (no code change, no schema change). Transaction 29100 (a +$10,000 contribution) was booked by the bank-import pipeline against the wrong cash-sleeve holding **497** in a TFSA account. It belongs on the TFSA CAD cash holding **425** in a different TFSA account (account_id=614). The fix mutates a single row's `portfolio_holding_id` and bumps `updated_at`; `source` is **deliberately preserved** to honor the CLAUDE.md audit-trio invariant (`transactions.source` is INSERT-only).
 
 **Gate:** holding 425 must already have a `holding_accounts` row matching `(holding_id=425, account_id=<tx 29100's account_id>, user_id=<owner>)`. Per CLAUDE.md, every portfolio aggregator now JOINs through `holding_accounts` on `(holding, account)`; running the UPDATE without that pairing in place silently drops the leg from the aggregator. The pre-state SELECT below catches that and aborts before the UPDATE.
 
@@ -408,26 +437,27 @@ WHERE portfolio_holding_id = 497 AND id = 29100;  -- expect 0.
 SQL
 ```
 
-Then load `/portfolio` (or call MCP `get_portfolio_analysis`) for the IBKR TFSA account and confirm the contribution is now attributed to TFSA-CAD (holding 425) instead of Mimi TFSA Cash (holding 497).
+Then load `/portfolio` (or call MCP `get_portfolio_analysis`) for the destination TFSA account and confirm the contribution is now attributed to holding 425 (the TFSA CAD cash sleeve) instead of holding 497.
 
 ### Per-env rollout
 
-Run the same three blocks (pre-state → fix → post-state) per env, replacing the connection in each:
+Run the same three blocks (pre-state → fix → post-state) per env, replacing the connection in each. Staging is deprecated (2026-05-03) so only dev + prod apply.
 
 ```sh
 # dev
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev     -d pf_dev     ...
-
-# staging
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_staging -d pf_staging ...
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev ...
 
 # prod
-PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod    -d pf         ...
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     ...
 ```
 
-After the prod fix, restart the prod systemd service (`systemctl restart finlynq-prod` or equivalent) so the MCP per-user tx cache for the affected user is dropped and Claude sees the new attribution.
+After each env's fix, restart the matching systemd service (`systemctl restart pf-dev.service` for dev, `systemctl restart pf.service` for prod) so the MCP per-user tx cache for the affected user is dropped and Claude sees the new attribution.
 
-**Out of scope:** holding 497's separate $72,791 phantom `dividendsReceived` figure — deferred until issue [#84](https://github.com/finlynq/finlynq/issues/84) (`dividendsReceived` aggregator switch from `qty=0` heuristic to category_id match) lands. Auditing other bank-import rows that may have mis-routed onto holding 497 is a separate sweep.
+**Applied dev: 2026-05-04** — pre-state confirmed tx 29100 on holding 497 / account 614, both holdings owned by the same user, `holding_accounts` row for `(425, 614, owner)` present. UPDATE returned 1 row; `source='manual'` preserved, `updated_at` bumped to `2026-05-04 18:50:17.120195+00`. Post-state confirmed `portfolio_holding_id=425`, count of tx 29100 still on holding 497 = 0. `pf-dev.service` restarted.
+
+**Applied prod: 2026-05-04** — pre-state matched dev (`source='manual'`, holding 497, account 614). UPDATE returned 1 row; `source='manual'` preserved, `updated_at` bumped to `2026-05-04 18:50:43.904344+00`. Post-state confirmed `portfolio_holding_id=425`, count of tx 29100 still on holding 497 = 0. `pf.service` restarted.
+
+**Out of scope:** holding 497's separate $72,791 phantom `dividendsReceived` figure was tracked under issue [#84](https://github.com/finlynq/finlynq/issues/84) (`dividendsReceived` aggregator switch from `qty=0` heuristic to `category_id` match), now shipped. Auditing other bank-import rows that may have mis-routed onto holding 497 is a separate sweep.
 
 ## holding-accounts-backfill-orphans (2026-05-01, issue [#95](https://github.com/finlynq/finlynq/issues/95))
 

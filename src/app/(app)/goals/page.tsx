@@ -14,15 +14,31 @@ import { formatCurrency } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
-import { Plus, Trash2, Target, CheckCircle2, TrendingUp, Calendar } from "lucide-react";
+import { Plus, Trash2, Target, CheckCircle2, TrendingUp, Calendar, Pencil, X } from "lucide-react";
 
 type Goal = {
   id: number; name: string; type: string; targetAmount: number; currentAmount: number;
   currency: string;
-  deadline: string | null; accountName: string | null; priority: number; status: string;
+  deadline: string | null;
+  // Issue #130 — multi-account linking. `accountIds` is the canonical list;
+  // `accounts` carries decrypted display names; `accountName` is the legacy
+  // first-only string preserved for any consumer that hasn't migrated yet.
+  accountIds: number[]; accounts: string[]; accountName: string | null;
+  priority: number; status: string;
   progress: number; remaining: number; monthlyNeeded: number; note: string;
 };
 type Account = { id: number; name: string };
+
+type FormState = {
+  name: string;
+  type: string;
+  targetAmount: string;
+  currency: string;
+  deadline: string;
+  accountIds: number[]; // issue #130 — multi-account
+  priority: string;
+  note: string;
+};
 
 const goalTypeConfig: Record<string, { label: string; badgeClass: string; borderClass: string }> = {
   savings: { label: "Savings", badgeClass: "bg-emerald-100 text-emerald-700 border-emerald-200", borderClass: "border-l-emerald-500" },
@@ -43,16 +59,63 @@ function progressTextClass(progress: number): string {
   return "text-emerald-600";
 }
 
-export default function GoalsPage() {
-  const { displayCurrency } = useDisplayCurrency();
-  const [goals, setGoals] = useState<Goal[]>([]);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [form, setForm] = useState({ name: "", type: "savings", targetAmount: "", currency: displayCurrency, deadline: "", accountId: "", priority: "1", note: "" });
-  const [errors, setErrors] = useState<{ name?: string; targetAmount?: string }>({});
+function emptyForm(displayCurrency: string): FormState {
+  return {
+    name: "",
+    type: "savings",
+    targetAmount: "",
+    currency: displayCurrency,
+    deadline: "",
+    accountIds: [],
+    priority: "1",
+    note: "",
+  };
+}
+
+function goalToForm(g: Goal, displayCurrency: string): FormState {
+  return {
+    name: g.name ?? "",
+    type: g.type,
+    targetAmount: String(g.targetAmount),
+    currency: g.currency || displayCurrency,
+    deadline: g.deadline ?? "",
+    accountIds: g.accountIds ?? [],
+    priority: String(g.priority ?? 1),
+    note: g.note ?? "",
+  };
+}
+
+/**
+ * <GoalEditForm> — shared Add/Edit goal form (issue #130). Mode is set by
+ * `mode`: "add" routes to POST /api/goals; "edit" carries the goal id and
+ * routes to PUT /api/goals. The form fully owns its state; the parent
+ * triggers `onSave()` once persistence completes so it can refresh the
+ * list.
+ */
+function GoalEditForm({
+  mode,
+  goalId,
+  initial,
+  accounts,
+  onSave,
+  onCancel,
+  displayCurrency,
+}: {
+  mode: "add" | "edit";
+  goalId?: number;
+  initial: FormState;
+  accounts: Account[];
+  onSave: () => void;
+  onCancel: () => void;
+  displayCurrency: string;
+}) {
+  const [form, setForm] = useState<FormState>(initial);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const sortAccount = useDropdownOrder("account");
 
   function validateForm() {
-    const e: { name?: string; targetAmount?: string } = {};
+    const e: Record<string, string> = {};
     if (!form.name.trim()) e.name = "Name is required";
     if (!form.targetAmount || parseFloat(form.targetAmount) <= 0) e.targetAmount = "Target amount must be greater than 0";
     setErrors(e);
@@ -61,20 +124,180 @@ export default function GoalsPage() {
 
   const isFormValid = form.name.trim() !== "" && form.targetAmount !== "" && parseFloat(form.targetAmount) > 0;
 
-  const load = useCallback(() => { fetch("/api/goals").then((r) => r.json()).then(setGoals); }, []);
-  useEffect(() => { load(); fetch("/api/accounts").then((r) => r.json()).then(setAccounts); }, [load]);
+  // Account chip selector — pick from the unselected pool, remove via the X
+  // on each chip. Single-select Combobox is reused as the picker; the
+  // selected ids drive the chip row.
+  const selectedSet = new Set(form.accountIds);
+  const availableAccounts = accounts.filter((a) => !selectedSet.has(a.id));
 
-  const sortAccount = useDropdownOrder("account");
+  function addAccount(idStr: string) {
+    if (!idStr) return;
+    const id = parseInt(idStr);
+    if (Number.isNaN(id)) return;
+    if (selectedSet.has(id)) return;
+    setForm({ ...form, accountIds: [...form.accountIds, id] });
+  }
+
+  function removeAccount(id: number) {
+    setForm({ ...form, accountIds: form.accountIds.filter((x) => x !== id) });
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!validateForm()) return;
-    await fetch("/api/goals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: form.name, type: form.type, targetAmount: parseFloat(form.targetAmount), currency: form.currency || displayCurrency, deadline: form.deadline || null, accountId: form.accountId ? parseInt(form.accountId) : null, priority: parseInt(form.priority), note: form.note }) });
-    setDialogOpen(false);
-    setForm({ name: "", type: "savings", targetAmount: "", currency: displayCurrency, deadline: "", accountId: "", priority: "1", note: "" });
-    setErrors({});
-    load();
+    setSubmitting(true);
+    try {
+      const payload: Record<string, unknown> = {
+        name: form.name,
+        type: form.type,
+        targetAmount: parseFloat(form.targetAmount),
+        currency: form.currency || displayCurrency,
+        deadline: form.deadline || null,
+        accountIds: form.accountIds,
+        priority: parseInt(form.priority),
+        note: form.note,
+      };
+      if (mode === "edit" && goalId != null) {
+        payload.id = goalId;
+        await fetch("/api/goals", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await fetch("/api/goals", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+      onSave();
+    } finally {
+      setSubmitting(false);
+    }
   }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3">
+      <div>
+        <Label>Goal Name</Label>
+        <Input value={form.name} onChange={(e) => { setForm({ ...form, name: e.target.value }); setErrors({ ...errors, name: "" }); }} placeholder="e.g. Emergency Fund" />
+        {errors.name && <p className="text-xs text-destructive mt-1">{errors.name}</p>}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Type</Label>
+          <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v ?? "savings" })}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="savings">Savings</SelectItem>
+              <SelectItem value="debt_payoff">Debt Payoff</SelectItem>
+              <SelectItem value="investment">Investment</SelectItem>
+              <SelectItem value="emergency_fund">Emergency Fund</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label>Currency</Label>
+          <Select value={form.currency} onValueChange={(v) => setForm({ ...form, currency: v ?? displayCurrency })}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {SUPPORTED_FIAT_CURRENCIES.map((c) => (
+                <SelectItem key={c} value={c}>{c}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div>
+        <Label>Target Amount</Label>
+        <Input type="number" step="0.01" value={form.targetAmount} onChange={(e) => { setForm({ ...form, targetAmount: e.target.value }); setErrors({ ...errors, targetAmount: "" }); }} />
+        {errors.targetAmount && <p className="text-xs text-destructive mt-1">{errors.targetAmount}</p>}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Deadline</Label>
+          <Input type="date" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} />
+        </div>
+        <div>
+          <Label>Priority</Label>
+          <Select value={form.priority} onValueChange={(v) => setForm({ ...form, priority: v ?? "1" })}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="1">High</SelectItem>
+              <SelectItem value="2">Medium</SelectItem>
+              <SelectItem value="3">Low</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div>
+        <Label>Linked Accounts</Label>
+        {form.accountIds.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {form.accountIds.map((id) => {
+              const a = accounts.find((x) => x.id === id);
+              return (
+                <span key={id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-muted text-xs font-medium border border-border/60">
+                  {a?.name ?? `#${id}`}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${a?.name ?? `#${id}`}`}
+                    onClick={() => removeAccount(id)}
+                    className="hover:text-destructive"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
+        <Combobox
+          value=""
+          onValueChange={(v) => addAccount(v ?? "")}
+          items={sortAccount(
+            availableAccounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+            (a) => Number(a.value),
+            (a, z) => a.label.localeCompare(z.label),
+          )}
+          placeholder={form.accountIds.length === 0 ? "Add an account…" : "Add another…"}
+          searchPlaceholder="Search accounts…"
+          emptyMessage="No matches"
+          className="w-full"
+        />
+        <p className="text-xs text-muted-foreground mt-1">
+          Goal progress sums transactions across every linked account. Leave empty for manual tracking.
+        </p>
+      </div>
+      <div>
+        <Label>Note</Label>
+        <Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+      </div>
+      <div className="flex gap-2">
+        {mode === "edit" && (
+          <Button type="button" variant="outline" className="flex-1" onClick={onCancel} disabled={submitting}>
+            Cancel
+          </Button>
+        )}
+        <Button type="submit" className="flex-1" disabled={!isFormValid || submitting}>
+          {submitting ? "Saving…" : mode === "edit" ? "Save Changes" : "Create Goal"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+export default function GoalsPage() {
+  const { displayCurrency } = useDisplayCurrency();
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
+  const [editGoal, setEditGoal] = useState<Goal | null>(null);
+  const [seedForm, setSeedForm] = useState<FormState>(emptyForm(displayCurrency));
+
+  const load = useCallback(() => { fetch("/api/goals").then((r) => r.json()).then(setGoals); }, []);
+  useEffect(() => { load(); fetch("/api/accounts").then((r) => r.json()).then(setAccounts); }, [load]);
 
   async function toggleStatus(goal: Goal) {
     await fetch("/api/goals", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: goal.id, status: goal.status === "active" ? "completed" : "active" }) });
@@ -98,79 +321,39 @@ export default function GoalsPage() {
           <h1 className="text-2xl font-bold">Financial Goals</h1>
           <p className="text-sm text-muted-foreground mt-1">Track your savings targets and measure progress over time</p>
         </div>
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog open={addOpen} onOpenChange={(o) => { setAddOpen(o); if (!o) setSeedForm(emptyForm(displayCurrency)); }}>
           <DialogTrigger render={<Button />}><Plus className="h-4 w-4 mr-1" /> Add Goal</DialogTrigger>
           <DialogContent>
             <DialogHeader><DialogTitle>New Financial Goal</DialogTitle></DialogHeader>
-            <form onSubmit={handleSubmit} className="space-y-3">
-              <div>
-                <Label>Goal Name</Label>
-                <Input value={form.name} onChange={(e) => { setForm({ ...form, name: e.target.value }); setErrors({ ...errors, name: "" }); }} placeholder="e.g. Emergency Fund" />
-                {errors.name && <p className="text-xs text-destructive mt-1">{errors.name}</p>}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><Label>Type</Label>
-                  <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v ?? "savings" })}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="savings">Savings</SelectItem>
-                      <SelectItem value="debt_payoff">Debt Payoff</SelectItem>
-                      <SelectItem value="investment">Investment</SelectItem>
-                      <SelectItem value="emergency_fund">Emergency Fund</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Label>Currency</Label>
-                  <Select value={form.currency} onValueChange={(v) => setForm({ ...form, currency: v ?? displayCurrency })}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {SUPPORTED_FIAT_CURRENCIES.map(c => (
-                        <SelectItem key={c} value={c}>{c}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div>
-                <Label>Target Amount</Label>
-                <Input type="number" step="0.01" value={form.targetAmount} onChange={(e) => { setForm({ ...form, targetAmount: e.target.value }); setErrors({ ...errors, targetAmount: "" }); }} />
-                {errors.targetAmount && <p className="text-xs text-destructive mt-1">{errors.targetAmount}</p>}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><Label>Deadline</Label><Input type="date" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} /></div>
-                <div><Label>Priority</Label>
-                  <Select value={form.priority} onValueChange={(v) => setForm({ ...form, priority: v ?? "1" })}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="1">High</SelectItem>
-                      <SelectItem value="2">Medium</SelectItem>
-                      <SelectItem value="3">Low</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div><Label>Link to Account</Label>
-                <Combobox
-                  value={form.accountId}
-                  onValueChange={(v) => setForm({ ...form, accountId: v })}
-                  items={sortAccount(
-                    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
-                    (a) => Number(a.value),
-                    (a, z) => a.label.localeCompare(z.label),
-                  )}
-                  placeholder="None (manual tracking)"
-                  searchPlaceholder="Search accounts…"
-                  emptyMessage="No matches"
-                  className="w-full"
-                />
-              </div>
-              <div><Label>Note</Label><Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></div>
-              <Button type="submit" className="w-full" disabled={!isFormValid}>Create Goal</Button>
-            </form>
+            <GoalEditForm
+              mode="add"
+              initial={seedForm}
+              accounts={accounts}
+              displayCurrency={displayCurrency}
+              onSave={() => { setAddOpen(false); setSeedForm(emptyForm(displayCurrency)); load(); }}
+              onCancel={() => { setAddOpen(false); setSeedForm(emptyForm(displayCurrency)); }}
+            />
           </DialogContent>
         </Dialog>
       </div>
+
+      {/* Edit dialog — issue #130 */}
+      <Dialog open={editGoal !== null} onOpenChange={(o) => { if (!o) setEditGoal(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Edit Goal</DialogTitle></DialogHeader>
+          {editGoal && (
+            <GoalEditForm
+              mode="edit"
+              goalId={editGoal.id}
+              initial={goalToForm(editGoal, displayCurrency)}
+              accounts={accounts}
+              displayCurrency={displayCurrency}
+              onSave={() => { setEditGoal(null); load(); }}
+              onCancel={() => setEditGoal(null)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Summary cards — only show when there are goals */}
       {goals.length > 0 && (
@@ -231,7 +414,7 @@ export default function GoalsPage() {
               ].map(({ label, type }) => (
                 <button
                   key={label}
-                  onClick={() => { setForm({ ...form, name: label, type }); setDialogOpen(true); }}
+                  onClick={() => { setSeedForm({ ...emptyForm(displayCurrency), name: label, type }); setAddOpen(true); }}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-border/60 bg-muted/40 hover:bg-muted transition-colors"
                 >
                   <Plus className="h-3 w-3" />{label}
@@ -266,7 +449,10 @@ export default function GoalsPage() {
                     <h3 className="font-semibold">{g.name}</h3>
                     <div className="flex flex-wrap gap-2 mt-1">
                       <Badge className={config.badgeClass}>{config.label}</Badge>
-                      {g.accountName && <Badge variant="secondary">{g.accountName}</Badge>}
+                      {/* Issue #130 — render every linked account as its own chip. */}
+                      {(g.accounts ?? []).filter((n) => n).map((name, i) => (
+                        <Badge key={`${g.accountIds[i] ?? i}`} variant="secondary">{name}</Badge>
+                      ))}
                       {g.deadline && (
                         <Badge variant="outline" className="gap-1">
                           <Calendar className="h-3 w-3" />
@@ -277,8 +463,15 @@ export default function GoalsPage() {
                   </div>
                 </div>
                 <div className="flex gap-1">
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleStatus(g)}><CheckCircle2 className="h-4 w-4" /></Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleDelete(g.id)}><Trash2 className="h-4 w-4" /></Button>
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setEditGoal(g)} title="Edit">
+                    <Pencil className="h-4 w-4" />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleStatus(g)} title="Mark complete">
+                    <CheckCircle2 className="h-4 w-4" />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleDelete(g.id)} title="Delete">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </div>
               </div>
               <div className="space-y-2">
@@ -319,10 +512,15 @@ export default function GoalsPage() {
                   </div>
                 </div>
                 <div className="flex gap-1">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditGoal(g)} title="Edit">
+                    <Pencil className="h-3 w-3" />
+                  </Button>
                   <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => toggleStatus(g)} title="Reactivate">
                     <Target className="h-3 w-3" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => handleDelete(g.id)}><Trash2 className="h-3 w-3" /></Button>
+                  <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => handleDelete(g.id)}>
+                    <Trash2 className="h-3 w-3" />
+                  </Button>
                 </div>
               </CardContent>
             </Card>

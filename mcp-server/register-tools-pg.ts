@@ -256,6 +256,76 @@ function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveRe
 }
 
 /**
+ * Strict resolver for portfolio_holdings DELETE/destructive operations
+ * (issue #127). Same waterfall as {@link fuzzyFind} but:
+ *   1. Searches both `name` and `symbol`.
+ *   2. Substring/reverse-substring hits require token overlap with the input
+ *      (using the same length-≥3 tokenization as {@link resolveCategoryStrict}).
+ *      This gates the silent reverse-includes match where a 1-char holding
+ *      name like "S" would silently match any longer input like "TESTV"
+ *      (because "testv".includes("s") is true) — and proceed to DELETE the
+ *      wrong holding.
+ *   3. On `low_confidence` returns the candidate the caller would have hit
+ *      under loose matching, so the error message can read "did you mean …?"
+ *
+ * Pass already-decrypted rows ({@link decryptNameish}). With `dek === null`
+ * (stdio post Phase 4) the rows' `name`/`symbol` will be raw ciphertext
+ * (`v1:...`) and the matcher will simply not find anything — the caller
+ * surfaces "not found" cleanly rather than 500'ing.
+ */
+type HoldingResolveTier = "exact-name" | "exact-symbol" | "startsWith-name" | "startsWith-symbol" | "substring";
+type HoldingResolveResult =
+  | { ok: true; holding: Row; tier: HoldingResolveTier }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "low_confidence"; suggestion: Row };
+function resolvePortfolioHoldingStrict(input: string, options: Row[]): HoldingResolveResult {
+  if (!input || !options.length) return { ok: false, reason: "missing" };
+  const lo = input.toLowerCase().trim();
+  const exactName = options.find(o => String(o.name ?? "").toLowerCase() === lo);
+  if (exactName) return { ok: true, holding: exactName, tier: "exact-name" };
+  const exactSymbol = options.find(o => String(o.symbol ?? "").toLowerCase() === lo);
+  if (exactSymbol) return { ok: true, holding: exactSymbol, tier: "exact-symbol" };
+  const startsName = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    return n !== "" && n.startsWith(lo);
+  });
+  if (startsName) return { ok: true, holding: startsName, tier: "startsWith-name" };
+  const startsSymbol = options.find(o => {
+    const s = String(o.symbol ?? "").toLowerCase();
+    return s !== "" && s.startsWith(lo);
+  });
+  if (startsSymbol) return { ok: true, holding: startsSymbol, tier: "startsWith-symbol" };
+  // Substring / reverse-substring tier — gate on token overlap so a 1-2 char
+  // holding name can't silently swallow a longer destructive input.
+  const tokenize = (s: string) =>
+    new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
+  const inputTokens = tokenize(lo);
+  const sharesToken = (text: string) => {
+    if (!inputTokens.size) return false;
+    for (const t of tokenize(text)) if (inputTokens.has(t)) return true;
+    return false;
+  };
+  const sub = options.find(o => {
+    const n = String(o.name ?? "").toLowerCase();
+    if (n === "") return false;
+    if (!n.includes(lo) && !lo.includes(n)) return false;
+    return sharesToken(n);
+  });
+  if (sub) return { ok: true, holding: sub, tier: "substring" };
+  // No safe match. Surface what loose matching WOULD have picked so the
+  // caller can render a "did you mean …?" message.
+  const legacy =
+    options.find(o => String(o.name ?? "").toLowerCase().includes(lo)) ??
+    options.find(o => {
+      const n = String(o.name ?? "").toLowerCase();
+      return n !== "" && lo.includes(n);
+    });
+  return legacy
+    ? { ok: false, reason: "low_confidence", suggestion: legacy }
+    : { ok: false, reason: "missing" };
+}
+
+/**
  * Stream D: decrypt name + alias + symbol columns on a row set before
  * handing them to {@link fuzzyFind} or display code. Pre-Phase-3, rows may
  * have plaintext populated and `name_ct` null — in that case plaintext
@@ -492,25 +562,25 @@ async function autoCategory(
  * user. Lookup-only — NEVER auto-creates (auto-create is the import pipeline's
  * job; MCP callers use add_portfolio_holding for that).
  *
- * Matching ladder (case-insensitive, exact):
- *   - plaintext `name` (legacy + dual-write rows)
- *   - plaintext `symbol` (e.g. "HURN" → "Huron Consulting Group Inc.")
- *   - HMAC `name_lookup`   match when DEK is available (Phase-3 NULL'd rows)
- *   - HMAC `symbol_lookup` match when DEK is available
+ * Matching is HMAC-only after Stream D Phase 4 (2026-05-03) physically dropped
+ * the plaintext `name`/`symbol` columns:
+ *   - HMAC `name_lookup`   match (covers both "Acme Corp" and "ACME")
+ *   - HMAC `symbol_lookup` match (covers ticker-style input)
  *
  * The same `nameLookup(dek, trimmed)` HMAC value is checked against both
  * `name_lookup` and `symbol_lookup` columns since the HMAC is computed over
  * trimmed-lowercase input regardless of whether that input is a name or
- * ticker. Phase-1 helper, ergonomic for write tools where users naturally
- * say "HURN" instead of the full company name.
+ * ticker. Ergonomic for write tools where users naturally say "HURN"
+ * instead of the full company name.
  *
  * When `accountId` is set, the lookup is scoped to that account — disambiguates
  * the same name/ticker in two brokerages. The `(user_id, account_id, name_lookup)`
  * partial UNIQUE makes per-account matches unambiguous; without scoping, two
  * accounts with the same-named holding return an ambiguity error.
  *
- * Mirrors the dual-cohort handling in portfolio-holding-resolver.ts but
- * single-shot — no map pre-build, no auto-create.
+ * Requires `dek` (HTTP MCP is auth-gated; DEK is always present). Returns
+ * a clean error if `dek` is null rather than running a query that would
+ * never match.
  */
 async function resolvePortfolioHoldingByName(
   db: DbLike,
@@ -522,27 +592,29 @@ async function resolvePortfolioHoldingByName(
   const trimmed = name.trim();
   if (!trimmed) return { ok: false, error: "portfolioHolding cannot be empty" };
 
-  const lookup = dek ? nameLookup(dek, trimmed) : null;
+  if (!dek) {
+    return {
+      ok: false,
+      error: `Cannot resolve holding "${trimmed}" without an unlocked DEK. Pass portfolioHoldingId directly, or unlock the session.`,
+    };
+  }
+
+  const lookup = nameLookup(dek, trimmed);
   const accountFilter = accountId ? sql`AND account_id = ${accountId}` : sql``;
   const matches = await q(db, sql`
     SELECT id
       FROM portfolio_holdings
      WHERE user_id = ${userId}
-       AND (
-         LOWER(name) = LOWER(${trimmed})
-         OR LOWER(symbol) = LOWER(${trimmed})
-         ${lookup ? sql`OR name_lookup = ${lookup} OR symbol_lookup = ${lookup}` : sql``}
-       )
+       AND (name_lookup = ${lookup} OR symbol_lookup = ${lookup})
        ${accountFilter}
      LIMIT 5
   `);
 
   if (matches.length === 0) {
     // Surface candidate "name (TICKER)" entries so the agent can retry with a
-    // valid identifier. Decrypt name_ct + symbol_ct under DEK; fall back to
-    // plaintext columns for legacy rows.
+    // valid identifier. Decrypt name_ct + symbol_ct under DEK.
     const allRaw = await q(db, sql`
-      SELECT id, name, name_ct, symbol, symbol_ct
+      SELECT id, name_ct, symbol_ct
         FROM portfolio_holdings
        WHERE user_id = ${userId}
        ${accountFilter}
@@ -551,16 +623,14 @@ async function resolvePortfolioHoldingByName(
     const candidates = allRaw
       .map((r) => {
         let nm: string | null = null;
-        if (r.name_ct && dek) {
+        if (r.name_ct) {
           try { nm = decryptField(dek, String(r.name_ct)); } catch { nm = null; }
         }
-        if (!nm && r.name) nm = String(r.name);
         if (!nm) return null;
         let sym: string | null = null;
-        if (r.symbol_ct && dek) {
+        if (r.symbol_ct) {
           try { sym = decryptField(dek, String(r.symbol_ct)); } catch { sym = null; }
         }
-        if (!sym && r.symbol) sym = String(r.symbol);
         return sym ? `${nm} (${sym})` : nm;
       })
       .filter((n): n is string => Boolean(n));
@@ -626,7 +696,7 @@ async function aggregateHoldings(
   userId: string,
   dek: Buffer | null,
   opts?: { buysOnly?: boolean; since?: string; dividendsCategoryId?: number | null }
-): Promise<(HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null })[]> {
+): Promise<(HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null; currency: string })[]> {
   const buysFilter = opts?.buysOnly
     ? sql`AND t.amount < 0`
     : sql``;
@@ -649,25 +719,39 @@ async function aggregateHoldings(
   // Issue #96: LEFT JOIN to the cash-leg sibling for multi-currency trade
   // pairs. SELECT cash.amount as cash_amount; accumulate() prefers it on
   // a paired buy row. Cash leg is identified by (same user, same
-  // trade_link_id, qty=0 or NULL, different id). Both legs sit in the
-  // same brokerage account so the amount is in the same currency — no
-  // currency hop needed at this layer (the entered_currency story is
-  // identical because both legs share account_id).
-  type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null };
+  // trade_link_id, qty=0 or NULL, different id).
+  // Issue #129: SELECT t.entered_amount, t.entered_currency, ph.currency
+  // (holding currency), cash.entered_amount, cash.entered_currency, and
+  // a.currency (account currency) so accumulate() can normalize each
+  // row's amount into the holding's own currency. Without this, a USD
+  // ETF held inside a CAD account summed cost basis in CAD and tagged
+  // it USD, producing a double-FX inflation downstream.
+  type Agg = HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null; currency: string };
   // Issue #86: key by holding_id (not display name) so two holdings sharing
   // a name across accounts (e.g. VUN.TO in TFSA + RRSP) stay distinct rows.
   // Phase 6 (2026-04-29) eliminated orphan rows; t.portfolio_holding_id is
   // never null here. Skip-and-warn any row that surprises us with a null FK.
   const out = new Map<number, Agg>();
+  // Issue #128: SELECT t.trade_link_id so accumulate() can skip paired
+  // cash-leg rows from the realized-gain sell branch.
+  // Stream D Phase 4: ph.name dropped — read ph.name_ct only.
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
-           ph.name AS holding_name, ph.name_ct AS holding_name_ct,
-           cash.amount AS cash_amount, cash.id AS cash_id
+           t.trade_link_id,
+           t.entered_amount, t.entered_currency, t.currency AS row_currency,
+           a.currency AS account_currency,
+           ph.name_ct AS holding_name_ct,
+           ph.currency AS holding_currency,
+           cash.amount AS cash_amount, cash.id AS cash_id,
+           cash.entered_amount AS cash_entered_amount,
+           cash.entered_currency AS cash_entered_currency,
+           cash.currency AS cash_row_currency
     FROM transactions t
     INNER JOIN holding_accounts ha
       ON ha.holding_id = t.portfolio_holding_id
      AND ha.account_id = t.account_id
      AND ha.user_id = ${userId}
+    INNER JOIN accounts a ON a.id = t.account_id
     LEFT JOIN portfolio_holdings ph ON t.portfolio_holding_id = ph.id
     LEFT JOIN transactions cash
       ON cash.user_id = ${userId}
@@ -680,10 +764,48 @@ async function aggregateHoldings(
       ${buysFilter}
       ${dateFilter}
   `);
+
+  // Issue #129: pre-resolve every (entered_currency → holding_currency) FX
+  // hop into a synchronous cache so accumulate() can stay synchronous.
+  // getRate is awaited once per distinct cross-currency pair.
+  const todayStr = new Date().toISOString().split("T")[0];
+  const fxCache = new Map<string, number>();
+  const fxKey = (from: string, to: string) => `${from.toUpperCase()}->${to.toUpperCase()}`;
+  const neededPairs = new Set<string>();
+  for (const r of fkRows) {
+    const holdingCcy = String(r.holding_currency ?? "").toUpperCase();
+    if (!holdingCcy) continue;
+    const qty = Number(r.quantity ?? 0);
+    // Buy-side: entered_currency from this row OR cash leg if paired.
+    if (qty > 0) {
+      const isPaired = r.cash_id != null;
+      const enteredCcy = isPaired
+        ? String(r.cash_entered_currency ?? r.cash_row_currency ?? r.account_currency ?? "").toUpperCase()
+        : String(r.entered_currency ?? r.row_currency ?? r.account_currency ?? "").toUpperCase();
+      if (enteredCcy && enteredCcy !== holdingCcy) neededPairs.add(fxKey(enteredCcy, holdingCcy));
+    } else if (qty < 0) {
+      const enteredCcy = String(r.entered_currency ?? r.row_currency ?? r.account_currency ?? "").toUpperCase();
+      if (enteredCcy && enteredCcy !== holdingCcy) neededPairs.add(fxKey(enteredCcy, holdingCcy));
+    }
+    // Dividends: entered_currency on the row.
+    const enteredCcy = String(r.entered_currency ?? r.row_currency ?? r.account_currency ?? "").toUpperCase();
+    if (enteredCcy && enteredCcy !== holdingCcy) neededPairs.add(fxKey(enteredCcy, holdingCcy));
+  }
+  for (const key of neededPairs) {
+    const [from, to] = key.split("->");
+    fxCache.set(key, await getRate(from, to, todayStr, userId));
+  }
+  const fxLookup = (from: string, to: string): number => {
+    const f = (from || "").toUpperCase();
+    const t = (to || "").toUpperCase();
+    if (!f || !t || f === t) return 1;
+    return fxCache.get(fxKey(f, t)) ?? 1;
+  };
+
   for (const r of fkRows) {
     const hid = Number(r.portfolio_holding_id ?? 0) || null;
     if (hid == null) continue; // shouldn't happen post-Phase-6; defensive skip
-    // Prefer decrypted name_ct, fall back to plaintext name (legacy rows).
+    // Stream D Phase 4: only the ciphertext column remains. Decrypt or skip.
     let name = "";
     if (r.holding_name_ct && dek) {
       try {
@@ -692,29 +814,47 @@ async function aggregateHoldings(
         name = "";
       }
     }
-    if (!name) name = String(r.holding_name ?? "");
-    // Skip rows whose holding_name_ct failed to decrypt AND has no plaintext
-    // fallback (DEK mismatch). The downstream UI relies on a non-empty name.
+    // Skip rows whose holding_name_ct failed to decrypt or DEK is missing
+    // (stdio transport, or a DEK mismatch). The downstream UI relies on a
+    // non-empty name.
     if (!name || name.startsWith("v1:")) continue;
-    accumulate(out, hid, name, r, dividendsCategoryId);
+    accumulate(out, hid, name, r, dividendsCategoryId, fxLookup);
   }
 
   return Array.from(out.values()).sort((a, b) => b.buy_amount - a.buy_amount);
 }
 
 /** Shared accumulator. Keyed by holding_id (issue #86) — display name is
- *  carried as a row field but never used for lookup. */
+ *  carried as a row field but never used for lookup.
+ *
+ *  Issue #129: cost basis (buy_amount, sell_amount, dividends) is normalized
+ *  into the holding's own currency (`r.holding_currency`). Cross-currency
+ *  rows (e.g. a USD ETF inside a CAD account where `entered_currency=USD`
+ *  and `account_currency=CAD`) are FX-converted via `fxLookup`. Same-currency
+ *  rows pass through untouched (fxLookup returns 1). The output is then
+ *  consistently in `holding_currency`, so callers can `tagAmount(buyAmt,
+ *  holding.currency, "account")` correctly. */
 function accumulate(
-  out: Map<number, HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null }>,
+  out: Map<number, HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null; currency: string }>,
   holdingId: number,
   name: string,
   r: Row,
   dividendsCategoryId: number | null,
+  fxLookup: (from: string, to: string) => number,
 ): void {
   const qty = Number(r.quantity ?? 0);
   const amt = Number(r.amount);
   const d = String(r.date);
   const catId = r.category_id != null ? Number(r.category_id) : null;
+  // Issue #129: holding currency is the canonical accounting unit for this
+  // aggregator's per-holding totals. Falls back to the row's account
+  // currency only as a last resort (no portfolio_holdings join, e.g.
+  // legacy data) — never to USD/CAD silently.
+  const holdingCcy = String(r.holding_currency ?? r.account_currency ?? r.row_currency ?? "").toUpperCase();
+  const accountCcy = String(r.account_currency ?? r.row_currency ?? "").toUpperCase();
+  const enteredCcy = String(r.entered_currency ?? r.row_currency ?? accountCcy).toUpperCase();
+  const cashEnteredCcy = String(r.cash_entered_currency ?? r.cash_row_currency ?? accountCcy).toUpperCase();
+
   const row = out.get(holdingId) ?? {
     name,
     buy_qty: 0,
@@ -728,6 +868,7 @@ function accumulate(
     net_quantity: 0,
     last_activity: null as string | null,
     holding_id: holdingId,
+    currency: holdingCcy || "CAD",
   };
   row.tx_count += 1;
   row.net_quantity += qty;
@@ -745,20 +886,58 @@ function accumulate(
   if (qty > 0) {
     row.buy_qty += qty;
     // Issue #96: when a paired cash-leg sibling is present (multi-currency
-    // trade pair), use its amount as cost basis instead of this stock leg's
-    // amount. cash_amount is null when no pair exists (legacy /
+    // trade pair), use its entered_amount as cost basis instead of this
+    // stock leg's amount. cash_amount is null when no pair exists (legacy /
     // single-currency trades) — fall back to the stock leg's own amount.
-    const cashAmt = r.cash_id != null ? Number(r.cash_amount) : NaN;
-    const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(amt);
-    row.buy_amount += buyCostAmt;
+    // Issue #129: prefer entered_amount (in entered_currency) so the
+    // cross-currency normalization below applies; entered_amount falls
+    // back to amount when it's null (un-backfilled legacy rows).
+    const isPaired = r.cash_id != null;
+    let buyCostInEntered: number;
+    let buyCostCcy: string;
+    if (isPaired) {
+      const cashEnteredAmt = r.cash_entered_amount != null ? Number(r.cash_entered_amount) : NaN;
+      const cashAmt = Number.isFinite(cashEnteredAmt) ? cashEnteredAmt : Number(r.cash_amount ?? 0);
+      buyCostInEntered = Math.abs(cashAmt);
+      buyCostCcy = cashEnteredCcy;
+    } else {
+      const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
+      buyCostInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+      buyCostCcy = enteredCcy;
+    }
+    const fx = holdingCcy ? fxLookup(buyCostCcy, holdingCcy) : 1;
+    row.buy_amount += buyCostInEntered * fx;
     row.purchases += 1;
     if (!row.first_purchase || d < row.first_purchase) row.first_purchase = d;
   } else if (qty < 0) {
-    row.sell_qty += Math.abs(qty);
-    row.sell_amount += Math.abs(amt);
+    // Issue #128: skip paired cash-leg rows (`trade_link_id IS NOT NULL AND
+    // amount = 0`). These are the cash-side sibling of a tradeGroupKey-paired
+    // buy (issue #96); the stock leg captures the trade economics. Counting
+    // them as "sells" on the cash sleeve produced a phantom realized loss
+    // (sellAmt=0, sellQty=N, avgCost~=1 → realizedGain ~= -N) even though no
+    // cash position was sold. Conjunctive predicate leaves legitimate cash
+    // withdrawals (`trade_link_id NULL`, `amount<0`) untouched.
+    const tradeLinkId = r.trade_link_id ?? null;
+    if (tradeLinkId != null && amt === 0) {
+      // Paired cash-leg sibling — skip the sell branch.
+    } else {
+      row.sell_qty += Math.abs(qty);
+      // Issue #129: sell amount in entered_currency, FX-normalized to
+      // holding currency.
+      const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
+      const sellAmtInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+      const fx = holdingCcy ? fxLookup(enteredCcy, holdingCcy) : 1;
+      row.sell_amount += sellAmtInEntered * fx;
+    }
   }
   if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
-    row.dividends += amt;
+    // Issue #129: dividends in entered_currency, FX-normalized to holding
+    // currency. Sign preserved (dividends contribute positive; withholding-
+    // tax / corrections contribute negative — see issue #84).
+    const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
+    const divInEntered = Number.isFinite(enteredAmt) ? enteredAmt : amt;
+    const fx = holdingCcy ? fxLookup(enteredCcy, holdingCcy) : 1;
+    row.dividends += divInEntered * fx;
   }
   out.set(holdingId, row);
 }
@@ -788,13 +967,13 @@ export function registerPgTools(
     },
     async ({ currency, reportingCurrency }) => {
       const raw = await q(db, sql`
-        SELECT a.id, a.name, a.name_ct, a.alias, a.alias_ct, a.type, a."group", a.currency,
+        SELECT a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency,
                COALESCE(SUM(t.amount), 0) AS balance
         FROM accounts a
         LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
         WHERE a.user_id = ${userId}
           ${currency && currency !== "all" ? sql`AND a.currency = ${currency}` : sql``}
-        GROUP BY a.id, a.name, a.name_ct, a.alias, a.alias_ct, a.type, a."group", a.currency
+        GROUP BY a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency
         ORDER BY a.type, a."group"
       `);
       // Stream D: decrypt name + alias before returning. Drop the internal
@@ -856,8 +1035,10 @@ export function registerPgTools(
       // after decryption when the data is encrypted. Fetch a larger window then
       // trim to lim after filtering.
       const fetchCap = payee || tags ? Math.max(lim * 10, 500) : lim;
-      // Stream D: category filter uses name_lookup (HMAC) when DEK present,
-      // falls back to legacy plaintext name= for stdio/pre-backfill rows.
+      // Stream D Phase 4: plaintext c.name was dropped on 2026-05-03. The
+      // category filter must go through name_lookup (HMAC) — there is no
+      // plaintext fallback. Without a DEK we cannot compute the lookup, so
+      // the filter is dropped (no false matches better than 500).
       const categoryLookup = category && dek ? nameLookup(dek, category) : null;
       // NOTE: account_id and portfolio_holding_id are independent filters —
       // both are valid alone or combined (e.g. "all VCN.TO dividends in IBKR
@@ -865,8 +1046,8 @@ export function registerPgTools(
       // counterpart in tools-v2.ts mirrors this exactly (issue #80).
       const rawRows = await q(db, sql`
         SELECT t.id, t.date,
-               a.name AS account, a.name_ct AS account_ct,
-               c.name AS category, c.name_ct AS category_ct, c.type AS category_type,
+               a.name_ct AS account_ct,
+               c.name_ct AS category_ct, c.type AS category_type,
                t.currency, t.amount, t.entered_currency, t.entered_amount, t.entered_fx_rate,
                t.payee, t.note, t.tags, t.portfolio_holding_id, t.quantity,
                t.created_at, t.updated_at, t.source
@@ -880,11 +1061,7 @@ export function registerPgTools(
           ${end_date ? sql`AND t.date <= ${end_date}` : sql``}
           ${account_id !== undefined ? sql`AND t.account_id = ${account_id}` : sql``}
           ${portfolio_holding_id !== undefined ? sql`AND t.portfolio_holding_id = ${portfolio_holding_id}` : sql``}
-          ${category
-            ? categoryLookup
-              ? sql`AND (c.name = ${category} OR c.name_lookup = ${categoryLookup})`
-              : sql`AND c.name = ${category}`
-            : sql``}
+          ${category && categoryLookup ? sql`AND c.name_lookup = ${categoryLookup}` : sql``}
         ORDER BY t.date DESC
         LIMIT ${fetchCap}
       `);
@@ -892,8 +1069,8 @@ export function registerPgTools(
         const { account_ct, category_ct, ...rest } = r;
         return {
           ...rest,
-          account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
-          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          account: account_ct && dek ? decryptField(dek, account_ct) : null,
+          category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
       let decrypted = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
@@ -959,21 +1136,21 @@ export function registerPgTools(
       const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
       // Stream D: GROUP BY c.id so encrypted rows don't bucket together.
       const rawRows = await q(db, sql`
-        SELECT b.id, c.name AS category, c.name_ct AS category_ct, c."group" AS category_group,
+        SELECT b.id, c.name_ct AS category_ct, c."group" AS category_group,
                b.amount AS budget,
                COALESCE(ABS(SUM(CASE WHEN t.date >= ${startDate} AND t.date <= ${endDate} THEN t.amount ELSE 0 END)), 0) AS spent
         FROM budgets b
         JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
         LEFT JOIN transactions t ON t.category_id = c.id AND t.user_id = ${userId}
         WHERE b.month = ${month} AND b.user_id = ${userId}
-        GROUP BY b.id, c.id, c.name, c.name_ct, c."group", b.amount
+        GROUP BY b.id, c.id, c.name_ct, c."group", b.amount
         ORDER BY c."group"
       `);
       const rows = rawRows.map((r) => {
         const { category_ct, ...rest } = r;
         return {
           ...rest,
-          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
       return text({ rows, reportingCurrency: reporting });
@@ -1002,22 +1179,24 @@ export function registerPgTools(
         ? sql`TO_CHAR(t.date::date, 'YYYY')`
         : sql`TO_CHAR(t.date::date, 'YYYY-MM')`;
 
-      // Stream D: GROUP BY c.id + c.name_ct so encrypted rows don't merge.
+      // Stream D Phase 4: c.name dropped — read c.name_ct only and decrypt
+      // post-query. GROUP BY c.id + c.name_ct keeps encrypted-only rows
+      // distinct without depending on the dropped column.
       const rawRows = await q(db, sql`
         SELECT ${truncExpr} AS period, c.id AS category_id,
-               c.name AS category, c.name_ct AS category_ct,
+               c.name_ct AS category_ct,
                c."group" AS category_group, SUM(t.amount) AS total
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId} AND t.date >= ${startDate} AND c.type = 'E'
-        GROUP BY ${truncExpr}, c.id, c.name, c.name_ct, c."group"
+        GROUP BY ${truncExpr}, c.id, c.name_ct, c."group"
         ORDER BY period, total
       `);
       const rows = rawRows.map((r) => {
         const { category_ct, ...rest } = r;
         return {
           ...rest,
-          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
       return text({ rows, reportingCurrency: reporting });
@@ -1035,10 +1214,10 @@ export function registerPgTools(
     },
     async ({ start_date, end_date, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
-      // Stream D: include c.name_ct for in-memory decrypt.
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const rawRows = await q(db, sql`
         SELECT c.id AS category_id, c.type AS category_type, c."group" AS category_group,
-               c.name AS category, c.name_ct AS category_ct,
+               c.name_ct AS category_ct,
                SUM(t.amount) AS total, COUNT(*) AS count
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
@@ -1046,14 +1225,14 @@ export function registerPgTools(
           AND t.date >= ${start_date}
           AND t.date <= ${end_date}
           AND c.type IN ('I','E')
-        GROUP BY c.id, c.type, c."group", c.name, c.name_ct
+        GROUP BY c.id, c.type, c."group", c.name_ct
         ORDER BY c.type, c."group"
       `);
       const rows = rawRows.map((r) => {
         const { category_ct, ...rest } = r;
         return {
           ...rest,
-          category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+          category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
       // Unrealized P&L: valuation G/L (asset price moves) + FX G/L (account
@@ -1188,21 +1367,47 @@ export function registerPgTools(
   );
 
   // ── get_goals ─────────────────────────────────────────────────────────────
-  server.tool("get_goals", "Get all financial goals with progress", {}, async () => {
-    const raw = await q(db, sql`
-      SELECT g.id, g.name, g.name_ct, g.type, g.target_amount, g.deadline, g.status, g.priority,
-             a.name AS account, a.name_ct AS account_name_ct
+  server.tool("get_goals", "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking.", {}, async () => {
+    const goalsRaw = await q(db, sql`
+      SELECT g.id, g.name_ct, g.type, g.target_amount, g.deadline, g.status, g.priority
       FROM goals g
-      LEFT JOIN accounts a ON g.account_id = a.id
       WHERE g.user_id = ${userId}
       ORDER BY g.priority
     `);
-    const rows = raw.map((r) => {
-      const { name_ct, account_name_ct, ...rest } = r;
+    if (!goalsRaw.length) return text([]);
+    const goalIds = goalsRaw.map((g) => Number(g.id));
+    // Pull every (goal_id, account_id, account_name_ct) link in one query.
+    // Note: Drizzle's `sql` tag interpolates a JS array as separate scalar
+    // params (`($2, $3)`), so the previous `ANY(${goalIds}::int[])` shape
+    // rendered as `ANY(($2, $3)::int[])` — Postgres parsed `($2, $3)` as a
+    // ROW literal and rejected the row→array cast (PR #142 follow-up). Use
+    // `ARRAY[...]::int[]` with `sql.join` so the cast wraps a real array
+    // constructor.
+    const goalIdsExpr = sql.join(goalIds.map((id) => sql`${id}`), sql`, `);
+    const linksRaw = await q(db, sql`
+      SELECT ga.goal_id, ga.account_id, a.name_ct AS account_name_ct
+      FROM goal_accounts ga
+      LEFT JOIN accounts a ON ga.account_id = a.id
+      WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(ARRAY[${goalIdsExpr}]::int[])
+    `);
+    const linksByGoal = new Map<number, { ids: number[]; names: string[] }>();
+    for (const l of linksRaw) {
+      const goalId = Number(l.goal_id);
+      const accountId = Number(l.account_id);
+      const acctName = l.account_name_ct && dek ? decryptField(dek, l.account_name_ct) : null;
+      const entry = linksByGoal.get(goalId) ?? { ids: [], names: [] };
+      entry.ids.push(accountId);
+      entry.names.push(acctName ?? "");
+      linksByGoal.set(goalId, entry);
+    }
+    const rows = goalsRaw.map((r) => {
+      const { name_ct, ...rest } = r;
+      const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [] };
       return {
         ...rest,
-        name: name_ct && dek ? decryptField(dek, name_ct) : rest.name,
-        account: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account,
+        name: name_ct && dek ? decryptField(dek, name_ct) : null,
+        accountIds: links.ids,
+        accounts: links.names,
       };
     });
     return text(rows);
@@ -1211,12 +1416,12 @@ export function registerPgTools(
   // ── get_categories ─────────────────────────────────────────────────────────
   server.tool("get_categories", "List all available transaction categories", {}, async () => {
     const raw = await q(db, sql`
-      SELECT name, name_ct, type, "group"
+      SELECT id, name_ct, type, "group"
       FROM categories
       WHERE user_id = ${userId}
       ORDER BY type, "group"
     `);
-    // Stream D: decrypt name; drop internal _ct column from output.
+    // Stream D Phase 4: decrypt name_ct; drop internal _ct column from output.
     const rows = decryptNameish(raw, dek).map((r) => {
       const { name_ct, ...rest } = r;
       void name_ct;
@@ -1228,7 +1433,7 @@ export function registerPgTools(
   // ── get_loans ─────────────────────────────────────────────────────────────
   server.tool("get_loans", "Get all loans with amortization summary", {}, async () => {
     const raw = await q(db, sql`
-      SELECT id, name, name_ct, type, principal, annual_rate, term_months, start_date,
+      SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
              payment_frequency, extra_payment
       FROM loans
       WHERE user_id = ${userId}
@@ -1250,8 +1455,8 @@ export function registerPgTools(
     },
     async ({ reportingCurrency }) => {
       const rawSubs = await q(db, sql`
-        SELECT s.id, s.name, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
-               c.name AS category_name, c.name_ct AS category_name_ct
+        SELECT s.id, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
+               c.name_ct AS category_name_ct
         FROM subscriptions s
         LEFT JOIN categories c ON s.category_id = c.id
         WHERE s.user_id = ${userId}
@@ -1259,8 +1464,8 @@ export function registerPgTools(
       `);
       const subs: Row[] = rawSubs.map((r) => ({
         ...r,
-        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
-        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : r.category_name,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
+        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
       }));
 
       const active = subs.filter(s => s.status === "active");
@@ -1522,19 +1727,19 @@ export function registerPgTools(
       const sixAgo = new Date(now); sixAgo.setMonth(sixAgo.getMonth() - 6);
       const startDate = `${sixAgo.getFullYear()}-${String(sixAgo.getMonth() + 1).padStart(2, "0")}-01`;
 
-      // Stream D: GROUP BY c.id so encrypted rows don't merge; decrypt in memory.
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const rawRows = await q(db, sql`
         SELECT TO_CHAR(t.date::date, 'YYYY-MM') AS month, c.id AS cat_id,
-               c.name AS category, c.name_ct AS category_ct,
+               c.name_ct AS category_ct,
                COALESCE(t.currency, a.currency) AS currency,
                SUM(t.amount) AS total
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND t.date >= ${startDate} AND c.type = 'E'
-        GROUP BY TO_CHAR(t.date::date, 'YYYY-MM'), c.id, c.name, c.name_ct, COALESCE(t.currency, a.currency)
+        GROUP BY TO_CHAR(t.date::date, 'YYYY-MM'), c.id, c.name_ct, COALESCE(t.currency, a.currency)
         ORDER BY month
-      `) as { month: string; cat_id: number; category: string | null; category_ct: string | null; currency: string | null; total: number }[];
+      `) as { month: string; cat_id: number; category_ct: string | null; currency: string | null; total: number }[];
 
       // Convert each (month, category, currency) bucket to reporting and
       // collapse to (month, category) so anomaly detection works on a
@@ -1542,7 +1747,7 @@ export function registerPgTools(
       const collapsed = new Map<string, { month: string; category: string; total: number }>();
       for (const r of rawRows) {
         const fx = await fxFor(String(r.currency ?? reporting));
-        const cat = (r.category_ct && dek ? decryptField(dek, r.category_ct) : r.category) ?? "";
+        const cat = (r.category_ct && dek ? decryptField(dek, r.category_ct) : null) ?? "";
         const key = `${r.month}|${cat}`;
         const converted = Number(r.total) * fx;
         const existing = collapsed.get(key);
@@ -1604,16 +1809,17 @@ export function registerPgTools(
 
       const items: { type: string; severity: string; title: string; description: string; amount?: number }[] = [];
 
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const budgetRawRows = await q(db, sql`
-        SELECT c.id AS cat_id, c.name AS cat, c.name_ct AS cat_ct, b.amount AS budget,
+        SELECT c.id AS cat_id, c.name_ct AS cat_ct, b.amount AS budget,
                COALESCE(ABS(SUM(CASE WHEN t.date >= ${monthStart} AND t.date <= ${monthEnd} THEN t.amount ELSE 0 END)), 0) AS spent
         FROM budgets b LEFT JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
         LEFT JOIN transactions t ON t.category_id = b.category_id AND t.user_id = ${userId}
         WHERE b.month = ${month} AND b.user_id = ${userId}
-        GROUP BY c.id, c.name, c.name_ct, b.amount
-      `) as { cat_id: number; cat: string | null; cat_ct: string | null; budget: number; spent: number }[];
+        GROUP BY c.id, c.name_ct, b.amount
+      `) as { cat_id: number; cat_ct: string | null; budget: number; spent: number }[];
       const budgetRows: { cat: string; budget: number; spent: number }[] = budgetRawRows.map((r) => ({
-        cat: (r.cat_ct && dek ? decryptField(dek, r.cat_ct) : r.cat) ?? "",
+        cat: (r.cat_ct && dek ? decryptField(dek, r.cat_ct) : null) ?? "",
         budget: r.budget,
         spent: r.spent,
       }));
@@ -1689,23 +1895,24 @@ export function registerPgTools(
       const ps = prevStart.toISOString().split("T")[0];
       const pe = prevEnd.toISOString().split("T")[0];
 
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const spendingRaw = await q(db, sql`
-        SELECT c.id AS cat_id, c.name, c.name_ct,
+        SELECT c.id AS cat_id, c.name_ct,
                COALESCE(t.currency, a.currency) AS currency,
                ABS(SUM(t.amount)) AS total
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND c.type = 'E' AND t.date >= ${ws} AND t.date <= ${we}
-        GROUP BY c.id, c.name, c.name_ct, COALESCE(t.currency, a.currency)
+        GROUP BY c.id, c.name_ct, COALESCE(t.currency, a.currency)
         ORDER BY total DESC
-      `) as { cat_id: number; name: string | null; name_ct: string | null; currency: string | null; total: number }[];
+      `) as { cat_id: number; name_ct: string | null; currency: string | null; total: number }[];
 
       // Collapse cross-currency category buckets to a single reporting total.
       const spendingByCat = new Map<string, number>();
       for (const r of spendingRaw) {
         const fx = await fxFor(String(r.currency ?? reporting));
-        const name = (r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name) ?? "";
+        const name = (r.name_ct && dek ? decryptField(dek, r.name_ct) : null) ?? "";
         const converted = Number(r.total) * fx;
         spendingByCat.set(name, (spendingByCat.get(name) ?? 0) + converted);
       }
@@ -1744,8 +1951,9 @@ export function registerPgTools(
         income += Number(r.total) * fx;
       }
 
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
       const notableRaw = await q(db, sql`
-        SELECT t.date, t.payee, c.name AS category, c.name_ct AS category_ct,
+        SELECT t.date, t.payee, c.name_ct AS category_ct,
                COALESCE(t.currency, a.currency) AS currency, ABS(t.amount) AS amt
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
@@ -1761,7 +1969,7 @@ export function registerPgTools(
         return {
           ...rest,
           payee: dek ? (decryptField(dek, String(n.payee ?? "")) ?? "") : n.payee,
-          category: category_ct && dek ? decryptField(dek, String(category_ct)) : rest.category,
+          category: category_ct && dek ? decryptField(dek, String(category_ct)) : null,
           currency: ccy,
           amtTagged: tagAmount(amt, ccy, "account"),
           amtReporting: tagAmount(amt * fx, reporting, "reporting"),
@@ -1945,31 +2153,65 @@ export function registerPgTools(
   // ── add_goal ───────────────────────────────────────────────────────────────
   server.tool(
     "add_goal",
-    "Create a new financial goal",
+    "Create a new financial goal. `account_ids` (issue #130) accepts 0..N account ids — the goal's progress sums across all linked accounts. Legacy single `account` (fuzzy-matched name) is still accepted as a single-element list. Pass `account_ids: []` for a manual-tracking goal.",
     {
       name: z.string().describe("Goal name"),
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
       target_amount: z.number().describe("Target amount"),
       deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
+      account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). Prefer `account_ids` for multi-account goals."),
+      account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking)."),
     },
-    async ({ name, type, target_amount, deadline, account }) => {
-      let accountId: number | null = null;
-      if (account) {
+    async ({ name, type, target_amount, deadline, account, account_ids }) => {
+      // Resolve the canonical id list. account_ids wins; fall back to fuzzy-match
+      // on the legacy single `account` argument.
+      let resolvedIds: number[] = [];
+      if (account_ids !== undefined) {
+        resolvedIds = account_ids;
+      } else if (account) {
         const rawAccounts = await q(db, sql`
           SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
         `);
         const allAccounts = decryptNameish(rawAccounts, dek);
         const acct = fuzzyFind(account, allAccounts);
-        accountId = acct ? Number(acct.id) : null;
+        if (acct) resolvedIds = [Number(acct.id)];
+      }
+      // Verify ownership for every supplied id.
+      // Drizzle expands a JS array as separate scalars, so wrap in
+      // `ARRAY[...]::int[]` (not `(${arr})::int[]` — that's a row-cast).
+      if (resolvedIds.length > 0) {
+        const idsExpr = sql.join(resolvedIds.map((id) => sql`${id}`), sql`, `);
+        const owned = await q(db, sql`
+          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(ARRAY[${idsExpr}]::int[])
+        `);
+        if (owned.length !== new Set(resolvedIds).size) {
+          return err(`One or more account_ids are not owned by you.`);
+        }
       }
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
-      // Stream D Phase 4 — plaintext name column dropped.
-      await db.execute(sql`
+      // Stream D Phase 4 — plaintext name column dropped. Issue #130 — dual-write
+      // the legacy `goals.account_id` (first id only) AND the goal_accounts join.
+      const inserted = await q(db, sql`
         INSERT INTO goals (user_id, type, target_amount, deadline, account_id, status, name_ct, name_lookup)
-        VALUES (${userId}, ${type}, ${target_amount}, ${deadline ?? null}, ${accountId}, 'active', ${n.ct}, ${n.lookup})
+        VALUES (${userId}, ${type}, ${target_amount}, ${deadline ?? null}, ${resolvedIds[0] ?? null}, 'active', ${n.ct}, ${n.lookup})
+        RETURNING id
       `);
-      return text({ success: true, message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}` });
+      const goalId = Number(inserted[0]?.id);
+      if (goalId && resolvedIds.length > 0) {
+        for (const accountId of resolvedIds) {
+          await db.execute(sql`
+            INSERT INTO goal_accounts (user_id, goal_id, account_id)
+            VALUES (${userId}, ${goalId}, ${accountId})
+            ON CONFLICT (goal_id, account_id, user_id) DO NOTHING
+          `);
+        }
+      }
+      return text({
+        success: true,
+        goalId,
+        accountIds: resolvedIds,
+        message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}${resolvedIds.length > 0 ? ` linked to ${resolvedIds.length} account(s)` : ""}`,
+      });
     }
   );
 
@@ -2281,7 +2523,13 @@ export function registerPgTools(
 
       const rawAccounts = await q(db, sql`SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      // Stream D Phase 4: c.name dropped — must decrypt c.name_ct via decryptNameish
+      // before reading c.name. Pre-Phase-4 the SELECT-only-name_ct + reading-c.name
+      // accidentally worked because Postgres still had the column; now `c.name` is
+      // undefined and the map produced empty strings (resolvedCategory.name was ""
+      // in every per-row response — issue #93 follow-up).
+      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const allCats = decryptNameish(rawCats, dek);
       const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
       // Cache user-owned holding ids in one SELECT instead of one ownership
       // check per row.
@@ -2556,14 +2804,18 @@ export function registerPgTools(
             const accountIds = Array.from(accountIdSet);
             const newTxIds = committed.map(c => c.newTransactionId);
             // Single SELECT bounded by the union window across affected
-            // accounts; per-row band check happens in JS.
+            // accounts; per-row band check happens in JS. `ARRAY[...]::int[]`
+            // (not `(...)::int[]` — that's a row-cast) because Drizzle expands
+            // each JS array element as a separate scalar param.
+            const accountIdsExpr = sql.join(accountIds.map((id) => sql`${id}`), sql`, `);
+            const newTxIdsExpr = sql.join(newTxIds.map((id) => sql`${id}`), sql`, `);
             const poolRows = await q(db, sql`
               SELECT id, account_id, date, amount, payee
                 FROM transactions
                WHERE user_id = ${userId}
-                 AND account_id = ANY(${accountIds}::int[])
+                 AND account_id = ANY(ARRAY[${accountIdsExpr}]::int[])
                  AND date BETWEEN ${bounds.minDate} AND ${bounds.maxDate}
-                 AND id <> ALL(${newTxIds}::int[])
+                 AND id <> ALL(ARRAY[${newTxIdsExpr}]::int[])
             `);
             const candidates: CandidateRow[] = poolRows.map((r) => {
               const rawPayee = r.payee == null ? null : String(r.payee);
@@ -2861,7 +3113,7 @@ export function registerPgTools(
   // /api/transactions/transfer POST handler — both call into createTransferPair().
   server.tool(
     "record_transfer",
-    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit on source, credit on destination) atomically with a shared link_id so they show up as a paired transfer in the UI. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over name; pass at least the name when ids aren't known. When only the names are given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency transfers (pass `receivedAmount` to lock the bank's landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares between brokerage accounts; `amount` may be 0 for pure in-kind moves). BOTH the source and destination holdings MUST already exist in their respective accounts. Investment accounts require a cash holding for the transaction currency — if a destination cash sleeve is missing, call `add_portfolio_holding` first with the transaction currency. For brokerage stock/ETF/crypto buys and sells (cash sleeve ↔ symbol holding inside one brokerage account), prefer `record_trade` — it handles the same-account in-kind dance automatically.",
+    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit on source, credit on destination) atomically with a shared link_id so they show up as a paired transfer in the UI. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over name; pass at least the name when ids aren't known. When only the names are given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency transfers (pass `receivedAmount` to lock the bank's landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares between brokerage accounts; `amount` may be 0 for pure in-kind moves). BOTH the source and destination holdings MUST already exist in their respective accounts. Investment accounts require a cash holding for the transaction currency — if a destination cash sleeve is missing, call `add_portfolio_holding` first with the transaction currency. For brokerage stock/ETF/crypto buys and sells (cash sleeve ↔ symbol holding inside one brokerage account), prefer `record_trade` — it handles the same-account in-kind dance automatically. SAME-ACCOUNT FOREX (cash sleeve ↔ cash sleeve in different conceptual currencies inside ONE account, e.g. 'Cash - USD' → 'Cash - CAD'): both sleeves inherit the parent account's currency at the schema level, so the conceptual currency lives only in the holding name suffix (`... - XXX` ISO-4217 code). When source and destination resolve to two cash sleeves with divergent suffixes, `receivedAmount` is honored and drives both the destination cash leg's `amount` and the destination `quantity` (cash sleeves track quantity = amount). When the suffixes match (or are missing), `receivedAmount` is ignored as before — pass `destQuantity` explicitly if you need asymmetric in-kind semantics for same-currency cash sleeves.",
     {
       fromAccount: z.string().optional().describe("Source account name or alias — fuzzy matched against name, exact on alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided."),
       toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided."),
@@ -3408,19 +3660,33 @@ export function registerPgTools(
   // ── update_goal ────────────────────────────────────────────────────────────
   server.tool(
     "update_goal",
-    "Update a financial goal's target, deadline, or status",
+    "Update a financial goal's target, deadline, status, or linked accounts. `account_ids` (issue #130) replaces the existing account-link set atomically — pass `[]` to unlink all, or omit to leave links unchanged.",
     {
       goal: z.string().describe("Goal name (fuzzy matched)"),
       target_amount: z.number().optional(),
       deadline: z.string().optional().describe("YYYY-MM-DD"),
       status: z.enum(["active", "completed", "paused"]).optional(),
       name: z.string().optional().describe("Rename the goal"),
+      account_ids: z.array(z.number().int()).optional().describe("Replace the goal's linked accounts (issue #130). When supplied, the existing goal_accounts rows are deleted and replaced with the new set in a single transaction. Pass `[]` to unlink all. Omit to leave links unchanged."),
     },
-    async ({ goal, target_amount, deadline, status, name }) => {
+    async ({ goal, target_amount, deadline, status, name, account_ids }) => {
       const rawGoals = await q(db, sql`SELECT id, name_ct FROM goals WHERE user_id = ${userId}`);
       const allGoals = decryptNameish(rawGoals, dek);
       const g = fuzzyFind(goal, allGoals);
       if (!g) return err(`Goal "${goal}" not found`);
+
+      // Verify account ownership upfront so we don't half-apply.
+      // Drizzle expands a JS array as separate scalars, so wrap in
+      // `ARRAY[...]::int[]` (not `(${arr})::int[]` — that's a row-cast).
+      if (account_ids && account_ids.length > 0) {
+        const idsExpr = sql.join(account_ids.map((id) => sql`${id}`), sql`, `);
+        const owned = await q(db, sql`
+          SELECT id FROM accounts WHERE user_id = ${userId} AND id = ANY(ARRAY[${idsExpr}]::int[])
+        `);
+        if (owned.length !== new Set(account_ids).size) {
+          return err(`One or more account_ids are not owned by you.`);
+        }
+      }
 
       // Stream D Phase 4 — plaintext name dropped.
       const updates: ReturnType<typeof sql>[] = [];
@@ -3432,6 +3698,10 @@ export function registerPgTools(
       if (target_amount !== undefined) updates.push(sql`target_amount = ${target_amount}`);
       if (deadline !== undefined) updates.push(sql`deadline = ${deadline}`);
       if (status !== undefined) updates.push(sql`status = ${status}`);
+      // Mirror the legacy single-account column (issue #130) — first id only.
+      if (account_ids !== undefined) {
+        updates.push(sql`account_id = ${account_ids[0] ?? null}`);
+      }
       if (!updates.length) return err("No fields to update");
 
       const result = await db.execute(
@@ -3442,7 +3712,27 @@ export function registerPgTools(
           ? (result as { rowCount: number }).rowCount
           : null;
       if (affected === 0) return err(`Goal "${g.name}" not found or not owned by this user`);
-      return text({ success: true, message: `Goal "${g.name}" updated` });
+
+      // Replace the join (DELETE existing + INSERT new). When the caller didn't
+      // supply `account_ids`, leave the join untouched.
+      if (account_ids !== undefined) {
+        await db.execute(sql`
+          DELETE FROM goal_accounts WHERE goal_id = ${g.id} AND user_id = ${userId}
+        `);
+        for (const accountId of account_ids) {
+          await db.execute(sql`
+            INSERT INTO goal_accounts (user_id, goal_id, account_id)
+            VALUES (${userId}, ${g.id}, ${accountId})
+            ON CONFLICT (goal_id, account_id, user_id) DO NOTHING
+          `);
+        }
+      }
+
+      return text({
+        success: true,
+        accountIds: account_ids ?? null,
+        message: `Goal "${g.name}" updated`,
+      });
     }
   );
 
@@ -3631,8 +3921,8 @@ export function registerPgTools(
           add_account: "add_account(name, type, group?, currency?, note?, alias?) — type: 'A'=asset, 'L'=liability. alias is a short shorthand (e.g. last 4 digits of a card) used when receipts/imports reference the account by a non-canonical name.",
           update_account: "update_account(account, name?, group?, currency?, note?, alias?) — Fuzzy account name or alias. Pass empty alias to clear.",
           delete_account: "delete_account(account, force?) — force=true to delete with transactions.",
-          add_goal: "add_goal(name, type, target_amount, deadline?, account?) — type: savings|debt_payoff|investment|emergency_fund.",
-          update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?) — status: active|completed|paused.",
+          add_goal: "add_goal(name, type, target_amount, deadline?, account?, account_ids?) — type: savings|debt_payoff|investment|emergency_fund. account_ids: number[] for multi-account linking (issue #130).",
+          update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?, account_ids?) — status: active|completed|paused. account_ids: replace linked-account set ([] = unlink all).",
           delete_goal: "delete_goal(goal) — Fuzzy goal name.",
           create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'T'=transfer.",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?) — match_payee supports % wildcards.",
@@ -3640,7 +3930,7 @@ export function registerPgTools(
           get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
-          record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair between two accounts. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity.",
+          record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair between two accounts. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
           record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
           preview_bulk_update: "preview_bulk_update(filter, changes) — accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker → id), tags ({mode: append|replace|remove, value}). Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. Stdio surface is narrower (no quantity/holding fields).",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Same `changes` keys as preview_bulk_update. Stdio: category-by-name only; quantity/holding writes refused.",
@@ -3743,17 +4033,20 @@ export function registerPgTools(
       const acct = fuzzyFind(account, allAccounts);
       if (!acct) return err(`Account "${account}" not found`);
 
-      // Stream D: check duplicate against both plaintext name AND name_lookup
-      // (HMAC). The partial UNIQUE on (user_id, account_id, name_lookup) is
-      // the DB backstop, but a friendly pre-check beats raising 23505.
+      // Stream D Phase 4: portfolio_holdings.name plaintext column dropped —
+      // uniqueness gate now relies on name_lookup HMAC. No DEK ⇒ no lookup ⇒
+      // we cannot run the pre-check, so let the DB UNIQUE backstop raise
+      // 23505 (caught below as `unique`) instead of silently inserting a dup.
       const lookup = dek ? nameLookup(dek, name) : null;
-      const existing = await q(db, sql`
-        SELECT id FROM portfolio_holdings
-        WHERE user_id = ${userId} AND account_id = ${acct.id}
-          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
-      `);
-      if (existing.length) {
-        return err(`Holding "${name}" already exists in account "${acct.name}" (id: ${existing[0].id})`);
+      if (lookup) {
+        const existing = await q(db, sql`
+          SELECT id FROM portfolio_holdings
+          WHERE user_id = ${userId} AND account_id = ${acct.id}
+            AND name_lookup = ${lookup}
+        `);
+        if (existing.length) {
+          return err(`Holding "${name}" already exists in account "${acct.name}" (id: ${existing[0].id})`);
+        }
       }
 
       const symbolValue = symbol && symbol.trim() ? symbol.trim() : null;
@@ -3851,7 +4144,7 @@ export function registerPgTools(
       }
 
       const rawHoldings = await q(db, sql`
-        SELECT id, account_id, name, symbol, name_ct, symbol_ct
+        SELECT id, account_id, name_ct, symbol_ct
         FROM portfolio_holdings
         WHERE user_id = ${userId}
       `);
@@ -3920,20 +4213,27 @@ export function registerPgTools(
     },
     async ({ holding }) => {
       const rawHoldings = await q(db, sql`
-        SELECT id, name, symbol, name_ct, symbol_ct
+        SELECT id, name_ct, symbol_ct
         FROM portfolio_holdings
         WHERE user_id = ${userId}
       `);
       const allHoldings = decryptNameish(rawHoldings, dek);
-      let h: Row | null = fuzzyFind(holding, allHoldings);
-      if (!h) {
-        const lo = holding.toLowerCase().trim();
-        h =
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase() === lo) ??
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase().startsWith(lo)) ??
-          null;
+      // Issue #127: resolve via strict matcher gated on token overlap so a
+      // tiny-named holding (e.g. "S") cannot silently swallow a longer input
+      // (e.g. "TESTV") via fuzzyFind's reverse-includes branch and DELETE
+      // the wrong row. Reads still tolerate fuzziness; destructive paths do not.
+      const resolved = resolvePortfolioHoldingStrict(holding, allHoldings);
+      if (!resolved.ok) {
+        if (resolved.reason === "low_confidence") {
+          const sName = String(resolved.suggestion.name ?? "");
+          return err(`Holding "${holding}" did not match strongly — did you mean "${sName}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+        }
+        return err(`Holding "${holding}" not found`);
       }
-      if (!h) return err(`Holding "${holding}" not found`);
+      const h = resolved.holding;
+      // Capture decrypted name BEFORE the DELETE so the response renders
+      // truthful state, not whatever the matcher landed on after a stale read.
+      const matchedName = String(h.name ?? "");
 
       const txnCount = await q(db, sql`
         SELECT COUNT(*) AS cnt FROM transactions
@@ -3942,11 +4242,15 @@ export function registerPgTools(
       const count = Number(txnCount[0]?.cnt ?? 0);
 
       await db.execute(sql`DELETE FROM portfolio_holdings WHERE id = ${h.id} AND user_id = ${userId}`);
+      // Per CLAUDE.md "Every MCP tx-mutating write must call invalidateUser":
+      // FK ON DELETE SET NULL mutates linked transactions' portfolio_holding_id,
+      // so the per-user tx cache must be invalidated.
+      invalidateUserTxCache(userId);
       return text({
         success: true,
         message: count > 0
-          ? `Holding "${h.name}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
-          : `Holding "${h.name}" deleted.`,
+          ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
+          : `Holding "${matchedName}" deleted.`,
       });
     }
   );
@@ -3954,13 +4258,53 @@ export function registerPgTools(
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",
-    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Returns one row per `holdingId` — two holdings sharing a display name across accounts (e.g. VUN.TO in TFSA + RRSP) appear as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter to specific holdings; matching is case-insensitive substring + token-overlap against name AND symbol. The response includes a `warnings` array listing any `symbols` filter entries that matched zero holdings.",
+    "Portfolio holdings with all investment metrics: quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, % of portfolio. Returns one row per `holdingId` — two holdings sharing a display name across accounts (e.g. VUN.TO in TFSA + RRSP) appear as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter to specific holdings; matching is case-insensitive substring against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND); across multiple entries the result is the union (OR). Pass `account_id` (FK fast-path) or `account` (fuzzy name/alias) to scope results to a single account — `account_id` wins when both are passed. The response includes a `warnings` array listing any `symbols` / `account` filter entries that matched zero rows.",
     {
-      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols (omit for all). Matched case-insensitively against both name and symbol via substring + token-overlap (so 'VCN.TO (TFSA)' matches a holding named 'VCN.TO'). Unmatched filter entries are surfaced in the response's `warnings` array."),
+      symbols: z.array(z.string()).optional().describe("Filter to specific holding names/symbols/accounts (omit for all). Substring match against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND) — so 'VCN.TO (TFSA)' matches only holdings whose combined name/symbol/account contains both 'vcn.to' and 'tfsa'. Across multiple entries the result is the union (OR). Unmatched entries surface in `warnings`."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching; scopes results to holdings in this account only. Wins over `account` if both are passed. Bad/foreign id returns empty `holdings` plus a warning entry."),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched, low-confidence rejected — issue #123). PREFER `account_id` when known. Unmatched/low-confidence entries surface in `warnings` with empty holdings."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Used for the summary block totals."),
     },
-    async ({ symbols, reportingCurrency }) => {
+    async ({ symbols, account_id, account, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
+
+      // Issue #123: scope to a single account when account_id or account is
+      // passed. account_id wins (mirrors record_transaction's precedence).
+      // Filter rides the existing holding_accounts JOIN grain (issue #25 —
+      // (holding_id, account_id, user_id)) so this is just an additional
+      // WHERE on portfolio_holdings; no new joins. On rejection (bad id /
+      // unknown name / low confidence) we short-circuit to empty holdings +
+      // a warning, matching the symbols-warnings contract from issue #86.
+      const accountWarnings: string[] = [];
+      let scopeAccountId: number | null = null;
+      let scopeRejected = false;
+      if (account_id != null) {
+        const ownsRow = await q(db, sql`
+          SELECT 1 AS ok FROM accounts WHERE id = ${account_id} AND user_id = ${userId}
+        `);
+        if (!ownsRow.length) {
+          accountWarnings.push(`account_id=${account_id}: not found`);
+          scopeRejected = true;
+        } else {
+          scopeAccountId = account_id;
+        }
+      } else if (account != null) {
+        const rawAccounts = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          if (resolved.reason === "low_confidence") {
+            accountWarnings.push(`${account}: no matching account (did you mean ${resolved.suggestion.name} id=${Number(resolved.suggestion.id)}?)`);
+          } else {
+            accountWarnings.push(`${account}: no matching account`);
+          }
+          scopeRejected = true;
+        } else {
+          scopeAccountId = Number(resolved.account.id);
+        }
+      }
       const todayStr = new Date().toISOString().split("T")[0];
       const fxCache = new Map<string, number>();
       const fxFor = async (ccy: string): Promise<number> => {
@@ -3971,6 +4315,34 @@ export function registerPgTools(
         return r;
       };
 
+      // Issue #123: when the caller passed an account scope and it failed to
+      // resolve, short-circuit to empty holdings + the warnings array. Same
+      // shape as a successful empty result (no error) so callers stay
+      // monomorphic — mirrors the symbols-all-unmatched warnings contract.
+      if (scopeRejected) {
+        return text({
+          disclaimer: PORTFOLIO_DISCLAIMER,
+          note: "Account scope did not resolve — no holdings returned. See `warnings` for details.",
+          totalHoldings: 0,
+          reportingCurrency: reporting,
+          warnings: accountWarnings,
+          summary: {
+            totalCostBasis: 0,
+            lifetimeCostBasis: 0,
+            totalRealizedGain: 0,
+            totalDividends: 0,
+            totalReturn: 0,
+            totalReturnPct: null,
+            lifetimeCostBasisReporting: tagAmount(0, reporting, "reporting"),
+            totalRealizedGainReporting: tagAmount(0, reporting, "reporting"),
+            totalDividendsReporting: tagAmount(0, reporting, "reporting"),
+            totalReturnReporting: tagAmount(0, reporting, "reporting"),
+            totalReturnPctReporting: null,
+          },
+          holdings: [],
+        });
+      }
+
       // Issue #84: dividends classified by category_id, not the legacy
       // qty=0+amt>0 heuristic. Pass the user's Dividends category id (or
       // null if they have no such category) into the aggregator.
@@ -3980,18 +4352,24 @@ export function registerPgTools(
       // Issue #86: SELECT ph.id so we can build an id-keyed phMap. Two
       // holdings sharing a display name (TFSA + RRSP) collide in a
       // name-keyed map; keying by id keeps them distinct.
+      // Issue #123: SELECT ph.account_id so we can guard rows in the per-row
+      // loop below when an account scope is active. The filter rides the
+      // existing holding_accounts JOIN grain (issue #25); we don't add a new
+      // join — just an extra WHERE predicate.
+      // Stream D Phase 4: ph.name, ph.symbol, a.name dropped — read *_ct only.
       const phRaw = await q(db, sql`
-        SELECT ph.id, ph.name, ph.name_ct, ph.symbol, ph.symbol_ct, ph.currency,
-               a.name as account_name, a.name_ct as account_name_ct
+        SELECT ph.id, ph.account_id, ph.name_ct, ph.symbol_ct, ph.currency,
+               a.name_ct as account_name_ct
         FROM portfolio_holdings ph
         JOIN accounts a ON a.id = ph.account_id
         WHERE ph.user_id = ${userId}
+          ${scopeAccountId != null ? sql`AND ph.account_id = ${scopeAccountId}` : sql``}
       `);
       const ph: Row[] = phRaw.map((p) => ({
         ...p,
-        name: p.name_ct && dek ? decryptField(dek, p.name_ct) : p.name,
-        symbol: p.symbol_ct && dek ? decryptField(dek, p.symbol_ct) : p.symbol,
-        account_name: p.account_name_ct && dek ? decryptField(dek, p.account_name_ct) : p.account_name,
+        name: p.name_ct && dek ? decryptField(dek, p.name_ct) : null,
+        symbol: p.symbol_ct && dek ? decryptField(dek, p.symbol_ct) : null,
+        account_name: p.account_name_ct && dek ? decryptField(dek, p.account_name_ct) : null,
       }));
       const phMap = new Map<number, Row>(ph.map(p => [Number(p.id), p]));
 
@@ -3999,6 +4377,16 @@ export function registerPgTools(
       // Track which filter entries matched at least one holding; unmatched
       // ones surface in the response as warnings.
       const matchedFilters = new Set<string>();
+      // Issue #124: pre-tokenize each filter entry once. Empty/whitespace-only
+      // entries (e.g. "()" tokenizes to []) would vacuously match every row
+      // under `tokens.every(...)` — guard them here and let them surface as
+      // unmatched warnings instead.
+      const symbolTokens = symbolFilters
+        ? symbolFilters.map(s => ({
+            raw: s,
+            tokens: s.split(/[\s()[\]]+/).filter(Boolean),
+          }))
+        : null;
 
       const today = new Date();
       type HoldingResult = {
@@ -4024,21 +4412,32 @@ export function registerPgTools(
         // and silently merge into one row; an id-keyed map keeps them
         // distinct and ensures `account` reflects the right side of the pair.
         const info = m.holding_id != null ? phMap.get(Number(m.holding_id)) : undefined;
-        if (symbolFilters) {
-          const name = String(m.name).toLowerCase();
+        // Issue #123: when an account scope is active, phMap only contains
+        // matching-account holdings. metrics covers ALL user holdings, so
+        // skip rows whose info is missing under that scope. Without a scope
+        // we still tolerate missing info (defensive — an aggregator row
+        // without a phMap match falls through to the existing null/empty
+        // handling below).
+        if (scopeAccountId != null && !info) continue;
+        if (symbolTokens) {
+          const name = String(m.name ?? "").toLowerCase();
           const sym = String(info?.symbol ?? "").toLowerCase();
-          // Token-overlap check: split filter and target on whitespace +
-          // parens + brackets and accept any shared non-empty token.
-          // Handles inputs like "VCN.TO (TFSA)" matching a holding named
-          // "VCN.TO". Falls back to substring match for the common case.
-          const matched = symbolFilters.some(s => {
-            if (name.includes(s) || sym.includes(s)) {
-              matchedFilters.add(s);
+          const acct = String(info?.account_name ?? "").toLowerCase();
+          // Issue #124: AND-within-entry semantic. Build a single haystack
+          // covering name + symbol + account, and require every token in a
+          // filter entry to appear in it. Across entries the semantic is OR.
+          // Full-string substring fast path stays for the cheap single-token
+          // case. Skip empty-token entries (e.g. "()" → [tokens=[]]) so they
+          // surface as warnings rather than vacuously matching every row.
+          const haystack = `${name} ${sym} ${acct}`;
+          const matched = symbolTokens.some(({ raw, tokens }) => {
+            if (tokens.length === 0) return false;
+            if (haystack.includes(raw)) {
+              matchedFilters.add(raw);
               return true;
             }
-            const tokens = s.split(/[\s()[\]]+/).filter(Boolean);
-            const hit = tokens.some(t => name.includes(t) || sym.includes(t));
-            if (hit) matchedFilters.add(s);
+            const hit = tokens.every(t => haystack.includes(t));
+            if (hit) matchedFilters.add(raw);
             return hit;
           });
           if (!matched) continue;
@@ -4113,10 +4512,16 @@ export function registerPgTools(
       // Issue #86: surface unmatched `symbols` filter entries as warnings so
       // the caller can correct typos/missing positions instead of silently
       // getting an empty result.
-      const warnings: string[] = symbolFilters
-        ? symbols!.filter(s => !matchedFilters.has(s.toLowerCase()))
-            .map(s => `${s}: no matching holding found`)
-        : [];
+      // Issue #123: merge any account-scope warnings (e.g. account_id not
+      // owned, or low-confidence fuzzy account match) into the same array.
+      // The contract is strings only — no objects — to keep callers simple.
+      const warnings: string[] = [
+        ...accountWarnings,
+        ...(symbolFilters
+          ? symbols!.filter(s => !matchedFilters.has(s.toLowerCase()))
+              .map(s => `${s}: no matching holding found`)
+          : []),
+      ];
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
@@ -4253,17 +4658,31 @@ export function registerPgTools(
       // qty=0+amt>0 heuristic.
       const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
       // Issue #96: LEFT JOIN to cash-leg sibling (multi-currency trade
-      // pair). cash.amount is the broker's actual settlement value in the
-      // brokerage account's currency; we substitute it for t.amount on a
-      // paired buy row in the loop below. cash.id is null for unpaired
-      // rows (legacy / single-currency / non-buy) — fallback path.
+      // pair). cash.entered_amount is the broker's actual settlement value
+      // in cash.entered_currency; we substitute it for t.amount on a paired
+      // buy row in the loop below. cash.id is null for unpaired rows
+      // (legacy / single-currency / non-buy) — fallback path.
+      // Issue #128: SELECT t.trade_link_id so the per-row loop below can skip
+      // paired cash-leg rows from the realized-gain sell branch.
+      // Issue #129: SELECT ph.currency, t.entered_amount, t.entered_currency,
+      // and the cash leg's entered_*; the per-row loop normalizes amounts
+      // into the holding's own currency. Without this, cross-currency
+      // holdings (USD ETF inside CAD account) summed amounts in account
+      // currency and labeled them holding currency, producing inflated
+      // numbers and a downstream double-FX bug in reporting.
+      // Stream D Phase 4: ph.name, ph.symbol, a.name dropped — read *_ct only.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
-               t.portfolio_holding_id, t.category_id,
-               ph.name_ct as ph_name_ct, ph.name as ph_name,
-               ph.symbol as ph_symbol, ph.symbol_ct as ph_symbol_ct,
-               a.name as account_name, a.name_ct as account_name_ct, a.currency,
-               cash.amount AS cash_amount, cash.id AS cash_id
+               t.portfolio_holding_id, t.category_id, t.trade_link_id,
+               t.entered_amount, t.entered_currency, t.currency AS row_currency,
+               ph.name_ct as ph_name_ct,
+               ph.symbol_ct as ph_symbol_ct,
+               ph.currency as holding_currency,
+               a.name_ct as account_name_ct, a.currency,
+               cash.amount AS cash_amount, cash.id AS cash_id,
+               cash.entered_amount AS cash_entered_amount,
+               cash.entered_currency AS cash_entered_currency,
+               cash.currency AS cash_row_currency
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         INNER JOIN holding_accounts ha
@@ -4283,24 +4702,19 @@ export function registerPgTools(
       `);
 
       const decryptedAll: Row[] = rawTxns.map((t) => {
-        // Decrypt the JOINed holding's name (ph_name_ct preferred, plaintext
-        // ph_name fallback for legacy rows pre-Stream-D).
+        // Stream D Phase 4: only ciphertext sources remain. Decrypt or null.
         let ph: string | null = null;
         if (t.ph_name_ct && dek) {
           try { ph = decryptField(dek, String(t.ph_name_ct)) ?? null; } catch { ph = null; }
         }
-        if (!ph && t.ph_name) ph = String(t.ph_name);
-        // Same fallback ladder for the symbol — tool's "fuzzy match on name
-        // OR symbol" contract relies on exact equality on this.
         let ph_sym: string | null = null;
         if (t.ph_symbol_ct && dek) {
           try { ph_sym = decryptField(dek, String(t.ph_symbol_ct)) ?? null; } catch { ph_sym = null; }
         }
-        if (!ph_sym && t.ph_symbol) ph_sym = String(t.ph_symbol);
         const pay = dek ? decryptField(dek, String(t.payee ?? "")) : t.payee;
         const nt = dek ? decryptField(dek, String(t.note ?? "")) : t.note;
         const tg = dek ? decryptField(dek, String(t.tags ?? "")) : t.tags;
-        const accName = t.account_name_ct && dek ? decryptField(dek, String(t.account_name_ct)) : t.account_name;
+        const accName = t.account_name_ct && dek ? decryptField(dek, String(t.account_name_ct)) : null;
         return { ...t, portfolio_holding: ph, ph_symbol: ph_sym, payee: pay, note: nt, tags: tg, account_name: accName };
       });
       // Issue #86: when `holdingId` is provided, short-circuit the fuzzy
@@ -4374,6 +4788,41 @@ export function registerPgTools(
         )?.portfolio_holding_id as number | undefined) ?? null);
       const today = new Date();
 
+      // Issue #129: holding currency is sourced from `ph.currency` (the
+      // JOINed portfolio_holdings currency), NOT `a.currency` (account
+      // currency). Cross-currency holdings (e.g. USD ETF in a CAD account)
+      // had their cost basis previously labeled with the account currency;
+      // the fix re-labels with the actual holding currency AND normalizes
+      // the per-row amount into that currency. Falls back to account
+      // currency only if ph.currency is null (legacy data with broken FK).
+      const holdingCurrency = String(
+        txns[0]?.holding_currency ?? txns[0]?.currency ?? reporting
+      ).toUpperCase();
+
+      // Pre-resolve every (entered_currency → holding_currency) FX hop
+      // into a synchronous cache.
+      const fxCache = new Map<string, number>();
+      const fxPair = (from: string, to: string) => `${from.toUpperCase()}->${to.toUpperCase()}`;
+      const neededPairs = new Set<string>();
+      for (const t of txns) {
+        const enteredCcy = String(t.entered_currency ?? t.row_currency ?? t.currency ?? "").toUpperCase();
+        if (enteredCcy && enteredCcy !== holdingCurrency) neededPairs.add(fxPair(enteredCcy, holdingCurrency));
+        if (t.cash_id != null) {
+          const cashCcy = String(t.cash_entered_currency ?? t.cash_row_currency ?? t.currency ?? "").toUpperCase();
+          if (cashCcy && cashCcy !== holdingCurrency) neededPairs.add(fxPair(cashCcy, holdingCurrency));
+        }
+      }
+      for (const key of neededPairs) {
+        const [from, to] = key.split("->");
+        fxCache.set(key, await getRate(from, to, todayStr, userId));
+      }
+      const fxLookup = (from: string, to: string): number => {
+        const f = (from || "").toUpperCase();
+        const t2 = (to || "").toUpperCase();
+        if (!f || !t2 || f === t2) return 1;
+        return fxCache.get(fxPair(f, t2)) ?? 1;
+      };
+
       let buyQty = 0, buyAmt = 0, sellQty = 0, sellAmt = 0, divAmt = 0;
       const purchases: typeof txns = [];
       const sales: typeof txns = [];
@@ -4389,20 +4838,62 @@ export function registerPgTools(
       // silently dropped dividend reinvestments and withholding-tax /
       // negative-correction rows. When the user has no Dividends category
       // (dividendsCategoryId == null), divAmt stays 0.
+      //
+      // Issue #129: every per-row amount is normalized into the holding's
+      // own currency. entered_amount + entered_currency is the truth
+      // source; falls back to amount + account-currency for un-backfilled
+      // legacy rows. For paired buys (issue #96) the cash leg's
+      // entered_amount/currency wins. The previous code summed amounts in
+      // account currency and labeled them with the holding currency,
+      // producing inflated cost basis on every cross-currency holding.
       for (const t of txns) {
         const qty = Number(t.quantity ?? 0);
         const amt = Number(t.amount);
         const catId = t.category_id != null ? Number(t.category_id) : null;
+        const enteredCcy = String(t.entered_currency ?? t.row_currency ?? t.currency ?? "").toUpperCase();
         if (qty > 0) {
           // Issue #96: paired cash-leg cost basis when present.
-          const cashAmt = t.cash_id != null ? Number(t.cash_amount) : NaN;
-          const buyCostAmt = Number.isFinite(cashAmt) ? Math.abs(cashAmt) : Math.abs(amt);
-          buyQty += qty; buyAmt += buyCostAmt; purchases.push(t);
+          // Issue #129: prefer cash.entered_amount in cash.entered_currency,
+          // FX-converted into holding currency; falls back to cash.amount in
+          // the cash row's currency, then to the stock leg's
+          // entered_amount/amount.
+          let buyCostInHolding: number;
+          if (t.cash_id != null) {
+            const cashEnteredAmt = t.cash_entered_amount != null ? Number(t.cash_entered_amount) : NaN;
+            const cashAmt = Number.isFinite(cashEnteredAmt) ? cashEnteredAmt : Number(t.cash_amount ?? 0);
+            const cashCcy = String(t.cash_entered_currency ?? t.cash_row_currency ?? t.currency ?? "").toUpperCase();
+            buyCostInHolding = Math.abs(cashAmt) * fxLookup(cashCcy, holdingCurrency);
+          } else {
+            const enteredAmt = t.entered_amount != null ? Number(t.entered_amount) : NaN;
+            const buyCostInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+            buyCostInHolding = buyCostInEntered * fxLookup(enteredCcy, holdingCurrency);
+          }
+          buyQty += qty; buyAmt += buyCostInHolding; purchases.push(t);
         } else if (qty < 0) {
-          sellQty += Math.abs(qty); sellAmt += Math.abs(amt); sales.push(t);
+          // Issue #128: skip paired cash-leg rows (`trade_link_id IS NOT NULL
+          // AND amount = 0`) from the realized-gain sell branch. These are
+          // the cash-side sibling of a tradeGroupKey-paired buy (issue #96);
+          // counting them as sells produced a phantom realized loss on the
+          // cash sleeve. Conjunctive predicate leaves legitimate cash
+          // withdrawals untouched.
+          const tradeLinkId = t.trade_link_id ?? null;
+          if (tradeLinkId != null && amt === 0) {
+            // Paired cash-leg sibling — skip sell-branch contribution.
+          } else {
+            // Issue #129: sell amount in entered_currency, FX-converted.
+            const enteredAmt = t.entered_amount != null ? Number(t.entered_amount) : NaN;
+            const sellAmtInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+            const sellAmtInHolding = sellAmtInEntered * fxLookup(enteredCcy, holdingCurrency);
+            sellQty += Math.abs(qty); sellAmt += sellAmtInHolding; sales.push(t);
+          }
         }
         if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
-          divAmt += amt;
+          // Issue #129: dividend amount in entered_currency, FX-converted.
+          // Sign preserved (dividends contribute positive; withholding-
+          // tax / corrections contribute negative — see issue #84).
+          const enteredAmt = t.entered_amount != null ? Number(t.entered_amount) : NaN;
+          const divInEntered = Number.isFinite(enteredAmt) ? enteredAmt : amt;
+          divAmt += divInEntered * fxLookup(enteredCcy, holdingCurrency);
           dividends.push(t);
         }
       }
@@ -4417,10 +4908,6 @@ export function registerPgTools(
         ? Math.floor((today.getTime() - new Date(String(firstDate)).getTime()) / 86400000)
         : null;
 
-      // Holding currency: sourced from the dominant account currency in
-      // the txn set (a.currency joined above). Falls back to reporting if
-      // every row has it null.
-      const holdingCurrency = String(txns[0]?.currency ?? reporting);
       const fxToReporting = await getRate(holdingCurrency, reporting, todayStr, userId);
 
       return text({
@@ -4506,8 +4993,9 @@ export function registerPgTools(
       // list rather than averaging across them.
       let resolvedHoldingId: number | null = holdingId ?? null;
       if (resolvedHoldingId == null) {
+        // Stream D Phase 4: name + symbol plaintext columns dropped.
         const candidatesRaw = await q(db, sql`
-          SELECT id, name, name_ct, symbol, symbol_ct, account_id
+          SELECT id, name_ct, symbol_ct, account_id
           FROM portfolio_holdings
           WHERE user_id = ${userId}
         `);
@@ -4516,7 +5004,6 @@ export function registerPgTools(
           if (c.symbol_ct && dek) {
             try { sym = decryptField(dek, String(c.symbol_ct)) ?? null; } catch { sym = null; }
           }
-          if (!sym && c.symbol) sym = String(c.symbol);
           return { ...c, symbol_decrypted: sym };
         });
         const matches: Row[] = candidates.filter((c: Row) => {
@@ -4576,9 +5063,10 @@ export function registerPgTools(
       const unjoinedTransactionCount = Number(unjoinedRows[0]?.cnt ?? 0);
 
       // Pull every contributing leg via the same JOIN the aggregators use.
+      // Stream D Phase 4: a.name dropped — read a.name_ct only.
       const legsRaw = await q(db, sql`
         SELECT t.id, t.date, t.account_id, t.quantity, t.amount, t.source,
-               a.name AS account_name, a.name_ct AS account_name_ct,
+               a.name_ct AS account_name_ct,
                t.payee
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
@@ -4941,10 +5429,11 @@ export function registerPgTools(
     "List all loans with balance, rate, payment, payoff date, and linked account",
     {},
     async () => {
+      // Stream D Phase 4: l.name + a.name dropped — read *_ct only.
       const rawRows = await q(db, sql`
-        SELECT l.id, l.name, l.name_ct, l.type, l.principal, l.annual_rate, l.term_months,
+        SELECT l.id, l.name_ct, l.type, l.principal, l.annual_rate, l.term_months,
                l.start_date, l.payment_amount, l.payment_frequency, l.extra_payment,
-               l.note, l.account_id, a.name AS account_name, a.name_ct AS account_name_ct
+               l.note, l.account_id, a.name_ct AS account_name_ct
         FROM loans l
         LEFT JOIN accounts a ON a.id = l.account_id
         WHERE l.user_id = ${userId}
@@ -4952,8 +5441,8 @@ export function registerPgTools(
       `);
       const rows: Row[] = rawRows.map((r) => ({
         ...r,
-        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
-        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : r.account_name,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
+        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : null,
       }));
       const today = new Date().toISOString().split("T")[0];
       const enriched = rows.map((r) => {
@@ -5109,13 +5598,14 @@ export function registerPgTools(
     },
     async ({ loan_id, as_of_date, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
+      // Stream D Phase 4: l.name dropped — read l.name_ct only.
       const rows = await q(db, sql`
-        SELECT id, name, principal, annual_rate, term_months, start_date,
+        SELECT id, name_ct, principal, annual_rate, term_months, start_date,
                payment_frequency, extra_payment, currency
         FROM loans WHERE id = ${loan_id} AND user_id = ${userId}
       `);
       if (!rows.length) return err(`Loan #${loan_id} not found`);
-      const loan = rows[0];
+      const loan = decryptNameish(rows, dek)[0];
       const summary = generateAmortizationSchedule(
         Number(loan.principal),
         Number(loan.annual_rate),
@@ -5164,12 +5654,14 @@ export function registerPgTools(
     },
     async ({ strategy, extra_payment, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
-      const loans = await q(db, sql`
-        SELECT id, name, principal, annual_rate, term_months, start_date,
+      // Stream D Phase 4: l.name dropped — read l.name_ct only.
+      const loansRaw = await q(db, sql`
+        SELECT id, name_ct, principal, annual_rate, term_months, start_date,
                payment_amount, payment_frequency, extra_payment
         FROM loans WHERE user_id = ${userId}
       `);
-      if (!loans.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
+      if (!loansRaw.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
+      const loans = decryptNameish(loansRaw, dek);
       const today = new Date().toISOString().split("T")[0];
       const debts: Debt[] = loans.map((l) => {
         const summary = generateAmortizationSchedule(
@@ -5324,11 +5816,12 @@ export function registerPgTools(
     "List all subscriptions with full detail (status, next billing, category, account, notes)",
     { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
     async ({ status }) => {
+      // Stream D Phase 4: s.name + c.name + a.name dropped — read *_ct only.
       const raw = await q(db, sql`
-        SELECT s.id, s.name, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
+        SELECT s.id, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
                s.cancel_reminder_date, s.notes,
-               s.category_id, c.name AS category_name, c.name_ct AS category_name_ct,
-               s.account_id, a.name AS account_name, a.name_ct AS account_name_ct
+               s.category_id, c.name_ct AS category_name_ct,
+               s.account_id, a.name_ct AS account_name_ct
         FROM subscriptions s
         LEFT JOIN categories c ON c.id = s.category_id
         LEFT JOIN accounts a ON a.id = s.account_id
@@ -5336,12 +5829,11 @@ export function registerPgTools(
           ${status && status !== "all" ? sql`AND s.status = ${status}` : sql``}
         ORDER BY s.status
       `);
-      // Stream D: decrypt name + joined category_name + account_name.
       const rows = raw.map((r) => ({
         ...r,
-        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : r.name,
-        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : r.category_name,
-        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : r.account_name,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
+        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
+        account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : null,
       }));
       return text({ success: true, data: rows });
     }
@@ -5362,11 +5854,13 @@ export function registerPgTools(
       notes: z.string().optional(),
     },
     async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
-      const lookup = dek ? nameLookup(dek, name) : null;
+      // Stream D Phase 4: subscriptions.name plaintext column dropped — uniqueness
+      // gate now relies on name_lookup HMAC. No DEK ⇒ no lookup ⇒ refuse cleanly.
+      if (!dek) return err("Cannot create subscription without an unlocked DEK (Stream D Phase 4).");
+      const lookup = nameLookup(dek, name);
       const existing = await q(db, sql`
         SELECT id FROM subscriptions
-        WHERE user_id = ${userId}
-          AND (name = ${name} ${lookup ? sql`OR name_lookup = ${lookup}` : sql``})
+        WHERE user_id = ${userId} AND name_lookup = ${lookup}
       `);
       if (existing.length) return err(`Subscription "${name}" already exists (id: ${existing[0].id})`);
 
@@ -5476,8 +5970,10 @@ export function registerPgTools(
     async ({ id }) => {
       const existing = await q(db, sql`SELECT id, name_ct FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Subscription #${id} not found`);
+      // Stream D Phase 4: name plaintext dropped — decrypt name_ct via DEK.
+      const decryptedName = existing[0].name_ct && dek ? decryptField(dek, String(existing[0].name_ct)) : null;
       await db.execute(sql`DELETE FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, data: { id, message: `Subscription "${existing[0].name}" deleted` } });
+      return text({ success: true, data: { id, message: `Subscription "${decryptedName ?? `#${id}`}" deleted` } });
     }
   );
 
@@ -5487,9 +5983,11 @@ export function registerPgTools(
     "List all auto-categorization rules with their match patterns and target categories",
     {},
     async () => {
+      // Stream D Phase 4: c.name dropped — read c.name_ct only.
+      // r.name is on transaction_rules, NOT in the Phase-4 drop scope.
       const rawRows = await q(db, sql`
         SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
-               r.assign_category_id, c.name AS category_name, c.name_ct AS category_name_ct,
+               r.assign_category_id, c.name_ct AS category_name_ct,
                r.assign_tags, r.rename_to, r.is_active, r.priority, r.created_at
         FROM transaction_rules r
         LEFT JOIN categories c ON c.id = r.assign_category_id
@@ -5500,7 +5998,7 @@ export function registerPgTools(
         const { category_name_ct, ...rest } = r;
         return {
           ...rest,
-          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : null,
         };
       });
       return text({ success: true, data: rows });
@@ -5532,7 +6030,8 @@ export function registerPgTools(
       if (assign_category !== undefined) {
         if (assign_category === "") assignCategoryIdUpdate = null;
         else {
-          const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+          const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+          const allCats = decryptNameish(rawCats, dek);
           const cat = fuzzyFind(assign_category, allCats);
           if (!cat) return err(`Category "${assign_category}" not found`);
           assignCategoryIdUpdate = Number(cat.id);
@@ -5601,10 +6100,11 @@ export function registerPgTools(
       if (!value && field !== "amount") return err("match_value or match_payee is required");
       const limit = sample_size ?? 5000;
 
+      // Stream D Phase 4: c.name + a.name dropped — read *_ct only.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.payee, t.tags, t.amount, t.category_id,
-               c.name AS category_name, c.name_ct AS category_name_ct,
-               t.account_id, a.name AS account_name, a.name_ct AS account_name_ct
+               c.name_ct AS category_name_ct,
+               t.account_id, a.name_ct AS account_name_ct
         FROM transactions t
         LEFT JOIN categories c ON c.id = t.category_id
         LEFT JOIN accounts a ON a.id = t.account_id
@@ -5616,8 +6116,8 @@ export function registerPgTools(
         const { category_name_ct, account_name_ct, ...rest } = r;
         return {
           ...rest,
-          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
-          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account_name,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : null,
+          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : null,
         };
       });
 
@@ -5802,10 +6302,11 @@ export function registerPgTools(
     async ({ transaction_id }) => {
       const owner = await q(db, sql`SELECT id FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
+      // Stream D Phase 4: c.name + a.name dropped — read *_ct only.
       const rawSplits = await q(db, sql`
         SELECT s.id, s.transaction_id, s.category_id,
-               c.name AS category_name, c.name_ct AS category_name_ct,
-               s.account_id, a.name AS account_name, a.name_ct AS account_name_ct,
+               c.name_ct AS category_name_ct,
+               s.account_id, a.name_ct AS account_name_ct,
                s.amount, s.note, s.description, s.tags
         FROM transaction_splits s
         LEFT JOIN categories c ON c.id = s.category_id
@@ -5817,8 +6318,8 @@ export function registerPgTools(
         const { category_name_ct, account_name_ct, ...rest } = r;
         return {
           ...rest,
-          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : rest.category_name,
-          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : rest.account_name,
+          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : null,
+          account_name: account_name_ct && dek ? decryptField(dek, account_name_ct) : null,
         };
       });
       const decrypted = rows.map((r) => {
@@ -6260,9 +6761,10 @@ export function registerPgTools(
     }
 
     const sampleIds = ids.slice(0, 10);
+    // Stream D Phase 4: a.name + c.name dropped — read *_ct only.
     const rawRows = await q(db, sql`
-      SELECT t.id, t.date, t.account_id, a.name AS account, a.name_ct AS account_ct,
-             t.category_id, c.name AS category, c.name_ct AS category_ct,
+      SELECT t.id, t.date, t.account_id, a.name_ct AS account_ct,
+             t.category_id, c.name_ct AS category_ct,
              t.currency, t.amount, t.payee, t.note, t.tags, t.is_business,
              t.quantity, t.portfolio_holding_id
       FROM transactions t
@@ -6275,8 +6777,8 @@ export function registerPgTools(
       const { account_ct, category_ct, ...rest } = r;
       return {
         ...rest,
-        account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
-        category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+        account: account_ct && dek ? decryptField(dek, account_ct) : null,
+        category: category_ct && dek ? decryptField(dek, category_ct) : null,
       };
     });
     const before = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
@@ -6440,9 +6942,10 @@ export function registerPgTools(
           return text({ success: true, data: { affectedCount: 0, sample: [], confirmationToken: "" } });
         }
         const sampleIds = ids.slice(0, 10);
+        // Stream D Phase 4: a.name + c.name dropped — read *_ct only.
         const rawRows = await q(db, sql`
-          SELECT t.id, t.date, a.name AS account, a.name_ct AS account_ct,
-                 c.name AS category, c.name_ct AS category_ct,
+          SELECT t.id, t.date, a.name_ct AS account_ct,
+                 c.name_ct AS category_ct,
                  t.currency, t.amount, t.payee, t.note, t.tags
           FROM transactions t
           LEFT JOIN accounts a ON t.account_id = a.id
@@ -6454,8 +6957,8 @@ export function registerPgTools(
           const { account_ct, category_ct, ...rest } = r;
           return {
             ...rest,
-            account: account_ct && dek ? decryptField(dek, account_ct) : rest.account,
-            category: category_ct && dek ? decryptField(dek, category_ct) : rest.category,
+            account: account_ct && dek ? decryptField(dek, account_ct) : null,
+            category: category_ct && dek ? decryptField(dek, category_ct) : null,
           };
         });
         const sample = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
@@ -6838,8 +7341,11 @@ export function registerPgTools(
 
         // Dedup via generateImportHash — runs against plaintext payee, which
         // is what we have at this boundary.
-        const accounts = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
-        const accountByName = new Map<string, number>(accounts.map((a) => [String(a.name), Number(a.id)]));
+        // Stream D Phase 4: a.name dropped — decrypt name_ct via decryptNameish
+        // before building the lookup map.
+        const accountsRaw = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
+        const accounts = decryptNameish(accountsRaw, dek);
+        const accountByName = new Map<string, number>(accounts.map((a) => [String(a.name ?? ""), Number(a.id)]));
         const existingHashRows = await q(db, sql`SELECT import_hash FROM transactions WHERE user_id = ${userId} AND import_hash IS NOT NULL`);
         const existingHashes = new Set<string>(existingHashRows.map((r) => String(r.import_hash)));
 
@@ -6889,6 +7395,10 @@ export function registerPgTools(
             const dateMin = shiftIsoDate(dates[0], -7);
             const dateMax = shiftIsoDate(dates[dates.length - 1], 7);
             if (dateMin && dateMax) {
+              // `ARRAY[...]::int[]` (not `(${arr})::int[]` — Drizzle expands
+              // each element as a scalar param, so the latter parses as a
+              // row-cast). PR #142 follow-up.
+              const accountIdSetExpr = sql.join(accountIdSet.map((id) => sql`${id}`), sql`, `);
               const poolRows = await q(db, sql`
                 SELECT t.id, t.account_id, t.date, t.amount, t.payee, t.import_hash,
                        t.fit_id, t.link_id, c.type AS category_type, t.source,
@@ -6896,7 +7406,7 @@ export function registerPgTools(
                   FROM transactions t
                   LEFT JOIN categories c ON c.id = t.category_id
                  WHERE t.user_id = ${userId}
-                   AND t.account_id = ANY(${accountIdSet}::int[])
+                   AND t.account_id = ANY(ARRAY[${accountIdSetExpr}]::int[])
                    AND t.date BETWEEN ${dateMin} AND ${dateMax}
               `);
               const byAccount = new Map<number, DuplicateCandidateRow[]>();
@@ -6932,11 +7442,14 @@ export function registerPgTools(
               // Sibling-account index for transfer-pair hint.
               const siblingAccountByLinkId = new Map<string, number>();
               if (linkIds.length > 0) {
+                // `ARRAY[...]::text[]` for the same Drizzle-expansion reason
+                // documented above (PR #142 follow-up).
+                const linkIdsExpr = sql.join(linkIds.map((id) => sql`${id}`), sql`, `);
                 const sibRows = await q(db, sql`
                   SELECT link_id, account_id
                     FROM transactions
                    WHERE user_id = ${userId}
-                     AND link_id = ANY(${linkIds}::text[])
+                     AND link_id = ANY(ARRAY[${linkIdsExpr}]::text[])
                 `);
                 const accountSet = new Set<number>(accountIdSet);
                 const byLink = new Map<string, number[]>();

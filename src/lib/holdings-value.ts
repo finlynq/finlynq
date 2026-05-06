@@ -104,16 +104,39 @@ export async function getHoldingsValueByAccount(
   //
   // Issue #96: LEFT JOIN to the cash-leg sibling for multi-currency trade
   // pairs. When a buy row (qty>0) has a paired cash leg (same trade_link_id,
-  // qty=0), use the cash leg's `amount` (the broker's actual settlement in
-  // account currency) instead of the stock leg's amount (which is the same
-  // trade re-priced at Finlynq's live FX rate and under-counts the broker's
-  // spread). Both legs sit in the same brokerage account, so amount is in
-  // the same currency for both — no currency hop needed at this layer.
+  // qty=0), use the cash leg's `entered_amount`/`amount` instead of the
+  // stock leg's amount (which is the same trade re-priced at Finlynq's
+  // live FX rate and under-counts the broker's spread).
+  //
+  // Issue #129: per-currency bucketing. SELECT `entered_amount` +
+  // `entered_currency` (and `cash.entered_amount`/`cash.entered_currency`
+  // for paired buys) so cross-currency holdings (e.g. USD ETF inside CAD
+  // brokerage) sum cost basis in the *entered* currency. The post-query
+  // loop then FX-normalizes each bucket into the holding currency before
+  // computing avg cost. The legacy "approximation that transaction
+  // amounts == account currency" produced inflated cost-basis numbers
+  // for every cross-currency holding.
   const cashLeg = alias(schema.transactions, "cash");
   const isPairedBuy = sql<boolean>`(COALESCE(${schema.transactions.quantity}, 0) > 0 AND ${cashLeg.id} IS NOT NULL)`;
+  // Mirror the REST overview's effectiveBuyAmount / effectiveEnteredCurrency
+  // pattern so cash-leg substitution composes with per-currency bucketing.
+  const effectiveEnteredCurrency = sql<string>`
+    CASE
+      WHEN ${isPairedBuy} THEN COALESCE(${cashLeg.enteredCurrency}, ${cashLeg.currency})
+      ELSE COALESCE(${schema.transactions.enteredCurrency}, ${schema.transactions.currency})
+    END
+  `;
+  const effectiveBuyAmount = sql<number>`
+    CASE
+      WHEN ${isPairedBuy}
+        THEN ABS(COALESCE(${cashLeg.enteredAmount}, ${cashLeg.amount}))
+      ELSE ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}))
+    END
+  `;
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
+      enteredCurrency: effectiveEnteredCurrency,
       delta: sql<number>`COALESCE(SUM(
         CASE
           WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.quantity}
@@ -122,13 +145,7 @@ export async function getHoldingsValueByAccount(
         END
       ), 0)::float8`,
       totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
-      totalBuyAmount: sql<number>`COALESCE(SUM(
-        CASE
-          WHEN ${isPairedBuy} THEN ABS(${cashLeg.amount})
-          WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ABS(${schema.transactions.amount})
-          ELSE 0
-        END
-      ), 0)::float8`,
+      totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
       totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
     })
     .from(schema.transactions)
@@ -156,19 +173,29 @@ export async function getHoldingsValueByAccount(
       isNotNull(schema.transactions.portfolioHoldingId),
       lte(schema.transactions.date, asOfDate),
     ))
-    .groupBy(schema.transactions.portfolioHoldingId);
+    .groupBy(schema.transactions.portfolioHoldingId, effectiveEnteredCurrency);
 
   const qtyByHoldingId = new Map<number, number>();
-  type CostAgg = { buyQty: number; buyAmount: number; sellQty: number };
-  const costAggByHoldingId = new Map<number, CostAgg>();
+  // Per-currency cost buckets per holding. Each entry is the SUM of buy/sell
+  // amounts in its own `enteredCurrency`. Collapsed into holding-currency
+  // cost basis via the FX cache below.
+  type CostBucket = { enteredCurrency: string; buyQty: number; buyAmountInEntered: number; sellQty: number };
+  const costBucketsByHoldingId = new Map<number, CostBucket[]>();
   for (const r of fkAggRows) {
     if (r.portfolioHoldingId == null) continue;
-    qtyByHoldingId.set(r.portfolioHoldingId, Number(r.delta));
-    costAggByHoldingId.set(r.portfolioHoldingId, {
+    const delta = Number(r.delta);
+    qtyByHoldingId.set(
+      r.portfolioHoldingId,
+      (qtyByHoldingId.get(r.portfolioHoldingId) ?? 0) + delta,
+    );
+    const arr = costBucketsByHoldingId.get(r.portfolioHoldingId) ?? [];
+    arr.push({
+      enteredCurrency: String(r.enteredCurrency || "").toUpperCase(),
       buyQty: Number(r.totalBuyQty),
-      buyAmount: Number(r.totalBuyAmount),
+      buyAmountInEntered: Number(r.totalBuyAmountInEntered),
       sellQty: Number(r.totalSellQty),
     });
+    costBucketsByHoldingId.set(r.portfolioHoldingId, arr);
   }
 
   // Price lookups — exclude currency-code symbols (CAD, USD, …) since
@@ -270,24 +297,34 @@ export async function getHoldingsValueByAccount(
     const fx = await getFx(priceCurrency, accountCurrency);
     const valueInAccountCcy = qty * price * fx;
 
-    // Cost basis per holding: avg-cost × remaining qty, in transaction
-    // currency, then converted to account currency. Falls back to current
+    // Cost basis per holding: avg-cost (in HOLDING currency) × remaining
+    // qty, then converted to account currency. Falls back to current
     // market value when no buy transactions exist (e.g. holdings imported
     // from a snapshot with quantity but no buy legs) — sets unrealized G/L
     // to 0 rather than fabricating a gain.
-    const fkAgg = costAggByHoldingId.get(h.id);
-    const buyQty = fkAgg?.buyQty ?? 0;
-    const buyAmount = fkAgg?.buyAmount ?? 0;
-    const avgCostInTxCcy = buyQty > 0 ? buyAmount / buyQty : null;
+    //
+    // Issue #129: per-currency bucketing. Each bucket carries
+    // `buyAmountInEntered` in its own currency. FX-normalize each bucket
+    // into the holding currency, sum, then divide by total buy qty. For a
+    // USD ETF in a CAD account, the entered_amount is in USD — without the
+    // hop the previous "transaction amount = account currency" approximation
+    // produced a CAD figure mislabeled as USD/holding-ccy and inflated the
+    // cost basis (and the unrealized P&L) for every cross-currency holding.
+    const buckets = costBucketsByHoldingId.get(h.id) ?? [];
+    let totalBuyQty = 0;
+    let totalBuyAmountInHoldingCcy = 0;
+    for (const b of buckets) {
+      totalBuyQty += b.buyQty;
+      const enteredCcy = b.enteredCurrency || h.currency;
+      const fxToHoldingCcy = await getFx(enteredCcy, h.currency);
+      totalBuyAmountInHoldingCcy += b.buyAmountInEntered * fxToHoldingCcy;
+    }
+    const avgCostInHoldingCcy = totalBuyQty > 0 ? totalBuyAmountInHoldingCcy / totalBuyQty : null;
     let costBasisInAccountCcy: number;
-    if (avgCostInTxCcy != null) {
-      // Transaction amounts are stored in account currency for the row's
-      // account, so no FX hop needed when the holding lives in the same
-      // account. (Cross-currency holdings would need entered_currency
-      // handling; the portfolio overview's per-currency bucket logic
-      // covers that — for the dashboard balance number we accept the
-      // approximation that transaction amounts == account currency.)
-      costBasisInAccountCcy = qty * avgCostInTxCcy;
+    if (avgCostInHoldingCcy != null) {
+      const costBasisInHoldingCcy = qty * avgCostInHoldingCcy;
+      const fxHoldingToAccount = await getFx(h.currency, accountCurrency);
+      costBasisInAccountCcy = costBasisInHoldingCcy * fxHoldingToAccount;
     } else {
       costBasisInAccountCcy = valueInAccountCcy;
     }
