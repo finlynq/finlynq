@@ -23,6 +23,7 @@ import { decryptField } from "@/lib/crypto/envelope";
 // stream-d-backfill + stream-d-phase3-null helpers deleted. Canonicalize
 // remains and reads ciphertext directly.
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
+import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
 
 const verifySchema = z.object({
   mfaPendingToken: z.string().min(1, "Pending token is required"),
@@ -103,6 +104,8 @@ export async function POST(request: NextRequest) {
       if (pendingJti) deleteDEK(pendingJti);
       // Stream D Phase 4: only canonicalization remains. See login route.
       enqueueCanonicalizePortfolioNames(user.id, pendingDek);
+      // Staging encryption upgrade — see login route for rationale.
+      enqueueUpgradeStagingEncryption(user.id, pendingDek);
     }
 
     const response = NextResponse.json({ success: true });

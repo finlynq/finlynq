@@ -41,8 +41,11 @@ export interface StageEmailImportResult {
   alreadyProcessed: boolean;
 }
 
-/** 14 days as ms. */
-const STAGE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+/** 60 days as ms. Bumped from 14d on 2026-05-06 alongside the login-time
+ *  service→user encryption upgrade — rows convert to user-DEK as soon as
+ *  the user is active, so the longer plaintext-equivalent window is bounded
+ *  by the user's login cadence, not the full 60d. */
+const STAGE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 
 export async function stageEmailImport(
   input: StageEmailImportInput,

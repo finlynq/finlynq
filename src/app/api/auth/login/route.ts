@@ -33,6 +33,7 @@ import { putDEK } from "@/lib/crypto/dek-cache";
 // `stream-d-phase3-null` (NULLs plaintext after backfill) are obsolete with
 // no plaintext source; both helpers were deleted.
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
+import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
 
 // Accept either {identifier, password} (preferred) OR {email, password}
 // (legacy clients). Both shapes normalise to an `identifier` string.
@@ -191,6 +192,11 @@ export async function POST(request: NextRequest) {
       // "Cash <CCY>"). User-defined positions keep their free-text name.
       // Bails silently for DEK-mismatch users — sample-decrypt precondition.
       enqueueCanonicalizePortfolioNames(user.id, dek);
+      // Service→user staging-row encryption upgrade (2026-05-06). Flips this
+      // user's pending email-staged rows from PF_STAGING_KEY to user-DEK so
+      // the 60-day window isn't service-key-decryptable for active users.
+      // Idempotent, fire-and-forget, errors swallowed.
+      enqueueUpgradeStagingEncryption(user.id, dek);
     }
 
     const response = NextResponse.json({ success: true });

@@ -25,6 +25,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { executeImport, type RawTransaction } from "@/lib/import-pipeline";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
+import { tryDecryptField } from "@/lib/crypto/envelope";
 import { sourceTagFor } from "@/lib/tx-source";
 
 export const dynamic = "force-dynamic";
@@ -83,21 +84,32 @@ export async function POST(
     return NextResponse.json({ error: "No rows selected" }, { status: 400 });
   }
 
-  // Shape for executeImport. Decrypt the staging-envelope fields (Finding #9)
-  // before passing to the pipeline — the pipeline expects plaintext and then
+  // Shape for executeImport. Decrypt the staging-envelope fields before
+  // passing to the pipeline — the pipeline expects plaintext and then
   // re-encrypts under the user's DEK inside `transactions`.
+  //
+  // Tier branching (2026-05-06): rows can be at 'service' tier (sv1: under
+  // PF_STAGING_KEY) or 'user' tier (v1: under this user's DEK), depending on
+  // whether the login-time upgrade job has run yet. tryDecryptField returns
+  // null on auth-tag failure (load-bearing per CLAUDE.md) — null fields fall
+  // back to "" / undefined the same way they did pre-tier.
+  //
   // Issue #62: stamp source:email so cross-source dedup can identify rows
   // that arrived via Resend Inbound. The staged_imports/staged_transactions
   // tables don't carry `tags`, so we apply it at materialize time.
   const emailTag = sourceTagFor("email");
+  const decode = (value: string | null, tier: string): string | null => {
+    if (value == null) return null;
+    return tier === "user" ? tryDecryptField(dek, value) : decryptStaged(value);
+  };
   const rows: RawTransaction[] = selected.map((r) => ({
     date: r.date,
-    account: decryptStaged(r.accountName) ?? "",
+    account: decode(r.accountName, r.encryptionTier) ?? "",
     amount: r.amount,
-    payee: decryptStaged(r.payee) ?? "",
-    category: decryptStaged(r.category) ?? undefined,
+    payee: decode(r.payee, r.encryptionTier) ?? "",
+    category: decode(r.category, r.encryptionTier) ?? undefined,
     currency: r.currency ?? undefined,
-    note: decryptStaged(r.note) ?? undefined,
+    note: decode(r.note, r.encryptionTier) ?? undefined,
     tags: emailTag,
   }));
 

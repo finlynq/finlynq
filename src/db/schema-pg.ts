@@ -611,8 +611,18 @@ export const stagedTransactions = pgTable("staged_transactions", {
   id: text("id").primaryKey(), // UUID
   stagedImportId: text("staged_import_id").notNull().references(() => stagedImports.id, { onDelete: "cascade" }),
   userId: text("user_id").notNull().references(() => users.id),
-  // Plaintext — bounded lifetime (14 days), deleted on approve/reject/expire.
-  // Re-inserted into `transactions` with the user's DEK at approve time.
+  // Encrypted — bounded lifetime (60 days, 2026-05-06), deleted on
+  // approve/reject/expire. Re-inserted into `transactions` with the user's
+  // DEK at approve time.
+  //
+  // Two-tier encryption:
+  //   - 'service' (default at ingest): wrapped with PF_STAGING_KEY (sv1:),
+  //     readable by anyone with the env var + DB.
+  //   - 'user': wrapped with the user's DEK (v1:), readable only by that
+  //     user. The login-time upgrade job (enqueueUpgradeStagingEncryption)
+  //     flips rows from service → user when the DEK becomes available.
+  // Read paths branch on `encryption_tier` to pick decryptStaged() vs
+  // tryDecryptField(dek, ...).
   date: text("date").notNull(),
   amount: doublePrecision("amount").notNull(),
   currency: text("currency").default("CAD"),
@@ -623,6 +633,7 @@ export const stagedTransactions = pgTable("staged_transactions", {
   rowIndex: integer("row_index").notNull(),
   isDuplicate: boolean("is_duplicate").notNull().default(false),
   importHash: text("import_hash").notNull(),
+  encryptionTier: text("encryption_tier").notNull().default("service"),
 });
 
 // ─── Email Import — Admin Inbox + Trash (Phase A) ──────────────────────────
