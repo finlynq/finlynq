@@ -2917,4 +2917,104 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       return txt({ success: true, data: { uploadId: upload_id, message: "Upload cancelled" } });
     }
   );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Staging review tools — stdio refusals (issue #156, 2026-05-06)
+  //
+  // The seven staging-review tools all require either (a) the user's DEK
+  // (writes that re-encrypt fields under user-tier; approve materializes
+  // into encrypted `transactions`) or (b) per-row tier-branched decryption
+  // that would silently surface raw `v1:` ciphertext to Claude on user-tier
+  // rows when no DEK is available.
+  //
+  // Stdio MCP carries no DEK and has no per-request user context beyond
+  // PF_USER_ID. Every tool refuses cleanly and points at the HTTP MCP
+  // transport. The refusal message MUST NOT echo PF_USER_ID — the load-
+  // bearing rule is "don't surface user IDs in stdio errors."
+  // ─────────────────────────────────────────────────────────────────────────
+  const stagingHttpOnlyError = () =>
+    sqliteErr(
+      "This tool requires the HTTP MCP transport because staging operations need to read or write encrypted data under your DEK. Connect via the HTTP MCP at /mcp instead, or use the web UI at /import/pending.",
+    );
+
+  server.tool(
+    "list_staged_imports",
+    "List the user's staged imports (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    {
+      status: z.enum(["pending", "imported", "rejected"]).optional(),
+      limit: z.number().int().positive().optional(),
+    },
+    async () => stagingHttpOnlyError(),
+  );
+
+  server.tool(
+    "get_staged_import",
+    "Fetch full detail for one staged import (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    { stagedImportId: z.string() },
+    async () => stagingHttpOnlyError(),
+  );
+
+  server.tool(
+    "list_staged_transactions",
+    "Flat list of staged transaction rows (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    {
+      stagedImportId: z.string().optional(),
+      dedupStatus: z.enum(["new", "existing", "probable_duplicate"]).optional(),
+      rowStatus: z.enum(["pending", "approved", "rejected"]).optional(),
+      txType: z.enum(["E", "I", "R"]).optional(),
+      limit: z.number().int().positive().optional(),
+    },
+    async () => stagingHttpOnlyError(),
+  );
+
+  server.tool(
+    "update_staged_transaction",
+    "Edit a single staged transaction row (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    {
+      stagedTransactionId: z.string(),
+      txType: z.enum(["E", "I", "R"]).optional(),
+      payee: z.string().optional(),
+      category: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+      quantity: z.number().nullable().optional(),
+      portfolioHoldingId: z.number().int().nullable().optional(),
+      enteredAmount: z.number().nullable().optional(),
+      enteredCurrency: z.string().nullable().optional(),
+      peerStagedId: z.string().nullable().optional(),
+      targetAccountId: z.number().int().nullable().optional(),
+      forceCommit: z.boolean().optional(),
+    },
+    async () => stagingHttpOnlyError(),
+  );
+
+  server.tool(
+    "link_staged_transfer_pair",
+    "Sugar over update_staged_transaction (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    { rowAId: z.string(), rowBId: z.string() },
+    async () => stagingHttpOnlyError(),
+  );
+
+  server.tool(
+    "approve_staged_rows",
+    "Materialize staged rows into the live transactions table (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    {
+      stagedImportId: z.string(),
+      rowIds: z.array(z.string()).optional(),
+      forceImportIndices: z.array(z.number().int()).optional(),
+      idempotencyKey: z.string().uuid().optional(),
+      confirmation_token: z.string().optional(),
+    },
+    async () => stagingHttpOnlyError(),
+  );
+
+  server.tool(
+    "reject_staged_import",
+    "Reject (hard-delete) a staged import (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    {
+      stagedImportId: z.string(),
+      confirmation_token: z.string().optional(),
+    },
+    async () => stagingHttpOnlyError(),
+  );
 }
