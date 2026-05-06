@@ -14,9 +14,10 @@
  *   hint for that candidate but can still match on amount/date/holding.
  *
  * Performance — for a 1k-row CSV across 5 accounts spanning 3 months, the
- * candidate pool is at most ~15k rows (well under MAX_RECONCILE_ROWS = 10k
- * the reconcile path already accepts). If imports get larger the pool query
- * can be batched per-account chunk; today the single-query path is fine.
+ * candidate pool is at most ~15k rows (well under the 10k row cap the
+ * staging upload + classify paths already accept). If imports get larger
+ * the pool query can be batched per-account chunk; today the single-query
+ * path is fine.
  */
 
 import { db, schema } from "@/db";
