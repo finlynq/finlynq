@@ -11,11 +11,13 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { and, eq, asc } from "drizzle-orm";
+import { and, eq, asc, sql } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { tryDecryptField } from "@/lib/crypto/envelope";
+import { getHoldingsValueByAccount } from "@/lib/holdings-value";
+import { getRate } from "@/lib/fx-service";
 
 export const dynamic = "force-dynamic";
 
@@ -59,6 +61,12 @@ export async function GET(
       rowIndex: schema.stagedTransactions.rowIndex,
       isDuplicate: schema.stagedTransactions.isDuplicate,
       encryptionTier: schema.stagedTransactions.encryptionTier,
+      // Issue #154 — surface dedup_status + row_status so the client-side
+      // reconciliation callout can recompute "After approval" live as the
+      // user toggles row checkboxes (selection != row_status, but the
+      // initial projection uses dedup_status to exclude EXISTING rows).
+      dedupStatus: schema.stagedTransactions.dedupStatus,
+      rowStatus: schema.stagedTransactions.rowStatus,
     })
     .from(schema.stagedTransactions)
     .where(eq(schema.stagedTransactions.stagedImportId, id))
@@ -84,7 +92,111 @@ export async function GET(
     };
   });
 
-  return NextResponse.json({ staged, rows: decryptedRows });
+  // ─── Issue #154: statement-balance reconciliation ──────────────────────
+  // When the staged import has a bound account AND a statement balance, the
+  // review page renders a three-column "Statement says / Finlynq has now /
+  // After approval" callout. Compute the numbers server-side so the client
+  // doesn't have to reach into balances + holdings-value + FX itself.
+  let currentBalance: number | null = null;
+  let projectedBalance: number | null = null;
+  let pendingDelta: number | null = null;
+  let boundAccountCurrency: string | null = null;
+
+  if (staged.boundAccountId != null) {
+    const acct = await db
+      .select({
+        id: schema.accounts.id,
+        currency: schema.accounts.currency,
+        isInvestment: schema.accounts.isInvestment,
+      })
+      .from(schema.accounts)
+      .where(and(
+        eq(schema.accounts.id, staged.boundAccountId),
+        eq(schema.accounts.userId, userId),
+      ))
+      .get();
+
+    if (acct) {
+      boundAccountCurrency = acct.currency;
+      // CLAUDE.md: "Account balance for accounts with holdings = holdings.value,
+      // NOT b.balance + holdings.value." The dashboard route is the canonical
+      // pattern; mirror it here. For pure-cash accounts holdingsByAccount has
+      // no entry → fall through to SUM(transactions.amount).
+      let balanceInAccountCcy: number;
+      if (acct.isInvestment) {
+        // Investment accounts always go through holdings-value, even if the
+        // map is empty (a brand-new investment account with no positions
+        // sums to 0). Don't fall back to the cash-account formula.
+        const holdingsByAccount = await getHoldingsValueByAccount(userId, dek);
+        balanceInAccountCcy = holdingsByAccount.get(acct.id)?.value ?? 0;
+      } else {
+        const sumRow = await db
+          .select({
+            balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
+          })
+          .from(schema.transactions)
+          .where(and(
+            eq(schema.transactions.userId, userId),
+            eq(schema.transactions.accountId, acct.id),
+          ))
+          .get();
+        balanceInAccountCcy = Number(sumRow?.balance ?? 0);
+      }
+
+      // Projected delta: sum of staged amounts that count toward the
+      // post-approval balance. Only NEW + PROBABLE_DUPLICATE rows count
+      // (EXISTING rows would double-count — they're already in the live
+      // transactions table). Row status='pending' filters out rows the
+      // user has already actioned in a prior partial approve.
+      // Amounts are stored in the staged row's `currency`, which the
+      // upload route defaults to the bound account's currency for
+      // OFX/QFX uploads. CSV rows can carry a different currency; this
+      // projection assumes per-row currency matches the account, which
+      // is the common case. If a user hits a mixed-currency CSV the
+      // projection will be slightly off — accepted tradeoff (display-
+      // only, "user is the judge").
+      const eligibleRows = rows.filter(
+        (r) => r.rowStatus === "pending" && r.dedupStatus !== "existing",
+      );
+      pendingDelta = eligibleRows.reduce((acc, r) => acc + Number(r.amount ?? 0), 0);
+
+      // Statement currency for display. Falls back to account currency when
+      // the upload didn't carry one (most CSV cases).
+      const stmtCcy = staged.statementCurrency ?? acct.currency;
+
+      // FX-convert "Finlynq has now" + projection into the statement
+      // currency for like-with-like display. Same-currency = no-op via
+      // getRate's early-return.
+      let fxRate = 1;
+      if (stmtCcy !== acct.currency) {
+        try {
+          fxRate = await getRate(
+            acct.currency,
+            stmtCcy,
+            new Date().toISOString().split("T")[0],
+            userId,
+          );
+        } catch {
+          // FX failure → display in account currency unconverted.
+          fxRate = 1;
+        }
+      }
+
+      currentBalance = balanceInAccountCcy * fxRate;
+      projectedBalance = (balanceInAccountCcy + pendingDelta) * fxRate;
+    }
+  }
+
+  return NextResponse.json({
+    staged,
+    rows: decryptedRows,
+    reconciliation: {
+      currentBalance,
+      projectedBalance,
+      pendingDelta,
+      boundAccountCurrency,
+    },
+  });
 }
 
 export async function DELETE(
