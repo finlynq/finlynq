@@ -40,6 +40,17 @@ export interface RawTransaction {
   tags?: string;
   quantity?: number;
   portfolioHolding?: string;
+  /**
+   * Issue #155: explicit portfolio_holdings.id override. When set, takes
+   * precedence over the holding-name resolver — `portfolioHolding` is
+   * ignored. Used by the staging-approve flow where the user picked a
+   * holding in the review UI and we already have the FK on hand;
+   * round-tripping through the name resolver would (a) add a needless
+   * decrypt + lookup, (b) risk creating a duplicate auto-Cash holding
+   * if the row's name happens to be empty. Caller is responsible for
+   * verifying ownership before passing the id.
+   */
+  portfolioHoldingId?: number | null;
   fitId?: string;
   /** Groups multi-leg rows (transfer, same-account conversion, liquidation)
    *  so the UI can display them as linked siblings. Every row in one group
@@ -429,9 +440,11 @@ export async function executeImport(
       enteredFxRate,
       quantity: row.quantity ?? null,
       portfolioHolding: row.portfolioHolding ?? null,
-      // Resolved below in a single pass after auto-categorize. Kept null
-      // here so the caller doesn't need to know about the FK column.
-      portfolioHoldingId: null,
+      // Issue #155: pre-fill the FK when the caller supplied one (staging
+      // approve flow). The resolver pass below skips rows whose FK is
+      // already non-null. When portfolioHoldingId is unset, fall back to
+      // the historical resolver-based path (CSV/OFX upload, email path).
+      portfolioHoldingId: row.portfolioHoldingId ?? null,
       note: row.note ?? "",
       payee: row.payee ?? "",
       tags: row.tags ?? "",
@@ -499,6 +512,10 @@ export async function executeImport(
   try {
     const resolver = await buildHoldingResolver(userId, userDek ?? null);
     for (const row of toInsert) {
+      // Issue #155: skip rows that the caller pre-populated with an
+      // explicit FK (the staging-approve path). The caller is responsible
+      // for owner-verification — we don't re-check here.
+      if (row.portfolioHoldingId != null) continue;
       if (!row.portfolioHolding) continue;
       row.portfolioHoldingId = await resolver.resolve(
         row.accountId,
