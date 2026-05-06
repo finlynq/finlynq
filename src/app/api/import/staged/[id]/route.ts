@@ -67,6 +67,19 @@ export async function GET(
       // initial projection uses dedup_status to exclude EXISTING rows).
       dedupStatus: schema.stagedTransactions.dedupStatus,
       rowStatus: schema.stagedTransactions.rowStatus,
+      // Issue #155 — full-transaction parity columns the row editor reads
+      // and writes. Numeric / structural / FK — not encrypted, no per-tier
+      // branch needed. tags is a free-text comma-separated value (same
+      // shape as live transactions.tags) — also unencrypted at staging.
+      txType: schema.stagedTransactions.txType,
+      quantity: schema.stagedTransactions.quantity,
+      portfolioHoldingId: schema.stagedTransactions.portfolioHoldingId,
+      enteredAmount: schema.stagedTransactions.enteredAmount,
+      enteredCurrency: schema.stagedTransactions.enteredCurrency,
+      tags: schema.stagedTransactions.tags,
+      fitId: schema.stagedTransactions.fitId,
+      peerStagedId: schema.stagedTransactions.peerStagedId,
+      targetAccountId: schema.stagedTransactions.targetAccountId,
     })
     .from(schema.stagedTransactions)
     .where(eq(schema.stagedTransactions.stagedImportId, id))

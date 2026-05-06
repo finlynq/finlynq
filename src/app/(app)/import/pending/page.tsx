@@ -11,7 +11,12 @@
  * Rows auto-expire after 14 days regardless of action.
  */
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useState } from "react";
+
+// Aliased Fragment so we can pass `key` without TypeScript complaining about
+// React's reserved key on the shorthand `<>` syntax — we render two
+// <TableRow>s per source staged row, and React needs a key per item.
+const RowFragment = Fragment;
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -33,9 +38,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, Inbox, Mail, Upload, Clock, Check, X, RefreshCw } from "lucide-react";
+import { ArrowLeft, Inbox, Mail, Upload, Clock, Check, X, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
 import { ReconciliationCallout } from "@/components/staging/reconciliation-callout";
+import {
+  StagedRowEditor,
+  type StagedEditableRow,
+  type AccountOption,
+  type HoldingOption,
+} from "@/components/staging/staged-row-editor";
 
 interface StagedRow {
   id: string;
@@ -62,21 +73,10 @@ interface StagedDetail {
     statementCurrency?: string | null;
     boundAccountId?: number | null;
   };
-  rows: Array<{
-    id: string;
-    date: string;
-    amount: number;
-    currency: string | null;
-    payee: string | null;
-    category: string | null;
-    accountName: string | null;
-    note: string | null;
-    rowIndex: number;
-    isDuplicate: boolean;
-    // Issue #154 — surface dedup_status so the live projected-balance
-    // recomputation can exclude EXISTING rows even when they're selected.
-    dedupStatus?: "new" | "existing" | "probable_duplicate";
-  }>;
+  // Issue #155 — rows now carry every editable field. The full shape lives
+  // in StagedEditableRow (components/staging/staged-row-editor.tsx); this
+  // page treats its rows as that type.
+  rows: StagedEditableRow[];
   reconciliation?: {
     currentBalance: number | null;
     projectedBalance: number | null;
@@ -111,6 +111,22 @@ function PendingImportsPageInner() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [acting, setActing] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  // Issue #155: account + holding catalogs for the row editor's dropdowns.
+  // Loaded once when the user opens the dialog; cached for the session.
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
+  const [holdings, setHoldings] = useState<HoldingOption[]>([]);
+  // Per-row expansion: only the row(s) the user explicitly clicks render
+  // the editor. Keeps the dialog responsive on large statements.
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+
+  const toggleExpanded = useCallback((rowId: string) => {
+    setExpandedRows((s) => {
+      const next = new Set(s);
+      if (next.has(rowId)) next.delete(rowId);
+      else next.add(rowId);
+      return next;
+    });
+  }, []);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -133,13 +149,61 @@ function PendingImportsPageInner() {
     setOpenId(id);
     setDetail(null);
     setDetailLoading(true);
+    setExpandedRows(new Set());
     try {
-      const res = await fetch(`/api/import/staged/${id}`);
-      const data: StagedDetail = await res.json();
-      if (!res.ok) throw new Error((data as unknown as { error?: string }).error || "Failed to load");
+      // Fetch detail + account + holding catalogs in parallel. The catalogs
+      // populate the staged-row-editor's dropdowns; staleness is acceptable
+      // (changes during the dialog's lifetime are rare). Issue #155.
+      const [detailRes, acctRes, holdRes] = await Promise.all([
+        fetch(`/api/import/staged/${id}`),
+        fetch("/api/accounts"),
+        fetch("/api/portfolio"),
+      ]);
+      const data: StagedDetail = await detailRes.json();
+      if (!detailRes.ok) {
+        throw new Error((data as unknown as { error?: string }).error || "Failed to load");
+      }
       setDetail(data);
       // Default selection = all non-duplicate rows.
       setSelected(new Set(data.rows.filter((r) => !r.isDuplicate).map((r) => r.id)));
+      if (acctRes.ok) {
+        const acctRaw = (await acctRes.json()) as Array<{
+          id: number;
+          name: string | null;
+          currency: string;
+          isInvestment?: boolean;
+        }>;
+        setAccounts(
+          acctRaw
+            .filter((a) => a.name != null)
+            .map((a) => ({
+              id: a.id,
+              name: a.name as string,
+              currency: a.currency,
+              isInvestment: Boolean(a.isInvestment),
+            })),
+        );
+      }
+      if (holdRes.ok) {
+        const holdRaw = (await holdRes.json()) as Array<{
+          id: number;
+          name: string | null;
+          symbol: string | null;
+          accountId: number | null;
+          currency: string;
+        }>;
+        setHoldings(
+          holdRaw
+            .filter((h) => h.name != null)
+            .map((h) => ({
+              id: h.id,
+              name: h.name as string,
+              symbol: h.symbol,
+              accountId: h.accountId,
+              currency: h.currency,
+            })),
+        );
+      }
     } catch (e) {
       setToast({ type: "error", msg: e instanceof Error ? e.message : "Failed to load" });
       setOpenId(null);
@@ -152,6 +216,7 @@ function PendingImportsPageInner() {
     setOpenId(null);
     setDetail(null);
     setSelected(new Set());
+    setExpandedRows(new Set());
   }, []);
 
   // Auto-open the detail dialog when navigated with ?id=… (e.g. after the
@@ -396,36 +461,83 @@ function PendingImportsPageInner() {
                         aria-label="Select all"
                       />
                     </TableHead>
+                    <TableHead className="w-8" />
                     <TableHead>Date</TableHead>
                     <TableHead>Account</TableHead>
                     <TableHead>Payee</TableHead>
-                    <TableHead>Category</TableHead>
+                    <TableHead>Type</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {detail.rows.map((r) => (
-                    <TableRow key={r.id} className={r.isDuplicate ? "opacity-60" : ""}>
-                      <TableCell>
-                        <input
-                          type="checkbox"
-                          checked={selected.has(r.id)}
-                          onChange={() => toggleRow(r.id)}
-                          aria-label={`Select row ${r.rowIndex}`}
-                        />
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{r.date}</TableCell>
-                      <TableCell className="text-xs">{r.accountName || <span className="text-muted-foreground">—</span>}</TableCell>
-                      <TableCell className="text-xs truncate max-w-[200px]">{r.payee || <span className="text-muted-foreground">—</span>}</TableCell>
-                      <TableCell className="text-xs">
-                        {r.category || <span className="text-muted-foreground">—</span>}
-                        {r.isDuplicate && <Badge variant="outline" className="ml-2 text-[10px]">dupe</Badge>}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
-                        {formatCurrency(r.amount, r.currency || "CAD")}
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {detail.rows.map((r) => {
+                    const isExpanded = expandedRows.has(r.id);
+                    return (
+                      <RowFragment key={r.id}>
+                        <TableRow className={r.isDuplicate ? "opacity-60" : ""}>
+                          <TableCell>
+                            <input
+                              type="checkbox"
+                              checked={selected.has(r.id)}
+                              onChange={() => toggleRow(r.id)}
+                              aria-label={`Select row ${r.rowIndex}`}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <button
+                              type="button"
+                              onClick={() => toggleExpanded(r.id)}
+                              aria-label={isExpanded ? "Collapse row editor" : "Edit row"}
+                              className="text-muted-foreground hover:text-foreground p-1 -m-1"
+                            >
+                              {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                            </button>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">{r.date}</TableCell>
+                          <TableCell className="text-xs">{r.accountName || <span className="text-muted-foreground">—</span>}</TableCell>
+                          <TableCell className="text-xs truncate max-w-[200px]">
+                            {r.payee || <span className="text-muted-foreground">—</span>}
+                            {r.category && <span className="text-muted-foreground"> · {r.category}</span>}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {r.txType === "R" ? (
+                              <Badge variant="outline" className="text-[10px]">Transfer</Badge>
+                            ) : r.txType === "I" ? (
+                              <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">Income</Badge>
+                            ) : (
+                              <Badge variant="outline" className="text-[10px]">Expense</Badge>
+                            )}
+                            {r.isDuplicate && <Badge variant="outline" className="ml-1 text-[10px]">dupe</Badge>}
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-xs">
+                            {formatCurrency(r.amount, r.currency || "CAD")}
+                          </TableCell>
+                        </TableRow>
+                        {isExpanded && (
+                          <TableRow>
+                            <TableCell colSpan={7} className="p-0">
+                              <StagedRowEditor
+                                stagedImportId={detail.staged.id}
+                                row={r}
+                                siblingRows={detail.rows}
+                                accounts={accounts}
+                                holdings={holdings}
+                                onUpdated={(updated) => {
+                                  setDetail((d) => {
+                                    if (!d) return d;
+                                    return {
+                                      ...d,
+                                      rows: d.rows.map((x) => (x.id === updated.id ? updated : x)),
+                                    };
+                                  });
+                                }}
+                              />
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </RowFragment>
+                    );
+                  })}
                 </TableBody>
               </Table>
             )}
