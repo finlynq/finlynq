@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/table";
 import { ArrowLeft, Inbox, Mail, Upload, Clock, Check, X, RefreshCw } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
+import { ReconciliationCallout } from "@/components/staging/reconciliation-callout";
 
 interface StagedRow {
   id: string;
@@ -51,7 +52,16 @@ interface StagedRow {
 }
 
 interface StagedDetail {
-  staged: StagedRow & { status: string; originalFilename?: string | null; fileFormat?: string | null };
+  staged: StagedRow & {
+    status: string;
+    originalFilename?: string | null;
+    fileFormat?: string | null;
+    // Issue #154 — reconciliation inputs from staged_imports.
+    statementBalance?: number | null;
+    statementBalanceDate?: string | null;
+    statementCurrency?: string | null;
+    boundAccountId?: number | null;
+  };
   rows: Array<{
     id: string;
     date: string;
@@ -63,7 +73,16 @@ interface StagedDetail {
     note: string | null;
     rowIndex: number;
     isDuplicate: boolean;
+    // Issue #154 — surface dedup_status so the live projected-balance
+    // recomputation can exclude EXISTING rows even when they're selected.
+    dedupStatus?: "new" | "existing" | "probable_duplicate";
   }>;
+  reconciliation?: {
+    currentBalance: number | null;
+    projectedBalance: number | null;
+    pendingDelta: number | null;
+    boundAccountCurrency: string | null;
+  };
 }
 
 function daysUntil(iso: string): number {
@@ -330,6 +349,38 @@ function PendingImportsPageInner() {
               ) : "Loading…"}
             </DialogDescription>
           </DialogHeader>
+
+          {/* Issue #154 — statement-balance reconciliation. Renders nothing
+              when statementBalance is null, and a one-line hint when no
+              account is bound. Live-recompute "After approval" from the
+              currently-selected rows (excluding dedup_status='existing'). */}
+          {detail && detail.staged.statementBalance != null && (() => {
+            const recon = detail.reconciliation;
+            const current = recon?.currentBalance ?? null;
+            // Live-projected: currentBalance + Σ(selected rows
+            // where dedup_status != 'existing'). Recomputes on every
+            // checkbox toggle. The server's projectedBalance is the
+            // "approve everything eligible" baseline; the client owns
+            // the live "what the user actually picked" view.
+            let projected: number | null = null;
+            if (current != null) {
+              const liveDelta = detail.rows
+                .filter((r) => selected.has(r.id) && r.dedupStatus !== "existing")
+                .reduce((acc, r) => acc + Number(r.amount ?? 0), 0);
+              projected = current + liveDelta;
+            }
+            return (
+              <ReconciliationCallout
+                statementBalance={detail.staged.statementBalance ?? null}
+                statementBalanceDate={detail.staged.statementBalanceDate ?? null}
+                statementCurrency={detail.staged.statementCurrency ?? null}
+                boundAccountId={detail.staged.boundAccountId ?? null}
+                currentBalance={current}
+                projectedBalance={projected}
+                boundAccountCurrency={recon?.boundAccountCurrency ?? null}
+              />
+            );
+          })()}
 
           <div className="flex-1 overflow-auto border rounded-lg">
             {detailLoading && <p className="p-6 text-sm text-muted-foreground text-center">Loading rows…</p>}
