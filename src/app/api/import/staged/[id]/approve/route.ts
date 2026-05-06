@@ -26,7 +26,7 @@ import { executeImport, type RawTransaction } from "@/lib/import-pipeline";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { tryDecryptField } from "@/lib/crypto/envelope";
-import { sourceTagFor } from "@/lib/tx-source";
+import { sourceTagFor, isFormatTag, type FormatTag } from "@/lib/tx-source";
 
 export const dynamic = "force-dynamic";
 
@@ -56,7 +56,11 @@ export async function POST(
 
   // Verify ownership — staged_imports must belong to this user.
   const staged = await db
-    .select({ id: schema.stagedImports.id })
+    .select({
+      id: schema.stagedImports.id,
+      source: schema.stagedImports.source,
+      fileFormat: schema.stagedImports.fileFormat,
+    })
     .from(schema.stagedImports)
     .where(and(
       eq(schema.stagedImports.id, id),
@@ -94,13 +98,39 @@ export async function POST(
   // null on auth-tag failure (load-bearing per CLAUDE.md) — null fields fall
   // back to "" / undefined the same way they did pre-tier.
   //
-  // Issue #62: stamp source:email so cross-source dedup can identify rows
-  // that arrived via Resend Inbound. The staged_imports/staged_transactions
-  // tables don't carry `tags`, so we apply it at materialize time.
-  const emailTag = sourceTagFor("email");
+  // Issue #62: stamp source:<format> so cross-source dedup can identify
+  // where the row arrived from. The staged_imports/staged_transactions tables
+  // don't carry `tags`, so we apply at materialize time. Issue #153: tag
+  // varies by file_format/source so uploads (CSV/OFX/QFX) get
+  // `source:csv|ofx|qfx` instead of always-`source:email`.
+  //
+  // Mapping:
+  //   staged_imports.source='email'  → 'source:email' (Resend Inbound)
+  //   staged_imports.file_format=X   → 'source:X' when X is a known FormatTag
+  //   else                           → fall back to 'source:email' for safety
+  const sourceTag = (() => {
+    if (staged.source === "email") return sourceTagFor("email");
+    const ff = staged.fileFormat;
+    if (ff && isFormatTag(ff)) return sourceTagFor(ff as FormatTag);
+    // 'xlsx' file_format (when added) maps to FormatTag 'excel'.
+    if (ff === "xlsx") return sourceTagFor("excel");
+    return sourceTagFor("email");
+  })();
   const decode = (value: string | null, tier: string): string | null => {
     if (value == null) return null;
     return tier === "user" ? tryDecryptField(dek, value) : decryptStaged(value);
+  };
+  // Preserve any tags the upload route stamped on the staged row (today's
+  // upload route doesn't set them; future upload paths might). The source
+  // tag is appended after, dedup-on-substring keeps it idempotent.
+  const mergeTags = (existing: string | null | undefined, tag: string): string => {
+    const list = (existing ?? "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t);
+    if (list.some((t) => t.toLowerCase() === tag.toLowerCase())) return list.join(",");
+    list.push(tag);
+    return list.join(",");
   };
   const rows: RawTransaction[] = selected.map((r) => ({
     date: r.date,
@@ -110,7 +140,7 @@ export async function POST(
     category: decode(r.category, r.encryptionTier) ?? undefined,
     currency: r.currency ?? undefined,
     note: decode(r.note, r.encryptionTier) ?? undefined,
-    tags: emailTag,
+    tags: mergeTags(r.tags, sourceTag),
   }));
 
   const result = await executeImport(rows, forceImportIndices, userId, dek);

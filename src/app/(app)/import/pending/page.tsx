@@ -11,8 +11,9 @@
  * Rows auto-expire after 14 days regardless of action.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -32,22 +33,25 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, Inbox, Mail, Clock, Check, X, RefreshCw } from "lucide-react";
+import { ArrowLeft, Inbox, Mail, Upload, Clock, Check, X, RefreshCw } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
 
 interface StagedRow {
   id: string;
-  source: string;
+  source: string; // 'email' | 'upload'
   fromAddress: string | null;
   subject: string | null;
   receivedAt: string;
   totalRowCount: number;
   duplicateCount: number;
   expiresAt: string;
+  // Issue #153 — populated for upload-source rows.
+  originalFilename?: string | null;
+  fileFormat?: string | null;
 }
 
 interface StagedDetail {
-  staged: StagedRow & { status: string };
+  staged: StagedRow & { status: string; originalFilename?: string | null; fileFormat?: string | null };
   rows: Array<{
     id: string;
     date: string;
@@ -67,7 +71,18 @@ function daysUntil(iso: string): number {
   return Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)));
 }
 
+// useSearchParams requires Suspense (issue #153 — auto-open ?id=…). The
+// inner component owns the page state + side effects; the default export
+// just wraps it.
 export default function PendingImportsPage() {
+  return (
+    <Suspense fallback={null}>
+      <PendingImportsPageInner />
+    </Suspense>
+  );
+}
+
+function PendingImportsPageInner() {
   const [list, setList] = useState<StagedRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +134,19 @@ export default function PendingImportsPage() {
     setDetail(null);
     setSelected(new Set());
   }, []);
+
+  // Auto-open the detail dialog when navigated with ?id=… (e.g. after the
+  // /import/reconcile upload route stages a batch and redirects here).
+  // Issue #153 — uploads land in staging now and want a deep link to their
+  // own review queue entry without an extra click.
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const idFromUrl = searchParams?.get("id");
+    if (idFromUrl) {
+      void openDetail(idFromUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const toggleRow = (id: string) => {
     setSelected((s) => {
@@ -193,8 +221,8 @@ export default function PendingImportsPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Pending Imports</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Transactions that arrived via email and are waiting for your review.
-            Rows auto-expire after 14 days.
+            Transactions from email forwards or file uploads (CSV / OFX / QFX),
+            waiting for your review. Rows auto-expire after 60 days.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={loadList} disabled={loading}>
@@ -226,11 +254,11 @@ export default function PendingImportsPage() {
             <div>
               <p className="text-sm font-medium">Nothing pending</p>
               <p className="text-xs text-muted-foreground mt-1">
-                Forward a bank statement or CSV to your import address and it&apos;ll land here for review.
+                Upload a CSV/OFX/QFX statement at <Link href="/import/reconcile" className="underline">Import → Reconciliation</Link>, or forward a bank statement to your import address — both land here for review.
               </p>
             </div>
             <Link href="/import" className="inline-block">
-              <Button variant="outline" size="sm">View import address</Button>
+              <Button variant="outline" size="sm">View import options</Button>
             </Link>
           </CardContent>
         </Card>
@@ -238,17 +266,26 @@ export default function PendingImportsPage() {
 
       {list && list.length > 0 && (
         <div className="space-y-3">
-          {list.map((row) => (
+          {list.map((row) => {
+            const isUpload = row.source === "upload";
+            const Icon = isUpload ? Upload : Mail;
+            const headline = isUpload
+              ? row.originalFilename || "Uploaded file"
+              : row.subject || "(no subject)";
+            const subline = isUpload
+              ? `${(row.fileFormat ?? "file").toUpperCase()} upload · ${new Date(row.receivedAt).toLocaleString()}`
+              : `from ${row.fromAddress || "(unknown)"} · received ${new Date(row.receivedAt).toLocaleString()}`;
+            return (
             <Card key={row.id} className="cursor-pointer hover:border-primary/50 transition-colors" onClick={() => openDetail(row.id)}>
               <CardContent className="py-4">
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
-                      <Mail className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <p className="text-sm font-medium truncate">{row.subject || "(no subject)"}</p>
+                      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <p className="text-sm font-medium truncate">{headline}</p>
                     </div>
                     <p className="text-xs text-muted-foreground truncate">
-                      from {row.fromAddress || "(unknown)"} · received {new Date(row.receivedAt).toLocaleString()}
+                      {subline}
                     </p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -268,7 +305,8 @@ export default function PendingImportsPage() {
                 </div>
               </CardContent>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -278,10 +316,17 @@ export default function PendingImportsPage() {
             <DialogTitle>Review transactions</DialogTitle>
             <DialogDescription>
               {detail ? (
-                <>
-                  From <span className="font-medium">{detail.staged.fromAddress || "(unknown)"}</span>
-                  {detail.staged.subject && <> · {detail.staged.subject}</>}
-                </>
+                detail.staged.source === "upload" ? (
+                  <>
+                    <span className="font-medium">{detail.staged.originalFilename || "Uploaded file"}</span>
+                    {detail.staged.fileFormat && <> · {detail.staged.fileFormat.toUpperCase()} upload</>}
+                  </>
+                ) : (
+                  <>
+                    From <span className="font-medium">{detail.staged.fromAddress || "(unknown)"}</span>
+                    {detail.staged.subject && <> · {detail.staged.subject}</>}
+                  </>
+                )
               ) : "Loading…"}
             </DialogDescription>
           </DialogHeader>

@@ -1,12 +1,8 @@
 /**
- * Reconciliation mode (issue #36).
+ * Reconciliation classifier (issue #36).
  *
- * Statement-import workflow that classifies each parsed row against
- * existing Finlynq state before any write happens, then commits the
- * user-approved subset atomically.
- *
- * Three-way classification (vs the binary NEW / DUPLICATE the regular
- * import preview produces):
+ * Three-way row classification used by the upload-staging path
+ * (`/api/import/staging/upload`, issue #153):
  *
  *   - NEW                — no fit_id or import_hash hit
  *   - EXISTING           — exact dedup hit (same row already in DB)
@@ -14,21 +10,23 @@
  *                          but no exact hash hit. Settlement-vs-posting
  *                          gaps are the canonical case.
  *
- * Pure logic — file parsing lives in csv-parser/ofx-parser; this module
- * orchestrates classification + atomic commit. Used by
- * /api/import/reconcile/{preview,commit}.
+ * Pure logic — file parsing lives in csv-parser/ofx-parser. The previous
+ * `commitReconcile` helper that materialized rows directly into
+ * `transactions` was deleted in #153 alongside the
+ * `/api/import/reconcile/{preview,commit}` route pair; uploads now persist
+ * into `staged_imports` / `staged_transactions` and the approve endpoint at
+ * `/api/import/staged/[id]/approve` is the only commit path.
+ *
+ * The classifier itself is kept here so future review/preview surfaces (MCP
+ * staging tools, statement-balance reconciliation page, batched CLI re-classify)
+ * can reuse it without duplicating the dedup logic.
  */
 
 import { db, schema } from "@/db";
 import { and, eq, inArray, or } from "drizzle-orm";
 import { generateImportHash, checkDuplicates, checkFitIdDuplicates } from "./import-hash";
 import { normalizeDate } from "./csv-parser";
-import { tryDecryptField, encryptField } from "./crypto/envelope";
-import { applyRulesToBatch, type TransactionRule } from "./auto-categorize";
-import { getInvestmentAccountIds } from "./investment-account";
-import { safeConvertToAccountCurrency } from "./currency-conversion";
-import { prewarmRates } from "./fx-service";
-import { invalidateUser as invalidateUserTxCache } from "./mcp/user-tx-cache";
+import { tryDecryptField } from "./crypto/envelope";
 import { detectProbableDuplicates } from "./external-import/duplicate-detect";
 import { buildDuplicateCandidatePool } from "./external-import/duplicate-detect-pool";
 import type { RawTransaction } from "./import-pipeline";
@@ -36,8 +34,11 @@ import type { RawTransaction } from "./import-pipeline";
 /** Default settlement-vs-posting fuzz window. */
 export const DEFAULT_DATE_TOLERANCE_DAYS = 3;
 
-/** Hard cap for one reconcile session — keeps preview classification cheap. */
-export const MAX_RECONCILE_ROWS = 10_000;
+/** Hard cap for one classify pass — keeps preview classification cheap.
+ *  Kept module-internal in #153 (the public `MAX_RECONCILE_ROWS` symbol was
+ *  removed); the staging-upload route owns its own `MAX_STAGING_ROWS` cap so
+ *  callers don't need to know this value. */
+const MAX_CLASSIFY_ROWS = 10_000;
 
 export type ReconcileStatus = "new" | "existing" | "probable_duplicate";
 
@@ -170,10 +171,10 @@ export async function classifyForReconcile(
   const tolerance = opts.dateToleranceDays ?? DEFAULT_DATE_TOLERANCE_DAYS;
   const errors: ReconcileClassifyResult["errors"] = [];
 
-  if (rows.length > MAX_RECONCILE_ROWS) {
+  if (rows.length > MAX_CLASSIFY_ROWS) {
     errors.push({
       rowIndex: 0,
-      message: `Statement contains ${rows.length.toLocaleString()} rows, exceeding the ${MAX_RECONCILE_ROWS.toLocaleString()} reconcile limit. Split the file into smaller chunks.`,
+      message: `Statement contains ${rows.length.toLocaleString()} rows, exceeding the ${MAX_CLASSIFY_ROWS.toLocaleString()} classify limit. Split the file into smaller chunks.`,
     });
     return { rows: [], errors, counts: { new: 0, existing: 0, probableDuplicate: 0, errors: 1 } };
   }
@@ -210,10 +211,10 @@ export async function classifyForReconcile(
       : null;
 
     const accountId = acct?.id ?? null;
-    // Hash uses 0 when accountId is unknown — re-computed in commitReconcile
-    // once the user has bound a real account in preview-edit. Stable enough
-    // here for the dedup join below; an unresolved account skips dedup
-    // anyway.
+    // Hash uses 0 when accountId is unknown — re-computed at approve-time
+    // once the user has bound a real account in the staging review UI.
+    // Stable enough here for the dedup join below; an unresolved account
+    // skips dedup anyway.
     const hash = generateImportHash(
       normalizedDate,
       accountId ?? 0,
@@ -415,231 +416,9 @@ function tryDecryptPayee(dek: Buffer, value: string | null | undefined): string 
   return tryDecryptField(dek, value, "transactions.payee");
 }
 
-/** Subset of ReconcileRow the commit handler accepts back from the client. */
-export interface ApprovedReconcileRow {
-  rowIndex: number;
-  date: string;
-  accountId: number;
-  amount: number;
-  payee: string;
-  categoryId?: number | null;
-  currency?: string;
-  enteredAmount?: number;
-  enteredCurrency?: string;
-  note?: string;
-  tags?: string;
-  quantity?: number;
-  portfolioHoldingId?: number | null;
-  fitId?: string;
-  linkId?: string;
-}
-
-export interface CommitResult {
-  total: number;
-  imported: number;
-  errors: string[];
-}
-
-/**
- * Atomic commit. The whole batch lives inside one `db.transaction()` —
- * any failure rolls back every insert so the user is never left with a
- * partial commit they can't see.
- *
- * Re-validates account ownership inside the transaction (defends against
- * tampered finlynqAccountId values from the client).
- */
-export async function commitReconcile(
-  userId: string,
-  dek: Buffer,
-  approved: ApprovedReconcileRow[],
-): Promise<CommitResult> {
-  const errors: string[] = [];
-  if (approved.length === 0) {
-    return { total: 0, imported: 0, errors };
-  }
-  if (approved.length > MAX_RECONCILE_ROWS) {
-    return {
-      total: approved.length,
-      imported: 0,
-      errors: [`Commit exceeds ${MAX_RECONCILE_ROWS} row limit`],
-    };
-  }
-
-  // Account ownership + currency lookup. Reject any row whose accountId
-  // doesn't belong to this user before we open the transaction.
-  const accountIds = Array.from(new Set(approved.map((r) => r.accountId)));
-  const accountRows = await db
-    .select({ id: schema.accounts.id, currency: schema.accounts.currency })
-    .from(schema.accounts)
-    .where(
-      and(
-        eq(schema.accounts.userId, userId),
-        inArray(schema.accounts.id, accountIds),
-      ),
-    )
-    .all();
-  const accountById = new Map<number, { currency: string }>();
-  for (const a of accountRows) accountById.set(a.id, { currency: a.currency });
-  for (const id of accountIds) {
-    if (!accountById.has(id)) {
-      return {
-        total: approved.length,
-        imported: 0,
-        errors: [`Account #${id} not found or not owned by current user`],
-      };
-    }
-  }
-
-  // Investment-account holding constraint pass (matches import-pipeline).
-  const investmentAccountIds = await getInvestmentAccountIds(userId);
-  for (const row of approved) {
-    if (
-      investmentAccountIds.has(row.accountId) &&
-      (row.portfolioHoldingId == null || row.portfolioHoldingId === 0)
-    ) {
-      return {
-        total: approved.length,
-        imported: 0,
-        errors: [
-          `Row ${row.rowIndex + 1}: investment account requires a portfolio holding — pick one in preview before committing.`,
-        ],
-      };
-    }
-  }
-
-  // Prewarm FX rates for cross-currency rows so the per-row conversion
-  // inside the transaction doesn't trigger N Yahoo fetches.
-  const prewarmCcy = new Set<string>();
-  const prewarmDates = new Set<string>();
-  for (const row of approved) {
-    const acctCcy = accountById.get(row.accountId)?.currency ?? "CAD";
-    const enteredCcy = (row.enteredCurrency ?? row.currency ?? acctCcy).toUpperCase();
-    if (enteredCcy !== acctCcy.toUpperCase()) {
-      prewarmCcy.add(enteredCcy);
-      prewarmCcy.add(acctCcy.toUpperCase());
-      prewarmDates.add(row.date);
-    }
-  }
-  if (prewarmCcy.size > 0 && prewarmDates.size > 0) {
-    try {
-      await prewarmRates([...prewarmCcy], [...prewarmDates], userId);
-    } catch {
-      // best-effort
-    }
-  }
-
-  // Build insertable rows, run auto-categorize on uncategorized ones, then
-  // open the transaction and INSERT in one atomic batch. If any INSERT
-  // throws, the whole transaction rolls back.
-  const insertable = await Promise.all(
-    approved.map(async (row) => {
-      const acctCcy = (accountById.get(row.accountId)?.currency ?? "CAD").toUpperCase();
-      const enteredAmount = row.enteredAmount ?? row.amount;
-      const enteredCurrency = (row.enteredCurrency ?? row.currency ?? acctCcy).toUpperCase();
-      let amount = row.amount;
-      let currency = enteredCurrency;
-      let enteredFxRate = 1;
-      if (enteredCurrency !== acctCcy) {
-        const conv = await safeConvertToAccountCurrency({
-          enteredAmount,
-          enteredCurrency,
-          accountCurrency: acctCcy,
-          date: row.date,
-          userId,
-        });
-        amount = conv.amount;
-        currency = conv.currency;
-        enteredFxRate = conv.enteredFxRate;
-      } else {
-        amount = enteredAmount;
-        currency = acctCcy;
-      }
-      const importHash = generateImportHash(
-        row.date,
-        row.accountId,
-        row.amount,
-        row.payee,
-      );
-      return {
-        rowIndex: row.rowIndex,
-        userId,
-        date: row.date,
-        accountId: row.accountId,
-        categoryId: row.categoryId ?? null,
-        currency,
-        amount,
-        enteredCurrency,
-        enteredAmount,
-        enteredFxRate,
-        quantity: row.quantity ?? null,
-        portfolioHoldingId: row.portfolioHoldingId ?? null,
-        note: row.note ?? "",
-        payee: row.payee ?? "",
-        tags: row.tags ?? "",
-        importHash,
-        fitId: row.fitId ?? null,
-        linkId: row.linkId ?? null,
-        source: "import" as const,
-      };
-    }),
-  );
-
-  // Apply auto-categorize rules to rows whose user-supplied categoryId is
-  // null (matches import-pipeline behavior — best-effort).
-  try {
-    const activeRules = (await db
-      .select()
-      .from(schema.transactionRules)
-      .where(eq(schema.transactionRules.isActive, 1))
-      .all()) as TransactionRule[];
-    if (activeRules.length > 0) {
-      const uncategorized = insertable.filter((r) => !r.categoryId);
-      if (uncategorized.length > 0) {
-        const results = applyRulesToBatch(
-          uncategorized.map((r) => ({ payee: r.payee, amount: r.amount, tags: r.tags })),
-          activeRules,
-        );
-        for (const { index, match } of results) {
-          if (match) {
-            const r = uncategorized[index];
-            if (match.assignCategoryId) r.categoryId = match.assignCategoryId;
-            if (match.assignTags) r.tags = match.assignTags;
-            if (match.renameTo) r.payee = match.renameTo;
-          }
-        }
-      }
-    }
-  } catch {
-    // best-effort
-  }
-
-  let imported = 0;
-  try {
-    await db.transaction(async (tx) => {
-      // Encrypt at the boundary — same envelope semantics as import-pipeline.
-      const values = insertable.map(({ rowIndex: _i, ...rest }) => ({
-        ...rest,
-        payee: encryptField(dek, rest.payee) ?? "",
-        note: encryptField(dek, rest.note) ?? "",
-        tags: encryptField(dek, rest.tags) ?? "",
-      }));
-      // One INSERT, all-or-nothing. Postgres handles batch values fine for
-      // up to a few thousand rows; the MAX_RECONCILE_ROWS cap protects us.
-      if (values.length > 0) {
-        await tx.insert(schema.transactions).values(values);
-        imported = values.length;
-      }
-    });
-  } catch (e) {
-    return {
-      total: approved.length,
-      imported: 0,
-      errors: [
-        `Atomic commit failed — no rows imported: ${e instanceof Error ? e.message : "Unknown error"}`,
-      ],
-    };
-  }
-
-  if (imported > 0) invalidateUserTxCache(userId);
-  return { total: approved.length, imported, errors };
-}
+// `commitReconcile`, `ApprovedReconcileRow`, and `CommitResult` were removed
+// in #153. The unified upload path stages rows in `staged_imports` /
+// `staged_transactions` and the approve endpoint at
+// `/api/import/staged/[id]/approve` (which calls `executeImport()`) is the
+// only commit path. Investment-account holding constraints + account
+// ownership re-validation are enforced there.
