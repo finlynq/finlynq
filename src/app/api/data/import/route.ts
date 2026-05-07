@@ -304,6 +304,12 @@ export async function POST(request: NextRequest) {
     // Insert transactions, remapping FK references. Plaintext text fields are
     // encrypted at the boundary; `v1:` ciphertext from a same-account backup
     // passes through unchanged.
+    //
+    // C-5 (2026-05-07): an unmapped accountId/categoryId throws rather than
+    // passing the raw id through. Mirrors the canonical `strip()` helper above
+    // — silently writing the source DB's integer id risked attaching the
+    // restored row to another tenant's account/category whose serial PK
+    // happened to match.
     const txnIdMap = new Map<number, number>();
     if (d.transactions?.length) {
       const remapped = d.transactions.map(({ id: _id, userId: _uid, accountId, categoryId, source: rawSource, ...rest }) => {
@@ -312,11 +318,35 @@ export async function POST(request: NextRequest) {
         // backups round-trip the original surface (CSV-imported stays
         // 'import'). coerceSourceForRestore guards the CHECK constraint
         // from typo'd / corrupted JSON.
+        let mappedAccountId: number | null;
+        if (accountId == null) {
+          mappedAccountId = null;
+        } else {
+          const newId = accountIdMap.get(accountId as number);
+          if (newId == null) {
+            throw new Error(
+              `Backup transaction references unknown accountId=${String(accountId)} — accounts section missing or inconsistent`,
+            );
+          }
+          mappedAccountId = newId;
+        }
+        let mappedCategoryId: number | null;
+        if (categoryId == null) {
+          mappedCategoryId = null;
+        } else {
+          const newId = categoryIdMap.get(categoryId as number);
+          if (newId == null) {
+            throw new Error(
+              `Backup transaction references unknown categoryId=${String(categoryId)} — categories section missing or inconsistent`,
+            );
+          }
+          mappedCategoryId = newId;
+        }
         const withFks = {
           ...rest,
           userId,
-          accountId: accountId != null ? (accountIdMap.get(accountId as number) ?? (accountId as number)) : null,
-          categoryId: categoryId != null ? (categoryIdMap.get(categoryId as number) ?? (categoryId as number)) : null,
+          accountId: mappedAccountId,
+          categoryId: mappedCategoryId,
           source: coerceSourceForRestore(rawSource),
         };
         return encryptRowFields(dek, withFks, TX_ENC_FIELDS);
@@ -331,18 +361,52 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert transaction splits with remapped IDs (also encrypting text fields)
+    //
+    // C-5 (2026-05-07): unmapped FKs throw instead of silently inserting the
+    // raw id from the source DB. A split without a mapped parent transaction
+    // is silently dropped (the parent transaction wasn't in the backup) —
+    // that's the only soft path; account/category misses are hard fails.
     if (d.transactionSplits?.length && txnIdMap.size > 0) {
       const remapped = d.transactionSplits
         .map(({ id: _id, transactionId, accountId, categoryId, ...rest }) => {
+          const newTxnId = txnIdMap.get(transactionId as number);
+          if (newTxnId == null) {
+            // Parent transaction not in this backup — skip the orphan split.
+            return null;
+          }
+          let mappedAccountId: number | null;
+          if (accountId == null) {
+            mappedAccountId = null;
+          } else {
+            const newId = accountIdMap.get(accountId as number);
+            if (newId == null) {
+              throw new Error(
+                `Backup split references unknown accountId=${String(accountId)} — accounts section missing or inconsistent`,
+              );
+            }
+            mappedAccountId = newId;
+          }
+          let mappedCategoryId: number | null;
+          if (categoryId == null) {
+            mappedCategoryId = null;
+          } else {
+            const newId = categoryIdMap.get(categoryId as number);
+            if (newId == null) {
+              throw new Error(
+                `Backup split references unknown categoryId=${String(categoryId)} — categories section missing or inconsistent`,
+              );
+            }
+            mappedCategoryId = newId;
+          }
           const withFks = {
             ...rest,
-            transactionId: txnIdMap.get(transactionId as number) ?? (transactionId as number),
-            accountId: accountId != null ? (accountIdMap.get(accountId as number) ?? (accountId as number)) : null,
-            categoryId: categoryId != null ? (categoryIdMap.get(categoryId as number) ?? (categoryId as number)) : null,
+            transactionId: newTxnId,
+            accountId: mappedAccountId,
+            categoryId: mappedCategoryId,
           };
           return encryptRowFields(dek, withFks, SPLIT_ENC_FIELDS);
         })
-        .filter((s) => (s as { transactionId: unknown }).transactionId != null);
+        .filter((s): s is Row => s !== null);
       if (remapped.length) {
         await db
           .insert(schema.transactionSplits)

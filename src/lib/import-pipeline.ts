@@ -201,9 +201,9 @@ export async function previewImport(
   const hashOnlyRows = valid.filter((v) => !v.fitId);
 
   // fitId-based dedup
-  const existingFitIds = await checkFitIdDuplicates(fitIdRows.map((v) => v.fitId!));
+  const existingFitIds = await checkFitIdDuplicates(fitIdRows.map((v) => v.fitId!), userId);
   // hash-based dedup
-  const existingHashes = await checkDuplicates(hashOnlyRows.map((v) => v.hash));
+  const existingHashes = await checkDuplicates(hashOnlyRows.map((v) => v.hash), userId);
 
   const duplicates: PreviewResult["valid"] = [];
   const nonDuplicates: PreviewResult["valid"] = [];
@@ -459,8 +459,8 @@ export async function executeImport(
   const fitIdRows = insertable.filter((r) => r.fitId);
   const hashOnlyRows = insertable.filter((r) => !r.fitId);
 
-  const existingFitIds = await checkFitIdDuplicates(fitIdRows.map((r) => r.fitId!));
-  const existingHashes = await checkDuplicates(hashOnlyRows.map((r) => r.importHash));
+  const existingFitIds = await checkFitIdDuplicates(fitIdRows.map((r) => r.fitId!), userId);
+  const existingHashes = await checkDuplicates(hashOnlyRows.map((r) => r.importHash), userId);
 
   // Filter: keep non-duplicates + force-imported duplicates
   const toInsert = insertable.filter((r) => {

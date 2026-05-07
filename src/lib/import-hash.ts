@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { db, schema } from "@/db";
-import { inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 export function generateImportHash(
   date: string,
@@ -17,7 +17,13 @@ export function generateImportHash(
   return createHash("sha256").update(normalized).digest("hex").slice(0, 32);
 }
 
-export async function checkDuplicates(hashes: string[]): Promise<Set<string>> {
+/**
+ * Check for duplicate transactions by `import_hash` (CSV/email/OFX content
+ * dedup key). Scoped to the importing user's transactions only — passing in
+ * `userId` is required so an authenticated user can't probe another tenant's
+ * hashes.
+ */
+export async function checkDuplicates(hashes: string[], userId: string): Promise<Set<string>> {
   if (hashes.length === 0) return new Set();
 
   const existing = new Set<string>();
@@ -28,7 +34,12 @@ export async function checkDuplicates(hashes: string[]): Promise<Set<string>> {
     const rows = await db
       .select({ hash: schema.transactions.importHash })
       .from(schema.transactions)
-      .where(inArray(schema.transactions.importHash, batch))
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          inArray(schema.transactions.importHash, batch),
+        ),
+      )
       .all();
     for (const row of rows) {
       if (row.hash) existing.add(row.hash);
@@ -40,9 +51,11 @@ export async function checkDuplicates(hashes: string[]): Promise<Set<string>> {
 
 /**
  * Check for duplicate transactions by fitId (bank-provided unique ID).
- * Returns the set of fitIds that already exist in the database.
+ * Returns the set of fitIds that already exist for the importing user.
+ * Scoping to `userId` is required so an authenticated user can't probe
+ * another tenant's bank fitIds.
  */
-export async function checkFitIdDuplicates(fitIds: string[]): Promise<Set<string>> {
+export async function checkFitIdDuplicates(fitIds: string[], userId: string): Promise<Set<string>> {
   if (fitIds.length === 0) return new Set();
 
   const existing = new Set<string>();
@@ -53,7 +66,12 @@ export async function checkFitIdDuplicates(fitIds: string[]): Promise<Set<string
     const rows = await db
       .select({ fitId: schema.transactions.fitId })
       .from(schema.transactions)
-      .where(inArray(schema.transactions.fitId, batch))
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          inArray(schema.transactions.fitId, batch),
+        ),
+      )
       .all();
     for (const row of rows) {
       if (row.fitId) existing.add(row.fitId);

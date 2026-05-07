@@ -540,7 +540,7 @@ export async function importTransactions(csvText: string, userId: string, dek: B
 
     if (values.length > 0) {
       const hashes = values.map((v) => v.importHash);
-      const existingHashes = await checkDuplicates(hashes);
+      const existingHashes = await checkDuplicates(hashes, userId);
       const newValues = values.filter((v) => !existingHashes.has(v.importHash));
       skippedDuplicates += values.length - newValues.length;
 

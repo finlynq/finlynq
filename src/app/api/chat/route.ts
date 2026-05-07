@@ -24,7 +24,7 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
 
-    const response = await processMessage(parsed.data.message.trim(), dek);
+    const response = await processMessage(parsed.data.message.trim(), userId, dek);
     return NextResponse.json(response);
   } catch (error: unknown) {
     await logApiError("POST", "/api/chat", error, userId);
