@@ -5,6 +5,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -44,6 +45,13 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, snapshotSchema);
     if (parsed.error) return parsed.error;
 
+    // Cross-tenant FK guard (H-1). Without this, a snapshot row for user B's
+    // account_id would land under user A's user_id and surface in A's UI
+    // (or just silently corrupt B's account-balance history).
+    await verifyOwnership(auth.context.userId, {
+      accountIds: [parsed.data.accountId],
+    });
+
     const snap = await db.insert(schema.snapshots).values({
       userId: auth.context.userId,
       accountId: parsed.data.accountId,
@@ -53,6 +61,9 @@ export async function POST(request: NextRequest) {
     }).returning().get();
     return NextResponse.json(snap, { status: 201 });
   } catch (error: unknown) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     const message = safeErrorMessage(error, "Failed to create snapshot");
     return NextResponse.json({ error: message }, { status: 500 });
   }

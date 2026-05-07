@@ -22,7 +22,16 @@ vi.mock("@/db", () => ({
 vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
-vi.mock("drizzle-orm", () => ({ eq: vi.fn(), desc: vi.fn(), and: vi.fn() }));
+vi.mock("drizzle-orm", () => ({ eq: vi.fn(), desc: vi.fn(), and: vi.fn(), inArray: vi.fn() }));
+
+// B4 — bypass verifyOwnership in this unit test; cross-tenant rejection is
+// covered in the dedicated authz-ownership.test.ts.
+vi.mock("@/lib/verify-ownership", () => ({
+  verifyOwnership: vi.fn(async () => undefined),
+  OwnershipError: class OwnershipError extends Error {
+    constructor() { super("ownership"); }
+  },
+}));
 
 import { GET, POST, DELETE } from "@/app/api/snapshots/route";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";

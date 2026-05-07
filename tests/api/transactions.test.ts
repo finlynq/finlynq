@@ -17,6 +17,14 @@ vi.mock("@/lib/queries", () => ({
   deleteTransaction: (...args: unknown[]) => mockDeleteTransaction(...args),
 }));
 
+// B4 — bypass verifyOwnership; cross-tenant rejection in authz-ownership.test.ts.
+vi.mock("@/lib/verify-ownership", () => ({
+  verifyOwnership: vi.fn(async () => undefined),
+  OwnershipError: class OwnershipError extends Error {
+    constructor() { super("ownership"); }
+  },
+}));
+
 import { GET, POST, PUT, DELETE } from "@/app/api/transactions/route";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";

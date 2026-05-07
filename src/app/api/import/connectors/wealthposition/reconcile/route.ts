@@ -6,6 +6,7 @@ import {
   insertOpeningBalanceAdjustment,
 } from "@/lib/external-import/reconciliation";
 import { WealthPositionApiError } from "@finlynq/import-connectors/wealthposition";
+import { OwnershipError } from "@/lib/verify-ownership";
 
 export async function GET(request: NextRequest) {
   const auth = await requireEncryption(request);
@@ -57,6 +58,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const result = await insertOpeningBalanceAdjustment(auth.userId, auth.dek, parsed.data);
-  return NextResponse.json(result);
+  try {
+    const result = await insertOpeningBalanceAdjustment(auth.userId, auth.dek, parsed.data);
+    return NextResponse.json(result);
+  } catch (err) {
+    if (err instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    throw err;
+  }
 }
