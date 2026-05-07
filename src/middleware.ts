@@ -157,6 +157,23 @@ function csrfCheck(request: NextRequest): NextResponse | null {
   );
 }
 
+/**
+ * Generate a cryptographically random nonce for per-request CSP.
+ * 16 random bytes encoded as base64 — meets the CSP spec's recommendation
+ * (≥128 bits of entropy). `crypto.randomUUID` would also work but base64
+ * keeps the header shorter.
+ */
+function generateNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  // Base64-encode without using Buffer (Edge runtime compat).
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 export function middleware(request: NextRequest) {
   // Handle CORS preflight requests
   if (request.method === "OPTIONS") {
@@ -171,7 +188,20 @@ export function middleware(request: NextRequest) {
   const csrfBlock = csrfCheck(request);
   if (csrfBlock) return csrfBlock;
 
-  const response = NextResponse.next();
+  // Per-request CSP nonce (B10 / finding C-8). Server components read this
+  // via `headers().get('x-nonce')` and pass it to <ThemeProvider> + <Script>
+  // so framework-injected and app-injected inline scripts can be tagged.
+  // We propagate it BOTH on the inbound request headers (for `headers()`
+  // RSC reads) AND in the outbound CSP `script-src` directive.
+  const nonce = generateNonce();
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-nonce", nonce);
+
+  const response = NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
 
   // CORS headers for managed mode
   const corsHeaders = getCorsHeaders(request);
@@ -189,27 +219,35 @@ export function middleware(request: NextRequest) {
     pathname.startsWith("/cloud/") ||
     pathname.startsWith("/self-hosted/");
 
-  // CSP `script-src` policy. Today both marketing AND app routes still need
-  // `'unsafe-inline'` because:
-  //   - Next.js's RSC streaming injects inline `<script>` tags
-  //     (`self.__next_f.push(...)`) on every server-rendered page; without
-  //     `'unsafe-inline'` (or a per-request nonce on every one of them) the
-  //     app fails to hydrate.
-  //   - `next-themes` injects its own inline FOUC-prevention script in the
-  //     root layout; it accepts a `nonce` prop but Next.js's RSC inline
-  //     scripts also need that same nonce to be threaded everywhere.
-  //   - Turbopack's dev runtime injects inline HMR scripts.
-  // Removing `'unsafe-inline'` requires the full nonce + `'strict-dynamic'`
-  // migration tracked as a follow-up. This PR ships the CSRF Origin gate +
-  // `object-src 'none'` + CORS startup validator now; the nonce migration
-  // lands in a separate change once the touch points have been audited.
-  // Residual risk: an HTML-injection sink in a server-rendered template
-  // (e.g. unescaped `displayName` interpolation in an email body that is
-  // also rendered as a web page somewhere) could still execute. Email
-  // template hardening is tracked under finding M-19.
-  const scriptSrc = isWebsite
-    ? "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://www.googletagmanager.com"
-    : "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com";
+  // CSP `script-src` policy — per-request nonce + 'strict-dynamic'
+  // (B10 / finding C-8).
+  //
+  // 'strict-dynamic' propagates trust transitively: a script loaded with a
+  // valid nonce can in turn load other scripts (covers Next.js HMR + the GA
+  // gtag loader). When 'strict-dynamic' is present, host-source allowlists
+  // (e.g. `https://www.googletagmanager.com`) are IGNORED by modern browsers
+  // — the nonce'd loader brings the trust with it.
+  //
+  // 'unsafe-eval' is dev-only — Next.js's HMR / React Refresh runtimes
+  // evaluate code via `eval`/`new Function` in dev mode. Production builds
+  // do not need it.
+  const isDev = process.env.NODE_ENV !== "production";
+
+  const scriptSrcParts = [
+    "script-src",
+    "'self'",
+    `'nonce-${nonce}'`,
+    "'strict-dynamic'",
+    // Legacy browser fallback. CSP3-compliant browsers ignore these when
+    // 'strict-dynamic' is present; older ones (which would otherwise block
+    // every script) accept them.
+    "https:",
+    "http:",
+  ];
+  if (isDev) {
+    scriptSrcParts.push("'unsafe-eval'");
+  }
+  const scriptSrc = scriptSrcParts.join(" ");
 
   const imgSrc = isWebsite
     ? "img-src 'self' data: blob: https://coin-images.coingecko.com https://assets.coingecko.com https://www.google-analytics.com https://www.googletagmanager.com"
@@ -219,7 +257,12 @@ export function middleware(request: NextRequest) {
     ? "connect-src 'self' https://www.google-analytics.com https://*.analytics.google.com https://*.google-analytics.com https://www.googletagmanager.com"
     : "connect-src 'self'";
 
-  // Content Security Policy — restrictive default, allow self and inline styles (for Tailwind)
+  // Content Security Policy — script-src is now nonce-based with
+  // 'strict-dynamic'. 'unsafe-inline' has been removed from script-src
+  // entirely; 'object-src none' blocks Flash/`<object>`/`<embed>`.
+  // style-src still needs 'unsafe-inline' because Tailwind + shadcn emit
+  // inline styles at render time — that's a separate hardening (no
+  // current finding tracks it; styles can't exfiltrate the way scripts can).
   response.headers.set(
     "Content-Security-Policy",
     [
@@ -233,8 +276,14 @@ export function middleware(request: NextRequest) {
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
+      "object-src 'none'",
     ].join("; ")
   );
+
+  // Expose the nonce on the response so route handlers / debugging tools
+  // can read it. Server components read it via `headers().get('x-nonce')`
+  // (set on the inbound request above).
+  response.headers.set("x-nonce", nonce);
 
   // Prevent clickjacking
   response.headers.set("X-Frame-Options", "DENY");
