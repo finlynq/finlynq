@@ -754,3 +754,17 @@ export const adminAudit = pgTable("admin_audit", {
   ip: text("ip"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ─── Revoked JWT jtis ───────────────────────────────────────────────────────
+//
+// Server-side JWT denylist (B7, 2026-05-07). A jti is INSERTed here when a
+// user logs out (so a stolen cookie can't keep accessing plaintext-only
+// routes — finding H-5) or when an MFA-pending token is exchanged for a
+// real session (so the pending token can't be replayed against /mfa/verify
+// — finding H-4). The auth path consults this table on every request via a
+// 30s in-process cache. A daily cron prunes rows whose `expires_at` < NOW()
+// (tokens past their JWT exp would already fail signature verification).
+export const revokedJtis = pgTable("revoked_jtis", {
+  jti: text("jti").primaryKey(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});

@@ -17,8 +17,16 @@ export {
   verifySessionToken,
   verifySessionTokenDetailed,
   currentDeployGeneration,
+  isJtiRevoked,
+  revokeJti,
+  isPendingToken,
 } from "./jwt";
-export type { SessionPayload, VerifyResult, VerifyFailureReason } from "./jwt";
+export type {
+  SessionPayload,
+  VerifyResult,
+  VerifyFailureReason,
+  CreateSessionTokenOptions,
+} from "./jwt";
 export { hashPassword, verifyPassword } from "./passwords";
 export { generateMfaSecret, verifyMfaCode, generateBackupCodes } from "./mfa";
 export {

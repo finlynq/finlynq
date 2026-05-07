@@ -1,8 +1,8 @@
-/**
+﻿/**
  * Admin user management API (Phase 6: NS-36)
  *
- * GET  /api/admin/users — list all users (paginated)
- * PATCH /api/admin/users — update a user's role or plan
+ * GET  /api/admin/users â€” list all users (paginated)
+ * PATCH /api/admin/users â€” update a user's role or plan
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -48,7 +48,7 @@ const updateSchema = z.object({
   role: z.enum(["user", "admin"]).optional(),
   plan: z.enum(["free", "pro", "premium"]).optional(),
   planExpiresAt: z.string().optional(),
-  // Required if the acting admin has MFA enabled — Finding Admin-MFA-step-up.
+  // Required if the acting admin has MFA enabled â€” Finding Admin-MFA-step-up.
   // A stale session cookie alone can no longer silently mutate other users.
   mfaCode: z.string().length(6).optional(),
 });
@@ -86,7 +86,7 @@ export async function PATCH(request: NextRequest) {
           { status: 403 }
         );
       }
-      const dek = sessionId ? getDEK(sessionId) : null;
+      const dek = sessionId ? getDEK(sessionId, userId) : null;
       if (!dek) {
         return NextResponse.json(
           { error: "Session expired. Please sign in again." },
@@ -126,7 +126,7 @@ export async function PATCH(request: NextRequest) {
       planExpiresAt: planExpiresAt ?? target.planExpiresAt,
     };
 
-    // Finding #16 — audit-log the mutation. Fire-and-forget so a failed audit
+    // Finding #16 â€” audit-log the mutation. Fire-and-forget so a failed audit
     // write doesn't block a legitimate admin op (but it is logged to server log).
     if (role && role !== target.role) {
       await logAdminAction({

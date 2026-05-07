@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, eq } from "drizzle-orm";
 import { suggestCategory } from "@/lib/auto-categorize";
@@ -10,15 +10,15 @@ import { validateBody, safeErrorMessage } from "@/lib/validate";
 
 const { transactions, categories } = schema;
 
-// POST { payee } → suggested category
+// POST { payee } â†’ suggested category
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
-  // Suggest tolerates a missing DEK — history match against encrypted
+  // Suggest tolerates a missing DEK â€” history match against encrypted
   // payees simply won't fire (returns null suggestion). Legacy plaintext
   // rows keep working via the passthrough in decryptField.
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
   try {
     const body = await req.json();
 
@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
     const { payee } = parsed.data;
 
     // Get existing transactions with their payee and categoryId. Payee may be
-    // encrypted — match against the decrypted plaintext in memory.
+    // encrypted â€” match against the decrypted plaintext in memory.
     const existing = await db
       .select({
         payee: transactions.payee,
@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ suggestion: null });
     }
 
-    // Stream D Phase 4 — plaintext name dropped. Decrypt on the fly.
+    // Stream D Phase 4 â€” plaintext name dropped. Decrypt on the fly.
     const rawCategory = await db
       .select({
         id: categories.id,

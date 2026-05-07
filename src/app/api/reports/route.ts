@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, eq, and, gte, lte } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
@@ -13,7 +13,7 @@ import {
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
   const params = request.nextUrl.searchParams;
   const type = params.get("type") ?? "income-statement";
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;
@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
     ];
     if (isBusiness) conditions.push(eq(schema.transactions.isBusiness, 1));
 
-    // Stream D Phase 4 — plaintext name dropped. Group on stable id +
+    // Stream D Phase 4 â€” plaintext name dropped. Group on stable id +
     // category metadata; decrypt name_ct in-memory after aggregation.
     const rows = await db
       .select({
@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
       .orderBy(schema.categories.type, schema.categories.group)
       .all();
 
-    // Aggregate across currencies per category — keyed on categoryId so
+    // Aggregate across currencies per category â€” keyed on categoryId so
     // rows with NULL plaintext (Phase-3 cutover) don't collide.
     const categoryTotals = new Map<string | number, { categoryType: string; categoryGroup: string; categoryName: string; total: number; count: number }>();
     for (const row of rows) {
@@ -80,7 +80,7 @@ export async function GET(request: NextRequest) {
     const totalIncome = income.reduce((s, r) => s + r.total, 0);
     const totalExpenses = expenses.reduce((s, r) => s + Math.abs(r.total), 0);
 
-    // Unrealized P&L for the same period — decomposed into valuation
+    // Unrealized P&L for the same period â€” decomposed into valuation
     // (asset price moves) and FX (account currency vs display currency).
     // periodStart maps to the income-statement startDate; periodEnd to
     // endDate. Computed on the fly per the architecture decision.
@@ -117,11 +117,11 @@ export async function GET(request: NextRequest) {
             accountId: a.accountId,
             accountName: a.accountName,
             accountCurrency: a.accountCurrency,
-            // costBasis + marketValue come from the periodEnd snapshot —
+            // costBasis + marketValue come from the periodEnd snapshot â€”
             // useful context for the drilldown.
             costBasis: round2(a.end.costBasis),
             marketValue: round2(a.end.marketValue),
-            // Period delta — what moved during the period.
+            // Period delta â€” what moved during the period.
             valuationGL: round2(a.valuationGL),
             fxGL: round2(a.fxGL),
             totalGL: round2(a.totalGL),
@@ -136,7 +136,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (type === "balance-sheet") {
-    // Stream D Phase 4 — plaintext name dropped.
+    // Stream D Phase 4 â€” plaintext name dropped.
     const balances = await db
       .select({
         accountId: schema.accounts.id,
@@ -190,7 +190,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (type === "tax-summary") {
-    // Stream D Phase 4 — plaintext name dropped.
+    // Stream D Phase 4 â€” plaintext name dropped.
     const rows = await db
       .select({
         categoryId: schema.categories.id,
@@ -212,7 +212,7 @@ export async function GET(request: NextRequest) {
       .groupBy(schema.categories.id, schema.categories.group, schema.categories.nameCt, schema.transactions.currency)
       .all();
 
-    // Aggregate across currencies per category — keyed on categoryId.
+    // Aggregate across currencies per category â€” keyed on categoryId.
     const categoryTotals = new Map<string | number, { group: string; category: string; total: number; isIncome: boolean }>();
     for (const r of rows) {
       const group = r.categoryGroup ?? "";

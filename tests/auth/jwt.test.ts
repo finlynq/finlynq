@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 
 // Set a stable JWT secret for tests
 process.env.PF_JWT_SECRET = "test-jwt-secret-for-vitest-32chars!!";
@@ -7,6 +7,8 @@ import {
   createSessionToken,
   verifySessionToken,
   verifySessionTokenDetailed,
+  isPendingToken,
+  _clearRevokedJtiCache,
 } from "@/lib/auth/jwt";
 
 describe("JWT utilities", () => {
@@ -85,5 +87,102 @@ describe("JWT deploy-generation force-logout", () => {
     const { token } = await createSessionToken("u", false);
     process.env.DEPLOY_GENERATION = "deploy-b";
     expect(await verifySessionToken(token)).toBeNull();
+  });
+});
+
+describe("JWT pending claim (B7)", () => {
+  it("default tokens have no pending claim", async () => {
+    const { token } = await createSessionToken("user-pending-1", false);
+    const payload = await verifySessionToken(token);
+    expect(payload).not.toBeNull();
+    expect(payload!.pending).toBeUndefined();
+    expect(isPendingToken(payload)).toBe(false);
+  });
+
+  it("pending: true is round-tripped through sign/verify", async () => {
+    const { token } = await createSessionToken("user-pending-2", false, {
+      pending: true,
+      expirationTime: "5m",
+    });
+    const payload = await verifySessionToken(token);
+    expect(payload).not.toBeNull();
+    expect(payload!.pending).toBe(true);
+    expect(isPendingToken(payload)).toBe(true);
+  });
+
+  it("respects custom expirationTime overrides", async () => {
+    const { token } = await createSessionToken("user-pending-3", false, {
+      expirationTime: "5m",
+    });
+    const payload = await verifySessionToken(token);
+    expect(payload).not.toBeNull();
+    // 5 minutes from now ± a few seconds for sign/verify slop
+    const expSec = payload!.exp as number;
+    const now = Math.floor(Date.now() / 1000);
+    expect(expSec - now).toBeGreaterThan(60 * 4);
+    expect(expSec - now).toBeLessThan(60 * 6);
+  });
+});
+
+describe("JWT revocation list (B7)", () => {
+  // We mock the dynamic db import that isJtiRevoked reaches for so we can
+  // exercise the cache + denylist logic without spinning up Postgres.
+  beforeAll(() => {
+    _clearRevokedJtiCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    _clearRevokedJtiCache();
+  });
+
+  it("verifySessionTokenDetailed returns reason='revoked' when jti is denylisted", async () => {
+    const revokedSet = new Set<string>();
+    // Stub the @/db and @/db/schema-pg modules with a minimal in-memory shim.
+    vi.doMock("@/db", () => ({
+      db: {
+        select: () => ({
+          from: () => ({
+            where: () => ({
+              limit: async () => {
+                // We can't easily inspect the where() arg here, so we look
+                // up via the captured jti-under-test instead. Reset per test.
+                return Array.from(revokedSet).map((jti) => ({ jti }));
+              },
+            }),
+          }),
+        }),
+        insert: () => ({
+          values: () => ({
+            onConflictDoNothing: () => Promise.resolve(),
+          }),
+        }),
+      },
+    }));
+    vi.doMock("@/db/schema-pg", () => ({
+      revokedJtis: { jti: "jti", expiresAt: "expires_at" },
+    }));
+    vi.doMock("drizzle-orm", () => ({
+      eq: (_col: unknown, val: unknown) => {
+        // Side-effect: when the verifier asks "is jti X revoked?" we add it
+        // to the set so the where().limit() shim returns a hit.
+        revokedSet.add(val as string);
+        return val;
+      },
+    }));
+
+    // Re-import so the mocks take effect.
+    vi.resetModules();
+    const { createSessionToken: csTk, verifySessionTokenDetailed: vstd } =
+      await import("@/lib/auth/jwt");
+    process.env.DEPLOY_GENERATION = "0";
+    const { token } = await csTk("user-revoked", false);
+    const res = await vstd(token);
+    expect(res.payload).toBeNull();
+    expect(res.reason).toBe("revoked");
+  });
+
+  it("isPendingToken handles null safely", () => {
+    expect(isPendingToken(null)).toBe(false);
   });
 });

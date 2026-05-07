@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { and, eq, ne } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
@@ -9,20 +9,20 @@ import { decryptField } from "@/lib/crypto/envelope";
 /**
  * GET /api/transactions/linked?linkId=<id>&excludeId=<txId>
  *
- * Returns the sibling transactions sharing a `link_id` — the "other legs"
+ * Returns the sibling transactions sharing a `link_id` â€” the "other legs"
  * of a multi-leg import (transfer, same-account conversion, liquidation).
  * Scoped to the requesting user so a leaked link id can't surface another
  * tenant's rows.
  *
  * Follows the same soft-DEK policy as GET /api/transactions: if the in-
  * memory DEK cache is cold, encrypted columns come back as `v1:...` rather
- * than 423-ing — callers can still render account + amount + date.
+ * than 423-ing â€” callers can still render account + amount + date.
  */
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
 
   const params = request.nextUrl.searchParams;
   const linkId = params.get("linkId");
@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
   ];
   if (excludeId) conditions.push(ne(schema.transactions.id, excludeId));
 
-  // Stream D Phase 4 — plaintext name columns dropped; only ciphertext.
+  // Stream D Phase 4 â€” plaintext name columns dropped; only ciphertext.
   const rows = await db
     .select({
       id: schema.transactions.id,
@@ -78,7 +78,7 @@ export async function GET(request: NextRequest) {
     rows as Array<Parameters<typeof decryptTxRows>[1][number]>,
   ) as Array<typeof rows[number]>;
 
-  // Stream D Phase 4 — plaintext name columns dropped. Decrypt name_ct and
+  // Stream D Phase 4 â€” plaintext name columns dropped. Decrypt name_ct and
   // surface as `accountName` / `categoryName` / `portfolioHolding`.
   const enriched = decrypted.map((r) => {
     let resolvedName: string | null = null;

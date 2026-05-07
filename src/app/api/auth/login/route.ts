@@ -188,16 +188,23 @@ export async function POST(request: NextRequest) {
     }
 
     // If MFA is enabled, return a pending state (no session yet).
-    // The DEK is cached under the pending jti with a 5-minute TTL so MFA
-    // verify can promote it to the real session without asking the user to
-    // re-enter their password. If MFA verify fails or times out, the entry
+    // B7: the pending token carries `pending: true` and a 5-minute TTL.
+    // The default account strategy rejects pending tokens for every route
+    // except /api/auth/mfa/verify so a captured pending cookie can't access
+    // dashboards or transactions (finding H-4). On successful MFA verify the
+    // pending jti is INSERTed into `revoked_jtis` so the token can't be
+    // replayed against /mfa/verify either.
+    // The DEK is cached under the pending jti with a matching 5-minute TTL so
+    // MFA verify can promote it to the real session without asking the user
+    // to re-enter their password. If MFA verify fails or times out, the entry
     // ages out naturally.
     if (user.mfaEnabled) {
       const { token: pendingToken, jti: pendingJti } = await createSessionToken(
         user.id,
-        false
+        false,
+        { pending: true, expirationTime: "5m" }
       );
-      if (dek) putDEK(pendingJti, dek, 5 * 60_000);
+      if (dek) putDEK(pendingJti, dek, 5 * 60_000, user.id);
       return NextResponse.json({
         mfaRequired: true,
         mfaPendingToken: pendingToken,
@@ -208,7 +215,7 @@ export async function POST(request: NextRequest) {
     await recordSuccessfulLogin(user.id);
     const { token, jti } = await createSessionToken(user.id, false);
     if (dek) {
-      putDEK(jti, dek, SESSION_TTL_MS);
+      putDEK(jti, dek, SESSION_TTL_MS, user.id);
       // Stream D Phase 4 (2026-05-03): plaintext columns are gone, so the
       // backfill + phase-3-null helpers no longer run on login. Only the
       // per-user lazy canonicalization remains — it now reads `name_ct` /
