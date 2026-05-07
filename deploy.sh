@@ -205,6 +205,17 @@ fi
 
 # 3. Build
 if [ "$SKIP_BUILD" = false ]; then
+  # Defensive chown opener (issue: pitfall-#1 in memory/finlynq-deploy-pitfalls.md
+  # surfaced for the third time during the session-3 prod promotion). A previous
+  # deploy that failed mid-flight left 132 root-owned files inside
+  # .next/standalone/.next/static/ which blocked the `run_as rm -rf .next` here
+  # because paperclip-agent doesn't own them. Reclaim ownership before the rm
+  # so a half-failed deploy can recover on the next run instead of needing
+  # manual `chown` recovery via SSH. `2>/dev/null || true` because the dir may
+  # not exist on a fresh box.
+  if [ -d .next ] && [ -n "$REPO_OWNER" ]; then
+    sudo chown -R "$REPO_OWNER:$REPO_OWNER" .next 2>/dev/null || true
+  fi
   echo "==> Removing stale build output..."
   run_as "rm -rf .next"
   echo "==> Building Next.js..."
