@@ -89,6 +89,29 @@ const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const AUTH_COOKIE = "pf_session";
 
 /**
+ * Pre-auth state-changing routes that authenticate via a request-bound
+ * credential (password, reset token, email-verification token), NOT the
+ * `pf_session` cookie. These must bypass the CSRF gate even when a stale
+ * session cookie is attached, otherwise users with leftover cookies from
+ * a previous session 403 when they try to log in or recover their account.
+ *
+ * Login CSRF is mitigated by SameSite=Lax on the freshly-issued session
+ * cookie (an attacker-cross-site POST can't read it back) and by the user
+ * having to supply correct credentials in the first place — there is no
+ * server-state mutation an attacker can drive without those credentials.
+ *
+ * Confirm/verify routes are URL-token authenticated; the token itself is
+ * the unguessable CSRF nonce.
+ */
+const CSRF_BYPASS_PATHS = new Set([
+  "/api/auth/login",
+  "/api/auth/register",
+  "/api/auth/password-reset/request",
+  "/api/auth/password-reset/confirm",
+  "/api/auth/verify-email",
+]);
+
+/**
  * Origin/Referer CSRF check for state-changing requests that authenticate via
  * the `pf_session` cookie.
  *
@@ -108,6 +131,12 @@ const AUTH_COOKIE = "pf_session";
 function csrfCheck(request: NextRequest): NextResponse | null {
   if (!STATE_CHANGING_METHODS.has(request.method)) return null;
 
+  // Pre-auth state-changing routes (login, register, password-reset, email
+  // verification) bypass the gate. They authenticate via password / reset
+  // token / email token rather than the session cookie, and a stale cookie
+  // from a previous session would otherwise 403 a fresh login attempt.
+  if (CSRF_BYPASS_PATHS.has(request.nextUrl.pathname)) return null;
+
   // Bearer / API-key flows authenticate per-request via a bound credential
   // that a foreign origin can't read or replay via cookie-CSRF. Skip them.
   // Mirrors the strategy selection in `selectStrategy()` in
@@ -125,8 +154,6 @@ function csrfCheck(request: NextRequest): NextResponse | null {
   }
 
   // Only enforce on requests that are actually riding the session cookie.
-  // Pre-login routes (POST /api/auth/login) etc. don't carry a cookie yet —
-  // letting them through avoids breaking the login flow itself.
   const sessionCookie = request.cookies.get(AUTH_COOKIE);
   if (!sessionCookie) return null;
 
@@ -301,7 +328,6 @@ export function middleware(request: NextRequest) {
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
-      "object-src 'none'",
     ].join("; ")
   );
 
