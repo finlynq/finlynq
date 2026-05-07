@@ -9,8 +9,9 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { sql } from "drizzle-orm";
+import { sql, inArray } from "drizzle-orm";
 import { z } from "zod";
+import { stagedTransactions } from "../src/db/schema-pg";
 import { decryptField, encryptField } from "../src/lib/crypto/envelope";
 import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
 import { encryptName, nameLookup } from "../src/lib/crypto/encrypted-columns";
@@ -106,6 +107,58 @@ function rows(result: unknown): Row[] {
 
 async function q(db: DbLike, query: ReturnType<typeof sql>): Promise<Row[]> {
   return rows(await db.execute(query));
+}
+
+// ─── Idempotency-key in-flight mutex (M-1, SECURITY_REVIEW 2026-05-06) ──────
+//
+// Two concurrent calls with the same idempotencyKey can both miss the
+// `mcp_idempotency_keys` lookup, both run the per-row INSERTs (double-
+// inserting), and only one wins the response-persist `ON CONFLICT DO NOTHING`.
+// This mutex serializes the lookup → execute → persist window per (user, key)
+// within a single Node process — the second concurrent call awaits the first
+// and then re-checks the DB, finding the persisted response and returning a
+// replay.
+//
+// Process-local: Finlynq runs one MCP HTTP process per env (per CLAUDE.md
+// deploy layout). Multi-instance deployments would still have the residual
+// race the original ON CONFLICT DO NOTHING already mitigated; the in-process
+// mutex closes the race for the deployment shape Finlynq actually ships.
+//
+// HMR resilience: stored on globalThis so a Next.js hot reload doesn't
+// double-mint the map and re-open the race window mid-request.
+const IDEMPOTENCY_MUTEX_KEY = "__pf_mcp_idempotency_mutex__";
+type GlobalWithMutex = typeof globalThis & {
+  [IDEMPOTENCY_MUTEX_KEY]?: Map<string, Promise<unknown>>;
+};
+function getIdempotencyMutex(): Map<string, Promise<unknown>> {
+  const g = globalThis as GlobalWithMutex;
+  if (!g[IDEMPOTENCY_MUTEX_KEY]) g[IDEMPOTENCY_MUTEX_KEY] = new Map();
+  return g[IDEMPOTENCY_MUTEX_KEY]!;
+}
+async function withIdempotencyMutex<T>(
+  userId: string,
+  key: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const map = getIdempotencyMutex();
+  const lockKey = `${userId}::${key}`;
+  // Wait for any in-flight call with the same key.
+  const prev = map.get(lockKey);
+  if (prev) {
+    try {
+      await prev;
+    } catch {
+      // Predecessor failure must not block this attempt.
+    }
+  }
+  const run = (async () => fn())();
+  // Hold the slot until run settles, then clean up so the map doesn't grow.
+  map.set(lockKey, run);
+  try {
+    return await run;
+  } finally {
+    if (map.get(lockKey) === run) map.delete(lockKey);
+  }
 }
 
 function text(data: unknown) {
@@ -2490,15 +2543,13 @@ export function registerPgTools(
       })).describe("Array of transactions to record"),
     },
     async ({ transactions, account_id: defaultAccountId, dryRun, idempotencyKey }) => {
-      const today = new Date().toISOString().split("T")[0];
-
       // Idempotency replay (issue #98). Look up first — before any
       // account/category/holdings prefetch — so a hit returns immediately.
       // Scoped on `(user_id, key, tool_name)` with a 72h freshness window;
       // older rows are GC'd by `sweepMcpIdempotencyKeys` but treat them as
       // misses here defensively. dryRun=true skips replay AND skips storage:
       // a preview must never block a future real submit with the same key.
-      if (idempotencyKey && !dryRun) {
+      const lookupReplay = async (): Promise<ReturnType<typeof text> | null> => {
         try {
           const hit = await q(db, sql`
             SELECT response_json
@@ -2523,7 +2574,33 @@ export function registerPgTools(
           // eslint-disable-next-line no-console
           console.warn("[bulk_record_transactions] idempotency lookup failed:", e);
         }
+        return null;
+      };
+      if (idempotencyKey && !dryRun) {
+        const replay = await lookupReplay();
+        if (replay) return replay;
       }
+
+      // M-1 (SECURITY_REVIEW 2026-05-06): serialize the per-key write window
+      // through a process-local mutex. Two concurrent calls with the same key
+      // both miss the lookup above; without serialization both would run the
+      // per-row INSERTs (double-inserting). With the mutex, the second waits
+      // for the first to finish and then re-checks the cache below, returning
+      // a replay instead of a fresh batch of rows.
+      if (idempotencyKey && !dryRun) {
+        return withIdempotencyMutex(userId, idempotencyKey, async () => {
+          // Re-check the cache after entering the critical section — a
+          // sibling call may have just finished and persisted its response
+          // while we were queued.
+          const replay = await lookupReplay();
+          if (replay) return replay;
+          return runBulkRecord();
+        });
+      }
+      return runBulkRecord();
+
+      async function runBulkRecord() {
+      const today = new Date().toISOString().split("T")[0];
 
       const rawAccounts = await q(db, sql`SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
       const allAccounts = decryptNameish(rawAccounts, dek);
@@ -2899,6 +2976,7 @@ export function registerPgTools(
       }
 
       return text(responseBody);
+      } // end runBulkRecord
     }
   );
 
@@ -6186,8 +6264,13 @@ export function registerPgTools(
     },
     async ({ ordered_ids }) => {
       // Verify ownership of every id before writing anything.
+      // Defense-in-depth (low finding, SECURITY_REVIEW 2026-05-06): use a
+      // parameterized `ANY(ARRAY[…]::int[])` builder rather than concatenating
+      // a CSV. Number() coercion still gates upstream so this is currently
+      // safe; the swap removes the fragile pattern.
+      const orderedIdsExpr = sql.join(ordered_ids.map((n) => sql`${Number(n)}`), sql`, `);
       const owned = await q(db, sql`
-        SELECT id FROM transaction_rules WHERE user_id = ${userId} AND id IN ${sql.raw(`(${ordered_ids.map((n) => Number(n)).join(",")})`)}
+        SELECT id FROM transaction_rules WHERE user_id = ${userId} AND id = ANY(ARRAY[${orderedIdsExpr}]::int[])
       `);
       if (owned.length !== ordered_ids.length) {
         return err(`One or more rule ids are not owned by this user (expected ${ordered_ids.length}, found ${owned.length})`);
@@ -6273,8 +6356,11 @@ export function registerPgTools(
       // Hydrate category names for the top-N counts. Stream D Phase 4:
       // plaintext name dropped; decrypt name_ct.
       const topCatIds = Array.from(catCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, topN);
-      const categoryRows = topCatIds.length
-        ? await q(db, sql`SELECT id, name_ct, type, "group" FROM categories WHERE user_id = ${userId} AND id IN ${sql.raw(`(${topCatIds.map(([id]) => id).join(",")})`)}`)
+      const topCatIdsExpr = topCatIds.length
+        ? sql.join(topCatIds.map(([id]) => sql`${Number(id)}`), sql`, `)
+        : null;
+      const categoryRows = topCatIdsExpr
+        ? await q(db, sql`SELECT id, name_ct, type, "group" FROM categories WHERE user_id = ${userId} AND id = ANY(ARRAY[${topCatIdsExpr}]::int[])`)
         : [];
       const categorySuggestions = topCatIds.map(([id, count]) => {
         const c = categoryRows.find((x) => Number(x.id) === id);
@@ -6578,7 +6664,10 @@ export function registerPgTools(
     if (filter.ids && filter.ids.length > 0) {
       const safeIds = filter.ids.map((n) => Number(n)).filter((n) => Number.isFinite(n));
       if (safeIds.length === 0) return [];
-      whereParts.push(sql.raw(`id IN (${safeIds.join(",")})`));
+      // Defense-in-depth: parameterized ANY(ARRAY[...]::int[]) instead of
+      // hand-rolled CSV (low finding, SECURITY_REVIEW 2026-05-06).
+      const safeIdsExpr = sql.join(safeIds.map((id) => sql`${id}`), sql`, `);
+      whereParts.push(sql`id = ANY(ARRAY[${safeIdsExpr}]::int[])`);
     }
     if (filter.start_date) whereParts.push(sql`date >= ${filter.start_date}`);
     if (filter.end_date) whereParts.push(sql`date <= ${filter.end_date}`);
@@ -6766,6 +6855,8 @@ export function registerPgTools(
 
     const sampleIds = ids.slice(0, 10);
     // Stream D Phase 4: a.name + c.name dropped — read *_ct only.
+    // Defense-in-depth: parameterized ANY(ARRAY[...]::int[]) instead of CSV.
+    const sampleIdsExpr = sql.join(sampleIds.map((id) => sql`${Number(id)}`), sql`, `);
     const rawRows = await q(db, sql`
       SELECT t.id, t.date, t.account_id, a.name_ct AS account_ct,
              t.category_id, c.name_ct AS category_ct,
@@ -6774,7 +6865,7 @@ export function registerPgTools(
       FROM transactions t
       LEFT JOIN accounts a ON t.account_id = a.id
       LEFT JOIN categories c ON t.category_id = c.id
-      WHERE t.id IN ${sql.raw(`(${sampleIds.join(",")})`)} AND t.user_id = ${userId}
+      WHERE t.id = ANY(ARRAY[${sampleIdsExpr}]::int[]) AND t.user_id = ${userId}
       ORDER BY t.id
     `);
     const rows = rawRows.map((r) => {
@@ -6806,39 +6897,44 @@ export function registerPgTools(
    */
   async function commitBulkUpdate(ids: number[], resolved: ResolvedChanges): Promise<number> {
     if (ids.length === 0) return 0;
-    const idList = sql.raw(`(${ids.map((n) => Number(n)).join(",")})`);
+    // Defense-in-depth (low finding, SECURITY_REVIEW 2026-05-06): use a
+    // parameterized `ANY(ARRAY[...]::int[])` predicate rather than a hand-built
+    // CSV. Number() coercion above keeps the input safe today; this swap
+    // removes the fragile pattern from the call sites.
+    const idsExpr = sql.join(ids.map((n) => sql`${Number(n)}`), sql`, `);
+    const idMatch = sql`id = ANY(ARRAY[${idsExpr}]::int[])`;
 
     // Per-field updates: keeps the SQL simple + parameterized, and lets us
     // encrypt payee / note / tags when a DEK is present.
     if (resolved.category_id !== undefined) {
-      await db.execute(sql`UPDATE transactions SET category_id = ${resolved.category_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET category_id = ${resolved.category_id}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
     }
     if (resolved.account_id !== undefined) {
-      await db.execute(sql`UPDATE transactions SET account_id = ${resolved.account_id}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET account_id = ${resolved.account_id}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
     }
     if (resolved.date !== undefined) {
-      await db.execute(sql`UPDATE transactions SET date = ${resolved.date}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET date = ${resolved.date}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
     }
     if (resolved.is_business !== undefined) {
-      await db.execute(sql`UPDATE transactions SET is_business = ${resolved.is_business}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET is_business = ${resolved.is_business}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
     }
     if (resolved.payee !== undefined) {
       const v = dek ? encryptField(dek, resolved.payee) : resolved.payee;
-      await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
     }
     if (resolved.note !== undefined) {
       const v = dek ? encryptField(dek, resolved.note) : resolved.note;
-      await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET note = ${v}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
     }
     if (resolved.quantity !== undefined) {
       // Issue #61: `null` clears the column; numeric writes go through directly.
       // Source-stamping rule (issue #28): `source` is INSERT-only — never set here.
-      await db.execute(sql`UPDATE transactions SET quantity = ${resolved.quantity}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET quantity = ${resolved.quantity}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
     }
     if (resolved.portfolioHoldingId !== undefined) {
       // Ownership pre-checked at resolveBulkChanges time. Audit invariant:
       // bumps updated_at; never touches `source`.
-      await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolved.portfolioHoldingId}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+      await db.execute(sql`UPDATE transactions SET portfolio_holding_id = ${resolved.portfolioHoldingId}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
     }
     if (resolved.tags !== undefined) {
       // Tag edits need per-row merging when mode != replace (because each row
@@ -6846,9 +6942,9 @@ export function registerPgTools(
       // mutate, re-encrypt, write row-by-row. For replace we can write once.
       if (resolved.tags.mode === "replace") {
         const v = dek ? encryptField(dek, resolved.tags.value) : resolved.tags.value;
-        await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE id IN ${idList} AND user_id = ${userId}`);
+        await db.execute(sql`UPDATE transactions SET tags = ${v}, updated_at = NOW() WHERE ${idMatch} AND user_id = ${userId}`);
       } else {
-        const rows = await q(db, sql`SELECT id, tags FROM transactions WHERE id IN ${idList} AND user_id = ${userId}`);
+        const rows = await q(db, sql`SELECT id, tags FROM transactions WHERE ${idMatch} AND user_id = ${userId}`);
         const tokens = resolved.tags.value.split(",").map((s) => s.trim()).filter(Boolean);
         for (const r of rows) {
           const plain = dek ? (decryptField(dek, String(r.tags ?? "")) ?? "") : String(r.tags ?? "");
@@ -6947,6 +7043,8 @@ export function registerPgTools(
         }
         const sampleIds = ids.slice(0, 10);
         // Stream D Phase 4: a.name + c.name dropped — read *_ct only.
+        // Defense-in-depth: parameterized ANY(ARRAY[...]::int[]) instead of CSV.
+        const sampleIdsExpr = sql.join(sampleIds.map((id) => sql`${Number(id)}`), sql`, `);
         const rawRows = await q(db, sql`
           SELECT t.id, t.date, a.name_ct AS account_ct,
                  c.name_ct AS category_ct,
@@ -6954,7 +7052,7 @@ export function registerPgTools(
           FROM transactions t
           LEFT JOIN accounts a ON t.account_id = a.id
           LEFT JOIN categories c ON t.category_id = c.id
-          WHERE t.id IN ${sql.raw(`(${sampleIds.join(",")})`)} AND t.user_id = ${userId}
+          WHERE t.id = ANY(ARRAY[${sampleIdsExpr}]::int[]) AND t.user_id = ${userId}
           ORDER BY t.id
         `);
         const rows = rawRows.map((r) => {
@@ -6988,7 +7086,9 @@ export function registerPgTools(
         const check = verifyConfirmationToken(confirmation_token, userId, "bulk_delete", { ids });
         if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_delete.`);
         if (ids.length === 0) return text({ success: true, data: { deleted: 0 } });
-        await db.execute(sql`DELETE FROM transactions WHERE id IN ${sql.raw(`(${ids.join(",")})`)} AND user_id = ${userId}`);
+        // Defense-in-depth: parameterized ANY(ARRAY[...]::int[]) instead of CSV.
+        const idsExpr = sql.join(ids.map((id) => sql`${Number(id)}`), sql`, `);
+        await db.execute(sql`DELETE FROM transactions WHERE id = ANY(ARRAY[${idsExpr}]::int[]) AND user_id = ${userId}`);
         invalidateUserTxCache(userId);
         return text({ success: true, data: { deleted: ids.length } });
       } catch (e) {
@@ -7713,12 +7813,19 @@ export function registerPgTools(
             .map((i) => Number(i.bound_account_id)),
         ),
       );
-      const boundAccounts = boundIds.length
+      // Defense-in-depth (low finding, SECURITY_REVIEW 2026-05-06): use a
+      // parameterized `ANY(ARRAY[...]::int[])` predicate. Number() coercion
+      // upstream keeps the input safe today; the swap removes the fragile
+      // pattern.
+      const boundIdsExpr = boundIds.length
+        ? sql.join(boundIds.map((id) => sql`${Number(id)}`), sql`, `)
+        : null;
+      const boundAccounts = boundIdsExpr
         ? await q(
             db,
             sql`
               SELECT id, currency, is_investment FROM accounts
-              WHERE user_id = ${userId} AND id IN ${sql.raw(`(${boundIds.join(",")})`)}
+              WHERE user_id = ${userId} AND id = ANY(ARRAY[${boundIdsExpr}]::int[])
             `,
           )
         : [];
@@ -7729,12 +7836,13 @@ export function registerPgTools(
       const cashBalanceByAcct = new Map<number, number>();
       const cashOnly = boundAccounts.filter((a) => !a.is_investment).map((a) => Number(a.id));
       if (cashOnly.length) {
+        const cashOnlyExpr = sql.join(cashOnly.map((id) => sql`${id}`), sql`, `);
         const sums = await q(
           db,
           sql`
             SELECT account_id, COALESCE(SUM(amount), 0) AS bal
             FROM transactions
-            WHERE user_id = ${userId} AND account_id IN ${sql.raw(`(${cashOnly.join(",")})`)}
+            WHERE user_id = ${userId} AND account_id = ANY(ARRAY[${cashOnlyExpr}]::int[])
             GROUP BY account_id
           `,
         );
@@ -8777,12 +8885,15 @@ export function registerPgTools(
 
       // Cleanup staged rows — delete materialized; if all rows gone, drop
       // the parent staged_imports row too.
+      // H-13 (SECURITY_REVIEW 2026-05-06): use Drizzle's `inArray(...)` so the
+      // ids ride as parameterized values; the previous `sql.raw` builder
+      // hand-rolled quote-escaping which is fragile in the face of new
+      // staged-row id formats and not idiomatic.
       if (materializedRowIds.size > 0) {
-        const idsCsv = [...materializedRowIds].map((s) => `'${s.replace(/'/g, "''")}'`).join(",");
         await db.execute(
           sql`DELETE FROM staged_transactions
               WHERE staged_import_id = ${stagedImportId}
-                AND id IN ${sql.raw(`(${idsCsv})`)}`,
+                AND ${inArray(stagedTransactions.id, [...materializedRowIds])}`,
         );
       }
       const remainingCount = allRows.length - materializedRowIds.size;

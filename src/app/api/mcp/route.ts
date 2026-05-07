@@ -78,8 +78,42 @@ async function authenticateMcp(request: NextRequest) {
   };
 }
 
+// M-21 (SECURITY_REVIEW 2026-05-06): cap MCP request bodies at 1 MB. The MCP
+// surface is auth-gated, but a logged-in attacker (or a buggy client) could
+// otherwise stream an unbounded payload — JSON parsing happens inside the
+// SDK transport with no size guard. 1 MB comfortably exceeds any legitimate
+// MCP message; staging upload (the largest legitimate body) goes through
+// /api/import/staging/upload, not here.
+const MCP_MAX_BODY_BYTES = 1 * 1024 * 1024;
+
 // POST — MCP messages (initialize + tool calls)
 export async function POST(request: NextRequest) {
+  // Pre-check Content-Length BEFORE auth so we don't parse / buffer huge
+  // bodies when we'll reject. Mirror the pattern in
+  // /api/import/staging/upload/route.ts:91-97. We require the header — MCP
+  // clients all send Content-Length, and chunked uploads are not expected
+  // on this endpoint.
+  const contentLengthRaw = request.headers.get("content-length");
+  if (contentLengthRaw == null) {
+    return NextResponse.json(
+      { error: "Content-Length header required" },
+      { status: 411 },
+    );
+  }
+  const contentLength = Number(contentLengthRaw);
+  if (!Number.isFinite(contentLength) || contentLength < 0) {
+    return NextResponse.json(
+      { error: "Invalid Content-Length header" },
+      { status: 400 },
+    );
+  }
+  if (contentLength > MCP_MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { error: `Request body exceeds ${MCP_MAX_BODY_BYTES} byte limit` },
+      { status: 413 },
+    );
+  }
+
   const auth = await authenticateMcp(request);
   if (!auth.authenticated) return auth.response;
 

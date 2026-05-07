@@ -65,6 +65,60 @@ export interface ConfirmationClaims {
   payloadHash: string;
   issuedAt: number;
   expiresAt: number;
+  /**
+   * Token id — random UUIDv4 minted at sign time. Used as the single-use
+   * marker (M-2 in SECURITY_REVIEW 2026-05-06). Optional in the type so old
+   * tokens still parse; new tokens always carry one.
+   */
+  jti?: string;
+}
+
+// ─── Single-use replay defense (M-2) ──────────────────────────────────────────
+//
+// The token format is symmetric — anyone who captures a token can replay it
+// against the same userId/operation/payload until the 5-minute TTL expires.
+// We mark each jti as used on the first successful verify and reject any
+// future verify for the same jti. The store is a small bounded LRU keyed on
+// jti with TTL = the token TTL; entries auto-expire so the map can't grow
+// unboundedly. Stored on globalThis for HMR resilience.
+const USED_JTI_KEY = "__pf_confirmation_used_jti__";
+const USED_JTI_MAX = 10_000;
+type UsedJtiStore = Map<string, number>; // jti → expiresAt
+type GlobalWithUsedJti = typeof globalThis & { [USED_JTI_KEY]?: UsedJtiStore };
+function getUsedJtiStore(): UsedJtiStore {
+  const g = globalThis as GlobalWithUsedJti;
+  if (!g[USED_JTI_KEY]) g[USED_JTI_KEY] = new Map<string, number>();
+  return g[USED_JTI_KEY]!;
+}
+function isJtiUsed(jti: string): boolean {
+  const store = getUsedJtiStore();
+  const exp = store.get(jti);
+  if (exp == null) return false;
+  if (exp <= Date.now()) {
+    store.delete(jti);
+    return false;
+  }
+  return true;
+}
+function markJtiUsed(jti: string, expiresAt: number): void {
+  const store = getUsedJtiStore();
+  // Sweep expired entries lazily when we'd otherwise overflow the cap. Worst
+  // case here is O(n) once per overflow; n is bounded at USED_JTI_MAX so the
+  // amortized cost is constant.
+  if (store.size >= USED_JTI_MAX) {
+    const now = Date.now();
+    for (const [k, v] of store) if (v <= now) store.delete(k);
+    if (store.size >= USED_JTI_MAX) {
+      // Still full — evict the oldest entry (Map iteration order = insertion).
+      const oldest = store.keys().next().value;
+      if (typeof oldest === "string") store.delete(oldest);
+    }
+  }
+  store.set(jti, expiresAt);
+}
+/** Exported for tests — clears the in-memory store. */
+export function __resetUsedJtiStoreForTests(): void {
+  getUsedJtiStore().clear();
 }
 
 /** Canonical JSON serialization — stable key ordering so hashes are deterministic. */
@@ -128,6 +182,8 @@ export function signConfirmationToken(
     payloadHash: hashPayload(payload),
     issuedAt: now,
     expiresAt: now + CONFIRMATION_TOKEN_TTL_MS,
+    // M-2: every token gets a unique jti; verify rejects re-use.
+    jti: crypto.randomUUID(),
   };
   const payloadPart = b64urlEncode(JSON.stringify(claims));
   const mac = crypto
@@ -144,7 +200,8 @@ export type ConfirmationVerifyFailure =
   | "expired"
   | "user-mismatch"
   | "operation-mismatch"
-  | "payload-mismatch";
+  | "payload-mismatch"
+  | "replay";
 
 export interface ConfirmationVerifyResult {
   valid: boolean;
@@ -215,6 +272,16 @@ export function verifyConfirmationToken(
   }
   if (claims.payloadHash !== hashPayload(payload)) {
     return { valid: false, reason: "payload-mismatch", claims };
+  }
+
+  // M-2: single-use jti. Tokens minted before this change carry no jti — they
+  // can still verify (defensive) but they aren't replay-protected. New tokens
+  // always carry one and are rejected on second use.
+  if (typeof claims.jti === "string" && claims.jti.length > 0) {
+    if (isJtiUsed(claims.jti)) {
+      return { valid: false, reason: "replay", claims };
+    }
+    markJtiUsed(claims.jti, claims.expiresAt);
   }
 
   return { valid: true, claims };
