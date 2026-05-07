@@ -284,8 +284,8 @@ export async function POST(request: NextRequest) {
     // classifier — rows that already exist in `transactions` flip to EXISTING.
     const fitIds = shaped.filter((r) => r.fitId).map((r) => r.fitId!);
     const hashes = shaped.filter((r) => r.accountId !== null).map((r) => r.hash);
-    const existingFitIds = await checkFitIdDuplicates(fitIds);
-    const existingHashes = await checkDuplicates(hashes);
+    const existingFitIds = await checkFitIdDuplicates(fitIds, userId);
+    const existingHashes = await checkDuplicates(hashes, userId);
 
     const exactMatchedTxIds = new Set<number>();
     const fitIdHits = fitIds.filter((f) => existingFitIds.has(f));

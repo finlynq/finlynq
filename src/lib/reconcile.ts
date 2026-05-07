@@ -250,8 +250,8 @@ export async function classifyForReconcile(
   // any pipeline shows up as EXISTING here.
   const fitIds = shaped.filter((r) => r.fitId).map((r) => r.fitId!);
   const hashes = shaped.filter((r) => r.accountId !== null).map((r) => r.hash);
-  const existingFitIds = await checkFitIdDuplicates(fitIds);
-  const existingHashes = await checkDuplicates(hashes);
+  const existingFitIds = await checkFitIdDuplicates(fitIds, userId);
+  const existingHashes = await checkDuplicates(hashes, userId);
 
   // Pull the matching rows so we can attach a ReconcileMatch (id + date).
   // Only fetch by ids we actually need — the union of fitId hits and hash
