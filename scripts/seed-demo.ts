@@ -260,7 +260,7 @@ function investmentTransactions(startDate: Date): InvestmentTx[] {
  * Throws with a clear error message rather than `process.exit` so the
  * stack trace is captured in journalctl.
  */
-async function assertDemoDatabase(client: pg.PoolClient, url: string) {
+export async function assertDemoDatabase(client: pg.PoolClient, url: string) {
   const explicitOptIn = process.env.PF_ALLOW_DEMO_SEED === "1";
   const urlMatches = /demo|finlynq/i.test(url);
   if (!explicitOptIn && !urlMatches) {

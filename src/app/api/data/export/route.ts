@@ -52,7 +52,8 @@ function wrapBackupWithPassphrase(jsonBody: string, passphrase: string): string 
  * it past the user's session and would trip the "tryDecryptField returns
  * null on failure" invariant from CLAUDE.md.
  */
-function decryptRowFields(
+// Exported for regression test in tests/api/export-decrypt-failures.test.ts.
+export function decryptRowFields(
   dek: Buffer | null,
   row: Record<string, unknown>,
   fields: readonly string[],
