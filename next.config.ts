@@ -2,13 +2,19 @@ import type { NextConfig } from "next";
 
 // Security headers applied to every route. CSP was shipped as Report-Only in
 // `50a1742` (2026-04-22) for a watch window; flipped to enforced on
-// 2026-04-23 after a clean week. Next.js hydration + Tailwind/shadcn still
-// need `'unsafe-inline'` / `'unsafe-eval'` — once we wire nonces through the
-// custom document we can drop both.
+// 2026-04-23 after a clean week.
+//
+// NOTE (B10, 2026-05-07): the AUTHORITATIVE CSP is set by middleware on
+// every HTML response — it carries a per-request nonce and the `script-src`
+// directive built around `'nonce-...' 'strict-dynamic'`. The static CSP
+// below is a fallback for the rare case where middleware doesn't run
+// (matcher excludes `_next/static` etc., which don't render HTML anyway).
+// Keep `'unsafe-inline'` here as a defensive fallback only; middleware will
+// overwrite this header in practice.
 const CSP_DIRECTIVES = [
   "default-src 'self'",
-  // Next.js needs inline + eval for its hydration runtime and dev HMR. Once
-  // we wire nonces through the custom document we can tighten this.
+  // Fallback only — middleware overrides with a nonce-based directive on
+  // every HTML response. See src/middleware.ts.
   "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com",
   // Tailwind + shadcn emit inline styles at render time — unavoidable.
   "style-src 'self' 'unsafe-inline'",
