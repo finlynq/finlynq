@@ -6,6 +6,29 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Test hygiene — partial triage of pre-existing failures (Open #3, batch 1) (2026-05-07)
+
+The handover noted ~90 pre-existing test failures that pre-dated the security batch (post-Stream-D-Phase-4 cleanup never finished). This first triage batch fixes 11 of them by patching mocks that drifted from current route signatures, and documents the remaining 79 by root cause for future PRs.
+
+- **fx-service mock missing `getDisplayCurrency`** ([tests/api/budgets.test.ts](tests/api/budgets.test.ts), [tests/api/dashboard.test.ts](tests/api/dashboard.test.ts), [tests/api/fx.test.ts](tests/api/fx.test.ts), [tests/api/reports.test.ts](tests/api/reports.test.ts)) — every route gained a `await getDisplayCurrency(userId, ?currency)` call to honor the user's display-currency preference, but the four tests that mock `@/lib/fx-service` never added the function to their mock factory. Fix: add `getDisplayCurrency: vi.fn(async (_userId, override) => override ?? "CAD")` to each mock object.
+- **`getRateMap` second-arg mismatch** ([tests/api/budgets.test.ts:99](tests/api/budgets.test.ts), [tests/api/dashboard.test.ts:65](tests/api/dashboard.test.ts)) — Stream D added a `userId` second argument to `getRateMap` for per-user rate caching. Two tests asserted only the currency arg (`toHaveBeenCalledWith("EUR")`); fixed to include the auth-mock's userId (`"default"`).
+- **schema mock missing `portfolioHoldings`/`holdingAccounts`** ([tests/api/reports.test.ts](tests/api/reports.test.ts)) — the reports route now calls `getHoldingsValueByAccount` for unrealized P&L, which references `schema.portfolioHoldings.id`. Added stubs for `portfolioHoldings`, `holdingAccounts`, and the additional columns (quantity, portfolioHoldingId, userId, type, linkId, tradeLinkId, enteredAmount, enteredCurrency on transactions; userId on categories/accounts/portfolio_holdings).
+
+**Result**: 90 → 79 failing tests (11 recovered). `tests/security-tenant-isolation.test.ts`, `tests/oauth-scopes.test.ts`, `tests/envelope-pepper-version.test.ts`, `tests/api/middleware-csrf.test.ts`, `tests/login-lockout-enumeration.test.ts`, all middleware/request-origins tests still passing.
+
+**Remaining 79 failures grouped by root cause** (each is its own follow-up PR; this triage is the foundation):
+
+1. **Stream D Phase 4 plaintext-name fallout** (~30 failures) — tests expect routes to return `name: "Groceries"` but they now return `name: null` because the column was dropped and tests don't seed `name_ct` ciphertext. Per-feature fixture update + DEK seeding. Files: `tests/api/categories.test.ts`, `tests/api/goals.test.ts`, `tests/api/loans.test.ts`, `tests/api/subscriptions.test.ts`.
+2. **Drizzle proxy-mock `rows.map is not a function`** (~20 failures) — the `mockDbChain` Proxy returns the chain object on every property access; awaited `db.select()` chains expect to terminate in an array. Needs the proxy to be thenable / mock-resolveable. Files: `tests/api/reports.test.ts`, `tests/api/snapshots.test.ts`, `tests/api/recap.test.ts`, `tests/api/scenarios.test.ts`, `tests/api/recurring.test.ts`.
+3. **404 vs 200 on routes that gained `requireEncryption()`** (~15 failures) — handlers now refuse with 423 if no DEK, and tests don't supply one. Mock should set `dek: <Buffer>` on the auth context. Files: `tests/api/data.test.ts`, `tests/api/import-execute.test.ts`, `tests/api/portfolio.test.ts`, `tests/api/insights.test.ts`, `tests/api/onboarding.test.ts`, `tests/api/tax.test.ts`, `tests/api/monte-carlo.test.ts`, `tests/api/fire.test.ts`.
+4. **`rawGoals.map is not a function`** ([tests/api/goals.test.ts](tests/api/goals.test.ts)) — overlaps with #1 and #2. Goals route now JOINs through `goal_accounts` (issue #130, 2026-05-04); the proxy mock doesn't reflect the new shape.
+5. **MFA / require-auth schema drift** ([tests/auth/mfa.test.ts](tests/auth/mfa.test.ts), [tests/auth/require-auth.test.ts](tests/auth/require-auth.test.ts)) — the B7 MFA pending-JWT + `revoked_jtis` work added behavior these tests didn't anticipate.
+6. **chat-engine `userId` parameter** ([tests/api/chat.test.ts](tests/api/chat.test.ts)) — the B3 cross-tenant fix added a required `userId` param; test doesn't pass one.
+7. **rules POST `match_payee` reference** ([tests/api/rules.test.ts](tests/api/rules.test.ts)) — the well-known pre-existing `match_payee` column bug (per CLAUDE.md "Several MCP rule-management tools reference `match_payee` (a non-existent column)").
+8. **transactions schema-drift** ([tests/api/transactions.test.ts](tests/api/transactions.test.ts)) — pre-mock-only references; tests still seed the dropped Stream-D plaintext columns.
+
+Each group is independent; an agent could pick any single bucket and ship a targeted PR. Recommended order: #3 (DEK on auth context) → #1 (Stream D fixtures) → #2 (Drizzle proxy mock) — biggest blocks of failures and least risk of cross-contamination.
+
 ### Security — Session 4 batch E: PF_PEPPER rotation support (Open #2) (2026-05-07)
 - **Pepper rotation is now non-destructive.** Until this PR, rotating `PF_PEPPER` invalidated every encrypted DEK envelope: the new scrypt input didn't match the wrap, so unwrap failed with a bad-tag error and active users would silently render encrypted columns as null. The handover called this out as a "load-bearing, must be tested against a copy of prod DB first" follow-up.
 - **Schema** ([scripts/migrations/20260507_pepper_version.sql](scripts/migrations/20260507_pepper_version.sql)) — `users.pepper_version SMALLINT NOT NULL DEFAULT 1`. Names which env var holds the pepper used when the row's DEK envelope was last wrapped: version 1 → `PF_PEPPER` (legacy default), version N → `PF_PEPPER_V<N>` (rotated). Partial index on `pepper_version` to make the rotation script's "find stragglers" SELECT cheap.
