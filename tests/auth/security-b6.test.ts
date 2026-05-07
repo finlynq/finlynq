@@ -80,15 +80,15 @@ describe("getTransport prod refusal (M-17)", () => {
   });
 
   afterEach(() => {
-    if (originalEnv === undefined) delete process.env.NODE_ENV;
-    else process.env.NODE_ENV = originalEnv;
-    if (originalSmtp === undefined) delete process.env.SMTP_HOST;
-    else process.env.SMTP_HOST = originalSmtp;
+    vi.unstubAllEnvs();
+    if (originalSmtp === undefined) vi.stubEnv("SMTP_HOST", "");
+    else vi.stubEnv("SMTP_HOST", originalSmtp);
+    if (originalEnv !== undefined) vi.stubEnv("NODE_ENV", originalEnv);
   });
 
   it("sendEmail throws in production when SMTP_HOST is unset", async () => {
-    delete process.env.SMTP_HOST;
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("SMTP_HOST", "");
+    vi.stubEnv("NODE_ENV", "production");
     // Re-import to bypass any prior module cache that closed over a different env.
     vi.resetModules();
     const { sendEmail } = await import("@/lib/email");
@@ -98,8 +98,8 @@ describe("getTransport prod refusal (M-17)", () => {
   });
 
   it("sendEmail falls back to console in development when SMTP_HOST is unset", async () => {
-    delete process.env.SMTP_HOST;
-    process.env.NODE_ENV = "development";
+    vi.stubEnv("SMTP_HOST", "");
+    vi.stubEnv("NODE_ENV", "development");
     vi.resetModules();
     const { sendEmail } = await import("@/lib/email");
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
