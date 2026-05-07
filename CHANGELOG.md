@@ -6,6 +6,28 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Security — Session 4 batch E: PF_PEPPER rotation support (Open #2) (2026-05-07)
+- **Pepper rotation is now non-destructive.** Until this PR, rotating `PF_PEPPER` invalidated every encrypted DEK envelope: the new scrypt input didn't match the wrap, so unwrap failed with a bad-tag error and active users would silently render encrypted columns as null. The handover called this out as a "load-bearing, must be tested against a copy of prod DB first" follow-up.
+- **Schema** ([scripts/migrations/20260507_pepper_version.sql](scripts/migrations/20260507_pepper_version.sql)) — `users.pepper_version SMALLINT NOT NULL DEFAULT 1`. Names which env var holds the pepper used when the row's DEK envelope was last wrapped: version 1 → `PF_PEPPER` (legacy default), version N → `PF_PEPPER_V<N>` (rotated). Partial index on `pepper_version` to make the rotation script's "find stragglers" SELECT cheap.
+- **Envelope code** ([src/lib/crypto/envelope.ts](src/lib/crypto/envelope.ts)) — `deriveKEK` now accepts an optional `pepperVersion` param (defaults to 1 for back-compat). New `getPepperForVersion(n)` reads `PF_PEPPER` for n=1, `PF_PEPPER_V<n>` for n>1, throws on unsupported versions. The dev fallback (empty buffer + warning) is preserved per-version. `HIGHEST_SUPPORTED_PEPPER_VERSION = 2` is the new ceiling — bump it before introducing v3 or the decoder refuses any row at v3.
+- **Login route** ([src/app/api/auth/login/route.ts](src/app/api/auth/login/route.ts)) — reads `user.pepperVersion`, passes it through to `deriveKEK` so unrotated rows still unwrap with the OLD pepper. **Lazy rewrap** — when `PF_PEPPER_TARGET_VERSION` env var is set to N>1, login successfully unwraps with the row's current version, then re-wraps with KEK derived from the target pepper, persists, and bumps `pepper_version` in a single follow-up UPDATE. Failure of the rewrap is logged but doesn't block the login (next attempt retries). Result: pepper rotation now happens incrementally as users log in, no force-logout needed.
+- **Schema definition** ([src/db/schema-pg.ts](src/db/schema-pg.ts)) — `users.pepperVersion` field added so Drizzle's `select()` on `users` returns it.
+- **Admin tool** [scripts/rewrap-peppers.ts](scripts/rewrap-peppers.ts) — operator playbook + dry-run reporter. Reports the current `pepper_version` distribution and lists stragglers (users still at < target). Per the inline doc: lazy rewrap on login does the actual work; this script's role is informational + identifying users who haven't logged in recently. The actual `--revoke-sessions` mode is documented as out of scope for this PR (per-user JWT revocation needs additional plumbing); operator falls back to global `DEPLOY_GENERATION` bump or per-user wipe-account if a force-rotation is genuinely needed.
+
+**Operator playbook** (in [scripts/rewrap-peppers.ts](scripts/rewrap-peppers.ts)):
+1. Pre-flight backup. `pg_dump` immediately before any rotation step.
+2. Stage `PF_PEPPER_V2=<new>` in the systemd EnvironmentFile alongside the current `PF_PEPPER=<old>`. Restart so both peppers are loaded.
+3. Set `PF_PEPPER_TARGET_VERSION=2`. Restart.
+4. Watch login error rates over the next N days. Lazy rewrap fires on every successful login.
+5. Run `npx tsx scripts/rewrap-peppers.ts --target=2 --stale-days=30` to identify users who haven't logged in. Decide per-user whether to force action or accept that long-dormant accounts stay at the old pepper.
+6. Once distribution shows zero rows at the old version, drop `PF_PEPPER` from systemd, rename `PF_PEPPER_V2` → `PF_PEPPER`, bump `pepper_version`'s default in code, and you're back to a single-pepper configuration ready for the next rotation.
+
+**Tests** ([tests/envelope-pepper-version.test.ts](tests/envelope-pepper-version.test.ts)) — 8 cases covering version 1 vs version 2 KEK derivation, wrap/unwrap round-trip per version, the cross-version unwrap failure (auth-tag check), the unsupported-version guard, and a full v1→v2 rotation simulation that mirrors the lazy-rewrap login path.
+
+**This PR ships the plumbing but does NOT trigger any rotation.** No operator action is required. The `pepper_version` column adds with default=1 so every existing row stays on PF_PEPPER. To start a rotation, the operator follows the playbook above (test on a prod-DB copy first per the original handover's load-bearing warning).
+
+Build: `tsc --noEmit` clean, `npm run build` clean. Tests: 8/8 pass.
+
 ### Security — Session 4 batch D: OAuth scope plumbing (Open #1) (2026-05-07)
 - **OAuth tokens now carry a `scope` claim**. `oauth_authorization_codes` and `oauth_access_tokens` gain a `scope TEXT NOT NULL DEFAULT 'mcp:read mcp:write'` column ([scripts/migrations/20260507_oauth_scopes.sql](scripts/migrations/20260507_oauth_scopes.sql)). Recognized tokens at this PR: `mcp:read` (read-only MCP tools) and `mcp:write` (mutating MCP tools — record/update/delete/approve/etc.).
 - **Authorize endpoint** ([src/app/api/oauth/authorize/route.ts](src/app/api/oauth/authorize/route.ts)) accepts a `scope` parameter from the consent POST body, validates it via `normalizeRequestedScope`, and persists it on the auth code. Empty / missing scope → DEFAULT_SCOPE (`mcp:read mcp:write`) for back-compat with pre-PR clients. Unknown scope tokens → RFC 6749 §3.3 `invalid_scope` 400.
