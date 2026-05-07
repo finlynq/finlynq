@@ -43,7 +43,7 @@ import {
 } from "@/lib/auth/queries";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { deriveKEK, unwrapDEK, createWrappedDEKForPassword } from "@/lib/crypto/envelope";
+import { deriveKEK, unwrapDEK, wrapDEK, createWrappedDEKForPassword } from "@/lib/crypto/envelope";
 import { putDEK } from "@/lib/crypto/dek-cache";
 // Stream D Phase 4 (2026-05-03): plaintext display-name columns dropped.
 // `stream-d-backfill` (encrypts plaintext into ct) and
@@ -152,13 +152,56 @@ export async function POST(request: NextRequest) {
     let dek: Buffer | null = null;
     if (user.kekSalt && user.dekWrapped && user.dekWrappedIv && user.dekWrappedTag) {
       try {
-        const kek = deriveKEK(password, Buffer.from(user.kekSalt, "base64"));
+        // Open #2 — read pepper_version from the user row. Rows with
+        // pepper_version=1 use the legacy PF_PEPPER; rows that have been
+        // rotated by scripts/rewrap-peppers.ts use PF_PEPPER_V2 (etc).
+        // Existing rows without the column (pre-migration) default to 1
+        // via the schema-side `.default(1)`.
+        const pepperVersion = user.pepperVersion ?? 1;
+        const kek = deriveKEK(password, Buffer.from(user.kekSalt, "base64"), pepperVersion);
         dek = unwrapDEK(kek, {
           salt: Buffer.from(user.kekSalt, "base64"),
           wrapped: Buffer.from(user.dekWrapped, "base64"),
           iv: Buffer.from(user.dekWrappedIv, "base64"),
           tag: Buffer.from(user.dekWrappedTag, "base64"),
         });
+
+        // Lazy pepper rewrap (Open #2). When the operator stages a new pepper
+        // and sets PF_PEPPER_TARGET_VERSION=N>1, this branch fires for any
+        // user still at pepper_version<N and re-wraps their DEK under the
+        // target pepper inside this same request. The operator can roll out
+        // a pepper rotation without forcing a global force-logout: dormant
+        // users stay at the old pepper until they next log in.
+        const target = Number(process.env.PF_PEPPER_TARGET_VERSION ?? "1");
+        if (Number.isFinite(target) && target > pepperVersion && dek) {
+          try {
+            const newKek = deriveKEK(
+              password,
+              Buffer.from(user.kekSalt, "base64"),
+              target
+            );
+            const newWrap = wrapDEK(newKek, dek, Buffer.from(user.kekSalt, "base64"));
+            await promoteUserToEncryption(user.id, {
+              kekSalt: newWrap.salt.toString("base64"),
+              dekWrapped: newWrap.wrapped.toString("base64"),
+              dekWrappedIv: newWrap.iv.toString("base64"),
+              dekWrappedTag: newWrap.tag.toString("base64"),
+            });
+            // Bump pepper_version. Done as a separate UPDATE to keep
+            // promoteUserToEncryption signature stable (its callers don't
+            // know about pepper versions).
+            const { db } = await import("@/db");
+            const { sql: dz } = await import("drizzle-orm");
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await (db as any).execute(
+              dz`UPDATE users SET pepper_version = ${target} WHERE id = ${user.id}`
+            );
+          } catch (err) {
+            // Rewrap failure shouldn't block the login. The user gets in
+            // with the OLD pepper-wrapped DEK; the next login retries.
+            await logApiError("POST", "/api/auth/login (pepper-rewrap)", err);
+          }
+        }
       } catch (err) {
         await logApiError("POST", "/api/auth/login (unwrap)", err);
         return NextResponse.json(

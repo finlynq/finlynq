@@ -439,6 +439,13 @@ export const users = pgTable(
     dekWrappedIv: text("dek_wrapped_iv"),    // 12 bytes, AES-GCM IV
     dekWrappedTag: text("dek_wrapped_tag"),  // 16 bytes, AES-GCM auth tag
     encryptionV: integer("encryption_v").notNull().default(1),
+    // Open #2 — pepper rotation support. Names which env var holds the pepper
+    // used when this row's DEK envelope was last wrapped. Version 1 → PF_PEPPER
+    // (legacy default). Version 2 → PF_PEPPER_V2. After
+    // scripts/rewrap-peppers.ts re-wraps a user's DEK with the new pepper, it
+    // bumps this column. The login flow reads it and passes through to
+    // deriveKEK so unrotated rows still unwrap with the old pepper.
+    pepperVersion: integer("pepper_version").notNull().default(1),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
