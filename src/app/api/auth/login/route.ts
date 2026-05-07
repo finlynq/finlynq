@@ -12,12 +12,29 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 import { getDialect } from "@/db";
 import {
   verifyPassword,
   createSessionToken,
   AUTH_COOKIE,
 } from "@/lib/auth";
+
+/**
+ * Finding H-3 (2026-05-07) — fixed-cost bcrypt comparison target used when
+ * the supplied identifier doesn't match any user. Without this, login takes
+ * ~150ms for a known username (bcrypt verify against the real hash) but ~1ms
+ * for an unknown one (we short-circuit on lookup) — a wall-clock oracle that
+ * leaks which identifiers exist. The dummy hash is generated once at module
+ * load with the same cost factor as `hashPassword`, so the bcrypt-compare
+ * branch we walk in the !user case has the same CPU profile as the success
+ * path. The plaintext is a fixed string nobody could ever submit; it is
+ * never compared against anything that could match.
+ */
+const DUMMY_BCRYPT_HASH = bcrypt.hashSync(
+  "never-actually-matched-anything",
+  12
+);
 import { SESSION_TTL_MS } from "@/lib/auth/jwt";
 import {
   getUserByIdentifier,
@@ -116,7 +133,15 @@ export async function POST(request: NextRequest) {
     );
 
     const user = await getUserByIdentifier(identifier);
-    if (!user) return invalidCredentials;
+    if (!user) {
+      // Finding H-3 — pay the bcrypt cost even when the user is missing so
+      // wall-clock timing doesn't leak whether the identifier exists. The
+      // result of this compare is intentionally discarded; the cost is the
+      // point. Returning before this would shave ~150ms off the response
+      // and turn login into a username-enumeration oracle.
+      await verifyPassword(password, DUMMY_BCRYPT_HASH);
+      return invalidCredentials;
+    }
 
     const valid = await verifyPassword(password, user.passwordHash);
     if (!valid) return invalidCredentials;

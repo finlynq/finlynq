@@ -96,17 +96,29 @@ export async function getUserByUsername(username: string) {
 /**
  * Login lookup helper: accepts a username OR an email and returns the user
  * row. Username-shaped and email-shaped strings overlap (usernames are
- * allowed to contain '@' and '.'), so we always check the username column
- * first then fall back to the email column. The cross-column collision rule
- * enforced by isIdentifierClaimed at signup ensures this ordering is
+ * allowed to contain '@' and '.'), so a single SQL query checks both columns
+ * via `lower(username) = ? OR lower(email) = ?`. The cross-column collision
+ * rule enforced by isIdentifierClaimed at signup ensures this lookup is
  * unambiguous: a single string can match at most one user.
+ *
+ * Finding C-6 (2026-05-07) — collapsed two sequential queries into one. The
+ * old "check username first, fall back to email" pattern was a timing oracle:
+ * username-shaped identifiers returned in ~1 query of latency, email-shaped
+ * identifiers returned in ~2. Combined with C-6's username-check enumeration
+ * fix this closes the wall-clock side channel on `getUserByIdentifier`.
  */
 export async function getUserByIdentifier(identifier: string) {
   const trimmed = identifier.trim();
   if (trimmed.length === 0) return null;
-  const byUsername = await getUserByUsername(trimmed);
-  if (byUsername) return byUsername;
-  return getUserByEmail(trimmed);
+  const u = getSchema().users;
+  const rows = await db
+    .select()
+    .from(u)
+    .where(
+      sql`lower(${u.username}) = lower(${trimmed}) OR lower(${u.email}) = lower(${trimmed})`
+    )
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 /**
@@ -239,6 +251,44 @@ export async function markResetTokenUsed(tokenHash: string) {
   await db.update(getSchema().passwordResetTokens)
     .set({ usedAt: now })
     .where(eq(getSchema().passwordResetTokens.tokenHash, tokenHash));
+}
+
+/**
+ * Finding C-7 (2026-05-07) — count this user's unused, unexpired reset
+ * tokens issued within the given window. Used to gate per-user reset-request
+ * rate limits (3/hr, 10/day) on top of the existing per-IP bucket. Bounds a
+ * distributed mailbomb against a single recipient.
+ */
+export async function countActiveResetTokensSince(userId: string, sinceMs: number): Promise<number> {
+  const s = getSchema();
+  const sinceIso = new Date(Date.now() - sinceMs).toISOString();
+  const rows = await db
+    .select({ total: count() })
+    .from(s.passwordResetTokens)
+    .where(
+      sql`${s.passwordResetTokens.userId} = ${userId}
+          AND ${s.passwordResetTokens.createdAt} >= ${sinceIso}`
+    );
+  return rows[0]?.total ?? 0;
+}
+
+/**
+ * Finding C-7 (2026-05-07) — mark every existing unused, unexpired reset
+ * token for this user as used. Called when a fresh token is issued so the
+ * outstanding-tokens-per-user count stays bounded. Without this, a single
+ * user could amass dozens of simultaneously-valid tokens (each independently
+ * useful for account takeover if any single email is intercepted).
+ */
+export async function markStaleResetTokensUsed(userId: string): Promise<void> {
+  const s = getSchema();
+  const nowIso = new Date().toISOString();
+  await db.update(s.passwordResetTokens)
+    .set({ usedAt: nowIso })
+    .where(
+      sql`${s.passwordResetTokens.userId} = ${userId}
+          AND ${s.passwordResetTokens.usedAt} IS NULL
+          AND ${s.passwordResetTokens.expiresAt} > ${nowIso}`
+    );
 }
 
 // ─── Email verification queries ─────────────────────────────────────────────
