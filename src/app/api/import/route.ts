@@ -1,11 +1,40 @@
 import { NextRequest, NextResponse } from "next/server";
 import { importAccounts, importCategories, importPortfolio, importTransactions } from "@/lib/csv-parser";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { safeErrorMessage } from "@/lib/validate";
 
+// 20 MB cap on the multipart body. Larger imports should use the
+// staging pipeline (`/api/import/staging/upload`), which streams. The
+// previous lack of any cap meant a single authenticated user could OOM
+// the server by uploading a multi-hundred-MB CSV that `formData()` then
+// buffered into memory.
+const MAX_BODY_BYTES = 20 * 1024 * 1024;
+
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  // Pre-check the declared Content-Length before we start consuming the
+  // body. This is a defense against very-large bodies; the formData()
+  // parser would otherwise buffer the entire body into memory before we
+  // get a chance to refuse.
+  const contentLengthHeader = request.headers.get("content-length");
+  if (contentLengthHeader) {
+    const declared = Number(contentLengthHeader);
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+      return NextResponse.json(
+        { error: `Import body too large (${declared} bytes; max ${MAX_BODY_BYTES})` },
+        { status: 413 }
+      );
+    }
+  }
+
+  // requireEncryption fires 423 at the boundary if the user has no DEK
+  // (e.g. session expired between request and submit, or API-key
+  // strategy without a wrapped DEK). The previous `requireAuth` allowed
+  // the import to start running without a DEK; csv-parser's encrypted
+  // dedup-lookup would then either crash deeper in the call stack or
+  // silently fall back to plaintext-only matching.
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const formData = await request.formData() as unknown as globalThis.FormData;
     const fileType = formData.get("type") as string;
@@ -19,7 +48,6 @@ export async function POST(request: NextRequest) {
     let result;
 
     // Stream D Phase 4 — pass DEK so importers can encrypt + dedup via lookup.
-    const { dek } = auth.context;
     switch (fileType) {
       case "accounts":
         result = await importAccounts(text, userId, dek);

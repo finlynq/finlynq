@@ -125,10 +125,31 @@ if [ -z "$DB_URL" ]; then
 fi
 
 # 2.6. Backup database before any schema mutation.
+#
+# The backup directory is owner-only (0700) — pg_dump output is plaintext
+# SQL containing every encrypted column's ciphertext plus the plaintext
+# columns we have not migrated to encryption yet. Lock down permissions
+# so a different local user on the box cannot read backups even if they
+# slipped past directory ACLs.
+#
+# Encryption-at-rest for these dumps is intentionally out of scope of
+# this PR — it needs a key-management story (where does the encryption
+# key live? how does an operator decrypt during a recovery?) — see
+# follow-up issue. For now: 0700 + retention is the floor.
 echo "==> Backing up database..."
 mkdir -p /opt/finlynq-backups
+chmod 0700 /opt/finlynq-backups
 pg_dump "$DB_URL" > "/opt/finlynq-backups/${SERVICE_NAME}_$(date +%Y%m%d_%H%M%S).sql"
 echo "==> Backup complete"
+
+# Retention. Default 14 days; override via BACKUP_RETENTION_DAYS in the
+# deploy environment. Variable was previously declared but never read.
+BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
+if [[ "$BACKUP_RETENTION_DAYS" =~ ^[0-9]+$ ]] && [ "$BACKUP_RETENTION_DAYS" -gt 0 ]; then
+  echo "==> Pruning backups older than ${BACKUP_RETENTION_DAYS} day(s)..."
+  find /opt/finlynq-backups -type f -mtime +"$BACKUP_RETENTION_DAYS" \
+    \( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.enc" \) -delete || true
+fi
 
 # 2.7. Schema migrations — automated, tracked, idempotent.
 #

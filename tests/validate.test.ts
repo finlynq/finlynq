@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { z, ZodError } from "zod";
-import { validateBody, validateQuery, safeErrorMessage, safeRoute } from "@/lib/validate";
+import { validateBody, validateQuery, safeErrorMessage, safeRoute, AppError } from "@/lib/validate";
 
 describe("validateBody", () => {
   const schema = z.object({
@@ -54,34 +54,34 @@ describe("validateQuery", () => {
   });
 });
 
-describe("safeErrorMessage", () => {
-  it("returns error message for simple errors", () => {
+describe("safeErrorMessage (M-18 allowlist)", () => {
+  // Allowlist behavior: only ZodError and AppError pass through. Plain
+  // `Error` returns the fallback regardless of message content.
+  it("returns fallback for plain Error (allowlist)", () => {
     const err = new Error("Something went wrong");
-    expect(safeErrorMessage(err, "Fallback")).toBe("Something went wrong");
+    expect(safeErrorMessage(err, "Fallback")).toBe("Fallback");
   });
 
-  it("strips file paths from error messages", () => {
+  it("returns fallback for messages containing file paths", () => {
     const err = new Error("Error at /home/user/src/file.ts:42");
     expect(safeErrorMessage(err, "Fallback")).toBe("Fallback");
   });
 
-  it("strips .js file paths", () => {
-    const err = new Error("Error in /app/server.js:10");
-    expect(safeErrorMessage(err, "Fallback")).toBe("Fallback");
+  it("returns fallback for SQL/Postgres internals", () => {
+    expect(
+      safeErrorMessage(new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed"), "Fallback")
+    ).toBe("Fallback");
+    // Postgres error formats that the previous denylist heuristic missed:
+    expect(safeErrorMessage(new Error("connect ECONNREFUSED 127.0.0.1:5432"), "Fallback")).toBe(
+      "Fallback"
+    );
+    expect(
+      safeErrorMessage(new Error('relation "mystery_table" does not exist'), "Fallback")
+    ).toBe("Fallback");
   });
 
-  it("strips SQLITE errors", () => {
-    const err = new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed");
-    expect(safeErrorMessage(err, "Fallback")).toBe("Fallback");
-  });
-
-  it("strips stack traces", () => {
+  it("returns fallback for stack-trace-like messages", () => {
     const err = new Error("at Object.<anonymous> (/home/app.ts:1:1)");
-    expect(safeErrorMessage(err, "Fallback")).toBe("Fallback");
-  });
-
-  it("strips long messages", () => {
-    const err = new Error("a".repeat(201));
     expect(safeErrorMessage(err, "Fallback")).toBe("Fallback");
   });
 
@@ -91,11 +91,36 @@ describe("safeErrorMessage", () => {
     expect(safeErrorMessage(null, "Fallback")).toBe("Fallback");
   });
 
+  it("passes through AppError messages (allowlist)", () => {
+    const err = new AppError("Account not owned by user");
+    expect(safeErrorMessage(err, "Fallback")).toBe("Account not owned by user");
+  });
+
+  it("passes through duck-typed AppError across module boundaries", () => {
+    // Simulates an AppError thrown from a different module instance
+    // (HMR / ESM dual loading), where `instanceof` would fail.
+    const ducked = {
+      name: "AppError",
+      message: "duck-typed app error",
+      [Symbol.for("finlynq.AppError")]: true,
+    };
+    expect(safeErrorMessage(ducked, "Fallback")).toBe("duck-typed app error");
+  });
+
   it("formats ZodError messages", () => {
     const zodErr = new ZodError([
       { code: "invalid_type", expected: "string", input: 0, path: ["name"], message: "Expected string" },
     ]);
     expect(safeErrorMessage(zodErr, "Fallback")).toBe("Expected string");
+  });
+
+  it("passes through ZodError-shaped objects across module instances", () => {
+    // workspace + nested package can ship two zod copies — duck-type fallback
+    const ducked = {
+      name: "ZodError",
+      issues: [{ message: "Expected string" }, { message: "must be > 0" }],
+    };
+    expect(safeErrorMessage(ducked, "Fallback")).toBe("Expected string; must be > 0");
   });
 });
 
@@ -107,20 +132,28 @@ describe("safeRoute", () => {
     expect(body).toEqual({ ok: true });
   });
 
-  it("catches errors and returns 500", async () => {
+  it("returns fallback for plain Error (allowlist)", async () => {
     const res = await safeRoute("Operation failed", () => {
       throw new Error("Unexpected");
     });
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toBe("Unexpected");
+    expect(body.error).toBe("Operation failed");
   });
 
-  it("uses fallback for unsafe errors", async () => {
+  it("uses fallback for messages with file paths", async () => {
     const res = await safeRoute("Operation failed", () => {
       throw new Error("Error at /src/lib/queries.ts:42");
     });
     const body = await res.json();
     expect(body.error).toBe("Operation failed");
+  });
+
+  it("passes through AppError to caller", async () => {
+    const res = await safeRoute("Operation failed", () => {
+      throw new AppError("Insufficient balance");
+    });
+    const body = await res.json();
+    expect(body.error).toBe("Insufficient balance");
   });
 });

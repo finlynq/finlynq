@@ -187,7 +187,43 @@ export async function deleteApiKey(userId: string): Promise<void> {
 }
 
 /**
+ * Constant-time comparison wrapper.
+ *
+ * `crypto.timingSafeEqual` requires equal-length buffers and throws on
+ * mismatch. We always hash the candidate first (fixed 32-byte digest)
+ * before calling this, so length is always 32 and the throw cannot fire.
+ * The wrapper short-circuits on length mismatch defensively.
+ */
+function constantTimeEqual(a: Buffer, b: Buffer): boolean {
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Decode the hex digest portion of an `authLookupHash` value (`sha256:<hex>`).
+ * Returns null on any format mismatch or non-hex content. We use this to
+ * convert the row value into a 32-byte buffer for `timingSafeEqual`.
+ */
+function decodeStoredHash(stored: string): Buffer | null {
+  if (!stored.startsWith(API_KEY_HASH_PREFIX)) return null;
+  const hex = stored.slice(API_KEY_HASH_PREFIX.length);
+  if (hex.length !== 64 || !/^[0-9a-f]+$/i.test(hex)) return null;
+  try {
+    return Buffer.from(hex, "hex");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Validate an API key and return the user ID + unwrapped DEK (when available).
+ *
+ * Hash-only lookup. The legacy plaintext-fallback branch was removed
+ * 2026-05-07: `migrate-hash-api-keys.ts` plus an in-place migration during
+ * `validateApiKey` (now removed) covered the original rollout window;
+ * any key that has not been used since then was already broken because
+ * the migration script wrote pre-domain-separation hashes that no longer
+ * match the current `authLookupHash` format.
  *
  * DEK is null for legacy API keys created before the encryption rollout;
  * callers that need encrypted-column access should treat that as a prompt
@@ -205,46 +241,42 @@ export async function validateApiKey(
     return "Missing X-API-Key or Authorization: Bearer <key> header";
   }
 
-  // Hashed lookup — the normal case after migration.
-  const hashed = hashApiKey(headerKey);
-  let rows = await db
-    .select({ userId: schema.settings.userId })
+  // Compute the candidate hash once. We compare against every row's stored
+  // hash in JS using `crypto.timingSafeEqual`, so the comparison itself
+  // does not leak via byte-level branch timing. The DB equality lookup at
+  // the prior call site (Drizzle `eq`) was already constant-time at the
+  // Postgres level for sha256 hex strings of equal length, but doing the
+  // compare in JS makes the constant-time guarantee explicit and resilient
+  // to future schema changes (e.g. adding a per-key salt).
+  const candidateHashHex = hashApiKey(headerKey).slice(API_KEY_HASH_PREFIX.length);
+  const candidateHashBuf = Buffer.from(candidateHashHex, "hex");
+
+  // Pull every API-key row. There is one row per user, and the userbase
+  // size is bounded by the number of registered users — for self-hosted
+  // single-user installs this is 1; for managed Finlynq it is the active
+  // user count. Equality lookup at the DB level would also be fine; we
+  // accept the small cost of an in-process scan for the explicit
+  // constant-time guarantee.
+  const rows = await db
+    .select({ userId: schema.settings.userId, value: schema.settings.value })
     .from(schema.settings)
-    .where(
-      and(
-        eq(schema.settings.key, API_KEY_SETTING),
-        eq(schema.settings.value, hashed)
-      )
-    )
+    .where(eq(schema.settings.key, API_KEY_SETTING))
     .execute();
 
-  // Fallback: legacy row that still stores the raw key (pre-migration). If
-  // we find one, migrate it in place so future lookups hit the hashed path.
-  // Eliminates any window where the deploy-vs-migration ordering matters.
-  if (!rows.length) {
-    const legacy = await db
-      .select({ userId: schema.settings.userId })
-      .from(schema.settings)
-      .where(
-        and(
-          eq(schema.settings.key, API_KEY_SETTING),
-          eq(schema.settings.value, headerKey)
-        )
-      )
-      .execute();
-    if (legacy.length) {
-      const { sql } = await import("drizzle-orm");
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (db as any).execute(sql`
-        UPDATE settings SET value = ${hashed}
-        WHERE key = ${API_KEY_SETTING} AND user_id = ${legacy[0].userId}
-      `);
-      rows = legacy;
+  let matchedUserId: string | null = null;
+  for (const row of rows) {
+    const stored = decodeStoredHash(row.value as string);
+    if (!stored) continue; // Malformed or legacy non-hashed row: ignore.
+    if (constantTimeEqual(stored, candidateHashBuf)) {
+      matchedUserId = row.userId as string;
+      // Do not break — exhaust the loop so the wall-clock time does not
+      // depend on which row matched. The candidate hash is 32 bytes of
+      // collision-resistant output, so at most one row can match.
     }
   }
 
-  if (!rows.length) return "Invalid API key";
-  const userId = rows[0].userId as string;
+  if (!matchedUserId) return "Invalid API key";
+  const userId = matchedUserId;
 
   // Look up the DEK wrap (if any) and unwrap with the API key.
   const dekRows = await db

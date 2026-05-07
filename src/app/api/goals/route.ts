@@ -3,7 +3,7 @@ import { db, schema } from "@/db";
 import { eq, and, sql, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, AppError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { getLatestFxRate } from "@/lib/fx-service";
@@ -68,7 +68,7 @@ async function verifyAccountOwnership(userId: string, accountIds: number[]): Pro
   if (owned.length !== new Set(accountIds).size) {
     const ownedIds = new Set(owned.map((a) => a.id));
     const missing = accountIds.filter((id) => !ownedIds.has(id));
-    throw new Error(`Account id(s) not owned by user: ${missing.join(", ")}`);
+    throw new AppError(`Account id(s) not owned by user: ${missing.join(", ")}`);
   }
 }
 
