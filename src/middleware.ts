@@ -312,9 +312,40 @@ export function middleware(request: NextRequest) {
   // Content Security Policy — script-src is now nonce-based with
   // 'strict-dynamic'. 'unsafe-inline' has been removed from script-src
   // entirely; 'object-src none' blocks Flash/`<object>`/`<embed>`.
-  // style-src still needs 'unsafe-inline' because Tailwind + shadcn emit
-  // inline styles at render time — that's a separate hardening (no
-  // current finding tracks it; styles can't exfiltrate the way scripts can).
+  //
+  // ── style-src 'unsafe-inline' — known gap, deferred ─────────────────────
+  //
+  // Removing 'unsafe-inline' from style-src is documented as Open #9 in
+  // SECURITY_HANDOVER_2026-05-07.md, with the disposition: "Real work —
+  // needs hashing inline styles or migrating to CSS modules. Scope it
+  // before starting."
+  //
+  // Every React `style={{ ... }}` prop renders as an HTML
+  // `style="..."` attribute. HTML attributes can't carry CSP nonces
+  // (only `<style>` and `<script>` tags can), so removing 'unsafe-inline'
+  // from style-src would break every component that uses the `style`
+  // prop. CSP 3 also lacks a 'strict-dynamic' equivalent for styles.
+  // Adding a nonce alongside 'unsafe-inline' DOES NOT help — browsers
+  // disable 'unsafe-inline' as soon as a nonce or hash appears, breaking
+  // the same callsites.
+  //
+  // The migration path is:
+  //   1. Audit every `style={{ ... }}` in the codebase. Most can be
+  //      replaced with Tailwind atomic classes (statically compiled, no
+  //      inline output).
+  //   2. The remaining handful that need dynamic values (e.g. percent
+  //      widths in progress bars, computed colors) should move to CSS
+  //      custom properties set via className + a `--var` declaration.
+  //   3. Next.js's built-in not-found / error pages ship inline <style>
+  //      blocks; can't change those without forking the framework. Hash
+  //      them with `'sha256-...'` once they're stable.
+  //
+  // Threat model: an XSS that escapes script-src (which it can't, post B10)
+  // could set inline styles to exfiltrate via background-image: url(attacker)
+  // or @import — the same exfil vector pixel-tracker abuse uses. The
+  // 'object-src none' + 'frame-ancestors none' + nonce-based script-src
+  // already block the more direct exfiltration paths; style-based exfil is
+  // narrow but real. Worth eventually closing.
   response.headers.set(
     "Content-Security-Policy",
     [
