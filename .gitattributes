@@ -1,0 +1,19 @@
+# CHANGELOG.md is append-only at the top — every PR adds a fresh "Unreleased"
+# stanza. The standard 3-way merge fails almost every time because two PRs
+# land their entries at the same line. The "union" merge driver concatenates
+# both sides verbatim instead of conflicting; reviewers can re-order if needed.
+#
+# Open #6 from SECURITY_HANDOVER_2026-05-07.md. Saves ~30min of manual rebasing
+# per multi-PR security batch (B1–B10 hit this 11 times in 24h).
+#
+# Note: `merge=union` is enabled here in the repo's .gitattributes; for the
+# driver to take effect each developer's local git also needs no special
+# config — `union` is built into git, no `git config merge.union.driver`
+# line required.
+CHANGELOG.md merge=union
+
+# Shell scripts must keep LF line endings even on Windows checkouts. Otherwise
+# git's `core.autocrlf=true` (the default on Windows installers) rewrites
+# deploy.sh to CRLF, the +x bit drops, and the deploy fails on Linux as soon
+# as the file is pushed. Pin the line ending explicitly.
+*.sh text eol=lf
