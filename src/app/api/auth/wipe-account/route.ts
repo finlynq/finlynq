@@ -13,6 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 import { getDialect } from "@/db";
 import { verifyPassword, hashPassword } from "@/lib/auth";
 import { requireAuth } from "@/lib/auth/require-auth";
@@ -29,6 +30,18 @@ const wipeSchema = z.object({
     message: "Confirmation phrase must be exactly 'WIPE'",
   }),
 });
+
+/**
+ * Finding H-3 (2026-05-07) — same dummy bcrypt hash pattern as login. The
+ * authenticated user lookup can still 404 (e.g. a session JWT outliving the
+ * underlying user row after an admin delete) and we'd rather pay a fixed
+ * bcrypt cost than expose a wall-clock difference between "user gone" and
+ * "user exists, password wrong".
+ */
+const DUMMY_BCRYPT_HASH = bcrypt.hashSync(
+  "never-actually-matched-anything",
+  12
+);
 
 export async function POST(request: NextRequest) {
   if (getDialect() !== "postgres") {
@@ -59,6 +72,9 @@ export async function POST(request: NextRequest) {
 
     const user = await getUserById(userId);
     if (!user) {
+      // Finding H-3 — pay the bcrypt cost even when the user row is gone so
+      // wall-clock timing doesn't leak the user-exists/user-deleted state.
+      await verifyPassword(parsed.data.password, DUMMY_BCRYPT_HASH);
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
