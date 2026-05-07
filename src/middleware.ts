@@ -69,16 +69,18 @@ function getCorsHeaders(request: NextRequest): Record<string, string> {
 }
 
 /**
- * Resolve the origins that count as "us" for this request — both the
- * URL-derived `nextUrl.origin` AND, if the request arrived via a reverse
- * proxy, the proxy-reported origin reconstructed from `X-Forwarded-Proto`
- * + the inbound Host. See [src/lib/request-origins.ts] for the full
- * threat-model rationale (issue #176).
+ * Resolve the origins that count as "us" for this request. Combines the
+ * URL-derived fallback with a Host-header + X-Forwarded-Proto-derived
+ * origin when the request came in via a reverse proxy. See
+ * [src/lib/request-origins.ts] for the full threat-model rationale and
+ * why `nextUrl.host` alone is unreliable (it reflects HOSTNAME=0.0.0.0
+ * from the systemd unit, not the public hostname). Issue #176.
  */
 function getOwnOriginsFor(request: NextRequest): string[] {
   return getRequestOrigins({
     fallbackOrigin: request.nextUrl.origin,
-    fallbackHost: request.nextUrl.host,
+    fallbackProtocol: request.nextUrl.protocol,
+    hostHeader: request.headers.get("host"),
     getHeader: (name) => request.headers.get(name),
   });
 }
