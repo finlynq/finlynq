@@ -177,20 +177,22 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   shopt -s nullglob
   for file in "$MIGRATIONS_DIR"/*.sql; do
     version="$(basename "$file" .sql)"
-    # Filename gate: only [A-Za-z0-9_-]. Defense-in-depth — the SQL below
-    # uses psql's `:'ver'` parameter-binding to quote the value, so a
-    # malicious filename couldn't escape the literal even without this
-    # check. Keeping the regex anyway to fail fast on obviously-wrong files.
+    # Filename gate: only [A-Za-z0-9_-]. This is the sole barrier against
+    # SQL injection from a hostile migration filename — the SQL below
+    # interpolates $version directly because psql's `:'ver'` parameter
+    # substitution is a psql-script-only feature and is NOT processed by
+    # the server when passed via -c. The regex permits no quote, semicolon,
+    # backslash, or whitespace, so direct interpolation is safe.
     if ! [[ "$version" =~ ^[A-Za-z0-9_-]+$ ]]; then
       echo "==> ERROR: migration filename '$version' contains unsafe characters; rename to [A-Za-z0-9_-] only."
       exit 1
     fi
-    exists=$(psql "$DB_URL" -tA -v ver="$version" -c "SELECT 1 FROM schema_migrations WHERE version = :'ver';")
+    exists=$(psql "$DB_URL" -tA -c "SELECT 1 FROM schema_migrations WHERE version = '$version';")
     if [ "$exists" = "1" ]; then continue; fi
     echo "==> Applying migration: $version"
-    psql "$DB_URL" -v ON_ERROR_STOP=1 -v ver="$version" --single-transaction \
+    psql "$DB_URL" -v ON_ERROR_STOP=1 --single-transaction \
       -f "$file" \
-      -c "INSERT INTO schema_migrations (version) VALUES (:'ver');"
+      -c "INSERT INTO schema_migrations (version) VALUES ('$version');"
     APPLIED_COUNT=$((APPLIED_COUNT + 1))
   done
   shopt -u nullglob
