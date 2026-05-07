@@ -157,7 +157,7 @@ export async function POST(request: NextRequest) {
     // Issue session token, and cache the DEK under its jti so this new session
     // can immediately read/write encrypted columns.
     const { token, jti } = await createSessionToken(user.id, false);
-    putDEK(jti, dek, SESSION_TTL_MS);
+    putDEK(jti, dek, SESSION_TTL_MS, user.id);
 
     const response = NextResponse.json(
       { success: true, userId: user.id, username },

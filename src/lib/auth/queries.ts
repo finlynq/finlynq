@@ -493,6 +493,11 @@ export async function wipeUserDataAndRewrap(
 
     // Rewrap the DEK with the new password + bump encryption version so any
     // cached session DEK gets invalidated on next auth check.
+    //
+    // B7 (M-6): clear MFA in the same transaction. The MFA secret was
+    // encrypted under the OLD DEK; after the rewrap it would fail to
+    // decrypt on next login, locking the user out. The user can re-enable
+    // MFA after they log back in if they want it.
     const now = new Date().toISOString();
     await tx.update(s.users)
       .set({
@@ -502,6 +507,8 @@ export async function wipeUserDataAndRewrap(
         dekWrappedIv: wrap.dekWrappedIv,
         dekWrappedTag: wrap.dekWrappedTag,
         encryptionV: sql`${s.users.encryptionV} + 1`,
+        mfaEnabled: 0,
+        mfaSecret: null,
         updatedAt: now,
       })
       .where(eq(s.users.id, userId));

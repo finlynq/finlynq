@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, isNotNull, sql, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
@@ -27,11 +27,11 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
   const displayCurrency = await getDisplayCurrency(userId, request.nextUrl.searchParams.get("currency"));
   const todayDate = new Date().toISOString().split("T")[0];
 
-  // Active currencies — used to recognize user-defined currency codes (XAU
+  // Active currencies â€” used to recognize user-defined currency codes (XAU
   // etc.) as cash positions when they appear as a holding's symbol.
   const activeRow = await db
     .select({ value: schema.settings.value })
@@ -77,8 +77,8 @@ export async function GET(request: NextRequest) {
   // 2. Classify holdings.
   //
   // Cash includes truly-empty-symbol rows AND rows whose symbol IS itself
-  // a currency code (USD, CAD, EUR, XAU, …). Without the second branch,
-  // a holding with symbol="CAD" was being looked up as a stock on Yahoo —
+  // a currency code (USD, CAD, EUR, XAU, â€¦). Without the second branch,
+  // a holding with symbol="CAD" was being looked up as a stock on Yahoo â€”
   // Yahoo happens to return data for some unrelated ticker named CAD,
   // surfaced as a fake "$95.88" price + Stocks badge in the UI.
   const cryptoHoldings = holdings.filter(h => {
@@ -120,7 +120,7 @@ export async function GET(request: NextRequest) {
   // 5. Get FX rates for currency conversion to the display currency.
   // Triangulates through USD via getRate() so any user currency works.
   // Also pre-populate metal-symbol rates (XAU/XAG/XPT/XPD) so the cash
-  // branch can compute price = symbol→holding-currency cross-rate when
+  // branch can compute price = symbolâ†’holding-currency cross-rate when
   // the symbol is a metal but the holding currency is something else
   // (e.g. XAU in a USD account).
   const currencies = new Set<string>(holdings.map(h => h.currency).filter(Boolean));
@@ -135,10 +135,10 @@ export async function GET(request: NextRequest) {
     fxRates.set(cur, await getRate(cur, displayCurrency, todayDate, userId));
   }
 
-  // Cross-currency-cost-basis cache: rate(entered_currency → holding_currency,
+  // Cross-currency-cost-basis cache: rate(entered_currency â†’ holding_currency,
   // today). Used to normalize cost basis to the holding's own currency before
   // computing P&L. Without this, a CAD cash position held in a USD account
-  // (Fidelity-CAD style) sums cost basis in USD but market value in CAD —
+  // (Fidelity-CAD style) sums cost basis in USD but market value in CAD â€”
   // subtracting the two yields a meaningless number.
   const crossRateCache = new Map<string, number>();
   const getCrossRate = async (from: string, to: string): Promise<number> => {
@@ -180,12 +180,12 @@ export async function GET(request: NextRequest) {
   // so that aggregation is keyed on (holding_id, account_id, entered_currency)
   // rather than just (portfolio_holding_id, entered_currency). Today each
   // portfolio_holdings row maps to exactly one holding_accounts pairing
-  // (is_primary=true), so the result set is identical — but once Section G's
+  // (is_primary=true), so the result set is identical â€” but once Section G's
   // table is consumed by writes too, a canonical position spanning multiple
   // accounts will produce one bucket per (holding, account) here, which the
   // post-enrichment byHolding regroup later collapses into the canonical row.
   //
-  // CLAUDE.md "Portfolio aggregator" — qty>0 = buy regardless of amount
+  // CLAUDE.md "Portfolio aggregator" â€” qty>0 = buy regardless of amount
   // sign. ABS(amount) covers Finlynq-native (amt<0+qty>0) and WP convention
   // (amt>0+qty>0). entered_amount uses ABS so cost basis stays positive.
   // COALESCE handles un-backfilled rows where entered_* are still NULL.
@@ -204,10 +204,10 @@ export async function GET(request: NextRequest) {
   // re-priced at Finlynq's live rate, which under-counts the spread. Use
   // the cash leg's value as the buy's cost basis when present; fall back
   // to the stock leg's own amount otherwise (legacy data, single-currency
-  // trades). Buckets group on the *effective* entered_currency — for a
+  // trades). Buckets group on the *effective* entered_currency â€” for a
   // paired buy that's the cash leg's currency, for everything else (sells,
   // dividends, unpaired buys) it's the row's own currency. CLAUDE.md
-  // "Portfolio aggregator" — qty>0 = buy regardless of amount sign;
+  // "Portfolio aggregator" â€” qty>0 = buy regardless of amount sign;
   // preserved here.
   const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
   // Issue #96: aliased self-join to the cash-leg sibling. Cash leg is
@@ -345,7 +345,7 @@ export async function GET(request: NextRequest) {
   };
 
   const today = new Date();
-  // Compute derived metrics from a TxAgg → TxMetrics.
+  // Compute derived metrics from a TxAgg â†’ TxMetrics.
   const toMetrics = (a: TxAgg): TxMetrics => {
     const buyQty = a.totalBuyQty;
     const buyAmt = a.totalBuyAmount;
@@ -376,9 +376,9 @@ export async function GET(request: NextRequest) {
     };
   };
 
-  // Pre-compute the quote currency for each holding — the currency that
-  // marketValue (price × quantity) will be in once we enrich. Cost basis
-  // MUST be normalized to this currency so unrealizedGain = marketValue −
+  // Pre-compute the quote currency for each holding â€” the currency that
+  // marketValue (price Ã— quantity) will be in once we enrich. Cost basis
+  // MUST be normalized to this currency so unrealizedGain = marketValue âˆ’
   // costBasis is dimensionally consistent. Crypto's quote is "CAD" (the
   // crypto-service quirk); cash uses the symbol; stocks use Yahoo's q.currency.
   const quoteCurrencyById = new Map<number, string>();
@@ -390,7 +390,7 @@ export async function GET(request: NextRequest) {
     else if (symbolIsCurrencyH && h.symbol) {
       const symU = h.symbol.toUpperCase();
       // Metals (XAU/XAG/XPT/XPD) are tradeable units priced in the holding's
-      // currency, not unit currencies — quote them in h.currency so 6.9 oz
+      // currency, not unit currencies â€” quote them in h.currency so 6.9 oz
       // shows as USD 32,287, not XAU 6.90. Fiat-cash positions (USD cash in
       // a CAD account, etc.) keep the symbol as quote so the user sees the
       // actual currency they hold.
@@ -414,7 +414,7 @@ export async function GET(request: NextRequest) {
 
   // Reduce per-currency buckets into a single TxMetrics keyed by holding id.
   // Cost basis normalized to the holding's quote currency via FX before
-  // summing — fixes the cross-currency P&L bug for cash-as-currency
+  // summing â€” fixes the cross-currency P&L bug for cash-as-currency
   // positions.
   const metricsByHoldingId = new Map<number, TxMetrics>();
   for (const h of holdings) {
@@ -463,7 +463,7 @@ export async function GET(request: NextRequest) {
         quoteCurrency = "CAD";
       }
     } else if (h.symbol && !symbolIsCurrency) {
-      // Stocks/ETFs only — currency-code symbols skip Yahoo to avoid
+      // Stocks/ETFs only â€” currency-code symbols skip Yahoo to avoid
       // matching unrelated tickers (Yahoo has stocks under CAD, USD, etc.).
       const q = quotes.get(h.symbol);
       if (q) {
@@ -474,7 +474,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Get quantity and cost metrics from transactions. FK-keyed lookup —
+    // Get quantity and cost metrics from transactions. FK-keyed lookup â€”
     // independent of holding name, so renames don't orphan transactions.
     const txData = metricsByHoldingId.get(h.id) ?? null;
     const quantity = txData?.qty ?? null;
@@ -495,17 +495,17 @@ export async function GET(request: NextRequest) {
       marketValueDisplay = convertCurrency(marketValue, fxRate);
     } else if (price === null && (symbolIsCurrency || !h.symbol) && h.isCrypto !== 1 && quantity !== null && quantity !== 0) {
       // Cash position: either no symbol OR symbol is itself a currency code
-      // (USD, CAD, XAU, …). The price = 1 in the holding's own currency
+      // (USD, CAD, XAU, â€¦). The price = 1 in the holding's own currency
       // (one CAD is one CAD), AND the value converted to the display
-      // currency = quantity × FX-rate(holding-currency → display-currency).
-      // The "Price" column should show "$1.00 CAD" not "US$95.88" — so
+      // currency = quantity Ã— FX-rate(holding-currency â†’ display-currency).
+      // The "Price" column should show "$1.00 CAD" not "US$95.88" â€” so
       // quoteCurrency is the holding's own currency, not the display target.
       //
       // Exception: a metal symbol (XAU/XAG/XPT/XPD) on a holding whose
       // currency is something else means the symbol is a tradeable unit
       // priced in h.currency. Compute price as the cross-rate so e.g. 6.9
-      // oz of gold in a USD account shows as $4679/oz × 6.9 = $32,287 USD,
-      // not "1.00 XAU × 6.90 = 6.90 XAU".
+      // oz of gold in a USD account shows as $4679/oz Ã— 6.9 = $32,287 USD,
+      // not "1.00 XAU Ã— 6.90 = 6.90 XAU".
       const symU = h.symbol ? h.symbol.toUpperCase() : null;
       const ccU = h.currency.toUpperCase();
       if (symU && isMetalCurrency(symU) && symU !== ccU) {
@@ -788,7 +788,7 @@ export async function GET(request: NextRequest) {
       : null,
   }));
 
-  // 11. By-holding aggregation — same financial position pooled across the
+  // 11. By-holding aggregation â€” same financial position pooled across the
   // accounts that hold it. Issue #25 (Section F) interim path (a):
   // re-group `enrichedHoldings` by canonical key post-enrichment. The
   // SQL-side join through `holding_accounts` (path (b)) is a follow-up;
@@ -813,19 +813,19 @@ export async function GET(request: NextRequest) {
       if (h.symbol) {
         const symU = h.symbol.toUpperCase();
         // Metal sleeves (XAU/XAG/XPT/XPD) are universal regardless of the
-        // account's holding currency — XAU in a CAD account and XAU in a
+        // account's holding currency â€” XAU in a CAD account and XAU in a
         // USD account hold the same ounces of gold.
         if (isMetalCurrency(symU)) {
           return { key: `metal:${symU}`, symbol: symU, name: symU };
         }
-        // Currency-code symbol → cash sleeve in that currency.
+        // Currency-code symbol â†’ cash sleeve in that currency.
         return { key: `cash:${symU}`, symbol: symU, name: `Cash ${symU}` };
       }
-      // No symbol → cash in the holding's own row currency.
+      // No symbol â†’ cash in the holding's own row currency.
       const cur = h.currency.toUpperCase();
       return { key: `cash:${cur}`, symbol: cur, name: `Cash ${cur}` };
     }
-    // User-defined fallback (no symbol, non-cash) — fragment by name. After
+    // User-defined fallback (no symbol, non-cash) â€” fragment by name. After
     // the canonicalization helper has run for this user, these rows still
     // collapse on (lowercased) free-text name within a user's portfolio.
     return { key: `custom:${(h.name || "?").trim().toLowerCase()}`, symbol: null, name: h.name || "?" };
@@ -876,7 +876,7 @@ export async function GET(request: NextRequest) {
     acc.marketValueDisplay += h.marketValueDisplay ?? 0;
     acc.unrealizedGainDisplay += h.unrealizedGainDisplay ?? 0;
 
-    // FX hop into displayCurrency for cost basis / realized / dividends —
+    // FX hop into displayCurrency for cost basis / realized / dividends â€”
     // the per-row totalCostBasis / realizedGain / dividendsReceived live in
     // the holding's quote currency. Reuse the same fxRates map the per-row
     // path uses so the rollup matches summary totals to within rounding.
@@ -888,8 +888,8 @@ export async function GET(request: NextRequest) {
   }
 
   const byHolding = Array.from(byHoldingMap.values()).map(a => {
-    // Avg cost across accounts is qty-weighted: Σ(costBasis_acct) / Σ(qty_acct).
-    // Avoids the simple-mean bug when one account holds 10× more shares.
+    // Avg cost across accounts is qty-weighted: Î£(costBasis_acct) / Î£(qty_acct).
+    // Avoids the simple-mean bug when one account holds 10Ã— more shares.
     const avgCostDisplay = a.totalQty > 0 && a.costBasisDisplay > 0
       ? a.costBasisDisplay / a.totalQty
       : null;

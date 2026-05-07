@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
   const devGuard = await requireDevMode(request);
   if (devGuard) return devGuard;
   const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
   // Fetch last 12 months of transactions with payees
   const cutoff = new Date();
   cutoff.setFullYear(cutoff.getFullYear() - 1);
@@ -35,7 +35,7 @@ export async function GET(request: NextRequest) {
     ))
     .all();
 
-  // Decrypt payees before grouping — detector groups by normalized payee, so
+  // Decrypt payees before grouping â€” detector groups by normalized payee, so
   // we must give it plaintext (ciphertext has a random IV per row). If no
   // DEK is available the passthrough keeps legacy plaintext rows working.
   const detected = detectRecurringTransactions(

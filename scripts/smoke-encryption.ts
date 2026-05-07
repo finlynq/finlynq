@@ -32,8 +32,8 @@ function assert(label: string, cond: unknown) {
 const pw = "correct horse battery staple";
 const { dek, wrapped } = createWrappedDEKForPassword(pw);
 
-putDEK("jti-1", dek, 60_000);
-assert("cache hit after signup", getDEK("jti-1")?.equals(dek));
+putDEK("jti-1", dek, 60_000, "user-1");
+assert("cache hit after signup", getDEK("jti-1", "user-1")?.equals(dek));
 
 const input = {
   date: "2026-04-20",
@@ -76,6 +76,6 @@ assert(
 );
 
 deleteDEK("jti-1");
-assert("cache miss after logout", getDEK("jti-1") === null);
+assert("cache miss after logout", getDEK("jti-1", "user-1") === null);
 
 console.log("\nAll Phase 1 smoke checks passed.");

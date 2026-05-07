@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
   // (pre-encryption) won't have one; the auth code still issues but MCP
   // reads against encrypted rows will return ciphertext until the user
   // re-authenticates through browser login.
-  const sessionDek = payload.jti ? getDEK(payload.jti) : null;
+  const sessionDek = payload.jti ? getDEK(payload.jti, payload.sub) : null;
 
   let body: Record<string, string>;
   try {

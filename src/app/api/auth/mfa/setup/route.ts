@@ -5,11 +5,24 @@
  *   generate: Generate a new TOTP secret and provisioning URI
  *   enable:   Verify a code and enable MFA
  *   disable:  Verify a code and disable MFA
+ *
+ * B7 hardening (2026-05-07, finding H-6):
+ *  - `enable` and `disable` require the user to re-supply their current
+ *    password. A stolen cookie (without the password) can no longer flip
+ *    MFA on (with the attacker's secret) and lock out the real user, nor
+ *    flip it off as a precursor to an account takeover.
+ *  - Per-user rate limit (5/hr) on `enable`/`disable`. Stops a CSRF chain
+ *    that captures one valid request from being amplified into many.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAuth, generateMfaSecret, verifyMfaCode } from "@/lib/auth";
+import {
+  requireAuth,
+  generateMfaSecret,
+  verifyMfaCode,
+  verifyPassword,
+} from "@/lib/auth";
 import {
   getUserById,
   enableUserMfa,
@@ -18,6 +31,7 @@ import {
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 const setupSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("generate") }),
@@ -25,10 +39,12 @@ const setupSchema = z.discriminatedUnion("action", [
     action: z.literal("enable"),
     secret: z.string().min(1, "Secret is required"),
     code: z.string().length(6, "Code must be 6 digits"),
+    currentPassword: z.string().min(1, "Current password is required"),
   }),
   z.object({
     action: z.literal("disable"),
     code: z.string().length(6, "Code must be 6 digits"),
+    currentPassword: z.string().min(1, "Current password is required"),
   }),
 ]);
 
@@ -58,7 +74,29 @@ export async function POST(request: NextRequest) {
       }
 
       case "enable": {
-        const { secret, code } = parsed.data;
+        const { secret, code, currentPassword } = parsed.data;
+
+        // Per-user 5/hr rate limit. Same key for enable and disable so a
+        // toggle-flood is throttled together. We hit this BEFORE the password
+        // check so a brute-force attempt against one user's password also
+        // exhausts the bucket.
+        const rate = checkRateLimit(`mfa-toggle:${userId}`, 5, 60 * 60_000);
+        if (!rate.allowed) {
+          return NextResponse.json(
+            { error: "Too many MFA changes. Please try again later." },
+            { status: 429 }
+          );
+        }
+
+        // Re-verify the password — H-6. Stolen-cookie attackers don't have it.
+        const okPw = await verifyPassword(currentPassword, user.passwordHash);
+        if (!okPw) {
+          return NextResponse.json(
+            { error: "Current password is incorrect." },
+            { status: 401 }
+          );
+        }
+
         if (!verifyMfaCode(secret, code)) {
           return NextResponse.json(
             { error: "Invalid verification code. Please try again." },
@@ -68,7 +106,7 @@ export async function POST(request: NextRequest) {
         // Need the DEK to encrypt the TOTP seed at rest. Enabling MFA requires
         // an active encrypted session; send the user to re-login if the DEK
         // is missing (stale deploy cache, legacy unencrypted account, etc.).
-        const dek = sessionId ? getDEK(sessionId) : null;
+        const dek = sessionId ? getDEK(sessionId, userId) : null;
         if (!dek) {
           return NextResponse.json(
             { error: "Session expired. Please sign in again to enable MFA." },
@@ -80,6 +118,24 @@ export async function POST(request: NextRequest) {
       }
 
       case "disable": {
+        const { code, currentPassword } = parsed.data;
+
+        const rate = checkRateLimit(`mfa-toggle:${userId}`, 5, 60 * 60_000);
+        if (!rate.allowed) {
+          return NextResponse.json(
+            { error: "Too many MFA changes. Please try again later." },
+            { status: 429 }
+          );
+        }
+
+        const okPw = await verifyPassword(currentPassword, user.passwordHash);
+        if (!okPw) {
+          return NextResponse.json(
+            { error: "Current password is incorrect." },
+            { status: 401 }
+          );
+        }
+
         if (!user.mfaEnabled || !user.mfaSecret) {
           return NextResponse.json(
             { error: "MFA is not enabled." },
@@ -87,7 +143,7 @@ export async function POST(request: NextRequest) {
           );
         }
         // Decrypt stored MFA secret with the session DEK.
-        const dek = sessionId ? getDEK(sessionId) : null;
+        const dek = sessionId ? getDEK(sessionId, userId) : null;
         if (!dek) {
           return NextResponse.json(
             { error: "Session expired. Please sign in again to disable MFA." },
@@ -103,7 +159,7 @@ export async function POST(request: NextRequest) {
             { status: 500 }
           );
         }
-        if (!decryptedSecret || !verifyMfaCode(decryptedSecret, parsed.data.code)) {
+        if (!decryptedSecret || !verifyMfaCode(decryptedSecret, code)) {
           return NextResponse.json(
             { error: "Invalid verification code." },
             { status: 400 }

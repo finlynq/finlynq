@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, gte, lte, eq } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
@@ -11,16 +11,16 @@ export async function GET(request: NextRequest) {
   // Soft-DEK policy mirrors the income-statement endpoint: legacy plaintext
   // stays readable when the cache is cold; Phase-3 NULL'd rows degrade to
   // "Uncategorized" rather than 423-ing the whole report.
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
   const params = request.nextUrl.searchParams;
   const currentYear = new Date().getFullYear();
   const year1 = parseInt(params.get("year1") ?? String(currentYear - 1), 10);
   const year2 = parseInt(params.get("year2") ?? String(currentYear), 10);
 
-  // Category comparison for each year — keyed on categories.id so Phase-3
+  // Category comparison for each year â€” keyed on categories.id so Phase-3
   // NULL plaintext doesn't collapse every category into a single bucket.
   async function getCategoryTotals(year: number) {
-    // Stream D Phase 4 — plaintext name dropped.
+    // Stream D Phase 4 â€” plaintext name dropped.
     const rows = await db
       .select({
         categoryId: schema.categories.id,

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { getMonthlySpending, getTransactions } from "@/lib/queries";
 import { detectAnomalies, analyzeTrends, analyzeMerchants, spendingByDayOfWeek } from "@/lib/spending-insights";
 import { getCurrentMonth } from "@/lib/currency";
@@ -13,13 +13,13 @@ export async function GET(request: NextRequest) {
   const devGuard = await requireDevMode(request);
   if (devGuard) return devGuard;
   const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
   const now = new Date();
   const startDate = `${now.getFullYear() - 1}-01-01`;
   const endDate = `${now.getFullYear()}-12-31`;
   const currentMonth = getCurrentMonth();
 
-  // Stream D Phase 4 — getMonthlySpending now returns categoryNameCt; decrypt
+  // Stream D Phase 4 â€” getMonthlySpending now returns categoryNameCt; decrypt
   // before feeding the analyzers (they need plaintext labels).
   const { decryptName } = await import("@/lib/crypto/encrypted-columns");
   const monthlySpending = await getMonthlySpending(userId, startDate, endDate);

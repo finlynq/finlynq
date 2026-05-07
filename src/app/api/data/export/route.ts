@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, inArray } from "drizzle-orm";
 import { pbkdf2Sync, randomBytes, createCipheriv } from "crypto";
@@ -8,7 +8,7 @@ import { tryDecryptField } from "@/lib/crypto/envelope";
 import { safeErrorMessage } from "@/lib/validate";
 import { validatePasswordStrength } from "@/lib/auth/password-policy";
 
-// Finding #8 — optional passphrase-wrap for backup exports.
+// Finding #8 â€” optional passphrase-wrap for backup exports.
 // Format when wrapped:
 //   {"v": "pf-backup-1", "kdf": "pbkdf2-sha256", "iters": 600000,
 //    "salt": "<b64 16>", "iv": "<b64 12>", "tag": "<b64 16>",
@@ -58,7 +58,7 @@ function decryptRowFields(dek: Buffer | null, row: Record<string, unknown>, fiel
 const TX_FIELDS = ["payee", "note", "tags", "portfolioHolding"] as const;
 const SPLIT_FIELDS = ["note", "description", "tags"] as const;
 
-// POST accepts `{ passphrase: string }` to passphrase-wrap the export —
+// POST accepts `{ passphrase: string }` to passphrase-wrap the export â€”
 // Finding #8. Both GET and POST share the same body builder below.
 export async function POST(request: NextRequest) {
   return handleExport(request);
@@ -72,9 +72,9 @@ async function handleExport(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
-  // Export tolerates a missing DEK — without it, encrypted rows ship as
+  // Export tolerates a missing DEK â€” without it, encrypted rows ship as
   // ciphertext (still restoreable into the same account).
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
 
   try {
     const [
@@ -117,7 +117,7 @@ async function handleExport(request: NextRequest) {
       db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)),
     ]);
 
-    // Transaction splits have no userId — filter by user's transaction IDs
+    // Transaction splits have no userId â€” filter by user's transaction IDs
     const txIds = transactions.map((t) => t.id);
     const transactionSplits =
       txIds.length > 0
@@ -152,7 +152,7 @@ async function handleExport(request: NextRequest) {
         subscriptions,
         transactionRules,
         importTemplates,
-        // fxRates is now a global cache (not user-scoped) — exported as fxOverrides for the user's pinned rates only.
+        // fxRates is now a global cache (not user-scoped) â€” exported as fxOverrides for the user's pinned rates only.
         fxOverrides,
         settings: settingsRows,
         contributionRoom,
@@ -161,7 +161,7 @@ async function handleExport(request: NextRequest) {
 
     const jsonBody = JSON.stringify(backup, null, 2);
 
-    // Optional passphrase-wrap — if the caller supplies a ?passphrase=..., we
+    // Optional passphrase-wrap â€” if the caller supplies a ?passphrase=..., we
     // AES-GCM the export body with a PBKDF2-derived key. The file is then
     // self-protecting: losing it to cloud sync or email attachments does not
     // leak content unless the attacker also has the passphrase. Passphrase
@@ -178,7 +178,7 @@ async function handleExport(request: NextRequest) {
           passphrase = parsed.passphrase;
         }
       } catch {
-        // No JSON body — fall through to plain export.
+        // No JSON body â€” fall through to plain export.
       }
       if (passphrase) {
         const strengthError = validatePasswordStrength(passphrase);
