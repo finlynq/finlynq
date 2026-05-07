@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { getRequestOrigins } from "@/lib/request-origins";
 
 /**
  * Allowed origins for managed (hosted) mode.
@@ -67,6 +68,21 @@ function getCorsHeaders(request: NextRequest): Record<string, string> {
   return {};
 }
 
+/**
+ * Resolve the origins that count as "us" for this request — both the
+ * URL-derived `nextUrl.origin` AND, if the request arrived via a reverse
+ * proxy, the proxy-reported origin reconstructed from `X-Forwarded-Proto`
+ * + the inbound Host. See [src/lib/request-origins.ts] for the full
+ * threat-model rationale (issue #176).
+ */
+function getOwnOriginsFor(request: NextRequest): string[] {
+  return getRequestOrigins({
+    fallbackOrigin: request.nextUrl.origin,
+    fallbackHost: request.nextUrl.host,
+    getHeader: (name) => request.headers.get(name),
+  });
+}
+
 const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const AUTH_COOKIE = "pf_session";
 
@@ -112,8 +128,15 @@ function csrfCheck(request: NextRequest): NextResponse | null {
   const sessionCookie = request.cookies.get(AUTH_COOKIE);
   if (!sessionCookie) return null;
 
-  const ownOrigin = request.nextUrl.origin;
-  const allowed = new Set<string>([ownOrigin, ...MANAGED_ALLOWED_ORIGINS]);
+  // Includes both the URL-derived origin AND the proxy-reported origin
+  // when behind Caddy/nginx (X-Forwarded-Proto). See issue #176 — without
+  // the proxy-derived entry, every same-origin POST 403s because Next.js
+  // sees the binding as `http://localhost:<port>` while the browser sends
+  // `Origin: https://...`.
+  const allowed = new Set<string>([
+    ...getOwnOriginsFor(request),
+    ...MANAGED_ALLOWED_ORIGINS,
+  ]);
 
   const origin = request.headers.get("origin");
   if (origin) {
