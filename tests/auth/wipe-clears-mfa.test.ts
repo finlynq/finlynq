@@ -38,7 +38,13 @@ vi.mock("@/db", () => {
     return c;
   };
 
-  const tx = {
+  type TxStub = {
+    select: () => unknown;
+    delete: () => unknown;
+    update: () => unknown;
+    insert: () => unknown;
+  };
+  const tx: TxStub = {
     select: () => makeChain([]),
     delete: () => makeChain([]),
     update: () => makeChain([]),
@@ -46,7 +52,7 @@ vi.mock("@/db", () => {
   };
   return {
     db: {
-      transaction: async (fn: (tx: typeof tx) => Promise<unknown>) =>
+      transaction: async (fn: (tx: TxStub) => Promise<unknown>) =>
         fn(tx),
       // Outer pre-tx select for mcpUploads
       select: () => makeChain([]),
