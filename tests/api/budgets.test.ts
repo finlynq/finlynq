@@ -32,6 +32,10 @@ const mockConvertWithRateMap = vi.fn();
 vi.mock("@/lib/fx-service", () => ({
   getRateMap: (...a: unknown[]) => mockGetRateMap(...a),
   convertWithRateMap: (...a: unknown[]) => mockConvertWithRateMap(...a),
+  // Routes call getDisplayCurrency to resolve `?currency=` against the user's
+  // settings. The override-or-CAD fallback matches every existing test that
+  // doesn't explicitly pass a currency.
+  getDisplayCurrency: vi.fn(async (_userId: string, override: string | null) => override ?? "CAD"),
 }));
 
 import { GET, POST, DELETE } from "@/app/api/budgets/route";
@@ -92,7 +96,8 @@ describe("API /api/budgets", () => {
       ]);
       const req = createMockRequest("http://localhost:3000/api/budgets?month=2024-01&currency=EUR");
       await GET(req);
-      expect(mockGetRateMap).toHaveBeenCalledWith("EUR");
+      // getRateMap signature is (displayCurrency, userId) per Stream D rate caching.
+      expect(mockGetRateMap).toHaveBeenCalledWith("EUR", "default");
     });
   });
 

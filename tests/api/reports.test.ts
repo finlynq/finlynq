@@ -13,9 +13,14 @@ vi.mock("@/db", () => ({
     get: (_t, prop) => mockDbChain[prop as string] ?? vi.fn().mockReturnValue(mockDbChain),
   }),
   schema: {
-    transactions: { id: "id", date: "date", amount: "amount", accountId: "accountId", categoryId: "categoryId", currency: "currency", isBusiness: "isBusiness" },
-    categories: { id: "id", type: "type", group: "group", name: "name" },
-    accounts: { id: "id", type: "type", group: "group", name: "name", currency: "currency" },
+    transactions: { id: "id", date: "date", amount: "amount", accountId: "accountId", categoryId: "categoryId", currency: "currency", isBusiness: "isBusiness", quantity: "quantity", portfolioHoldingId: "portfolioHoldingId", userId: "userId", type: "type", linkId: "linkId", tradeLinkId: "tradeLinkId", enteredAmount: "enteredAmount", enteredCurrency: "enteredCurrency" },
+    categories: { id: "id", type: "type", group: "group", name: "name", userId: "userId" },
+    accounts: { id: "id", type: "type", group: "group", name: "name", currency: "currency", userId: "userId", isInvestment: "isInvestment" },
+    // Stream D / portfolio routes pull schema.portfolioHoldings off this mock.
+    // Without these stubs, getHoldingsValueByAccount blows up on
+    // `schema.portfolioHoldings.id` (undefined-property access).
+    portfolioHoldings: { id: "id", accountId: "accountId", userId: "userId", nameCt: "nameCt", symbolCt: "symbolCt", currency: "currency", isCrypto: "isCrypto", nameLookup: "nameLookup" },
+    holdingAccounts: { holdingId: "holdingId", accountId: "accountId", userId: "userId", qty: "qty", costBasis: "costBasis" },
   },
 }));
 
@@ -26,6 +31,7 @@ vi.mock("@/lib/auth/require-auth", () => ({
 vi.mock("@/lib/fx-service", () => ({
   getRateMap: vi.fn(async () => new Map([["CAD", 1]])),
   convertWithRateMap: vi.fn((amount: number) => amount),
+  getDisplayCurrency: vi.fn(async (_userId: string, override: string | null) => override ?? "CAD"),
 }));
 
 vi.mock("drizzle-orm", () => ({
