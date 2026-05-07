@@ -12,9 +12,21 @@ import { wrapDEKForSecret, unwrapDEKForSecret, authLookupHash } from "@/lib/api-
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-export const AUTH_CODE_TTL_MS = 10 * 60 * 1000;               // 10 minutes
+// RFC 6749 §4.1.2 recommends auth codes "have a maximum lifetime of 10 minutes"
+// but explicitly notes "should be short lived" — production OAuth deployments
+// typically issue 60–120s. The code carries the wrapped DEK, so a stolen code
+// is a DEK-exfil primitive; tightening to 60s narrows the window dramatically
+// while still leaving plenty of slack for the network round-trip a legit
+// client makes between the redirect callback and `/api/oauth/token`.
+export const AUTH_CODE_TTL_MS = 60 * 1000;                    // 60 seconds
 export const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;            // 1 hour
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/** Cap on `redirect_uris` per registered client. RFC 7591 doesn't mandate one,
+ * but accepting an unbounded list lets a single DCR call seed every URI a
+ * future attacker might want to reuse. Five is plenty for legitimate clients
+ * (dev / staging / prod / mobile / desktop) and keeps the DB row small. */
+export const MAX_REDIRECT_URIS_PER_CLIENT = 5;
 
 /** The issuer / base URL for OAuth metadata. */
 export function getIssuer(): string {
@@ -30,11 +42,43 @@ const pgDb = db as any;
 /**
  * Verify a PKCE S256 code_verifier against a stored code_challenge.
  * code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))
+ *
+ * Uses `timingSafeEqual` for the byte comparison. The code challenge is
+ * technically public (it shipped on the redirect URL), so a timing leak here
+ * isn't directly exploitable — but the cost of `timingSafeEqual` is one extra
+ * Buffer comparison and the discipline pays off if the function is ever
+ * reused in a context where the challenge is sensitive.
  */
 export function verifyPkceS256(codeVerifier: string, codeChallenge: string): boolean {
   const hash = crypto.createHash("sha256").update(codeVerifier, "ascii").digest();
   const computed = hash.toString("base64url");
-  return computed === codeChallenge;
+  // Length-equal first: timingSafeEqual throws on mismatched lengths, and a
+  // length difference is a fast non-cryptographic signal anyway.
+  if (computed.length !== codeChallenge.length) return false;
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(computed, "ascii"),
+      Buffer.from(codeChallenge, "ascii")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate a PKCE `code_challenge_method` parameter.
+ *
+ * Only `S256` is accepted. RFC 7636 §4.2 explicitly notes that `plain` is
+ * "NOT RECOMMENDED" and OAuth 2.1 (draft-ietf-oauth-v2-1) requires `S256`.
+ * Our `.well-known/oauth-authorization-server` already advertises
+ * `code_challenge_methods_supported: ["S256"]`, so accepting `plain` was a
+ * server-side bug, not a documented capability.
+ *
+ * Returns `true` only when the method is the exact string "S256". An undefined
+ * or empty method is rejected — callers must pass it explicitly.
+ */
+export function isValidPkceMethod(method: string | undefined): boolean {
+  return method === "S256";
 }
 
 // ─── Authorization Codes ─────────────────────────────────────────────────────
@@ -57,6 +101,13 @@ export async function createAuthCode(opts: {
   clientId: string;
   dek?: Buffer | null;
 }): Promise<string> {
+  // Defense-in-depth: route handlers should already have rejected non-S256
+  // methods, but if a caller bypasses that check we MUST NOT persist a `plain`
+  // challenge — `consumeAuthCode` rejects non-S256 anyway, but issuing a code
+  // that can never validate is a silent footgun.
+  if (!isValidPkceMethod(opts.codeChallengeMethod)) {
+    throw new Error("Invalid code_challenge_method — only S256 is supported");
+  }
   const code = crypto.randomBytes(32).toString("hex");
   const codeHash = authLookupHash(code);
   const now = new Date();
@@ -120,12 +171,12 @@ export async function consumeAuthCode(opts: {
   if (row.client_id !== opts.clientId) return null;
   if (row.redirect_uri !== opts.redirectUri) return null;
 
-  // PKCE verification
-  if (row.code_challenge_method === "S256") {
-    if (!verifyPkceS256(opts.codeVerifier, row.code_challenge)) return null;
-  } else {
-    if (opts.codeVerifier !== row.code_challenge) return null;
-  }
+  // PKCE verification — only S256 is accepted. The `plain` branch was removed
+  // for defense-in-depth: `createAuthCode` and `/api/oauth/authorize` already
+  // refuse to issue a code with `plain`, but a row predating those checks (or
+  // a future bug that bypasses them) must not validate here either.
+  if (row.code_challenge_method !== "S256") return null;
+  if (!verifyPkceS256(opts.codeVerifier, row.code_challenge)) return null;
 
   let dek: Buffer | null = null;
   if (row.dek_wrapped) {
@@ -295,16 +346,55 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
 
 // ─── Redirect URI validation ──────────────────────────────────────────────────
 
-/** Allow any HTTPS URI, or localhost/127.0.0.1 for dev */
-export function isValidRedirectUri(uri: string): boolean {
+/**
+ * Scheme/host-level check used at registration time. A `redirect_uri` is
+ * acceptable to register only if it is HTTPS, or if it is `http://localhost`
+ * / `http://127.0.0.1` (with optional port and path) for local development.
+ *
+ * This is NOT the runtime check that authorize uses — at runtime we require
+ * exact-string membership against the client's registered list, which closes
+ * the open-redirect vector entirely (a registered URI is verbatim what the
+ * code is delivered to). See `isRegisteredRedirectUri` for the runtime check.
+ */
+export function isAcceptableRedirectScheme(uri: string): boolean {
+  let url: URL;
   try {
-    const url = new URL(uri);
-    if (url.protocol === "https:") return true;
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return true;
-    return false;
+    url = new URL(uri);
   } catch {
     return false;
   }
+  if (url.protocol === "https:") return true;
+  if (url.protocol === "http:") {
+    // Allow http://localhost or http://127.0.0.1 (optional port, optional path).
+    // Reject any other http: host — a public-internet http target leaks the
+    // auth code (and our wrapped DEK) over the wire.
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return true;
+  }
+  return false;
+}
+
+/**
+ * Runtime membership check. The presented `redirect_uri` must exactly match
+ * one of the URIs the client registered. No scheme-only match, no prefix
+ * match, no host-only match — the registered URI is delivered as-is.
+ *
+ * Returns false if the registered list is empty, since after the registration
+ * tightening (see `registerClient`) every client is guaranteed to have a
+ * non-empty list. Callers can rely on the membership semantic alone.
+ */
+export function isRegisteredRedirectUri(uri: string, registered: string[]): boolean {
+  if (!Array.isArray(registered) || registered.length === 0) return false;
+  if (typeof uri !== "string" || uri.length === 0) return false;
+  return registered.includes(uri);
+}
+
+/**
+ * @deprecated — kept only as a thin wrapper so any external callers don't
+ * hard-fail. Internal callers should use `isAcceptableRedirectScheme` (at
+ * registration time) or `isRegisteredRedirectUri` (at runtime).
+ */
+export function isValidRedirectUri(uri: string): boolean {
+  return isAcceptableRedirectScheme(uri);
 }
 
 // ─── Dynamic Client Registration (RFC 7591) ──────────────────────────────────
@@ -326,11 +416,85 @@ export interface RegisteredClient {
   token_endpoint_auth_method: string;
 }
 
+/**
+ * RFC 7591 error response shape. Thrown by `registerClient` when validation
+ * fails so the route handler can map it to a `400` with the standard body.
+ */
+export class ClientRegistrationError extends Error {
+  readonly error: string;
+  readonly error_description: string;
+
+  constructor(error: string, description: string) {
+    super(`${error}: ${description}`);
+    this.error = error;
+    this.error_description = description;
+  }
+}
+
+/**
+ * Validate the `redirect_uris` array supplied to `registerClient`.
+ *
+ * RFC 7591 §2 lists `redirect_uris` as one of the metadata fields for clients
+ * that use the `authorization_code` grant. We require it for every client we
+ * register because:
+ *
+ *   - Without a non-empty list, the runtime authorize handler had a
+ *     "allow any if empty" branch that turned the registry into an open
+ *     redirect — anyone with a freshly-registered client_id could deliver
+ *     the auth code (and our wrapped DEK) to attacker.example.com.
+ *   - Per-URI scheme validation (HTTPS or localhost only) closes the
+ *     plaintext-leak vector for the auth code in transit.
+ *
+ * Returns the canonicalized array on success; throws `ClientRegistrationError`
+ * with an RFC 7591-shaped error code on failure.
+ */
+function validateRedirectUris(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    throw new ClientRegistrationError(
+      "invalid_redirect_uri",
+      "redirect_uris must be a non-empty array of URIs"
+    );
+  }
+  if (input.length === 0) {
+    throw new ClientRegistrationError(
+      "invalid_redirect_uri",
+      "redirect_uris must contain at least one URI"
+    );
+  }
+  if (input.length > MAX_REDIRECT_URIS_PER_CLIENT) {
+    throw new ClientRegistrationError(
+      "invalid_redirect_uri",
+      `redirect_uris must contain at most ${MAX_REDIRECT_URIS_PER_CLIENT} entries`
+    );
+  }
+  const out: string[] = [];
+  for (const entry of input) {
+    if (typeof entry !== "string" || entry.length === 0) {
+      throw new ClientRegistrationError(
+        "invalid_redirect_uri",
+        "redirect_uris entries must be non-empty strings"
+      );
+    }
+    if (!isAcceptableRedirectScheme(entry)) {
+      throw new ClientRegistrationError(
+        "invalid_redirect_uri",
+        `redirect_uri "${entry}" must be HTTPS, or http://localhost / http://127.0.0.1 for local development`
+      );
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
 /** Register a new OAuth client and return its metadata. */
 export async function registerClient(input: ClientRegistrationInput): Promise<RegisteredClient> {
   const clientId = crypto.randomUUID();
   const clientName = input.client_name ?? "Unknown Client";
-  const redirectUris = input.redirect_uris ?? [];
+  // Reject empty / oversized / scheme-invalid redirect_uris BEFORE any INSERT.
+  // Without this, a freshly-registered client could authorize against any URI
+  // (the authorize handler had an "allow any if list empty" branch, removed in
+  // the same security batch).
+  const redirectUris = validateRedirectUris(input.redirect_uris);
   const grantTypes = input.grant_types ?? ["authorization_code"];
   const responseTypes = input.response_types ?? ["code"];
   const authMethod = input.token_endpoint_auth_method ?? "none";
