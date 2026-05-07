@@ -6,6 +6,19 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Documentation — formal note on `style-src 'unsafe-inline'` constraint (#9, 2026-05-07)
+
+Captures the technical constraint behind why `style-src 'unsafe-inline'` can't be removed from the CSP today, and the migration path for closing it. Code-only change to [src/middleware.ts](src/middleware.ts) — a 28-line comment block above the CSP directive.
+
+**Constraint**: every React `style={{ ... }}` prop renders as a `style="..."` HTML attribute. HTML attributes can't carry CSP nonces (only `<style>` and `<script>` tags can). Removing `'unsafe-inline'` would break every component using the style prop, plus framework-injected inline styles from Recharts, framer-motion, and Next.js's not-found page. Adding a nonce alongside `'unsafe-inline'` doesn't help — browsers disable `'unsafe-inline'` the moment any nonce or hash appears in the directive.
+
+**Migration path** (out of scope of this PR):
+1. Audit every `style={{ ... }}` in `src/` (11 files at last count). Most can move to Tailwind atomic classes; the rest can use CSS custom properties via className + `--var`.
+2. Framework inline styles (Recharts SVG positioning, framer-motion animations, Next.js error pages) need hashing with `'sha256-...'` or framework-level workarounds.
+3. Verify the migration with the existing CSP test suite + a runtime CSP-violation observer in dev.
+
+**Threat addressed by closing this**: an XSS that escapes script-src (currently impossible post-B10) could exfiltrate via inline `background-image: url(attacker)` or `@import`. Real but narrow vs the script-src vectors B10 already closed.
+
 ### Test hygiene — partial triage of pre-existing failures (Open #3, batch 1) (2026-05-07)
 
 The handover noted ~90 pre-existing test failures that pre-dated the security batch (post-Stream-D-Phase-4 cleanup never finished). This first triage batch fixes 11 of them by patching mocks that drifted from current route signatures, and documents the remaining 79 by root cause for future PRs.
