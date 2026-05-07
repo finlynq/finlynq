@@ -76,13 +76,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const tokens = await createAccessToken(result.userId, client_id, result.dek);
+    const tokens = await createAccessToken(result.userId, client_id, result.dek, result.scope);
     return NextResponse.json(
       {
         access_token: tokens.accessToken,
         token_type: "Bearer",
         expires_in: tokens.expiresIn,
         refresh_token: tokens.refreshToken,
+        scope: tokens.scope,
       },
       { headers: CORS_HEADERS }
     );
@@ -120,6 +121,7 @@ export async function POST(request: NextRequest) {
         token_type: "Bearer",
         expires_in: tokens.expiresIn,
         refresh_token: tokens.refreshToken,
+        scope: tokens.scope,
       },
       { headers: CORS_HEADERS }
     );

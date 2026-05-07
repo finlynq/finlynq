@@ -9,6 +9,9 @@ import crypto from "crypto";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { wrapDEKForSecret, unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
+import { DEFAULT_SCOPE, normalizeRequestedScope, InvalidScopeError } from "@/lib/oauth-scopes";
+
+export { DEFAULT_SCOPE, InvalidScopeError } from "@/lib/oauth-scopes";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -100,6 +103,8 @@ export async function createAuthCode(opts: {
   redirectUri: string;
   clientId: string;
   dek?: Buffer | null;
+  /** Space-separated OAuth scope tokens. Defaults to DEFAULT_SCOPE if omitted. */
+  scope?: string;
 }): Promise<string> {
   // Defense-in-depth: route handlers should already have rejected non-S256
   // methods, but if a caller bypasses that check we MUST NOT persist a `plain`
@@ -108,6 +113,7 @@ export async function createAuthCode(opts: {
   if (!isValidPkceMethod(opts.codeChallengeMethod)) {
     throw new Error("Invalid code_challenge_method — only S256 is supported");
   }
+  const scope = normalizeRequestedScope(opts.scope ?? DEFAULT_SCOPE);
   const code = crypto.randomBytes(32).toString("hex");
   const codeHash = authLookupHash(code);
   const now = new Date();
@@ -118,10 +124,10 @@ export async function createAuthCode(opts: {
 
   await pgDb.execute(sql`
     INSERT INTO oauth_authorization_codes
-      (user_id, code, code_challenge, code_challenge_method, redirect_uri, client_id, expires_at, used, created_at, dek_wrapped)
+      (user_id, code, code_challenge, code_challenge_method, redirect_uri, client_id, expires_at, used, created_at, dek_wrapped, scope)
     VALUES
       (${opts.userId}, ${codeHash}, ${opts.codeChallenge}, ${opts.codeChallengeMethod},
-       ${opts.redirectUri}, ${opts.clientId}, ${expiresAt}, 0, ${now.toISOString()}, ${dekWrapped})
+       ${opts.redirectUri}, ${opts.clientId}, ${expiresAt}, 0, ${now.toISOString()}, ${dekWrapped}, ${scope})
   `);
 
   return code;
@@ -138,6 +144,7 @@ type AuthCodeRow = {
   expires_at: string;
   used: number;
   dek_wrapped: string | null;
+  scope: string | null;
 };
 
 /**
@@ -156,7 +163,7 @@ export async function consumeAuthCode(opts: {
   redirectUri: string;
   clientId: string;
   codeVerifier: string;
-}): Promise<{ userId: string; dek: Buffer | null } | null> {
+}): Promise<{ userId: string; dek: Buffer | null; scope: string } | null> {
   // Atomic claim — at most one caller gets the row; everyone else sees empty.
   // Lookup by hash; the raw code is never stored in DB.
   const codeHash = authLookupHash(opts.code);
@@ -187,7 +194,11 @@ export async function consumeAuthCode(opts: {
     }
   }
 
-  return { userId: row.user_id, dek };
+  // Pre-PR rows have no scope column data; treat absence as DEFAULT_SCOPE so
+  // existing tokens keep their pre-rollout full-access semantics.
+  const scope = (row.scope && row.scope.trim().length > 0) ? row.scope : DEFAULT_SCOPE;
+
+  return { userId: row.user_id, dek, scope };
 }
 
 // ─── Access Tokens ───────────────────────────────────────────────────────────
@@ -200,12 +211,15 @@ export async function consumeAuthCode(opts: {
 export async function createAccessToken(
   userId: string,
   clientId: string,
-  dek?: Buffer | null
+  dek?: Buffer | null,
+  scope?: string
 ): Promise<{
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
+  scope: string;
 }> {
+  const tokenScope = normalizeRequestedScope(scope ?? DEFAULT_SCOPE);
   const accessToken = `pf_oauth_${crypto.randomBytes(32).toString("hex")}`;
   const refreshToken = `pf_refresh_${crypto.randomBytes(32).toString("hex")}`;
   const accessHash = authLookupHash(accessToken);
@@ -221,12 +235,12 @@ export async function createAccessToken(
 
   await pgDb.execute(sql`
     INSERT INTO oauth_access_tokens
-      (user_id, token, refresh_token, client_id, expires_at, refresh_expires_at, created_at, dek_wrapped, dek_wrapped_refresh)
+      (user_id, token, refresh_token, client_id, expires_at, refresh_expires_at, created_at, dek_wrapped, dek_wrapped_refresh, scope)
     VALUES
-      (${userId}, ${accessHash}, ${refreshHash}, ${clientId}, ${expiresAt}, ${refreshExpiresAt}, ${now.toISOString()}, ${dekWrapped}, ${dekWrappedRefresh})
+      (${userId}, ${accessHash}, ${refreshHash}, ${clientId}, ${expiresAt}, ${refreshExpiresAt}, ${now.toISOString()}, ${dekWrapped}, ${dekWrappedRefresh}, ${tokenScope})
   `);
 
-  return { accessToken, refreshToken, expiresIn: ACCESS_TOKEN_TTL_MS / 1000 };
+  return { accessToken, refreshToken, expiresIn: ACCESS_TOKEN_TTL_MS / 1000, scope: tokenScope };
 }
 
 type TokenRow = {
@@ -240,22 +254,23 @@ type TokenRow = {
   dek_wrapped: string | null;
   dek_wrapped_refresh: string | null;
   revoked_at: string | null;
+  scope: string | null;
 };
 
 /**
  * Validate an OAuth access token. Returns {userId, dek} if valid, null otherwise.
  * Revoked tokens (rotated or killed by reuse-detection) are rejected.
  */
-export async function validateOauthToken(token: string): Promise<{ userId: string; dek: Buffer | null } | null> {
+export async function validateOauthToken(token: string): Promise<{ userId: string; dek: Buffer | null; scope: string } | null> {
   const tokenHash = authLookupHash(token);
   const result = await pgDb.execute(sql`
-    SELECT user_id, expires_at, dek_wrapped
+    SELECT user_id, expires_at, dek_wrapped, scope
       FROM oauth_access_tokens
      WHERE token = ${tokenHash}
        AND revoked_at IS NULL
      LIMIT 1
   `);
-  const rows: Pick<TokenRow, "user_id" | "expires_at" | "dek_wrapped">[] = result.rows ?? result ?? [];
+  const rows: Pick<TokenRow, "user_id" | "expires_at" | "dek_wrapped" | "scope">[] = result.rows ?? result ?? [];
   if (!rows.length) return null;
   if (new Date(rows[0].expires_at) < new Date()) return null;
 
@@ -267,7 +282,9 @@ export async function validateOauthToken(token: string): Promise<{ userId: strin
       dek = null;
     }
   }
-  return { userId: rows[0].user_id, dek };
+  // Pre-PR rows have no scope; treat absence as DEFAULT_SCOPE for back-compat.
+  const scope = (rows[0].scope && rows[0].scope.trim().length > 0) ? rows[0].scope : DEFAULT_SCOPE;
+  return { userId: rows[0].user_id, dek, scope };
 }
 
 /**
@@ -287,6 +304,7 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
+  scope: string;
 } | null> {
   const nowIso = new Date().toISOString();
   const refreshHash = authLookupHash(refreshToken);
@@ -328,7 +346,7 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
     return null;
   }
 
-  const { user_id, dek_wrapped_refresh } = rows[0];
+  const { user_id, dek_wrapped_refresh, scope: oldScope } = rows[0];
 
   // Unwrap DEK using the refresh-token-wrapped envelope. We never stored the
   // old access token plaintext, so the refresh path uses its own envelope.
@@ -341,7 +359,14 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
     }
   }
 
-  return createAccessToken(user_id, clientId, dek);
+  // Refresh preserves scope. RFC 6749 §6 explicitly forbids scope ESCALATION
+  // on refresh ("the requested scope MUST NOT include any scope not originally
+  // granted"). We don't accept a `scope` parameter on refresh at all — the
+  // refreshed token gets exactly the original scope. Pre-PR rows without a
+  // scope column fall back to DEFAULT_SCOPE.
+  const preservedScope = (oldScope && oldScope.trim().length > 0) ? oldScope : DEFAULT_SCOPE;
+
+  return createAccessToken(user_id, clientId, dek, preservedScope);
 }
 
 // ─── Redirect URI validation ──────────────────────────────────────────────────

@@ -19,6 +19,7 @@ import { db } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { accountStrategy } from "@/lib/auth/require-auth";
 import { validateOauthToken, getIssuer } from "@/lib/oauth";
+import { DEFAULT_SCOPE, parseScope, isToolAllowedForScope } from "@/lib/oauth-scopes";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { registerPgTools } from "../../../../mcp-server/register-tools-pg";
 
@@ -35,7 +36,7 @@ async function authenticateMcp(request: NextRequest) {
     if (result) {
       return {
         authenticated: true as const,
-        context: { userId: result.userId, method: "oauth" as const, mfaVerified: false, dek: result.dek, sessionId: null as string | null },
+        context: { userId: result.userId, method: "oauth" as const, mfaVerified: false, dek: result.dek, sessionId: null as string | null, scope: result.scope },
       };
     }
     // Token looks like OAuth but failed validation — return 401 with WWW-Authenticate
@@ -127,6 +128,29 @@ export async function POST(request: NextRequest) {
   }
 
   const server = new McpServer({ name: "finlynq", version: "2.3.0" });
+
+  // Resolve the effective scope for this request. OAuth tokens carry a stored
+  // scope; API-key / session-cookie auth defaults to DEFAULT_SCOPE (full
+  // read+write — those auth methods predate scope plumbing and remain
+  // unrestricted). When scope is narrower than full, wrap server.tool() so
+  // every out-of-scope tool registration becomes a no-op — the SDK never
+  // even learns about those tools, so they don't appear in tools/list and
+  // can't be called.
+  const scopeString = "scope" in auth.context ? auth.context.scope : DEFAULT_SCOPE;
+  const scopeSet = parseScope(scopeString);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const originalTool = (server as any).tool.bind(server);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server as any).tool = (name: string, ...args: unknown[]) => {
+    if (!isToolAllowedForScope(name, scopeSet)) {
+      // Drop registration silently — out-of-scope tools shouldn't surface in
+      // tools/list as "I exist but you can't call me", because that leaks
+      // information about what the broader API supports. The OAuth dance
+      // already told the client which scope it asked for.
+      return undefined;
+    }
+    return originalTool(name, ...args);
+  };
 
   // PostgreSQL-only mode — async Drizzle queries, user-scoped.
   // DEK comes from whichever auth path we matched: API-key envelope, session
