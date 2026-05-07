@@ -1,4 +1,6 @@
 # ── Stage 1: Install dependencies ────────────────────────────────────────────
+# TODO(security): pin node:22-alpine to a digest (e.g. node:22-alpine@sha256:...)
+# so a tag rebase can't silently swap the base image we publish from.
 FROM node:22-alpine AS deps
 RUN apk add --no-cache libc6-compat python3 make g++
 WORKDIR /app
@@ -7,6 +9,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ── Stage 2: Build the application ───────────────────────────────────────────
+# TODO(security): pin node:22-alpine to a digest — see deps stage.
 FROM node:22-alpine AS builder
 RUN apk add --no-cache libc6-compat python3 make g++
 WORKDIR /app
@@ -14,6 +17,10 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
+# `.dockerignore` (added in the Docker hardening pass) keeps `.env*`, `.git`,
+# `node_modules`, `.next`, tests, agent state, etc. out of the image. If you
+# ever publish a slimmer Dockerfile, audit `.dockerignore` first — `COPY . .`
+# is otherwise the load-bearing place secrets sneak into a published layer.
 COPY . .
 
 # Build the Next.js app (standalone output for minimal image)
@@ -24,6 +31,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # ── Stage 3: Production image ─────────────────────────────────────────────────
+# TODO(security): pin node:22-alpine to a digest — see deps stage.
 FROM node:22-alpine AS runner
 RUN apk add --no-cache curl netcat-openbsd
 WORKDIR /app

@@ -20,7 +20,6 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npx tsc --noEmit
-        continue-on-error: true
       - run: npm run build
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
@@ -39,7 +38,9 @@ jobs:
 
     steps:
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
+        # Pinned to commit SHA for v1.2.0 — stops a tag move from
+        # silently swapping the action used to ship to production.
+        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
@@ -49,7 +50,9 @@ jobs:
             sudo bash /home/projects/pf/deploy.sh
 
       - name: Verify deployment
-        uses: appleboy/ssh-action@v1.2.0
+        # Pinned to commit SHA for v1.2.0 — stops a tag move from
+        # silently swapping the action used to ship to production.
+        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
