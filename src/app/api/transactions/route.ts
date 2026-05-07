@@ -15,6 +15,7 @@ import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { isSortableColumnId } from "@/lib/transactions/columns";
 import { isTransactionSource, type TransactionSource } from "@/lib/tx-source";
+import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 const postSchema = z.object({
   date: z.string(),
@@ -74,7 +75,7 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
 
   const params = request.nextUrl.searchParams;
   const search = params.get("search") ?? undefined;
@@ -444,6 +445,17 @@ export async function POST(request: NextRequest) {
     if (!resolved.ok) return resolved.response;
     Object.assign(data, resolved.fields);
 
+    // Cross-tenant FK guard (H-1) — verify the caller owns every FK id
+    // supplied in the body BEFORE the resolver auto-creates anything or the
+    // INSERT fires. `portfolioHoldingId` is checked when present; the name
+    // resolver below scopes by `auth.userId` so the resolved-from-name path
+    // can't cross tenants.
+    await verifyOwnership(auth.userId, {
+      accountIds: [data.accountId],
+      categoryIds: [data.categoryId],
+      holdingIds: data.portfolioHoldingId != null ? [data.portfolioHoldingId] : undefined,
+    });
+
     // Resolve portfolioHolding name → portfolio_holdings.id when the caller
     // didn't supply the FK directly. Auto-creates a holding scoped to the
     // tx's account when missing — matches the import-pipeline behavior so
@@ -474,6 +486,11 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
+    if (error instanceof OwnershipError) {
+      // 404 (not 403) — same shape as "not found" so the caller can't
+      // distinguish "another user's id" from "non-existent id". H-1.
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     // Postgres FK violation — typically a stale categoryId / accountId /
     // portfolioHoldingId from a stale UI form. Map to 400 with a friendly
     // pointer instead of leaking the SQL error as a 500.
@@ -501,6 +518,20 @@ export async function PUT(request: NextRequest) {
     if (!resolved.ok) return resolved.response;
     Object.assign(data, resolved.fields);
 
+    // Cross-tenant FK guard (H-1). The transaction id itself is checked by
+    // the SQL `eq(transactions.userId, ...)` in `updateTransaction`, but the
+    // FK ids in the update body would otherwise re-attribute the row to
+    // another user's account/category/holding.
+    await verifyOwnership(auth.userId, {
+      accountIds: data.accountId != null ? [data.accountId] : undefined,
+      categoryIds: data.categoryId != null ? [data.categoryId] : undefined,
+      // `null` is an explicit clear-the-FK; only verify positive ids.
+      holdingIds:
+        data.portfolioHoldingId != null && data.portfolioHoldingId > 0
+          ? [data.portfolioHoldingId]
+          : undefined,
+    });
+
     // Same name→id resolution as POST. Only runs when caller passed a name
     // without explicitly supplying (or nulling) the FK.
     if (
@@ -524,6 +555,9 @@ export async function PUT(request: NextRequest) {
         { error: error.message, code: error.code, accountId: error.accountId },
         { status: 400 },
       );
+    }
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
     if (typeof error === "object" && error !== null && (error as { code?: string }).code === "23503") {
       return NextResponse.json(

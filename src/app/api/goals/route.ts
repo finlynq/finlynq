@@ -3,8 +3,10 @@ import { db, schema } from "@/db";
 import { eq, and, sql, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { validateBody, safeErrorMessage, AppError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { getHoldingsValueByAccount } from "@/lib/holdings-value";
+import { getLatestFxRate } from "@/lib/fx-service";
 
 const postSchema = z.object({
   name: z.string(),
@@ -66,7 +68,7 @@ async function verifyAccountOwnership(userId: string, accountIds: number[]): Pro
   if (owned.length !== new Set(accountIds).size) {
     const ownedIds = new Set(owned.map((a) => a.id));
     const missing = accountIds.filter((id) => !ownedIds.has(id));
-    throw new Error(`Account id(s) not owned by user: ${missing.join(", ")}`);
+    throw new AppError(`Account id(s) not owned by user: ${missing.join(", ")}`);
   }
 }
 
@@ -152,19 +154,100 @@ export async function GET(request: NextRequest) {
 
   // Calculate current amount summed across ALL linked accounts (issue #130).
   // JOIN grain is `(goal_id, account_id, user_id)` — see CLAUDE.md.
-  const withProgress = await Promise.all(goals.map(async (g) => {
-    let currentAmount = 0;
-    if (g.accountIds.length > 0) {
-      const result = await db
-        .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
+  //
+  // Issue #151: branch on `accounts.is_investment` per linked account.
+  //   - Investment accounts: use market value from `getHoldingsValueByAccount`
+  //     (same aggregator the dashboard / accounts page uses). Cash sleeve is
+  //     already inside `holdings.value` via the currency-as-holding pattern,
+  //     so this matches the accounts-page balance for the same account.
+  //   - Cash accounts: keep `SUM(transactions.amount)` path (unchanged).
+  // Each per-account contribution is FX-converted into the goal's currency
+  // before summing — multi-currency goals (e.g. CAD goal linked to a USD
+  // account) now report a meaningful `progress = currentAmount / targetAmount`.
+  // CLAUDE.md "Account balance for accounts with holdings = `holdings.value`"
+  // is the same rule the goals page now follows.
+
+  // Resolve the union of linked account ids across all goals so we hit the
+  // metadata table once instead of once per goal.
+  const allAccountIds = Array.from(
+    new Set(goals.flatMap((g) => g.accountIds)),
+  );
+  const accountMeta: Map<number, { currency: string; isInvestment: boolean }> =
+    allAccountIds.length > 0
+      ? new Map(
+          (
+            await db
+              .select({
+                id: schema.accounts.id,
+                currency: schema.accounts.currency,
+                isInvestment: schema.accounts.isInvestment,
+              })
+              .from(schema.accounts)
+              .where(
+                and(
+                  eq(schema.accounts.userId, userId),
+                  inArray(schema.accounts.id, allAccountIds),
+                ),
+              )
+          ).map((a) => [a.id, { currency: a.currency, isInvestment: !!a.isInvestment }]),
+        )
+      : new Map();
+
+  // Pull the holdings-value snapshot once (shared across goals). Internally
+  // it computes per-account market value with full per-currency cost-basis
+  // bucketing (issue #129) and cash-leg substitution (issue #96).
+  const holdingsByAccount = await getHoldingsValueByAccount(userId, auth.context.dek);
+
+  // Per-account cash-flow basis (cash accounts only). One query, grouped by
+  // accountId — same SUM the legacy code computed but batched.
+  const cashRows = allAccountIds.length > 0
+    ? await db
+        .select({
+          accountId: schema.transactions.accountId,
+          total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)::float8`,
+        })
         .from(schema.transactions)
         .where(
           and(
             eq(schema.transactions.userId, userId),
-            inArray(schema.transactions.accountId, g.accountIds),
+            inArray(schema.transactions.accountId, allAccountIds),
           ),
-        );
-      currentAmount = Number(result[0]?.total ?? 0);
+        )
+        .groupBy(schema.transactions.accountId)
+    : [];
+  const cashByAccount = new Map<number, number>();
+  for (const r of cashRows) {
+    if (r.accountId == null) continue;
+    cashByAccount.set(r.accountId, Number(r.total ?? 0));
+  }
+
+  // FX cache shared across goals — most users have ≤3 distinct currencies.
+  const fxCache = new Map<string, number>();
+  const getFx = async (from: string, to: string): Promise<number> => {
+    if (from === to) return 1;
+    const key = `${from}->${to}`;
+    if (fxCache.has(key)) return fxCache.get(key)!;
+    const rate = await getLatestFxRate(from, to, userId);
+    fxCache.set(key, rate);
+    return rate;
+  };
+
+  const withProgress = await Promise.all(goals.map(async (g) => {
+    let currentAmount = 0;
+    const goalCurrency = (g.currency ?? "CAD").toUpperCase();
+    for (const accountId of g.accountIds) {
+      const meta = accountMeta.get(accountId);
+      if (!meta) continue; // account got deleted under us; skip silently
+      // Investment accounts: holdings.value (market value) in account currency.
+      // Cash accounts: transaction sum in account currency.
+      let valueInAccountCcy: number;
+      if (meta.isInvestment) {
+        valueInAccountCcy = holdingsByAccount.get(accountId)?.value ?? 0;
+      } else {
+        valueInAccountCcy = cashByAccount.get(accountId) ?? 0;
+      }
+      const fx = await getFx(meta.currency, goalCurrency);
+      currentAmount += valueInAccountCcy * fx;
     }
 
     const progress = g.targetAmount > 0 ? Math.min((currentAmount / g.targetAmount) * 100, 100) : 0;

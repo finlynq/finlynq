@@ -1,15 +1,18 @@
 /**
  * GET /api/import/staged
  *
- * List the current user's pending staged imports (email-delivered rows
- * awaiting review at /import/pending).
+ * List the current user's pending staged imports — both email-delivered
+ * rows and upload-staged rows — awaiting review at /import/pending.
  *
  * Query params:
  *   ?count=1  → return only `{ pending: number }` for lightweight nav badge polling
  *
  * Otherwise returns an array of:
  *   { id, source, fromAddress, subject, receivedAt, totalRowCount,
- *     duplicateCount, expiresAt }
+ *     duplicateCount, expiresAt, originalFilename, fileFormat }
+ *
+ * `source` is 'email' or 'upload'. Email rows populate fromAddress + subject;
+ * upload rows populate originalFilename + fileFormat (issue #153).
  *
  * Rows are user-scoped via userId filter. Expired rows (expires_at < now)
  * are filtered out in case the cleanup cron hasn't run yet.
@@ -53,6 +56,11 @@ export async function GET(request: NextRequest) {
       totalRowCount: schema.stagedImports.totalRowCount,
       duplicateCount: schema.stagedImports.duplicateCount,
       expiresAt: schema.stagedImports.expiresAt,
+      // Issue #153: upload-source rows surface filename + format on the list
+      // so the review UI can show "{filename} · CSV" instead of an empty
+      // "(no subject)" + "from (unknown)".
+      originalFilename: schema.stagedImports.originalFilename,
+      fileFormat: schema.stagedImports.fileFormat,
     })
     .from(schema.stagedImports)
     .where(and(

@@ -605,14 +605,37 @@ export const stagedImports = pgTable("staged_imports", {
   totalRowCount: integer("total_row_count").notNull().default(0),
   duplicateCount: integer("duplicate_count").notNull().default(0),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  // ─── Unified-ingest columns (issue #152, 2026-05-06) ─────────────────
+  // Per-statement metadata so non-email sources (CSV/OFX/XLSX uploads,
+  // future Plaid sync, MCP "park for later") can populate the same staging
+  // tables. All nullable — email path leaves them NULL today.
+  statementBalance: doublePrecision("statement_balance"),
+  statementBalanceDate: text("statement_balance_date"), // YYYY-MM-DD
+  statementCurrency: text("statement_currency"), // ISO 4217
+  statementPeriodStart: text("statement_period_start"), // YYYY-MM-DD
+  statementPeriodEnd: text("statement_period_end"), // YYYY-MM-DD
+  boundAccountId: integer("bound_account_id").references(() => accounts.id),
+  // 'ofx' | 'qfx' | 'csv' | 'xlsx' | 'pdf' | 'plaid' | 'mcp'
+  fileFormat: text("file_format"),
+  originalFilename: text("original_filename"), // display only, e.g. "chase-2026-04.csv"
 });
 
 export const stagedTransactions = pgTable("staged_transactions", {
   id: text("id").primaryKey(), // UUID
   stagedImportId: text("staged_import_id").notNull().references(() => stagedImports.id, { onDelete: "cascade" }),
   userId: text("user_id").notNull().references(() => users.id),
-  // Plaintext — bounded lifetime (14 days), deleted on approve/reject/expire.
-  // Re-inserted into `transactions` with the user's DEK at approve time.
+  // Encrypted — bounded lifetime (60 days, 2026-05-06), deleted on
+  // approve/reject/expire. Re-inserted into `transactions` with the user's
+  // DEK at approve time.
+  //
+  // Two-tier encryption:
+  //   - 'service' (default at ingest): wrapped with PF_STAGING_KEY (sv1:),
+  //     readable by anyone with the env var + DB.
+  //   - 'user': wrapped with the user's DEK (v1:), readable only by that
+  //     user. The login-time upgrade job (enqueueUpgradeStagingEncryption)
+  //     flips rows from service → user when the DEK becomes available.
+  // Read paths branch on `encryption_tier` to pick decryptStaged() vs
+  // tryDecryptField(dek, ...).
   date: text("date").notNull(),
   amount: doublePrecision("amount").notNull(),
   currency: text("currency").default("CAD"),
@@ -623,6 +646,44 @@ export const stagedTransactions = pgTable("staged_transactions", {
   rowIndex: integer("row_index").notNull(),
   isDuplicate: boolean("is_duplicate").notNull().default(false),
   importHash: text("import_hash").notNull(),
+  encryptionTier: text("encryption_tier").notNull().default("service"),
+  // ─── Unified-ingest columns (issue #152, 2026-05-06) ─────────────────
+  // Full-transaction parity fields so uploads/transfers/investment trades
+  // round-trip through staging. Not encrypted — structural / numeric / FK.
+  // Existing email-path rows take the defaults: tx_type='E',
+  // dedup_status='new', row_status='pending', everything else NULL.
+  txType: text("tx_type").notNull().default("E"), // 'E' | 'I' | 'R' (CHECK enforced in SQL)
+  quantity: doublePrecision("quantity"), // for investment trades; NULL for cash-only
+  // Resolved holding when the row is on an investment account. Set by the
+  // user / classifier in staging; required at approve time for investment
+  // accounts (see CLAUDE.md "Investment-account constraint").
+  portfolioHoldingId: integer("portfolio_holding_id").references(
+    () => portfolioHoldings.id,
+    { onDelete: "set null" }
+  ),
+  // Cross-currency rows (issue #129) — amount in the entered currency when
+  // it differs from the account currency.
+  enteredAmount: doublePrecision("entered_amount"),
+  enteredCurrency: text("entered_currency"), // ISO 4217
+  tags: text("tags"), // free-text tags like live `transactions.tags`
+  // OFX FITID — bank-supplied transaction id. Carried through staging so
+  // dedup at approve time can match the same key the import-pipeline uses.
+  fitId: text("fit_id"),
+  // Transfer pairing (tx_type='R'):
+  //   - peer_staged_id: when both legs are in staging (e.g. a brokerage CSV
+  //     that includes both sides). Self-FK; DEFERRABLE INITIALLY DEFERRED
+  //     so both rows can be inserted in the same transaction.
+  //   - target_account_id: when only one leg is in staging — user picks the
+  //     destination account; approve mints the second leg via createTransferPair().
+  // Mutually exclusive (enforced application-layer at approve time).
+  peerStagedId: text("peer_staged_id"),
+  targetAccountId: integer("target_account_id").references(() => accounts.id),
+  // Persisted classification so the review UI doesn't re-run dedup on every page load.
+  dedupStatus: text("dedup_status").notNull().default("new"), // 'new' | 'existing' | 'probable_duplicate'
+  // Per-row state. 'approved' rows are deleted immediately after the
+  // materialize-into-`transactions` step (today's behavior); the column lets
+  // the MCP "approve a subset" path mark intent before the actual delete.
+  rowStatus: text("row_status").notNull().default("pending"), // 'pending' | 'approved' | 'rejected'
 });
 
 // ─── Email Import — Admin Inbox + Trash (Phase A) ──────────────────────────
@@ -692,4 +753,18 @@ export const adminAudit = pgTable("admin_audit", {
   afterJson: text("after_json"),
   ip: text("ip"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ─── Revoked JWT jtis ───────────────────────────────────────────────────────
+//
+// Server-side JWT denylist (B7, 2026-05-07). A jti is INSERTed here when a
+// user logs out (so a stolen cookie can't keep accessing plaintext-only
+// routes — finding H-5) or when an MFA-pending token is exchanged for a
+// real session (so the pending token can't be replayed against /mfa/verify
+// — finding H-4). The auth path consults this table on every request via a
+// 30s in-process cache. A daily cron prunes rows whose `expires_at` < NOW()
+// (tokens past their JWT exp would already fail signature verification).
+export const revokedJtis = pgTable("revoked_jtis", {
+  jti: text("jti").primaryKey(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });

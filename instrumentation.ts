@@ -94,6 +94,23 @@ export async function register() {
     } catch (err) {
       console.error("[instrumentation] Failed to start sweep-mcp-idempotency cron:", err);
     }
+
+    // Revoked JWT jtis cleanup (B7, 2026-05-07). Daily sweep — delete rows
+    // whose `expires_at` is past. Past exp the JWT signature validation
+    // would already reject the token, so keeping the row in the denylist
+    // is wasted space. The auth path's 30s in-process cache means this
+    // sweep doesn't need to be more aggressive.
+    try {
+      const { startRevokedJtisSweepTimer, sweepRevokedJtis } = await import(
+        "./src/lib/cron/sweep-revoked-jtis"
+      );
+      sweepRevokedJtis().catch((err) => {
+        console.error("[instrumentation] initial sweep-revoked-jtis failed:", err);
+      });
+      startRevokedJtisSweepTimer();
+    } catch (err) {
+      console.error("[instrumentation] Failed to start sweep-revoked-jtis cron:", err);
+    }
   } catch (err) {
     // Log but don't crash the server — healthz will report degraded state
     console.error("[instrumentation] Failed to initialize PostgreSQL adapter:", err);

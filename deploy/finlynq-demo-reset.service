@@ -5,19 +5,39 @@ Wants=postgresql.service
 
 [Service]
 Type=oneshot
-# Adjust WorkingDirectory to match the environment being reset.
-# Typical paths on the Finlynq server:
-#   prod:    /var/www/finlynq
-#   staging: /var/www/finlynq-staging
-#   dev:     /var/www/finlynq-dev
-WorkingDirectory=/var/www/finlynq
-# EnvironmentFile should point at the same .env used by the Next.js service for
-# this environment — in particular, it must define DATABASE_URL (or PF_DATABASE_URL).
+
+# --- Path / identity ---
+# Match `pf.service` on the production VPS (DEPLOY.md). Override for dev or
+# self-hosted layouts by editing this file or using a drop-in unit.
+WorkingDirectory=/home/projects/pf/pf-app
+
+# Same .env as the Next.js service for this environment. Must define
+# DATABASE_URL (or PF_DATABASE_URL). It must ALSO define PF_PEPPER and
+# PF_STAGING_KEY — the demo seed unwraps the demo user's DEK envelope and
+# fails (login 500s) if those vars aren't set on this unit. See
+# DEPLOY.md "Required env vars".
 EnvironmentFile=/etc/finlynq/finlynq.env
 ExecStart=/usr/bin/env npx tsx scripts/seed-demo.ts
-# Run as the same user that owns the repo files.
-User=finlynq
-Group=finlynq
+
+# Same user that owns the repo files on the deploy host (DEPLOY.md
+# "Server Structure"). NOT root — root would let a compromised seed
+# script touch the rest of the system.
+User=paperclip-agent
+Group=paperclip-agent
+
+# --- Hardening (M-14) ---
+# The demo reset is run nightly with no human in the loop, against a
+# real production database. We apply the standard systemd-sandbox set
+# so that even if `seed-demo.ts` is compromised it can't touch the rest
+# of the host filesystem, /etc, /home of other users, or escalate via
+# setuid binaries. ReadWritePaths only needs to cover what the seeder
+# actually writes (transient npm/npx caches plus the WorkingDirectory).
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/home/projects/pf/pf-app /home/paperclip-agent/.npm /tmp
+
 StandardOutput=journal
 StandardError=journal
 # Demo resets are idempotent — no point retrying a hard failure indefinitely.

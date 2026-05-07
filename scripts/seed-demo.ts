@@ -240,11 +240,64 @@ function investmentTransactions(startDate: Date): InvestmentTx[] {
 
 // ─── Main ──────────────────────────────────────────────────────────────────
 
+/**
+ * Guard against accidentally running this destructive script against a
+ * non-demo database. The seeder wipes the demo user's data and reseeds
+ * fresh samples — pointing it at a prod DB with a different
+ * configuration would happily write the demo seed and clobber real data
+ * for any user that happened to share the demo UUID.
+ *
+ * Three layered checks:
+ *  1. Explicit opt-in: `PF_ALLOW_DEMO_SEED=1` bypasses the URL check (for
+ *     CI / local dev where the URL doesn't follow naming conventions).
+ *  2. URL substring: the connection string must contain "demo" or
+ *     "finlynq" (case-insensitive). Production URLs in DEPLOY.md match
+ *     ("postgres://finlynq_prod@..."); local dev DBs usually do not.
+ *  3. Sanity check: refuse if the DB has more than one user row. The
+ *     demo DB is single-user by definition; multi-user means we're
+ *     pointing at the real app DB.
+ *
+ * Throws with a clear error message rather than `process.exit` so the
+ * stack trace is captured in journalctl.
+ */
+export async function assertDemoDatabase(client: pg.PoolClient, url: string) {
+  const explicitOptIn = process.env.PF_ALLOW_DEMO_SEED === "1";
+  const urlMatches = /demo|finlynq/i.test(url);
+  if (!explicitOptIn && !urlMatches) {
+    throw new Error(
+      "Refusing to run seed-demo on a non-demo DB. " +
+        "Set PF_ALLOW_DEMO_SEED=1 or use a DATABASE_URL containing 'demo' / 'finlynq'."
+    );
+  }
+
+  // Guard #3: a "demo" database should have at most one user row (the
+  // demo user itself). If we see multiple, we are almost certainly
+  // pointed at the real prod DB by accident.
+  try {
+    const { rows } = await client.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM users`
+    );
+    const count = Number(rows[0]?.count ?? "0");
+    if (count > 1) {
+      throw new Error(
+        `Refusing to run seed-demo on a DB with ${count} users — ` +
+          `this looks like a real app database, not the single-user demo.`
+      );
+    }
+  } catch (err: unknown) {
+    // `users` table missing on a fresh DB is fine — proceed (demo seed
+    // creates it via existing migrations). Any other DB error is fatal.
+    const code = (err as { code?: string } | null)?.code;
+    if (code !== "42P01") throw err;
+  }
+}
+
 async function main() {
   const pool = new pg.Pool({ connectionString: databaseUrl });
   const client = await pool.connect();
 
   try {
+    await assertDemoDatabase(client, databaseUrl);
     console.log(`[seed-demo] Target DB: ${databaseUrl.split("@")[1] ?? "(hidden)"}`);
     const now = new Date().toISOString();
 

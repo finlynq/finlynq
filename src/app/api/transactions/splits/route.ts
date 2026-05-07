@@ -1,10 +1,10 @@
-/**
- * /api/transactions/splits — CRUD for transaction splits
+﻿/**
+ * /api/transactions/splits â€” CRUD for transaction splits
  *
- * GET    ?transactionId=N  → list splits for a transaction
- * GET    (no params)        → list ALL splits for the user (for export)
- * POST                     → create/replace all splits for a transaction
- * DELETE ?transactionId=N  → delete all splits for a transaction
+ * GET    ?transactionId=N  â†’ list splits for a transaction
+ * GET    (no params)        â†’ list ALL splits for the user (for export)
+ * POST                     â†’ create/replace all splits for a transaction
+ * DELETE ?transactionId=N  â†’ delete all splits for a transaction
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -48,12 +48,12 @@ async function assertTxnOwnership(transactionId: number, userId: string): Promis
 }
 
 export async function GET(request: NextRequest) {
-  // Reads degrade gracefully — without a DEK, encrypted split rows ship
+  // Reads degrade gracefully â€” without a DEK, encrypted split rows ship
   // as `v1:` ciphertext rather than 423-ing the transactions page.
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
 
   const transactionIdParam = request.nextUrl.searchParams.get("transactionId");
 
@@ -109,7 +109,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Pull parent's currency context so each split inherits the entered_*
-    // trilogy. Splits don't accept their own entered_* from the client —
+    // trilogy. Splits don't accept their own entered_* from the client â€”
     // they're derived from the parent's locked rate so the split sums match
     // the parent's entered amount.
     const parent = await db

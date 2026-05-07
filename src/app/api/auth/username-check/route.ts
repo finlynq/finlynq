@@ -2,15 +2,19 @@
  * GET /api/auth/username-check?u=<value>
  *
  * Lightweight live availability check used by the signup form. Returns
- * { available: boolean, error?: string }. The `error` field carries the
- * format error from validateUsername when the input fails the regex /
- * reserved check — the UI can render it inline without making the user
- * submit to find out.
+ * { available: boolean }.
  *
- * Rate-limited per IP (30/min) so the typing flow stays responsive but
- * scripted enumeration is bounded. We never reveal *why* a username is
- * unavailable beyond "format" vs "taken" — same anti-enumeration stance as
- * /api/auth/login's generic error.
+ * Finding C-6 (2026-05-07) — anti-enumeration hardening. The previous
+ * version returned distinct error strings for "format" vs "taken" vs
+ * "reserved", letting an attacker walk the user table by toggling on the
+ * exact reason. We now return a uniform `{ available: false }` for any
+ * unclaimable identifier — the UI is left with a single "try a different
+ * one" message and the response carries no enumeration signal.
+ *
+ * Rate-limited per IP (30/min) for typing-flow responsiveness. There is no
+ * authenticated-session gate because this endpoint must be callable from the
+ * signup form before the user has an account; a CAPTCHA would be the next
+ * step if scripted enumeration becomes observable in logs.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -21,26 +25,23 @@ import { isIdentifierClaimed } from "@/lib/auth/queries";
 
 export async function GET(request: NextRequest) {
   if (getDialect() !== "postgres") {
-    return NextResponse.json(
-      { available: false, error: "Registration is only available in managed mode." },
-      { status: 403 }
-    );
+    return NextResponse.json({ available: false }, { status: 403 });
   }
 
   const ip =
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
   const limit = checkRateLimit(`username-check:${ip}`, 30, 60_000);
   if (!limit.allowed) {
-    return NextResponse.json(
-      { available: false, error: "Too many checks. Please slow down." },
-      { status: 429 }
-    );
+    return NextResponse.json({ available: false }, { status: 429 });
   }
 
   const raw = request.nextUrl.searchParams.get("u") ?? "";
   const validation = validateUsername(raw);
   if (!validation.ok) {
-    return NextResponse.json({ available: false, error: validation.error });
+    // Format / reserved / length failures — collapse into the same generic
+    // "unavailable" shape as a real collision so the response can't be used
+    // to fingerprint the validator's rules.
+    return NextResponse.json({ available: false });
   }
 
   // isIdentifierClaimed is the right check: we want to reject usernames that
@@ -48,7 +49,7 @@ export async function GET(request: NextRequest) {
   // single-identifier-per-user invariant.
   const taken = await isIdentifierClaimed(validation.value);
   if (taken) {
-    return NextResponse.json({ available: false, error: "That username is taken." });
+    return NextResponse.json({ available: false });
   }
   return NextResponse.json({ available: true });
 }

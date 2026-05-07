@@ -4,6 +4,7 @@ import { eq, and, asc } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 const postSchema = z.object({
   name: z.string(),
@@ -75,6 +76,13 @@ export async function POST(req: NextRequest) {
     if (parsed.error) return parsed.error;
     const { name, matchField, matchType, matchValue, assignCategoryId, assignTags, renameTo, priority } = parsed.data;
 
+    // Cross-tenant FK guard (H-1) — `assignCategoryId` is the only client-
+    // supplied FK on this route. Without verification, a rule that fires on
+    // user A's transactions could re-categorize them to user B's category.
+    if (assignCategoryId != null) {
+      await verifyOwnership(auth.context.userId, { categoryIds: [assignCategoryId] });
+    }
+
     const rule = await db
       .insert(transactionRules)
       .values({
@@ -95,6 +103,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(rule, { status: 201 });
   } catch (error: unknown) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create rule") }, { status: 500 });
   }
 }
@@ -107,6 +118,12 @@ export async function PUT(req: NextRequest) {
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...updates } = parsed.data;
+
+    // Cross-tenant FK guard (H-1). `assignCategoryId` may be re-pointed on
+    // update — same risk as the POST path.
+    if (updates.assignCategoryId != null && updates.assignCategoryId > 0) {
+      await verifyOwnership(auth.context.userId, { categoryIds: [updates.assignCategoryId] });
+    }
 
     // Build a clean update object
     const data: Record<string, unknown> = {};
@@ -130,6 +147,9 @@ export async function PUT(req: NextRequest) {
     if (!rule) return NextResponse.json({ error: "Rule not found" }, { status: 404 });
     return NextResponse.json(rule);
   } catch (error: unknown) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update rule") }, { status: 500 });
   }
 }

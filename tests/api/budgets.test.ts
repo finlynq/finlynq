@@ -4,6 +4,16 @@ vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
 }));
 
+// B4 — verifyOwnership runs a real DB query in the route. These existing
+// tests don't seed accounts/categories, so bypass the helper here. The
+// dedicated authz-ownership.test.ts covers the cross-tenant rejection path.
+vi.mock("@/lib/verify-ownership", () => ({
+  verifyOwnership: vi.fn(async () => undefined),
+  OwnershipError: class OwnershipError extends Error {
+    constructor() { super("ownership"); }
+  },
+}));
+
 const mockGetBudgets = vi.fn();
 const mockUpsertBudget = vi.fn();
 const mockDeleteBudget = vi.fn();

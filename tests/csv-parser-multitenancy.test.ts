@@ -44,7 +44,7 @@ vi.mock("drizzle-orm", async () => {
 vi.mock("@/lib/import-hash", () => ({
   generateImportHash: (date: string, accountId: number, amount: number, payee: string) =>
     `${date}|${accountId}|${amount}|${payee}`,
-  checkDuplicates: vi.fn(async () => new Set<string>()),
+  checkDuplicates: vi.fn(async (_hashes: string[], _userId: string) => new Set<string>()),
 }));
 
 // Mock encrypted-columns helpers so the test's lookup hashes match the

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { processMessage } from "@/lib/chat-engine";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
@@ -18,13 +18,13 @@ export async function POST(request: NextRequest) {
   const devGuard = await requireDevMode(request);
   if (devGuard) return devGuard;
   const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
 
-    const response = await processMessage(parsed.data.message.trim(), dek);
+    const response = await processMessage(parsed.data.message.trim(), userId, dek);
     return NextResponse.json(response);
   } catch (error: unknown) {
     await logApiError("POST", "/api/chat", error, userId);

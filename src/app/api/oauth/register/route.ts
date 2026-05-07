@@ -10,7 +10,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { registerClient } from "@/lib/oauth";
+import { ClientRegistrationError, registerClient } from "@/lib/oauth";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 const CORS_HEADERS = {
@@ -59,13 +59,27 @@ export async function POST(request: NextRequest) {
     // Empty body is fine — all fields are optional per RFC 7591
   }
 
-  const client = await registerClient({
-    client_name: typeof body.client_name === "string" ? body.client_name : undefined,
-    redirect_uris: Array.isArray(body.redirect_uris) ? body.redirect_uris as string[] : undefined,
-    grant_types: Array.isArray(body.grant_types) ? body.grant_types as string[] : undefined,
-    response_types: Array.isArray(body.response_types) ? body.response_types as string[] : undefined,
-    token_endpoint_auth_method: typeof body.token_endpoint_auth_method === "string" ? body.token_endpoint_auth_method : undefined,
-  });
+  // `registerClient` throws `ClientRegistrationError` when redirect_uris is
+  // missing/empty/oversized/scheme-invalid. Map that to the RFC 7591 §3.2.2
+  // error response shape (`{error, error_description}`) with a 400.
+  let client;
+  try {
+    client = await registerClient({
+      client_name: typeof body.client_name === "string" ? body.client_name : undefined,
+      redirect_uris: Array.isArray(body.redirect_uris) ? body.redirect_uris as string[] : undefined,
+      grant_types: Array.isArray(body.grant_types) ? body.grant_types as string[] : undefined,
+      response_types: Array.isArray(body.response_types) ? body.response_types as string[] : undefined,
+      token_endpoint_auth_method: typeof body.token_endpoint_auth_method === "string" ? body.token_endpoint_auth_method : undefined,
+    });
+  } catch (err) {
+    if (err instanceof ClientRegistrationError) {
+      return NextResponse.json(
+        { error: err.error, error_description: err.error_description },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+    throw err;
+  }
 
   // RFC 7591 §3.2 — 201 Created with the registered metadata
   return NextResponse.json(client, { status: 201, headers: CORS_HEADERS });

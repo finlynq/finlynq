@@ -15,14 +15,25 @@ Self-hosters using stdio MCP must add `PF_USER_ID` to their Claude Desktop confi
 
 ## Tool surface — current count
 
-**83 tools registered on HTTP / 79 on stdio** as of 2026-05-01.
+**90 tools registered on HTTP / 86 on stdio** as of 2026-05-06.
 
-The 6 HTTP-only tools are:
+The 6 HTTP-only tools (legacy carve-outs) are:
 - File-upload flow: `list_pending_uploads`, `preview_import`, `execute_import`, `cancel_import`
 - `get_loans` (pre-existing HTTP-only read — stdio ships `list_loans` instead)
 - (1 historical adjustment — see consolidation log)
 
+The 7 staging-review tools added in #156 are HTTP-only behaviorally — stdio registers them too but every handler refuses with a "use HTTP MCP" error (so they appear in `tools/list` for discoverability instead of vanishing).
+
 ### Tool surface evolution
+
+- **2026-05-06 — Staging-review tools ([#156](https://github.com/finlynq/finlynq/issues/156))** (83 → 90 HTTP, 79 → 86 stdio):
+  - **Read tools:** `list_staged_imports` (statement-level metadata + synthetic `reconciliation` block), `get_staged_import` (full detail with decrypted display fields), `list_staged_transactions` (flat row list, filters by import / dedup-status / row-status / tx-type).
+  - **Write tools:** `update_staged_transaction` (per-row edits — same shape as PATCH `/api/import/staged/[id]/rows/[rowId]`), `link_staged_transfer_pair` (sugar over update — sets `tx_type='R'` + cross-points `peer_staged_id`), `approve_staged_rows` (materialize into `transactions`), `reject_staged_import` (hard-delete + cascade).
+  - **Confirmation-token preview/execute pattern** on the destructive ones. `approve_staged_rows` and `reject_staged_import` are single-tool, two-call: omit `confirmation_token` and you get a summary + signed token (5-min TTL); pass the token + same payload and the tool commits. `approve_staged_rows` ALSO accepts an optional caller-supplied `idempotencyKey` (UUID) — same 72h `mcp_idempotency_keys` pattern as `bulk_record_transactions`. Stored response body is metadata-only (`{ok, imported, errors, stagedImportId}`) so no plaintext redaction is required.
+  - **Per-row encryption-tier branch** on every read: `'service'` rows decrypt with `decryptStaged()` (PF_STAGING_KEY, sv1: envelope); `'user'` rows decrypt with `tryDecryptField(dek, ...)` (user DEK, v1: envelope). `update_staged_transaction` re-encrypts edited fields under the row's EXISTING tier — never flips mid-edit. `import_hash` is NEVER recomputed by edits (load-bearing for cross-source dedup).
+  - **Approve-time materialization** mirrors REST `/api/import/staged/[id]/approve`: peer-paired transfers mint server-generated `link_id` and INSERT both legs in one transaction; target-account-paired transfers delegate to `createTransferPair()`; everything else flows through `executeImport`. Investment-account rows whose holding is unset get the account's Cash sleeve via `defaultHoldingForInvestmentAccount`. After commit, `invalidateUser(userId)` is called on the per-user MCP tx cache.
+  - **Cross-tenant isolation.** Every tool filters by `user_id` and returns "Not found" when the id doesn't belong to the caller. `list_staged_transactions` verifies ownership before filtering when `stagedImportId` is supplied. `link_staged_transfer_pair` validates same-import + opposite-amounts + different-account-names.
+  - **Stdio refusal** uses a single shared error message that intentionally does NOT echo `PF_USER_ID` (load-bearing — stdio errors must never leak the configured user id). Read tools refuse too because user-tier rows would silently surface raw `v1:` ciphertext to Claude on stdio.
 
 - **2026-05-04 — `record_transfer` honors `receivedAmount` on same-account cash-sleeve forex ([#125](https://github.com/finlynq/finlynq/issues/125))** (no tool count change; HTTP only — stdio refuses investment-account writes already):
   - Two cash sleeves of conceptually different currencies (e.g. `Cash - USD` vs `Cash - CAD`) inside one investment account both inherit the parent account's currency at the schema level (`portfolio_holdings.currency = accounts.currency`). The `isCrossCurrency` short-circuit in `createTransferPair` keys on account currencies, so the same-currency branch silently coerced `receivedAmount` to `sentAmount` and the destination quantity dropped the user's FX-converted amount on the floor — write succeeded, sleeves under/over-stated.

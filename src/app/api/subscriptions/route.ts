@@ -7,6 +7,7 @@ import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows, decryptTxRows } from "@/lib/crypto/encrypted-columns";
+import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 const createSchema = z.object({
   name: z.string(),
@@ -138,6 +139,12 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, createSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
+    // Cross-tenant FK guard (H-1) — both categoryId and accountId arrive
+    // from the client body. Verify before INSERT.
+    await verifyOwnership(userId, {
+      categoryIds: d.categoryId != null ? [d.categoryId] : undefined,
+      accountIds: d.accountId != null ? [d.accountId] : undefined,
+    });
     const enc = buildNameFields(auth.context.dek, { name: d.name });
     // Stream D Phase 4 — plaintext name dropped.
     const sub = await db
@@ -160,6 +167,9 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(sub, { status: 201 });
   } catch (error: unknown) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     await logApiError("POST", "/api/subscriptions", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
@@ -177,6 +187,25 @@ export async function PUT(request: NextRequest) {
     const rawName = (rawData as Record<string, unknown>).name;
     const data = { ...rawData };
     delete (data as Record<string, unknown>).name;
+    // Cross-tenant FK guard (H-1) — `categoryId` and `accountId` may be
+    // re-pointed by an UPDATE. Schema is `passthrough()` so we read from
+    // `data` defensively. Numeric IDs only; non-numeric values are caller
+    // bugs the existing handler already swallows.
+    const updatedCategoryId = (data as Record<string, unknown>).categoryId;
+    const updatedAccountId = (data as Record<string, unknown>).accountId;
+    const refs: {
+      categoryIds?: number[];
+      accountIds?: number[];
+    } = {};
+    if (typeof updatedCategoryId === "number" && updatedCategoryId > 0) {
+      refs.categoryIds = [updatedCategoryId];
+    }
+    if (typeof updatedAccountId === "number" && updatedAccountId > 0) {
+      refs.accountIds = [updatedAccountId];
+    }
+    if (refs.categoryIds || refs.accountIds) {
+      await verifyOwnership(auth.context.userId, refs);
+    }
     const enc = typeof rawName === "string"
       ? buildNameFields(auth.context.dek, { name: rawName })
       : {};
@@ -188,6 +217,9 @@ export async function PUT(request: NextRequest) {
       .get();
     return NextResponse.json(sub);
   } catch (error: unknown) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     await logApiError("PUT", "/api/subscriptions", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }

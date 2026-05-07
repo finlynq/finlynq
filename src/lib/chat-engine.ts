@@ -16,8 +16,8 @@ export type ChatResponse = {
 
 /**
  * Safe-decrypt a payee or note for display. Returns an empty string if the
- * value is unreadable (e.g. encrypted with a different user's DEK — the chat
- * engine doesn't yet scope queries by user). Never throws.
+ * value is unreadable (e.g. encrypted with a different user's DEK). Never
+ * throws.
  */
 function safeDecrypt(dek: Buffer | null | undefined, v: string | null | undefined): string {
   if (v == null || v === "") return "";
@@ -76,10 +76,14 @@ function parseDateRange(msg: string): { start: string; end: string; label: strin
   return { start: startOfMonth(0), end: endOfMonth(0), label: monthLabel(0) };
 }
 
-async function findCategoryName(msg: string, dek: Buffer | null): Promise<string | null> {
+async function findCategoryName(msg: string, userId: string, dek: Buffer | null): Promise<string | null> {
   // Stream D Phase 4 — decrypt name_ct on the fly. Returns null when no DEK
   // (chat features degrade to "I couldn't find that").
-  const cats = await db.select({ nameCt: schema.categories.nameCt }).from(schema.categories).all();
+  const cats = await db
+    .select({ nameCt: schema.categories.nameCt })
+    .from(schema.categories)
+    .where(eq(schema.categories.userId, userId))
+    .all();
   const decrypted = cats
     .map((c) => decryptName(c.nameCt, dek, null))
     .filter((n): n is string => Boolean(n));
@@ -91,8 +95,12 @@ async function findCategoryName(msg: string, dek: Buffer | null): Promise<string
   return null;
 }
 
-async function findAccountName(msg: string, dek: Buffer | null): Promise<string | null> {
-  const accs = await db.select({ nameCt: schema.accounts.nameCt }).from(schema.accounts).all();
+async function findAccountName(msg: string, userId: string, dek: Buffer | null): Promise<string | null> {
+  const accs = await db
+    .select({ nameCt: schema.accounts.nameCt })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.userId, userId))
+    .all();
   const decrypted = accs
     .map((a) => decryptName(a.nameCt, dek, null))
     .filter((n): n is string => Boolean(n));
@@ -106,7 +114,7 @@ async function findAccountName(msg: string, dek: Buffer | null): Promise<string 
 
 // ─── Intent matchers ────────────────────────────────────────────────
 
-type IntentCtx = { dek: Buffer | null };
+type IntentCtx = { userId: string; dek: Buffer | null };
 type IntentHandler = (msg: string, ctx: IntentCtx) => Promise<ChatResponse | null>;
 
 const handleNetWorth: IntentHandler = async (_msg, ctx) => {
@@ -121,6 +129,7 @@ const handleNetWorth: IntentHandler = async (_msg, ctx) => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
+    .where(eq(schema.accounts.userId, ctx.userId))
     .groupBy(schema.accounts.id, schema.accounts.nameCt, schema.accounts.type, schema.accounts.group, schema.accounts.currency)
     .orderBy(schema.accounts.type, schema.accounts.group)
     .all();
@@ -150,13 +159,17 @@ const handleNetWorth: IntentHandler = async (_msg, ctx) => {
 
 const handleSpending: IntentHandler = async (msg, ctx) => {
   const range = parseDateRange(msg);
-  const categoryName = await findCategoryName(msg, ctx.dek);
+  const categoryName = await findCategoryName(msg, ctx.userId, ctx.dek);
 
   if (categoryName) {
     // Stream D Phase 4 — match by name_lookup HMAC.
     const lookup = ctx.dek ? nameLookup(ctx.dek, categoryName) : null;
     const cat = lookup
-      ? await db.select().from(schema.categories).where(eq(schema.categories.nameLookup, lookup)).get()
+      ? await db
+          .select()
+          .from(schema.categories)
+          .where(and(eq(schema.categories.userId, ctx.userId), eq(schema.categories.nameLookup, lookup)))
+          .get()
       : null;
     if (!cat) return { text: `I couldn't find a category named "${categoryName}".` };
 
@@ -165,6 +178,7 @@ const handleSpending: IntentHandler = async (msg, ctx) => {
       .from(schema.transactions)
       .where(
         and(
+          eq(schema.transactions.userId, ctx.userId),
           eq(schema.transactions.categoryId, cat.id),
           gte(schema.transactions.date, range.start),
           lte(schema.transactions.date, range.end)
@@ -188,6 +202,7 @@ const handleSpending: IntentHandler = async (msg, ctx) => {
     .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
     .where(
       and(
+        eq(schema.transactions.userId, ctx.userId),
         eq(schema.categories.type, "E"),
         gte(schema.transactions.date, range.start),
         lte(schema.transactions.date, range.end)
@@ -219,20 +234,29 @@ const handleSpending: IntentHandler = async (msg, ctx) => {
 };
 
 const handleBalance: IntentHandler = async (msg, ctx) => {
-  const accountName = await findAccountName(msg, ctx.dek);
+  const accountName = await findAccountName(msg, ctx.userId, ctx.dek);
 
   if (accountName) {
     // Stream D Phase 4 — match by name_lookup HMAC.
     const lookup = ctx.dek ? nameLookup(ctx.dek, accountName) : null;
     const acc = lookup
-      ? await db.select().from(schema.accounts).where(eq(schema.accounts.nameLookup, lookup)).get()
+      ? await db
+          .select()
+          .from(schema.accounts)
+          .where(and(eq(schema.accounts.userId, ctx.userId), eq(schema.accounts.nameLookup, lookup)))
+          .get()
       : null;
     if (!acc) return { text: `I couldn't find an account named "${accountName}".` };
 
     const result = await db
       .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
       .from(schema.transactions)
-      .where(eq(schema.transactions.accountId, acc.id))
+      .where(
+        and(
+          eq(schema.transactions.userId, ctx.userId),
+          eq(schema.transactions.accountId, acc.id)
+        )
+      )
       .get();
 
     return {
@@ -250,6 +274,7 @@ const handleBalance: IntentHandler = async (msg, ctx) => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
+    .where(eq(schema.accounts.userId, ctx.userId))
     .groupBy(schema.accounts.id, schema.accounts.nameCt, schema.accounts.type, schema.accounts.currency)
     .orderBy(schema.accounts.type)
     .all();
@@ -280,7 +305,7 @@ const handleBalance: IntentHandler = async (msg, ctx) => {
 
 const handleBudget: IntentHandler = async (msg, ctx) => {
   const month = getCurrentMonth();
-  const categoryName = await findCategoryName(msg, ctx.dek);
+  const categoryName = await findCategoryName(msg, ctx.userId, ctx.dek);
 
   // Stream D Phase 4 — ciphertext only.
   const rawBudgetRows = await db
@@ -291,7 +316,7 @@ const handleBudget: IntentHandler = async (msg, ctx) => {
     })
     .from(schema.budgets)
     .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
-    .where(eq(schema.budgets.month, month))
+    .where(and(eq(schema.budgets.userId, ctx.userId), eq(schema.budgets.month, month)))
     .all();
   const budgetRows = rawBudgetRows.map((b) => ({
     categoryId: b.categoryId,
@@ -313,6 +338,7 @@ const handleBudget: IntentHandler = async (msg, ctx) => {
       .from(schema.transactions)
       .where(
         and(
+          eq(schema.transactions.userId, ctx.userId),
           eq(schema.transactions.categoryId, b.categoryId),
           gte(schema.transactions.date, start),
           lte(schema.transactions.date, end)
@@ -389,6 +415,7 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
       .where(
         and(
+          eq(schema.transactions.userId, ctx.userId),
           eq(schema.categories.type, "E"),
           gte(schema.transactions.date, range.start),
           lte(schema.transactions.date, range.end)
@@ -431,6 +458,7 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
 
   const range = parseDateRange(msg);
   const conditions = [
+    eq(schema.transactions.userId, ctx.userId),
     gte(schema.transactions.date, range.start),
     lte(schema.transactions.date, range.end),
   ];
@@ -494,7 +522,7 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
   };
 };
 
-const handleTrends: IntentHandler = async (msg) => {
+const handleTrends: IntentHandler = async (_msg, ctx) => {
   // Compare spending month over month
   const months = 6;
   const monthlyData: { month: string; income: number; expenses: number }[] = [];
@@ -513,6 +541,7 @@ const handleTrends: IntentHandler = async (msg) => {
       .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
       .where(
         and(
+          eq(schema.transactions.userId, ctx.userId),
           gte(schema.transactions.date, start),
           lte(schema.transactions.date, end),
           sql`${schema.categories.type} IN ('E', 'I')`
@@ -562,7 +591,7 @@ const handleGoals: IntentHandler = async (_msg, ctx) => {
       status: schema.goals.status,
     })
     .from(schema.goals)
-    .where(eq(schema.goals.status, "active"))
+    .where(and(eq(schema.goals.userId, ctx.userId), eq(schema.goals.status, "active")))
     .all();
   const goals = rawGoals.map((g) => ({
     ...g,
@@ -579,7 +608,12 @@ const handleGoals: IntentHandler = async (_msg, ctx) => {
       const result = await db
         .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
         .from(schema.transactions)
-        .where(eq(schema.transactions.accountId, g.accountId))
+        .where(
+          and(
+            eq(schema.transactions.userId, ctx.userId),
+            eq(schema.transactions.accountId, g.accountId)
+          )
+        )
         .get();
       currentAmount = result?.total ?? 0;
     }
@@ -622,7 +656,12 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
     const bankAccounts = await db
       .select({ id: schema.accounts.id })
       .from(schema.accounts)
-      .where(sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`)
+      .where(
+        and(
+          eq(schema.accounts.userId, ctx.userId),
+          sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`
+        )
+      )
       .all();
 
     let currentBalance = 0;
@@ -630,7 +669,12 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
       const result = await db
         .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
         .from(schema.transactions)
-        .where(eq(schema.transactions.accountId, ba.id))
+        .where(
+          and(
+            eq(schema.transactions.userId, ctx.userId),
+            eq(schema.transactions.accountId, ba.id)
+          )
+        )
         .get();
       currentBalance += result?.total ?? 0;
     }
@@ -653,7 +697,12 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
       nextDate: schema.recurringTransactions.nextDate,
     })
     .from(schema.recurringTransactions)
-    .where(eq(schema.recurringTransactions.active, 1))
+    .where(
+      and(
+        eq(schema.recurringTransactions.userId, ctx.userId),
+        eq(schema.recurringTransactions.active, 1)
+      )
+    )
     .orderBy(schema.recurringTransactions.nextDate)
     .all();
 
@@ -684,7 +733,7 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
   };
 };
 
-const handleSummary: IntentHandler = async () => {
+const handleSummary: IntentHandler = async (_msg, ctx) => {
   const month = getCurrentMonth();
   const start = startOfMonth(0);
   const end = endOfMonth(0);
@@ -697,6 +746,7 @@ const handleSummary: IntentHandler = async () => {
     })
     .from(schema.accounts)
     .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
+    .where(eq(schema.accounts.userId, ctx.userId))
     .groupBy(schema.accounts.id, schema.accounts.type)
     .all();
 
@@ -717,6 +767,7 @@ const handleSummary: IntentHandler = async () => {
     .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
     .where(
       and(
+        eq(schema.transactions.userId, ctx.userId),
         gte(schema.transactions.date, start),
         lte(schema.transactions.date, end),
         sql`${schema.categories.type} IN ('E', 'I')`
@@ -733,11 +784,15 @@ const handleSummary: IntentHandler = async () => {
   const goalCount = await db
     .select({ count: sql<number>`count(*)` })
     .from(schema.goals)
-    .where(eq(schema.goals.status, "active"))
+    .where(and(eq(schema.goals.userId, ctx.userId), eq(schema.goals.status, "active")))
     .get();
 
   // Budgets over
-  const budgetRows = await db.select().from(schema.budgets).where(eq(schema.budgets.month, month)).all();
+  const budgetRows = await db
+    .select()
+    .from(schema.budgets)
+    .where(and(eq(schema.budgets.userId, ctx.userId), eq(schema.budgets.month, month)))
+    .all();
   let overBudgetCount = 0;
   for (const b of budgetRows) {
     const spent = await db
@@ -745,6 +800,7 @@ const handleSummary: IntentHandler = async () => {
       .from(schema.transactions)
       .where(
         and(
+          eq(schema.transactions.userId, ctx.userId),
           eq(schema.transactions.categoryId, b.categoryId),
           gte(schema.transactions.date, start),
           lte(schema.transactions.date, end)
@@ -829,14 +885,18 @@ const intents: IntentPattern[] = [
   },
 ];
 
-export async function processMessage(message: string, dek: Buffer | null = null): Promise<ChatResponse> {
+export async function processMessage(
+  message: string,
+  userId: string,
+  dek: Buffer | null = null,
+): Promise<ChatResponse> {
   const lower = message.toLowerCase().trim();
 
   if (!lower) {
     return { text: "Please ask me something about your finances!" };
   }
 
-  const ctx: IntentCtx = { dek };
+  const ctx: IntentCtx = { userId, dek };
 
   // Match intent by keyword
   for (const intent of intents) {

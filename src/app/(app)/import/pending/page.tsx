@@ -11,8 +11,14 @@
  * Rows auto-expire after 14 days regardless of action.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useState } from "react";
+
+// Aliased Fragment so we can pass `key` without TypeScript complaining about
+// React's reserved key on the shorthand `<>` syntax — we render two
+// <TableRow>s per source staged row, and React needs a key per item.
+const RowFragment = Fragment;
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -32,34 +38,51 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, Inbox, Mail, Clock, Check, X, RefreshCw } from "lucide-react";
+import { ArrowLeft, Inbox, Mail, Upload, Clock, Check, X, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
+import { ReconciliationCallout } from "@/components/staging/reconciliation-callout";
+import {
+  StagedRowEditor,
+  type StagedEditableRow,
+  type AccountOption,
+  type HoldingOption,
+} from "@/components/staging/staged-row-editor";
 
 interface StagedRow {
   id: string;
-  source: string;
+  source: string; // 'email' | 'upload'
   fromAddress: string | null;
   subject: string | null;
   receivedAt: string;
   totalRowCount: number;
   duplicateCount: number;
   expiresAt: string;
+  // Issue #153 — populated for upload-source rows.
+  originalFilename?: string | null;
+  fileFormat?: string | null;
 }
 
 interface StagedDetail {
-  staged: StagedRow & { status: string };
-  rows: Array<{
-    id: string;
-    date: string;
-    amount: number;
-    currency: string | null;
-    payee: string | null;
-    category: string | null;
-    accountName: string | null;
-    note: string | null;
-    rowIndex: number;
-    isDuplicate: boolean;
-  }>;
+  staged: StagedRow & {
+    status: string;
+    originalFilename?: string | null;
+    fileFormat?: string | null;
+    // Issue #154 — reconciliation inputs from staged_imports.
+    statementBalance?: number | null;
+    statementBalanceDate?: string | null;
+    statementCurrency?: string | null;
+    boundAccountId?: number | null;
+  };
+  // Issue #155 — rows now carry every editable field. The full shape lives
+  // in StagedEditableRow (components/staging/staged-row-editor.tsx); this
+  // page treats its rows as that type.
+  rows: StagedEditableRow[];
+  reconciliation?: {
+    currentBalance: number | null;
+    projectedBalance: number | null;
+    pendingDelta: number | null;
+    boundAccountCurrency: string | null;
+  };
 }
 
 function daysUntil(iso: string): number {
@@ -67,7 +90,18 @@ function daysUntil(iso: string): number {
   return Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)));
 }
 
+// useSearchParams requires Suspense (issue #153 — auto-open ?id=…). The
+// inner component owns the page state + side effects; the default export
+// just wraps it.
 export default function PendingImportsPage() {
+  return (
+    <Suspense fallback={null}>
+      <PendingImportsPageInner />
+    </Suspense>
+  );
+}
+
+function PendingImportsPageInner() {
   const [list, setList] = useState<StagedRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +111,22 @@ export default function PendingImportsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [acting, setActing] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  // Issue #155: account + holding catalogs for the row editor's dropdowns.
+  // Loaded once when the user opens the dialog; cached for the session.
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
+  const [holdings, setHoldings] = useState<HoldingOption[]>([]);
+  // Per-row expansion: only the row(s) the user explicitly clicks render
+  // the editor. Keeps the dialog responsive on large statements.
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+
+  const toggleExpanded = useCallback((rowId: string) => {
+    setExpandedRows((s) => {
+      const next = new Set(s);
+      if (next.has(rowId)) next.delete(rowId);
+      else next.add(rowId);
+      return next;
+    });
+  }, []);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -99,13 +149,61 @@ export default function PendingImportsPage() {
     setOpenId(id);
     setDetail(null);
     setDetailLoading(true);
+    setExpandedRows(new Set());
     try {
-      const res = await fetch(`/api/import/staged/${id}`);
-      const data: StagedDetail = await res.json();
-      if (!res.ok) throw new Error((data as unknown as { error?: string }).error || "Failed to load");
+      // Fetch detail + account + holding catalogs in parallel. The catalogs
+      // populate the staged-row-editor's dropdowns; staleness is acceptable
+      // (changes during the dialog's lifetime are rare). Issue #155.
+      const [detailRes, acctRes, holdRes] = await Promise.all([
+        fetch(`/api/import/staged/${id}`),
+        fetch("/api/accounts"),
+        fetch("/api/portfolio"),
+      ]);
+      const data: StagedDetail = await detailRes.json();
+      if (!detailRes.ok) {
+        throw new Error((data as unknown as { error?: string }).error || "Failed to load");
+      }
       setDetail(data);
       // Default selection = all non-duplicate rows.
       setSelected(new Set(data.rows.filter((r) => !r.isDuplicate).map((r) => r.id)));
+      if (acctRes.ok) {
+        const acctRaw = (await acctRes.json()) as Array<{
+          id: number;
+          name: string | null;
+          currency: string;
+          isInvestment?: boolean;
+        }>;
+        setAccounts(
+          acctRaw
+            .filter((a) => a.name != null)
+            .map((a) => ({
+              id: a.id,
+              name: a.name as string,
+              currency: a.currency,
+              isInvestment: Boolean(a.isInvestment),
+            })),
+        );
+      }
+      if (holdRes.ok) {
+        const holdRaw = (await holdRes.json()) as Array<{
+          id: number;
+          name: string | null;
+          symbol: string | null;
+          accountId: number | null;
+          currency: string;
+        }>;
+        setHoldings(
+          holdRaw
+            .filter((h) => h.name != null)
+            .map((h) => ({
+              id: h.id,
+              name: h.name as string,
+              symbol: h.symbol,
+              accountId: h.accountId,
+              currency: h.currency,
+            })),
+        );
+      }
     } catch (e) {
       setToast({ type: "error", msg: e instanceof Error ? e.message : "Failed to load" });
       setOpenId(null);
@@ -118,7 +216,21 @@ export default function PendingImportsPage() {
     setOpenId(null);
     setDetail(null);
     setSelected(new Set());
+    setExpandedRows(new Set());
   }, []);
+
+  // Auto-open the detail dialog when navigated with ?id=… (e.g. after the
+  // /import/reconcile upload route stages a batch and redirects here).
+  // Issue #153 — uploads land in staging now and want a deep link to their
+  // own review queue entry without an extra click.
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const idFromUrl = searchParams?.get("id");
+    if (idFromUrl) {
+      void openDetail(idFromUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const toggleRow = (id: string) => {
     setSelected((s) => {
@@ -193,8 +305,8 @@ export default function PendingImportsPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Pending Imports</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Transactions that arrived via email and are waiting for your review.
-            Rows auto-expire after 14 days.
+            Transactions from email forwards or file uploads (CSV / OFX / QFX),
+            waiting for your review. Rows auto-expire after 60 days.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={loadList} disabled={loading}>
@@ -226,11 +338,11 @@ export default function PendingImportsPage() {
             <div>
               <p className="text-sm font-medium">Nothing pending</p>
               <p className="text-xs text-muted-foreground mt-1">
-                Forward a bank statement or CSV to your import address and it&apos;ll land here for review.
+                Upload a CSV/OFX/QFX statement at <Link href="/import/reconcile" className="underline">Import → Reconciliation</Link>, or forward a bank statement to your import address — both land here for review.
               </p>
             </div>
             <Link href="/import" className="inline-block">
-              <Button variant="outline" size="sm">View import address</Button>
+              <Button variant="outline" size="sm">View import options</Button>
             </Link>
           </CardContent>
         </Card>
@@ -238,17 +350,26 @@ export default function PendingImportsPage() {
 
       {list && list.length > 0 && (
         <div className="space-y-3">
-          {list.map((row) => (
+          {list.map((row) => {
+            const isUpload = row.source === "upload";
+            const Icon = isUpload ? Upload : Mail;
+            const headline = isUpload
+              ? row.originalFilename || "Uploaded file"
+              : row.subject || "(no subject)";
+            const subline = isUpload
+              ? `${(row.fileFormat ?? "file").toUpperCase()} upload · ${new Date(row.receivedAt).toLocaleString()}`
+              : `from ${row.fromAddress || "(unknown)"} · received ${new Date(row.receivedAt).toLocaleString()}`;
+            return (
             <Card key={row.id} className="cursor-pointer hover:border-primary/50 transition-colors" onClick={() => openDetail(row.id)}>
               <CardContent className="py-4">
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
-                      <Mail className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <p className="text-sm font-medium truncate">{row.subject || "(no subject)"}</p>
+                      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <p className="text-sm font-medium truncate">{headline}</p>
                     </div>
                     <p className="text-xs text-muted-foreground truncate">
-                      from {row.fromAddress || "(unknown)"} · received {new Date(row.receivedAt).toLocaleString()}
+                      {subline}
                     </p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -268,7 +389,8 @@ export default function PendingImportsPage() {
                 </div>
               </CardContent>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -278,13 +400,52 @@ export default function PendingImportsPage() {
             <DialogTitle>Review transactions</DialogTitle>
             <DialogDescription>
               {detail ? (
-                <>
-                  From <span className="font-medium">{detail.staged.fromAddress || "(unknown)"}</span>
-                  {detail.staged.subject && <> · {detail.staged.subject}</>}
-                </>
+                detail.staged.source === "upload" ? (
+                  <>
+                    <span className="font-medium">{detail.staged.originalFilename || "Uploaded file"}</span>
+                    {detail.staged.fileFormat && <> · {detail.staged.fileFormat.toUpperCase()} upload</>}
+                  </>
+                ) : (
+                  <>
+                    From <span className="font-medium">{detail.staged.fromAddress || "(unknown)"}</span>
+                    {detail.staged.subject && <> · {detail.staged.subject}</>}
+                  </>
+                )
               ) : "Loading…"}
             </DialogDescription>
           </DialogHeader>
+
+          {/* Issue #154 — statement-balance reconciliation. Renders nothing
+              when statementBalance is null, and a one-line hint when no
+              account is bound. Live-recompute "After approval" from the
+              currently-selected rows (excluding dedup_status='existing'). */}
+          {detail && detail.staged.statementBalance != null && (() => {
+            const recon = detail.reconciliation;
+            const current = recon?.currentBalance ?? null;
+            // Live-projected: currentBalance + Σ(selected rows
+            // where dedup_status != 'existing'). Recomputes on every
+            // checkbox toggle. The server's projectedBalance is the
+            // "approve everything eligible" baseline; the client owns
+            // the live "what the user actually picked" view.
+            let projected: number | null = null;
+            if (current != null) {
+              const liveDelta = detail.rows
+                .filter((r) => selected.has(r.id) && r.dedupStatus !== "existing")
+                .reduce((acc, r) => acc + Number(r.amount ?? 0), 0);
+              projected = current + liveDelta;
+            }
+            return (
+              <ReconciliationCallout
+                statementBalance={detail.staged.statementBalance ?? null}
+                statementBalanceDate={detail.staged.statementBalanceDate ?? null}
+                statementCurrency={detail.staged.statementCurrency ?? null}
+                boundAccountId={detail.staged.boundAccountId ?? null}
+                currentBalance={current}
+                projectedBalance={projected}
+                boundAccountCurrency={recon?.boundAccountCurrency ?? null}
+              />
+            );
+          })()}
 
           <div className="flex-1 overflow-auto border rounded-lg">
             {detailLoading && <p className="p-6 text-sm text-muted-foreground text-center">Loading rows…</p>}
@@ -300,36 +461,83 @@ export default function PendingImportsPage() {
                         aria-label="Select all"
                       />
                     </TableHead>
+                    <TableHead className="w-8" />
                     <TableHead>Date</TableHead>
                     <TableHead>Account</TableHead>
                     <TableHead>Payee</TableHead>
-                    <TableHead>Category</TableHead>
+                    <TableHead>Type</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {detail.rows.map((r) => (
-                    <TableRow key={r.id} className={r.isDuplicate ? "opacity-60" : ""}>
-                      <TableCell>
-                        <input
-                          type="checkbox"
-                          checked={selected.has(r.id)}
-                          onChange={() => toggleRow(r.id)}
-                          aria-label={`Select row ${r.rowIndex}`}
-                        />
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{r.date}</TableCell>
-                      <TableCell className="text-xs">{r.accountName || <span className="text-muted-foreground">—</span>}</TableCell>
-                      <TableCell className="text-xs truncate max-w-[200px]">{r.payee || <span className="text-muted-foreground">—</span>}</TableCell>
-                      <TableCell className="text-xs">
-                        {r.category || <span className="text-muted-foreground">—</span>}
-                        {r.isDuplicate && <Badge variant="outline" className="ml-2 text-[10px]">dupe</Badge>}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
-                        {formatCurrency(r.amount, r.currency || "CAD")}
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {detail.rows.map((r) => {
+                    const isExpanded = expandedRows.has(r.id);
+                    return (
+                      <RowFragment key={r.id}>
+                        <TableRow className={r.isDuplicate ? "opacity-60" : ""}>
+                          <TableCell>
+                            <input
+                              type="checkbox"
+                              checked={selected.has(r.id)}
+                              onChange={() => toggleRow(r.id)}
+                              aria-label={`Select row ${r.rowIndex}`}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <button
+                              type="button"
+                              onClick={() => toggleExpanded(r.id)}
+                              aria-label={isExpanded ? "Collapse row editor" : "Edit row"}
+                              className="text-muted-foreground hover:text-foreground p-1 -m-1"
+                            >
+                              {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                            </button>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">{r.date}</TableCell>
+                          <TableCell className="text-xs">{r.accountName || <span className="text-muted-foreground">—</span>}</TableCell>
+                          <TableCell className="text-xs truncate max-w-[200px]">
+                            {r.payee || <span className="text-muted-foreground">—</span>}
+                            {r.category && <span className="text-muted-foreground"> · {r.category}</span>}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {r.txType === "R" ? (
+                              <Badge variant="outline" className="text-[10px]">Transfer</Badge>
+                            ) : r.txType === "I" ? (
+                              <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">Income</Badge>
+                            ) : (
+                              <Badge variant="outline" className="text-[10px]">Expense</Badge>
+                            )}
+                            {r.isDuplicate && <Badge variant="outline" className="ml-1 text-[10px]">dupe</Badge>}
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-xs">
+                            {formatCurrency(r.amount, r.currency || "CAD")}
+                          </TableCell>
+                        </TableRow>
+                        {isExpanded && (
+                          <TableRow>
+                            <TableCell colSpan={7} className="p-0">
+                              <StagedRowEditor
+                                stagedImportId={detail.staged.id}
+                                row={r}
+                                siblingRows={detail.rows}
+                                accounts={accounts}
+                                holdings={holdings}
+                                onUpdated={(updated) => {
+                                  setDetail((d) => {
+                                    if (!d) return d;
+                                    return {
+                                      ...d,
+                                      rows: d.rows.map((x) => (x.id === updated.id ? updated : x)),
+                                    };
+                                  });
+                                }}
+                              />
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </RowFragment>
+                    );
+                  })}
                 </TableBody>
               </Table>
             )}

@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-service";
+import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 const postSchema = z.object({
   categoryId: z.number(),
@@ -75,9 +76,18 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
+    // Cross-tenant FK guard (H-1) — `categoryId` is the only client-supplied
+    // FK on this route. Without verification, a budget for user B's category
+    // would land under user A's user_id and skew A's "spent vs budget" view.
+    await verifyOwnership(auth.context.userId, {
+      categoryIds: [parsed.data.categoryId],
+    });
     const budget = await upsertBudget(auth.context.userId, parsed.data);
     return NextResponse.json(budget, { status: 201 });
   } catch (error: unknown) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     await logApiError("POST", "/api/budgets", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to save budget") }, { status: 500 });
   }

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, inArray } from "drizzle-orm";
 import { pbkdf2Sync, randomBytes, createCipheriv } from "crypto";
@@ -8,7 +8,7 @@ import { tryDecryptField } from "@/lib/crypto/envelope";
 import { safeErrorMessage } from "@/lib/validate";
 import { validatePasswordStrength } from "@/lib/auth/password-policy";
 
-// Finding #8 — optional passphrase-wrap for backup exports.
+// Finding #8 â€” optional passphrase-wrap for backup exports.
 // Format when wrapped:
 //   {"v": "pf-backup-1", "kdf": "pbkdf2-sha256", "iters": 600000,
 //    "salt": "<b64 16>", "iv": "<b64 12>", "tag": "<b64 16>",
@@ -43,22 +43,48 @@ function wrapBackupWithPassphrase(jsonBody: string, passphrase: string): string 
   );
 }
 
-function decryptRowFields(dek: Buffer | null, row: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+/**
+ * Decrypt a row's listed text fields in place.
+ *
+ * Mutates a `decryptFailures` counter on the caller. We intentionally write
+ * `null` to the field on auth-tag failure rather than the raw `v1:` ciphertext
+ * (the previous `?? v` fallback) — embedding ciphertext in a backup leaks
+ * it past the user's session and would trip the "tryDecryptField returns
+ * null on failure" invariant from CLAUDE.md.
+ */
+// Exported for regression test in tests/api/export-decrypt-failures.test.ts.
+export function decryptRowFields(
+  dek: Buffer | null,
+  row: Record<string, unknown>,
+  fields: readonly string[],
+  failures: { count: number }
+): Record<string, unknown> {
   if (!dek) return row;
   const out: Record<string, unknown> = { ...row };
   for (const f of fields) {
     const v = out[f];
     if (typeof v === "string") {
-      out[f] = tryDecryptField(dek, v, `export.${f}`) ?? v;
+      const dec = tryDecryptField(dek, v, `export.${f}`);
+      if (dec === null && v.startsWith("v1:")) {
+        // Auth-tag failure on a real envelope — preserve the row but mark
+        // the field null and bump the counter so the caller can surface
+        // a partial-export warning.
+        out[f] = null;
+        failures.count++;
+      } else {
+        out[f] = dec ?? v;
+      }
     }
   }
   return out;
 }
 
-const TX_FIELDS = ["payee", "note", "tags", "portfolioHolding"] as const;
+// `portfolioHolding` was dropped in transactions Phase 5 (2026-04-29); leaving
+// it in this list ran `tryDecryptField` over `undefined` strings forever.
+const TX_FIELDS = ["payee", "note", "tags"] as const;
 const SPLIT_FIELDS = ["note", "description", "tags"] as const;
 
-// POST accepts `{ passphrase: string }` to passphrase-wrap the export —
+// POST accepts `{ passphrase: string }` to passphrase-wrap the export â€”
 // Finding #8. Both GET and POST share the same body builder below.
 export async function POST(request: NextRequest) {
   return handleExport(request);
@@ -72,9 +98,9 @@ async function handleExport(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
-  // Export tolerates a missing DEK — without it, encrypted rows ship as
+  // Export tolerates a missing DEK â€” without it, encrypted rows ship as
   // ciphertext (still restoreable into the same account).
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
 
   try {
     const [
@@ -117,7 +143,7 @@ async function handleExport(request: NextRequest) {
       db.select().from(schema.contributionRoom).where(eq(schema.contributionRoom.userId, userId)),
     ]);
 
-    // Transaction splits have no userId — filter by user's transaction IDs
+    // Transaction splits have no userId â€” filter by user's transaction IDs
     const txIds = transactions.map((t) => t.id);
     const transactionSplits =
       txIds.length > 0
@@ -127,14 +153,20 @@ async function handleExport(request: NextRequest) {
     // Decrypt text fields so the backup is portable (user can restore into
     // a fresh account with a different DEK). Backup files are downloaded to
     // the user's device; they're responsible for securing them at rest.
-    const decryptedTransactions = transactions.map((t) => decryptRowFields(dek, t, TX_FIELDS));
-    const decryptedSplits = transactionSplits.map((s) => decryptRowFields(dek, s, SPLIT_FIELDS));
+    const failures = { count: 0 };
+    const decryptedTransactions = transactions.map((t) =>
+      decryptRowFields(dek, t, TX_FIELDS, failures)
+    );
+    const decryptedSplits = transactionSplits.map((s) =>
+      decryptRowFields(dek, s, SPLIT_FIELDS, failures)
+    );
 
     const dateStr = new Date().toISOString().slice(0, 10);
     const backup = {
       version: "1.0",
       exportedAt: new Date().toISOString(),
       appVersion: "3.0",
+      decryptFailures: failures.count,
       data: {
         accounts,
         categories,
@@ -152,7 +184,7 @@ async function handleExport(request: NextRequest) {
         subscriptions,
         transactionRules,
         importTemplates,
-        // fxRates is now a global cache (not user-scoped) — exported as fxOverrides for the user's pinned rates only.
+        // fxRates is now a global cache (not user-scoped) â€” exported as fxOverrides for the user's pinned rates only.
         fxOverrides,
         settings: settingsRows,
         contributionRoom,
@@ -161,7 +193,7 @@ async function handleExport(request: NextRequest) {
 
     const jsonBody = JSON.stringify(backup, null, 2);
 
-    // Optional passphrase-wrap — if the caller supplies a ?passphrase=..., we
+    // Optional passphrase-wrap â€” if the caller supplies a ?passphrase=..., we
     // AES-GCM the export body with a PBKDF2-derived key. The file is then
     // self-protecting: losing it to cloud sync or email attachments does not
     // leak content unless the attacker also has the passphrase. Passphrase
@@ -178,7 +210,7 @@ async function handleExport(request: NextRequest) {
           passphrase = parsed.passphrase;
         }
       } catch {
-        // No JSON body — fall through to plain export.
+        // No JSON body â€” fall through to plain export.
       }
       if (passphrase) {
         const strengthError = validatePasswordStrength(passphrase);

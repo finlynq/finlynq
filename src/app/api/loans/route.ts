@@ -11,6 +11,7 @@ import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 const createLoanSchema = z.object({
   name: z.string(),
@@ -136,6 +137,11 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, createLoanSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
+    // Cross-tenant FK guard (H-1) — verify the optional accountId belongs
+    // to the caller before INSERT. `null`/undefined skipped by the helper.
+    if (d.accountId != null) {
+      await verifyOwnership(auth.context.userId, { accountIds: [d.accountId] });
+    }
     const enc = buildNameFields(auth.context.dek, { name: d.name });
     // Stream D Phase 4 — plaintext name dropped.
     const loan = await db.insert(schema.loans).values({
@@ -156,6 +162,9 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(loan, { status: 201 });
   } catch (error: unknown) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     await logApiError("POST", "/api/loans", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
@@ -169,6 +178,11 @@ export async function PUT(request: NextRequest) {
     const parsed = validateBody(body, updateLoanSchema);
     if (parsed.error) return parsed.error;
     const { id, name, ...data } = parsed.data;
+    // Cross-tenant FK guard (H-1) — `accountId` may be re-pointed to another
+    // user's account on update. `null` is an explicit unlink; skip it.
+    if (data.accountId != null && data.accountId > 0) {
+      await verifyOwnership(auth.context.userId, { accountIds: [data.accountId] });
+    }
     const toEncrypt: Record<string, string | null | undefined> = {};
     if (name !== undefined) toEncrypt.name = name;
     const enc = buildNameFields(auth.context.dek, toEncrypt);
@@ -177,6 +191,9 @@ export async function PUT(request: NextRequest) {
     const loan = await db.update(schema.loans).set({ ...data, ...enc } as any).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).returning().get();
     return NextResponse.json(loan);
   } catch (error: unknown) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     await logApiError("PUT", "/api/loans", error, auth.context.userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }

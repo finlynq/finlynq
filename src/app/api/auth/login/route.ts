@@ -12,12 +12,29 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 import { getDialect } from "@/db";
 import {
   verifyPassword,
   createSessionToken,
   AUTH_COOKIE,
 } from "@/lib/auth";
+
+/**
+ * Finding H-3 (2026-05-07) — fixed-cost bcrypt comparison target used when
+ * the supplied identifier doesn't match any user. Without this, login takes
+ * ~150ms for a known username (bcrypt verify against the real hash) but ~1ms
+ * for an unknown one (we short-circuit on lookup) — a wall-clock oracle that
+ * leaks which identifiers exist. The dummy hash is generated once at module
+ * load with the same cost factor as `hashPassword`, so the bcrypt-compare
+ * branch we walk in the !user case has the same CPU profile as the success
+ * path. The plaintext is a fixed string nobody could ever submit; it is
+ * never compared against anything that could match.
+ */
+const DUMMY_BCRYPT_HASH = bcrypt.hashSync(
+  "never-actually-matched-anything",
+  12
+);
 import { SESSION_TTL_MS } from "@/lib/auth/jwt";
 import {
   getUserByIdentifier,
@@ -33,6 +50,7 @@ import { putDEK } from "@/lib/crypto/dek-cache";
 // `stream-d-phase3-null` (NULLs plaintext after backfill) are obsolete with
 // no plaintext source; both helpers were deleted.
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
+import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
 
 // Accept either {identifier, password} (preferred) OR {email, password}
 // (legacy clients). Both shapes normalise to an `identifier` string.
@@ -115,7 +133,15 @@ export async function POST(request: NextRequest) {
     );
 
     const user = await getUserByIdentifier(identifier);
-    if (!user) return invalidCredentials;
+    if (!user) {
+      // Finding H-3 — pay the bcrypt cost even when the user is missing so
+      // wall-clock timing doesn't leak whether the identifier exists. The
+      // result of this compare is intentionally discarded; the cost is the
+      // point. Returning before this would shave ~150ms off the response
+      // and turn login into a username-enumeration oracle.
+      await verifyPassword(password, DUMMY_BCRYPT_HASH);
+      return invalidCredentials;
+    }
 
     const valid = await verifyPassword(password, user.passwordHash);
     if (!valid) return invalidCredentials;
@@ -162,16 +188,23 @@ export async function POST(request: NextRequest) {
     }
 
     // If MFA is enabled, return a pending state (no session yet).
-    // The DEK is cached under the pending jti with a 5-minute TTL so MFA
-    // verify can promote it to the real session without asking the user to
-    // re-enter their password. If MFA verify fails or times out, the entry
+    // B7: the pending token carries `pending: true` and a 5-minute TTL.
+    // The default account strategy rejects pending tokens for every route
+    // except /api/auth/mfa/verify so a captured pending cookie can't access
+    // dashboards or transactions (finding H-4). On successful MFA verify the
+    // pending jti is INSERTed into `revoked_jtis` so the token can't be
+    // replayed against /mfa/verify either.
+    // The DEK is cached under the pending jti with a matching 5-minute TTL so
+    // MFA verify can promote it to the real session without asking the user
+    // to re-enter their password. If MFA verify fails or times out, the entry
     // ages out naturally.
     if (user.mfaEnabled) {
       const { token: pendingToken, jti: pendingJti } = await createSessionToken(
         user.id,
-        false
+        false,
+        { pending: true, expirationTime: "5m" }
       );
-      if (dek) putDEK(pendingJti, dek, 5 * 60_000);
+      if (dek) putDEK(pendingJti, dek, 5 * 60_000, user.id);
       return NextResponse.json({
         mfaRequired: true,
         mfaPendingToken: pendingToken,
@@ -182,7 +215,7 @@ export async function POST(request: NextRequest) {
     await recordSuccessfulLogin(user.id);
     const { token, jti } = await createSessionToken(user.id, false);
     if (dek) {
-      putDEK(jti, dek, SESSION_TTL_MS);
+      putDEK(jti, dek, SESSION_TTL_MS, user.id);
       // Stream D Phase 4 (2026-05-03): plaintext columns are gone, so the
       // backfill + phase-3-null helpers no longer run on login. Only the
       // per-user lazy canonicalization remains — it now reads `name_ct` /
@@ -191,6 +224,11 @@ export async function POST(request: NextRequest) {
       // "Cash <CCY>"). User-defined positions keep their free-text name.
       // Bails silently for DEK-mismatch users — sample-decrypt precondition.
       enqueueCanonicalizePortfolioNames(user.id, dek);
+      // Service→user staging-row encryption upgrade (2026-05-06). Flips this
+      // user's pending email-staged rows from PF_STAGING_KEY to user-DEK so
+      // the 60-day window isn't service-key-decryptable for active users.
+      // Idempotent, fire-and-forget, errors swallowed.
+      enqueueUpgradeStagingEncryption(user.id, dek);
     }
 
     const response = NextResponse.json({ success: true });

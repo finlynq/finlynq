@@ -1,16 +1,14 @@
 /**
  * Shared CSV parser pipeline (issue #63).
  *
- * Both `/api/import/preview` and `/api/import/reconcile/preview` need the
+ * Both `/api/import/preview` and `/api/import/staging/upload` need the
  * same fallback chain to handle non-canonical bank export headers
  * (`Transaction Date` / `Description` / `Debit` / `Credit` etc.). Before
- * this module they each had their own implementation — reconcile only
- * implemented steps 1-2, so any CSV that the regular import handled via
- * the auto-template-match step (3) or the column-mapping fallback (4)
- * silently returned "No transactions found in file" on the reconcile path.
+ * this module they each had their own implementation; the staging-upload
+ * path replaced the old `/api/import/reconcile/preview` route in #153.
  *
  * Behavior is sourced from one place. See [route.ts](../../../app/api/import/preview/route.ts)
- * and [reconcile/preview/route.ts](../../../app/api/import/reconcile/preview/route.ts).
+ * and [staging/upload/route.ts](../../../app/api/import/staging/upload/route.ts).
  *
  * The pipeline is **read-only** — no DB writes, no encryption. Encryption
  * stays at the commit boundary in the route handlers / `reconcile.ts`. The

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, gte, lte, eq } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
   // DEK is needed to resolve `categories.name_ct` for Phase-3 NULL'd users.
   // Soft-fail (null DEK) keeps legacy plaintext readable; encrypted-only
   // rows surface as "" and roll up under the existing "Uncategorized" bucket.
-  const dek = sessionId ? getDEK(sessionId) : null;
+  const dek = sessionId ? getDEK(sessionId, userId) : null;
 
   const params = request.nextUrl.searchParams;
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;

@@ -19,6 +19,7 @@ import { generateImportHash } from "@/lib/import-hash";
 import { encryptField } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { WEALTHPOSITION_CONNECTOR_ID } from "@/lib/external-import/orchestrator";
+import { verifyOwnership } from "@/lib/verify-ownership";
 
 export interface ReconciliationRow {
   externalAccountId: string;
@@ -154,6 +155,17 @@ export async function insertOpeningBalanceAdjustment(
   const mapping =
     params.mapping ?? (await loadConnectorMapping(userId, WEALTHPOSITION_CONNECTOR_ID));
   const categoryId = params.categoryId ?? mapping.openingBalanceCategoryId ?? null;
+
+  // Cross-tenant FK guard (H-1) — `finlynqAccountId` and `categoryId` arrive
+  // from the API route's request body. The route filters by user_id on the
+  // INSERT, but Postgres FK alone is satisfied by any global serial id, so
+  // a malicious client can otherwise bind another user's category/account
+  // to its own row. The mapping's openingBalanceCategoryId is server-stored
+  // (already user-scoped); only verify when the caller overrode it.
+  await verifyOwnership(userId, {
+    accountIds: [params.finlynqAccountId],
+    categoryIds: params.categoryId != null ? [params.categoryId] : undefined,
+  });
 
   const pfAccounts = await getAccounts(userId, { includeArchived: true });
   const account = pfAccounts.find((a) => a.id === params.finlynqAccountId);

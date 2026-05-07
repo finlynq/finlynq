@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
+import { headers } from "next/headers";
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
@@ -22,7 +23,13 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // Per-request CSP nonce set by middleware (B10 / finding C-8). Forwarded
+  // to next-themes so its FOUC-prevention inline script carries the nonce.
+  // Falls back to undefined if middleware didn't run (e.g. static export);
+  // next-themes treats `undefined` as "no nonce".
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} antialiased noise-bg`}>
@@ -31,6 +38,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           defaultTheme="dark"
           enableSystem
           disableTransitionOnChange
+          nonce={nonce}
         >
           {children}
         </ThemeProvider>

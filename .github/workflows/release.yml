@@ -26,6 +26,12 @@ jobs:
 
       - name: Create GitHub Release
         uses: actions/github-script@v7
+        env:
+          # Pass changelog notes through env to avoid `${{ ... }}` template
+          # interpolation inside the JS body — a backtick or `${...}` in the
+          # changelog would otherwise be parsed by the runner as workflow
+          # code with `contents: write` permission.
+          NOTES: ${{ steps.changelog.outputs.notes }}
         with:
           script: |
             github.rest.repos.createRelease({
@@ -33,7 +39,7 @@ jobs:
               repo: context.repo.repo,
               tag_name: context.ref.replace('refs/tags/', ''),
               name: context.ref.replace('refs/tags/', ''),
-              body: `${{ steps.changelog.outputs.notes }}`,
+              body: process.env.NOTES,
               draft: false,
               prerelease: false
             })

@@ -635,7 +635,7 @@ export default function LandingPage() {
           <div className="privacy-diagram reveal">
             {[
               { k: "Step 01", t: "Your password" },
-              { k: "Step 02", t: "Derive key (PBKDF2)" },
+              { k: "Step 02", t: "Derive key (scrypt)" },
               { k: "Step 03", t: "AES-256 encrypt" },
               { k: "Step 04", t: "Stored encrypted" },
             ].map((node, i, arr) => (
@@ -655,7 +655,7 @@ export default function LandingPage() {
               },
               {
                 h: "Your password is the key.",
-                p: "Your encryption key is derived from your password via PBKDF2. Finlynq never sees your passphrase or your plaintext data.",
+                p: "Your encryption key is derived from your password via memory-hard scrypt (PBKDF2 is also used to wrap optional backup-export passphrases). Finlynq never sees your passphrase or your plaintext data.",
               },
               {
                 h: "Zero-knowledge architecture.",
