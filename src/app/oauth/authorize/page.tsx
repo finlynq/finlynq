@@ -11,16 +11,19 @@ import {
   TrendingUp,
 } from "lucide-react";
 
-// Authorized OAuth clients receive a Bearer token that exposes the full HTTP
-// MCP tool surface — read AND write. The earlier copy claimed "Read-only
-// access," which was inaccurate: every issued token can record transactions,
-// approve staged imports, delete rules, etc. Real OAuth scope plumbing (so
-// a client could request a read-only subset) is tracked as a follow-up; for
-// this consent screen we tell the user the truth.
-const PERMISSIONS = [
+// Permissions block. Each entry is gated on whether the client requested
+// the corresponding scope (`mcp:read` for the read items, `mcp:write` for
+// the write item). Pre-scope clients (no `?scope=` parameter) default to
+// full access — same as before this PR — so the consent screen looks
+// identical for them. A `scope=mcp:read` request only renders the three
+// read items and the bottom "read AND write" warning becomes a "read-only"
+// note instead.
+const READ_PERMISSIONS = [
   { icon: Database, text: "Read accounts, balances, and transactions" },
   { icon: TrendingUp, text: "Read your portfolio and investment positions" },
   { icon: PiggyBank, text: "Read budgets, goals, and spending history" },
+];
+const WRITE_PERMISSIONS = [
   { icon: PencilLine, text: "Create, edit, and delete transactions, rules, and goals" },
 ];
 
@@ -49,6 +52,13 @@ function AuthorizePageInner() {
   const state = searchParams.get("state") ?? "";
   const codeChallenge = searchParams.get("code_challenge") ?? "";
   const codeChallengeMethod = searchParams.get("code_challenge_method") ?? "S256";
+  // RFC 6749 §3.3 — space-separated list of scope tokens. Empty/missing
+  // defaults to the full read+write scope (back-compat: pre-scope-PR clients
+  // got full access, and we keep that until clients opt into narrower scopes).
+  const requestedScope = searchParams.get("scope") ?? "";
+  const scopeTokens = requestedScope.split(/\s+/).filter(Boolean);
+  const wantsWrite = scopeTokens.length === 0 || scopeTokens.includes("mcp:write");
+  const wantsRead = scopeTokens.length === 0 || scopeTokens.includes("mcp:read") || wantsWrite;
 
   const [sessionState, setSessionState] = useState<"loading" | "loggedIn" | "loggedOut">("loading");
   const [loading, setLoading] = useState(false);
@@ -128,6 +138,10 @@ function AuthorizePageInner() {
           state,
           code_challenge: codeChallenge,
           code_challenge_method: codeChallengeMethod,
+          // Pass through the scope from the URL so the consent the user gave
+          // matches the scope persisted on the auth code + token. Empty falls
+          // through to DEFAULT_SCOPE on the server.
+          scope: requestedScope || undefined,
         }),
       });
       const data = await res.json();
@@ -271,12 +285,20 @@ function AuthorizePageInner() {
           </p>
         </div>
 
-        {/* Permissions list */}
+        {/* Permissions list — gated by the scope tokens the client requested. */}
         <div className="rounded-xl border border-border bg-card p-4 space-y-3 mb-4">
           <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground/60 mb-1">
             This will allow {displayName} to:
           </p>
-          {PERMISSIONS.map(({ icon: Icon, text }) => (
+          {wantsRead && READ_PERMISSIONS.map(({ icon: Icon, text }) => (
+            <div key={text} className="flex items-center gap-3">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                <Icon className="h-3.5 w-3.5 text-primary" />
+              </div>
+              <span className="text-sm text-foreground/80">{text}</span>
+            </div>
+          ))}
+          {wantsWrite && WRITE_PERMISSIONS.map(({ icon: Icon, text }) => (
             <div key={text} className="flex items-center gap-3">
               <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
                 <Icon className="h-3.5 w-3.5 text-primary" />
@@ -286,20 +308,30 @@ function AuthorizePageInner() {
           ))}
         </div>
 
-        {/* Read AND write warning. The legacy "Read-only access" copy was
-            inaccurate — every issued OAuth token can mutate the user's data
-            until the connection is revoked. Real OAuth scope plumbing that
-            lets a client request a read-only subset is tracked as a follow-up. */}
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 mb-4">
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="h-4 w-4 text-amber-500 mt-0.5 shrink-0" />
-            <p className="text-xs text-foreground/80 leading-relaxed">
-              {displayName} will be able to <strong>read AND write</strong> your
-              financial data — including creating, editing, and deleting
-              transactions — until you revoke the connection.
-            </p>
+        {/* Scope-aware warning. Read+write clients get the legacy amber
+            warning; read-only clients get a green note instead. */}
+        {wantsWrite ? (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 mb-4">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-500 mt-0.5 shrink-0" />
+              <p className="text-xs text-foreground/80 leading-relaxed">
+                {displayName} will be able to <strong>read AND write</strong> your
+                financial data — including creating, editing, and deleting
+                transactions — until you revoke the connection.
+              </p>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 mb-4">
+            <div className="flex items-start gap-2">
+              <Database className="h-4 w-4 text-emerald-500 mt-0.5 shrink-0" />
+              <p className="text-xs text-foreground/80 leading-relaxed">
+                {displayName} requested <strong>read-only</strong> access. It
+                cannot create, edit, or delete any of your data — only read it.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Exact redirect URI in monospace so the user sees what they're
             actually authorizing. The hostname-only display in the prior
