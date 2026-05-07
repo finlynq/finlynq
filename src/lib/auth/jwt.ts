@@ -12,8 +12,13 @@
  *   happens the verifier returns reason `"deploy-reauth-required"`, which
  *   the auth middleware surfaces to clients as a 401 with
  *   `{ code: "deploy-reauth-required" }` so the UI can show a "please
- *   sign in again" screen instead of a generic error. If `DEPLOY_GENERATION`
- *   is unset we default to "0" so local dev keeps working.
+ *   sign in again" screen instead of a generic error.
+ *
+ *   In production the value is REQUIRED — the resolver throws if unset,
+ *   because the silent `"0"` fallback meant a deploy that forgot to stamp
+ *   the env produced JWTs that survived every subsequent (also-unstamped)
+ *   restart, defeating the force-logout invariant. In development the
+ *   resolver still falls back to `"0"` so local servers keep working.
  */
 
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
@@ -69,7 +74,15 @@ export const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Resolve the current deploy-generation. Read each call so tests can mutate env. */
 export function currentDeployGeneration(): string {
-  return process.env.DEPLOY_GENERATION ?? "0";
+  const gen = process.env.DEPLOY_GENERATION;
+  if (gen) return gen;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "DEPLOY_GENERATION is required in production. deploy.sh stamps this with `date +%s` before restarting the service; if you're seeing this, the systemd drop-in at /etc/systemd/system/<service>.service.d/deploy-generation.conf is missing or didn't load. Fix the deploy step rather than setting a static value — the whole point is forced re-auth on every restart."
+    );
+  }
+  // Dev only — keeps local servers working without a stamped env.
+  return "0";
 }
 
 /**
@@ -126,8 +139,9 @@ export async function verifySessionTokenDetailed(
     });
     const session = payload as SessionPayload;
     // Tokens minted before the current deploy lack the current `gen` value.
-    // "0" default keeps pre-feature tokens working in environments that don't
-    // set DEPLOY_GENERATION yet.
+    // The "0" fallback on `actualGen` is harmless because in production
+    // `expectedGen` is forced to a real timestamp by `currentDeployGeneration()`,
+    // so any token without a `gen` claim fails the equality check below.
     const expectedGen = currentDeployGeneration();
     const actualGen = session.gen ?? "0";
     if (actualGen !== expectedGen) {

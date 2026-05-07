@@ -1,0 +1,47 @@
+# Keep secrets, local state, and developer artifacts out of the published image.
+# Without this, `COPY . .` in the Dockerfile bakes whatever lives next to it on
+# the build host into the layer — including any local .env that hardcodes
+# PF_JWT_SECRET / PF_PEPPER / PF_STAGING_KEY / DATABASE_URL.
+
+# Secrets — anything that looks like an env file
+.env
+.env.*
+!.env.example
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Dependencies and build output (the Dockerfile reinstalls + rebuilds inside)
+node_modules
+.next
+*.tsbuildinfo
+
+# Logs and local caches
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor / agent local state
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Tests, fixtures, coverage, and reporter output — not needed at runtime
+tests/
+e2e/
+test-results/
+coverage/
+playwright-report/
+
+# Mobile app — not part of the web image
+mobile/
+
+# Docker artifacts themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
