@@ -15,7 +15,10 @@ import {
   getClient,
   isRegisteredRedirectUri,
   isValidPkceMethod,
+  InvalidScopeError,
+  DEFAULT_SCOPE,
 } from "@/lib/oauth";
+import { normalizeRequestedScope } from "@/lib/oauth-scopes";
 import { getDEK } from "@/lib/crypto/dek-cache";
 
 export async function POST(request: NextRequest) {
@@ -42,7 +45,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const { action, client_id, redirect_uri, state, code_challenge, code_challenge_method } = body;
+  const { action, client_id, redirect_uri, state, code_challenge, code_challenge_method, scope: rawScope } = body;
 
   // Validate the inputs we need for BOTH allow and deny: client_id (so we
   // can look up the registered redirect list) and redirect_uri (the value
@@ -115,6 +118,23 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Validate the requested scope against the recognized tokens. Empty/missing
+  // scope falls through to DEFAULT_SCOPE (back-compat for clients that don't
+  // know about the scope parameter). Unknown scope tokens reject with the
+  // RFC 6749 §3.3 invalid_scope error.
+  let scope: string;
+  try {
+    scope = normalizeRequestedScope(rawScope ?? DEFAULT_SCOPE);
+  } catch (err) {
+    if (err instanceof InvalidScopeError) {
+      return NextResponse.json(
+        { error: "invalid_scope", error_description: `Unknown scope: "${err.invalidToken}"` },
+        { status: 400 }
+      );
+    }
+    throw err;
+  }
+
   const code = await createAuthCode({
     userId: payload.sub,
     codeChallenge: code_challenge,
@@ -122,6 +142,7 @@ export async function POST(request: NextRequest) {
     redirectUri: redirect_uri,
     clientId: client_id,
     dek: sessionDek,
+    scope,
   });
 
   redirectUrl.searchParams.set("code", code);

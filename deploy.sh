@@ -126,29 +126,69 @@ fi
 
 # 2.6. Backup database before any schema mutation.
 #
-# The backup directory is owner-only (0700) — pg_dump output is plaintext
-# SQL containing every encrypted column's ciphertext plus the plaintext
-# columns we have not migrated to encryption yet. Lock down permissions
-# so a different local user on the box cannot read backups even if they
-# slipped past directory ACLs.
+# The backup directory is owner-only (0700) — pg_dump output contains every
+# encrypted column's ciphertext plus the plaintext columns we have not
+# migrated to encryption yet. Lock down permissions so a different local
+# user on the box cannot read backups even if they slipped past directory
+# ACLs.
 #
-# Encryption-at-rest for these dumps is intentionally out of scope of
-# this PR — it needs a key-management story (where does the encryption
-# key live? how does an operator decrypt during a recovery?) — see
-# follow-up issue. For now: 0700 + retention is the floor.
+# Encryption-at-rest (Open #5 in SECURITY_HANDOVER_2026-05-07.md): if a
+# passphrase file is configured at $BACKUP_ENCRYPTION_KEY_FILE (default
+# /etc/finlynq/backup-key), pipe pg_dump through gpg --symmetric AES-256
+# and write a `.sql.gpg` instead. Operators decrypt during recovery via
+# `scripts/restore-backup.sh`. If the passphrase file is absent, fall back
+# to plaintext + warn — don't gate deploys on a key being present, since
+# self-hosters who skip this step are still served by the 0700 dir + the
+# new chmod 0400 on the encrypted file.
+#
+# Threat model addressed:
+#  - A read-only break-in (e.g. log-aggregator-as-a-different-user reading
+#    /opt/finlynq-backups due to a perms drift) cannot decrypt without the
+#    passphrase file at /etc/finlynq/backup-key.
+#  - The passphrase file itself is 0400 owned by root; only the deploy.sh
+#    invocation (which already runs as root) can read it.
+#
+# Threat model NOT addressed:
+#  - Full root compromise on the deploy host trivially reads both the key
+#    and the backups. That's "ransomware paradise" no matter what we do
+#    short of moving the key off-box (KMS, HSM); see follow-up.
 echo "==> Backing up database..."
 mkdir -p /opt/finlynq-backups
 chmod 0700 /opt/finlynq-backups
-pg_dump "$DB_URL" > "/opt/finlynq-backups/${SERVICE_NAME}_$(date +%Y%m%d_%H%M%S).sql"
-echo "==> Backup complete"
+BACKUP_TS=$(date +%Y%m%d_%H%M%S)
+BACKUP_BASE="/opt/finlynq-backups/${SERVICE_NAME}_${BACKUP_TS}"
+BACKUP_ENCRYPTION_KEY_FILE="${BACKUP_ENCRYPTION_KEY_FILE:-/etc/finlynq/backup-key}"
+
+if [ -r "$BACKUP_ENCRYPTION_KEY_FILE" ] && command -v gpg >/dev/null 2>&1; then
+  echo "==> Encrypting backup with key from $BACKUP_ENCRYPTION_KEY_FILE"
+  pg_dump "$DB_URL" | \
+    gpg --batch --symmetric --cipher-algo AES256 \
+        --passphrase-file "$BACKUP_ENCRYPTION_KEY_FILE" \
+        --no-tty --quiet \
+        --output "${BACKUP_BASE}.sql.gpg"
+  chmod 0400 "${BACKUP_BASE}.sql.gpg"
+  echo "==> Backup complete (encrypted): ${BACKUP_BASE}.sql.gpg"
+else
+  if [ ! -r "$BACKUP_ENCRYPTION_KEY_FILE" ]; then
+    echo "==> WARNING: backup-key file not readable at $BACKUP_ENCRYPTION_KEY_FILE — writing plaintext backup."
+    echo "    To enable encryption-at-rest, follow the recovery playbook in scripts/restore-backup.sh"
+  elif ! command -v gpg >/dev/null 2>&1; then
+    echo "==> WARNING: gpg not on PATH — writing plaintext backup."
+    echo "    Install gpg (apt-get install gnupg) to enable backup encryption."
+  fi
+  pg_dump "$DB_URL" > "${BACKUP_BASE}.sql"
+  chmod 0400 "${BACKUP_BASE}.sql"
+  echo "==> Backup complete (plaintext): ${BACKUP_BASE}.sql"
+fi
 
 # Retention. Default 14 days; override via BACKUP_RETENTION_DAYS in the
-# deploy environment. Variable was previously declared but never read.
+# deploy environment. Now matches encrypted (.sql.gpg), legacy plaintext
+# (.sql), gzipped legacy (.sql.gz), and the older .sql.enc filename.
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
 if [[ "$BACKUP_RETENTION_DAYS" =~ ^[0-9]+$ ]] && [ "$BACKUP_RETENTION_DAYS" -gt 0 ]; then
   echo "==> Pruning backups older than ${BACKUP_RETENTION_DAYS} day(s)..."
   find /opt/finlynq-backups -type f -mtime +"$BACKUP_RETENTION_DAYS" \
-    \( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.enc" \) -delete || true
+    \( -name "*.sql" -o -name "*.sql.gz" -o -name "*.sql.enc" -o -name "*.sql.gpg" \) -delete || true
 fi
 
 # 2.7. Schema migrations — automated, tracked, idempotent.
@@ -205,6 +245,17 @@ fi
 
 # 3. Build
 if [ "$SKIP_BUILD" = false ]; then
+  # Defensive chown opener (issue: pitfall-#1 in memory/finlynq-deploy-pitfalls.md
+  # surfaced for the third time during the session-3 prod promotion). A previous
+  # deploy that failed mid-flight left 132 root-owned files inside
+  # .next/standalone/.next/static/ which blocked the `run_as rm -rf .next` here
+  # because paperclip-agent doesn't own them. Reclaim ownership before the rm
+  # so a half-failed deploy can recover on the next run instead of needing
+  # manual `chown` recovery via SSH. `2>/dev/null || true` because the dir may
+  # not exist on a fresh box.
+  if [ -d .next ] && [ -n "$REPO_OWNER" ]; then
+    sudo chown -R "$REPO_OWNER:$REPO_OWNER" .next 2>/dev/null || true
+  fi
   echo "==> Removing stale build output..."
   run_as "rm -rf .next"
   echo "==> Building Next.js..."

@@ -20,6 +20,7 @@ const mockConvertWithRateMap = vi.fn();
 vi.mock("@/lib/fx-service", () => ({
   getRateMap: (...a: unknown[]) => mockGetRateMap(...a),
   convertWithRateMap: (...a: unknown[]) => mockConvertWithRateMap(...a),
+  getDisplayCurrency: vi.fn(async (_userId: string, override: string | null) => override ?? "CAD"),
 }));
 
 import { GET } from "@/app/api/dashboard/route";
@@ -61,7 +62,7 @@ describe("API /api/dashboard", () => {
     const res = await GET(req);
     const { data } = await parseResponse(res);
     expect((data as { displayCurrency: string }).displayCurrency).toBe("USD");
-    expect(mockGetRateMap).toHaveBeenCalledWith("USD");
+    expect(mockGetRateMap).toHaveBeenCalledWith("USD", "default");
   });
 
   it("converts account balances to display currency", async () => {

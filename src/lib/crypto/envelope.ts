@@ -31,42 +31,76 @@ const FIELD_VERSION = "v1";
  * The pepper is not a secret-to-users feature (users can't recover it even
  * if they lose access); it only raises the bar against DB-only leaks.
  *
- * Rotating the pepper invalidates every existing DEK envelope — don't
- * rotate without re-wrapping on login (Finding #3 deploy notes).
+ * Pepper rotation (Open #2 from SECURITY_HANDOVER_2026-05-07.md):
+ * `users.pepper_version` (added by 20260507_pepper_version.sql) names which
+ * env var to read. Version 1 → `PF_PEPPER` (legacy, default for every
+ * existing row). Version N (>1) → `PF_PEPPER_V<N>`. The rotation flow:
+ *
+ *   1. Operator sets PF_PEPPER_V2=<new> alongside PF_PEPPER=<old> and
+ *      restarts the service. Both peppers are now readable.
+ *   2. Operator runs `scripts/rewrap-peppers.ts` — for every row at
+ *      pepper_version=1, derive KEK with old pepper, unwrap DEK, re-wrap
+ *      with KEK derived from the new pepper, UPDATE the row + set
+ *      pepper_version=2. Idempotent and resumable.
+ *   3. Once `pepper_version=1` count is zero, the operator can drop
+ *      PF_PEPPER from the env (or rename PF_PEPPER_V2 → PF_PEPPER and
+ *      bump the migration default in code). Until then, both peppers
+ *      MUST stay set so reads from any unrotated row keep working.
  */
-function getPepper(): Buffer {
-  const raw = process.env.PF_PEPPER;
-  if (raw && raw.length >= 32) return Buffer.from(raw, "utf8");
-  if (process.env.NODE_ENV === "production" && !raw) {
+const HIGHEST_SUPPORTED_PEPPER_VERSION = 2;
+
+function getPepperForVersion(version: number): Buffer {
+  if (version < 1 || version > HIGHEST_SUPPORTED_PEPPER_VERSION) {
     throw new Error(
-      "PF_PEPPER env var is required in production (≥32 chars). " +
-        "Generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+      `[envelope] pepper_version=${version} is not supported by this build. ` +
+        `Highest supported version is ${HIGHEST_SUPPORTED_PEPPER_VERSION}. ` +
+        `Did the DB get rotated past what the running code knows about?`
     );
   }
-  if (process.env.NODE_ENV === "production" && raw && raw.length < 32) {
-    throw new Error("PF_PEPPER must be at least 32 characters");
+  const envVar = version === 1 ? "PF_PEPPER" : `PF_PEPPER_V${version}`;
+  const raw = process.env[envVar];
+  if (raw && raw.length >= 32) return Buffer.from(raw, "utf8");
+  if (process.env.NODE_ENV === "production") {
+    if (!raw) {
+      throw new Error(
+        `${envVar} env var is required in production (≥32 chars) for ` +
+          `pepper_version=${version} rows. ` +
+          `Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+      );
+    }
+    throw new Error(`${envVar} must be at least 32 characters`);
   }
   // Dev fallback — stable empty buffer so dev DEKs stay readable across
-  // restarts. We warn once so it's visible but not noisy.
-  if (!pepperWarned && process.env.NODE_ENV !== "production") {
+  // restarts. We warn once per version so it's visible but not noisy.
+  if (!pepperWarned.has(version)) {
     // eslint-disable-next-line no-console
     console.warn(
-      "[envelope] PF_PEPPER not set — using empty pepper for dev. " +
+      `[envelope] ${envVar} not set — using empty pepper for dev. ` +
         "DO NOT deploy to production without setting it."
     );
-    pepperWarned = true;
+    pepperWarned.add(version);
   }
   return Buffer.alloc(0);
 }
-let pepperWarned = false;
+
+/**
+ * Backwards-compat alias for callers that don't know about pepper versioning
+ * yet. Returns the version-1 pepper (the legacy single-pepper behavior).
+ * Internal code paths that have a `users.pepper_version` available should
+ * call `getPepperForVersion` directly.
+ */
+function getPepper(): Buffer {
+  return getPepperForVersion(1);
+}
+const pepperWarned = new Set<number>();
 
 /** HMAC the password with the pepper before scrypt. The scrypt input becomes
  * HMAC-SHA256(pepper, password), which is cryptographically equivalent to
  * a password-plus-pepper scheme but avoids worrying about delimiter
  * collisions, pepper-length edge cases, or concatenation ambiguity. An
  * empty pepper (dev fallback) degrades gracefully to plain HMAC(∅, password). */
-function pepperedPasswordBytes(password: string): Buffer {
-  const pepper = getPepper();
+function pepperedPasswordBytes(password: string, version = 1): Buffer {
+  const pepper = getPepperForVersion(version);
   return createHmac("sha256", pepper).update(password, "utf8").digest();
 }
 
@@ -82,9 +116,14 @@ export interface WrappedDEK {
  * Input is `HMAC(PF_PEPPER, password)` — the pepper lives in server env only,
  * not in the DB. A DB-only leak can't compute this input, so offline scrypt
  * cracking is blocked unless the attacker also has filesystem access.
+ *
+ * `pepperVersion` defaults to 1 (legacy `PF_PEPPER`). During a pepper
+ * rotation, callers that have a `users.pepper_version` available should pass
+ * it through so the right env var is read. Routes that need the user row
+ * already are loading it for password verification — they have it for free.
  */
-export function deriveKEK(password: string, salt: Buffer): Buffer {
-  return scryptSync(pepperedPasswordBytes(password), salt, KEY_LEN, {
+export function deriveKEK(password: string, salt: Buffer, pepperVersion = 1): Buffer {
+  return scryptSync(pepperedPasswordBytes(password, pepperVersion), salt, KEY_LEN, {
     N: SCRYPT_N,
     r: SCRYPT_R,
     p: SCRYPT_P,
