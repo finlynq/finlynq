@@ -43,19 +43,44 @@ function wrapBackupWithPassphrase(jsonBody: string, passphrase: string): string 
   );
 }
 
-function decryptRowFields(dek: Buffer | null, row: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+/**
+ * Decrypt a row's listed text fields in place.
+ *
+ * Mutates a `decryptFailures` counter on the caller. We intentionally write
+ * `null` to the field on auth-tag failure rather than the raw `v1:` ciphertext
+ * (the previous `?? v` fallback) — embedding ciphertext in a backup leaks
+ * it past the user's session and would trip the "tryDecryptField returns
+ * null on failure" invariant from CLAUDE.md.
+ */
+function decryptRowFields(
+  dek: Buffer | null,
+  row: Record<string, unknown>,
+  fields: readonly string[],
+  failures: { count: number }
+): Record<string, unknown> {
   if (!dek) return row;
   const out: Record<string, unknown> = { ...row };
   for (const f of fields) {
     const v = out[f];
     if (typeof v === "string") {
-      out[f] = tryDecryptField(dek, v, `export.${f}`) ?? v;
+      const dec = tryDecryptField(dek, v, `export.${f}`);
+      if (dec === null && v.startsWith("v1:")) {
+        // Auth-tag failure on a real envelope — preserve the row but mark
+        // the field null and bump the counter so the caller can surface
+        // a partial-export warning.
+        out[f] = null;
+        failures.count++;
+      } else {
+        out[f] = dec ?? v;
+      }
     }
   }
   return out;
 }
 
-const TX_FIELDS = ["payee", "note", "tags", "portfolioHolding"] as const;
+// `portfolioHolding` was dropped in transactions Phase 5 (2026-04-29); leaving
+// it in this list ran `tryDecryptField` over `undefined` strings forever.
+const TX_FIELDS = ["payee", "note", "tags"] as const;
 const SPLIT_FIELDS = ["note", "description", "tags"] as const;
 
 // POST accepts `{ passphrase: string }` to passphrase-wrap the export â€”
@@ -127,14 +152,20 @@ async function handleExport(request: NextRequest) {
     // Decrypt text fields so the backup is portable (user can restore into
     // a fresh account with a different DEK). Backup files are downloaded to
     // the user's device; they're responsible for securing them at rest.
-    const decryptedTransactions = transactions.map((t) => decryptRowFields(dek, t, TX_FIELDS));
-    const decryptedSplits = transactionSplits.map((s) => decryptRowFields(dek, s, SPLIT_FIELDS));
+    const failures = { count: 0 };
+    const decryptedTransactions = transactions.map((t) =>
+      decryptRowFields(dek, t, TX_FIELDS, failures)
+    );
+    const decryptedSplits = transactionSplits.map((s) =>
+      decryptRowFields(dek, s, SPLIT_FIELDS, failures)
+    );
 
     const dateStr = new Date().toISOString().slice(0, 10);
     const backup = {
       version: "1.0",
       exportedAt: new Date().toISOString(),
       appVersion: "3.0",
+      decryptFailures: failures.count,
       data: {
         accounts,
         categories,
