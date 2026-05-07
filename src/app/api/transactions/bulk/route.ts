@@ -22,6 +22,7 @@ import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache
 import { db, schema } from "@/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 const { transactions } = schema;
 
@@ -100,6 +101,16 @@ export async function POST(request: NextRequest) {
   try {
     const { action, ids } = parsed.data;
 
+    // Cross-tenant FK guard (H-1) — `update_category` and `update_account`
+    // re-point the FK on every selected row. Without verification, the new
+    // FK could belong to another user, attaching their account/category to
+    // the caller's transactions on every aggregator/report.
+    if (action === "update_category") {
+      await verifyOwnership(userId, { categoryIds: [parsed.data.categoryId] });
+    } else if (action === "update_account") {
+      await verifyOwnership(userId, { accountIds: [parsed.data.accountId] });
+    }
+
     // All operations are scoped to the user's own transactions
     switch (action) {
       case "delete":
@@ -161,6 +172,9 @@ export async function POST(request: NextRequest) {
     invalidateUserTxCache(userId);
     return NextResponse.json({ success: true, affected: ids.length });
   } catch (error) {
+    if (error instanceof OwnershipError) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     return NextResponse.json(
       { error: safeErrorMessage(error, "Bulk operation failed") },
       { status: 500 }

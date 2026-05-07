@@ -33,7 +33,16 @@ vi.mock("@/lib/loan-calculator", () => ({
 }));
 
 vi.mock("drizzle-orm", () => ({
-  eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(), asc: vi.fn(),
+  eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(), asc: vi.fn(), inArray: vi.fn(),
+}));
+
+// B4 — verifyOwnership runs a real DB query; bypass here since these
+// tests don't seed accounts. authz-ownership.test.ts covers cross-tenant.
+vi.mock("@/lib/verify-ownership", () => ({
+  verifyOwnership: vi.fn(async () => undefined),
+  OwnershipError: class OwnershipError extends Error {
+    constructor() { super("ownership"); }
+  },
 }));
 
 import { GET, POST, DELETE } from "@/app/api/loans/route";

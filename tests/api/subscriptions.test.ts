@@ -32,7 +32,15 @@ vi.mock("@/lib/recurring-detector", () => ({
 }));
 
 vi.mock("drizzle-orm", () => ({
-  eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(), asc: vi.fn(),
+  eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(), asc: vi.fn(), inArray: vi.fn(),
+}));
+
+// B4 — bypass verifyOwnership; cross-tenant rejection in authz-ownership.test.ts.
+vi.mock("@/lib/verify-ownership", () => ({
+  verifyOwnership: vi.fn(async () => undefined),
+  OwnershipError: class OwnershipError extends Error {
+    constructor() { super("ownership"); }
+  },
 }));
 
 import { GET, POST, PUT, DELETE } from "@/app/api/subscriptions/route";
