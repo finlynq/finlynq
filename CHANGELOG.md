@@ -6,6 +6,14 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Branding — replace Vercel default favicon.ico with Finlynq mark (2026-05-08)
+
+Replaces `pf-app/src/app/favicon.ico` (the Next.js scaffolding default — black circle + white triangle) with the Finlynq orange chart mark, multi-size 16/32/48/64/128/256, PNG-encoded ICO entries, 15318 bytes. Modern browsers fetched `/favicon.svg` and rendered correctly, but Google's `s2/favicons` scraper, social-card embeds, and other crawlers that prefer `.ico` over `.svg` were displaying the Vercel triangle as Finlynq's brand mark for finlynq.com.
+
+- Adds [scripts/make-favicon.mjs](scripts/make-favicon.mjs) as the reproducible source of truth — regenerates the .ico from `public/favicon.svg` using the existing `sharp` dependency.
+- No layout / metadata changes; no PNG variants; no apple-touch-icon. Strictly the .ico swap + the regen script.
+- Note: Google's CDN caches the old icon aggressively (days to weeks) and there is no public refresh API.
+
 ### MCP — serverInfo logo + metadata (2026-05-08)
 
 Adds `title`, `websiteUrl`, `description`, and `icons[]` to the `Implementation` object passed to both `McpServer` constructors so compatible MCP clients render the Finlynq mark instead of the default placeholder. Composes with the existing `withAutoAnnotations` wrap shipped in #193; server version stays at `3.0.0` — purely additive metadata, no behavior change.
