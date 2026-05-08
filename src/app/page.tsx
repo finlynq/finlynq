@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef } from "react";
-import { GoogleAnalytics } from "@/components/google-analytics";
+import { AnalyticsConsent } from "@/components/analytics-consent";
 import "./landing.css";
 
 const FEATURES = [
@@ -39,7 +39,7 @@ const FEATURES = [
   {
     idx: "F.06 · PRIVACY",
     title: "Self-host. Or don't.",
-    desc: "Run it on your Mac, your homelab, or our cloud — same features either way. AES-256 via SQLCipher. Your key never leaves your device.",
+    desc: "Run it on your Mac, your homelab, or our cloud — same features either way. Per-user envelope encryption (AES-256-GCM, scrypt-derived key). Your DEK lives only in memory while you're signed in.",
     viz: "pips",
   },
 ] as const;
@@ -74,15 +74,15 @@ const MCP_TOOLS = [
 ];
 
 const PLAN_FEATS = [
-  "27+ MCP tools — read & write",
-  "AES-256 encryption (SQLCipher)",
+  "90 MCP tools (HTTP) · 86 (stdio) — read & write",
+  "AES-256-GCM envelope encryption · scrypt-derived KEK",
   "CSV, Excel, OFX/QFX, PDF import",
   "Budgets, portfolio, goals, loans",
   "Natural-language AI chat",
   "FIRE calculator & Monte Carlo sim",
   "Rules & auto-categorize",
   "Self-host or managed cloud",
-  "REST API + MCP (HTTP & stdio)",
+  "REST API + MCP (HTTP & stdio · OAuth 2.1 + DCR)",
   "Dark mode, mobile-friendly UI",
 ];
 
@@ -242,7 +242,7 @@ export default function LandingPage() {
 
   return (
     <div className="fl-landing">
-      <GoogleAnalytics />
+      <AnalyticsConsent />
       {/* NAV */}
       <header className="fl-nav">
         <div className="fl-container nav-inner">
@@ -272,7 +272,7 @@ export default function LandingPage() {
           <div className="hero-copy reveal">
             <div className="hero-bar">
               <span className="tag">MCP</span>
-              <span>27 tools · Claude · Cursor · Windsurf · Cline</span>
+              <span>90 tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
             </div>
 
             <h1 className="display-xl">
@@ -297,11 +297,11 @@ export default function LandingPage() {
 
             <div className="hero-meta">
               <div className="cell">
-                <div className="v num">27+</div>
+                <div className="v num">90</div>
                 <div className="k">MCP tools</div>
               </div>
               <div className="cell">
-                <div className="v num">AES-256</div>
+                <div className="v num">AES-256-GCM</div>
                 <div className="k">Encryption</div>
               </div>
               <div className="cell">
@@ -499,7 +499,7 @@ export default function LandingPage() {
               </h2>
             </div>
             <p className="lede reveal d2">
-              A built-in MCP server exposes 27 financial tools to any compatible client. No custom
+              A built-in MCP server exposes 90 financial tools to any compatible client over OAuth 2.1 + DCR. No custom
               code, no brittle exports, no exporting to a spreadsheet then copying into a prompt.
             </p>
           </div>
@@ -636,8 +636,8 @@ export default function LandingPage() {
             {[
               { k: "Step 01", t: "Your password" },
               { k: "Step 02", t: "Derive key (scrypt)" },
-              { k: "Step 03", t: "AES-256 encrypt" },
-              { k: "Step 04", t: "Stored encrypted" },
+              { k: "Step 03", t: "Wrap your DEK" },
+              { k: "Step 04", t: "AES-256-GCM at rest" },
             ].map((node, i, arr) => (
               <div key={node.k} className="priv-node">
                 <div className="k">{node.k}</div>
@@ -763,7 +763,7 @@ export default function LandingPage() {
               </div>
               <div className="cta-fact">
                 <div className="eyebrow">ENCRYPTED</div>
-                <div>AES-256 via SQLCipher. Your key, never ours.</div>
+                <div>AES-256-GCM envelope encryption. Your DEK, never ours.</div>
               </div>
               <div className="cta-fact">
                 <div className="eyebrow">PORTABLE</div>
@@ -834,6 +834,9 @@ export default function LandingPage() {
                   <a href="https://github.com/finlynq/finlynq/discussions" target="_blank" rel="noreferrer">
                     Discussions
                   </a>
+                </li>
+                <li>
+                  <Link href="/privacy">Privacy</Link>
                 </li>
               </ul>
             </div>

@@ -5,6 +5,7 @@ import { createPgCompat } from "./pg-compat.js";
 import { registerCoreTools } from "./register-core-tools.js";
 import { registerV2Tools } from "./tools-v2.js";
 import { registerImportTemplateTools } from "./tools-import-templates.js";
+import { withAutoAnnotations } from "./auto-annotations.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -48,10 +49,10 @@ try {
 // This translates SQLite-style prepare/all/get/run calls to async PostgreSQL queries
 const db = createPgCompat(pool);
 
-const server = new McpServer({
+const server = withAutoAnnotations(new McpServer({
   name: "finlynq",
   version: "3.0.0",
-});
+}));
 
 registerCoreTools(server, db, { userId });
 registerV2Tools(server, db, { userId });

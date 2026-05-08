@@ -382,7 +382,7 @@ export default function McpGuidePage() {
             </div>
             {!apiKey && (
               <p className="text-xs text-muted-foreground">
-                Only a hash is stored, so the raw key can&rsquo;t be re-shown. Head to <a href="/settings/account" className="underline underline-offset-2 hover:text-foreground">Settings → API Key</a> and click <strong>Regenerate Key</strong> to get a fresh one.
+                Sign in at <a href="/cloud" className="underline underline-offset-2 hover:text-foreground">finlynq.com/cloud</a> (free), then visit <a href="/settings/account" className="underline underline-offset-2 hover:text-foreground">Settings → API Key</a> to generate one. We only store a hash — the raw key is shown to you once at creation and cannot be re-shown.
               </p>
             )}
           </div>
@@ -852,7 +852,7 @@ export default function McpGuidePage() {
         <section>
           <h2 className="mb-1 text-lg font-semibold text-foreground">What Claude can do</h2>
           <p className="mb-4 text-sm text-muted-foreground">
-            78 tools organized by task. Claude picks the right ones — you describe the outcome in plain English.
+            90 tools (HTTP) / 86 (stdio) organized by task. Claude picks the right ones — you describe the outcome in plain English.
             For the full alphabetical tool list with parameters, see{" "}
             <code className="bg-muted px-1 rounded">/api-docs</code> or{" "}
             <code className="bg-muted px-1 rounded">/.well-known/mcp.json</code>.
