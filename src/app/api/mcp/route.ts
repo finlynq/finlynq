@@ -151,7 +151,16 @@ export async function POST(request: NextRequest) {
   // Apply auto-annotations FIRST so every tool gets title + readOnlyHint /
   // destructiveHint / idempotentHint / openWorldHint inferred from name.
   // The scope filter below then wraps that further; both patches compose.
-  const server = withAutoAnnotations(new McpServer({ name: "finlynq", version: "3.0.0" }));
+  const server = withAutoAnnotations(new McpServer({
+    name: "finlynq",
+    title: "Finlynq",
+    version: "3.0.0",
+    websiteUrl: "https://finlynq.com",
+    description: "Track your money here, analyze it anywhere — open-source personal finance with 90 MCP tools.",
+    icons: [
+      { src: "https://finlynq.com/favicon.svg", mimeType: "image/svg+xml", sizes: ["any"] },
+    ],
+  }));
 
   const scopeString = "scope" in auth.context ? auth.context.scope : DEFAULT_SCOPE;
   const scopeSet = parseScope(scopeString);
