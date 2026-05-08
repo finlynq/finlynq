@@ -6,6 +6,14 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### MCP — serverInfo logo + metadata (2026-05-08)
+
+Adds `title`, `websiteUrl`, `description`, and `icons[]` to the `Implementation` object passed to both `McpServer` constructors so compatible MCP clients render the Finlynq mark instead of the default placeholder. Composes with the existing `withAutoAnnotations` wrap shipped in #193; server version stays at `3.0.0` — purely additive metadata, no behavior change.
+
+- HTTP route ([src/app/api/mcp/route.ts](src/app/api/mcp/route.ts)) and stdio entrypoint ([mcp-server/index.ts](mcp-server/index.ts)) both populated with the same fields.
+- Icon `src` reuses the existing `https://finlynq.com/favicon.svg` (mimeType `image/svg+xml`, sizes `["any"]`) — no new public asset.
+- Motivating context: Anthropic Connectors Directory submission ([HANDOVER_2026-05-08.md](../HANDOVER_2026-05-08.md)) — directory listings render server `icons[0].src` in the "Connect" UI.
+
 ### Documentation — formal note on `style-src 'unsafe-inline'` constraint (#9, 2026-05-07)
 
 Captures the technical constraint behind why `style-src 'unsafe-inline'` can't be removed from the CSP today, and the migration path for closing it. Code-only change to [src/middleware.ts](src/middleware.ts) — a 28-line comment block above the CSP directive.
