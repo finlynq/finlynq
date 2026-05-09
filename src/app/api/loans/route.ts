@@ -12,6 +12,8 @@ import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
+// Issue #213 — shared YYYY-MM-DD validator (regex + leap-year/Feb-30 round-trip).
+import { ymdDate, parseYmdSafe } from "../../../../mcp-server/lib/date-validators";
 
 const createLoanSchema = z.object({
   name: z.string(),
@@ -19,7 +21,7 @@ const createLoanSchema = z.object({
   principal: z.number(),
   annualRate: z.number(),
   termMonths: z.number(),
-  startDate: z.string(),
+  startDate: ymdDate,
   currency: z.string().regex(/^[A-Z]{3,4}$/, "ISO currency code").optional(),
   accountId: z.number().optional(),
   paymentAmount: z.number().optional(),
@@ -35,7 +37,7 @@ const updateLoanSchema = z.object({
   principal: z.number().optional(),
   annualRate: z.number().optional(),
   termMonths: z.number().optional(),
-  startDate: z.string().optional(),
+  startDate: ymdDate.optional(),
   currency: z.string().regex(/^[A-Z]{3,4}$/, "ISO currency code").optional(),
   accountId: z.number().optional().nullable(),
   paymentAmount: z.number().optional(),
@@ -77,6 +79,22 @@ export async function GET(request: NextRequest) {
 
   // Add amortization summary for each loan
   const withSummary = loans.map((loan) => {
+    // Issue #213 — guard against legacy bad start_date so the whole list
+    // doesn't crash with `Invalid time value`. Same pattern as MCP HTTP
+    // `list_loans` / `get_loan_amortization` / `get_debt_payoff_plan`.
+    if (parseYmdSafe(loan.startDate) === null) {
+      return {
+        ...loan,
+        monthlyPayment: null,
+        totalInterest: null,
+        payoffDate: null,
+        remainingBalance: null,
+        principalPaid: null,
+        interestPaid: null,
+        periodsRemaining: null,
+        dataIntegrity: { error: "invalid start_date", value: loan.startDate },
+      };
+    }
     const summary = generateAmortizationSchedule(
       loan.principal,
       loan.annualRate,

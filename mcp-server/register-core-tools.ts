@@ -36,6 +36,7 @@ import {
 } from "../src/lib/mcp/confirmation-token.js";
 import { InvestmentHoldingRequiredError } from "../src/lib/investment-account.js";
 import { validateSignVsCategory } from "../src/lib/transactions/sign-category-invariant.js";
+import { ymdDate, ymPeriod, parseYmdSafe } from "./lib/date-validators.js";
 import fs from "fs/promises";
 import {
   csvToRawTransactions,
@@ -399,7 +400,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "get_budget_summary",
     "Get budget vs actual spending for a specific month. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP or the web UI for this query.",
     {
-      month: z.string().describe("Month in YYYY-MM format"),
+      month: ymPeriod.describe("Month in YYYY-MM format"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
     async () => streamDRefuseRead("get_budget_summary", "categories"),
@@ -548,8 +549,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "get_income_statement",
     "Generate income statement for a period. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP or the web UI for this query.",
     {
-      start_date: z.string().describe("Start date"),
-      end_date: z.string().describe("End date"),
+      start_date: ymdDate.describe("Start date (YYYY-MM-DD)"),
+      end_date: ymdDate.describe("End date (YYYY-MM-DD)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
     async () => streamDRefuseRead("get_income_statement", "categories"),
@@ -562,7 +563,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "Set or update a budget for a category in a specific month. Stream D Phase 4: stdio cannot resolve category names — pass the category id via HTTP MCP, or use the web UI.",
     {
       category: z.string().describe("Category name (refused on stdio — Stream D Phase 4)"),
-      month: z.string().describe("Month (YYYY-MM)"),
+      month: ymPeriod.describe("Month (YYYY-MM)"),
       amount: z.number().describe("Budget amount (positive number)"),
     },
     async () => streamDRefuseRead("set_budget", "categories"),
@@ -575,7 +576,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: z.string().describe("Goal name"),
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
       target_amount: z.number().describe("Target amount"),
-      deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
+      deadline: ymdDate.optional().describe("Deadline (YYYY-MM-DD)"),
       account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). Use HTTP MCP for multi-account."),
       account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Refused on stdio — use HTTP MCP."),
     },
@@ -592,7 +593,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     {
       account: z.string().describe("Account name or alias (refused on stdio — Stream D Phase 4)"),
       value: z.number().describe("Current value"),
-      date: z.string().optional().describe("Snapshot date (defaults to today)"),
+      date: ymdDate.optional().describe("Snapshot date (defaults to today)"),
       note: z.string().optional().describe("Optional note"),
     },
     async () => streamDRefuseRead("add_snapshot", "accounts"),
@@ -701,7 +702,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "get_weekly_recap",
     "Get a weekly financial recap. Stream D Phase 4: stdio cannot decrypt category names — use HTTP MCP or the web UI for this query.",
     {
-      date: z.string().optional().describe("End date for the week (YYYY-MM-DD). Defaults to current week."),
+      date: ymdDate.optional().describe("End date for the week (YYYY-MM-DD). Defaults to current week."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
     async () => streamDRefuseRead("get_weekly_recap", "categories"),
@@ -716,7 +717,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       payee: z.string().describe("Payee or merchant name"),
       account: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `account_id` instead."),
       account_id: z.number().int().optional().describe("Account FK (accounts.id). Required on stdio."),
-      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `category_id` instead, or omit for auto-detection."),
       category_id: z.number().int().optional().describe("Category FK (categories.id). Use this instead of `category` on stdio."),
       note: z.string().optional(),
@@ -851,7 +852,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         payee: z.string(),
         account: z.string().optional(),
         account_id: z.number().int().optional(),
-        date: z.string().optional(),
+        date: z.string().optional().describe("YYYY-MM-DD calendar date. Per-row validation in HTTP MCP; stdio refuses entirely (Stream D Phase 4)."),
         category: z.string().optional(),
         note: z.string().optional(),
         tags: z.string().optional(),
@@ -871,7 +872,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "Update fields of an existing transaction by ID. Stream D Phase 4 (stdio): pass `category_id` (numeric) — `category` (name) is refused because stdio cannot resolve names. Pass enteredAmount + enteredCurrency to re-lock cross-currency rate; passing only `amount` updates the account-side without touching entered_*.",
     {
       id: z.number().describe("Transaction ID"),
-      date: z.string().optional(),
+      date: ymdDate.optional(),
       amount: z.number().optional().describe("Amount in account currency. Doesn't touch entered_* side."),
       payee: z.string().optional(),
       category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `category_id` instead."),
@@ -1036,7 +1037,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Required on stdio."),
       to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Required on stdio."),
       amount: z.number().nonnegative().describe("Cash amount sent, in SOURCE account's currency."),
-      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination."),
       holding: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). In-kind transfers require name resolution — use HTTP MCP."),
       destHolding: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4)."),
@@ -1127,7 +1128,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       currency: z.string().optional(),
       fees: z.number().nonnegative().optional(),
       fxRate: z.number().positive().optional(),
-      date: z.string().optional(),
+      date: ymdDate.optional(),
       note: z.string().optional(),
     },
     async () => streamDRefuseRead("record_trade", "portfolio_holdings"),
@@ -1145,7 +1146,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       from_account_id: z.number().int().optional(),
       to_account_id: z.number().int().optional(),
       amount: z.number().positive().optional(),
-      date: z.string().optional(),
+      date: ymdDate.optional(),
       receivedAmount: z.number().positive().optional(),
       note: z.string().optional(),
       tags: z.string().optional(),
@@ -1224,7 +1225,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     {
       category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `category_id` instead."),
       category_id: z.number().int().optional().describe("Category FK (categories.id)."),
-      month: z.string().describe("Month (YYYY-MM)"),
+      month: ymPeriod.describe("Month (YYYY-MM)"),
     },
     async ({ category, category_id, month }) => {
       if (category != null) {
@@ -1317,7 +1318,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     {
       goal: z.string().describe("Goal name (fuzzy matched)"),
       target_amount: z.number().optional(),
-      deadline: z.string().optional(),
+      deadline: ymdDate.optional(),
       status: z.enum(["active", "completed", "paused"]).optional(),
       name: z.string().optional().describe("Rename the goal"),
       account_ids: z.array(z.number().int()).optional().describe("Replace linked accounts (issue #130). Refused on stdio — use HTTP MCP."),
@@ -1777,7 +1778,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       principal: z.number(),
       annual_rate: z.number(),
       term_months: z.number().int().positive(),
-      start_date: z.string(),
+      start_date: ymdDate,
       account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
       payment_amount: z.number().optional(),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
@@ -1804,7 +1805,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       principal: z.number().optional(),
       annual_rate: z.number().optional(),
       term_months: z.number().int().positive().optional(),
-      start_date: z.string().optional(),
+      start_date: ymdDate.optional(),
       payment_amount: z.number().optional(),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
       extra_payment: z.number().optional(),
@@ -1838,7 +1839,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "Full amortization schedule for a loan. Amounts are in the loan's own currency; the response surfaces both the loan currency and reportingCurrency for context.",
     {
       loan_id: z.number(),
-      as_of_date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      as_of_date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
     async ({ loan_id, as_of_date, reportingCurrency }) => {
@@ -1847,6 +1848,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         `SELECT id, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment, currency FROM loans WHERE id = ? AND user_id = ?`
       ).get(loan_id, userId) as SqliteRow | undefined;
       if (!loan) return sqliteErr(`Loan #${loan_id} not found`);
+      // Issue #213 — guard against legacy bad start_date so this tool no
+      // longer throws Invalid time value when one slipped past the
+      // pre-validator code paths.
+      if (parseYmdSafe(String(loan.start_date)) === null) {
+        return txt({
+          success: false,
+          error: "invalid start_date",
+          loanId: loan_id,
+          value: loan.start_date,
+        });
+      }
       const summary = generateAmortizationSchedule(
         Number(loan.principal),
         Number(loan.annual_rate),
@@ -1900,7 +1912,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       ).all(userId) as SqliteRow[];
       if (!loans.length) return txt({ success: true, data: { message: "No loans found", strategies: {} } });
       const today = new Date().toISOString().split("T")[0];
-      const debts: Debt[] = loans.map((l) => {
+      // Issue #213 — split out legacy bad rows so one bad start_date no
+      // longer poisons the whole strategy computation.
+      const excluded: Array<{ loanId: number; error: string; value: unknown }> = [];
+      const validLoans = loans.filter((l) => {
+        if (parseYmdSafe(String(l.start_date)) === null) {
+          excluded.push({ loanId: Number(l.id), error: "invalid start_date", value: l.start_date });
+          return false;
+        }
+        return true;
+      });
+      const debts: Debt[] = validLoans.map((l) => {
         const summary = generateAmortizationSchedule(
           Number(l.principal),
           Number(l.annual_rate),
@@ -1925,6 +1947,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const strat = strategy ?? "both";
       const extra = extra_payment ?? 0;
       const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts }, reportingCurrency: reporting };
+      if (excluded.length) result.excluded = excluded;
       if (strat === "avalanche" || strat === "both") result.avalanche = calculateDebtPayoff(debts, extra, "avalanche");
       if (strat === "snowball" || strat === "both") result.snowball = calculateDebtPayoff(debts, extra, "snowball");
       return txt({ success: true, data: result });
@@ -1938,7 +1961,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     {
       from: z.string(),
       to: z.string(),
-      date: z.string().optional(),
+      date: ymdDate.optional(),
     },
     async ({ from, to, date }) => {
       // Issue #206 — validate currencies + date at the MCP boundary.
@@ -1981,9 +2004,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     {
       from: z.string(),
       to: z.string(),
-      date: z.string(),
+      date: ymdDate,
       rate: z.number().positive(),
-      dateTo: z.string().optional(),
+      dateTo: ymdDate.optional(),
       note: z.string().optional(),
     },
     async ({ from, to, date, rate, dateTo, note }) => {
@@ -2040,7 +2063,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       amount: z.number(),
       from: z.string(),
       to: z.string(),
-      date: z.string().optional(),
+      date: ymdDate.optional(),
     },
     async ({ amount, from, to, date }) => {
       // Issue #206 — validate currencies + date at the MCP boundary.
@@ -2080,7 +2103,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: z.string(),
       amount: z.number(),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]),
-      next_billing_date: z.string(),
+      next_billing_date: ymdDate,
       currency: supportedCurrencyEnum.optional(),
       category: z.string().optional(),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
@@ -2102,12 +2125,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: z.string().optional(),
       amount: z.number().optional(),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
-      next_billing_date: z.string().optional(),
+      next_billing_date: ymdDate.optional(),
       currency: supportedCurrencyEnum.optional(),
       category: z.string().optional().describe("Empty string clears"),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
       status: z.enum(["active", "paused", "cancelled"]).optional(),
-      cancel_reminder_date: z.string().optional(),
+      cancel_reminder_date: ymdDate.optional(),
       notes: z.string().optional(),
     },
     async ({ id, name, amount, cadence, next_billing_date, currency, category, account, status, cancel_reminder_date, notes }) => {
@@ -2417,8 +2440,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
   const bulkFilterSchema = z.object({
     ids: z.array(z.number()).optional(),
-    start_date: z.string().optional(),
-    end_date: z.string().optional(),
+    start_date: ymdDate.optional(),
+    end_date: ymdDate.optional(),
     category_id: z.number().nullable().optional(),
     account_id: z.number().optional(),
     payee_match: z.string().optional(),
@@ -2436,6 +2459,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     category_id: z.number().nullable().optional(),
     category: z.string().optional(),
     account_id: z.number().optional(),
+    // Issue #213 — date validation runs in `resolveBulkChanges` (not the
+    // schema) so a single bad date surfaces in `unappliedChanges` rather
+    // than collapsing the whole zod parse.
     date: z.string().optional(),
     note: z.string().optional(),
     payee: z.string().optional(),
@@ -2516,7 +2542,20 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
     if (changes.category_id !== undefined) resolved.category_id = changes.category_id;
     if (changes.account_id !== undefined) resolved.account_id = changes.account_id;
-    if (changes.date !== undefined) resolved.date = changes.date;
+    // Issue #213 — date validation gate. A bad date NEVER lands in
+    // `resolved.date` (commitBulkUpdate writes unconditionally when the
+    // key is present); surfaced via `unappliedChanges`.
+    if (changes.date !== undefined) {
+      if (parseYmdSafe(changes.date) === null) {
+        unapplied.push({
+          field: "date",
+          requestedValue: changes.date,
+          reason: `Invalid date "${changes.date}" — expected YYYY-MM-DD calendar date.`,
+        });
+      } else {
+        resolved.date = changes.date;
+      }
+    }
     if (changes.note !== undefined) resolved.note = changes.note;
     if (changes.payee !== undefined) resolved.payee = changes.payee;
     if (changes.is_business !== undefined) resolved.is_business = changes.is_business;
@@ -2626,6 +2665,21 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
        ORDER BY t.id`
     ).all(...sampleIds, userId) as Record<string, unknown>[];
     const after = before.map((r) => applyChangesToRow(r, resolved));
+    // Issue #213 — refuse to mint a token when every requested change
+    // failed to resolve. Mirrors the HTTP gate at register-tools-pg.ts.
+    const writableKeys = (Object.keys(resolved) as Array<keyof typeof resolved>).filter(
+      (k) => k !== "category_name",
+    );
+    if (writableKeys.length === 0 && unapplied.length > 0) {
+      return {
+        affectedCount: ids.length,
+        sampleBefore: before,
+        sampleAfter: after,
+        unappliedChanges: unapplied,
+        ids: [],
+        confirmationToken: "",
+      };
+    }
     // Sign the user-supplied `changes` (not the resolved form) so the token
     // round-trips between preview and execute calls.
     const token = signConfirmationToken(userId, op, { ids, changes });
@@ -2861,7 +2915,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       candidates: z.array(z.object({
         payee: z.string(), amount: z.number(),
         cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
-        next_billing_date: z.string().optional(),
+        next_billing_date: ymdDate.optional(),
         category_id: z.number().optional(),
       })).min(1),
       confirmation_token: z.string(),
