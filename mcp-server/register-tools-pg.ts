@@ -4300,26 +4300,52 @@ export function registerPgTools(
   );
 
   // ── create_rule ────────────────────────────────────────────────────────────
+  // Issue #214 — two-bug fix:
+  //   (a) `match_payee` column does NOT exist in `transaction_rules` (schema is
+  //       (match_field, match_type, match_value)). Synthesize the three target
+  //       fields from the user-facing `match_payee` alias and write the new
+  //       schema. `created_at` is NOT NULL with no DB default — set it.
+  //   (b) `decryptNameish` was missing on the categories SELECT, so every row
+  //       had `name === undefined`. The `fuzzyFind` waterfall's last step
+  //       (`lo.includes(String(o.name ?? "").toLowerCase())`) collapses to
+  //       `lo.includes("")` which is always true — silently returning the
+  //       first category in the result set as a "match". Mirror what
+  //       `update_rule` does so unknown categories error out cleanly.
   server.tool(
     "create_rule",
     "Create an auto-categorization rule for future imports",
     {
-      match_payee: z.string().describe("Payee pattern to match (supports LIKE wildcards: %)"),
+      match_payee: z.string().describe("Payee pattern to match (substring, case-insensitive; legacy `%` wildcards are stripped)"),
       assign_category: z.string().describe("Category name to assign (fuzzy matched)"),
       rename_to: z.string().optional().describe("Optionally rename matched payee to this"),
       assign_tags: z.string().optional().describe("Tags to assign (comma-separated)"),
       priority: z.number().optional().describe("Rule priority (higher = checked first, default 0)"),
     },
     async ({ match_payee, assign_category, rename_to, assign_tags, priority }) => {
-      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const allCats = decryptNameish(rawCats, dek);
       const cat = fuzzyFind(assign_category, allCats);
       if (!cat) return err(`Category "${assign_category}" not found`);
 
+      // Strip legacy `%` wildcards — the new schema's `match_type='contains'`
+      // is substring-only. Mirrors what apply_rules_to_uncategorized already
+      // did at the matcher layer.
+      const cleanedValue = match_payee.replace(/%/g, "");
+      // Synthesize a `name` (NOT NULL on transaction_rules). Truncate to fit
+      // text columns comfortably; the user's actual matching pattern lives in
+      // `match_value`, this is just the human label.
+      const synthName = `Match "${cleanedValue}" → ${String(cat.name ?? "")}`.slice(0, 200);
+      const todayISO = new Date().toISOString().split("T")[0];
+
       await db.execute(sql`
-        INSERT INTO transaction_rules (user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active)
-        VALUES (${userId}, ${match_payee}, ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, 1)
+        INSERT INTO transaction_rules
+          (user_id, name, match_field, match_type, match_value,
+           assign_category_id, rename_to, assign_tags, priority, is_active, created_at)
+        VALUES
+          (${userId}, ${synthName}, 'payee', 'contains', ${cleanedValue},
+           ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, 1, ${todayISO})
       `);
-      return text({ success: true, message: `Rule created: "${match_payee}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` });
+      return text({ success: true, message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` });
     }
   );
 
@@ -4363,15 +4389,23 @@ export function registerPgTools(
     async ({ dry_run, limit }) => {
       const maxRows = limit ?? 500;
       const txns = await q(db, sql`
-        SELECT id, payee, amount FROM transactions
+        SELECT id, payee, amount, tags FROM transactions
         WHERE user_id = ${userId} AND (category_id IS NULL OR category_id = 0)
         ORDER BY date DESC LIMIT ${maxRows}
       `);
       if (!txns.length) return text({ message: "No uncategorized transactions found", updated: 0 });
 
+      // Issue #214 — schema is (match_field, match_type, match_value), NOT
+      // `match_payee`. Pull the new column set; SQL-filter to active rules
+      // and iterate in priority order in memory (same shape as the import
+      // pipeline preview at the bottom of this file).
       const rules = await q(db, sql`
-        SELECT match_payee, assign_category_id, rename_to, assign_tags, priority
-        FROM transaction_rules WHERE user_id = ${userId} AND is_active = 1
+        SELECT match_field, match_type, match_value,
+               assign_category_id, rename_to, assign_tags, priority
+        FROM transaction_rules
+        WHERE user_id = ${userId}
+          AND is_active = 1
+          AND assign_category_id IS NOT NULL
         ORDER BY priority DESC
       `);
 
@@ -4379,11 +4413,34 @@ export function registerPgTools(
       const preview: { id: number; payee: string; categoryId: number }[] = [];
 
       for (const txn of txns) {
-        // Decrypt the payee so we can match against the plaintext rule pattern.
+        // Decrypt payee + tags in memory so we can match against plaintext
+        // rule values. Tags-rules need plaintext too (matchesRule reads
+        // `txn.tags` for `match_field='tags'`).
         const plainPayee = dek ? (decryptField(dek, String(txn.payee ?? "")) ?? "") : String(txn.payee ?? "");
+        const plainTags = dek ? (decryptField(dek, String(txn.tags ?? "")) ?? "") : String(txn.tags ?? "");
+        const amt = Number(txn.amount);
         for (const rule of rules) {
-          const pattern = String(rule.match_payee ?? "").toLowerCase().replace(/%/g, "");
-          if (plainPayee.toLowerCase().includes(pattern)) {
+          const field = String(rule.match_field ?? "");
+          const type = String(rule.match_type ?? "");
+          const value = String(rule.match_value ?? "");
+          let hit = false;
+          if (field === "amount") {
+            const ruleAmount = parseFloat(value);
+            if (isNaN(ruleAmount)) { hit = false; }
+            else if (type === "greater_than") hit = amt > ruleAmount;
+            else if (type === "less_than") hit = amt < ruleAmount;
+            else if (type === "exact") hit = Math.abs(amt - ruleAmount) < 0.01;
+          } else {
+            const fieldVal = (field === "tags" ? plainTags : plainPayee).toLowerCase();
+            const valueLower = value.toLowerCase();
+            if (type === "contains") hit = fieldVal.includes(valueLower);
+            else if (type === "exact") hit = fieldVal === valueLower;
+            else if (type === "regex") {
+              try { hit = new RegExp(value, "i").test(field === "tags" ? plainTags : plainPayee); }
+              catch { hit = false; }
+            }
+          }
+          if (hit) {
             if (!dry_run) {
               // rule.rename_to / rule.assign_tags are plaintext; encrypt
               // them before writing to the encrypted transaction columns.
@@ -4487,7 +4544,7 @@ export function registerPgTools(
             categories: "id, user_id, type(E/I/T), group, name, note",
             budgets: "id, user_id, category_id, month(YYYY-MM), amount, currency",
             goals: "id, user_id, name, type, target_amount, current_amount, deadline, status, account_id",
-            transaction_rules: "id, user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active",
+            transaction_rules: "id, user_id, name, match_field, match_type, match_value, assign_category_id, rename_to, assign_tags, priority, is_active, created_at",
             portfolio_holdings: "id, user_id, account_id, name, symbol, currency, note",
           },
           amount_convention: "Negative=expense/debit, Positive=income/credit",

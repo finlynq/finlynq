@@ -304,10 +304,35 @@ function resolvePortfolioHoldingStrict(input: string, options: SqliteRow[]): Std
 /** Auto-categorize payee: rules → historical frequency (both user-scoped) */
 async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): Promise<number | null> {
   if (!payee) return null;
-  const rule = await sqlite.prepare(
-    `SELECT assign_category_id FROM transaction_rules WHERE user_id = ? AND is_active = 1 AND LOWER(?) LIKE LOWER(match_payee) ORDER BY priority DESC LIMIT 1`
-  ).get(userId, payee) as { assign_category_id: number } | undefined;
-  if (rule?.assign_category_id) return rule.assign_category_id;
+  // Issue #214 — schema is (match_field, match_type, match_value), NOT
+  // `match_payee`. The previous SELECT 500'd on every record_transaction call
+  // when the user had any active rule (column "match_payee" does not exist).
+  // SQL-filter active payee-rules with an assigned category, then evaluate
+  // contains/exact/regex semantics in memory using the shared `matchesRule`
+  // helper. Identical pattern to the HTTP `autoCategory` fix in
+  // register-tools-pg.ts (commit 7d70677).
+  const rules = await sqlite.prepare(
+    `SELECT id, name, match_field, match_type, match_value,
+            assign_category_id, assign_tags, rename_to, is_active, priority
+     FROM transaction_rules
+     WHERE user_id = ?
+       AND is_active = 1
+       AND match_field = 'payee'
+       AND assign_category_id IS NOT NULL
+     ORDER BY priority DESC`
+  ).all(userId) as Array<{
+    id: number; name: string; match_field: string; match_type: string;
+    match_value: string; assign_category_id: number | null;
+    assign_tags: string | null; rename_to: string | null;
+    is_active: number; priority: number;
+  }>;
+  for (const rule of rules) {
+    // autoCategory only resolves on payee at write-time; amount/tags rules
+    // run at apply_rules_to_uncategorized time after the row is committed.
+    if (matchesRule({ payee, amount: 0, tags: "" }, rule) && rule.assign_category_id) {
+      return rule.assign_category_id;
+    }
+  }
   const hist = await sqlite.prepare(
     `SELECT category_id, COUNT(*) as cnt FROM transactions WHERE user_id = ? AND LOWER(payee) = LOWER(?) AND category_id IS NOT NULL GROUP BY category_id ORDER BY cnt DESC LIMIT 1`
   ).get(userId, payee) as { category_id: number } | undefined;
@@ -1399,10 +1424,20 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         `SELECT id FROM categories WHERE user_id = ? AND id = ?`
       ).get(userId, assign_category_id) as { id: number } | undefined;
       if (!cat) return sqliteErr(`Category #${assign_category_id} not found or not owned by you.`);
+      // Issue #214 — schema is (match_field, match_type, match_value), NOT
+      // `match_payee`. Synthesize the new triplet from the user-facing
+      // `match_payee` alias (legacy `%` wildcards stripped) and stamp the
+      // synthesized name + created_at (both NOT NULL with no DB default).
+      const cleanedValue = match_payee.replace(/%/g, "");
+      const synthName = `Match "${cleanedValue}" → category #${Number(cat.id)}`.slice(0, 200);
+      const todayISO = new Date().toISOString().split("T")[0];
       await sqlite.prepare(
-        `INSERT INTO transaction_rules (user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)`
-      ).run(userId, match_payee, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0);
-      return txt({ success: true, message: `Rule created: "${match_payee}" → category #${Number(cat.id)}` });
+        `INSERT INTO transaction_rules
+           (user_id, name, match_field, match_type, match_value,
+            assign_category_id, rename_to, assign_tags, priority, is_active, created_at)
+         VALUES (?, ?, 'payee', 'contains', ?, ?, ?, ?, ?, 1, ?)`
+      ).run(userId, synthName, cleanedValue, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0, todayISO);
+      return txt({ success: true, message: `Rule created: "${cleanedValue}" → category #${Number(cat.id)}` });
     }
   );
 
@@ -1715,7 +1750,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           categories: "id, type(E/I/T), group, name, note",
           budgets: "id, category_id, month(YYYY-MM), amount",
           goals: "id, name, type, target_amount, deadline, status, account_id",
-          transaction_rules: "id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active",
+          transaction_rules: "id, name, match_field, match_type, match_value, assign_category_id, rename_to, assign_tags, priority, is_active, created_at",
         },
         amount_convention: "Negative=expense/debit, Positive=income/credit",
         date_format: "YYYY-MM-DD strings",
