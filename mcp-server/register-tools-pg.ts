@@ -34,6 +34,7 @@ import {
   summarizeUnrealizedPnL,
 } from "../src/lib/unrealized-pnl";
 import { resolveTxAmountsCore } from "../src/lib/currency-conversion";
+import { roundMoney, roundFxRate } from "../src/lib/money";
 import { deriveTxWriteWarnings } from "../src/lib/queries";
 import {
   createTransferPair,
@@ -1065,11 +1066,16 @@ export function registerPgTools(
       const enriched = rows.map((r) => {
         const ccy = String(r.currency);
         const fx = fxByCcy.get(ccy) ?? 1;
-        const balanceReporting = Math.round(Number(r.balance) * fx * 100) / 100;
+        // Issue #208 — round the raw `balance` to crush IEEE-754 leaks
+        // (`-3.6e-11`-class noise from SUM(t.amount)). `tagAmount` already
+        // 2dp-rounds the tagged variants; this fixes the bypassed field.
+        const rawBalance = roundMoney(Number(r.balance), ccy);
+        const balanceReporting = roundMoney(Number(r.balance) * fx, reporting);
         totalReporting += balanceReporting;
         return {
           ...r,
-          balanceTagged: tagAmount(Number(r.balance), ccy, "account"),
+          balance: rawBalance,
+          balanceTagged: tagAmount(rawBalance, ccy, "account"),
           balanceReporting: tagAmount(balanceReporting, reporting, "reporting"),
         };
       });
@@ -1077,7 +1083,7 @@ export function registerPgTools(
       return text({
         accounts: enriched,
         reportingCurrency: reporting,
-        totalReporting: tagAmount(totalReporting, reporting, "reporting"),
+        totalReporting: tagAmount(roundMoney(totalReporting, reporting), reporting, "reporting"),
       });
     }
   );
@@ -1300,8 +1306,12 @@ export function registerPgTools(
       `);
       const rows = rawRows.map((r) => {
         const { category_ct, ...rest } = r;
+        // Issue #208 — round per-row `total` (raw SUM(t.amount) leaks
+        // IEEE-754 noise) and cast `count` (PG BIGINT-as-string) to Number.
         return {
           ...rest,
+          total: roundMoney(Number(r.total), reporting),
+          count: Number(r.count),
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
@@ -1318,12 +1328,15 @@ export function registerPgTools(
         rows,
         reportingCurrency: reporting,
         unrealized: {
+          // Issue #208 — round all totals and per-account fields at the
+          // response shape; the helpers themselves keep full precision so
+          // internal math doesn't compound rounding errors.
           totals: {
-            costBasis: unrealizedTotals.costBasis,
-            marketValue: unrealizedTotals.marketValue,
-            valuationGL: unrealizedTotals.valuationGL,
-            fxGL: unrealizedTotals.fxGL,
-            totalGL: unrealizedTotals.totalGL,
+            costBasis: roundMoney(unrealizedTotals.costBasis, reporting),
+            marketValue: roundMoney(unrealizedTotals.marketValue, reporting),
+            valuationGL: roundMoney(unrealizedTotals.valuationGL, reporting),
+            fxGL: roundMoney(unrealizedTotals.fxGL, reporting),
+            totalGL: roundMoney(unrealizedTotals.totalGL, reporting),
           },
           accounts: unrealized
             .filter((a) => a.hasHoldings || Math.abs(a.fxGL) > 0.005 || Math.abs(a.valuationGL) > 0.005)
@@ -1331,15 +1344,15 @@ export function registerPgTools(
               accountId: a.accountId,
               accountName: a.accountName,
               accountCurrency: a.accountCurrency,
-              // periodEnd snapshot for context
-              costBasis: a.end.costBasis,
-              marketValue: a.end.marketValue,
+              // periodEnd snapshot for context — already in reporting ccy
+              costBasis: roundMoney(a.end.costBasis, reporting),
+              marketValue: roundMoney(a.end.marketValue, reporting),
               // Period delta = end_snapshot - start_snapshot, what moved
-              valuationGL: a.valuationGL,
-              fxGL: a.fxGL,
-              totalGL: a.totalGL,
-              startMarketValue: a.start.marketValue,
-              endMarketValue: a.end.marketValue,
+              valuationGL: roundMoney(a.valuationGL, reporting),
+              fxGL: roundMoney(a.fxGL, reporting),
+              totalGL: roundMoney(a.totalGL, reporting),
+              startMarketValue: roundMoney(a.start.marketValue, reporting),
+              endMarketValue: roundMoney(a.end.marketValue, reporting),
               hasHoldings: a.hasHoldings,
               costBasisMissing: a.costBasisMissing,
             })),
@@ -1387,13 +1400,24 @@ export function registerPgTools(
           totalLiabilities += vals.liabilities * fx;
           totalNet += vals.net * fx;
         }
+        // Issue #208 — round per-currency assets/liabilities/net at the
+        // response boundary (raw SUM(t.amount) leaks IEEE-754 noise like
+        // `5598.589999990002`). Round in each currency's own precision.
+        const roundedSummary: Record<string, { assets: number; liabilities: number; net: number }> = {};
+        for (const [ccy, vals] of Object.entries(summary)) {
+          roundedSummary[ccy] = {
+            assets: roundMoney(vals.assets, ccy),
+            liabilities: roundMoney(vals.liabilities, ccy),
+            net: roundMoney(vals.net, ccy),
+          };
+        }
         return text({
-          byCurrency: summary,
+          byCurrency: roundedSummary,
           reportingCurrency: reporting,
           total: {
-            assets: tagAmount(totalAssets, reporting, "reporting"),
-            liabilities: tagAmount(totalLiabilities, reporting, "reporting"),
-            net: tagAmount(totalNet, reporting, "reporting"),
+            assets: tagAmount(roundMoney(totalAssets, reporting), reporting, "reporting"),
+            liabilities: tagAmount(roundMoney(totalLiabilities, reporting), reporting, "reporting"),
+            net: tagAmount(roundMoney(totalNet, reporting), reporting, "reporting"),
           },
         });
       }
@@ -2512,13 +2536,23 @@ export function registerPgTools(
       const encNote = dek ? encryptField(dek, note ?? "") : (note ?? "");
       const encTags = dek ? encryptField(dek, tags ?? "") : (tags ?? "");
 
+      // Issue #208 — round `entered_amount` to currency precision before INSERT.
+      // `convertToAccountCurrency` already round2's `resolved.amount`, but
+      // `enteredAmount` flows through unrounded — Claude can pass
+      // `enteredAmount: 1.96511214` and it lands raw in the DB, then compounds
+      // forever in every aggregator's SUM(t.amount). Persist precision with
+      // intent. `entered_fx_rate` is NOT a money field — it's a divisor, full
+      // FP precision preserved.
+      const persistedEnteredAmount = roundMoney(resolved.enteredAmount, resolved.enteredCurrency);
+      const persistedAmount = roundMoney(resolved.amount, resolved.currency);
+
       // Issue #28: stamp source explicitly + return audit timestamps so
       // the AI assistant can verify the write landed and self-attributed.
       // Issue #96: trade_link_id stamped from validated `tradeLinkId` arg
       // (NULL when absent — legacy / unpaired rows).
       const result = await q(db, sql`
         INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source, trade_link_id)
-        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null}, ${'mcp_http'}, ${tradeLinkId ?? null})
+        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${persistedAmount}, ${resolved.enteredCurrency}, ${persistedEnteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null}, ${'mcp_http'}, ${tradeLinkId ?? null})
         RETURNING id, created_at, updated_at, source, trade_link_id
       `);
 
@@ -2877,9 +2911,14 @@ export function registerPgTools(
           // validated the group, stamp the minted UUID into trade_link_id.
           const tgKey = (t as { tradeGroupKey?: unknown }).tradeGroupKey;
           const rowTradeLinkId = typeof tgKey === "string" ? (tradeGroupUuid.get(tgKey) ?? null) : null;
+          // Issue #208 — round persisted money fields to currency precision.
+          // `entered_fx_rate` (divisor) keeps full FP; only the amount columns
+          // are rounded so SUM(t.amount) stops drifting.
+          const persistedEnteredAmount = roundMoney(resolved.enteredAmount, resolved.enteredCurrency);
+          const persistedAmount = roundMoney(resolved.amount, resolved.currency);
           const insRows = await q(db, sql`
             INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source, trade_link_id)
-            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'}, ${rowTradeLinkId})
+            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${persistedAmount}, ${resolved.enteredCurrency}, ${persistedEnteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'}, ${rowTradeLinkId})
             RETURNING id
           `);
           const newTxId = insRows[0]?.id != null ? Number(insRows[0].id) : null;
@@ -3554,9 +3593,11 @@ export function registerPgTools(
       // by the user's existing rule engine on next read. Tagged so it can be
       // tied back to the trade pair if needed.
       let feeTxId: number | null = null;
-      const feeAmountTrade = fees != null && fees > 0 ? Math.round(fees * 100) / 100 : 0;
+      // Issue #208 — round fee amounts via the helper (currency-aware).
+      // `tradeCurrency` is the trade's own ccy; `acctCurrency` is the account ccy.
+      const feeAmountTrade = fees != null && fees > 0 ? roundMoney(fees, tradeCurrency) : 0;
       if (feeAmountTrade > 0) {
-        const feeAmountAcct = Math.round(feeAmountTrade * fx * 100) / 100;
+        const feeAmountAcct = roundMoney(feeAmountTrade * fx, acctCurrency);
         const feePayee = `Trade fee — ${trimmedSymbol}`;
         const encPayee = encryptField(dek, feePayee);
         const encNote = encryptField(dek, "");
@@ -4598,6 +4639,11 @@ export function registerPgTools(
         const ccy = String(info?.currency ?? "CAD");
         const fx = await fxFor(ccy);
 
+        // Issue #208 — round at the response boundary using the helper so
+        // IEEE-754 noise (`-3.6e-11`-class drift, `5598.589999990002`-class
+        // leaks) is crushed everywhere these fields land. The aggregator
+        // (`accumulate()`) keeps full precision internally; we only round
+        // here.
         results.push({
           // FK to portfolio_holdings.id — pass this as portfolioHoldingId on
           // record_transaction / update_transaction to bind a transaction to
@@ -4608,19 +4654,19 @@ export function registerPgTools(
           account: info?.account_name ?? null,
           currency: ccy,
           quantity: Math.round(remainingQty * 10000) / 10000,
-          avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
+          avgCostPerShare: avgCost ? roundMoney(avgCost, ccy) : null,
           avgCostPerShareTagged: avgCost ? tagAmount(avgCost, ccy, "account") : null,
-          totalCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
-          lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
+          totalCostBasis: costBasis ? roundMoney(costBasis, ccy) : null,
+          lifetimeCostBasis: roundMoney(buyAmt, ccy),
           lifetimeCostBasisTagged: tagAmount(buyAmt, ccy, "account"),
           lifetimeCostBasisReporting: tagAmount(buyAmt * fx, reporting, "reporting"),
-          realizedGain: Math.round(realizedGain * 100) / 100,
+          realizedGain: roundMoney(realizedGain, ccy),
           realizedGainTagged: tagAmount(realizedGain, ccy, "account"),
           realizedGainReporting: tagAmount(realizedGain * fx, reporting, "reporting"),
-          dividendsReceived: Math.round(divs * 100) / 100,
+          dividendsReceived: roundMoney(divs, ccy),
           dividendsReceivedTagged: tagAmount(divs, ccy, "account"),
           dividendsReceivedReporting: tagAmount(divs * fx, reporting, "reporting"),
-          totalReturn: Math.round(totalReturn * 100) / 100,
+          totalReturn: roundMoney(totalReturn, ccy),
           totalReturnPct: totalReturnPct ? Math.round(totalReturnPct * 100) / 100 : null,
           firstPurchaseDate: fpDate,
           daysHeld,
@@ -4669,18 +4715,23 @@ export function registerPgTools(
         totalHoldings: results.length,
         reportingCurrency: reporting,
         warnings,
+        // Issue #208 — round summary aggregates at the response boundary.
+        // Mixed-currency raw sums (totalCostBasis, lifetimeCostBasis, etc.)
+        // are mathematically meaningless without an FX hop — they're
+        // preserved here for backward compat (issue #209 will rename/drop)
+        // but rounded to 2dp so the leak class shrinks regardless.
         summary: {
-          totalCostBasis: Math.round(totalCostBasis * 100) / 100,
-          lifetimeCostBasis: Math.round(totalLifetime * 100) / 100,
-          totalRealizedGain: Math.round(totalRealized * 100) / 100,
-          totalDividends: Math.round(totalDivs * 100) / 100,
-          totalReturn: Math.round(totalReturn * 100) / 100,
+          totalCostBasis: roundMoney(totalCostBasis, reporting),
+          lifetimeCostBasis: roundMoney(totalLifetime, reporting),
+          totalRealizedGain: roundMoney(totalRealized, reporting),
+          totalDividends: roundMoney(totalDivs, reporting),
+          totalReturn: roundMoney(totalReturn, reporting),
           totalReturnPct: totalLifetime > 0 ? Math.round((totalReturn / totalLifetime) * 10000) / 100 : null,
           // Currency-converted aggregates — these are the canonical totals.
-          lifetimeCostBasisReporting: tagAmount(totalLifetimeReporting, reporting, "reporting"),
-          totalRealizedGainReporting: tagAmount(totalRealizedReporting, reporting, "reporting"),
-          totalDividendsReporting: tagAmount(totalDivsReporting, reporting, "reporting"),
-          totalReturnReporting: tagAmount(totalReturnReporting, reporting, "reporting"),
+          lifetimeCostBasisReporting: tagAmount(roundMoney(totalLifetimeReporting, reporting), reporting, "reporting"),
+          totalRealizedGainReporting: tagAmount(roundMoney(totalRealizedReporting, reporting), reporting, "reporting"),
+          totalDividendsReporting: tagAmount(roundMoney(totalDivsReporting, reporting), reporting, "reporting"),
+          totalReturnReporting: tagAmount(roundMoney(totalReturnReporting, reporting), reporting, "reporting"),
           totalReturnPctReporting: totalLifetimeReporting > 0 ? Math.round((totalReturnReporting / totalLifetimeReporting) * 10000) / 100 : null,
         },
         holdings: results,
@@ -4725,6 +4776,9 @@ export function registerPgTools(
         const totalReturn = realizedGain + divs;
         const fpDate = p.first_purchase ?? null;
         const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
+        // Issue #208 — per-row money fields stay in the holding's own
+        // currency; round at this boundary, not in `aggregateHoldings`.
+        const rowCcy = String(p.currency ?? reporting);
         return {
           // Issue #86: surface the FK id so callers can disambiguate
           // same-name holdings (e.g. VUN.TO in TFSA vs RRSP).
@@ -4732,13 +4786,13 @@ export function registerPgTools(
           holding: p.name,
           txCount: Number(p.tx_count),
           quantity: Math.round(remainingQty * 10000) / 10000,
-          lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
-          currentCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
-          avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
-          realizedGain: Math.round(realizedGain * 100) / 100,
+          lifetimeCostBasis: roundMoney(buyAmt, rowCcy),
+          currentCostBasis: costBasis ? roundMoney(costBasis, rowCcy) : null,
+          avgCostPerShare: avgCost ? roundMoney(avgCost, rowCcy) : null,
+          realizedGain: roundMoney(realizedGain, rowCcy),
           realizedGainPct: buyAmt > 0 ? Math.round((realizedGain / buyAmt) * 10000) / 100 : null,
-          dividendsReceived: Math.round(divs * 100) / 100,
-          totalReturn: Math.round(totalReturn * 100) / 100,
+          dividendsReceived: roundMoney(divs, rowCcy),
+          totalReturn: roundMoney(totalReturn, rowCcy),
           totalReturnPct: buyAmt > 0 ? Math.round((totalReturn / buyAmt) * 10000) / 100 : null,
           firstPurchase: fpDate,
           lastActivity: p.last_activity,
@@ -4757,12 +4811,15 @@ export function registerPgTools(
         period: period ?? "all",
         since,
         reportingCurrency: reporting,
+        // Issue #208 — round summary at the response boundary. These are
+        // raw mixed-currency sums (issue #209 will address the FX hop) but
+        // rounding still crushes the IEEE-754 leak class.
         summary: {
           holdings: results.length,
-          lifetimeCostBasis: Math.round(totLifetime * 100) / 100,
-          totalRealizedGain: Math.round(totRealized * 100) / 100,
-          totalDividends: Math.round(totDivs * 100) / 100,
-          totalReturn: Math.round(totReturn * 100) / 100,
+          lifetimeCostBasis: roundMoney(totLifetime, reporting),
+          totalRealizedGain: roundMoney(totRealized, reporting),
+          totalDividends: roundMoney(totDivs, reporting),
+          totalReturn: roundMoney(totReturn, reporting),
           totalReturnPct: totLifetime > 0 ? Math.round((totReturn / totLifetime) * 10000) / 100 : null,
         },
         holdings: results,
@@ -5062,24 +5119,24 @@ export function registerPgTools(
         holding: holdingName,
         currency: holdingCurrency,
         reportingCurrency: reporting,
-        // Position
+        // Position — Issue #208 round at the response boundary.
         currentShares: Math.round(remainingQty * 10000) / 10000,
-        avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
+        avgCostPerShare: avgCost ? roundMoney(avgCost, holdingCurrency) : null,
         avgCostPerShareTagged: avgCost ? tagAmount(avgCost, holdingCurrency, "account") : null,
-        currentCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
+        currentCostBasis: costBasis ? roundMoney(costBasis, holdingCurrency) : null,
         currentCostBasisTagged: costBasis !== null ? tagAmount(costBasis, holdingCurrency, "account") : null,
-        lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
+        lifetimeCostBasis: roundMoney(buyAmt, holdingCurrency),
         lifetimeCostBasisTagged: tagAmount(buyAmt, holdingCurrency, "account"),
         lifetimeCostBasisReporting: tagAmount(buyAmt * fxToReporting, reporting, "reporting"),
         // Performance
-        realizedGain: Math.round(realizedGain * 100) / 100,
+        realizedGain: roundMoney(realizedGain, holdingCurrency),
         realizedGainTagged: tagAmount(realizedGain, holdingCurrency, "account"),
         realizedGainReporting: tagAmount(realizedGain * fxToReporting, reporting, "reporting"),
         realizedGainPct: buyAmt > 0 ? Math.round((realizedGain / buyAmt) * 10000) / 100 : null,
-        dividendsReceived: Math.round(divAmt * 100) / 100,
+        dividendsReceived: roundMoney(divAmt, holdingCurrency),
         dividendsReceivedTagged: tagAmount(divAmt, holdingCurrency, "account"),
         dividendsReceivedReporting: tagAmount(divAmt * fxToReporting, reporting, "reporting"),
-        totalReturn: Math.round(totalReturn * 100) / 100,
+        totalReturn: roundMoney(totalReturn, holdingCurrency),
         totalReturnTagged: tagAmount(totalReturn, holdingCurrency, "account"),
         totalReturnReporting: tagAmount(totalReturn * fxToReporting, reporting, "reporting"),
         totalReturnPct: buyAmt > 0 ? Math.round((totalReturn / buyAmt) * 10000) / 100 : null,
@@ -5092,20 +5149,21 @@ export function registerPgTools(
         sales: sales.length,
         dividendPayments: dividends.length,
         totalTransactions: txns.length,
-        // Recent history
+        // Recent history — Issue #208 round per-row amount.
         recentTransactions: txns.slice(-8).map(t => {
           const txCcy = String(t.currency ?? holdingCurrency);
+          const rawAmt = Number(t.amount);
           return {
             date: t.date,
-            amount: t.amount,
+            amount: roundMoney(rawAmt, txCcy),
             quantity: t.quantity,
             currency: txCcy,
-            amountTagged: tagAmount(Number(t.amount), txCcy, "account"),
+            amountTagged: tagAmount(rawAmt, txCcy, "account"),
             type: Number(t.quantity ?? 0) > 0
               ? "buy"
               : Number(t.quantity ?? 0) < 0
                 ? "sell"
-                : Number(t.amount) > 0 ? "dividend" : "other",
+                : rawAmt > 0 ? "dividend" : "other",
             account: t.account_name,
             note: t.note || undefined,
           };
@@ -5868,9 +5926,10 @@ export function registerPgTools(
       const warnings: string[] = [];
       if (fromLookup.source === "fallback") warnings.push(`No historical rate available for ${fromCode}; using hardcoded fallback.`);
       if (toLookup.source === "fallback") warnings.push(`No historical rate available for ${toCode}; using hardcoded fallback.`);
+      // Issue #208 — `roundFxRate` (8dp) is the bank-standard rate precision.
       return text({ success: true, data: {
         from: fromCode, to: toCode, date: d,
-        rate: Math.round(rate * 100000000) / 100000000,
+        rate: roundFxRate(rate),
         source: fromLookup.source === "override" || toLookup.source === "override" ? "override" : fromLookup.source,
         legs: { from: fromLookup, to: toLookup },
         ...(warnings.length ? { warnings } : {}),
@@ -5986,9 +6045,10 @@ export function registerPgTools(
         return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: 1, converted: amount, source: "identity" } });
       }
       const rate = await getRate(fromCode, toCode, d, userId);
-      const converted = Math.round(amount * rate * 100) / 100;
-      // Match get_fx_rate precision (8 decimals, the bank standard).
-      const ratePrecise = Math.round(rate * 100000000) / 100000000;
+      // Issue #208 — `converted` is a money amount (target-currency precision);
+      // `rate` is a divisor (8dp, bank standard). Helpers name the contract.
+      const converted = roundMoney(amount * rate, toCode);
+      const ratePrecise = roundFxRate(rate);
       return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: ratePrecise, converted, date: d, source: "triangulated" } });
     }
   );
