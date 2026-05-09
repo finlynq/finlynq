@@ -279,15 +279,27 @@ export async function assertDemoDatabase(client: pg.PoolClient, url: string) {
   // Guard #3: a "demo" database should have at most one user row (the
   // demo user itself). If we see multiple, we are almost certainly
   // pointed at the real prod DB by accident.
+  //
+  // Exception: when PF_ALLOW_DEMO_SEED=1 is explicitly set, skip this
+  // check. The Finlynq prod VPS deploys both the demo user and the
+  // operator's real account onto the same `pf` Postgres DB (the demo
+  // doesn't have its own DB). The seed's wipe step is strictly
+  // user-scoped (`WHERE user_id = $1` with the demo UUID at every
+  // table), so multi-user is fine — the count guard is only a
+  // backstop for wrong-DB-connection mistakes, not the actual
+  // protection mechanism. Operators acknowledging the multi-user
+  // topology opt in via the env var.
   try {
     const { rows } = await client.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM users`
     );
     const count = Number(rows[0]?.count ?? "0");
-    if (count > 1) {
+    if (count > 1 && !explicitOptIn) {
       throw new Error(
         `Refusing to run seed-demo on a DB with ${count} users — ` +
-          `this looks like a real app database, not the single-user demo.`
+          `this looks like a real app database, not the single-user demo. ` +
+          `If this is the intended multi-tenant topology (demo user shares ` +
+          `the prod DB with real users), set PF_ALLOW_DEMO_SEED=1 to opt in.`
       );
     }
   } catch (err: unknown) {
