@@ -18,7 +18,13 @@ import {
   calculateDebtPayoff,
   type Debt,
 } from "../src/lib/loan-calculator.js";
-import { getLatestFxRate, getRate } from "../src/lib/fx-service.js";
+import {
+  getLatestFxRate,
+  getRate,
+  validateCurrencyCode,
+  validateFxDate,
+} from "../src/lib/fx-service.js";
+import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies.js";
 import { resolveTxAmountsCore } from "../src/lib/currency-conversion.js";
 import {
   invalidateUser as invalidateUserTxCache,
@@ -316,6 +322,12 @@ function txt(data: unknown) {
 function sqliteErr(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
 }
+
+// Issue #206 — currency enum widened to the full SUPPORTED_CURRENCIES list
+// (32 fiats + 4 cryptos + 4 metals). Mirrors register-tools-pg.ts.
+const supportedCurrencyEnum = z.enum(
+  SUPPORTED_CURRENCIES as unknown as [string, ...string[]]
+);
 
 /**
  * Stream D Phase 4 refusal helper (2026-05-03).
@@ -1180,7 +1192,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: z.string().describe("Account name (must be unique)"),
       type: z.enum(["A", "L"]).describe("'A'=asset, 'L'=liability"),
       group: z.string().optional().describe("Account group"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("Currency (default CAD)"),
+      currency: supportedCurrencyEnum.optional().describe("Currency (default CAD)"),
       note: z.string().optional(),
       alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },
@@ -1199,7 +1211,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       account: z.string().describe("Current account name or alias (fuzzy matched against name; exact match on alias)"),
       name: z.string().optional(),
       group: z.string().optional(),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional(),
       note: z.string().optional(),
       alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports. Pass an empty string to clear."),
     },
@@ -1338,7 +1350,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: z.string().min(1).max(200).describe("Display name of the holding"),
       account: z.string().describe("Brokerage account name or alias (fuzzy matched). Required because uniqueness is per (account, name)."),
       symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional(),
       isCrypto: z.boolean().optional(),
       note: z.string().max(500).optional(),
     },
@@ -1359,7 +1371,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: z.string().min(1).max(200).optional(),
       symbol: z.string().max(50).optional().describe("Pass empty string to clear"),
       account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) instead."),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional(),
       isCrypto: z.boolean().optional(),
       note: z.string().max(500).optional(),
     },
@@ -1864,10 +1876,23 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       date: z.string().optional(),
     },
     async ({ from, to, date }) => {
-      const d = date ?? new Date().toISOString().split("T")[0];
-      if (from === to) return txt({ success: true, data: { from, to, date: d, rate: 1, source: "identity" } });
-      const rate = await getRate(from, to, d, userId);
-      return txt({ success: true, data: { from, to, date: d, rate, source: "triangulated" } });
+      // Issue #206 — validate currencies + date at the MCP boundary.
+      let fromCode: string;
+      let toCode: string;
+      let d: string;
+      try {
+        fromCode = validateCurrencyCode(from);
+        toCode = validateCurrencyCode(to);
+        d = validateFxDate(date ?? new Date().toISOString().split("T")[0]);
+      } catch (e) {
+        return sqliteErr(e instanceof Error ? e.message : String(e));
+      }
+      if (fromCode === toCode) {
+        return txt({ success: true, data: { from: fromCode, to: toCode, date: d, rate: 1, source: "identity" } });
+      }
+      const rate = await getRate(fromCode, toCode, d, userId);
+      const ratePrecise = Math.round(rate * 100000000) / 100000000;
+      return txt({ success: true, data: { from: fromCode, to: toCode, date: d, rate: ratePrecise, source: "triangulated" } });
     }
   );
 
@@ -1897,8 +1922,23 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       note: z.string().optional(),
     },
     async ({ from, to, date, rate, dateTo, note }) => {
-      const fromU = from.trim().toUpperCase();
-      const toU = to.trim().toUpperCase();
+      // Issue #206 — validate currencies + dates at the MCP boundary so a
+      // future-dated or unknown-currency override can't poison the cache.
+      let fromU: string;
+      let toU: string;
+      let dateFrom: string;
+      let dateToFinal: string;
+      try {
+        fromU = validateCurrencyCode(from);
+        toU = validateCurrencyCode(to);
+        dateFrom = validateFxDate(date);
+        dateToFinal = validateFxDate(dateTo ?? date);
+      } catch (e) {
+        return sqliteErr(e instanceof Error ? e.message : String(e));
+      }
+      if (dateToFinal < dateFrom) {
+        return sqliteErr(`dateTo (${dateToFinal}) must be on or after date (${dateFrom}).`);
+      }
       let currency: string;
       let rateToUsd: number;
       if (fromU === "USD") { currency = toU; rateToUsd = 1 / rate; }
@@ -1907,8 +1947,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       const result = await sqlite.prepare(
         `INSERT INTO fx_overrides (user_id, currency, date_from, date_to, rate_to_usd, note) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
-      ).get(userId, currency, date, dateTo ?? date, rateToUsd, note ?? "") as { id: number } | undefined;
-      return txt({ success: true, data: { id: result?.id, currency, dateFrom: date, dateTo: dateTo ?? date, rateToUsd, action: "created" } });
+      ).get(userId, currency, dateFrom, dateToFinal, rateToUsd, note ?? "") as { id: number } | undefined;
+      return txt({ success: true, data: { id: result?.id, currency, dateFrom, dateTo: dateToFinal, rateToUsd, action: "created" } });
     }
   );
 
@@ -1938,11 +1978,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       date: z.string().optional(),
     },
     async ({ amount, from, to, date }) => {
-      const d = date ?? new Date().toISOString().split("T")[0];
-      if (from === to) return txt({ success: true, data: { amount, from, to, rate: 1, converted: amount } });
-      const rate = await getRate(from, to, d, userId);
+      // Issue #206 — validate currencies + date at the MCP boundary.
+      let fromCode: string;
+      let toCode: string;
+      let d: string;
+      try {
+        fromCode = validateCurrencyCode(from);
+        toCode = validateCurrencyCode(to);
+        d = validateFxDate(date ?? new Date().toISOString().split("T")[0]);
+      } catch (e) {
+        return sqliteErr(e instanceof Error ? e.message : String(e));
+      }
+      if (fromCode === toCode) {
+        return txt({ success: true, data: { amount, from: fromCode, to: toCode, rate: 1, converted: amount } });
+      }
+      const rate = await getRate(fromCode, toCode, d, userId);
       const converted = Math.round(amount * rate * 100) / 100;
-      return txt({ success: true, data: { amount, from, to, rate, converted, date: d, source: "triangulated" } });
+      const ratePrecise = Math.round(rate * 100000000) / 100000000;
+      return txt({ success: true, data: { amount, from: fromCode, to: toCode, rate: ratePrecise, converted, date: d, source: "triangulated" } });
     }
   );
 
@@ -1963,7 +2016,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       amount: z.number(),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]),
       next_billing_date: z.string(),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional(),
       category: z.string().optional(),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
       notes: z.string().optional(),
@@ -1985,7 +2038,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       amount: z.number().optional(),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
       next_billing_date: z.string().optional(),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional(),
       category: z.string().optional().describe("Empty string clears"),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
       status: z.enum(["active", "paused", "cancelled"]).optional(),

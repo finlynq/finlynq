@@ -6,6 +6,21 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### CRITICAL: FX historical-rate bug + cache poisoning + currency validation (#206, 2026-05-09)
+
+Fixes the auditor's #1 finding from `reviews/2026-05-09/04-fx-rate-historical-and-cache-poisoning.md`. Four compounding defects in the FX cache + lookup were silently poisoning every cross-currency cost basis, FX gain, and reporting-currency conversion in the system.
+
+- **Historical-rate bug** ([src/lib/fx-service.ts](src/lib/fx-service.ts)) — `fetchYahooRateToUsd()` was building the historical chart URL correctly (`period1`/`period2`) but extracting `meta.regularMarketPrice` from the response, which is **today's** price even on a historical payload. The actual close lives at `result.indicators.quote[0].close[]` indexed by `result.timestamp[]`. The historical branch now picks the latest close ≤ requested date over a 7-day window (catches weekend/holiday gaps); the latest-rate branch (`date >= today`) keeps `meta.regularMarketPrice` (correct there). Stooq metals path was always correct — left alone.
+- **Future-date cache write gate** — `getRateToUsdDetailed()` now skips `writeCached()` when `date > today`. Before: a future-date query would stamp a synthetic row at the future date with today's price; that row then outranked every legitimate historical row in `findNearestCached` and served as a stale fallback for every miss. Engine still tolerates future-date QUERIES (load-bearing for `convertToAccountCurrency` write paths and the `settleFutureFxRates` cron which re-locks rates when the date arrives) — the hard reject lives at the MCP tool boundary, not in the engine.
+- **`findNearestCached` hardening** — now restricts to `date <= today`. Defense in depth.
+- **MCP boundary validation** — new `validateCurrencyCode()` + `validateFxDate()` helpers exported from `fx-service.ts`. Both transports (HTTP `register-tools-pg.ts` + stdio `register-core-tools.ts`) wrap `get_fx_rate`, `set_fx_override`, `convert_amount` with try/catch on the validators. Rejects empty strings, unknown currencies (e.g. `XYZ` → `error: unknown currency: XYZ` instead of silent USD-parity fallback), pre-1970 dates, and future dates. `set_fx_override` also rejects `dateTo < date`.
+- **`convert_amount` precision aligned** — now returns rate to 8 decimals (matching `get_fx_rate`). The `converted` amount stays at 2 decimals (currency-display precision).
+- **Currency-enum widening** ([mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts), [mcp-server/register-core-tools.ts](mcp-server/register-core-tools.ts), [mcp-server/tools-v2.ts](mcp-server/tools-v2.ts)) — six create/update tool sites (`add_account`, `update_account`, `add_portfolio_holding`, `update_portfolio_holding`, `add_subscription`, `update_subscription`) replaced `z.enum(["CAD", "USD"])` with the full `SUPPORTED_CURRENCIES` list (32 fiats + 4 cryptos + 4 metals). The FX engine has supported all 40 currencies via triangulation through USD since the canonical-USD model landed; the artificial CAD/USD constraint on creates was the regression.
+- **Cache-purge migration** — new [scripts/migrations/20260509_fx-cache-purge-future-dates.sql](scripts/migrations/20260509_fx-cache-purge-future-dates.sql). `DELETE FROM fx_rates WHERE date::date > CURRENT_DATE`. Idempotent. `deploy.sh` runs it once per env via `schema_migrations` bookkeeping.
+- **Out of scope** — recomputing biased aggregates on existing transactions. Historical buys carry slightly biased cost basis because Yahoo lookup has been wrong forever. Fix forward only. Stdio MCP create/update tools for the 6 in-scope tables still refuse cleanly per Stream D Phase 4 (no DEK on stdio); the widened enum applies whenever those tools become invocable in future.
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes.
+
 ### Portfolio aggregator: orphan-holdings fix cohort — dual-write `holding_accounts` at all 8 unfixed INSERT paths (#205, 2026-05-09)
 
 Closes the issue #95 follow-up cohort. Every `portfolio_holdings` INSERT path now dual-writes the matching `holding_accounts(holding_id, account_id, user_id, qty=0, cost_basis=0, is_primary=true)` pairing in the same transaction, and a tracked SQL migration repairs any orphans created since the 2026-05-01 loose-script backfill.

@@ -15,6 +15,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { PgCompatDb } from "./pg-compat.js";
+import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies.js";
+
+// Issue #206 — currency enum widened to the full SUPPORTED_CURRENCIES list.
+const supportedCurrencyEnum = z.enum(
+  SUPPORTED_CURRENCIES as unknown as [string, ...string[]]
+);
 
 // ============ TYPES ============
 
@@ -230,7 +236,7 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
       name: z.string().describe("Account name (must be unique)"),
       type: z.enum(["A", "L"]).describe("Account type: 'A' for asset, 'L' for liability"),
       group: z.string().optional(),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional(),
       note: z.string().optional(),
     },
     async () => mcpError("add_account requires an unlocked DEK to write the encrypted accounts.name_ct/name_lookup columns after Stream D Phase 4. Stdio MCP cannot encrypt — use the HTTP MCP transport at /mcp or the web UI."),

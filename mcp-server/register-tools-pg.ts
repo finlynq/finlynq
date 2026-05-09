@@ -21,7 +21,14 @@ import {
   calculateDebtPayoff,
   type Debt,
 } from "../src/lib/loan-calculator";
-import { getLatestFxRate, getRate, getRateToUsdDetailed } from "../src/lib/fx-service";
+import {
+  getLatestFxRate,
+  getRate,
+  getRateToUsdDetailed,
+  validateCurrencyCode,
+  validateFxDate,
+} from "../src/lib/fx-service";
+import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies";
 import {
   computeAllAccountsUnrealizedPnL,
   summarizeUnrealizedPnL,
@@ -168,6 +175,12 @@ function text(data: unknown) {
 function err(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
 }
+
+// Issue #206 — currency enum widened to the full SUPPORTED_CURRENCIES list
+// (32 fiats + 4 cryptos + 4 metals). Zod requires the literal-tuple cast.
+const supportedCurrencyEnum = z.enum(
+  SUPPORTED_CURRENCIES as unknown as [string, ...string[]]
+);
 
 /**
  * Fuzzy match against a row list: exact-name → exact-alias → startsWith-name →
@@ -2280,7 +2293,7 @@ export function registerPgTools(
       name: z.string().describe("Account name (must be unique)"),
       type: z.enum(["A", "L"]).describe("Account type: 'A' for asset, 'L' for liability"),
       group: z.string().optional().describe("Account group (e.g. 'Banks', 'Credit Cards', 'Investment')"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("Currency (default CAD)"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: any currency in SUPPORTED_CURRENCIES is accepted; FX engine triangulates through USD."),
       note: z.string().optional().describe("Optional note"),
       alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },
@@ -3706,7 +3719,7 @@ export function registerPgTools(
       account: z.string().describe("Current account name or alias (fuzzy matched against name; exact match on alias)"),
       name: z.string().optional().describe("New name"),
       group: z.string().optional().describe("New group"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("New currency"),
+      currency: supportedCurrencyEnum.optional().describe("New ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       note: z.string().optional().describe("New note"),
       alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports (e.g. last 4 digits of a card). Pass an empty string to clear."),
     },
@@ -4138,7 +4151,7 @@ export function registerPgTools(
       name: z.string().min(1).max(200).describe("Display name of the holding (e.g. 'Vanguard All-Equity ETF')"),
       account: z.string().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required because uniqueness is scoped per (account, name)."),
       symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("Currency (default: parent account's currency)"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
       isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
       note: z.string().max(500).optional(),
     },
@@ -4242,7 +4255,7 @@ export function registerPgTools(
       name: z.string().min(1).max(200).optional().describe("New name"),
       symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
       account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) to move shares between accounts; update individual transactions to re-attribute history."),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       isCrypto: z.boolean().optional(),
       note: z.string().max(500).optional(),
     },
@@ -5825,17 +5838,33 @@ export function registerPgTools(
       date: z.string().optional().describe("YYYY-MM-DD — defaults to today"),
     },
     async ({ from, to, date }) => {
-      const d = date ?? new Date().toISOString().split("T")[0];
-      if (from === to) return text({ success: true, data: { from, to, date: d, rate: 1, source: "identity" } });
-      const fromLookup = await getRateToUsdDetailed(from, d, userId);
-      const toLookup = await getRateToUsdDetailed(to, d, userId);
-      if (toLookup.rate === 0) return err(`Cannot convert into ${to} (rate is zero)`);
+      // Issue #206 — validate currencies + date at the MCP boundary.
+      let fromCode: string;
+      let toCode: string;
+      let d: string;
+      try {
+        fromCode = validateCurrencyCode(from);
+        toCode = validateCurrencyCode(to);
+        d = validateFxDate(date ?? new Date().toISOString().split("T")[0]);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      if (fromCode === toCode) {
+        return text({ success: true, data: { from: fromCode, to: toCode, date: d, rate: 1, source: "identity" } });
+      }
+      const fromLookup = await getRateToUsdDetailed(fromCode, d, userId);
+      const toLookup = await getRateToUsdDetailed(toCode, d, userId);
+      if (toLookup.rate === 0) return err(`Cannot convert into ${toCode} (rate is zero)`);
       const rate = fromLookup.rate / toLookup.rate;
+      const warnings: string[] = [];
+      if (fromLookup.source === "fallback") warnings.push(`No historical rate available for ${fromCode}; using hardcoded fallback.`);
+      if (toLookup.source === "fallback") warnings.push(`No historical rate available for ${toCode}; using hardcoded fallback.`);
       return text({ success: true, data: {
-        from, to, date: d,
+        from: fromCode, to: toCode, date: d,
         rate: Math.round(rate * 100000000) / 100000000,
         source: fromLookup.source === "override" || toLookup.source === "override" ? "override" : fromLookup.source,
         legs: { from: fromLookup, to: toLookup },
+        ...(warnings.length ? { warnings } : {}),
       } });
     }
   );
@@ -5868,8 +5897,24 @@ export function registerPgTools(
       note: z.string().optional().describe("Optional note (e.g. 'bank rate at Wise on this day')"),
     },
     async ({ from, to, date, rate, dateTo, note }) => {
-      const fromU = from.trim().toUpperCase();
-      const toU = to.trim().toUpperCase();
+      // Issue #206 — validate currencies + dates at the MCP boundary so a
+      // future-dated or unknown-currency override can't poison the cache
+      // via findNearestCached's nearest-row lookup.
+      let fromU: string;
+      let toU: string;
+      let dateFrom: string;
+      let dateToFinal: string;
+      try {
+        fromU = validateCurrencyCode(from);
+        toU = validateCurrencyCode(to);
+        dateFrom = validateFxDate(date);
+        dateToFinal = validateFxDate(dateTo ?? date);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      if (dateToFinal < dateFrom) {
+        return err(`dateTo (${dateToFinal}) must be on or after date (${dateFrom}).`);
+      }
       let currency: string;
       let rateToUsd: number;
       if (fromU === "USD") {
@@ -5885,10 +5930,10 @@ export function registerPgTools(
       }
       const result = await q(db, sql`
         INSERT INTO fx_overrides (user_id, currency, date_from, date_to, rate_to_usd, note)
-        VALUES (${userId}, ${currency}, ${date}, ${dateTo ?? date}, ${rateToUsd}, ${note ?? ""})
+        VALUES (${userId}, ${currency}, ${dateFrom}, ${dateToFinal}, ${rateToUsd}, ${note ?? ""})
         RETURNING id
       `);
-      return text({ success: true, data: { id: Number(result[0]?.id), currency, dateFrom: date, dateTo: dateTo ?? date, rateToUsd, action: "created" } });
+      return text({ success: true, data: { id: Number(result[0]?.id), currency, dateFrom, dateTo: dateToFinal, rateToUsd, action: "created" } });
     }
   );
 
@@ -5917,11 +5962,25 @@ export function registerPgTools(
       date: z.string().optional().describe("YYYY-MM-DD — defaults to today"),
     },
     async ({ amount, from, to, date }) => {
-      const d = date ?? new Date().toISOString().split("T")[0];
-      if (from === to) return text({ success: true, data: { amount, from, to, rate: 1, converted: amount, source: "identity" } });
-      const rate = await getRate(from, to, d, userId);
+      // Issue #206 — validate currencies + date at the MCP boundary.
+      let fromCode: string;
+      let toCode: string;
+      let d: string;
+      try {
+        fromCode = validateCurrencyCode(from);
+        toCode = validateCurrencyCode(to);
+        d = validateFxDate(date ?? new Date().toISOString().split("T")[0]);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      if (fromCode === toCode) {
+        return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: 1, converted: amount, source: "identity" } });
+      }
+      const rate = await getRate(fromCode, toCode, d, userId);
       const converted = Math.round(amount * rate * 100) / 100;
-      return text({ success: true, data: { amount, from, to, rate, converted, date: d, source: "triangulated" } });
+      // Match get_fx_rate precision (8 decimals, the bank standard).
+      const ratePrecise = Math.round(rate * 100000000) / 100000000;
+      return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: ratePrecise, converted, date: d, source: "triangulated" } });
     }
   );
 
@@ -5966,7 +6025,7 @@ export function registerPgTools(
       amount: z.number().describe("Amount per billing cycle (positive number)"),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
       next_billing_date: z.string().describe("Next billing date (YYYY-MM-DD)"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("Default CAD"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
       category: z.string().optional().describe("Category name (fuzzy matched)"),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
       notes: z.string().optional(),
@@ -6021,7 +6080,7 @@ export function registerPgTools(
       amount: z.number().optional(),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
       next_billing_date: z.string().optional().describe("YYYY-MM-DD"),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       category: z.string().optional().describe("Category name (fuzzy). Empty string clears."),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
       status: z.enum(["active", "paused", "cancelled"]).optional(),
