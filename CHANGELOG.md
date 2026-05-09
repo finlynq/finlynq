@@ -6,6 +6,14 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Dashboard balance fallback now branches on `is_investment` (#204, 2026-05-09)
+
+`/api/dashboard` per-account balance previously fell back to `SUM(transactions.amount)` whenever `holdingsByAccount.get(b.accountId)` returned `undefined`. For an investment account whose holdings aggregator dropped a position (orphan `holding_accounts` row, FX outage, freshly-imported snapshot before the holding has any transactions), the dashboard silently rendered the cash-leg sum (just the buy/sell/dividend cash legs) as the account balance — a meaningless number that looked like a real balance. Mirrors the canonical pattern shipped under #151 for `/api/goals`.
+
+- **[src/app/api/dashboard/route.ts](src/app/api/dashboard/route.ts)** — replaced the `holdings ? holdings.value : cashFlowBasis` ternary with explicit branching on `b.isInvestment`. Investment accounts now return `holdings?.value ?? 0` (visible `0` when the aggregator emits nothing — diagnosable, not silently misleading); cash accounts return `cashFlowBasis` unchanged. Defensive `Boolean(b.isInvestment)` coercion in case a future refactor of `getAccountBalances` returns partial rows. `cashFlowBasis`, `holdingsValue`, `holdingsCostBasis`, and `convertedBalance` response fields preserved (no consumer regression on Accounts list, Account detail, Net Worth, or Income vs Expenses panels).
+- **Behavior change is user-visible** for any investment account where the aggregator currently returns empty: pre-fix shows a non-zero cash-leg number, post-fix shows `$0.00`. `$0` is the correct answer for "we couldn't compute holdings" and matches the goals page. `getAccountBalances` already returns `isInvestment` on every row ([src/lib/queries.ts:615](src/lib/queries.ts)) — no plumbing change required.
+- Independent of the upstream portfolio-aggregator orphan-holdings investigation (#205); the dashboard fallback rule is wrong on its own merits and remains correct after that fix lands.
+
 ### MCP `bulk_record_transactions` — fail loud on unknown category names (#203, 2026-05-09)
 
 `bulk_record_transactions` (MCP HTTP) previously coerced an unknown `category` name to `category_id = NULL` and reported the row as `success: true`, silently dropping the user's intent. The buggy branch lived at [mcp-server/register-tools-pg.ts:2765-2777](mcp-server/register-tools-pg.ts) where a `fuzzyFind` miss returned `null` instead of pushing a per-row failure. Sibling tools (`record_transaction`, `update_transaction`, `execute_bulk_update`) all fail loudly on unknown categories — this was the symmetric gap to issue #61's `unapplied[]` contract on the bulk-update side.

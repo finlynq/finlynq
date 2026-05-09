@@ -41,21 +41,34 @@ export async function GET(request: NextRequest) {
       accountNameCt: "accountName",
       aliasCt: "alias",
     });
-    // For investment accounts (any account with holdings), balance = market
-    // value of holdings (which already includes any cash sleeve via the
-    // currency-as-holding pattern). Transactions still drive cash-flow /
-    // income reports but no longer contribute to balance — this fixes the
-    // double-count where a payroll deposit was added to balance AND the
-    // ETF it was used to buy was also added.
+    // Per-account balance branches on `accounts.is_investment`, NOT on map
+    // presence (issue #204). Investment accounts always report holdings value
+    // (or 0 when the aggregator emits nothing); cash accounts report the
+    // transaction sum unchanged. Mirrors the canonical pattern from goals API
+    // (#151, src/app/api/goals/route.ts:244-247).
     //
-    // For pure-cash accounts (no holdings), balance = SUM(transactions.amount)
-    // unchanged. cashFlowBasis is the transaction sum exposed separately so
-    // the account detail page can display "Cash flow" alongside Market value.
+    // Pre-#204 the ternary keyed on map presence — when the holdings
+    // aggregator dropped every position for an investment account (orphan
+    // holding_accounts row, FX outage, freshly-imported snapshot before any
+    // transaction), the dashboard silently fell back to SUM(transactions.amount),
+    // which for an investment account is just the cash legs of buys/sells/
+    // dividends — meaningless as a "balance." Surfacing 0 instead is visible
+    // and diagnosable.
+    //
+    // For investment accounts the cash sleeve is already inside holdings.value
+    // via the currency-as-holding pattern, so we never sum (CLAUDE.md
+    // "Account balance for accounts with holdings" gotcha).
+    //
+    // cashFlowBasis is the transaction sum exposed separately so the account
+    // detail page can display "Cash flow" alongside Market value.
     const holdingsByAccount = await getHoldingsValueByAccount(userId, dek);
     const convertedBalances = balances.map((b: any) => {
       const holdings = holdingsByAccount.get(b.accountId);
       const cashFlowBasis = b.balance;
-      const totalBalance = holdings ? holdings.value : cashFlowBasis;
+      const isInvestment = Boolean(b.isInvestment);
+      const totalBalance = isInvestment
+        ? (holdings?.value ?? 0)
+        : cashFlowBasis;
       return {
         ...b,
         balance: totalBalance,
