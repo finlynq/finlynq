@@ -6,6 +6,10 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Demo seed — let `PF_ALLOW_DEMO_SEED=1` bypass the multi-user guard (2026-05-09)
+
+The Finlynq prod VPS provisions both the demo user (`00000000-0000-0000-0000-00000000demo`) and the operator's real account onto the same `pf` Postgres DB — the demo doesn't have its own database. The B9 hygiene PR ([#172](https://github.com/finlynq/finlynq/pull/172)) added a count-based safety guard in `assertDemoDatabase` that refuses to run when the DB has >1 user row, intended to catch wrong-DB-connection mistakes. On this prod topology that guard trips every time and prevented the seed from running today after PR #199 shipped (the seed's actual wipe step is `WHERE user_id = $1` with the demo UUID at every table, so multi-user has always been safe — the count guard was just a backstop). Now the existing `PF_ALLOW_DEMO_SEED=1` opt-in (which already bypassed guard #1, the URL substring check) also bypasses guard #3. Operator on a multi-tenant prod DB sets the env var on `finlynq-demo-reset.service` once; defaults still refuse for fresh self-hosters.
+
 ### Demo seed — fix missing `holding_accounts` dual-write + expand portfolio fixture (2026-05-09)
 
 Fixes [scripts/seed-demo.ts](scripts/seed-demo.ts) skipping the `holding_accounts` dual-write that every portfolio aggregator JOINs through (`(holding_id, account_id, user_id)` grain — see CLAUDE.md "Load-bearing gotchas" §"Every `portfolio_holdings` INSERT path must dual-write a `holding_accounts` row"). Without that join row, the demo account's `get_portfolio_analysis`, `analyze_holding`, and `get_portfolio_performance` MCP tools all returned "zero holdings tracked" — which was what Anthropic Connectors Directory reviewers (and the user) hit when querying the demo via Claude.ai. Also expands the demo holdings from 3 to 7 (VTI, VOO, VXUS, VCN.TO, VAB.TO, AAPL, BTC) plus a VOO rebalance sell so the portfolio donut/breakdown looks like a realistic small portfolio (~CA$17K cost basis after the partial sell) and the realized-gain code path is actually exercised by reviewers.
