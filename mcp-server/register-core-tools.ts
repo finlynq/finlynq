@@ -1299,7 +1299,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "Create a new transaction category",
     {
       name: z.string().describe("Category name (must be unique)"),
-      type: z.enum(["E", "I", "T"]).describe("'E'=expense, 'I'=income, 'T'=transfer"),
+      // Issue #211 (Bug d): aligned with the rest of the system on
+      // 'R' for transfer (was 'T'). Stdio create_category refuses
+      // post Stream D Phase 4 anyway, but keeping the enum honest
+      // so a future stdio-with-DEK transport doesn't reintroduce
+      // the orphan-type bug.
+      type: z.enum(["E", "I", "R"]).describe("'E'=expense, 'I'=income, 'R'=transfer"),
       group: z.string().optional(),
       note: z.string().optional(),
     },
@@ -1620,7 +1625,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           add_goal: "add_goal(name, type, target_amount, deadline?, account?)",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?)",
           delete_goal: "delete_goal(goal)",
-          create_category: "create_category(name, type, group?, note?) — type: E/I/T",
+          create_category: "create_category(name, type, group?, note?) — type: E/I/R",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?)",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark'",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
