@@ -2764,8 +2764,27 @@ export function registerPgTools(
 
           let catId: number | null = null;
           if (t.category) {
-            const cat = fuzzyFind(t.category, allCats);
-            catId = cat ? Number(cat.id) : null;
+            // Issue #203: explicit category names must fail loud when they
+            // don't resolve. The previous `fuzzyFind` + silent-null branch
+            // coerced unknown categories to `category_id = NULL` and
+            // reported the row as `success: true` — symmetric gap to the
+            // `unapplied[]` contract on `execute_bulk_update` (issue #61)
+            // and the strict-resolve pattern on `record_transaction`/
+            // `update_transaction`. Mirror `update_transaction`'s use of
+            // `resolveCategoryStrict` so low-confidence substring hits
+            // also surface a "did you mean..." hint instead of misrouting.
+            // The truthy `if (t.category)` check preserves the intentional
+            // "auto-categorize on no input" branch via `autoCategory`.
+            const resolved = resolveCategoryStrict(t.category, allCats);
+            if (!resolved.ok) {
+              const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+              const message = resolved.reason === "low_confidence"
+                ? `Category "${t.category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-submit with the exact name to confirm.`
+                : `Category "${t.category}" not found. Available: ${list}`;
+              results.push({ index: i, success: false, message, resolvedAccount: resolvedAccountInfo });
+              continue;
+            }
+            catId = Number(resolved.category.id);
           } else {
             catId = await autoCategory(
               db,
