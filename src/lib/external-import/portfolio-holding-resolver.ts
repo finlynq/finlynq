@@ -159,6 +159,33 @@ export async function buildHoldingResolver(
       const inserted = Array.isArray(insertedRow) ? insertedRow[0] : insertedRow;
       const id = inserted?.id;
       if (id != null) {
+        // Issue #205 — dual-write holding_accounts pairing. Every aggregator
+        // (issue #25) JOINs through this table; without the pairing the
+        // import-resolver-created holding is invisible. On pairing failure,
+        // DELETE the orphan portfolio_holdings row.
+        try {
+          await db
+            .insert(schema.holdingAccounts)
+            .values({
+              holdingId: id,
+              accountId,
+              userId,
+              qty: 0,
+              costBasis: 0,
+              isPrimary: true,
+            })
+            .onConflictDoNothing();
+        } catch (pairingErr) {
+          await db
+            .delete(schema.portfolioHoldings)
+            .where(
+              and(
+                eq(schema.portfolioHoldings.id, id),
+                eq(schema.portfolioHoldings.userId, userId),
+              ),
+            );
+          throw pairingErr;
+        }
         created++;
         byPlain.set(pk, id);
         if (lk) byLookup.set(lookupKey(accountId, lk), id);

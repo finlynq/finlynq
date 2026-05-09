@@ -140,7 +140,40 @@ export async function getOrCreateCashHolding(
       })
       .returning({ id: schema.portfolioHoldings.id });
     const id = Array.isArray(inserted) ? inserted[0]?.id : (inserted as { id?: number } | undefined)?.id;
-    if (id != null) return id;
+    if (id != null) {
+      // Issue #205 — dual-write holding_accounts pairing. The cash sleeve is
+      // the highest-traffic auto-create site (every first transaction in a
+      // newly-flagged investment account); without the pairing, the sleeve is
+      // invisible to every aggregator and `accounts.balance` resolves to a
+      // misleading 0/negative number. is_primary=true mirrors the legacy
+      // portfolio_holdings.account_id column. On pairing failure, DELETE the
+      // orphan portfolio_holdings row — a Cash sleeve we can't pair with the
+      // account is worse than no sleeve (the next call retries cleanly).
+      try {
+        await db
+          .insert(schema.holdingAccounts)
+          .values({
+            holdingId: id,
+            accountId,
+            userId,
+            qty: 0,
+            costBasis: 0,
+            isPrimary: true,
+          })
+          .onConflictDoNothing();
+      } catch (pairingErr) {
+        await db
+          .delete(schema.portfolioHoldings)
+          .where(
+            and(
+              eq(schema.portfolioHoldings.id, id),
+              eq(schema.portfolioHoldings.userId, userId),
+            ),
+          );
+        throw pairingErr;
+      }
+      return id;
+    }
   } catch (err) {
     // 23505 = unique_violation — concurrent writer beat us. Re-SELECT.
     const code = (err as { code?: string }).code;

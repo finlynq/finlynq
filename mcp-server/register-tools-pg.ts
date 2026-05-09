@@ -3461,6 +3461,23 @@ export function registerPgTools(
         `);
         cashHoldingId = Number(ins[0]?.id);
         cashHoldingName = cashName;
+        // Issue #205 — dual-write holding_accounts pairing. Mirrors the
+        // canonical pattern at register-tools-pg.ts:4190-4201 in
+        // add_portfolio_holding. Without the pairing, every aggregator (issue
+        // #25) silently drops trades against this sleeve. On pairing failure,
+        // DELETE the orphan portfolio_holdings row.
+        try {
+          await q(db, sql`
+            INSERT INTO holding_accounts (holding_id, account_id, user_id, qty, cost_basis, is_primary)
+            VALUES (${cashHoldingId}, ${acct.id}, ${userId}, 0, 0, true)
+            ON CONFLICT (holding_id, account_id) DO NOTHING
+          `);
+        } catch (pairingErr) {
+          await q(db, sql`
+            DELETE FROM portfolio_holdings WHERE id = ${cashHoldingId} AND user_id = ${userId}
+          `);
+          throw pairingErr;
+        }
       }
 
       // For BUY: cash sleeve is the source (must exist — done above);
