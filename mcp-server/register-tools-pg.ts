@@ -4500,6 +4500,9 @@ export function registerPgTools(
       // resolve, short-circuit to empty holdings + the warnings array. Same
       // shape as a successful empty result (no error) so callers stay
       // monomorphic — mirrors the symbols-all-unmatched warnings contract.
+      // Issue #209: dropped the mixed-currency raw `totalCostBasis` /
+      // `lifetimeCostBasis` / etc. fields — only `*Reporting` siblings remain
+      // (currency-converted, the canonical totals).
       if (scopeRejected) {
         return text({
           disclaimer: PORTFOLIO_DISCLAIMER,
@@ -4508,12 +4511,6 @@ export function registerPgTools(
           reportingCurrency: reporting,
           warnings: accountWarnings,
           summary: {
-            totalCostBasis: 0,
-            lifetimeCostBasis: 0,
-            totalRealizedGain: 0,
-            totalDividends: 0,
-            totalReturn: 0,
-            totalReturnPct: null,
             lifetimeCostBasisReporting: tagAmount(0, reporting, "reporting"),
             totalRealizedGainReporting: tagAmount(0, reporting, "reporting"),
             totalDividendsReporting: tagAmount(0, reporting, "reporting"),
@@ -4570,9 +4567,23 @@ export function registerPgTools(
         : null;
 
       const today = new Date();
+      // Issue #209 — threshold guard for `totalReturnPct`. Below this floor in
+      // the holding's own currency, the return % is suppressed (set to null)
+      // and a row warning surfaces the reason. Cash sleeves with $0.04 cost
+      // basis used to overflow to `18,501,638.9%`; legitimate near-zero
+      // positions (rounding dust on closed positions) get the same treatment.
+      const PERCENT_FLOOR_NATIVE = 1.0;
+      // Issue #209 — surfaced per row when the percentage is suppressed for
+      // any reason (cash sleeve, cost basis below floor).
+      type RowWarning = { holdingId: number | null; code: string; message: string };
+      const rowWarnings: RowWarning[] = [];
+      // Issue #209 — explicit status field so callers don't infer state from
+      // null patterns on totalCostBasis/daysHeld/firstPurchaseDate.
+      type HoldingStatus = "active" | "zero_position" | "cash_only" | "sold_out";
       type HoldingResult = {
         id: number | null;
         name: unknown; symbol: unknown; account: unknown; currency: string;
+        status: HoldingStatus;
         quantity: number; avgCostPerShare: number | null; totalCostBasis: number | null;
         lifetimeCostBasis: number; realizedGain: number; dividendsReceived: number;
         totalReturn: number | null; totalReturnPct: number | null;
@@ -4633,11 +4644,56 @@ export function registerPgTools(
         const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
         const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
         const totalReturn = realizedGain + divs; // unrealized excluded (no live prices in MCP)
-        const totalReturnPct = buyAmt > 0 ? (totalReturn / buyAmt) * 100 : null;
         const fpDate = m.first_purchase ?? null;
         const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
         const ccy = String(info?.currency ?? "CAD");
         const fx = await fxFor(ccy);
+
+        // Issue #209 — cash-sleeve detection. Cash sleeves are
+        // `name='Cash', symbol=NULL/empty` per the investment-account
+        // constraint (CLAUDE.md). A $9.90 dividend posted to a $0-cost cash
+        // sleeve must NOT report `100%+ return`. Detection guards on `info?`
+        // (when DEK is missing the symbol/name decrypt to null and detection
+        // silently fails — accepted soft-fallback per CLAUDE.md "Read vs
+        // write auth guards"; without the DEK every other display field is
+        // also blank).
+        const symbolStr = String(info?.symbol ?? "").trim();
+        const nameLower = String(m.name ?? "").trim().toLowerCase();
+        const isCashSleeve = symbolStr === "" && nameLower === "cash";
+
+        // Issue #209 — derive explicit status. Clients should branch on this
+        // field, not on null patterns of totalCostBasis/daysHeld.
+        const status: HoldingStatus = isCashSleeve
+          ? "cash_only"
+          : remainingQty > 0
+            ? "active"
+            : buyQty > 0 && remainingQty <= 0
+              ? "sold_out"
+              : "zero_position";
+
+        // Issue #209 — threshold-guard `totalReturnPct`. Cash sleeves never
+        // get a percentage. Below the native-currency floor, suppress and
+        // surface a row warning so the LLM can explain the suppression.
+        let totalReturnPct: number | null;
+        if (isCashSleeve) {
+          totalReturnPct = null;
+          rowWarnings.push({
+            holdingId: m.holding_id ?? null,
+            code: "cash_sleeve_no_return_pct",
+            message: "Cash sleeve — return % not meaningful (no cost basis convention).",
+          });
+        } else if (buyAmt >= PERCENT_FLOOR_NATIVE) {
+          totalReturnPct = (totalReturn / buyAmt) * 100;
+        } else {
+          totalReturnPct = null;
+          if (buyAmt > 0) {
+            rowWarnings.push({
+              holdingId: m.holding_id ?? null,
+              code: "cost_basis_too_small",
+              message: `Cost basis below ${PERCENT_FLOOR_NATIVE} ${ccy} — return % suppressed (would otherwise overflow).`,
+            });
+          }
+        }
 
         // Issue #208 — round at the response boundary using the helper so
         // IEEE-754 noise (`-3.6e-11`-class drift, `5598.589999990002`-class
@@ -4653,6 +4709,7 @@ export function registerPgTools(
           symbol: info?.symbol ?? null,
           account: info?.account_name ?? null,
           currency: ccy,
+          status,
           quantity: Math.round(remainingQty * 10000) / 10000,
           avgCostPerShare: avgCost ? roundMoney(avgCost, ccy) : null,
           avgCostPerShareTagged: avgCost ? tagAmount(avgCost, ccy, "account") : null,
@@ -4667,7 +4724,7 @@ export function registerPgTools(
           dividendsReceivedTagged: tagAmount(divs, ccy, "account"),
           dividendsReceivedReporting: tagAmount(divs * fx, reporting, "reporting"),
           totalReturn: roundMoney(totalReturn, ccy),
-          totalReturnPct: totalReturnPct ? Math.round(totalReturnPct * 100) / 100 : null,
+          totalReturnPct: totalReturnPct !== null ? Math.round(totalReturnPct * 100) / 100 : null,
           firstPurchaseDate: fpDate,
           daysHeld,
         });
@@ -4675,34 +4732,62 @@ export function registerPgTools(
 
       results.sort((a, b) => (b.lifetimeCostBasis ?? 0) - (a.lifetimeCostBasis ?? 0));
 
-      // Summary aggregates: convert each holding's lifetimeCostBasis et al
-      // into reporting currency before summing. The legacy sums were in
-      // mixed currencies — preserved here for backward compat but the
-      // *Reporting fields are the canonical totals.
-      const totalCostBasis = results.reduce((s, r) => s + (r.totalCostBasis ?? 0), 0);
-      const totalLifetime = results.reduce((s, r) => s + r.lifetimeCostBasis, 0);
-      const totalRealized = results.reduce((s, r) => s + r.realizedGain, 0);
-      const totalDivs = results.reduce((s, r) => s + r.dividendsReceived, 0);
-      const totalReturn = totalRealized + totalDivs;
-
+      // Issue #209 — dropped mixed-currency raw sums from the summary. The
+      // pre-209 code published `totalCostBasis` / `lifetimeCostBasis` /
+      // `totalRealizedGain` / `totalDividends` / `totalReturn` /
+      // `totalReturnPct` as raw arithmetic sums of per-row values that are
+      // each in their own currency — the result is mathematically
+      // meaningless ("615648.4 USD-ish + CAD-ish"). The `*Reporting` siblings
+      // (FX-converted into the user's reporting currency) are the canonical
+      // totals and are now the only summary money fields.
       let totalLifetimeReporting = 0;
       let totalRealizedReporting = 0;
       let totalDivsReporting = 0;
       for (const r of results) {
+        // Cash sleeves contribute $0 cost basis to the reporting sum (they
+        // hold cash, not invested capital) — keeping their per-row inputs in
+        // would understate the "total return %" denominator and inflate the
+        // numerator with dividends-on-cash. Realized gain / dividends from
+        // genuine holdings stay in.
+        if (r.status === "cash_only") {
+          totalRealizedReporting += r.realizedGainReporting.amount;
+          totalDivsReporting += r.dividendsReceivedReporting.amount;
+          continue;
+        }
         totalLifetimeReporting += r.lifetimeCostBasisReporting.amount;
         totalRealizedReporting += r.realizedGainReporting.amount;
         totalDivsReporting += r.dividendsReceivedReporting.amount;
       }
       const totalReturnReporting = totalRealizedReporting + totalDivsReporting;
 
+      // Issue #209 — threshold guard for the summary `totalReturnPctReporting`.
+      // Below this floor in reporting currency, the percentage is suppressed
+      // (set to null) and a top-level warning surfaces the reason.
+      const PERCENT_FLOOR_REPORTING = 10;
+      const summaryWarnings: string[] = [];
+      let totalReturnPctReporting: number | null;
+      if (totalLifetimeReporting >= PERCENT_FLOOR_REPORTING) {
+        totalReturnPctReporting = Math.round((totalReturnReporting / totalLifetimeReporting) * 10000) / 100;
+      } else {
+        totalReturnPctReporting = null;
+        if (totalLifetimeReporting > 0) {
+          summaryWarnings.push(
+            `Aggregate cost basis below ${PERCENT_FLOOR_REPORTING} ${reporting} — return % suppressed (would otherwise overflow).`
+          );
+        }
+      }
+
       // Issue #86: surface unmatched `symbols` filter entries as warnings so
       // the caller can correct typos/missing positions instead of silently
       // getting an empty result.
       // Issue #123: merge any account-scope warnings (e.g. account_id not
       // owned, or low-confidence fuzzy account match) into the same array.
-      // The contract is strings only — no objects — to keep callers simple.
+      // Issue #209: include the summary-level threshold-guard warning here.
+      // The contract is strings only — no objects — to keep callers simple;
+      // per-row warnings live on the response's `rowWarnings[]` array.
       const warnings: string[] = [
         ...accountWarnings,
+        ...summaryWarnings,
         ...(symbolFilters
           ? symbols!.filter(s => !matchedFilters.has(s.toLowerCase()))
               .map(s => `${s}: no matching holding found`)
@@ -4711,28 +4796,20 @@ export function registerPgTools(
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics. Results are per-holdingId — two holdings sharing a name across accounts return as separate rows.",
+        note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics. Results are per-holdingId — two holdings sharing a name across accounts return as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear in `holdings[]` with `status: 'cash_only'` and `totalReturnPct: null`.",
         totalHoldings: results.length,
         reportingCurrency: reporting,
         warnings,
-        // Issue #208 — round summary aggregates at the response boundary.
-        // Mixed-currency raw sums (totalCostBasis, lifetimeCostBasis, etc.)
-        // are mathematically meaningless without an FX hop — they're
-        // preserved here for backward compat (issue #209 will rename/drop)
-        // but rounded to 2dp so the leak class shrinks regardless.
+        rowWarnings,
+        // Issue #209 — only `*Reporting` siblings remain. These are the
+        // canonical totals (FX-converted into the user's reporting currency).
+        // Cash-sleeve `lifetimeCostBasis` is excluded from the denominator.
         summary: {
-          totalCostBasis: roundMoney(totalCostBasis, reporting),
-          lifetimeCostBasis: roundMoney(totalLifetime, reporting),
-          totalRealizedGain: roundMoney(totalRealized, reporting),
-          totalDividends: roundMoney(totalDivs, reporting),
-          totalReturn: roundMoney(totalReturn, reporting),
-          totalReturnPct: totalLifetime > 0 ? Math.round((totalReturn / totalLifetime) * 10000) / 100 : null,
-          // Currency-converted aggregates — these are the canonical totals.
           lifetimeCostBasisReporting: tagAmount(roundMoney(totalLifetimeReporting, reporting), reporting, "reporting"),
           totalRealizedGainReporting: tagAmount(roundMoney(totalRealizedReporting, reporting), reporting, "reporting"),
           totalDividendsReporting: tagAmount(roundMoney(totalDivsReporting, reporting), reporting, "reporting"),
           totalReturnReporting: tagAmount(roundMoney(totalReturnReporting, reporting), reporting, "reporting"),
-          totalReturnPctReporting: totalLifetimeReporting > 0 ? Math.round((totalReturnReporting / totalLifetimeReporting) * 10000) / 100 : null,
+          totalReturnPctReporting,
         },
         holdings: results,
       });
@@ -4763,7 +4840,67 @@ export function registerPgTools(
       const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
       const perf = await aggregateHoldings(db, userId, dek, { since, dividendsCategoryId });
 
-      const results = perf.map(p => {
+      // Issue #209 — load portfolio_holdings.symbol_ct so we can detect cash
+      // sleeves (`name='Cash', symbol=NULL/empty`) and suppress percentage
+      // overflow on rows like a $9.90 dividend posted to a $0-cost cash leg.
+      // Without the symbol we can't disambiguate a real holding called "Cash"
+      // from the auto-created cash sleeve.
+      const phRaw = await q(db, sql`
+        SELECT id, symbol_ct FROM portfolio_holdings WHERE user_id = ${userId}
+      `);
+      const symbolByHoldingId = new Map<number, string>();
+      for (const p of phRaw) {
+        const sym = p.symbol_ct && dek
+          ? (() => { try { return decryptField(dek, String(p.symbol_ct)) ?? ""; } catch { return ""; } })()
+          : "";
+        symbolByHoldingId.set(Number(p.id), String(sym ?? "").trim());
+      }
+
+      // Issue #209 — threshold guard for `*Pct` overflow. Below this floor in
+      // the holding's own currency the percentage is suppressed (set to null)
+      // so a $0.04 cost-basis row stops emitting `18,501,638.9%`.
+      const PERCENT_FLOOR_NATIVE = 1.0;
+      // Issue #209 — surfaced per row when the percentage is suppressed.
+      type PerfRowWarning = { holdingId: number | null; code: string; message: string };
+      const perfRowWarnings: PerfRowWarning[] = [];
+      // Issue #209 — explicit status field, mirrors get_portfolio_analysis.
+      type PerfHoldingStatus = "active" | "zero_position" | "cash_only" | "sold_out";
+
+      // Issue #209 — FX cache so we can roll up a `*Reporting` summary in
+      // the user's reporting currency (no more raw mixed-currency sums).
+      const todayStr = new Date().toISOString().split("T")[0];
+      const fxCache = new Map<string, number>();
+      const fxFor = async (ccy: string): Promise<number> => {
+        const k = (ccy || reporting).toUpperCase();
+        if (fxCache.has(k)) return fxCache.get(k)!;
+        const r = await getRate(k, reporting, todayStr, userId);
+        fxCache.set(k, r);
+        return r;
+      };
+
+      const results: Array<{
+        holdingId: number | null;
+        holding: unknown;
+        status: PerfHoldingStatus;
+        txCount: number;
+        quantity: number;
+        lifetimeCostBasis: number;
+        lifetimeCostBasisReporting: ReturnType<typeof tagAmount>;
+        currentCostBasis: number | null;
+        avgCostPerShare: number | null;
+        realizedGain: number;
+        realizedGainReporting: ReturnType<typeof tagAmount>;
+        realizedGainPct: number | null;
+        dividendsReceived: number;
+        dividendsReceivedReporting: ReturnType<typeof tagAmount>;
+        totalReturn: number;
+        totalReturnReporting: ReturnType<typeof tagAmount>;
+        totalReturnPct: number | null;
+        firstPurchase: unknown;
+        lastActivity: unknown;
+        daysHeld: number | null;
+      }> = [];
+      for (const p of perf) {
         const buyQty = Number(p.buy_qty ?? 0);
         const buyAmt = Number(p.buy_amount ?? 0);
         const sellQty = Number(p.sell_qty ?? 0);
@@ -4779,48 +4916,126 @@ export function registerPgTools(
         // Issue #208 — per-row money fields stay in the holding's own
         // currency; round at this boundary, not in `aggregateHoldings`.
         const rowCcy = String(p.currency ?? reporting);
-        return {
+        const fx = await fxFor(rowCcy);
+
+        // Issue #209 — cash-sleeve detection via symbol map. Same rule as
+        // get_portfolio_analysis: `symbol IS NULL/empty AND name='cash'` (case-
+        // insensitive). When DEK is missing the symbol decrypts to empty and
+        // detection silently fails — accepted soft-fallback per CLAUDE.md.
+        const symbolStr = p.holding_id != null
+          ? (symbolByHoldingId.get(Number(p.holding_id)) ?? "")
+          : "";
+        const nameLower = String(p.name ?? "").trim().toLowerCase();
+        const isCashSleeve = symbolStr === "" && nameLower === "cash";
+
+        const status: PerfHoldingStatus = isCashSleeve
+          ? "cash_only"
+          : remainingQty > 0
+            ? "active"
+            : buyQty > 0 && remainingQty <= 0
+              ? "sold_out"
+              : "zero_position";
+
+        // Issue #209 — threshold-guard both percentages and skip cash sleeves.
+        let realizedGainPct: number | null;
+        let totalReturnPct: number | null;
+        if (isCashSleeve) {
+          realizedGainPct = null;
+          totalReturnPct = null;
+          perfRowWarnings.push({
+            holdingId: p.holding_id ?? null,
+            code: "cash_sleeve_no_return_pct",
+            message: "Cash sleeve — return % not meaningful (no cost basis convention).",
+          });
+        } else if (buyAmt >= PERCENT_FLOOR_NATIVE) {
+          realizedGainPct = Math.round((realizedGain / buyAmt) * 10000) / 100;
+          totalReturnPct = Math.round((totalReturn / buyAmt) * 10000) / 100;
+        } else {
+          realizedGainPct = null;
+          totalReturnPct = null;
+          if (buyAmt > 0) {
+            perfRowWarnings.push({
+              holdingId: p.holding_id ?? null,
+              code: "cost_basis_too_small",
+              message: `Cost basis below ${PERCENT_FLOOR_NATIVE} ${rowCcy} — return % suppressed (would otherwise overflow).`,
+            });
+          }
+        }
+
+        results.push({
           // Issue #86: surface the FK id so callers can disambiguate
           // same-name holdings (e.g. VUN.TO in TFSA vs RRSP).
           holdingId: p.holding_id ?? null,
           holding: p.name,
+          status,
           txCount: Number(p.tx_count),
           quantity: Math.round(remainingQty * 10000) / 10000,
           lifetimeCostBasis: roundMoney(buyAmt, rowCcy),
+          lifetimeCostBasisReporting: tagAmount(buyAmt * fx, reporting, "reporting"),
           currentCostBasis: costBasis ? roundMoney(costBasis, rowCcy) : null,
           avgCostPerShare: avgCost ? roundMoney(avgCost, rowCcy) : null,
           realizedGain: roundMoney(realizedGain, rowCcy),
-          realizedGainPct: buyAmt > 0 ? Math.round((realizedGain / buyAmt) * 10000) / 100 : null,
+          realizedGainReporting: tagAmount(realizedGain * fx, reporting, "reporting"),
+          realizedGainPct,
           dividendsReceived: roundMoney(divs, rowCcy),
+          dividendsReceivedReporting: tagAmount(divs * fx, reporting, "reporting"),
           totalReturn: roundMoney(totalReturn, rowCcy),
-          totalReturnPct: buyAmt > 0 ? Math.round((totalReturn / buyAmt) * 10000) / 100 : null,
+          totalReturnReporting: tagAmount(totalReturn * fx, reporting, "reporting"),
+          totalReturnPct,
           firstPurchase: fpDate,
           lastActivity: p.last_activity,
           daysHeld,
-        };
-      });
+        });
+      }
 
-      const totLifetime = results.reduce((s, r) => s + r.lifetimeCostBasis, 0);
-      const totRealized = results.reduce((s, r) => s + r.realizedGain, 0);
-      const totDivs = results.reduce((s, r) => s + r.dividendsReceived, 0);
-      const totReturn = totRealized + totDivs;
+      // Issue #209 — drop mixed-currency raw sums; only `*Reporting` siblings
+      // remain in summary. Cash sleeves contribute realized/dividend amounts
+      // (still real money) but $0 cost basis, mirroring get_portfolio_analysis.
+      let totalLifetimeReporting = 0;
+      let totalRealizedReporting = 0;
+      let totalDivsReporting = 0;
+      for (const r of results) {
+        if (r.status !== "cash_only") {
+          totalLifetimeReporting += r.lifetimeCostBasisReporting.amount;
+        }
+        totalRealizedReporting += r.realizedGainReporting.amount;
+        totalDivsReporting += r.dividendsReceivedReporting.amount;
+      }
+      const totalReturnReporting = totalRealizedReporting + totalDivsReporting;
+
+      // Issue #209 — threshold guard for the summary aggregate. Mirrors
+      // get_portfolio_analysis (10 reporting-currency units).
+      const PERCENT_FLOOR_REPORTING = 10;
+      const summaryWarnings: string[] = [];
+      let totalReturnPctReporting: number | null;
+      if (totalLifetimeReporting >= PERCENT_FLOOR_REPORTING) {
+        totalReturnPctReporting = Math.round((totalReturnReporting / totalLifetimeReporting) * 10000) / 100;
+      } else {
+        totalReturnPctReporting = null;
+        if (totalLifetimeReporting > 0) {
+          summaryWarnings.push(
+            `Aggregate cost basis below ${PERCENT_FLOOR_REPORTING} ${reporting} — return % suppressed (would otherwise overflow).`
+          );
+        }
+      }
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "unrealizedGain requires live prices. Use the portfolio page for full metrics.",
+        note: "unrealizedGain requires live prices. Use the portfolio page for full metrics. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear with `status: 'cash_only'` and percentages suppressed.",
         period: period ?? "all",
         since,
         reportingCurrency: reporting,
-        // Issue #208 — round summary at the response boundary. These are
-        // raw mixed-currency sums (issue #209 will address the FX hop) but
-        // rounding still crushes the IEEE-754 leak class.
+        warnings: summaryWarnings,
+        rowWarnings: perfRowWarnings,
+        // Issue #209 — only `*Reporting` siblings remain. Cash-sleeve
+        // `lifetimeCostBasis` is excluded from the denominator.
         summary: {
           holdings: results.length,
-          lifetimeCostBasis: roundMoney(totLifetime, reporting),
-          totalRealizedGain: roundMoney(totRealized, reporting),
-          totalDividends: roundMoney(totDivs, reporting),
-          totalReturn: roundMoney(totReturn, reporting),
-          totalReturnPct: totLifetime > 0 ? Math.round((totReturn / totLifetime) * 10000) / 100 : null,
+          lifetimeCostBasisReporting: tagAmount(roundMoney(totalLifetimeReporting, reporting), reporting, "reporting"),
+          totalRealizedGainReporting: tagAmount(roundMoney(totalRealizedReporting, reporting), reporting, "reporting"),
+          totalDividendsReporting: tagAmount(roundMoney(totalDivsReporting, reporting), reporting, "reporting"),
+          totalReturnReporting: tagAmount(roundMoney(totalReturnReporting, reporting), reporting, "reporting"),
+          totalReturnPctReporting,
         },
         holdings: results,
       });
@@ -5414,9 +5629,17 @@ export function registerPgTools(
           v.pct = (v.value / totalBV) * 100;
         }
 
+        // Issue #209 — track which currentAlloc keys were matched by a target
+        // so we can surface the rest in `untargetedHoldings`. Without this,
+        // a user passing two targets against a 60-holding portfolio gets
+        // "BUY $X / BUY $Y" advice with no signal that the other 58 holdings
+        // exist and remain at their current weight.
+        const matchedAllocKeys = new Set<string>();
         const suggestions = targets.map(t => {
           const lo = t.holding.toLowerCase();
-          const current = [...currentAlloc.entries()].find(([k]) => k.includes(lo) || lo.includes(k))?.[1];
+          const matched = [...currentAlloc.entries()].find(([k]) => k.includes(lo) || lo.includes(k));
+          if (matched) matchedAllocKeys.add(matched[0]);
+          const current = matched?.[1];
           const currentPct = current?.pct ?? 0;
           const currentValue = current?.value ?? 0;
           const targetValue = (t.target_pct / 100) * totalBV;
@@ -5435,12 +5658,37 @@ export function registerPgTools(
           };
         });
 
+        // Issue #209 — surface untargeted holdings explicitly so the caller
+        // can decide whether the rebalancing recommendation is meaningful.
+        // The user-facing total (`totalPortfolioValue`) is the WHOLE portfolio
+        // book value across ALL holdings — never a subset — so the subset
+        // truncation symptom in the audit cannot recur.
+        let untargetedCount = 0;
+        let untargetedTotal = 0;
+        for (const [k, v] of currentAlloc.entries()) {
+          if (!matchedAllocKeys.has(k)) {
+            untargetedCount += 1;
+            untargetedTotal += v.value;
+          }
+        }
+        const targetedTotal = totalBV - untargetedTotal;
+
         return text({
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "rebalancing",
           reportingCurrency: reporting,
+          // Issue #209 — `totalPortfolioValue` is the whole-portfolio book
+          // value sum across ALL holdings, never a top-N slice.
           totalPortfolioValue: Math.round(totalBV * 100) / 100,
           totalPortfolioValueReporting: tagAmount(totalBV, reporting, "reporting"),
+          targetedPortfolioValueReporting: tagAmount(targetedTotal, reporting, "reporting"),
+          untargetedHoldings: {
+            count: untargetedCount,
+            totalBookValueReporting: tagAmount(untargetedTotal, reporting, "reporting"),
+            note: untargetedCount > 0
+              ? "These holdings are not covered by `targets`; they remain at their current weight in the suggestions below."
+              : "All holdings were matched by a target.",
+          },
           suggestions,
           note: "Values based on book cost, not market price. Get current prices for accurate rebalancing.",
         });
@@ -5541,12 +5789,21 @@ export function registerPgTools(
       const monthlyByMonth = new Map<string, number>();
       for (const c of contributions) {
         const fx = await fxFor(String(c.currency ?? reporting));
-        const key = String(c.month);
+        // Issue #209 — slice DATE_TRUNC's timestamp output to "YYYY-MM" so
+        // the response month label is shape-stable across the project (matches
+        // get_spending_trends + get_net_worth). Slicing BEFORE the map insert
+        // is safe because the SQL groups by DATE_TRUNC('month', ...) so each
+        // calendar month has exactly one row per currency.
+        const key = String(c.month).slice(0, 7);
         monthlyByMonth.set(key, (monthlyByMonth.get(key) ?? 0) + Number(c.invested) * fx);
       }
-      const monthlyContributions = [...monthlyByMonth.entries()]
-        .sort(([a], [b]) => b.localeCompare(a))
-        .slice(0, 12)
+      // Issue #209 — sort ascending (earliest → latest) so the response is
+      // monotonic-by-time. Keep the trailing-12-months window for the average
+      // (more statistically meaningful than the 6 we display); document the
+      // population window in the response so callers can reconcile.
+      const monthlyContributionsAll = [...monthlyByMonth.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(-12)
         .map(([month, invested]) => ({ month, invested: Math.round(invested * 100) / 100 }));
 
       const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
@@ -5578,13 +5835,22 @@ export function registerPgTools(
       const positions = Array.from(positionsByName.values());
       positions.sort((a, b) => b.book_value - a.book_value);
 
+      // Issue #209: `totalInvested` reduces over the FULL `positions` array
+      // (sum across all holdings, not the top-5 displayed). `topPositions` is
+      // the display-only slice further down.
       const totalInvested = positions.reduce((s, p) => s + Number(p.book_value), 0);
       const top3Pct = positions.slice(0, 3).reduce((s, p) => s + Number(p.book_value), 0) / (totalInvested || 1);
       const diversificationScore = Math.max(0, Math.round((1 - top3Pct) * 100));
 
-      const avgMonthlyContrib = monthlyContributions.length > 0
-        ? monthlyContributions.reduce((s, c) => s + Number(c.invested), 0) / monthlyContributions.length
+      // Issue #209 — average reconciles against the trailing-12 population,
+      // documented explicitly in the response. `monthlyContributions[]` is
+      // sliced to 6 for display further down.
+      const avgMonthlyContrib = monthlyContributionsAll.length > 0
+        ? monthlyContributionsAll.reduce((s, c) => s + Number(c.invested), 0) / monthlyContributionsAll.length
         : 0;
+      // Issue #209 — display window is the most-recent 6 (the trailing edge
+      // of the trailing-12 window).
+      const monthlyContributionsDisplayed = monthlyContributionsAll.slice(-6);
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
@@ -5596,7 +5862,15 @@ export function registerPgTools(
           totalInvestedReporting: tagAmount(totalInvested, reporting, "reporting"),
           avgMonthlyContribution: Math.round(avgMonthlyContrib * 100) / 100,
           avgMonthlyContributionReporting: tagAmount(avgMonthlyContrib, reporting, "reporting"),
+          // Issue #209 — explicit population window so callers can reconcile
+          // `avgMonthlyContribution` against the listed `monthlyContributions[]`
+          // (which is sliced to 6 for display).
+          avgMonthlyContributionPopulation: "trailing-12-months",
+          monthlyContributionsDisplayedCount: monthlyContributionsDisplayed.length,
           diversificationScore,
+          // Issue #209 — explicit scale documentation. The score is 0–100,
+          // higher = more diversified; previously implicit.
+          diversificationScoreMax: 100,
           diversificationLabel: diversificationScore > 70 ? "Well diversified" : diversificationScore > 40 ? "Moderately diversified" : "Concentrated",
           concentration: `Top 3 positions = ${Math.round(top3Pct * 1000) / 10}% of portfolio`,
         },
@@ -5608,7 +5882,9 @@ export function registerPgTools(
           pct: Math.round((Number(p.book_value) / totalInvested) * 1000) / 10,
           purchases: Number(p.purchases),
         })),
-        monthlyContributions: monthlyContributions.slice(0, 6).map(c => ({
+        // Issue #209 — already sorted ASC by month and sliced to the trailing
+        // 6 (most recent) above. Months are formatted as "YYYY-MM".
+        monthlyContributions: monthlyContributionsDisplayed.map(c => ({
           month: c.month,
           invested: c.invested,
           investedReporting: tagAmount(c.invested, reporting, "reporting"),

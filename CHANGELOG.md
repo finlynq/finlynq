@@ -6,6 +6,23 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Cross-currency portfolio totals + totalReturnPct overflow + rebalancing scope (#209, 2026-05-09)
+
+Fixes the cluster of correctness bugs in `get_portfolio_analysis` / `get_portfolio_performance` / `get_investment_insights` flagged by `reviews/2026-05-09/`. Top-line summary numbers were mathematically meaningless for cross-currency portfolios, `totalReturnPct` divided by near-zero producing values like `18,501,638.9%` on cash-sleeve "holdings", and rebalancing silently ignored untargeted holdings.
+
+- **Mixed-currency raw fields dropped from `get_portfolio_analysis.summary`** ([mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts)). Legacy `totalCostBasis` / `lifetimeCostBasis` / `totalRealizedGain` / `totalDividends` / `totalReturn` / `totalReturnPct` were raw arithmetic sums of per-row values each in their own currency — `615648.4 = (USD-ish + CAD-ish)`, not a number. Only `*Reporting` siblings (FX-converted to user's reporting currency) remain. Same in `get_portfolio_performance.summary` (which was previously the only tool with no reporting-currency rollup at all). **Breaking change** — any caller reading those fields directly must switch to `*Reporting`.
+- **`totalReturnPct` threshold guard** at every call site (analysis per-row + summary, performance per-row + summary). Per-row floor is `1.0` in the holding's native currency, summary floor is `10` in reporting currency. Below the floor returns `null` and a `warnings[]` (summary) or `rowWarnings[]` (per-row) entry surfaces the suppression. `realizedGainPct` in performance gets the same guard (same overflow risk).
+- **Cash-sleeve exclusion from `totalReturnPct`** via `symbol IS NULL/empty AND name='cash'` (CLAUDE.md "Currency-as-symbol in portfolio"). Cash sleeves still appear in `holdings[]`; only the percentage is suppressed. The summary aggregate excludes their `lifetimeCostBasis` from the denominator (cash sleeves hold cash, not invested capital). Realized gain / dividends on cash sleeves stay in the numerator. `get_portfolio_performance` had no symbol info per-row; loads `portfolio_holdings.symbol_ct` once per call so the same detection works.
+- **Per-row `status` field** (`active` / `zero_position` / `cash_only` / `sold_out`) on both tools. Clients should branch on `status` rather than infer state from null patterns on `totalCostBasis` / `daysHeld` / `firstPurchaseDate`.
+- **Rebalancing — `untargetedHoldings` block**. `mode='rebalancing'` returns `untargetedHoldings: { count, totalBookValueReporting, note }` plus a separate `targetedPortfolioValueReporting` so callers can see what fraction of the portfolio the recommendation covers. The audit reported "$32K base ignoring 59 other holdings worth ~$580K" — the response shaper already iterated over all holdings, but untargeted ones never surfaced in the response. `totalPortfolioValue` is documented as the whole-portfolio sum (was already correct).
+- **`monthlyContributions` formatting fixed** in `mode='patterns'`. `month` is now `"YYYY-MM"` (was a raw `DATE_TRUNC('month', ...)` timestamp), sort order is ascending (was descending). Slicing to YYYY-MM is done BEFORE the map insert (safe — SQL groups by `DATE_TRUNC` so each month has exactly one row per currency).
+- **`avgMonthlyContribution` reconciliation gap** in `mode='patterns'`. Average is now documented as `avgMonthlyContributionPopulation: "trailing-12-months"` + `monthlyContributionsDisplayedCount: 6` so callers can reconcile against the displayed slice.
+- **`diversificationScoreMax: 100` documented** in `mode='patterns'.summary`. Score was already 0–100, just undocumented.
+- Per-row money tagging unchanged. Per-row stays in native currency with `tagAmount(..., "account")`; summary aggregates use `reportingCurrency` with `tagAmount(..., "reporting")`. Four-aggregator alignment invariant (CLAUDE.md "Portfolio aggregator") preserved. Cached `holding_accounts.qty/cost_basis` columns still untouched (still a trap, still unread).
+- **Out of scope.** Stdio MCP equivalents are `streamDRefuseRead` post Stream D Phase 4, so the bugs never manifested there. `get_investment_insights` is HTTP-only. Decimal rounding hygiene work (#208) is orthogonal — `roundMoney` reused unchanged at every output boundary.
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes, smoke test (`tests/api/mcp-http-smoke.test.ts`) covers `get_portfolio_analysis` + `get_portfolio_performance` (presence-only).
+
 ### Decimal rounding hygiene: IEEE-754 leaks in MCP read tools + persisted FX-reval drift (#208, 2026-05-09)
 
 Fixes the auditor's `reviews/2026-05-09/08-decimal-rounding-hygiene.md`. Two distinct precision-drift classes addressed in one PR.
