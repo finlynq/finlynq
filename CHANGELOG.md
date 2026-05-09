@@ -6,6 +6,20 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### MCP `bulk_record_transactions` — fail loud on unknown category names (#203, 2026-05-09)
+
+`bulk_record_transactions` (MCP HTTP) previously coerced an unknown `category` name to `category_id = NULL` and reported the row as `success: true`, silently dropping the user's intent. The buggy branch lived at [mcp-server/register-tools-pg.ts:2765-2777](mcp-server/register-tools-pg.ts) where a `fuzzyFind` miss returned `null` instead of pushing a per-row failure. Sibling tools (`record_transaction`, `update_transaction`, `execute_bulk_update`) all fail loudly on unknown categories — this was the symmetric gap to issue #61's `unapplied[]` contract on the bulk-update side.
+
+The fix mirrors `update_transaction`'s strict-resolve pattern: per-row `success: false` with message `Category "<input>" not found. Available: <list>` (or a `did you mean "<close-match>" (id=N)?` hint when `resolveCategoryStrict` returns `low_confidence`). The row is NOT inserted; top-level `failed` is bumped automatically via the existing `results.filter(r => !r.success)` post-loop summary. `resolvedAccount` is included on the failure response to match the surrounding per-row failure shape (lines 2736, 2746, 2789).
+
+Preserved:
+- Rows with **no** `category` field at all still flow through `autoCategory` (the truthy `if (t.category)` check is unchanged).
+- Rows with valid category names still import; `resolvedCategory` is populated.
+- `dryRun: true` inherits the new failure behavior automatically (the fix sits before the dryRun branch).
+- Stdio `bulk_record_transactions` is unaffected — already refused under Stream D Phase 4 (no DEK on stdio) and only accepts numeric `category_id` anyway.
+
+User-reported during the 2026-05-09 review: a `bulk_record_transactions` call with `category: "Gifts"` (which the user did not have) returned `{"imported": 1, "failed": 0}` and inserted a row with `category_id = NULL`. With this change the same call returns `{"imported": 0, "failed": 1, "results": [{"success": false, "message": "Category \"Gifts\" not found. Available: ..."}]}` and no row is inserted.
+
 ### Demo seed — let `PF_ALLOW_DEMO_SEED=1` bypass the multi-user guard (2026-05-09)
 
 The Finlynq prod VPS provisions both the demo user (`00000000-0000-0000-0000-00000000demo`) and the operator's real account onto the same `pf` Postgres DB — the demo doesn't have its own database. The B9 hygiene PR ([#172](https://github.com/finlynq/finlynq/pull/172)) added a count-based safety guard in `assertDemoDatabase` that refuses to run when the DB has >1 user row, intended to catch wrong-DB-connection mistakes. On this prod topology that guard trips every time and prevented the seed from running today after PR #199 shipped (the seed's actual wipe step is `WHERE user_id = $1` with the demo UUID at every table, so multi-user has always been safe — the count guard was just a backstop). Now the existing `PF_ALLOW_DEMO_SEED=1` opt-in (which already bypassed guard #1, the URL substring check) also bypasses guard #3. Operator on a multi-tenant prod DB sets the env var on `finlynq-demo-reset.service` once; defaults still refuse for fresh self-hosters.
