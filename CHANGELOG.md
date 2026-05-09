@@ -6,6 +6,12 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### deploy.sh — atomic `.next` swap to fix live-service rm race (2026-05-09)
+
+The dev deploy for the merge-from-main commit (`c7a481c`) failed at the `rm -rf .next` step with `Directory not empty` on `.next/standalone`. Root cause: the running pf-dev service writes runtime fetch-cache files into `.next/standalone/.next/cache/fetch-cache/` on every outbound HTTP fetch (FX rates, Yahoo prices, etc.), and those new files appeared mid-traversal faster than `rm` could clean them — so `rm` finished traversing but the parent dir was never empty when it tried to rmdir it. The partial rm had already deleted `.next/standalone/server.js`, leaving dev returning 500 on every page request (`/api/healthz` still passed because it doesn't touch the build) until the workflow was re-run with the service stopped.
+
+Fix in [deploy.sh](deploy.sh): swap the in-place `rm -rf .next` for `mv .next .next.old.$$ && rm -rf .next.old.$$`. The `mv` is atomic and the running service keeps its file handles via the inode, so the rm operates on a detached tree that nobody is writing to. Also added a belt-and-suspenders sweep of `.next.old.*` in case a previous deploy died after the mv but before the rm. Pre-existing race that had been latent until today's deploy timing happened to overlap with active fetch traffic.
+
 ### Demo seed — let `PF_ALLOW_DEMO_SEED=1` bypass the multi-user guard (2026-05-09)
 
 The Finlynq prod VPS provisions both the demo user (`00000000-0000-0000-0000-00000000demo`) and the operator's real account onto the same `pf` Postgres DB — the demo doesn't have its own database. The B9 hygiene PR ([#172](https://github.com/finlynq/finlynq/pull/172)) added a count-based safety guard in `assertDemoDatabase` that refuses to run when the DB has >1 user row, intended to catch wrong-DB-connection mistakes. On this prod topology that guard trips every time and prevented the seed from running today after PR #199 shipped (the seed's actual wipe step is `WHERE user_id = $1` with the demo UUID at every table, so multi-user has always been safe — the count guard was just a backstop). Now the existing `PF_ALLOW_DEMO_SEED=1` opt-in (which already bypassed guard #1, the URL substring check) also bypasses guard #3. Operator on a multi-tenant prod DB sets the env var on `finlynq-demo-reset.service` once; defaults still refuse for fresh self-hosters.
