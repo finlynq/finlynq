@@ -16,10 +16,47 @@
 
 import { db, schema } from "@/db";
 import { and, eq, desc, gte, lte, isNull, or, sql } from "drizzle-orm";
-import { isCryptoCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
+import {
+  SUPPORTED_CURRENCIES,
+  isCryptoCurrency,
+  isMetalCurrency,
+} from "@/lib/fx/supported-currencies";
 
 export type RateSource = "yahoo" | "coingecko" | "stooq" | "override" | "stale" | "fallback";
 export type RateLookup = { rate: number; source: RateSource; effectiveDate: string };
+
+// Currency + date validation helpers for the MCP tool boundary.
+// IMPORTANT: do NOT call validateDate from inside getRateToUsdDetailed/getRate.
+// `convertToAccountCurrency` (write paths) legitimately resolves rates for
+// future-dated transactions and the `settleFutureFxRates` cron re-locks them
+// when the date arrives. Future-date hard-rejects belong on the public MCP
+// tool wrappers (`get_fx_rate`, `set_fx_override`, `convert_amount`), not in
+// the engine. (Issue #206 — historical rates + cache poisoning.)
+const SUPPORTED_CURRENCY_SET = new Set<string>(SUPPORTED_CURRENCIES);
+const FALLBACK_CURRENCY_SET = new Set<string>(); // populated below after FALLBACK_RATE_TO_USD definition
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const FX_MIN_DATE = "1970-01-01";
+
+export function validateCurrencyCode(code: string): string {
+  const c = (code ?? "").trim().toUpperCase();
+  if (!c) throw new Error("currency required");
+  if (!SUPPORTED_CURRENCY_SET.has(c) && !FALLBACK_CURRENCY_SET.has(c)) {
+    throw new Error(`unknown currency: ${c}`);
+  }
+  return c;
+}
+
+export function validateFxDate(date: string): string {
+  if (!date || !ISO_DATE_RE.test(date)) throw new Error("date must be YYYY-MM-DD");
+  if (date < FX_MIN_DATE) throw new Error("date out of range (pre-1970)");
+  // Use `todayISO()` declared below — function declarations are hoisted-equivalent
+  // for `const` arrow assigned at module top-level via `function` form below; this
+  // file uses an arrow `const`, so we inline the calculation to avoid TDZ.
+  const today = new Date().toISOString().split("T")[0];
+  if (date > today) throw new Error("future-dated FX rate not supported");
+  return date;
+}
 
 // Hardcoded fallbacks — only used when we can't reach Yahoo and have nothing
 // cached for this currency. Stored as <CCY> → USD.
@@ -42,6 +79,12 @@ const FALLBACK_RATE_TO_USD: Record<string, number> = {
   XPT: 1000,
   XPD: 1000,
 };
+
+// Pull the hardcoded codes into the validator's allowlist too, so users on a
+// self-hosted instance whose `SUPPORTED_CURRENCIES` happens to be missing one
+// (rare — every fallback code is also in the supported list today) still hit
+// the fallback path rather than `unknown currency`.
+for (const k of Object.keys(FALLBACK_RATE_TO_USD)) FALLBACK_CURRENCY_SET.add(k);
 
 const todayISO = (): string => new Date().toISOString().split("T")[0];
 
@@ -79,12 +122,15 @@ async function fetchYahooRateToUsd(currency: string, date: string): Promise<numb
     const symbol = `${currency}USD=X`;
     const today = todayISO();
     let url: string;
+    let isHistorical = false;
     if (date >= today) {
       url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`;
     } else {
+      // 7-day window catches weekend/holiday gaps — pick the latest close <= date.
       const start = Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000);
-      const end = start + 86400 * 2; // 2-day window catches weekend/holiday gaps
+      const end = start + 86400 * 7;
       url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${start}&period2=${end}`;
+      isHistorical = true;
     }
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -92,7 +138,29 @@ async function fetchYahooRateToUsd(currency: string, date: string): Promise<numb
     });
     if (!res.ok) return null;
     const data = await res.json();
-    const rate = data.chart?.result?.[0]?.meta?.regularMarketPrice;
+    const result = data.chart?.result?.[0];
+    if (!result) return null;
+    if (isHistorical) {
+      // Issue #206: meta.regularMarketPrice is TODAY's price even on a historical
+      // chart payload; the actual historical close lives at indicators.quote[0].close[]
+      // indexed by the timestamp[] array. Pick the latest close <= the requested date.
+      const timestamps: unknown = result.timestamp;
+      const closes: unknown = result.indicators?.quote?.[0]?.close;
+      if (!Array.isArray(timestamps) || !Array.isArray(closes)) return null;
+      const dateMs = new Date(`${date}T23:59:59Z`).getTime();
+      let best: { ts: number; close: number } | null = null;
+      for (let i = 0; i < timestamps.length; i++) {
+        const ts = timestamps[i];
+        const close = closes[i];
+        if (typeof ts !== "number" || typeof close !== "number" || close <= 0) continue;
+        const tsMs = ts * 1000;
+        if (tsMs > dateMs) continue;
+        if (!best || tsMs > best.ts) best = { ts: tsMs, close };
+      }
+      return best ? best.close : null;
+    }
+    // Latest branch — meta.regularMarketPrice is correct here.
+    const rate = result.meta?.regularMarketPrice;
     return typeof rate === "number" && rate > 0 ? rate : null;
   } catch {
     return null;
@@ -222,10 +290,18 @@ async function findCached(
 async function findNearestCached(
   currency: string
 ): Promise<{ rate: number; effectiveDate: string } | null> {
+  // Issue #206: restrict to date <= today so a poisoned future-dated row
+  // (left over before the deploy or written through a path that bypasses
+  // the gate below) can't outrank legitimate historical rows.
   const row = await db
     .select({ rateToUsd: schema.fxRates.rateToUsd, date: schema.fxRates.date })
     .from(schema.fxRates)
-    .where(eq(schema.fxRates.currency, currency))
+    .where(
+      and(
+        eq(schema.fxRates.currency, currency),
+        lte(schema.fxRates.date, todayISO())
+      )
+    )
     .orderBy(desc(schema.fxRates.date))
     .limit(1);
   if (row[0]) return { rate: row[0].rateToUsd, effectiveDate: row[0].date };
@@ -286,7 +362,15 @@ export async function getRateToUsdDetailed(
     liveSource = "yahoo";
   }
   if (fetched != null) {
-    await writeCached(code, date, fetched, liveSource);
+    // Issue #206: never persist future-dated rates. They would outrank
+    // legitimate historical rows in findNearestCached and serve as a stale
+    // fallback for every subsequent historical lookup that misses an exact
+    // match. The future-date branch above (date >= today) returns the
+    // current spot price; the cron at src/lib/cron/settle-future-fx.ts
+    // re-locks future-dated transaction rows when their date arrives.
+    if (date <= todayISO()) {
+      await writeCached(code, date, fetched, liveSource);
+    }
     return { rate: fetched, source: liveSource, effectiveDate: date };
   }
 
