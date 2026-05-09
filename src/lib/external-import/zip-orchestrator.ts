@@ -368,7 +368,26 @@ async function syncPortfolioHoldings(
   }
 
   if (toInsert.length === 0) return { inserted: 0 };
-  await db.insert(schema.portfolioHoldings).values(toInsert);
+  // Issue #205 — capture inserted ids and dual-write the holding_accounts
+  // pairings in the same call. Without the pairing the connector-created
+  // holdings are invisible to every aggregator (issue #25).
+  const insertedRows = await db
+    .insert(schema.portfolioHoldings)
+    .values(toInsert)
+    .returning({ id: schema.portfolioHoldings.id, accountId: schema.portfolioHoldings.accountId });
+  const haRows = insertedRows
+    .filter((h): h is { id: number; accountId: number } => h.accountId != null)
+    .map((h) => ({
+      holdingId: h.id,
+      accountId: h.accountId,
+      userId,
+      qty: 0,
+      costBasis: 0,
+      isPrimary: true,
+    }));
+  if (haRows.length > 0) {
+    await db.insert(schema.holdingAccounts).values(haRows).onConflictDoNothing();
+  }
   return { inserted: toInsert.length };
 }
 

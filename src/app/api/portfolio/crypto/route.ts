@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
@@ -120,6 +120,35 @@ export async function POST(request: NextRequest) {
       })
       .returning()
       .get();
+
+    // Issue #205 — dual-write holding_accounts pairing when accountId is
+    // present. Crypto holdings without an account stay unpaired (no aggregator
+    // JOIN to satisfy). On failure, DELETE the orphan portfolio_holdings row.
+    if (accountId != null) {
+      try {
+        await db
+          .insert(schema.holdingAccounts)
+          .values({
+            holdingId: holding.id,
+            accountId,
+            userId,
+            qty: 0,
+            costBasis: 0,
+            isPrimary: true,
+          })
+          .onConflictDoNothing();
+      } catch (pairingErr) {
+        await db
+          .delete(schema.portfolioHoldings)
+          .where(
+            and(
+              eq(schema.portfolioHoldings.id, holding.id),
+              eq(schema.portfolioHoldings.userId, userId),
+            ),
+          );
+        throw pairingErr;
+      }
+    }
 
     return NextResponse.json(holding);
   } catch (error: unknown) {

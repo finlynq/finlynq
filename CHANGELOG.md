@@ -6,6 +6,26 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Portfolio aggregator: orphan-holdings fix cohort — dual-write `holding_accounts` at all 8 unfixed INSERT paths (#205, 2026-05-09)
+
+Closes the issue #95 follow-up cohort. Every `portfolio_holdings` INSERT path now dual-writes the matching `holding_accounts(holding_id, account_id, user_id, qty=0, cost_basis=0, is_primary=true)` pairing in the same transaction, and a tracked SQL migration repairs any orphans created since the 2026-05-01 loose-script backfill.
+
+**User-visible symptom resolved:** investment accounts with holdings whose INSERT path skipped the pairing rendered the Portfolio page as `N holdings across 1 accounts` but every Qty / Avg Cost / Mkt Value / Unrealized G/L cell showed `--`, and "All Holdings" reported `No holdings found. Showing only positions with quantity > 0`. Root cause: every aggregator (issue #25) INNER-JOINs through `holding_accounts` on `(holding_id, account_id, user_id)`; without the pairing, every transaction for the holding silently dropped and live `SUM(transactions.quantity)` evaluated to 0.
+
+- **8 INSERT call sites fixed** to dual-write the pairing in the same transaction with `ON CONFLICT (holding_id, account_id) DO NOTHING` for idempotency and orphan-DELETE on hard pairing failure. The canonical pattern lives at [mcp-server/register-tools-pg.ts:4190-4201](mcp-server/register-tools-pg.ts) (PR #116, issue #95).
+  - REST `POST /api/portfolio` ([src/app/api/portfolio/route.ts](src/app/api/portfolio/route.ts)) — Add Holding dialog.
+  - REST `POST /api/portfolio/crypto` ([src/app/api/portfolio/crypto/route.ts](src/app/api/portfolio/crypto/route.ts)) — pairing skipped when `accountId` is null (crypto holdings can be unattached).
+  - Backup-restore `POST /api/data/import` ([src/app/api/data/import/route.ts](src/app/api/data/import/route.ts)) — bulk insert via `RETURNING { id, accountId }` then bulk pairing INSERT using freshly-`RETURNING`-ed ids + already-remapped `accountId`s (never raw FK ids from the source backup; preserves the cross-tenant FK guard from `strip()`).
+  - csv-parser ([src/lib/csv-parser.ts](src/lib/csv-parser.ts)) — per-row `RETURNING` + pairing.
+  - Connector pipeline `portfolio-holding-resolver` ([src/lib/external-import/portfolio-holding-resolver.ts](src/lib/external-import/portfolio-holding-resolver.ts)) — auto-create branch.
+  - Connector pipeline `zip-orchestrator` ([src/lib/external-import/zip-orchestrator.ts](src/lib/external-import/zip-orchestrator.ts)) — bulk insert via `RETURNING { id, accountId }` then bulk pairing INSERT.
+  - `getOrCreateCashHolding` ([src/lib/investment-account.ts](src/lib/investment-account.ts)) — highest-traffic auto-create site (every first transaction in a newly-flagged investment account).
+  - MCP HTTP `record_trade` cash-sleeve auto-create ([mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts), the `else` branch immediately after line 3464). Mirrors the canonical pattern from `add_portfolio_holding`.
+- **Tracked migration** [scripts/migrations/20260509_holding-accounts-backfill-orphans.sql](scripts/migrations/20260509_holding-accounts-backfill-orphans.sql) — idempotent `INSERT … ON CONFLICT … DO NOTHING` repairs any orphans created between the 2026-05-01 loose-script backfill and the deploy that ships this fix. Applied automatically by `deploy.sh` once per env via `schema_migrations` bookkeeping; deploy ordering is `git pull → npm install → backup → migrations → build → restart` so existing orphans are repaired before the new code starts serving traffic.
+- **CLAUDE.md** — the "Every `portfolio_holdings` INSERT path must dual-write a `holding_accounts` row" gotcha rewritten as a positive invariant ("dual-write is enforced at all 9 sites; new INSERT paths must follow the same pattern"), enumerating the 9 enforced sites + a pointer to the canonical pattern.
+
+Out of scope (preserved per CLAUDE.md): the 4 portfolio aggregators continue to read live `SUM(transactions.quantity)` from `transactions`, NOT the cached `holding_accounts.qty` / `cost_basis` (issue #99 trap — there is no invalidation path). Stdio MCP create paths still refuse cleanly post Stream D Phase 4 (no DEK on the stdio transport); they cannot create the bug class. Tool counts unchanged: 90 HTTP / 86 stdio. The non-cash leg of MCP HTTP `record_trade` is auto-created via `createTransferPair` → `buildHoldingResolver` (the resolver branch is already covered by the `portfolio-holding-resolver` fix in this cohort).
+
 ### Dashboard balance fallback now branches on `is_investment` (#204, 2026-05-09)
 
 `/api/dashboard` per-account balance previously fell back to `SUM(transactions.amount)` whenever `holdingsByAccount.get(b.accountId)` returned `undefined`. For an investment account whose holdings aggregator dropped a position (orphan `holding_accounts` row, FX outage, freshly-imported snapshot before the holding has any transactions), the dashboard silently rendered the cash-leg sum (just the buy/sell/dividend cash legs) as the account balance — a meaningless number that looked like a real balance. Mirrors the canonical pattern shipped under #151 for `/api/goals`.
