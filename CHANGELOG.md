@@ -6,6 +6,15 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Demo seed — fix missing `holding_accounts` dual-write + expand portfolio fixture (2026-05-09)
+
+Fixes [scripts/seed-demo.ts](scripts/seed-demo.ts) skipping the `holding_accounts` dual-write that every portfolio aggregator JOINs through (`(holding_id, account_id, user_id)` grain — see CLAUDE.md "Load-bearing gotchas" §"Every `portfolio_holdings` INSERT path must dual-write a `holding_accounts` row"). Without that join row, the demo account's `get_portfolio_analysis`, `analyze_holding`, and `get_portfolio_performance` MCP tools all returned "zero holdings tracked" — which was what Anthropic Connectors Directory reviewers (and the user) hit when querying the demo via Claude.ai. Also expands the demo holdings from 3 to 7 (VTI, VOO, VXUS, VCN.TO, VAB.TO, AAPL, BTC) plus a VOO rebalance sell so the portfolio donut/breakdown looks like a realistic small portfolio (~CA$17K cost basis after the partial sell) and the realized-gain code path is actually exercised by reviewers.
+
+- `holding_accounts` INSERT happens inside the existing `for (const h of holdingsSeed)` loop with `qty=0, cost_basis=0, is_primary=false`. The cached `qty` / `cost_basis` columns aren't read by aggregators (CLAUDE.md flags them as a trap); only the join-row existence matters.
+- No change to the wipe step — `holding_accounts.holding_id` already has `ON DELETE CASCADE` on `portfolio_holdings.id`, so `DELETE FROM portfolio_holdings WHERE user_id=$1` cleans the join automatically.
+- All transaction INSERTs now stamp `source='sample_data'` (issue #28 audit trio); previously inherited the `'manual'` default and looked indistinguishable from user-typed rows in audit queries.
+- Brokerage deposit bumped from $12K to $25K to cover the larger fixture with cushion remaining.
+
 ### Branding — replace Vercel default favicon.ico with Finlynq mark (2026-05-08)
 
 Replaces `pf-app/src/app/favicon.ico` (the Next.js scaffolding default — black circle + white triangle) with the Finlynq orange chart mark, multi-size 16/32/48/64/128/256, PNG-encoded ICO entries, 15318 bytes. Modern browsers fetched `/favicon.svg` and rendered correctly, but Google's `s2/favicons` scraper, social-card embeds, and other crawlers that prefer `.ico` over `.svg` were displaying the Vercel triangle as Finlynq's brand mark for finlynq.com.
