@@ -1532,8 +1532,17 @@ export function registerPgTools(
         WHERE s.user_id = ${userId}
         ORDER BY s.status
       `);
+      // Issue #207 — explicit whitelist so *_ct ciphertexts never escape via
+      // the downstream `taggedSubs` spread. Building a clean shape here means
+      // `taggedSubs.map(s => ({ ...s, ... }))` below carries no ciphertext.
       const subs: Row[] = rawSubs.map((r) => ({
-        ...r,
+        id: r.id,
+        amount: r.amount,
+        currency: r.currency,
+        frequency: r.frequency,
+        next_date: r.next_date,
+        status: r.status,
+        category_id: r.category_id,
         name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
         category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
       }));
@@ -2200,7 +2209,7 @@ export function registerPgTools(
     {
       category: z.string().describe("Category name"),
       month: z.string().describe("Month (YYYY-MM)"),
-      amount: z.number().describe("Budget amount (positive number)"),
+      amount: z.number().positive().describe("Budget amount (must be > 0)"),
     },
     async ({ category, month, amount }) => {
       // Stream D Phase 4 — match by name_lookup HMAC.
@@ -2227,7 +2236,7 @@ export function registerPgTools(
     {
       name: z.string().describe("Goal name"),
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
-      target_amount: z.number().describe("Target amount"),
+      target_amount: z.number().positive().describe("Target amount (must be > 0)"),
       deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
       account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). Prefer `account_ids` for multi-account goals."),
       account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking)."),
@@ -3794,7 +3803,7 @@ export function registerPgTools(
     "Update a financial goal's target, deadline, status, or linked accounts. `account_ids` (issue #130) replaces the existing account-link set atomically — pass `[]` to unlink all, or omit to leave links unchanged.",
     {
       goal: z.string().describe("Goal name (fuzzy matched)"),
-      target_amount: z.number().optional(),
+      target_amount: z.number().positive().optional().describe("Target amount (must be > 0)"),
       deadline: z.string().optional().describe("YYYY-MM-DD"),
       status: z.enum(["active", "completed", "paused"]).optional(),
       name: z.string().optional().describe("Rename the goal"),
@@ -5610,15 +5619,15 @@ export function registerPgTools(
     {
       name: z.string().describe("Loan name"),
       type: z.string().describe("Loan type (e.g. 'mortgage', 'auto', 'student', 'personal')"),
-      principal: z.number().describe("Original loan principal"),
-      annual_rate: z.number().describe("Annual interest rate (e.g. 5.5 for 5.5%)"),
+      principal: z.number().positive().describe("Original loan principal (must be > 0)"),
+      annual_rate: z.number().nonnegative().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0; zero allowed for 0% promo)"),
       term_months: z.number().int().positive().describe("Loan term in months"),
       start_date: z.string().describe("Loan start date (YYYY-MM-DD)"),
       account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
-      payment_amount: z.number().optional().describe("Override computed monthly payment"),
+      payment_amount: z.number().positive().optional().describe("Override computed monthly payment (must be > 0)"),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional().describe("Default monthly"),
-      extra_payment: z.number().optional().describe("Extra principal per payment (default 0)"),
-      min_payment: z.number().optional().describe("Alias for payment_amount — minimum required payment"),
+      extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0; default 0)"),
+      min_payment: z.number().positive().optional().describe("Alias for payment_amount — minimum required payment (must be > 0)"),
       note: z.string().optional(),
     },
     async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
@@ -5652,13 +5661,13 @@ export function registerPgTools(
       id: z.number().describe("Loan id"),
       name: z.string().optional(),
       type: z.string().optional(),
-      principal: z.number().optional(),
-      annual_rate: z.number().optional(),
+      principal: z.number().positive().optional().describe("Original loan principal (must be > 0)"),
+      annual_rate: z.number().nonnegative().optional().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0)"),
       term_months: z.number().int().positive().optional(),
       start_date: z.string().optional(),
-      payment_amount: z.number().optional(),
+      payment_amount: z.number().positive().optional().describe("Monthly payment override (must be > 0)"),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
-      extra_payment: z.number().optional(),
+      extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0)"),
       account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias). Pass empty string to clear."),
       note: z.string().optional(),
     },
@@ -6006,8 +6015,20 @@ export function registerPgTools(
           ${status && status !== "all" ? sql`AND s.status = ${status}` : sql``}
         ORDER BY s.status
       `);
+      // Issue #207 — explicit field whitelist so *_ct ciphertexts never escape
+      // the encryption boundary. Spreading `r` (`...r`) would carry name_ct,
+      // category_name_ct, and account_name_ct through to the client.
       const rows = raw.map((r) => ({
-        ...r,
+        id: r.id,
+        amount: r.amount,
+        currency: r.currency,
+        frequency: r.frequency,
+        next_date: r.next_date,
+        status: r.status,
+        cancel_reminder_date: r.cancel_reminder_date,
+        notes: r.notes,
+        category_id: r.category_id,
+        account_id: r.account_id,
         name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
         category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
         account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : null,
@@ -6022,7 +6043,7 @@ export function registerPgTools(
     "Create a new subscription",
     {
       name: z.string().describe("Subscription name (unique per user)"),
-      amount: z.number().describe("Amount per billing cycle (positive number)"),
+      amount: z.number().positive().describe("Amount per billing cycle (must be > 0)"),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
       next_billing_date: z.string().describe("Next billing date (YYYY-MM-DD)"),
       currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
@@ -6077,7 +6098,7 @@ export function registerPgTools(
     {
       id: z.number().describe("Subscription id"),
       name: z.string().optional(),
-      amount: z.number().optional(),
+      amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0)"),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
       next_billing_date: z.string().optional().describe("YYYY-MM-DD"),
       currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
