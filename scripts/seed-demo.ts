@@ -218,8 +218,8 @@ function generateTransactions(): TxSeed[] {
   // Brokerage deposit so TFSA has cash to invest
   const brokerageDepositDate = new Date(startDate);
   brokerageDepositDate.setDate(brokerageDepositDate.getDate() + 3);
-  txs.push({ date: isoDate(brokerageDepositDate), account: "Chequing", category: "Transfer to Savings", amount: -12000, payee: "Transfer to TFSA" });
-  txs.push({ date: isoDate(brokerageDepositDate), account: "Brokerage", category: "Transfer to Savings", amount: 12000, payee: "Transfer from Chequing" });
+  txs.push({ date: isoDate(brokerageDepositDate), account: "Chequing", category: "Transfer to Savings", amount: -25000, payee: "Transfer to TFSA" });
+  txs.push({ date: isoDate(brokerageDepositDate), account: "Brokerage", category: "Transfer to Savings", amount: 25000, payee: "Transfer from Chequing" });
 
   return txs;
 }
@@ -229,12 +229,18 @@ function generateTransactions(): TxSeed[] {
  * so the portfolio page can price holdings at live market rates. */
 type InvestmentTx = { daysFromStart: number; holding: string; quantity: number; amount: number; payee: string };
 
-function investmentTransactions(startDate: Date): InvestmentTx[] {
+function investmentTransactions(_startDate: Date): InvestmentTx[] {
   return [
-    { daysFromStart: 10, holding: "VTI", quantity: 20, amount: -5500, payee: "Buy VTI" },
-    { daysFromStart: 45, holding: "VOO", quantity: 10, amount: -4800, payee: "Buy VOO" },
-    { daysFromStart: 80, holding: "BTC", quantity: 0.025, amount: -1200, payee: "Buy BTC" },
-    { daysFromStart: 120, holding: "VTI", quantity: 5, amount: -1400, payee: "Buy VTI (DCA)" },
+    { daysFromStart: 10,  holding: "VTI",    quantity: 20,    amount: -5500, payee: "Buy VTI" },
+    { daysFromStart: 25,  holding: "VOO",    quantity: 10,    amount: -4800, payee: "Buy VOO" },
+    { daysFromStart: 40,  holding: "VXUS",   quantity: 15,    amount: -1100, payee: "Buy VXUS" },
+    { daysFromStart: 55,  holding: "VCN.TO", quantity: 25,    amount: -1200, payee: "Buy VCN.TO" },
+    { daysFromStart: 70,  holding: "VAB.TO", quantity: 30,    amount: -750,  payee: "Buy VAB.TO" },
+    { daysFromStart: 85,  holding: "AAPL",   quantity: 5,     amount: -1300, payee: "Buy AAPL" },
+    { daysFromStart: 100, holding: "BTC",    quantity: 0.025, amount: -1200, payee: "Buy BTC" },
+    { daysFromStart: 130, holding: "VTI",    quantity: 5,     amount: -1500, payee: "Buy VTI (DCA)" },
+    // One sell to exercise realized-gain code paths
+    { daysFromStart: 160, holding: "VOO",    quantity: -3,    amount: 1550,  payee: "Sell VOO (rebalance)" },
   ];
 }
 
@@ -417,8 +423,8 @@ async function main() {
       const categoryId = categoryIds[tx.category];
       if (!accountId || !categoryId) continue;
       await client.query(
-        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, is_business)
-         VALUES ($1, $2, $3, $4, 'CAD', $5, $6, $7, $8, 0)`,
+        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, is_business, source)
+         VALUES ($1, $2, $3, $4, 'CAD', $5, $6, $7, $8, 0, 'sample_data')`,
         [
           userId,
           tx.date,
@@ -439,9 +445,13 @@ async function main() {
     const brokerageId = accountIds["Brokerage"];
     console.log(`[seed-demo] Inserting portfolio holdings…`);
     const holdingsSeed = [
-      { name: "VTI", symbol: "VTI", currency: "USD", isCrypto: 0, note: "Vanguard Total Stock Market" },
-      { name: "VOO", symbol: "VOO", currency: "USD", isCrypto: 0, note: "Vanguard S&P 500" },
-      { name: "BTC", symbol: "BTC", currency: "USD", isCrypto: 1, note: "Bitcoin" },
+      { name: "VTI",    symbol: "VTI",    currency: "USD", isCrypto: 0, note: "Vanguard Total Stock Market (US broad)" },
+      { name: "VOO",    symbol: "VOO",    currency: "USD", isCrypto: 0, note: "Vanguard S&P 500" },
+      { name: "VXUS",   symbol: "VXUS",   currency: "USD", isCrypto: 0, note: "Vanguard International ex-US" },
+      { name: "VCN.TO", symbol: "VCN.TO", currency: "CAD", isCrypto: 0, note: "Vanguard FTSE Canada" },
+      { name: "VAB.TO", symbol: "VAB.TO", currency: "CAD", isCrypto: 0, note: "Vanguard Canadian Aggregate Bond" },
+      { name: "AAPL",   symbol: "AAPL",   currency: "USD", isCrypto: 0, note: "Apple Inc. — single stock" },
+      { name: "BTC",    symbol: "BTC",    currency: "USD", isCrypto: 1, note: "Bitcoin" },
     ];
     const holdingIdsByName: Record<string, number> = {};
     for (const h of holdingsSeed) {
@@ -454,7 +464,22 @@ async function main() {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
         [userId, brokerageId, nameEnc.ct, nameEnc.lookup, symbolEnc.ct, symbolEnc.lookup, h.currency, h.isCrypto, h.note]
       );
-      holdingIdsByName[h.name] = rows[0].id;
+      const holdingId = rows[0].id;
+      holdingIdsByName[h.name] = holdingId;
+
+      // Dual-write the holding_accounts join row. Per CLAUDE.md "Load-bearing
+      // gotchas" §"Every portfolio_holdings INSERT path must dual-write a
+      // holding_accounts row": every aggregator (REST /api/portfolio/overview,
+      // MCP HTTP accumulate(), get_portfolio_analysis, analyze_holding) JOINs
+      // through this table on (holding_id, account_id, user_id). Without it
+      // the demo portfolio is invisible to MCP — which is what regressed and
+      // gave reviewers "zero holdings tracked". qty/cost_basis are cached
+      // columns the aggregators don't read; default 0 and is_primary=false.
+      await client.query(
+        `INSERT INTO holding_accounts (holding_id, account_id, user_id, qty, cost_basis, is_primary)
+         VALUES ($1, $2, $3, 0, 0, false)`,
+        [holdingId, brokerageId, userId]
+      );
     }
 
     // Investment buys — bind portfolio_holding_id (FK). Phase 5 (2026-04-29)
@@ -470,8 +495,8 @@ async function main() {
         throw new Error(`[seed-demo] Investment tx references unknown holding '${i.holding}'`);
       }
       await client.query(
-        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, quantity, portfolio_holding_id, payee, note, tags, is_business)
-         VALUES ($1, $2, $3, NULL, 'CAD', $4, $5, $6, $7, $8, $9, 0)`,
+        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, quantity, portfolio_holding_id, payee, note, tags, is_business, source)
+         VALUES ($1, $2, $3, NULL, 'CAD', $4, $5, $6, $7, $8, $9, 0, 'sample_data')`,
         [
           userId,
           isoDate(d),
