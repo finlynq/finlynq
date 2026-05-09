@@ -41,7 +41,7 @@ import {
   updateTransferPair,
   deleteTransferPair,
 } from "../src/lib/transfer";
-import { resolveReportingCurrency } from "./reporting-currency";
+import { resolveReportingCurrency, aggregateInReporting } from "./reporting-currency";
 import { tagAmount } from "./currency-tagging";
 import {
   invalidateUser as invalidateUserTxCache,
@@ -1057,33 +1057,41 @@ export function registerPgTools(
 
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
-      const fxByCcy = new Map<string, number>();
-      for (const ccy of new Set(rows.map(r => String(r.currency)))) {
-        fxByCcy.set(ccy, await getRate(ccy, reporting, today, userId));
-      }
 
-      let totalReporting = 0;
-      const enriched = rows.map((r) => {
+      // Issue #210 — round-once aggregation. Callers MUST NOT round per-item
+      // before summing or `totalReporting` will drift 1c from `get_net_worth`
+      // for users with many multi-currency accounts. Aggregate the raw
+      // (unrounded) balance/currency tuples; render per-row display values
+      // separately from the inputs we pass to the helper.
+      const items = rows.map((r) => ({
+        amount: Number(r.balance),
+        currency: String(r.currency),
+      }));
+      const agg = await aggregateInReporting(
+        items,
+        reporting,
+        (from, to) => getRate(from, to, today, userId),
+      );
+
+      const enriched = rows.map((r, i) => {
         const ccy = String(r.currency);
-        const fx = fxByCcy.get(ccy) ?? 1;
         // Issue #208 — round the raw `balance` to crush IEEE-754 leaks
         // (`-3.6e-11`-class noise from SUM(t.amount)). `tagAmount` already
         // 2dp-rounds the tagged variants; this fixes the bypassed field.
         const rawBalance = roundMoney(Number(r.balance), ccy);
-        const balanceReporting = roundMoney(Number(r.balance) * fx, reporting);
-        totalReporting += balanceReporting;
+        const reportingAmount = agg.perItem[i].reportingAmount;
         return {
           ...r,
           balance: rawBalance,
           balanceTagged: tagAmount(rawBalance, ccy, "account"),
-          balanceReporting: tagAmount(balanceReporting, reporting, "reporting"),
+          balanceReporting: tagAmount(reportingAmount, reporting, "reporting"),
         };
       });
 
       return text({
         accounts: enriched,
         reportingCurrency: reporting,
-        totalReporting: tagAmount(roundMoney(totalReporting, reporting), reporting, "reporting"),
+        totalReporting: tagAmount(agg.totalReporting, reporting, "reporting"),
       });
     }
   );
@@ -1236,16 +1244,23 @@ export function registerPgTools(
   // ── get_spending_trends ────────────────────────────────────────────────────
   server.tool(
     "get_spending_trends",
-    "Get spending trends over time grouped by category. Totals are in the user's display currency by default; pass reportingCurrency to override.",
+    "Get spending trends over time grouped by category. Totals are in the user's display currency by default; pass reportingCurrency to override. Issue #210: `priorMonths: N` returns N+1 monthly buckets — the current (partial) month plus N priors. `months` is accepted as a deprecated alias.",
     {
       period: z.enum(["weekly", "monthly", "yearly"]).describe("Aggregation period"),
-      months: z.number().optional().describe("Months to look back (default 12)"),
+      priorMonths: z.number().optional().describe("Months to look back, in addition to the current (partial) month. Default 12 → returns 13 buckets (current + 12 priors)."),
+      months: z.number().optional().describe("DEPRECATED (issue #210) — alias for priorMonths."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ period, months, reportingCurrency }) => {
+    async ({ period, priorMonths, months, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
-      const lookback = months ?? 12;
-      const startDate = new Date(new Date().getFullYear(), new Date().getMonth() - lookback, 1)
+      if (months !== undefined && priorMonths === undefined) {
+        // eslint-disable-next-line no-console
+        console.warn("[mcp] get_spending_trends: `months` is deprecated (issue #210); use `priorMonths`.");
+      }
+      const lookback = priorMonths ?? months ?? 12;
+      const now = new Date();
+      const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const startDate = new Date(now.getFullYear(), now.getMonth() - lookback, 1)
         .toISOString().split("T")[0];
 
       // Postgres date truncation
@@ -1275,7 +1290,15 @@ export function registerPgTools(
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
-      return text({ rows, reportingCurrency: reporting });
+      // Issue #210 — surface `currentMonth` + `priorMonths` so downstream
+      // dashboards can flag the partial-month row, and echo `reportingCurrency`
+      // for shape symmetry with the current-totals branch.
+      return text({
+        rows,
+        reportingCurrency: reporting,
+        priorMonths: lookback,
+        currentMonth: currentMonthStr,
+      });
     }
   );
 
@@ -1364,16 +1387,27 @@ export function registerPgTools(
   // ── get_net_worth ──────────────────────────────────────────────────────────
   server.tool(
     "get_net_worth",
-    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). Pass `months` > 0 for a month-by-month trend; omit for current totals only.",
+    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). Pass `priorMonths` > 0 for a month-by-month trend (returns the current month plus N priors, with `currentMonth` flagged separately); omit for current totals only. Issue #210: legacy `months` param is accepted as a deprecated alias.",
     {
       currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency (per-row)"),
-      months: z.number().optional().describe("If set, return a trend over the last N months. Omit or set to 0 for current totals."),
+      priorMonths: z.number().optional().describe("If set, return a trend covering the current (partial) month plus N prior months. Omit or set to 0 for current totals."),
+      months: z.number().optional().describe("DEPRECATED (issue #210) — alias for priorMonths. New callers should use priorMonths."),
       reportingCurrency: z.string().optional().describe("ISO code — unified total currency. Defaults to user's display currency."),
     },
-    async ({ currency, months, reportingCurrency }) => {
+    async ({ currency, priorMonths, months, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
-      if (!months || months <= 0) {
+      // Issue #210 — `priorMonths` is the new contract; `months` is a
+      // deprecated alias kept for at least one release. If both are passed,
+      // priorMonths wins. The off-by-one bug was that `months: 3` returned 4
+      // distinct months (current + 3 priors) — now `priorMonths: 3` is exactly
+      // what callers asked for, and `months: 3` keeps the legacy behavior.
+      const lookback = priorMonths ?? months;
+      if (months !== undefined && priorMonths === undefined) {
+        // eslint-disable-next-line no-console
+        console.warn("[mcp] get_net_worth: `months` is deprecated (issue #210); use `priorMonths`.");
+      }
+      if (!lookback || lookback <= 0) {
         const rows = await q(db, sql`
           SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) AS total
           FROM accounts a
@@ -1392,14 +1426,17 @@ export function registerPgTools(
           summary[c].net = summary[c].assets + summary[c].liabilities;
         }
 
-        // Unified reporting total: convert each currency's net via FX.
-        let totalAssets = 0, totalLiabilities = 0, totalNet = 0;
-        for (const [ccy, vals] of Object.entries(summary)) {
-          const fx = await getRate(ccy, reporting, today, userId);
-          totalAssets += vals.assets * fx;
-          totalLiabilities += vals.liabilities * fx;
-          totalNet += vals.net * fx;
-        }
+        // Issue #210 — round-once aggregation. Same helper as
+        // `get_account_balances` so `total.net.amount` agrees byte-for-byte
+        // with `get_account_balances.totalReporting.amount` on the same state.
+        const fxLookup = (from: string, to: string) => getRate(from, to, today, userId);
+        const assetItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.assets, currency: ccy }));
+        const liabItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.liabilities, currency: ccy }));
+        const netItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.net, currency: ccy }));
+        const aggAssets = await aggregateInReporting(assetItems, reporting, fxLookup);
+        const aggLiab = await aggregateInReporting(liabItems, reporting, fxLookup);
+        const aggNet = await aggregateInReporting(netItems, reporting, fxLookup);
+
         // Issue #208 — round per-currency assets/liabilities/net at the
         // response boundary (raw SUM(t.amount) leaks IEEE-754 noise like
         // `5598.589999990002`). Round in each currency's own precision.
@@ -1415,15 +1452,18 @@ export function registerPgTools(
           byCurrency: roundedSummary,
           reportingCurrency: reporting,
           total: {
-            assets: tagAmount(roundMoney(totalAssets, reporting), reporting, "reporting"),
-            liabilities: tagAmount(roundMoney(totalLiabilities, reporting), reporting, "reporting"),
-            net: tagAmount(roundMoney(totalNet, reporting), reporting, "reporting"),
+            assets: tagAmount(aggAssets.totalReporting, reporting, "reporting"),
+            liabilities: tagAmount(aggLiab.totalReporting, reporting, "reporting"),
+            net: tagAmount(aggNet.totalReporting, reporting, "reporting"),
           },
         });
       }
 
-      const startDate = new Date();
-      startDate.setMonth(startDate.getMonth() - months);
+      // Issue #210 — `priorMonths: N` returns N+1 months (current partial
+      // month + N priors). `currentMonth` flags which row is the partial one.
+      const now = new Date();
+      const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const startDate = new Date(now.getFullYear(), now.getMonth() - lookback, 1);
       const startStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-01`;
 
       const rows = await q(db, sql`
@@ -1448,15 +1488,42 @@ export function registerPgTools(
       const running = new Map<string, number>();
       for (const b of baselines) running.set(b.currency, Number(b.total));
 
+      // Issue #210 — pre-fetch FX once per currency for the per-row
+      // `cumulativeNetWorthReporting` field. TODO once issue #04 lands: use
+      // each row's end-of-month FX rate; today's rate is a placeholder so
+      // the contract shape is forward-compatible.
+      const fxByCcy = new Map<string, number>();
+      for (const ccy of new Set(rows.map((r) => r.currency ?? "CAD"))) {
+        if (!fxByCcy.has(ccy)) {
+          fxByCcy.set(ccy, await getRate(ccy, reporting, today, userId));
+        }
+      }
+
       const trend = rows.map(row => {
         const c = row.currency ?? "CAD";
         const prev = running.get(c) ?? 0;
         const newTotal = prev + Number(row.total);
         running.set(c, newTotal);
-        return { month: row.month, currency: c, monthlyChange: Math.round(Number(row.total) * 100) / 100, cumulativeNetWorth: Math.round(newTotal * 100) / 100 };
+        const fx = fxByCcy.get(c) ?? 1;
+        return {
+          month: row.month,
+          currency: c,
+          monthlyChange: roundMoney(Number(row.total), c),
+          cumulativeNetWorth: roundMoney(newTotal, c),
+          cumulativeNetWorthReporting: tagAmount(newTotal * fx, reporting, "reporting"),
+          isCurrentMonth: row.month === currentMonthStr,
+        };
       });
 
-      return text({ months, trend });
+      return text({
+        priorMonths: lookback,
+        // Backwards-compat: keep `months` echoed in the response for callers
+        // that still parse it. Will be dropped in a future release.
+        months: lookback,
+        currentMonth: currentMonthStr,
+        reportingCurrency: reporting,
+        trend,
+      });
     }
   );
 
@@ -1629,7 +1696,7 @@ export function registerPgTools(
   // ── get_recurring_transactions ─────────────────────────────────────────────
   server.tool(
     "get_recurring_transactions",
-    "Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly.",
+    "Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly. Issue #210 — sign convention: `avgAmount` is always POSITIVE; the `direction` field carries the inflow/outflow semantic. Matches the storage convention used by `subscriptions.amount` / `add_subscription` / `list_subscriptions`. (Pre-issue-#210 callers that read raw `avgAmount` to decide sign should switch to `direction`.)",
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
@@ -1682,11 +1749,17 @@ export function registerPgTools(
           // Convert avg via the dominant row currency in the group.
           const ccy = group[0].rowCurrency;
           const fx = fxByCcy.get(ccy) ?? 1;
-          const avgReporting = avg * fx;
+          // Issue #210 — surface positive `avgAmount` to match the storage
+          // convention on `subscriptions.amount`. `direction` carries what
+          // sign used to (raw outflow → "outflow"; salary credit → "inflow").
+          const direction: "inflow" | "outflow" = avg >= 0 ? "inflow" : "outflow";
+          const avgAbs = Math.abs(avg);
+          const avgReporting = avgAbs * fx;
           recurring.push({
             payee: group[0].payee,
-            avgAmount: Math.round(avg * 100) / 100,
-            avgAmountTagged: tagAmount(avg, ccy, "account"),
+            avgAmount: roundMoney(avgAbs, ccy),
+            direction,
+            avgAmountTagged: tagAmount(avgAbs, ccy, "account"),
             avgAmountReporting: tagAmount(avgReporting, reporting, "reporting"),
             count: group.length,
             lastDate: group[group.length - 1].date,
@@ -2099,12 +2172,17 @@ export function registerPgTools(
   // ── get_cash_flow_forecast ─────────────────────────────────────────────────
   server.tool(
     "get_cash_flow_forecast",
-    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency).",
+    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency). Issue #210: by default, `currentBalance` scopes to accounts in the 'Banks' or 'Cash Accounts' groups; the response surfaces `accountsIncluded` + `accountsExcluded` so callers see exactly which accounts are in scope. Pass `accountFilter` to override (include/exclude lists or set `includeInvestments: true` to fold investment-account cash sleeves into the projection).",
     {
       days: z.number().optional().describe("Forecast horizon in days (default 90)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
+      accountFilter: z.object({
+        include: z.array(z.number().int()).optional().describe("Whitelist of account ids — only these contribute to currentBalance. Mutually exclusive with `exclude`."),
+        exclude: z.array(z.number().int()).optional().describe("Blacklist of account ids removed from the default Banks+Cash set."),
+        includeInvestments: z.boolean().optional().describe("If true, also include accounts where `is_investment=true` (uses their cash-sleeve balance)."),
+      }).optional().describe("Override the default Banks+Cash scope (issue #210)."),
     },
-    async ({ days, reportingCurrency }) => {
+    async ({ days, reportingCurrency, accountFilter }) => {
       const horizon = days ?? 90;
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const todayStr = new Date().toISOString().split("T")[0];
@@ -2172,13 +2250,44 @@ export function registerPgTools(
         recurring.push({ payee: group[0].payee, avgAmount: Math.round(avg * 100) / 100, frequency: freq, lastDate, nextDate });
       }
 
-      const bankRows = await q(db, sql`
-        SELECT a.id, a.currency FROM accounts a
-        WHERE a.user_id = ${userId} AND a."group" IN ('Banks', 'Cash Accounts')
-      `) as { id: number; currency: string | null }[];
+      // Issue #210 — partition every account by its `group` so we can
+      // surface what's in / out of scope. Default scope is Banks + Cash
+      // Accounts (preserves prior behavior); `accountFilter` overrides.
+      const allAccountsRaw = await q(db, sql`
+        SELECT a.id, a.currency, a."group" AS account_group, a.is_investment
+        FROM accounts a WHERE a.user_id = ${userId}
+      `) as { id: number; currency: string | null; account_group: string | null; is_investment: boolean | null }[];
+
+      const isDefaultBankCash = (g: string | null) => g === "Banks" || g === "Cash Accounts";
+      const includeSet = accountFilter?.include ? new Set(accountFilter.include) : null;
+      const excludeSet = accountFilter?.exclude ? new Set(accountFilter.exclude) : null;
+      const includeInvestments = accountFilter?.includeInvestments ?? false;
+
+      const inScope: typeof allAccountsRaw = [];
+      const outOfScope: typeof allAccountsRaw = [];
+      for (const a of allAccountsRaw) {
+        let inc: boolean;
+        if (includeSet) {
+          inc = includeSet.has(a.id);
+        } else {
+          inc = isDefaultBankCash(a.account_group) || (includeInvestments && a.is_investment === true);
+          if (excludeSet && excludeSet.has(a.id)) inc = false;
+        }
+        if (inc) inScope.push(a); else outOfScope.push(a);
+      }
+
+      // Group out-of-scope by account group so the response is human-scannable.
+      const excludedByGroup = new Map<string, number[]>();
+      for (const a of outOfScope) {
+        const g = a.account_group ?? "(no group)";
+        const list = excludedByGroup.get(g) ?? [];
+        list.push(a.id);
+        excludedByGroup.set(g, list);
+      }
+      const accountsExcluded = Array.from(excludedByGroup.entries()).map(([groupName, ids]) => ({ groupName, ids }));
 
       let currentBalance = 0;
-      for (const ba of bankRows) {
+      for (const ba of inScope) {
         const r = await q(db, sql`SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE user_id = ${userId} AND account_id = ${ba.id}`);
         const fx = await fxFor(String(ba.currency ?? reporting));
         currentBalance += Number(r[0]?.total ?? 0) * fx;
@@ -2211,6 +2320,11 @@ export function registerPgTools(
         currentBalance: tagAmount(currentBalance, reporting, "reporting"),
         daysAhead: horizon,
         projectedBalance: tagAmount(projectedBalance, reporting, "reporting"),
+        // Issue #210 — surface scope so the user sees why `currentBalance`
+        // differs from `get_account_balances.totalReporting` (different
+        // aggregations, different scope).
+        accountsIncluded: inScope.map((a) => a.id),
+        accountsExcluded,
         warnings: milestones.filter(p => p.balance < 500).map(p => ({
           date: p.date,
           balance: p.balance,
@@ -6335,7 +6449,7 @@ export function registerPgTools(
   // account, for editing flows.
   server.tool(
     "list_subscriptions",
-    "List all subscriptions with full detail (status, next billing, category, account, notes)",
+    "List all subscriptions with full detail (status, next billing, category, account, notes). Issue #210 — `amount` is always positive (the storage convention); a subscription is by definition an outflow.",
     { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
     async ({ status }) => {
       // Stream D Phase 4: s.name + c.name + a.name dropped — read *_ct only.
@@ -6376,7 +6490,7 @@ export function registerPgTools(
   // ── add_subscription ──────────────────────────────────────────────────────
   server.tool(
     "add_subscription",
-    "Create a new subscription",
+    "Create a new subscription. Issue #210 — `amount` MUST be positive (the storage convention). A subscription is by definition an outflow; the sign is implicit, not in the value.",
     {
       name: z.string().describe("Subscription name (unique per user)"),
       amount: z.number().positive().describe("Amount per billing cycle (must be > 0)"),
@@ -7615,7 +7729,7 @@ export function registerPgTools(
   // ── detect_subscriptions ───────────────────────────────────────────────────
   server.tool(
     "detect_subscriptions",
-    "Scan recent transactions (via the decrypted tx cache) and return candidate subscriptions — payees with 3+ regular-cadence occurrences and stable amounts. Returns a confirmationToken for bulk_add_subscriptions.",
+    "Scan recent transactions (via the decrypted tx cache) and return candidate subscriptions — payees with 3+ regular-cadence occurrences and stable amounts. Returns a confirmationToken for bulk_add_subscriptions. Issue #210 — `avgAmount` on each candidate is always positive (matches the `subscriptions.amount` storage convention).",
     {
       lookback_months: z.number().optional().describe("Months of history to scan (default 6)"),
     },
