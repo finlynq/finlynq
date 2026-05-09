@@ -6,6 +6,20 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### MCP schema: reject negative monetary inputs; strip *_ct from list_subscriptions / get_subscription_summary (#207, 2026-05-09)
+
+Closes the auditor's `reviews/2026-05-09/11-schema-numeric-and-currency-constraints.md`. Two coupled MCP HTTP gaps:
+
+- **Negative-monetary inputs** — `set_budget`, `add_goal` / `update_goal`, `add_loan` / `update_loan`, `add_subscription` / `update_subscription` accepted negative amounts despite docstrings claiming positive. The Zod schemas used a bare `z.number()`. Each callsite now uses `.positive()` (= `> 0`) for principal / target / amount / payment / budget, and `.nonnegative()` (= `>= 0`) for `annual_rate` and `extra_payment` (zero is a valid 0%-promo / no-extra case). `term_months` was already correct. Pattern mirrors `set_fx_override.rate`. ([mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts))
+- **Ciphertext leak in `list_subscriptions` and `get_subscription_summary`** — the response shapers spread `...r` (the raw DB row), carrying `name_ct`, `category_name_ct`, and `account_name_ct` through to the client alongside the decrypted plaintext. Stream D Phase 4 (CLAUDE.md: "writes use `name_ct` + `name_lookup` ONLY") expects ciphertext to stay server-side except via the user's DEK-unwrap path; the API surface had been silently emitting it for every authenticated read. Both shapers now use an explicit field whitelist. The `taggedSubs` shaper in `get_subscription_summary` re-spreads `s` — fixed at the construction site so the downstream spread inherits clean rows.
+- **Section C (currency-enum widening) — already shipped under #206**: the six `z.enum(["CAD", "USD"])` callsites mentioned in the issue (`add_account` / `update_account` / `add_portfolio_holding` / `update_portfolio_holding` / `add_subscription` / `update_subscription`) already use `supportedCurrencyEnum` (the full SUPPORTED_CURRENCIES list). No additional work needed.
+
+**Audit follow-up:** `list_loans` (`mcp-server/register-tools-pg.ts:5582`) has the same `...r` + `name_ct` SELECT shape and is leaking `name_ct` and `account_name_ct`. Filed as a separate issue per the original audit's "out of scope for THIS PR" guidance — a single shaper-audit issue covers any other shapers that surface.
+
+**Out of scope:** date-shape validation (covered by `05-date-validation-across-mcp.md`), empty-string `group` normalization (separate `get_account_balances` shaper fix), removal of `*_ct` columns from the DB (load-bearing per Stream D Phase 4 — do NOT touch).
+
+**Build-only verification.** Stdio MCP `list_subscriptions` already refuses via `streamDRefuseRead` (`register-core-tools.ts:1949`); stdio create/update tools for the affected tables already refuse per Stream D Phase 4. No DB migration. No `name_ct` / `name_lookup` / `decryptName()` path changes. No `invalidateUser(userId)` needed (no tx mutations). No CSP / cron / env-var / MCP tool count changes — the surface stays at **90 HTTP / 86 stdio** tools.
+
 ### CRITICAL: FX historical-rate bug + cache poisoning + currency validation (#206, 2026-05-09)
 
 Fixes the auditor's #1 finding from `reviews/2026-05-09/04-fx-rate-historical-and-cache-poisoning.md`. Four compounding defects in the FX cache + lookup were silently poisoning every cross-currency cost basis, FX gain, and reporting-currency conversion in the system.
