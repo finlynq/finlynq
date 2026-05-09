@@ -9,6 +9,7 @@ import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
 import { InvestmentHoldingRequiredError } from "@/lib/investment-account";
+import { SignCategoryMismatchError } from "@/lib/transactions/sign-category-invariant";
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
@@ -476,13 +477,25 @@ export async function POST(request: NextRequest) {
     // Issue #28: hard-code the writer surface at the route boundary rather
     // than relying on the schema default. Defensive against a future writer
     // path that forgets to set it — every entry point is grep-discoverable.
-    const tx = await createTransaction(auth.userId, { ...encrypted, source: "manual" });
+    const tx = await createTransaction(auth.userId, { ...encrypted, source: "manual" }, auth.dek);
     invalidateUserTxCache(auth.userId);
     return NextResponse.json(tx, { status: 201 });
   } catch (error: unknown) {
     if (error instanceof InvestmentHoldingRequiredError) {
       return NextResponse.json(
         { error: error.message, code: error.code, accountId: error.accountId },
+        { status: 400 },
+      );
+    }
+    if (error instanceof SignCategoryMismatchError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: error.code,
+          amount: error.amount,
+          categoryName: error.categoryName,
+          categoryType: error.categoryType,
+        },
         { status: 400 },
       );
     }
@@ -546,13 +559,25 @@ export async function PUT(request: NextRequest) {
     // Phase 5: never persist the legacy text column.
     delete data.portfolioHolding;
     const encrypted = encryptTxWrite(auth.dek, data);
-    const tx = await updateTransaction(id, auth.userId, encrypted);
+    const tx = await updateTransaction(id, auth.userId, encrypted, auth.dek);
     invalidateUserTxCache(auth.userId);
     return NextResponse.json(tx);
   } catch (error: unknown) {
     if (error instanceof InvestmentHoldingRequiredError) {
       return NextResponse.json(
         { error: error.message, code: error.code, accountId: error.accountId },
+        { status: 400 },
+      );
+    }
+    if (error instanceof SignCategoryMismatchError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: error.code,
+          amount: error.amount,
+          categoryName: error.categoryName,
+          categoryType: error.categoryType,
+        },
         { status: 400 },
       );
     }

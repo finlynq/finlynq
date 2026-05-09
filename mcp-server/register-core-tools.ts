@@ -35,6 +35,7 @@ import {
   verifyConfirmationToken,
 } from "../src/lib/mcp/confirmation-token.js";
 import { InvestmentHoldingRequiredError } from "../src/lib/investment-account.js";
+import { validateSignVsCategory } from "../src/lib/transactions/sign-category-invariant.js";
 import fs from "fs/promises";
 import {
   csvToRawTransactions,
@@ -752,15 +753,28 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }
 
       let catId: number | null = null;
+      let catType: string | null = null;
       if (category_id != null) {
-        // Validate ownership cheaply via id-only lookup; no plaintext name needed.
+        // Validate ownership + grab `type` for the issue #212 sign-vs-category
+        // invariant. `type` is plaintext on `categories` so stdio (no DEK) can
+        // still enforce the rule — only the error message degrades to
+        // `category #<id>`.
         const cat = await sqlite.prepare(
-          `SELECT id FROM categories WHERE user_id = ? AND id = ?`
-        ).get(userId, category_id) as { id: number } | undefined;
+          `SELECT id, type FROM categories WHERE user_id = ? AND id = ?`
+        ).get(userId, category_id) as { id: number; type?: string } | undefined;
         if (!cat) return sqliteErr(`Category #${category_id} not found or not owned by you.`);
         catId = Number(cat.id);
+        catType = cat.type != null ? String(cat.type) : null;
       } else {
         catId = await autoCategory(sqlite, userId, payee);
+        // Re-fetch type when autoCategory picked one — keeps the validator
+        // path symmetric with the explicit `category_id` branch above.
+        if (catId != null) {
+          const c = await sqlite.prepare(
+            `SELECT type FROM categories WHERE user_id = ? AND id = ?`,
+          ).get(userId, catId) as { type?: string } | undefined;
+          catType = c?.type != null ? String(c.type) : null;
+        }
       }
 
       const resolved = await resolveTxAmountsCore({
@@ -772,6 +786,18 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         enteredCurrency,
       });
       if (!resolved.ok) return sqliteErr(resolved.message);
+
+      // Issue #212 — sign-vs-category invariant. Hard reject before any INSERT.
+      // Stdio has no DEK so the error message uses `category #<id>` as the
+      // category name; the rule itself fires identically across transports.
+      if (catId != null) {
+        const sErr = validateSignVsCategory({
+          amount: resolved.amount,
+          categoryType: catType,
+          categoryName: `category #${catId}`,
+        });
+        if (sErr) return sqliteErr(sErr.message);
+      }
 
       const resolvedAccountInfo = { id: Number(acct.id) };
       const resolvedCategory = catId != null ? { id: Number(catId) } : null;
@@ -860,20 +886,25 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         return sqliteErr("`category` (name) is refused on stdio after Stream D Phase 4. Pass `category_id` instead.");
       }
       const existing = await sqlite.prepare(`
-        SELECT t.id, t.account_id, t.date, a.currency AS account_currency
+        SELECT t.id, t.account_id, t.category_id, t.amount, t.date, a.currency AS account_currency
           FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id
          WHERE t.id = ? AND t.user_id = ?
-      `).get(id, userId) as { id: number; date: string; account_currency?: string } | undefined;
+      `).get(id, userId) as { id: number; date: string; account_currency?: string; category_id?: number | null; amount?: number | null } | undefined;
       if (!existing) return sqliteErr(`Transaction #${id} not found or not owned by user`);
+      const existingAmountStdio = existing.amount != null ? Number(existing.amount) : null;
+      const existingCategoryIdStdio = existing.category_id != null ? Number(existing.category_id) : null;
 
       let catId: number | undefined;
+      let catTypeStdio: string | null = null;
       let resolvedCategory: { id: number } | null = null;
       if (category_id !== undefined) {
+        // Fetch `type` alongside ownership for issue #212.
         const cat = await sqlite.prepare(
-          `SELECT id FROM categories WHERE user_id = ? AND id = ?`
-        ).get(userId, category_id) as { id: number } | undefined;
+          `SELECT id, type FROM categories WHERE user_id = ? AND id = ?`
+        ).get(userId, category_id) as { id: number; type?: string } | undefined;
         if (!cat) return sqliteErr(`Category #${category_id} not found or not owned by you.`);
         catId = Number(cat.id);
+        catTypeStdio = cat.type != null ? String(cat.type) : null;
         resolvedCategory = { id: catId };
       }
 
@@ -887,6 +918,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         params.push(date);
         fieldsUpdated.push("date");
       }
+      // Track post-merge amount for the issue #212 sign-vs-category check
+      // below. Set in the entered/account-side branches.
+      let postMergeAmountStdio: number | null = existingAmountStdio;
       if (enteredAmount !== undefined) {
         const txDate = date ?? existing.date;
         const resolved = await resolveTxAmountsCore({
@@ -900,10 +934,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         updates.push("amount = ?", "currency = ?", "entered_amount = ?", "entered_currency = ?", "entered_fx_rate = ?");
         params.push(resolved.amount, resolved.currency, resolved.enteredAmount, resolved.enteredCurrency, resolved.enteredFxRate);
         fieldsUpdated.push("amount", "currency", "entered_amount", "entered_currency", "entered_fx_rate");
+        postMergeAmountStdio = resolved.amount;
       } else if (amount !== undefined) {
         updates.push("amount = ?");
         params.push(amount);
         fieldsUpdated.push("amount");
+        postMergeAmountStdio = amount;
       }
       if (payee !== undefined) {
         updates.push("payee = ?");
@@ -926,6 +962,30 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         fieldsUpdated.push("tags");
       }
       if (!updates.length) return sqliteErr("No fields to update");
+
+      // Issue #212 — sign-vs-category invariant on the post-merge state.
+      // Reuses the existing row's category_id when the patch doesn't touch
+      // it, and the existing amount when the patch doesn't touch amount.
+      // Stdio path: error message degrades to `category #<id>` (no DEK).
+      if (postMergeAmountStdio != null) {
+        const postMergeCatId = catId !== undefined ? catId : existingCategoryIdStdio;
+        let postMergeCatType = catTypeStdio;
+        if (postMergeCatId != null && catId === undefined) {
+          // Patch is not touching category — fetch the existing row's type.
+          const c = await sqlite.prepare(
+            `SELECT type FROM categories WHERE user_id = ? AND id = ?`,
+          ).get(userId, postMergeCatId) as { type?: string } | undefined;
+          postMergeCatType = c?.type != null ? String(c.type) : null;
+        }
+        if (postMergeCatId != null) {
+          const sErr = validateSignVsCategory({
+            amount: postMergeAmountStdio,
+            categoryType: postMergeCatType,
+            categoryName: `category #${postMergeCatId}`,
+          });
+          if (sErr) return sqliteErr(sErr.message);
+        }
+      }
 
       // Issue #28: every UPDATE bumps updated_at. Always appended — `source`
       // stays untouched (INSERT-only).
