@@ -177,6 +177,70 @@ function err(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
 }
 
+/**
+ * Build a top-N "did you mean ..." list for error messages without dumping
+ * the user's whole inventory into LLM logs / Sentry / browser network panel.
+ *
+ * Issue #211 (Bug e): the previous `Available: <full list>` formatter
+ * leaked every account/category name (including liability labels) into
+ * any error path. Now we surface at most `maxCount` near-matches ranked by
+ * a cheap edit-distance signal:
+ *   1) startsWith(query)
+ *   2) substring of query
+ *   3) shortest edit distance
+ *
+ * Names only — no `(id=N)` suffix unless `includeIds: true` is passed
+ * (the few callsites that genuinely need the id, e.g. `update_holding`,
+ * opt in explicitly so the default is privacy-safe).
+ */
+function suggestionList(
+  query: string,
+  options: Row[],
+  opts?: { maxCount?: number; includeIds?: boolean; field?: "name" | "symbol" }
+): string {
+  const maxCount = opts?.maxCount ?? 5;
+  const includeIds = opts?.includeIds ?? false;
+  const field = opts?.field ?? "name";
+  if (!options.length) return "(no candidates)";
+  const lo = (query ?? "").toLowerCase().trim();
+  const editDistance = (a: string, b: string): number => {
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    const m = a.length, n = b.length;
+    let prev = new Array<number>(n + 1).fill(0);
+    let cur = new Array<number>(n + 1).fill(0);
+    for (let j = 0; j <= n; j++) prev[j] = j;
+    for (let i = 1; i <= m; i++) {
+      cur[0] = i;
+      for (let j = 1; j <= n; j++) {
+        const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      }
+      [prev, cur] = [cur, prev];
+    }
+    return prev[n];
+  };
+  const scored = options
+    .map(o => {
+      const name = String(o[field] ?? "").trim();
+      if (!name) return null;
+      const lname = name.toLowerCase();
+      let bucket = 3;
+      if (lo && lname.startsWith(lo)) bucket = 0;
+      else if (lo && lname.includes(lo)) bucket = 1;
+      else if (lo && lo.includes(lname)) bucket = 2;
+      const dist = lo ? editDistance(lname, lo) : 0;
+      return { o, name, bucket, dist };
+    })
+    .filter((x): x is NonNullable<typeof x> => x != null)
+    .sort((a, b) => (a.bucket - b.bucket) || (a.dist - b.dist) || a.name.localeCompare(b.name))
+    .slice(0, maxCount);
+  if (!scored.length) return "(no candidates)";
+  return scored
+    .map(s => includeIds ? `"${s.name}" (id=${Number(s.o.id)})` : `"${s.name}"`)
+    .join(", ");
+}
+
 // Issue #206 — currency enum widened to the full SUPPORTED_CURRENCIES list
 // (32 fiats + 4 cryptos + 4 metals). Zod requires the literal-tuple cast.
 const supportedCurrencyEnum = z.enum(
@@ -2511,11 +2575,12 @@ export function registerPgTools(
         if (!account) return err("Pass either `account_id` or `account` (name/alias).");
         const resolved = resolveAccountStrict(account, allAccounts);
         if (!resolved.ok) {
-          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+          // Issue #211 Bug e: top-N suggestions only (was full inventory).
+          const suggestions = suggestionList(account, allAccounts);
           if (resolved.reason === "low_confidence") {
-            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
           }
-          return err(`Account "${account}" not found. Available: ${list}`);
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
         }
         acct = resolved.account;
       }
@@ -2528,7 +2593,10 @@ export function registerPgTools(
         const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
         const cat = fuzzyFind(category, allCats);
-        if (!cat) return err(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
+        if (!cat) {
+          // Issue #211 Bug e: top-N suggestions only.
+          return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
+        }
         catId = Number(cat.id);
       } else {
         catId = await autoCategory(db, userId, payee, dek, isInvestment);
@@ -2611,10 +2679,17 @@ export function registerPgTools(
         const ct = row?.name_ct as string | null | undefined;
         catName = (ct && dek ? decryptField(dek, String(ct)) : ct ?? "") || "uncategorized";
       }
+      // Issue #211 Bug h: when both `amount` and `enteredAmount` are
+      // passed, surface a structured warning so the caller knows the
+      // resolved value diverged from their literal `amount` arg.
       const warnings = deriveTxWriteWarnings({
         portfolioHoldingId: resolvedHoldingId,
         amount: resolved.amount,
         quantity,
+        originalAmount: enteredAmount != null && amount != null ? amount : null,
+        enteredAmount: enteredAmount != null && amount != null ? enteredAmount : null,
+        resolvedAmount: enteredAmount != null && amount != null ? resolved.amount : null,
+        enteredCurrency: enteredCurrency ?? null,
       });
       const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
       const resolvedCategory = catId ? { id: catId, name: String(catName ?? "") } : null;
@@ -2877,11 +2952,12 @@ export function registerPgTools(
           } else if (t.account) {
             const r = resolveAccountStrict(t.account, allAccounts);
             if (!r.ok) {
-              const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+              // Issue #211 Bug e: top-N suggestions only (was full inventory).
+              const suggestions = suggestionList(t.account, allAccounts);
               if (r.reason === "low_confidence") {
-                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-submit with account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}` });
+                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)` });
               } else {
-                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Available: ${list}` });
+                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Did you mean: ${suggestions}?` });
               }
               continue;
             }
@@ -2947,10 +3023,11 @@ export function registerPgTools(
             // "auto-categorize on no input" branch via `autoCategory`.
             const resolved = resolveCategoryStrict(t.category, allCats);
             if (!resolved.ok) {
-              const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+              // Issue #211 Bug e: top-N suggestions only.
+              const suggestions = suggestionList(t.category, allCats);
               const message = resolved.reason === "low_confidence"
-                ? `Category "${t.category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-submit with the exact name to confirm.`
-                : `Category "${t.category}" not found. Available: ${list}`;
+                ? `Category "${t.category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-submit with the exact name to confirm.`
+                : `Category "${t.category}" not found. Did you mean: ${suggestions}?`;
               results.push({ index: i, success: false, message, resolvedAccount: resolvedAccountInfo });
               continue;
             }
@@ -2979,10 +3056,15 @@ export function registerPgTools(
             continue;
           }
 
+          // Issue #211 Bug h: amount-vs-enteredAmount override warning.
           const rowWarnings = deriveTxWriteWarnings({
             portfolioHoldingId: rowHoldingId,
             amount: resolved.amount,
             quantity: t.quantity,
+            originalAmount: t.enteredAmount != null && t.amount != null ? t.amount : null,
+            enteredAmount: t.enteredAmount != null && t.amount != null ? t.enteredAmount : null,
+            resolvedAmount: t.enteredAmount != null && t.amount != null ? resolved.amount : null,
+            enteredCurrency: t.enteredCurrency ?? null,
           });
           const rowCategory = catId != null ? { id: catId, name: catNameById.get(catId) ?? "" } : null;
           const rowHolding = rowHoldingId != null ? { id: rowHoldingId } : null;
@@ -3217,11 +3299,11 @@ export function registerPgTools(
         const allCats = decryptNameish(rawCats, dek);
         const resolved = resolveCategoryStrict(category, allCats);
         if (!resolved.ok) {
+          // Issue #211 Bug e: top-N suggestions only.
           if (resolved.reason === "low_confidence") {
-            return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+            return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-call with the exact name to confirm.`);
           }
-          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
-          return err(`Category "${category}" not found. Available: ${list}`);
+          return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
         }
         catId = Number(resolved.category.id);
         resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
@@ -3413,7 +3495,6 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
       let fromAcct: Row | null = null;
       if (from_account_id != null) {
         fromAcct = allAccounts.find(a => Number(a.id) === from_account_id) ?? null;
@@ -3422,10 +3503,12 @@ export function registerPgTools(
         if (!fromAccount) return err("Pass either `from_account_id` or `fromAccount` (name/alias).");
         const resolved = resolveAccountStrict(fromAccount, allAccounts);
         if (!resolved.ok) {
+          // Issue #211 Bug e: top-N suggestions only (was full inventory).
+          const suggestions = suggestionList(fromAccount, allAccounts);
           if (resolved.reason === "low_confidence") {
-            return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with from_account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+            return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass from_account_id to disambiguate.)`);
           }
-          return err(`Source account "${fromAccount}" not found. Available: ${list}`);
+          return err(`Source account "${fromAccount}" not found. Did you mean: ${suggestions}?`);
         }
         fromAcct = resolved.account;
       }
@@ -3437,10 +3520,12 @@ export function registerPgTools(
         if (!toAccount) return err("Pass either `to_account_id` or `toAccount` (name/alias).");
         const resolved = resolveAccountStrict(toAccount, allAccounts);
         if (!resolved.ok) {
+          // Issue #211 Bug e: top-N suggestions only.
+          const suggestions = suggestionList(toAccount, allAccounts);
           if (resolved.reason === "low_confidence") {
-            return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with to_account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+            return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass to_account_id to disambiguate.)`);
           }
-          return err(`Destination account "${toAccount}" not found. Available: ${list}`);
+          return err(`Destination account "${toAccount}" not found. Did you mean: ${suggestions}?`);
         }
         toAcct = resolved.account;
       }
@@ -3557,11 +3642,12 @@ export function registerPgTools(
         if (!account) return err("Pass either `account_id` or `account` (name/alias).");
         const resolved = resolveAccountStrict(account, allAccounts);
         if (!resolved.ok) {
-          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+          // Issue #211 Bug e: top-N suggestions only.
+          const suggestions = suggestionList(account, allAccounts);
           if (resolved.reason === "low_confidence") {
-            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
           }
-          return err(`Account "${account}" not found. Available: ${list}`);
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
         }
         acct = resolved.account;
       }
@@ -3863,14 +3949,25 @@ export function registerPgTools(
       month: z.string().describe("Month (YYYY-MM)"),
     },
     async ({ category, month }) => {
-      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      // Issue #211 (Bug a): the SELECT only returns `name_ct` (encrypted)
+      // after Stream D Phase 4. Without `decryptNameish`, `fuzzyFind` runs
+      // against ciphertext and never matches — so `cat` was always null
+      // and `delete_budget` was a tool outage for every caller.
+      if (!dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4).");
+      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const allCats = decryptNameish(rawCats, dek);
       const cat = fuzzyFind(category, allCats);
-      if (!cat) return err(`Category "${category}" not found`);
+      if (!cat) {
+        return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
+      }
 
       const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
       if (!existing.length) return err(`No budget found for "${cat.name}" in ${month}`);
 
       await db.execute(sql`DELETE FROM budgets WHERE id = ${existing[0].id} AND user_id = ${userId}`);
+      // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
+      // any future budget-aware tx surface.
+      invalidateUserTxCache(userId);
       return text({ success: true, message: `Budget deleted: ${cat.name} for ${month}` });
     }
   );
@@ -4055,7 +4152,12 @@ export function registerPgTools(
     "Create a new transaction category",
     {
       name: z.string().describe("Category name (must be unique)"),
-      type: z.enum(["E", "I", "T"]).describe("Type: 'E'=expense, 'I'=income, 'T'=transfer"),
+      // Issue #211 (Bug d): enum was `["E", "I", "T"]` but every other
+      // surface (transfer.ts, staged_transactions.tx_type CHECK, MCP
+      // bulk_record_transactions, schema-pg) uses `'R'` for transfer.
+      // `'T'` rows persisted as orphans no other code path could render.
+      // Migration 20260509c flips any extant `type='T'` rows to `'R'`.
+      type: z.enum(["E", "I", "R"]).describe("Type: 'E'=expense, 'I'=income, 'R'=transfer"),
       group: z.string().optional().describe("Group label (e.g. 'Housing', 'Food')"),
       note: z.string().optional(),
     },
@@ -4219,7 +4321,7 @@ export function registerPgTools(
           add_goal: "add_goal(name, type, target_amount, deadline?, account?, account_ids?) — type: savings|debt_payoff|investment|emergency_fund. account_ids: number[] for multi-account linking (issue #130).",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?, account_ids?) — status: active|completed|paused. account_ids: replace linked-account set ([] = unlink all).",
           delete_goal: "delete_goal(goal) — Fuzzy goal name.",
-          create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'T'=transfer.",
+          create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'R'=transfer.",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?) — match_payee supports % wildcards.",
           apply_rules_to_uncategorized: "apply_rules_to_uncategorized(dry_run?, limit?) — Batch-apply rules to uncategorized transactions.",
           get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
@@ -6168,10 +6270,22 @@ export function registerPgTools(
     "Delete a loan by id",
     { id: z.number().describe("Loan id to delete") },
     async ({ id }) => {
+      // Issue #211 (Bug b): SELECT returns `name_ct` (encrypted) but the
+      // success message referenced `existing[0].name` — undefined post
+      // Stream D Phase 4. Decrypt BEFORE the DELETE so the message is
+      // informative; falls back to "#id" when DEK is absent.
       const existing = await q(db, sql`SELECT id, name_ct FROM loans WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Loan #${id} not found`);
+      const decrypted = decryptNameish(existing, dek);
+      const loanName = String(decrypted[0]?.name ?? "").trim();
       await db.execute(sql`DELETE FROM loans WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, data: { id, message: `Loan "${existing[0].name}" deleted` } });
+      return text({
+        success: true,
+        data: {
+          id,
+          message: loanName ? `Loan "${loanName}" deleted` : `Loan #${id} deleted`,
+        },
+      });
     }
   );
 
@@ -7299,11 +7413,11 @@ export function registerPgTools(
             reason: `Category "${changes.category}" did not match strongly — did you mean "${r.suggestion.name}" (id=${Number(r.suggestion.id)})?`,
           });
         } else {
-          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          // Issue #211 Bug e: top-N suggestions only (was full inventory).
           unapplied.push({
             field: "category",
             requestedValue: changes.category,
-            reason: `Category "${changes.category}" not found. Available: ${list}`,
+            reason: `Category "${changes.category}" not found. Did you mean: ${suggestionList(changes.category, allCats)}?`,
           });
         }
       } else {

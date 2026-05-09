@@ -392,22 +392,52 @@ export async function updateTransaction(id: number, userId: string, data: Partia
  * `portfolioHoldingId`/`quantity`, so the warning condition can't trigger
  * there — those tools don't need to call this.
  *
- * Today the only check: a row bound to a `portfolioHoldingId` that moves
- * cash (`amount != 0`) but omits `quantity` won't move the holding's unit
- * count. Silent today; surfaces a warning so callers don't end up with a
- * stale portfolio view. See issue #31.
+ * Returns `string[]` for backward compatibility with the MCP response
+ * envelope. Each entry is prefixed with a stable code so callers can
+ * pattern-match without parsing the message text:
+ *   - `[quantity_missing_for_bound_holding]`: a row bound to a
+ *     `portfolioHoldingId` that moves cash (`amount != 0`) but omits
+ *     `quantity` won't move the holding's unit count. Silent before;
+ *     surfaces a warning so callers don't end up with a stale portfolio
+ *     view. See issue #31.
+ *   - `[amount_overridden_by_entered]` (issue #211 Bug h): when both
+ *     `amount` and `enteredAmount` are passed, the tool docstring says
+ *     `amount` is silently ignored — make it loud. Surfaces the original
+ *     `amount` and the resolved `amount` (after FX) so the caller can
+ *     verify the override matched their intent.
  */
 export function deriveTxWriteWarnings(input: {
   portfolioHoldingId?: number | null;
   amount?: number | null;
   quantity?: number | null;
+  // Issue #211 Bug h: explicit override-detection inputs. Pass the
+  // *user-supplied* `amount` (the literal arg before resolution) and
+  // the *user-supplied* `enteredAmount` (likewise). `resolvedAmount`
+  // is what the server will write to the DB after FX conversion.
+  // Omit any of these to skip the override check.
+  originalAmount?: number | null;
+  enteredAmount?: number | null;
+  resolvedAmount?: number | null;
+  enteredCurrency?: string | null;
 }): string[] {
   const warnings: string[] = [];
   const hasHolding = input.portfolioHoldingId != null;
   const movesCash = input.amount != null && input.amount !== 0;
   const noQuantity = input.quantity == null;
   if (hasHolding && movesCash && noQuantity) {
-    warnings.push("quantity not set — holding unit count was not updated");
+    warnings.push(
+      "[quantity_missing_for_bound_holding] quantity not set — holding unit count was not updated",
+    );
+  }
+  if (
+    input.originalAmount != null &&
+    input.enteredAmount != null &&
+    input.resolvedAmount != null
+  ) {
+    const ccy = input.enteredCurrency ? ` ${input.enteredCurrency}` : "";
+    warnings.push(
+      `[amount_overridden_by_entered] \`amount\`=${input.originalAmount} was overridden by \`enteredAmount\`=${input.enteredAmount}${ccy}; written value is ${input.resolvedAmount} after FX.`,
+    );
   }
   return warnings;
 }
