@@ -6,6 +6,27 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-09 — Sign-vs-category invariant: hard-reject E-positive / I-negative writes at every tx-write callsite (#212)
+
+Closes the bug class behind a batch of receipt-OCR rows that landed on `Cash CAD` with **positive** `amount` on a `Groceries` (`E`-type) category — the seven historical rows understated expenses by ~$2,300 in the audit window. Every downstream aggregator (`get_income_statement`, `get_spending_trends`, `get_budget_summary`, `get_financial_health_score`, `get_spending_anomalies`, `get_weekly_recap`, account balance) inherited the wrong sign because no callsite enforced the documented sign-vs-category invariant. Coordinates with #203 (silent unknown-category drop) on the per-row failure envelope shape; #203 landed first, this PR reuses the same envelope.
+
+- **New helper** [`src/lib/transactions/sign-category-invariant.ts`](src/lib/transactions/sign-category-invariant.ts) — pure synchronous `validateSignVsCategory({ amount, categoryType, categoryName })` returns a `SignCategoryMismatchError` (`code: "sign_category_mismatch"`) when an asset/liability row violates the rule:
+  - `'E'` (expense) requires `amount ≤ 0`.
+  - `'I'` (income) requires `amount ≥ 0`.
+  - `'R'` (transfer) and the legacy `'T'` alias are exempt — sign convention varies per leg.
+  - `categoryType == null` (uncategorized) is exempt — receipt-OCR previews stay insertable.
+  - `amount === 0` is exempt (RSU vests, in-kind moves).
+  - Companion `validateSignVsCategoryById(userId, dek, categoryId, amount)` for the REST single-row path; bulk `getCategoryTypeMap(userId, dek, ids)` for batch use. `categories.type` is plaintext so DEK-less transports (stdio MCP) can still enforce the rule; only the error message degrades to `category #<id>` without a DEK.
+- **REST routes** ([src/app/api/transactions/route.ts](src/app/api/transactions/route.ts)) — `createTransaction` / `updateTransaction` ([src/lib/queries.ts](src/lib/queries.ts)) accept an optional `dek` and call `validateSignVsCategoryById` before INSERT/UPDATE; `updateTransaction` validates against the post-merge `(amount, categoryId)` pair when either is in the patch (mirrors the existing post-merge `requireHoldingForInvestmentAccount` pattern). Throws map to **400** with `code: sign_category_mismatch` and the offending `amount` / `categoryName` / `categoryType` in the body (mirrors the existing `InvestmentHoldingRequiredError` handler shape).
+- **MCP HTTP** ([mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts)) — `record_transaction` returns a hard error before INSERT; `bulk_record_transactions` per-row failures land in `results[i] = { success: false, code: "sign_category_mismatch", message, resolvedAccount, resolvedCategory }` and the batch keeps going (envelope shape coordinated with #203's silent-category-drop fix); `update_transaction` runs the validator on the post-merge state BEFORE any UPDATE so a violation aborts the patch atomically (the `enteredAmount` FX resolution was hoisted into a pre-flight pass to support this — same FX values land in the DB, no semantic change).
+- **MCP stdio** ([mcp-server/register-core-tools.ts](mcp-server/register-core-tools.ts)) — `record_transaction` + `update_transaction` (cash-account branch) both run the validator. Stdio cannot create or update names but CAN write transactions on cash accounts, so this closes the same hole on the stdio transport. Investment-account writes were already refused before this PR.
+- **Import pipeline** ([src/lib/import-pipeline.ts](src/lib/import-pipeline.ts)) — pre-fetches `getCategoryTypeMap` once per batch, per-row rejects violations into `importErrors[]` (mirrors the existing investment-account-rejection block), splices offending rows out without poisoning the batch. Staged-approve cash-bucket rows route through `executeImport` so they inherit the protection automatically; transfer-pair (`tx_type='R'`) and target-bound transfer (`createTransferPair`) rows are exempt by construction (categoryId always resolves to type='R').
+- **Transfers (`createTransferPair` / `createTransferPairViaSql`)** — type-`R` legs are exempt by construction; not wired (per the issue's "no-op for type-R" note) to keep the diff focused on the violating writers.
+- **Data migration** [`scripts/migrate-fix-receipt-sign-2026-05-09.sql`](scripts/migrate-fix-receipt-sign-2026-05-09.sql) — manual playbook (NOT in `scripts/migrations/`, per the code-FIRST-then-SQL convention for destructive UPDATEs). Audit SELECT + idempotent UPDATE for the seven flagged ids: flips `amount` and `entered_amount` sign, bumps `updated_at`, preserves `source`. Optional follow-up SELECT discovers any other historical wrong-sign rows for operator review (`c.type='E' AND a.type='A' AND t.amount > 0`).
+- **Tool count unchanged** — 90 HTTP / 86 stdio. Validator is a guard inside existing tools, not a new tool.
+
+**Verification.** `npx tsc --noEmit` clean; `npm run build` passes. Manual MCP smoke deferred to validator agent post-merge.
+
 ## 2026-05-09 — MCP API hygiene Phase 1: delete_budget / delete_loan / create_category / Available-PII / amount-override warning (#211)
 
 Phase 1 of the MCP API-hygiene cluster from `reviews/2026-05-09/12-mcp-api-hygiene-envelopes-and-pii.md`. Non-breaking — no envelope unification, no MCP version bump, no new `delete_category` tool. Phase 2 (fail-loud fuzzy match) and Phase 3 (envelope unification + version bump + new `delete_category` + Anthropic Directory re-coordination) remain to ship.

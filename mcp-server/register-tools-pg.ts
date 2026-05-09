@@ -91,6 +91,11 @@ import {
 import { decryptStaged, encryptStaged } from "../src/lib/crypto/staging-envelope";
 import { getHoldingsValueByAccount } from "../src/lib/holdings-value";
 import { sourceTagFor, isFormatTag, type FormatTag } from "../src/lib/tx-source";
+import {
+  validateSignVsCategory,
+  getCategoryTypeMap,
+  SignCategoryMismatchError,
+} from "../src/lib/transactions/sign-category-invariant";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -2671,13 +2676,29 @@ export function registerPgTools(
         }
       }
 
-      // Look up the resolved category name once — used by both the dry-run
-      // preview and the success message. Stream D Phase 4: decrypt name_ct.
+      // Look up the resolved category name + type once — used by both the
+      // dry-run preview, the success message, and the issue #212 sign-vs-
+      // category validator. Stream D Phase 4: decrypt name_ct. `type` is
+      // plaintext and DEK-free.
       let catName: string = "uncategorized";
+      let catType: string | null = null;
       if (catId) {
-        const row = (await q(db, sql`SELECT name_ct FROM categories WHERE id = ${catId}`))[0];
+        const row = (await q(db, sql`SELECT name_ct, type FROM categories WHERE id = ${catId}`))[0];
         const ct = row?.name_ct as string | null | undefined;
         catName = (ct && dek ? decryptField(dek, String(ct)) : ct ?? "") || "uncategorized";
+        catType = row?.type != null ? String(row.type) : null;
+      }
+      // Issue #212 — sign-vs-category invariant (HARD REJECT). 'E' must be
+      // ≤ 0; 'I' must be ≥ 0; 'R'/'T' exempt. Runs on resolved.amount AFTER
+      // FX so the rule is evaluated on the value that lands in the DB. dryRun
+      // returns a structured 400-equivalent envelope; non-dryRun never inserts.
+      const sErr = validateSignVsCategory({
+        amount: resolved.amount,
+        categoryType: catType,
+        categoryName: catName,
+      });
+      if (sErr) {
+        return err(sErr.message);
       }
       // Issue #211 Bug h: when both `amount` and `enteredAmount` are
       // passed, surface a structured warning so the caller knows the
@@ -2854,9 +2875,13 @@ export function registerPgTools(
       // accidentally worked because Postgres still had the column; now `c.name` is
       // undefined and the map produced empty strings (resolvedCategory.name was ""
       // in every per-row response — issue #93 follow-up).
-      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const rawCats = await q(db, sql`SELECT id, name_ct, type FROM categories WHERE user_id = ${userId}`);
       const allCats = decryptNameish(rawCats, dek);
       const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
+      // Issue #212 — sign-vs-category invariant. Build (id → type) once for
+      // the per-row validator. `type` is plaintext on `categories` so it
+      // round-trips through `decryptNameish` unchanged.
+      const catTypeById = new Map<number, string>(rawCats.map((c: Row) => [Number(c.id), String(c.type ?? "")]));
       // Cache user-owned holding ids in one SELECT instead of one ownership
       // check per row.
       const ownedHoldings = await q(db, sql`SELECT id FROM portfolio_holdings WHERE user_id = ${userId}`);
@@ -2917,6 +2942,11 @@ export function registerPgTools(
         index: number;
         success: boolean;
         message: string;
+        // Issue #212: per-row failure code so callers can distinguish
+        // sign-vs-category violations from generic resolution errors.
+        // Aligns with the #203 envelope shape (code is set only on
+        // success: false rows; success rows omit it).
+        code?: string;
         resolvedAccount?: { id: number; name: string };
         resolvedCategory?: { id: number; name: string } | null;
         resolvedHolding?: { id: number } | null;
@@ -3054,6 +3084,30 @@ export function registerPgTools(
           if (!resolved.ok) {
             results.push({ index: i, success: false, message: resolved.message, resolvedAccount: resolvedAccountInfo });
             continue;
+          }
+
+          // Issue #212 — sign-vs-category invariant per row. Fail this row
+          // only (matches the #203 unknown-category envelope: results[i]
+          // gets `success: false` + `code: 'sign_category_mismatch'`); the
+          // batch keeps going. The check runs on `resolved.amount` (after
+          // FX) so the rule is evaluated against the value the DB will see.
+          if (catId != null) {
+            const sErr = validateSignVsCategory({
+              amount: resolved.amount,
+              categoryType: catTypeById.get(catId) ?? null,
+              categoryName: catNameById.get(catId) ?? `category #${catId}`,
+            });
+            if (sErr) {
+              results.push({
+                index: i,
+                success: false,
+                message: sErr.message,
+                code: sErr.code,
+                resolvedAccount: resolvedAccountInfo,
+                resolvedCategory: { id: catId, name: catNameById.get(catId) ?? "" },
+              });
+              continue;
+            }
           }
 
           // Issue #211 Bug h: amount-vs-enteredAmount override warning.
@@ -3276,7 +3330,7 @@ export function registerPgTools(
     },
     async ({ id, date, amount, payee, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
       const existing = await q(db, sql`
-        SELECT t.id, t.account_id, t.date, t.amount, a.currency AS account_currency
+        SELECT t.id, t.account_id, t.category_id, t.date, t.amount, a.currency AS account_currency
           FROM transactions t
           LEFT JOIN accounts a ON a.id = t.account_id
          WHERE t.user_id = ${userId} AND t.id = ${id}
@@ -3285,6 +3339,10 @@ export function registerPgTools(
       const accountCurrency = String(existing[0].account_currency ?? "CAD");
       const txAccountId = existing[0].account_id != null ? Number(existing[0].account_id) : undefined;
       const existingAmount = existing[0].amount != null ? Number(existing[0].amount) : null;
+      // Issue #212 — capture existing category_id for the post-merge
+      // sign-vs-category check below (when the patch only touches amount,
+      // we still need the existing category to evaluate the invariant).
+      const existingCategoryId = existing[0].category_id != null ? Number(existing[0].category_id) : null;
 
       // Stream D: pull `name_ct` and decrypt before resolving. Without this,
       // Phase-3 NULL-plaintext rows end up with `name === null` and
@@ -3354,12 +3412,19 @@ export function registerPgTools(
       // success-message ambiguity that masked silent category drops.
       const fieldsUpdated: string[] = [];
       let postMergeAmount: number | null = existingAmount;
-      if (date !== undefined) {
-        await db.execute(sql`UPDATE transactions SET date = ${date}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        fieldsUpdated.push("date");
-      }
-      // Entered-side update — re-locks the FX rate at the row's (possibly
-      // updated) date. Triangulates and refuses on fallback.
+      // Pre-compute the post-merge amount when an FX-aware enteredAmount
+      // patch is in flight. This lets us validate the invariant BEFORE any
+      // UPDATE runs (issue #212) — otherwise a sign-vs-category violation
+      // would land on the row partially before being caught.
+      let preResolvedEntered:
+        | {
+            amount: number;
+            currency: string;
+            enteredAmount: number;
+            enteredCurrency: string;
+            enteredFxRate: number;
+          }
+        | null = null;
       if (enteredAmount !== undefined) {
         const txDate = date ?? String(existing[0].date);
         const resolved = await resolveTxAmountsCore({
@@ -3370,23 +3435,63 @@ export function registerPgTools(
           enteredCurrency,
         });
         if (!resolved.ok) return err(resolved.message);
+        preResolvedEntered = {
+          amount: resolved.amount,
+          currency: resolved.currency,
+          enteredAmount: resolved.enteredAmount,
+          enteredCurrency: resolved.enteredCurrency,
+          enteredFxRate: resolved.enteredFxRate,
+        };
+        postMergeAmount = resolved.amount;
+      } else if (amount !== undefined) {
+        postMergeAmount = amount;
+      }
+      // Issue #212 — sign-vs-category invariant on the post-merge state.
+      // Resolve type + name from the post-merge category. When the patch
+      // doesn't touch category, fall back to the existing row's category.
+      // Runs BEFORE every UPDATE so a violation aborts the whole patch
+      // cleanly — no partial application.
+      if (postMergeAmount != null) {
+        const postMergeCategoryId = catId !== undefined ? catId : existingCategoryId;
+        if (postMergeCategoryId != null) {
+          const cat = (await q(db, sql`SELECT id, type, name_ct FROM categories WHERE id = ${postMergeCategoryId} AND user_id = ${userId}`))[0] as Row | undefined;
+          if (cat) {
+            const ct = cat.name_ct as string | null | undefined;
+            const catName =
+              (ct && dek ? decryptField(dek, String(ct)) : ct ?? "") ||
+              `category #${postMergeCategoryId}`;
+            const sErr = validateSignVsCategory({
+              amount: postMergeAmount,
+              categoryType: cat.type as string | null | undefined,
+              categoryName: catName,
+            });
+            if (sErr) return err(sErr.message);
+          }
+        }
+      }
+      if (date !== undefined) {
+        await db.execute(sql`UPDATE transactions SET date = ${date}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
+        fieldsUpdated.push("date");
+      }
+      // Entered-side update — uses the pre-resolved values from the
+      // pre-flight pass above. No second resolveTxAmountsCore call.
+      if (preResolvedEntered) {
+        const r = preResolvedEntered;
         await db.execute(sql`
           UPDATE transactions
-             SET amount = ${resolved.amount},
-                 currency = ${resolved.currency},
-                 entered_amount = ${resolved.enteredAmount},
-                 entered_currency = ${resolved.enteredCurrency},
-                 entered_fx_rate = ${resolved.enteredFxRate},
+             SET amount = ${r.amount},
+                 currency = ${r.currency},
+                 entered_amount = ${r.enteredAmount},
+                 entered_currency = ${r.enteredCurrency},
+                 entered_fx_rate = ${r.enteredFxRate},
                  updated_at = NOW()
            WHERE id = ${id} AND user_id = ${userId}
         `);
         fieldsUpdated.push("amount", "currency", "entered_amount", "entered_currency", "entered_fx_rate");
-        postMergeAmount = resolved.amount;
       } else if (amount !== undefined) {
         // Account-side-only update: leave entered_* alone.
         await db.execute(sql`UPDATE transactions SET amount = ${amount}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         fieldsUpdated.push("amount");
-        postMergeAmount = amount;
       }
       if (catId !== undefined) {
         await db.execute(sql`UPDATE transactions SET category_id = ${catId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
