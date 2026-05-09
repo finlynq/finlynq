@@ -96,6 +96,7 @@ import {
   getCategoryTypeMap,
   SignCategoryMismatchError,
 } from "../src/lib/transactions/sign-category-invariant";
+import { ymdDate, ymPeriod, parseYmdSafe } from "./lib/date-validators";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -1173,8 +1174,8 @@ export function registerPgTools(
       payee: z.string().optional().describe("Partial payee/merchant name match"),
       min_amount: z.number().optional().describe("Minimum amount"),
       max_amount: z.number().optional().describe("Maximum amount"),
-      start_date: z.string().optional().describe("Start date (YYYY-MM-DD)"),
-      end_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
+      start_date: ymdDate.optional().describe("Start date (YYYY-MM-DD)"),
+      end_date: ymdDate.optional().describe("End date (YYYY-MM-DD)"),
       category: z.string().optional().describe("Category name (exact)"),
       tags: z.string().optional().describe("Tag to search for (partial match)"),
       account_id: z.number().int().optional().describe("Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses)."),
@@ -1279,7 +1280,7 @@ export function registerPgTools(
     "get_budget_summary",
     "Get budget vs actual spending for a specific month. Amounts are in the user's display currency (default reporting); pass reportingCurrency to override.",
     {
-      month: z.string().describe("Month in YYYY-MM format"),
+      month: ymPeriod.describe("Month in YYYY-MM format"),
       reportingCurrency: z.string().optional().describe("ISO code for unified totals; defaults to user's display currency."),
     },
     async ({ month, reportingCurrency }) => {
@@ -1376,8 +1377,8 @@ export function registerPgTools(
     "get_income_statement",
     "Generate income statement for a period. Totals are in the user's display currency by default; pass reportingCurrency to override.",
     {
-      start_date: z.string().describe("Start date"),
-      end_date: z.string().describe("End date"),
+      start_date: ymdDate.describe("Start date (YYYY-MM-DD)"),
+      end_date: ymdDate.describe("End date (YYYY-MM-DD)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
     async ({ start_date, end_date, reportingCurrency }) => {
@@ -2113,7 +2114,7 @@ export function registerPgTools(
     "get_weekly_recap",
     "Get a weekly financial recap: spending summary, income, net cash flow, notable transactions. Totals are converted to reportingCurrency (defaults to user's display currency).",
     {
-      date: z.string().optional().describe("End date for the week (YYYY-MM-DD). Defaults to current week."),
+      date: ymdDate.optional().describe("End date for the week (YYYY-MM-DD). Defaults to current week."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
     async ({ date, reportingCurrency }) => {
@@ -2415,7 +2416,7 @@ export function registerPgTools(
     "Set or update a budget for a category in a specific month",
     {
       category: z.string().describe("Category name"),
-      month: z.string().describe("Month (YYYY-MM)"),
+      month: ymPeriod.describe("Month (YYYY-MM)"),
       amount: z.number().positive().describe("Budget amount (must be > 0)"),
     },
     async ({ category, month, amount }) => {
@@ -2444,7 +2445,7 @@ export function registerPgTools(
       name: z.string().describe("Goal name"),
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
       target_amount: z.number().positive().describe("Target amount (must be > 0)"),
-      deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
+      deadline: ymdDate.optional().describe("Deadline (YYYY-MM-DD)"),
       account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). Prefer `account_ids` for multi-account goals."),
       account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking)."),
     },
@@ -2551,7 +2552,7 @@ export function registerPgTools(
       payee: z.string().describe("Payee or merchant name"),
       account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
       account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known — e.g. resolved from a prior `get_account_balances` or `search_transactions` call. If both this and `account` are passed, this wins."),
-      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional().describe("Optional note"),
       tags: z.string().optional().describe("Comma-separated tags"),
@@ -3073,6 +3074,19 @@ export function registerPgTools(
           }
 
           const txDate = t.date ?? today;
+          // Issue #213 — per-row date validation. Schema keeps
+          // `date: z.string().optional()` so a single bad row doesn't
+          // collapse the whole zod parse; we validate here so per-row
+          // failures show up in `results[]` like other resolution errors.
+          if (t.date !== undefined && parseYmdSafe(t.date) === null) {
+            results.push({
+              index: i,
+              success: false,
+              message: `Invalid date "${t.date}" — expected YYYY-MM-DD calendar date.`,
+              resolvedAccount: resolvedAccountInfo,
+            });
+            continue;
+          }
           const resolved = await resolveTxAmountsCore({
             accountCurrency: String(acct.currency),
             date: txDate,
@@ -3316,7 +3330,7 @@ export function registerPgTools(
     "Update fields of an existing transaction by ID. Pass enteredAmount + enteredCurrency to re-lock a cross-currency rate (rare); passing just `amount` keeps the entered side unchanged. To backfill a share count on an existing portfolio row, pass `quantity` (positive=buy/long, negative=sell, or null to clear).",
     {
       id: z.number().describe("Transaction ID"),
-      date: z.string().optional(),
+      date: ymdDate.optional(),
       amount: z.number().optional().describe("New amount in account currency. Doesn't touch the entered_* side."),
       payee: z.string().optional(),
       category: z.string().optional().describe("Category name (fuzzy matched)"),
@@ -3583,7 +3597,7 @@ export function registerPgTools(
       from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `fromAccount` are passed, this wins."),
       to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `toAccount` are passed, this wins."),
       amount: z.number().nonnegative().describe("Cash amount the user sent, in the SOURCE account's currency. > 0 for cash transfers; 0 is allowed only when `holding` + `quantity` are also set (pure in-kind transfer)."),
-      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination account, in DESTINATION's currency. When set, FX rate is locked to receivedAmount/amount. Ignored for same-currency transfers."),
       holding: z.string().optional().describe("Source-side holding name for an in-kind (share) transfer. MUST already exist in fromAccount. Pair with `quantity`."),
       destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding` (auto-created in toAccount if missing). Set this only when the destination uses a different label for the same instrument (e.g. source 'Gold Ounce' → dest 'Au Bullion')."),
@@ -3724,7 +3738,7 @@ export function registerPgTools(
       currency: z.string().optional().describe("ISO code (USD/CAD/...) of the trade — the cash sleeve and symbol holding both inherit this. Defaults to the account's currency."),
       fees: z.number().nonnegative().optional().describe("Optional commission/fees in `currency`. Booked as a separate negative-amount cash transaction on the cash sleeve (not part of the trade pair). Defaults to 0."),
       fxRate: z.number().positive().optional().describe("Trade-currency → account-currency rate for cross-currency trades. REQUIRED when `currency` differs from the account's currency. Ignored when currencies match (rate=1)."),
-      date: z.string().optional().describe("Trade/settlement date YYYY-MM-DD (default: today). Applied to both legs and the optional fees row."),
+      date: ymdDate.optional().describe("Trade/settlement date YYYY-MM-DD (default: today). Applied to both legs and the optional fees row."),
       note: z.string().optional().describe("Optional note applied to both legs."),
     },
     async ({ account, account_id, side, symbol, quantity, price, currency, fees, fxRate, date, note }) => {
@@ -3949,7 +3963,7 @@ export function registerPgTools(
       fromAccount: z.string().optional().describe("New source account name or alias. Re-runs FX if currency changes."),
       toAccount: z.string().optional().describe("New destination account name or alias."),
       amount: z.number().nonnegative().optional().describe("New amount sent (source currency); 0 only allowed when in-kind side is set."),
-      date: z.string().optional().describe("New date (YYYY-MM-DD); applied to both legs."),
+      date: ymdDate.optional().describe("New date (YYYY-MM-DD); applied to both legs."),
       receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override; rebuilds the destination leg's amount + locked FX rate."),
       holding: z.string().optional().describe("(Re)bind the in-kind source-side to this holding name. Pair with `quantity`."),
       destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding`. Use when destination uses a different label."),
@@ -4051,7 +4065,7 @@ export function registerPgTools(
     "Delete a budget entry for a category/month",
     {
       category: z.string().describe("Category name"),
-      month: z.string().describe("Month (YYYY-MM)"),
+      month: ymPeriod.describe("Month (YYYY-MM)"),
     },
     async ({ category, month }) => {
       // Issue #211 (Bug a): the SELECT only returns `name_ct` (encrypted)
@@ -4161,7 +4175,7 @@ export function registerPgTools(
     {
       goal: z.string().describe("Goal name (fuzzy matched)"),
       target_amount: z.number().positive().optional().describe("Target amount (must be > 0)"),
-      deadline: z.string().optional().describe("YYYY-MM-DD"),
+      deadline: ymdDate.optional().describe("YYYY-MM-DD"),
       status: z.enum(["active", "completed", "paused"]).optional(),
       name: z.string().optional().describe("Rename the goal"),
       account_ids: z.array(z.number().int()).optional().describe("Replace the goal's linked accounts (issue #130). When supplied, the existing goal_accounts rows are deleted and replaced with the new set in a single transaction. Pass `[]` to unlink all. Omit to leave links unchanged."),
@@ -4314,7 +4328,7 @@ export function registerPgTools(
     "add_snapshot",
     "Record a net-worth snapshot for tracking wealth over time",
     {
-      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       note: z.string().optional(),
     },
     async ({ date, note }) => {
@@ -6241,6 +6255,22 @@ export function registerPgTools(
       }));
       const today = new Date().toISOString().split("T")[0];
       const enriched = rows.map((r) => {
+        // Issue #213 — guard against pre-validator legacy bad rows. One bad
+        // start_date previously poisoned the whole list with
+        // `RangeError: Invalid time value`. Surface it per row instead.
+        if (parseYmdSafe(String(r.start_date)) === null) {
+          return {
+            ...r,
+            monthlyPayment: null,
+            totalInterest: null,
+            payoffDate: null,
+            remainingBalance: null,
+            principalPaid: null,
+            interestPaid: null,
+            periodsRemaining: null,
+            dataIntegrity: { error: "invalid start_date", value: r.start_date },
+          };
+        }
         const summary = generateAmortizationSchedule(
           Number(r.principal),
           Number(r.annual_rate),
@@ -6277,7 +6307,7 @@ export function registerPgTools(
       principal: z.number().positive().describe("Original loan principal (must be > 0)"),
       annual_rate: z.number().nonnegative().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0; zero allowed for 0% promo)"),
       term_months: z.number().int().positive().describe("Loan term in months"),
-      start_date: z.string().describe("Loan start date (YYYY-MM-DD)"),
+      start_date: ymdDate.describe("Loan start date (YYYY-MM-DD)"),
       account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
       payment_amount: z.number().positive().optional().describe("Override computed monthly payment (must be > 0)"),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional().describe("Default monthly"),
@@ -6319,7 +6349,7 @@ export function registerPgTools(
       principal: z.number().positive().optional().describe("Original loan principal (must be > 0)"),
       annual_rate: z.number().nonnegative().optional().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0)"),
       term_months: z.number().int().positive().optional(),
-      start_date: z.string().optional(),
+      start_date: ymdDate.optional(),
       payment_amount: z.number().positive().optional().describe("Monthly payment override (must be > 0)"),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
       extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0)"),
@@ -6400,7 +6430,7 @@ export function registerPgTools(
     "Full amortization schedule for a loan. Returns every payment period with principal/interest/balance. Amounts are in the loan's own currency; the response includes both the loan currency and the resolved reportingCurrency for context.",
     {
       loan_id: z.number().describe("Loan id"),
-      as_of_date: z.string().optional().describe("YYYY-MM-DD — summarises paid-to-date at this point (default: today)"),
+      as_of_date: ymdDate.optional().describe("YYYY-MM-DD — summarises paid-to-date at this point (default: today)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Surfaced in the response for cross-currency context."),
     },
     async ({ loan_id, as_of_date, reportingCurrency }) => {
@@ -6413,6 +6443,16 @@ export function registerPgTools(
       `);
       if (!rows.length) return err(`Loan #${loan_id} not found`);
       const loan = decryptNameish(rows, dek)[0];
+      // Issue #213 — early-return on legacy bad rows so this tool no longer
+      // throws Invalid time value when one slipped past pre-validator code paths.
+      if (parseYmdSafe(String(loan.start_date)) === null) {
+        return text({
+          success: false,
+          error: "invalid start_date",
+          loanId: loan_id,
+          value: loan.start_date,
+        });
+      }
       const summary = generateAmortizationSchedule(
         Number(loan.principal),
         Number(loan.annual_rate),
@@ -6470,7 +6510,18 @@ export function registerPgTools(
       if (!loansRaw.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
       const loans = decryptNameish(loansRaw, dek);
       const today = new Date().toISOString().split("T")[0];
-      const debts: Debt[] = loans.map((l) => {
+      // Issue #213 — split out legacy bad rows so one bad start_date no
+      // longer poisons the whole strategy computation. The bad rows still
+      // surface to the caller (`excluded`) so they can be fixed.
+      const excluded: Array<{ loanId: number; error: string; value: unknown }> = [];
+      const validLoans = loans.filter((l) => {
+        if (parseYmdSafe(String(l.start_date)) === null) {
+          excluded.push({ loanId: Number(l.id), error: "invalid start_date", value: l.start_date });
+          return false;
+        }
+        return true;
+      });
+      const debts: Debt[] = validLoans.map((l) => {
         const summary = generateAmortizationSchedule(
           Number(l.principal),
           Number(l.annual_rate),
@@ -6494,6 +6545,7 @@ export function registerPgTools(
       const strat = strategy ?? "both";
       const extra = extra_payment ?? 0;
       const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts }, reportingCurrency: reporting };
+      if (excluded.length) result.excluded = excluded;
       if (strat === "avalanche" || strat === "both") {
         result.avalanche = calculateDebtPayoff(debts, extra, "avalanche");
       }
@@ -6511,7 +6563,7 @@ export function registerPgTools(
     {
       from: z.string().describe("Source currency (ISO 4217 code, e.g. USD)"),
       to: z.string().describe("Target currency (ISO 4217 code, e.g. CAD)"),
-      date: z.string().optional().describe("YYYY-MM-DD — defaults to today"),
+      date: ymdDate.optional().describe("YYYY-MM-DD — defaults to today"),
     },
     async ({ from, to, date }) => {
       // Issue #206 — validate currencies + date at the MCP boundary.
@@ -6568,9 +6620,9 @@ export function registerPgTools(
     {
       from: z.string().describe("Source currency (e.g. USD)"),
       to: z.string().describe("Target currency (e.g. CAD)"),
-      date: z.string().describe("YYYY-MM-DD"),
+      date: ymdDate.describe("YYYY-MM-DD"),
       rate: z.number().positive().describe("Exchange rate — 1 {from} = rate {to}"),
-      dateTo: z.string().optional().describe("Optional end date YYYY-MM-DD; defaults to a single-day override"),
+      dateTo: ymdDate.optional().describe("Optional end date YYYY-MM-DD; defaults to a single-day override"),
       note: z.string().optional().describe("Optional note (e.g. 'bank rate at Wise on this day')"),
     },
     async ({ from, to, date, rate, dateTo, note }) => {
@@ -6636,7 +6688,7 @@ export function registerPgTools(
       amount: z.number().describe("Amount to convert"),
       from: z.string().describe("Source currency"),
       to: z.string().describe("Target currency"),
-      date: z.string().optional().describe("YYYY-MM-DD — defaults to today"),
+      date: ymdDate.optional().describe("YYYY-MM-DD — defaults to today"),
     },
     async ({ amount, from, to, date }) => {
       // Issue #206 — validate currencies + date at the MCP boundary.
@@ -6714,7 +6766,7 @@ export function registerPgTools(
       name: z.string().describe("Subscription name (unique per user)"),
       amount: z.number().positive().describe("Amount per billing cycle (must be > 0)"),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
-      next_billing_date: z.string().describe("Next billing date (YYYY-MM-DD)"),
+      next_billing_date: ymdDate.describe("Next billing date (YYYY-MM-DD)"),
       currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
       category: z.string().optional().describe("Category name (fuzzy matched)"),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
@@ -6769,12 +6821,12 @@ export function registerPgTools(
       name: z.string().optional(),
       amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0)"),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
-      next_billing_date: z.string().optional().describe("YYYY-MM-DD"),
+      next_billing_date: ymdDate.optional().describe("YYYY-MM-DD"),
       currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       category: z.string().optional().describe("Category name (fuzzy). Empty string clears."),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
       status: z.enum(["active", "paused", "cancelled"]).optional(),
-      cancel_reminder_date: z.string().optional().describe("YYYY-MM-DD"),
+      cancel_reminder_date: ymdDate.optional().describe("YYYY-MM-DD"),
       notes: z.string().optional(),
     },
     async ({ id, name, amount, cadence, next_billing_date, currency, category, account, status, cancel_reminder_date, notes }) => {
@@ -7357,8 +7409,8 @@ export function registerPgTools(
   // Claude doesn't have to fetch ids first.
   const bulkFilterSchema = z.object({
     ids: z.array(z.number()).optional().describe("Explicit transaction ids"),
-    start_date: z.string().optional().describe("YYYY-MM-DD inclusive"),
-    end_date: z.string().optional().describe("YYYY-MM-DD inclusive"),
+    start_date: ymdDate.optional().describe("YYYY-MM-DD inclusive"),
+    end_date: ymdDate.optional().describe("YYYY-MM-DD inclusive"),
     category_id: z.number().nullable().optional().describe("Exact category id (null matches uncategorized)"),
     account_id: z.number().optional().describe("Exact account id"),
     payee_match: z.string().optional().describe("Substring match against plaintext payee (case-insensitive)"),
@@ -7383,7 +7435,11 @@ export function registerPgTools(
     category_id: z.number().nullable().optional(),
     category: z.string().optional().describe("Category name (resolved server-side via the strict resolver — exact / startsWith / token-overlapping substring). Errors with 'did you mean …?' on ambiguous matches."),
     account_id: z.number().optional(),
-    date: z.string().optional(),
+    // Issue #213 — date validation runs in `resolveBulkChanges` (not the
+    // schema) so a single bad date surfaces in `unappliedChanges` rather
+    // than collapsing the whole zod parse. When `date` is the ONLY
+    // requested change AND it fails, no confirmation token is issued.
+    date: z.string().optional().describe("YYYY-MM-DD calendar date. Invalid values are dropped and surfaced via `unappliedChanges`; never silently committed."),
     note: z.string().optional(),
     payee: z.string().optional(),
     is_business: z.number().optional().describe("0 or 1"),
@@ -7498,7 +7554,24 @@ export function registerPgTools(
     // when resolving `category` (id wins on conflict).
     if (changes.category_id !== undefined) resolved.category_id = changes.category_id;
     if (changes.account_id !== undefined) resolved.account_id = changes.account_id;
-    if (changes.date !== undefined) resolved.date = changes.date;
+    // Issue #213 — date validation gate. A bad date NEVER lands in
+    // `resolved.date` (commitBulkUpdate writes unconditionally when the
+    // key is present), and is surfaced to the caller via `unappliedChanges`.
+    // The previous schema-level `z.string().optional()` accepted garbage
+    // verbatim; `preview_bulk_update({ changes: { date: 'not-a-date' } })`
+    // returned a confirmation token whose `execute_bulk_update` would
+    // silently corrupt every matched row.
+    if (changes.date !== undefined) {
+      if (parseYmdSafe(changes.date) === null) {
+        unapplied.push({
+          field: "date",
+          requestedValue: changes.date,
+          reason: `Invalid date "${changes.date}" — expected YYYY-MM-DD calendar date.`,
+        });
+      } else {
+        resolved.date = changes.date;
+      }
+    }
     if (changes.note !== undefined) resolved.note = changes.note;
     if (changes.payee !== undefined) resolved.payee = changes.payee;
     if (changes.is_business !== undefined) resolved.is_business = changes.is_business;
@@ -7663,6 +7736,26 @@ export function registerPgTools(
     });
     const before = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
     const after = before.map((r) => applyChangesToRow(r, resolved));
+    // Issue #213 — refuse to mint a confirmation token when every requested
+    // change failed to resolve. Without this gate, `preview_bulk_update`
+    // accepted `changes: { date: 'not-a-date' }`, the date dropped out at
+    // resolveBulkChanges, but a token still signed the (now-empty) update
+    // and `execute_bulk_update` would silently bump `updated_at` on every
+    // matched row. `category_name` is preview-only metadata; ignore it
+    // here — the same logic already excludes it in `commitBulkUpdate`.
+    const writableKeys = (Object.keys(resolved) as Array<keyof typeof resolved>).filter(
+      (k) => k !== "category_name",
+    );
+    if (writableKeys.length === 0 && unapplied.length > 0) {
+      return {
+        affectedCount: ids.length,
+        sampleBefore: before,
+        sampleAfter: after,
+        unappliedChanges: unapplied,
+        ids: [],
+        confirmationToken: "",
+      };
+    }
     // The token payload encodes the resolved ids — not the filter — so Claude
     // can't widen the scope between preview and execute. We sign the
     // user-supplied `changes` (not the resolved form) so the execute caller
@@ -8075,7 +8168,7 @@ export function registerPgTools(
         payee: z.string(),
         amount: z.number(),
         cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
-        next_billing_date: z.string().optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
+        next_billing_date: ymdDate.optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
         category_id: z.number().optional(),
       })).min(1),
       confirmation_token: z.string(),
