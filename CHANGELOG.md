@@ -6,6 +6,17 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-10 — Validator-agent reliability re-probe: `[amount_overridden_by_entered]` warning (#232)
+
+Process check, no code change. Resolves the contradiction between the PR #224 validator-agent comment ("warning fires for `record_transaction(amount=-50, enteredAmount=-100, enteredCurrency=USD)` against a CAD account") and the 2026-05-10 auditor reading (`warnings: []`).
+
+- **Re-probe verdict: validator-correct.** Live test on dev MCP HTTP confirms the warning fires top-level on the documented payload (`warnings: ["[amount_overridden_by_entered] \`amount\`=-50 was overridden by \`enteredAmount\`=-100 USD; written value is -136.76 after FX."]`). Three additional probes isolate the gate: only-`amount`-no-`enteredAmount` correctly returns `warnings: []` (nothing to override) — the most likely explanation for the auditor's reading. CAD-account / USD-entered / no-currency / USD-account-USD-entered all fire as expected. The gate at [register-tools-pg.ts:2712-2714](pf-app/mcp-server/register-tools-pg.ts) requires both `amount != null && enteredAmount != null`; FX divergence is NOT required.
+- **No code change.** The implementation at [pf-app/src/lib/queries.ts:462-471](pf-app/src/lib/queries.ts) `deriveTxWriteWarnings` and the three callsites at [pf-app/mcp-server/register-tools-pg.ts:2708, 3129, 3548](pf-app/mcp-server/register-tools-pg.ts) (the last one only for the holding/quantity branch by design) are correct as shipped in PR #224.
+- **`update_transaction` does not surface this warning** — by design, callsite at `register-tools-pg.ts:3548` only checks the holding/quantity branch. Stdio MCP doesn't expose `enteredAmount`, so warning is unreachable there. Both documented as out of scope on this issue.
+- **Files touched** — [pf-app/CHANGELOG.md](pf-app/CHANGELOG.md) (this entry), the parent [CHANGELOG.md](CHANGELOG.md) (mirror), `reviews/2026-05-10/09-validator-agent-amount-override-reliability.md` (re-probe results section appended, outside the repo), `~/.claude/projects/.../memory/validator-agent-trust.md` (new memory note: trust validator-agent MCP probes when payload is documented; spot-check when paraphrased).
+
+Verification: live re-probe on dev MCP HTTP (4 scenarios). Build-only — no runtime surface change.
+
 ## 2026-05-10 — FX engine: weekend/holiday walkback + per-leg source surfacing (#231)
 
 Two residuals from the [#206](https://github.com/finlynq/finlynq/issues/206) FX engine cleanup that PR #218 + PR #221 didn't catch.
