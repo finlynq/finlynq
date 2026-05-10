@@ -6,6 +6,23 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-10 — [HOTFIX] MCP delete_account resolves wrong account id (#230)
+
+Hotfix for a data-loss-risk bug class. The HTTP MCP `delete_account` handler called `fuzzyFind` on rows that only carried encrypted `name_ct` / `alias_ct` (Stream D Phase 4) without first running `decryptNameish`. Every row had `o.name === undefined`, so `fuzzyFind`'s last-resort `lo.includes(String(o.name ?? "").toLowerCase())` step collapsed to `lo.includes("")` (unconditionally true) and silently returned the FIRST account in the SELECT result. With `force=true` and FK CASCADE on `accounts → transactions / holding_accounts / goal_accounts`, a wrong-target call would have wiped every transaction, every holding pairing, and every goal link belonging to the wrong account. The live dev-MCP repro (verbatim from the audit): `delete_account(account="_VERIFY_EUR_ACCOUNT_", force=true)` resolved to a different, high-value asset account; the DELETE only failed because that wrong-target account had FK references blocking it. Same bug class as the closed #211 (`delete_budget` / `delete_loan`) and #214 (`create_rule`) — the resolver-class regression-prevention story now has tests.
+
+- **Schema** — `accountId: number?` added (preferred, exact match, works without DEK). `account: string?` is now optional. Either is required; both is allowed only when they resolve to the same id.
+- **Resolver** — id branch SELECTs by `id + user_id`; name branch refuses without an unlocked DEK (matches stdio's existing refusal at `register-core-tools.ts:1322-1326`) and runs `decryptNameish` BEFORE `fuzzyFind`. Mismatch between an `accountId` and a `account`-resolved id fails loud (`Account mismatch: "<name>" resolves to #<id>, but accountId=<id> was supplied`) and does NOT delete.
+- **Messages** — every error/success echo now includes both `#<id>` and `("<name>")` (or `("<encrypted>")` when no DEK is in scope on the id-only path). The literal `Account 'undefined'` from the audit is gone.
+- **Cache invariant** — `invalidateUserTxCache(userId)` now runs after a successful DELETE, matching the `delete_budget` precedent and the CLAUDE.md "every MCP tx-mutating write must call `invalidateUser(userId)`" gotcha.
+- **FK CASCADE** preserved at the DB level — no application-layer child DELETEs. A code comment names the three cascade paths so the next reader doesn't second-guess.
+- **Stdio** — already correct (refuses `account`, accepts `account_id`); only the help-crib was edited.
+- **Tests** — NEW [tests/mcp/delete-account.test.ts](tests/mcp/delete-account.test.ts) with 11 cases covering all 8 acceptance-criteria branches plus an adversarial-order regression that pins the live #230 repro shape (matching account is NOT first in the SELECT result; the resolver must still hit the correct id).
+- **MCP server version** stays 3.0.0 (bug fix; the only surface change is one new optional `accountId` param). Tool count stays 90 HTTP / 86 stdio.
+- **Files touched** — [mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts) (`delete_account` handler + `finlynq_help` crib), [mcp-server/register-core-tools.ts](mcp-server/register-core-tools.ts) (stdio `finlynq_help` crib only), NEW [tests/mcp/delete-account.test.ts](tests/mcp/delete-account.test.ts), [CHANGELOG.md](CHANGELOG.md), [../CLAUDE.md](../CLAUDE.md).
+- **Validator hint** — live MCP probes on dev: `delete_account(accountId=<id>)` succeeds without a DEK; `delete_account(account="_UNKNOWN_")` returns "Did you mean ...?" with no false-match; `delete_account(accountId=A, account="<name of B>")` returns the explicit mismatch error and does NOT delete; `delete_account(account="<known>")` echoes both name and id in the success message.
+
+Verification: `npx tsc --noEmit` clean (existing repo state), `npm run build` passes, `vitest run tests/mcp/delete-account.test.ts` 11/11 passes.
+
 ## 2026-05-10 — Data fixes: receipt-OCR sign flip + FX-reval rounding (#229)
 
 One-time historical data migration — non-destructive UPDATE-in-place fixes for residual rows that pre-date the pipeline guards from PR #225 (issue #212, sign-vs-category validator) and PR #221 (issue #208, IEEE-754 rounding hygiene). Forward-going writers are confirmed clean ([src/lib/currency-conversion.ts](src/lib/currency-conversion.ts) `round2()` at line 39 + 87, and [src/lib/cron/settle-future-fx.ts](src/lib/cron/settle-future-fx.ts) routes through `convertToAccountCurrency` which round2()s the amount). Tracked migration auto-applied by `deploy.sh`; loose destructive bucket not used (operation is non-destructive UPDATE-in-place, idempotent, globally scoped).

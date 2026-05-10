@@ -4145,26 +4145,106 @@ export function registerPgTools(
   );
 
   // ── delete_account ─────────────────────────────────────────────────────────
+  // Issue #230 (HOTFIX, 2026-05-10): the previous handler called `fuzzyFind`
+  // on rows that only carried `name_ct` / `alias_ct` (Stream D Phase 4) and
+  // never decrypted them. With every `o.name === undefined`, `fuzzyFind`'s
+  // last-resort `lo.includes(String(o.name ?? "").toLowerCase())` waterfall
+  // step collapsed to `lo.includes("")` — unconditionally true — and quietly
+  // returned the FIRST account in the SELECT result. Combined with `force=true`
+  // and FK CASCADE on `accounts → transactions / holding_accounts /
+  // goal_accounts`, the wrong-target was a data-loss-risk class. Same bug
+  // class as #211 (delete_budget / delete_loan) and #214 (create_rule).
+  //
+  // Fix: add an `accountId` (numeric, exact) param, mark `account` optional,
+  // require exactly one. Refuse the name path without an unlocked DEK (stdio
+  // already does this — `register-core-tools.ts` lines 1322-1326). Decrypt
+  // BEFORE fuzzy-matching. Echo both id + name in success/error messages so
+  // the caller can verify the resolved target.
+  //
+  // FK CASCADE remains DB-side: deleting an account drops its `transactions`,
+  // `holding_accounts`, and `goal_accounts` rows automatically — no
+  // application-layer child DELETEs needed.
   server.tool(
     "delete_account",
-    "Delete an account (only if it has no transactions)",
+    "Delete an account (only if it has no transactions). Pass exactly ONE of `accountId` (preferred, exact) or `account` (name/alias, fuzzy). Supplying both is allowed only when they resolve to the same account — a mismatch fails loud and does NOT delete.",
     {
-      account: z.string().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
-      force: z.boolean().optional().describe("Delete even if transactions exist (moves them to uncategorized)"),
+      accountId: z.number().int().positive().optional().describe("Account FK (accounts.id). Exact match — preferred and the only way to delete an account when the user's DEK is not unlocked."),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK because account names live in encrypted columns post Stream D Phase 4. Pass `accountId` instead when no DEK is available."),
+      force: z.boolean().optional().describe("Delete even if transactions exist. FK CASCADE removes the account's transactions, holding_accounts, and goal_accounts rows — irreversible."),
     },
-    async ({ account, force }) => {
-      const allAccounts = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return err(`Account "${account}" not found`);
-
-      const txnCount = await q(db, sql`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ${userId} AND account_id = ${acct.id}`);
-      const count = Number(txnCount[0]?.cnt ?? 0);
-      if (count > 0 && !force) {
-        return err(`Account "${acct.name}" has ${count} transaction(s). Pass force=true to delete anyway.`);
+    async ({ accountId, account, force }) => {
+      if (accountId == null && (account == null || account === "")) {
+        return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
       }
 
-      await db.execute(sql`DELETE FROM accounts WHERE id = ${acct.id} AND user_id = ${userId}`);
-      return text({ success: true, message: `Account "${acct.name}" deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` });
+      // Resolve via id first when supplied — the safe path that never depends
+      // on the DEK. SELECT both encrypted columns so we can echo a name on
+      // success when a DEK happens to be available.
+      let acct: Row | null = null;
+      if (accountId != null) {
+        const rows = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId} AND id = ${accountId}
+        `);
+        if (!rows.length) return err(`Account #${accountId} not found.`);
+        acct = decryptNameish(rows, dek)[0];
+      }
+
+      // Resolve via name (fuzzy). Refuses without a DEK — same shape as the
+      // stdio counterpart's refusal at register-core-tools.ts:1322-1326.
+      let resolvedByName: Row | null = null;
+      if (account != null && account !== "") {
+        if (!dek) {
+          return err("Cannot resolve account by name without an unlocked DEK (Stream D Phase 4). Pass `accountId` instead.");
+        }
+        const rawAccounts = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
+        resolvedByName = fuzzyFind(account, allAccounts);
+        if (!resolvedByName) {
+          return err(`Account "${account}" not found. Did you mean: ${suggestionList(account, allAccounts)}?`);
+        }
+      }
+
+      // When BOTH params supplied, fail loud on mismatch — never silently
+      // prefer one. (Matching ids: pick the id-resolved row so the success
+      // message uses its decrypted name.)
+      if (acct && resolvedByName) {
+        if (Number(acct.id) !== Number(resolvedByName.id)) {
+          return err(`Account mismatch: "${account}" resolves to #${Number(resolvedByName.id)}, but accountId=${Number(acct.id)} was supplied.`);
+        }
+        // Same row — id branch already populated `acct`, keep it.
+      } else if (!acct && resolvedByName) {
+        acct = resolvedByName;
+      }
+
+      if (!acct) {
+        // Defense in depth — the input-shape guard above should have caught this.
+        return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
+      }
+
+      const acctName = (acct.name as string | undefined) ?? "<encrypted>";
+      const acctId = Number(acct.id);
+
+      const txnCount = await q(db, sql`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ${userId} AND account_id = ${acctId}`);
+      const count = Number(txnCount[0]?.cnt ?? 0);
+      if (count > 0 && !force) {
+        return err(`Account #${acctId} ("${acctName}") has ${count} transaction(s). Pass force=true to delete anyway.`);
+      }
+
+      // FK CASCADE: this DELETE drops `transactions`, `holding_accounts`, and
+      // `goal_accounts` rows for this account in the same DB transaction. No
+      // application-layer child DELETEs needed (CLAUDE.md "wipe-account is
+      // single-transaction" gotcha).
+      await db.execute(sql`DELETE FROM accounts WHERE id = ${acctId} AND user_id = ${userId}`);
+      // CLAUDE.md invariant: every MCP tx-mutating write must invalidate the
+      // per-user tx cache. Mirrors `delete_budget` precedent at line ~4089.
+      invalidateUserTxCache(userId);
+      return text({
+        success: true,
+        accountId: acctId,
+        message: `Account #${acctId} ("${acctName}") deleted${count > 0 ? ` (${count} transactions also removed)` : ""}`,
+      });
     }
   );
 
@@ -4493,7 +4573,7 @@ export function registerPgTools(
           delete_budget: "delete_budget(category, month) — Remove budget entry.",
           add_account: "add_account(name, type, group?, currency?, note?, alias?) — type: 'A'=asset, 'L'=liability. alias is a short shorthand (e.g. last 4 digits of a card) used when receipts/imports reference the account by a non-canonical name.",
           update_account: "update_account(account, name?, group?, currency?, note?, alias?) — Fuzzy account name or alias. Pass empty alias to clear.",
-          delete_account: "delete_account(account, force?) — force=true to delete with transactions.",
+          delete_account: "delete_account(accountId? OR account?, force?) — accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Pass exactly one. force=true deletes even if transactions exist.",
           add_goal: "add_goal(name, type, target_amount, deadline?, account?, account_ids?) — type: savings|debt_payoff|investment|emergency_fund. account_ids: number[] for multi-account linking (issue #130).",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?, account_ids?) — status: active|completed|paused. account_ids: replace linked-account set ([] = unlink all).",
           delete_goal: "delete_goal(goal) — Fuzzy goal name.",
