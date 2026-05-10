@@ -838,6 +838,9 @@ export default function LandingPage() {
                 <li>
                   <Link href="/privacy">Privacy</Link>
                 </li>
+                <li>
+                  <Link href="/terms">Terms</Link>
+                </li>
               </ul>
             </div>
           </div>
