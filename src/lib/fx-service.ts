@@ -25,6 +25,44 @@ import {
 export type RateSource = "yahoo" | "coingecko" | "stooq" | "override" | "stale" | "fallback";
 export type RateLookup = { rate: number; source: RateSource; effectiveDate: string };
 
+// Issue #231: per-leg source collapse for triangulated pairs. When `get_fx_rate`
+// or `convert_amount` resolves a cross-rate it queries two legs (from→USD and
+// to→USD); we want the top-level `source` to surface the worst leg so a caller
+// inspecting a "yahoo" response isn't unknowingly using a stale fallback under
+// the hood. Ranking (lower = better, higher = surfaced):
+//   live (yahoo / coingecko / stooq)  <  override (positive label)  <  stale  <  fallback
+// `override` is the *positive* label only when EVERY leg is overridden — one
+// override + one stale degrades to "stale". When every leg is the same live
+// provider, that provider's name is preserved.
+const SOURCE_RANK: Record<RateSource, number> = {
+  yahoo: 0,
+  coingecko: 0,
+  stooq: 0,
+  override: 1,
+  stale: 2,
+  fallback: 3,
+};
+
+export function collapseLegSources(
+  legs: ReadonlyArray<{ source: RateSource }>
+): RateSource {
+  if (legs.length === 0) return "fallback";
+  // Pick the worst-ranked source.
+  let worst: RateSource = legs[0].source;
+  for (let i = 1; i < legs.length; i++) {
+    if (SOURCE_RANK[legs[i].source] > SOURCE_RANK[worst]) worst = legs[i].source;
+  }
+  // Special case: keep a positive provider label ("yahoo"/"coingecko"/"stooq")
+  // only when every leg uses that exact provider. Mixed live providers collapse
+  // to the first leg's label arbitrarily; if any leg is degraded the worst-rank
+  // pick already wins.
+  if (SOURCE_RANK[worst] === 0) {
+    const first = legs[0].source;
+    return legs.every((l) => l.source === first) ? first : worst;
+  }
+  return worst;
+}
+
 // Currency + date validation helpers for the MCP tool boundary.
 // IMPORTANT: do NOT call validateDate from inside getRateToUsdDetailed/getRate.
 // `convertToAccountCurrency` (write paths) legitimately resolves rates for
@@ -126,9 +164,16 @@ async function fetchYahooRateToUsd(currency: string, date: string): Promise<numb
     if (date >= today) {
       url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`;
     } else {
-      // 7-day window catches weekend/holiday gaps — pick the latest close <= date.
-      const start = Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000);
-      const end = start + 86400 * 7;
+      // Issue #231: window is biased BACKWARDS from the requested date so a
+      // weekend / exchange-holiday lookup resolves to the prior trading day's
+      // close rather than missing the window entirely (which would fall
+      // through to findNearestCached and serve today's spot as "stale").
+      // 7d back covers the worst-case Christmas–New Year cluster (4 closed
+      // days) plus a weekend; +1d forward absorbs a UTC timezone seam where
+      // Yahoo's bar timestamp could land on the next calendar day.
+      const reqMs = new Date(`${date}T00:00:00Z`).getTime();
+      const start = Math.floor((reqMs - 86400_000 * 7) / 1000);
+      const end = Math.floor((reqMs + 86400_000) / 1000);
       url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${start}&period2=${end}`;
       isHistorical = true;
     }
