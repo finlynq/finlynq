@@ -515,7 +515,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async () => streamDRefuseRead("get_loans", "loans"),
   );
 
-  server.tool("get_goals", "Get all financial goals with progress. Stdio cannot decrypt names (no DEK on this transport) — `name` and per-account display names come back null. Each goal carries `accountIds: number[]` (issue #130 multi-account linking) — use HTTP MCP or the web UI to see the decrypted names.", {}, async () => {
+  server.tool("get_goals", "Get all financial goals. Stdio cannot decrypt names (no DEK on this transport) — `name` and per-account display names come back null. Each goal carries `accountIds: number[]` (issue #130 multi-account linking) — use HTTP MCP or the web UI to see decrypted names AND progress numbers (`currentAmount`, `progress`, `percentComplete`, `remaining`, `monthlyNeeded`). Stdio doesn't surface progress because the shared helper (issue #233) requires the Drizzle pg client and the holdings-value aggregator, neither of which are wired into the stdio transport.", {}, async () => {
     // Stream D Phase 4 — plaintext g.name and a.name dropped. Stdio has no
     // DEK, so we can't decrypt name_ct. Return ids only and let the caller
     // hop to HTTP MCP / web UI for names.
@@ -1722,6 +1722,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           delete_account: "delete_account(account_id, force?) — stdio refuses `account` (name) post Stream D Phase 4; pass account_id (numeric).",
           add_goal: "add_goal(name, type, target_amount, deadline?, account?)",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?)",
+          get_goals: "get_goals() — Stdio returns ids + accountIds only (no decrypted names, no progress numbers per issue #233 — use HTTP MCP for `currentAmount`/`progress`/`percentComplete`).",
           delete_goal: "delete_goal(goal)",
           create_category: "create_category(name, type, group?, note?) — type: E/I/R",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?)",

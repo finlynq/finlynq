@@ -6,6 +6,31 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-10 — MCP get_goals progress fields + liability-account group default (#233)
+
+Bug fixes for two LOW-priority surfaces flagged in `reviews/2026-05-10/08-goals-progress-and-account-group-shape.md` — original audit issues #46 (`get_goals` missing progress fields) and #2 (empty `group` on liability accounts), bundled per the issue plan.
+
+### Bug fixes
+- **MCP HTTP `get_goals` now returns `currentAmount`, `progress`, `percentComplete`, `remaining`, `monthlyNeeded`** per goal. The docstring has promised "with progress" since shipping but the response only carried ids + decrypted names. Implementation routes through a new shared helper `src/lib/goals-progress.ts` that REST `GET /api/goals` now also calls — single source of truth for the math, no drift between the two surfaces. Per-account branching on `accounts.is_investment` (CLAUDE.md issue #151), per-currency FX into the goal currency (issue #129), and the `getHoldingsValueByAccount`-vs-`SUM(transactions.amount)` rule (CLAUDE.md "Account balance for accounts with holdings = `holdings.value`") are owned by the helper. `percentComplete` is an alias of `progress` so callers writing against either field name keep working. Stdio `get_goals` continues to return ids + `accountIds` with `name: null` (no DEK on stdio, no Drizzle pg client either) — docstring updated to point HTTP for progress numbers.
+- **`add_account` defaults blank `group` to `"Liability"` for `type='L'` rows.** Pre-fix, MCP `add_account` wrote `${group ?? ""}` and the cash-flow-forecast partition surfaced these as `accountsExcluded.groupName: ""` because the coalesce only handled NULL, not empty string. Fix lives in `src/lib/queries.ts` `resolveDefaultGroup(type, group)` — applied inside `createAccount`/`updateAccount` (covers REST `POST/PUT /api/accounts`), and inlined in the MCP HTTP `add_account` insert. Asset accounts keep current behavior — empty group is meaningful for assets that haven't been categorized. `get_cash_flow_forecast` also gained a belt-and-suspenders trim-then-coalesce so any pre-existing blank-group rows fall through to `"(no group)"` until the operator runs the backfill SQL.
+- **One-time SQL backfill** in `pf-app/scripts/migrate-account-group-blank-2026-05-10.sql` for legacy liability rows. Per CLAUDE.md "destructive migrations still need the manual code-FIRST playbook", this lives in `scripts/` (NOT the auto-applied `scripts/migrations/` dir) and is run per env after the code fix is live. Idempotent.
+- **`finlynq_help` cribs updated** on both HTTP and stdio register files — new `get_goals` entry mentions the progress fields (HTTP) / explicitly disclaims them (stdio).
+
+### Files touched
+- [src/lib/goals-progress.ts](src/lib/goals-progress.ts) (NEW)
+- [src/lib/queries.ts](src/lib/queries.ts) — `resolveDefaultGroup` + `createAccount`/`updateAccount`
+- [src/app/api/goals/route.ts](src/app/api/goals/route.ts) — refactor onto helper
+- [mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts) — `get_goals` progress fields, `add_account` group default, `get_cash_flow_forecast` trim, `finlynq_help` crib
+- [mcp-server/register-core-tools.ts](mcp-server/register-core-tools.ts) — stdio docstring + `finlynq_help` crib
+- [scripts/migrate-account-group-blank-2026-05-10.sql](scripts/migrate-account-group-blank-2026-05-10.sql) (NEW)
+
+### Out of scope
+- Backfilling other blank fields (`note`, `alias` are intentionally optional).
+- Changing the goal-completion threshold.
+- Surfacing progress on `get_loans` or other read tools.
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes; manual MCP smoke pending against dev.
+
 ## 2026-05-10 — Validator-agent reliability re-probe: `[amount_overridden_by_entered]` warning (#232)
 
 Process check, no code change. Resolves the contradiction between the PR #224 validator-agent comment ("warning fires for `record_transaction(amount=-50, enteredAmount=-100, enteredCurrency=USD)` against a CAD account") and the 2026-05-10 auditor reading (`warnings: []`).
