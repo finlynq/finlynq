@@ -47,8 +47,29 @@ type AccountWrite = {
   aliasLookup?: string | null;
 };
 
+/**
+ * Issue #233 — liability accounts that come in with a blank `group` are
+ * silently surfaced as `groupName: ""` in `get_cash_flow_forecast`'s
+ * `accountsExcluded` partition (the coalesce treats "" as truthy). Default
+ * `type='L'` rows whose `group` is missing/blank/whitespace-only to
+ * `"Liability"`. Asset accounts keep current behavior — empty group is a
+ * meaningful "uncategorized" state for assets.
+ */
+export function resolveDefaultGroup(
+  type: string,
+  group: string | null | undefined,
+): string {
+  const trimmed = (group ?? "").trim();
+  if (trimmed) return trimmed;
+  return type === "L" ? "Liability" : "";
+}
+
 export async function createAccount(userId: string, data: AccountWrite) {
-  return db.insert(accounts).values({ ...data, userId }).returning().get();
+  const normalized: AccountWrite = {
+    ...data,
+    group: resolveDefaultGroup(data.type, data.group),
+  };
+  return db.insert(accounts).values({ ...normalized, userId }).returning().get();
 }
 
 export async function updateAccount(
@@ -56,7 +77,19 @@ export async function updateAccount(
   userId: string,
   data: Partial<AccountWrite & { archived: boolean; isInvestment: boolean }>,
 ) {
-  return db.update(accounts).set(data).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).returning().get();
+  // Apply the same default when the caller supplies `group` explicitly. We
+  // only touch it when `group` is in the payload — leaving an unset group
+  // untouched is correct semantics for partial updates.
+  let normalized = data;
+  if (Object.prototype.hasOwnProperty.call(data, "group")) {
+    // We need the row's `type` to know whether the liability default applies
+    // when the caller didn't also supply `type`. Read once from the existing
+    // row.
+    const existingType =
+      data.type ?? (await getAccountById(id, userId))?.type ?? "A";
+    normalized = { ...data, group: resolveDefaultGroup(existingType, data.group) };
+  }
+  return db.update(accounts).set(normalized).where(and(eq(accounts.id, id), eq(accounts.userId, userId))).returning().get();
 }
 
 export async function deleteAccount(id: number, userId: string) {

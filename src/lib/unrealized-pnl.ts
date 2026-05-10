@@ -59,6 +59,16 @@ export type UnrealizedPnL = {
   fxGL: number;
   totalGL: number;
 
+  // Issue #236 (2026-05-10): when the period delta rounds to 0 but the
+  // cumulative-since-acquisition UGL is non-zero (an "inactive holding"
+  // whose cost basis ≠ market value AND the price didn't move in the
+  // window), `valuationGL` falls through to the cumulative figure so the
+  // open UGL surfaces in income-statement reports. `valuationGLBasis`
+  // discloses which semantic produced the value:
+  //   "period"     — strict end - start delta (default; non-zero deltas)
+  //   "cumulative" — delta rounded to 0, fell through to end.valuationGLAtDate
+  valuationGLBasis: "period" | "cumulative";
+
   hasHoldings: boolean;
   costBasisMissing: boolean;
 };
@@ -187,7 +197,22 @@ export async function computeAllAccountsUnrealizedPnL(
 
     // Period delta — what the user asked for: "this period - last period".
     // Valuation: cumulative UGL moved between snapshots.
-    const valuationGL = end.valuationGLAtDate - start.valuationGLAtDate;
+    let valuationGL = end.valuationGLAtDate - start.valuationGLAtDate;
+    let valuationGLBasis: "period" | "cumulative" = "period";
+    // Issue #236 (2026-05-10): when the period delta rounds to 0 but the
+    // cumulative-since-acquisition UGL is non-zero (an inactive holding
+    // whose cost basis ≠ market value AND the price didn't move during the
+    // window), surface the cumulative figure so income-statement consumers
+    // can see open UGL. Without this fall-through, a holding like the audit
+    // repro (cost 2920.27, mv 2918.04 with start==end) reported
+    // `valuationGL: 0` even though there is a real -2.23 unrealized loss
+    // sitting on the books. Conjunctive guard so legitimate quiescent
+    // holdings (cumulative ~ 0 too, e.g. brand-new buy at par) keep
+    // `valuationGL: 0` with basis="period".
+    if (Math.abs(valuationGL) < 0.005 && Math.abs(end.valuationGLAtDate) >= 0.005) {
+      valuationGL = end.valuationGLAtDate;
+      valuationGLBasis = "cumulative";
+    }
     // FX: holding the same balance over the period × the FX move. This
     // captures "how much CAD value of a USD account changed because USD/CAD
     // moved", independent of price changes.
@@ -214,6 +239,7 @@ export async function computeAllAccountsUnrealizedPnL(
       valuationGL,
       fxGL,
       totalGL,
+      valuationGLBasis,
       hasHoldings,
       costBasisMissing,
     });

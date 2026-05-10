@@ -6,6 +6,203 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+- Add public Terms of Service at `/terms` covering the managed cloud service. Required for Anthropic Connectors Directory submission Page 6 attestation. AGPL v3 governs self-hosted use of the source; these Terms govern finlynq.com only.
+
+## 2026-05-10 — [BREAKING] MCP API hygiene Phase 3: envelopes 3.1.0 + delete_category (#237)
+
+Third and final phase of the MCP API hygiene cluster from #211. **BREAKING change to MCP envelope shape — version bump 3.0.0 → 3.1.0 at both stdio and HTTP entry points.** Tool count goes 90 HTTP / 86 stdio → **91 HTTP / 87 stdio**.
+
+### Breaking changes
+
+- **Envelope unification.** Every MCP read/write tool now returns the canonical `{ success: true, data: <T> }` envelope. Out-of-shape responses (raw arrays, `{ ok: true, ... }`, `{ success: true, <inline-fields> }`) all collapse onto the unified shape. Callers that destructure top-level fields (`result.transactionId`, `result.imported`, raw arrays at `result[0]`) MUST switch to `result.data.transactionId`, `result.data.imported`, `result.data[0]`. Most clients reading `result.success` and `result.data` already worked because `{ success: true, transactionId, message }` was a superset; the formal contract is now consistent across every tool.
+- **Server version bump 3.0.0 → 3.1.0** at `mcp-server/index.ts:55` (stdio) and `src/app/api/mcp/route.ts:157` (HTTP).
+- **Anthropic Connectors Directory submission impact.** Clients connected mid-rollout will see `serverInfo.version: 3.1.0` after deploy. The directory entry still says `3.0.0` until the founder updates the form (Page 3 — `MCP server version`). HANDOVER_2026-05-08.md has the updated copy block.
+
+### Added
+
+- **`preview_delete_category` + `delete_category`** (HTTP). Confirmation-token preview/execute pattern (mirrors `preview_bulk_categorize` / `execute_bulk_categorize`). Preview returns `{ id, name, txCount, ruleCount, subscriptionCount, inUse, confirmationToken }` with a 5-min TTL token; execute verifies + re-checks FK references atomically + commits. Refuses with explicit row counts when any `transactions.category_id` / `transaction_rules.assign_category_id` / `subscriptions.category_id` still references the row. Resolves `id` exact-match OR fuzzy-by-name when a DEK is available (Stream D Phase 4 read pattern: `decryptNameish` + `fuzzyFind`).
+- **`delete_category`** (stdio). Numeric `id` only — refuses `name` cleanly with the Phase-4 error template (no DEK). FK refuse-check enforced unconditionally.
+- **`dataResponse(data)` helper** added to both `mcp-server/register-tools-pg.ts` and `mcp-server/register-core-tools.ts` (next to `text()` / `txt()` / `err()` / `sqliteErr()`). Single source of truth for the unified envelope shape — same wire encoding as `text()`, only the JSON shape differs.
+
+### Changed
+
+- **`get_loans` deprecated.** Description prefixed with `[DEPRECATED — use list_loans]`. Same-resource peer `list_loans` already returns the unified envelope. Removal planned for v3.2.0.
+- **Idempotency-key replay paths** in `bulk_record_transactions` and `approve_staged_rows` now defensively wrap pre-3.1.0 cached envelopes on the lookup branch (72h window). Cached responses written under the new shape replay as `{ success: true, data: { ...originalData, replayed: true } }`; older envelopes get the same wrapper applied to the bare body.
+- **`finlynq_help` tool catalog updates** on both transports — `delete_category` added to the categories section + write-tools list.
+
+### Internal
+
+- `mcp-server/auto-annotations.ts` header comment refreshed (90 → 91 HTTP / 86 → 87 stdio).
+- `pf-app/src/app/mcp-guide/page.tsx` tool-count copy updated.
+- `OAuth scope classification`: `delete_category` falls into `mcp:write` by default (the "everything else is a write" rule); `preview_delete_category` matches the `preview_*` read prefix and lands in `mcp:read`. No change to `src/lib/oauth-scopes.ts` needed.
+- `Auto-annotations`: `delete_category` is `destructiveHint: true` / `readOnlyHint: false` automatically (inferred by `delete_*` prefix); `preview_delete_category` is `readOnlyHint: true` (inferred by `preview_*`).
+
+## 2026-05-10 — MCP `get_investment_insights`: full-portfolio scoping + valuationGL fall-through + label fix (#236)
+
+Three residual defects in MCP HTTP `get_investment_insights` after PR #228 (issue #209) — all surfaced by the auditor's reviews/2026-05-10/04-portfolio-analysis-fullscope-and-label-fixes.md.
+
+### Bug fixes
+
+- **Drop the `buysOnly` SQL pre-filter from `aggregateHoldings()`.** The `mode='patterns'` and `mode='rebalancing'` branches of `get_investment_insights` previously called `aggregateHoldings(..., { buysOnly: true })`, which pre-filtered `t.amount < 0`. That violated the four-aggregator alignment invariant (CLAUDE.md "Portfolio aggregator: qty>0 is a buy regardless of amount sign") and silently dropped every WP-imported buy row (Finlynq-native is `amt<0+qty>0`, WP convention is `amt>0+qty>0`). Symptom: `summary.totalInvested` reported the subset of holdings whose buy rows happened to have `amount < 0` ($32,678.92 in the audit repro) against ~$580k of additional WP-imported holdings the user actually owns. Fix removes the opt entirely from the function signature so it can't be re-introduced; the buy-bucket semantic is preserved by `accumulate()`'s `qty > 0` branch — `a.buy_amount` only accumulates from rows where `qty > 0`. After the fix, `totalInvested` reduces over the FULL `positions` array and reconciles to `get_portfolio_analysis.summary.lifetimeCostBasisReporting` for the same user. The rebalancing `untargetedHoldings` block is preserved and now reports the correct count + book value of genuinely-untargeted holdings.
+
+- **`unrealized.accounts[].valuationGL` start==end fall-through.** When `start.marketValueNative === end.marketValueNative` AND `start.costBasisNative === end.costBasisNative`, both `*AtDate` values equal `(market - cost) * fx` and the period delta rounds to 0. For inactive holdings whose cost basis ≠ market value (audit repro: account id 612, costBasis 2920.27, marketValue 2918.04, expected `valuationGL ≈ -2.23`), the open UGL was being silently dropped. The period semantic now falls through to the cumulative-since-acquisition figure when `Math.abs(period delta) < 0.005 AND Math.abs(end.valuationGLAtDate) >= 0.005`. Each per-account row carries a new `valuationGLBasis: 'period' | 'cumulative'` field that discloses which semantic produced the value, so consumers can reconcile. Brand-new holdings near par (cumulative ~ 0 too) keep `valuationGL: 0` with `basis: 'period'` — only the start==end-but-non-zero-cumulative edge is rerouted.
+
+- **`unrealized.accounts[].accountCurrency` label drift (non-breaking).** Every monetary field on the per-account row (`costBasis` / `marketValue` / `valuationGL` / `fxGL` / `totalGL` / `startMarketValue` / `endMarketValue`) is FX-converted to the reporting currency by `roundMoney(..., reporting)`, but the row was labeled with the underlying account's ISO code (e.g. `accountCurrency: 'USD'` while the values were CAD-converted). The new authoritative field is `reportingCurrency: a.displayCurrency`; `accountCurrency` is kept as a deprecated alias for one release with a JSDoc warning. The full BREAKING rename will land alongside the 3.x envelope unification (issue #237) — coordinate any consumer migration to read `reportingCurrency` first to avoid a hard cutover.
+
+### Docs
+
+- **CLAUDE.md "Portfolio aggregator" load-bearing paragraph extended** — appended a note that `get_investment_insights` (HTTP-only, modes `patterns` + `rebalancing`) is the fifth caller of the canonical aggregator and inherits the invariant. **DO NOT pre-filter `t.amount < 0` in `aggregateHoldings()` SQL or any new aggregator path** — buy-classification is `accumulate()`'s job, keying on `qty > 0` direction. Adding the filter back silently drops WP-imported buys.
+
+### Files touched
+
+- `pf-app/mcp-server/register-tools-pg.ts` — `aggregateHoldings()` signature + SQL (drop `buysOnly`); two `aggregateHoldings(...)` callsites in `get_investment_insights`; `unrealized.accounts[]` response shape (add `reportingCurrency` + `valuationGLBasis`, mark `accountCurrency` deprecated)
+- `pf-app/src/lib/unrealized-pnl.ts` — `UnrealizedPnL` type (add `valuationGLBasis`); `computeAllAccountsUnrealizedPnL` (start==end fall-through)
+- `pf-app/CHANGELOG.md` — this entry
+- `CLAUDE.md` — extend "Portfolio aggregator" load-bearing paragraph
+
+## 2026-05-10 — MCP read tools: financial-health math, recurring staleness, cash-flow attribution (#235)
+
+Fixes the residual math + UX defects in three MCP aggregator tools that PR #228 (issue #210) didn't touch. Auditor file: `reviews/2026-05-10/07-readtool-aggregator-math-and-staleness.md`.
+
+### Bug fixes
+
+- **`get_financial_health_score` — five independent fixes.**
+  - **Round once at the end.** Sub-component `weighted` values stay un-rounded internally (`weightedRaw`); the surface response rounds each component for display + sums the un-rounded values for `score`, then rounds once. The previous code summed `Math.round(component.weighted)` and produced an off-by-one vs. the un-rounded sum (auditor saw 66 displayed when true total was 65).
+  - **Liquid-assets filter.** Replaced the substring blacklist (`!group.includes("invest") && !group.includes("retire")`) with explicit `is_investment` branching + a cash-group whitelist (`Banks`, `Cash Accounts`, `Cash`, `Savings`, `Chequing`, `Checking`). Mirrors the load-bearing rule documented in [CLAUDE.md](../CLAUDE.md) ("Account balance for accounts with holdings = `holdings.value`") so real estate / vehicles / locked-in retirement no longer slip through. Custom user-defined cash groups need to be added to the whitelist; that's intentional — extending the list is preferable to reverting to substring matching.
+  - **Net Worth Trend.** Replaced the hardcoded `score: 50, weighted: 8, detail: "Tracking"` placeholder with a real 3-month delta. The detail field now returns `{ direction: 'up' | 'down' | 'flat', magnitudePct: number, descriptor: string }` derived from net worth today vs. 90 days ago. Score scales from 0 (≤ -10% mom) to 100 (≥ +10% mom). When the user has < 60 days of transaction history, the component is excluded (see no-data exclusion below).
+  - **No-budget exclusion.** When `budgetsData.length === 0`, the Budget Adherence component is now EXCLUDED from the weighted average (not penalized at 50/100); the remaining components reweight proportionally to sum to 1.0. The same exclusion applies to Net Worth Trend when history is insufficient. Response surfaces `excludedComponents: [{ name, reason, detail }]` so callers can explain the omission. **Score-arithmetic change:** users without budgets typically see their score move UP since 50/100 was a soft penalty.
+  - **DTI denominator.** Switched from `(totalIncome / 3) * 12` 3m × 4 extrapolation to a real trailing-12m income / trailing-12m debt-payment ratio (`SUM(amount<0) WHERE accounts.type='L'` over 12m vs. `SUM` of income-typed transactions over 12m). The 3m × 4 estimator distorted in months with skewed payment timing (Q1 lump sums got multiplied by 4). Savings-rate keeps its 3m window.
+
+- **`get_recurring_transactions` — staleness flagging.** Each row now also surfaces `daysSinceLast: number`, `expectedCadenceDays: number` (already computed internally), and `flagged: boolean` (true when `daysSinceLast > expectedCadenceDays * 1.5`). Threshold lives in a named constant `STALENESS_THRESHOLD_MULTIPLIER` in [src/lib/recurring-detection.ts](src/lib/recurring-detection.ts) so it's tweakable in one place. The constant is also surfaced at the top level of the response so callers can recompute their own threshold.
+
+- **`get_cash_flow_forecast` — per-recurring-item attribution.** Response now includes `recurringContributions: Array<{ name, monthly, daysSinceLast, included, dropReason? }>` listing every detected-or-dropped candidate. Empty `recurringContributions` is itself a load-bearing signal that explains a near-zero forecast (the auditor saw $12.81 of swing over 90 days with no explanation). `dropReason` ∈ `'too_few_occurrences' | 'amount_too_small' | 'inconsistent' | 'stale'`. **Stale recurrences are dropped from the projection** (`dropReason: 'stale'`) — don't forward-project an item that's stopped charging. `recurringItems` is now structured as `{ included, dropped }` for clarity.
+
+### Improvements
+
+- **Shared helper.** Both `get_recurring_transactions` and `get_cash_flow_forecast` now route their cadence + staleness logic through [src/lib/recurring-detection.ts](src/lib/recurring-detection.ts) (pure, no DB I/O — testable in isolation). Both tools move in lockstep on threshold or drop-reason taxonomy changes — no forking.
+- **Read-only auth context preserved.** All three handlers continue to use `requireAuth()` + nullable DEK (no promotion to `requireEncryption()` — that would re-introduce 423 cascades on deploy restart).
+
+### Files touched
+
+- [mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts) — `get_financial_health_score`, `get_recurring_transactions`, `get_cash_flow_forecast`, `finlynq_help` cribs
+- [src/lib/recurring-detection.ts](src/lib/recurring-detection.ts) — new shared helper
+- [tests/recurring-detection.test.ts](tests/recurring-detection.test.ts) — 7 unit tests covering drop-reason buckets + stale boundary
+
+### Out of scope
+
+- Reworking `accounts.group` taxonomy itself; changing the recurring-detection algorithm; cohort/historical tracking on the score; user-customizable cash-group whitelist (constant for now).
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes, 7 new unit tests pass. Manual MCP HTTP probes pending validator pass on dev.
+
+---
+
+## 2026-05-10 — MCP API hygiene Phase 2: fail-loud fuzzy match + accountId on update_account (#234)
+
+Tightens the `resolveAccountStrict` and `resolveCategoryStrict` waterfalls so that ≥2 collisions on the same tier (`startsWith` or substring + token-overlap) now return an `ambiguous` result with up to five candidate rows — instead of silently routing the write to the first match. Adds the `accountId` exact-match escape hatch to `update_account` (was on the legacy `fuzzyFind` path) and a name+id mismatch check to every account-fuzzy MCP write tool.
+
+### Bug fixes
+- **Strict resolver — new `ambiguous` variant.** Both `resolveAccountStrict` ([mcp-server/register-tools-pg.ts:303-339](mcp-server/register-tools-pg.ts)) and `resolveCategoryStrict` ([:382-417](mcp-server/register-tools-pg.ts)) now return `{ ok: false, reason: "ambiguous", tier, candidates: Row[≤5] }` when the same prefix or substring tier has ≥2 hits. Exact-name and exact-alias still take a single match (alias-uniqueness is enforced at create time). Single-match continues to return `{ ok: true, ... }` unchanged — no regression on the common path. The discriminated-union typing means every existing `if (!resolved.ok)` callsite gets a fresh exhaustive-check from the type system, so adding the new `ambiguous` reason was type-safe across all 12 affected callers.
+- **All 12 callsites updated with an explicit `ambiguous` branch.** `record_transaction`, `bulk_record_transactions` (per-row account + per-row category), `update_transaction` (category), `record_transfer` (both legs), `record_trade`, `update_account`, `get_portfolio_analysis` (account-scope filter, surfaces an `accountWarnings[]` entry rather than erroring), and the bulk-update path's category resolver. Each includes "Pass account_id to disambiguate" in the user-facing error so the AI knows which exact-id field to use.
+- **`update_account`: switched from `fuzzyFind` to `resolveAccountStrict`, added `accountId` exact param.** Same bug class as #230 (`delete_account` hotfix): the previous handler called `fuzzyFind` against `name_ct`-only rows after `decryptNameish`, so a typo or ambiguous prefix could silently pick the first row from the SELECT. Now mirrors `delete_account`'s shape — pass exactly one of `accountId` (numeric, works without DEK) or `account` (name/alias, requires DEK), with a name+id mismatch check when both are supplied. Success message now echoes both id and name.
+- **Name+id mismatch check on every account-fuzzy write tool.** When `account` (name) AND `account_id` (or `from_account_id`/`to_account_id`) are both supplied, the resolver runs upfront and the result must agree with the supplied id — otherwise the call fails loud with `Account mismatch: "<name>" resolved to id #N, but account_id=M was passed.` Mirrors the precedent at `record_transaction` for `portfolioHolding`/`portfolioHoldingId`. Without this check, the existing "id wins" precedence would silently accept disagreeing pairs — re-introducing the silent-bind class of bug the strict resolver exists to prevent.
+- **Stdio MCP unchanged.** Stdio counterparts already require numeric ids and refuse `account` (name) post Stream D Phase 4; the new HTTP behavior doesn't apply there. `finlynq_help` cribs on both transports updated to mention the strict-fuzzy + fail-loud-ambiguity contract and the id escape hatch.
+- **No new tools, no MCP version bump.** Server stays at `3.0.0` with 90 HTTP / 86 stdio tools — version + envelope changes are gated to Phase 3.
+
+### Files touched
+- [mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts) — resolver type unions, ambiguity branches, `update_account` schema + handler, `finlynq_help` cribs
+- [mcp-server/register-core-tools.ts](mcp-server/register-core-tools.ts) — stdio `finlynq_help` cribs only (no behavior change)
+
+### Out of scope
+- Envelope unification (`{success, data}` everywhere) — Phase 3.
+- Version bump 3.0.0 → 3.1.0 — Phase 3.
+- New `delete_category` tool — Phase 3.
+- Edit-distance fuzzy matching — separate concern.
+- `transaction_rules.is_active` INTEGER → BOOLEAN migration — separate cross-cutting follow-up tracked under #214.
+- Switching `delete_budget`'s `fuzzyFind` to `resolveCategoryStrict` — recommended but deferable; the existing decrypt fix from #211 is enough for Phase 2's stated goal.
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes. Live MCP HTTP probes (4 scenarios per the issue's smoke plan: ambiguity, exact via id, mismatched pair, single-match regression) pending against dev — validator agent.
+
+---
+
+## 2026-05-10 — MCP get_goals progress fields + liability-account group default (#233)
+
+Bug fixes for two LOW-priority surfaces flagged in `reviews/2026-05-10/08-goals-progress-and-account-group-shape.md` — original audit issues #46 (`get_goals` missing progress fields) and #2 (empty `group` on liability accounts), bundled per the issue plan.
+
+### Bug fixes
+- **MCP HTTP `get_goals` now returns `currentAmount`, `progress`, `percentComplete`, `remaining`, `monthlyNeeded`** per goal. The docstring has promised "with progress" since shipping but the response only carried ids + decrypted names. Implementation routes through a new shared helper `src/lib/goals-progress.ts` that REST `GET /api/goals` now also calls — single source of truth for the math, no drift between the two surfaces. Per-account branching on `accounts.is_investment` (CLAUDE.md issue #151), per-currency FX into the goal currency (issue #129), and the `getHoldingsValueByAccount`-vs-`SUM(transactions.amount)` rule (CLAUDE.md "Account balance for accounts with holdings = `holdings.value`") are owned by the helper. `percentComplete` is an alias of `progress` so callers writing against either field name keep working. Stdio `get_goals` continues to return ids + `accountIds` with `name: null` (no DEK on stdio, no Drizzle pg client either) — docstring updated to point HTTP for progress numbers.
+- **`add_account` defaults blank `group` to `"Liability"` for `type='L'` rows.** Pre-fix, MCP `add_account` wrote `${group ?? ""}` and the cash-flow-forecast partition surfaced these as `accountsExcluded.groupName: ""` because the coalesce only handled NULL, not empty string. Fix lives in `src/lib/queries.ts` `resolveDefaultGroup(type, group)` — applied inside `createAccount`/`updateAccount` (covers REST `POST/PUT /api/accounts`), and inlined in the MCP HTTP `add_account` insert. Asset accounts keep current behavior — empty group is meaningful for assets that haven't been categorized. `get_cash_flow_forecast` also gained a belt-and-suspenders trim-then-coalesce so any pre-existing blank-group rows fall through to `"(no group)"` until the operator runs the backfill SQL.
+- **One-time SQL backfill** in `pf-app/scripts/migrate-account-group-blank-2026-05-10.sql` for legacy liability rows. Per CLAUDE.md "destructive migrations still need the manual code-FIRST playbook", this lives in `scripts/` (NOT the auto-applied `scripts/migrations/` dir) and is run per env after the code fix is live. Idempotent.
+- **`finlynq_help` cribs updated** on both HTTP and stdio register files — new `get_goals` entry mentions the progress fields (HTTP) / explicitly disclaims them (stdio).
+
+### Files touched
+- [src/lib/goals-progress.ts](src/lib/goals-progress.ts) (NEW)
+- [src/lib/queries.ts](src/lib/queries.ts) — `resolveDefaultGroup` + `createAccount`/`updateAccount`
+- [src/app/api/goals/route.ts](src/app/api/goals/route.ts) — refactor onto helper
+- [mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts) — `get_goals` progress fields, `add_account` group default, `get_cash_flow_forecast` trim, `finlynq_help` crib
+- [mcp-server/register-core-tools.ts](mcp-server/register-core-tools.ts) — stdio docstring + `finlynq_help` crib
+- [scripts/migrate-account-group-blank-2026-05-10.sql](scripts/migrate-account-group-blank-2026-05-10.sql) (NEW)
+
+### Out of scope
+- Backfilling other blank fields (`note`, `alias` are intentionally optional).
+- Changing the goal-completion threshold.
+- Surfacing progress on `get_loans` or other read tools.
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes; manual MCP smoke pending against dev.
+
+## 2026-05-10 — Validator-agent reliability re-probe: `[amount_overridden_by_entered]` warning (#232)
+
+Process check, no code change. Resolves the contradiction between the PR #224 validator-agent comment ("warning fires for `record_transaction(amount=-50, enteredAmount=-100, enteredCurrency=USD)` against a CAD account") and the 2026-05-10 auditor reading (`warnings: []`).
+
+- **Re-probe verdict: validator-correct.** Live test on dev MCP HTTP confirms the warning fires top-level on the documented payload (`warnings: ["[amount_overridden_by_entered] \`amount\`=-50 was overridden by \`enteredAmount\`=-100 USD; written value is -136.76 after FX."]`). Three additional probes isolate the gate: only-`amount`-no-`enteredAmount` correctly returns `warnings: []` (nothing to override) — the most likely explanation for the auditor's reading. CAD-account / USD-entered / no-currency / USD-account-USD-entered all fire as expected. The gate at [register-tools-pg.ts:2712-2714](pf-app/mcp-server/register-tools-pg.ts) requires both `amount != null && enteredAmount != null`; FX divergence is NOT required.
+- **No code change.** The implementation at [pf-app/src/lib/queries.ts:462-471](pf-app/src/lib/queries.ts) `deriveTxWriteWarnings` and the three callsites at [pf-app/mcp-server/register-tools-pg.ts:2708, 3129, 3548](pf-app/mcp-server/register-tools-pg.ts) (the last one only for the holding/quantity branch by design) are correct as shipped in PR #224.
+- **`update_transaction` does not surface this warning** — by design, callsite at `register-tools-pg.ts:3548` only checks the holding/quantity branch. Stdio MCP doesn't expose `enteredAmount`, so warning is unreachable there. Both documented as out of scope on this issue.
+- **Files touched** — [pf-app/CHANGELOG.md](pf-app/CHANGELOG.md) (this entry), the parent [CHANGELOG.md](CHANGELOG.md) (mirror), `reviews/2026-05-10/09-validator-agent-amount-override-reliability.md` (re-probe results section appended, outside the repo), `~/.claude/projects/.../memory/validator-agent-trust.md` (new memory note: trust validator-agent MCP probes when payload is documented; spot-check when paraphrased).
+
+Verification: live re-probe on dev MCP HTTP (4 scenarios). Build-only — no runtime surface change.
+
+## 2026-05-10 — FX engine: weekend/holiday walkback + per-leg source surfacing (#231)
+
+Two residuals from the [#206](https://github.com/finlynq/finlynq/issues/206) FX engine cleanup that PR #218 + PR #221 didn't catch.
+
+- **Walkback window — bug fix.** [`fetchYahooRateToUsd`](pf-app/src/lib/fx-service.ts) historical branch was building a forward-only window — `start = requestedDate, end = +7d` — which silently missed weekends + exchange holidays. A Sunday lookup like `get_fx_rate(USD, CAD, "2020-03-15")` had no historical bar at-or-before the requested date inside the window; the picker returned null, the engine fell through to `findNearestCached`, and the response surfaced today's spot price (often ~1.36) instead of Friday 2020-03-13's actual close (~1.39). The window is now biased BACKWARDS — `start = requestedDate - 7d, end = requestedDate + 1d`. 7d back covers the worst-case Christmas–New Year cluster (4 closed days) plus a weekend; +1d forward absorbs a UTC timezone seam where Yahoo's bar timestamp could land on the next calendar day. Picker predicate at [fx-service.ts:147-160](pf-app/src/lib/fx-service.ts) is unchanged (`tsMs <= dateMs`, latest-close-≤-requested-date). The Stooq metals path already walked backwards correctly and is unchanged.
+- **Per-leg source surfacing — feature.** New `collapseLegSources(legs)` helper exported from [fx-service.ts](pf-app/src/lib/fx-service.ts) ranks `fallback` > `stale` > `override` > `live (yahoo/coingecko/stooq)` and picks the worst across legs. `override` is preserved as a positive label only when EVERY leg is overridden (one override + one stale degrades to "stale"); a single live provider is preserved by name only when all legs use that exact provider (mixed live providers fall back to worst-rank). `get_fx_rate` and `convert_amount` (HTTP MCP) and their stdio mirrors now surface the collapsed top-level `source`, an `effectiveDate` (earliest-most-stale across legs), and a `legs: { from, to }` object with `{ rate, source, effectiveDate, currency }` per leg so callers can audit. `convert_amount` previously returned a flat `source: "triangulated"` that hid stale legs entirely.
+- **Files touched** — [pf-app/src/lib/fx-service.ts](pf-app/src/lib/fx-service.ts) (window math + `collapseLegSources` export), [pf-app/mcp-server/register-tools-pg.ts](pf-app/mcp-server/register-tools-pg.ts) (`get_fx_rate` + `convert_amount` collapse), [pf-app/mcp-server/register-core-tools.ts](pf-app/mcp-server/register-core-tools.ts) (stdio mirrors), [pf-app/tests/fx-service.test.ts](pf-app/tests/fx-service.test.ts) (collapse + window-bound unit tests), [CLAUDE.md](CLAUDE.md) ("FX historical lookup" gotcha extension).
+- **Out of scope** — `convert_amount.rate` 8dp precision (already shipped in #208/#221); future-date hard-rejects at MCP boundary (#206); currency enum widening on create/update tools (#206); Stooq metals window growth from 5d to 7d for parity with Yahoo (separate decision — Stooq's predicate is already correct, this would only affect very old multi-day metals holidays which are rare in practice).
+- **No breaking change for the happy path** — when both legs are fresh `yahoo`, top-level `source` stays `"yahoo"`. The new `legs` + `effectiveDate` fields are additive. `convert_amount`'s previous `source: "triangulated"` is gone but no production caller branches on that string today.
+- Follow-up to #240: purges poisoned fx_rate cache rows so the walkback fix actually surfaces on previously-cached (currency, date) pairs. Validation of #240 on dev returned today's spot for `get_fx_rate(USD, CAD, "2020-03-15")` because `findCached` short-circuited at step 2 of `getRateToUsdDetailed` on a row written before the deploy (currency+date matched, rate=today's spot, source=`"yahoo"`). Fresh historical lookups (e.g. `USD→EUR 2019-08-11`) walked back correctly, confirming the code path itself is right. New tracked migration [scripts/migrations/20260510_fx-cache-purge-pre-walkback.sql](pf-app/scripts/migrations/20260510_fx-cache-purge-pre-walkback.sql) DELETEs every `fx_rates` row where `date < CURRENT_DATE` (after a defensive malformed-date pre-filter mirroring the [#206 cache-purge migration](pf-app/scripts/migrations/20260509_fx-cache-purge-future-dates.sql)). Re-fetch cost is bounded by usage — one Yahoo hit per (currency, date) pair on next request, served via the corrected walkback. Today's row + future-dated rows (owned by `settle-future-fx` cron) are intentionally left in place. Idempotent (re-run on a clean predicate is a no-op).
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes. Unit tests cover the window bounds (Sunday + Christmas walkback) and the collapse precedence.
+
+## 2026-05-10 — [HOTFIX] MCP delete_account resolves wrong account id (#230)
+
+Hotfix for a data-loss-risk bug class. The HTTP MCP `delete_account` handler called `fuzzyFind` on rows that only carried encrypted `name_ct` / `alias_ct` (Stream D Phase 4) without first running `decryptNameish`. Every row had `o.name === undefined`, so `fuzzyFind`'s last-resort `lo.includes(String(o.name ?? "").toLowerCase())` step collapsed to `lo.includes("")` (unconditionally true) and silently returned the FIRST account in the SELECT result. With `force=true` and FK CASCADE on `accounts → transactions / holding_accounts / goal_accounts`, a wrong-target call would have wiped every transaction, every holding pairing, and every goal link belonging to the wrong account. The live dev-MCP repro (verbatim from the audit): `delete_account(account="_VERIFY_EUR_ACCOUNT_", force=true)` resolved to a different, high-value asset account; the DELETE only failed because that wrong-target account had FK references blocking it. Same bug class as the closed #211 (`delete_budget` / `delete_loan`) and #214 (`create_rule`) — the resolver-class regression-prevention story now has tests.
+
+- **Schema** — `accountId: number?` added (preferred, exact match, works without DEK). `account: string?` is now optional. Either is required; both is allowed only when they resolve to the same id.
+- **Resolver** — id branch SELECTs by `id + user_id`; name branch refuses without an unlocked DEK (matches stdio's existing refusal at `register-core-tools.ts:1322-1326`) and runs `decryptNameish` BEFORE `fuzzyFind`. Mismatch between an `accountId` and a `account`-resolved id fails loud (`Account mismatch: "<name>" resolves to #<id>, but accountId=<id> was supplied`) and does NOT delete.
+- **Messages** — every error/success echo now includes both `#<id>` and `("<name>")` (or `("<encrypted>")` when no DEK is in scope on the id-only path). The literal `Account 'undefined'` from the audit is gone.
+- **Cache invariant** — `invalidateUserTxCache(userId)` now runs after a successful DELETE, matching the `delete_budget` precedent and the CLAUDE.md "every MCP tx-mutating write must call `invalidateUser(userId)`" gotcha.
+- **FK CASCADE** preserved at the DB level — no application-layer child DELETEs. A code comment names the three cascade paths so the next reader doesn't second-guess.
+- **Stdio** — already correct (refuses `account`, accepts `account_id`); only the help-crib was edited.
+- **Tests** — NEW [tests/mcp/delete-account.test.ts](tests/mcp/delete-account.test.ts) with 11 cases covering all 8 acceptance-criteria branches plus an adversarial-order regression that pins the live #230 repro shape (matching account is NOT first in the SELECT result; the resolver must still hit the correct id).
+- **MCP server version** stays 3.0.0 (bug fix; the only surface change is one new optional `accountId` param). Tool count stays 90 HTTP / 86 stdio.
+- **Files touched** — [mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts) (`delete_account` handler + `finlynq_help` crib), [mcp-server/register-core-tools.ts](mcp-server/register-core-tools.ts) (stdio `finlynq_help` crib only), NEW [tests/mcp/delete-account.test.ts](tests/mcp/delete-account.test.ts), [CHANGELOG.md](CHANGELOG.md), [../CLAUDE.md](../CLAUDE.md).
+- **Validator hint** — live MCP probes on dev: `delete_account(accountId=<id>)` succeeds without a DEK; `delete_account(account="_UNKNOWN_")` returns "Did you mean ...?" with no false-match; `delete_account(accountId=A, account="<name of B>")` returns the explicit mismatch error and does NOT delete; `delete_account(account="<known>")` echoes both name and id in the success message.
+
+Verification: `npx tsc --noEmit` clean (existing repo state), `npm run build` passes, `vitest run tests/mcp/delete-account.test.ts` 11/11 passes.
+
+## 2026-05-10 — Data fixes: receipt-OCR sign flip + FX-reval rounding (#229)
+
+One-time historical data migration — non-destructive UPDATE-in-place fixes for residual rows that pre-date the pipeline guards from PR #225 (issue #212, sign-vs-category validator) and PR #221 (issue #208, IEEE-754 rounding hygiene). Forward-going writers are confirmed clean ([src/lib/currency-conversion.ts](src/lib/currency-conversion.ts) `round2()` at line 39 + 87, and [src/lib/cron/settle-future-fx.ts](src/lib/cron/settle-future-fx.ts) routes through `convertToAccountCurrency` which round2()s the amount). Tracked migration auto-applied by `deploy.sh`; loose destructive bucket not used (operation is non-destructive UPDATE-in-place, idempotent, globally scoped).
+
+- **Part A — receipt-OCR April 2026 sign flip.** Pre-validator E-type rows ingested with positive amounts on 2026-04 dates. Dev-side SELECT (2026-05-10) showed 8 rows on the auditor's user/account 605 totalling ~$1341 — the issue described "~7 rows / ~$880 net swing" but the slight count/sum drift is expected and the issue tolerates "If the count != 7 or the row list differs, narrow further." The predicate scopes to E-type + `amount > 0` + 2026-04 date window so the cohort is captured cleanly without touching older legitimate data-entry mistakes (out of scope per the issue) or other users' rows. Post-state: every flipped row has `amount < 0` and passes `validateSignVsCategory` (E => `amount <= 0`).
+- **Part B — round to 2dp.** Dev-side SELECT showed 54 rows with sub-cent precision (4-8 decimals) from older write paths prior to PR #221's rounding hygiene. Auditor's specific rows id 37619 (4dp: 9.8252) and id 37898 (8dp: 1.96511214) are in the set. All affected rows are CAD or USD — no JPY/BTC sub-cent-intentional currencies in the population today (out-of-scope per the source review). The display layer already rounds these on read; this aligns the persisted column.
+- **Audit-trio invariant** ([CLAUDE.md](../CLAUDE.md) "Audit trio (issue #28)") — both UPDATEs bump `updated_at = NOW()`; `source` is INSERT-only and is NOT in the SET clause (originally-`manual` rows stay `manual`).
+- **Idempotency** — both UPDATEs are predicate-self-guarded. Re-run on Part A finds no E+ April rows; re-run on Part B finds no sub-cent rows. Each is a no-op the second time. Tracked via `schema_migrations` so the runner only applies once per env regardless.
+- **Files touched** — NEW: [scripts/migrations/20260510_data-fix-receipt-sign-and-fx-reval-rounding.sql](scripts/migrations/20260510_data-fix-receipt-sign-and-fx-reval-rounding.sql). CHANGELOG.md.
+- **Out of scope** — adding a `CHECK` constraint on `transactions.amount` precision (would need to handle non-2dp currencies — JPY/BTC); other potential bug-class historical rows not flagged in the verification (e.g. pre-2026-04 receipt-OCR rows, older long-tail E+ rows on the same user); pipeline-side fixes already shipped in #225 + #221.
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes. Migration runner picks up the file on the next `deploy.sh` cycle (dev first, then prod).
+
 ## 2026-05-09 — MCP rules subsystem: stale `match_payee` column + missing `decryptNameish` resolver (#214)
 
 Fixes two compounding bugs in the MCP rules subsystem flagged by the auditor in `reviews/2026-05-09/07-rules-subsystem-is-active-and-resolver.md`. Both surface today in HTTP `create_rule` + `apply_rules_to_uncategorized` and stdio `create_rule` + the `autoCategory` helper called by stdio `record_transaction` / `bulk_record_transactions`.

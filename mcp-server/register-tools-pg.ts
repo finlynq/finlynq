@@ -27,6 +27,7 @@ import {
   getRateToUsdDetailed,
   validateCurrencyCode,
   validateFxDate,
+  collapseLegSources,
 } from "../src/lib/fx-service";
 import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies";
 import {
@@ -90,6 +91,7 @@ import {
 } from "../src/lib/auto-categorize";
 import { decryptStaged, encryptStaged } from "../src/lib/crypto/staging-envelope";
 import { getHoldingsValueByAccount } from "../src/lib/holdings-value";
+import { computeGoalProgress } from "../src/lib/goals-progress";
 import { sourceTagFor, isFormatTag, type FormatTag } from "../src/lib/tx-source";
 import {
   validateSignVsCategory,
@@ -97,6 +99,12 @@ import {
   SignCategoryMismatchError,
 } from "../src/lib/transactions/sign-category-invariant";
 import { ymdDate, ymPeriod, parseYmdSafe } from "./lib/date-validators";
+import {
+  analyzeRecurringGroup,
+  isStale,
+  STALENESS_THRESHOLD_MULTIPLIER,
+  type RecurringDropReason,
+} from "../src/lib/recurring-detection";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -177,6 +185,20 @@ async function withIdempotencyMutex<T>(
 
 function text(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+/**
+ * Issue #237 — unified envelope helper for read tools that previously
+ * returned raw arrays/objects via `text(rawValue)`. Wraps the value in the
+ * canonical `{ success: true, data: <T> }` envelope so every MCP read tool
+ * returns the same outer shape. Same wire encoding as `text()` — only the
+ * shape of the JSON inside differs.
+ *
+ * Use this for new read-tool surfaces and when normalizing legacy callsites.
+ * Existing `text({ success: true, data: ... })` writes don't need to change.
+ */
+function dataResponse(data: unknown) {
+  return text({ success: true, data });
 }
 
 function err(msg: string) {
@@ -296,20 +318,37 @@ type AccountResolveTier = "exact" | "alias" | "startsWith" | "substring";
 type AccountResolveResult =
   | { ok: true; account: Row; tier: AccountResolveTier }
   | { ok: false; reason: "missing" }
-  | { ok: false; reason: "low_confidence"; suggestion: Row };
+  | { ok: false; reason: "low_confidence"; suggestion: Row }
+  | { ok: false; reason: "ambiguous"; tier: "startsWith" | "substring"; candidates: Row[] };
 function resolveAccountStrict(input: string, options: Row[]): AccountResolveResult {
   if (!input || !options.length) return { ok: false, reason: "missing" };
   const lo = input.toLowerCase().trim();
+  // Exact-name and exact-alias tiers can never be ambiguous between
+  // themselves (alias-uniqueness within a user is enforced at create time;
+  // exact equality on a normalized lowercased trim is a single bucket). If
+  // somehow two rows carry the same exact name, prefer the first — silent
+  // here is fine because the operator already has a duplicate-rows
+  // pathology to clean up that the resolver can't fix.
   const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
   if (exact) return { ok: true, account: exact, tier: "exact" };
   const alias = options.find(o => String(o.alias ?? "").toLowerCase() === lo);
   if (alias) return { ok: true, account: alias, tier: "alias" };
-  const starts = options.find(o => {
+  // Issue #234 (Phase 2) — fail loud when ≥2 distinct names share a prefix
+  // hit. Previously the resolver did `options.find(...startsWith(lo))` and
+  // silently routed to the first — e.g. "Test RBC" with two child accounts
+  // "Test RBC TFSA" and "Test RBC RRSP" would silently land in whichever
+  // came back first from the SELECT. Now the caller gets an
+  // `ambiguous` result and surfaces a "did you mean …? Pass account_id."
+  // error so the AI can disambiguate via the exact-id escape hatch.
+  const starts = options.filter(o => {
     const n = String(o.name ?? "").toLowerCase();
     return n !== "" && n.startsWith(lo);
   });
-  if (starts) return { ok: true, account: starts, tier: "startsWith" };
-  // Substring/reverse-substring tier — gate on token overlap.
+  if (starts.length === 1) return { ok: true, account: starts[0], tier: "startsWith" };
+  if (starts.length >= 2) return { ok: false, reason: "ambiguous", tier: "startsWith", candidates: starts.slice(0, 5) };
+  // Substring/reverse-substring tier — gate on token overlap. Same
+  // ambiguity rule applies: any tie among token-overlap-passing rows
+  // forces the caller into the id escape hatch.
   const tokenize = (s: string) =>
     new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
   const inputTokens = tokenize(lo);
@@ -318,13 +357,14 @@ function resolveAccountStrict(input: string, options: Row[]): AccountResolveResu
     for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
     return false;
   };
-  const sub = options.find(o => {
+  const subs = options.filter(o => {
     const n = String(o.name ?? "").toLowerCase();
     if (n === "") return false;
     if (!n.includes(lo) && !lo.includes(n)) return false;
     return sharesToken(n);
   });
-  if (sub) return { ok: true, account: sub, tier: "substring" };
+  if (subs.length === 1) return { ok: true, account: subs[0], tier: "substring" };
+  if (subs.length >= 2) return { ok: false, reason: "ambiguous", tier: "substring", candidates: subs.slice(0, 5) };
   // No strong match. Surface what fuzzyFind WOULD have picked so the caller
   // can include it in the error message ("did you mean …?").
   const legacy =
@@ -357,17 +397,22 @@ type CategoryResolveTier = "exact" | "startsWith" | "substring";
 type CategoryResolveResult =
   | { ok: true; category: Row; tier: CategoryResolveTier }
   | { ok: false; reason: "missing" }
-  | { ok: false; reason: "low_confidence"; suggestion: Row };
+  | { ok: false; reason: "low_confidence"; suggestion: Row }
+  | { ok: false; reason: "ambiguous"; tier: "startsWith" | "substring"; candidates: Row[] };
 function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveResult {
   if (!input || !options.length) return { ok: false, reason: "missing" };
   const lo = input.toLowerCase().trim();
   const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
   if (exact) return { ok: true, category: exact, tier: "exact" };
-  const starts = options.find(o => {
+  // Issue #234 (Phase 2) — fail loud on ≥2 prefix collisions. e.g. with
+  // "Groceries" and "Groceries — Bulk", input "Groce" used to silently route
+  // to the first; now the caller surfaces an ambiguity error.
+  const starts = options.filter(o => {
     const n = String(o.name ?? "").toLowerCase();
     return n !== "" && n.startsWith(lo);
   });
-  if (starts) return { ok: true, category: starts, tier: "startsWith" };
+  if (starts.length === 1) return { ok: true, category: starts[0], tier: "startsWith" };
+  if (starts.length >= 2) return { ok: false, reason: "ambiguous", tier: "startsWith", candidates: starts.slice(0, 5) };
   const tokenize = (s: string) =>
     new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
   const inputTokens = tokenize(lo);
@@ -376,13 +421,14 @@ function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveRe
     for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
     return false;
   };
-  const sub = options.find(o => {
+  const subs = options.filter(o => {
     const n = String(o.name ?? "").toLowerCase();
     if (n === "") return false;
     if (!n.includes(lo) && !lo.includes(n)) return false;
     return sharesToken(n);
   });
-  if (sub) return { ok: true, category: sub, tier: "substring" };
+  if (subs.length === 1) return { ok: true, category: subs[0], tier: "substring" };
+  if (subs.length >= 2) return { ok: false, reason: "ambiguous", tier: "substring", candidates: subs.slice(0, 5) };
   // No strong match. Surface what fuzzyFind WOULD have picked so the caller
   // can include it in the error message.
   const legacy =
@@ -836,11 +882,19 @@ async function aggregateHoldings(
   db: DbLike,
   userId: string,
   dek: Buffer | null,
-  opts?: { buysOnly?: boolean; since?: string; dividendsCategoryId?: number | null }
+  opts?: { since?: string; dividendsCategoryId?: number | null }
 ): Promise<(HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null; currency: string })[]> {
-  const buysFilter = opts?.buysOnly
-    ? sql`AND t.amount < 0`
-    : sql``;
+  // Issue #236 (2026-05-10): the legacy `buysOnly: true` opt SQL-prefiltered
+  // `t.amount < 0`, which silently dropped every WP-imported buy row
+  // (Finlynq-native is `amt<0+qty>0`, WP convention is `amt>0+qty>0`). Buy
+  // classification is `accumulate()`'s job — keying off `qty>0` per the
+  // CLAUDE.md "Portfolio aggregator" invariant — and consumers that want
+  // only the buy bucket read `a.buy_amount` (which `accumulate()` only
+  // populates for `qty > 0` rows). Removing the opt entirely is safer than
+  // leaving a footgun: a future caller passing `buysOnly: true` would
+  // re-introduce the WP-drop bug. The patterns + rebalancing modes of
+  // `get_investment_insights` (the only previous callers) now use the
+  // canonical aggregator and reconcile against `get_portfolio_analysis`.
   const dateFilter = opts?.since ? sql`AND t.date >= ${opts.since}` : sql``;
   const dividendsCategoryId = opts?.dividendsCategoryId ?? null;
 
@@ -902,7 +956,6 @@ async function aggregateHoldings(
      AND COALESCE(cash.quantity, 0) = 0
     WHERE t.user_id = ${userId}
       AND t.portfolio_holding_id IS NOT NULL
-      ${buysFilter}
       ${dateFilter}
   `);
 
@@ -1158,7 +1211,7 @@ export function registerPgTools(
         };
       });
 
-      return text({
+      return dataResponse({
         accounts: enriched,
         reportingCurrency: reporting,
         totalReporting: tagAmount(agg.totalReporting, reporting, "reporting"),
@@ -1271,7 +1324,7 @@ export function registerPgTools(
         };
       });
 
-      return text({ results: tagged, count: tagged.length, reportingCurrency: reporting });
+      return dataResponse({ results: tagged, count: tagged.length, reportingCurrency: reporting });
     }
   );
 
@@ -1307,7 +1360,7 @@ export function registerPgTools(
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
-      return text({ rows, reportingCurrency: reporting });
+      return dataResponse({ rows, reportingCurrency: reporting });
     }
   );
 
@@ -1363,7 +1416,7 @@ export function registerPgTools(
       // Issue #210 — surface `currentMonth` + `priorMonths` so downstream
       // dashboards can flag the partial-month row, and echo `reportingCurrency`
       // for shape symmetry with the current-totals branch.
-      return text({
+      return dataResponse({
         rows,
         reportingCurrency: reporting,
         priorMonths: lookback,
@@ -1417,7 +1470,7 @@ export function registerPgTools(
         dek,
       });
       const unrealizedTotals = summarizeUnrealizedPnL(unrealized);
-      return text({
+      return dataResponse({
         rows,
         reportingCurrency: reporting,
         unrealized: {
@@ -1436,12 +1489,27 @@ export function registerPgTools(
             .map((a) => ({
               accountId: a.accountId,
               accountName: a.accountName,
+              // Issue #236 (2026-05-10): every monetary field on this row
+              // is converted to the reporting currency by `roundMoney(...,
+              // reporting)`, but the legacy field name was `accountCurrency`
+              // which suggested they were in the account's native currency.
+              // The label drift is fixed non-breakingly: `reportingCurrency`
+              // is the new authoritative label, `accountCurrency` is kept
+              // as a deprecated alias for one release. Future bumps may
+              // rename in 3.x BREAKING (see issue #237).
+              reportingCurrency: a.displayCurrency,
+              /** @deprecated since 2026-05-10 (issue #236) — use `reportingCurrency`. The values are in reporting currency, NOT this account's native currency. Will be removed in a future BREAKING release. */
               accountCurrency: a.accountCurrency,
               // periodEnd snapshot for context — already in reporting ccy
               costBasis: roundMoney(a.end.costBasis, reporting),
               marketValue: roundMoney(a.end.marketValue, reporting),
-              // Period delta = end_snapshot - start_snapshot, what moved
+              // Period delta = end_snapshot - start_snapshot, what moved.
+              // Issue #236: when start==end AND cost basis ≠ market value,
+              // `valuationGL` falls through to the cumulative open UGL so
+              // inactive holdings still surface a non-zero figure.
+              // `valuationGLBasis` discloses which semantic was used.
               valuationGL: roundMoney(a.valuationGL, reporting),
+              valuationGLBasis: a.valuationGLBasis,
               fxGL: roundMoney(a.fxGL, reporting),
               totalGL: roundMoney(a.totalGL, reporting),
               startMarketValue: roundMoney(a.start.marketValue, reporting),
@@ -1518,7 +1586,7 @@ export function registerPgTools(
             net: roundMoney(vals.net, ccy),
           };
         }
-        return text({
+        return dataResponse({
           byCurrency: roundedSummary,
           reportingCurrency: reporting,
           total: {
@@ -1585,7 +1653,7 @@ export function registerPgTools(
         };
       });
 
-      return text({
+      return dataResponse({
         priorMonths: lookback,
         // Backwards-compat: keep `months` echoed in the response for callers
         // that still parse it. Will be dropped in a future release.
@@ -1598,14 +1666,14 @@ export function registerPgTools(
   );
 
   // ── get_goals ─────────────────────────────────────────────────────────────
-  server.tool("get_goals", "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking.", {}, async () => {
+  server.tool("get_goals", "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking. Numeric progress fields (issue #233): `currentAmount` (in goal currency, summed across linked accounts using market value for investment accounts and SUM(amount) for cash accounts, FX-converted into goal currency), `progress` and `percentComplete` (0..100, 1dp), `remaining`, `monthlyNeeded` (when a deadline is set).", {}, async () => {
     const goalsRaw = await q(db, sql`
-      SELECT g.id, g.name_ct, g.type, g.target_amount, g.deadline, g.status, g.priority
+      SELECT g.id, g.name_ct, g.type, g.target_amount, g.currency, g.deadline, g.status, g.priority
       FROM goals g
       WHERE g.user_id = ${userId}
       ORDER BY g.priority
     `);
-    if (!goalsRaw.length) return text([]);
+    if (!goalsRaw.length) return dataResponse([]);
     const goalIds = goalsRaw.map((g) => Number(g.id));
     // Pull every (goal_id, account_id, account_name_ct) link in one query.
     // Note: Drizzle's `sql` tag interpolates a JS array as separate scalar
@@ -1631,17 +1699,39 @@ export function registerPgTools(
       entry.names.push(acctName ?? "");
       linksByGoal.set(goalId, entry);
     }
+    // Issue #233 — surface progress numbers via the shared helper so MCP
+    // HTTP and REST `/api/goals` can't drift. Pure aggregation; no name
+    // decryption involved.
+    const progressByGoal = await computeGoalProgress(
+      userId,
+      dek,
+      goalsRaw.map((r) => ({
+        id: Number(r.id),
+        currency: (r.currency as string | null) ?? null,
+        targetAmount: Number(r.target_amount ?? 0),
+        deadline: (r.deadline as string | null) ?? null,
+        accountIds: linksByGoal.get(Number(r.id))?.ids ?? [],
+      })),
+    );
     const rows = goalsRaw.map((r) => {
       const { name_ct, ...rest } = r;
       const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [] };
+      const progress = progressByGoal.get(Number(r.id));
       return {
         ...rest,
         name: name_ct && dek ? decryptField(dek, name_ct) : null,
         accountIds: links.ids,
         accounts: links.names,
+        currentAmount: progress?.currentAmount ?? 0,
+        progress: progress?.progress ?? 0,
+        // Alias matches the docstring's "with progress" promise; some
+        // existing consumers expect a literal `percentComplete` field.
+        percentComplete: progress?.progress ?? 0,
+        remaining: progress?.remaining ?? Number(r.target_amount ?? 0),
+        monthlyNeeded: progress?.monthlyNeeded ?? 0,
       };
     });
-    return text(rows);
+    return dataResponse(rows);
   });
 
   // ── get_categories ─────────────────────────────────────────────────────────
@@ -1658,11 +1748,14 @@ export function registerPgTools(
       void name_ct;
       return rest;
     });
-    return text(rows);
+    return dataResponse(rows);
   });
 
   // ── get_loans ─────────────────────────────────────────────────────────────
-  server.tool("get_loans", "Get all loans with amortization summary", {}, async () => {
+  // Issue #237 — DEPRECATED in favor of `list_loans`. The two tools return
+  // the same logical resource; `list_loans` has been the canonical surface
+  // since v3 envelope unification. Plan removal in v3.2.0.
+  server.tool("get_loans", "[DEPRECATED — use list_loans] Get all loans with amortization summary. Returned in the unified `{ success: true, data: [...] }` envelope as of v3.1.0.", {}, async () => {
     const raw = await q(db, sql`
       SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
              payment_frequency, extra_payment
@@ -1674,7 +1767,7 @@ export function registerPgTools(
       void name_ct;
       return rest;
     });
-    return text(rows);
+    return dataResponse(rows);
   });
 
   // ── get_subscription_summary ───────────────────────────────────────────────
@@ -1751,7 +1844,7 @@ export function registerPgTools(
         })
         .sort((a, b) => String(a.date ?? "").localeCompare(String(b.date ?? "")));
 
-      return text({
+      return dataResponse({
         reportingCurrency: reporting,
         totalMonthlyCost: tagAmount(totalMonthlyCostReporting, reporting, "reporting"),
         totalAnnualCost: tagAmount(totalMonthlyCostReporting * 12, reporting, "reporting"),
@@ -1766,7 +1859,7 @@ export function registerPgTools(
   // ── get_recurring_transactions ─────────────────────────────────────────────
   server.tool(
     "get_recurring_transactions",
-    "Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly. Issue #210 — sign convention: `avgAmount` is always POSITIVE; the `direction` field carries the inflow/outflow semantic. Matches the storage convention used by `subscriptions.amount` / `add_subscription` / `list_subscriptions`. (Pre-issue-#210 callers that read raw `avgAmount` to decide sign should switch to `direction`.)",
+    `Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly. Issue #210 — sign convention: \`avgAmount\` is always POSITIVE; the \`direction\` field carries the inflow/outflow semantic. Matches the storage convention used by \`subscriptions.amount\` / \`add_subscription\` / \`list_subscriptions\`. (Pre-issue-#210 callers that read raw \`avgAmount\` to decide sign should switch to \`direction\`.) Issue #235 — also surfaces \`daysSinceLast\`, \`expectedCadenceDays\`, and \`flagged\` per row (flagged when \`daysSinceLast > expectedCadenceDays * ${STALENESS_THRESHOLD_MULTIPLIER}\`) so callers can spot stale recurrences.`,
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
@@ -1811,40 +1904,47 @@ export function registerPgTools(
 
       const recurring: Array<Record<string, unknown>> = [];
       for (const [, group] of groups) {
-        if (group.length < 3) continue;
-        const avg = group.reduce((s, t) => s + Number(t.amount), 0) / group.length;
-        if (Math.abs(avg) < 0.01) continue;
-        const consistent = group.every(t => Math.abs(Number(t.amount) - avg) / Math.abs(avg) < 0.2);
-        if (consistent) {
-          // Convert avg via the dominant row currency in the group.
-          const ccy = group[0].rowCurrency;
-          const fx = fxByCcy.get(ccy) ?? 1;
-          // Issue #210 — surface positive `avgAmount` to match the storage
-          // convention on `subscriptions.amount`. `direction` carries what
-          // sign used to (raw outflow → "outflow"; salary credit → "inflow").
-          const direction: "inflow" | "outflow" = avg >= 0 ? "inflow" : "outflow";
-          const avgAbs = Math.abs(avg);
-          const avgReporting = avgAbs * fx;
-          recurring.push({
-            payee: group[0].payee,
-            avgAmount: roundMoney(avgAbs, ccy),
-            direction,
-            avgAmountTagged: tagAmount(avgAbs, ccy, "account"),
-            avgAmountReporting: tagAmount(avgReporting, reporting, "reporting"),
-            count: group.length,
-            lastDate: group[group.length - 1].date,
-            currency: ccy,
-          });
-        }
+        // Shared with get_cash_flow_forecast (issue #235) — both tools must
+        // move in lockstep on the staleness threshold + drop-reason taxonomy.
+        const cadence = analyzeRecurringGroup(group, today);
+        if (!cadence.detected) continue;
+        // Convert avg via the dominant row currency in the group.
+        const ccy = group[0].rowCurrency;
+        const fx = fxByCcy.get(ccy) ?? 1;
+        // Issue #210 — surface positive `avgAmount` to match the storage
+        // convention on `subscriptions.amount`. `direction` carries what
+        // sign used to (raw outflow → "outflow"; salary credit → "inflow").
+        const direction: "inflow" | "outflow" = cadence.avg >= 0 ? "inflow" : "outflow";
+        const avgAbs = Math.abs(cadence.avg);
+        const avgReporting = avgAbs * fx;
+        recurring.push({
+          payee: group[0].payee,
+          avgAmount: roundMoney(avgAbs, ccy),
+          direction,
+          avgAmountTagged: tagAmount(avgAbs, ccy, "account"),
+          avgAmountReporting: tagAmount(avgReporting, reporting, "reporting"),
+          count: group.length,
+          lastDate: cadence.lastDate,
+          // Issue #235 — surface staleness signal so callers can flag
+          // subscriptions that have stopped charging without a cancellation.
+          daysSinceLast: cadence.daysSinceLast,
+          expectedCadenceDays: Math.round(cadence.expectedCadenceDays * 10) / 10,
+          flagged: isStale(cadence),
+          currency: ccy,
+        });
       }
-      return text({ reportingCurrency: reporting, recurring });
+      return dataResponse({
+        reportingCurrency: reporting,
+        recurring,
+        stalenessThresholdMultiplier: STALENESS_THRESHOLD_MULTIPLIER,
+      });
     }
   );
 
   // ── get_financial_health_score ─────────────────────────────────────────────
   server.tool(
     "get_financial_health_score",
-    "Calculate a financial health score 0-100 with breakdown by component. Component scores are currency-independent ratios; the underlying totals (income, expenses, liabilities, liquid assets) are converted to reportingCurrency (defaults to user's display currency).",
+    `Calculate a financial health score 0-100 with breakdown by component. Component scores are currency-independent ratios; the underlying totals (income, expenses, liabilities, liquid assets) are converted to reportingCurrency (defaults to user's display currency). Issue #235 changes: (a) final score is summed from un-rounded sub-components and rounded once at the end (no off-by-one); (b) liquid assets exclude illiquid asset accounts (uses \`accounts.is_investment\` + a cash-group whitelist); (c) Net Worth Trend is a real 3M delta with \`{ direction, magnitudePct, descriptor }\` payload; (d) when there are no budgets the Budget Adherence component is EXCLUDED (not penalized at 50/100) and the remaining weights renormalize — \`excludedComponents\` lists what was dropped; (e) DTI uses trailing-12-month debt payments / trailing-12-month income (no 3m × 4 extrapolation).`,
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Affects the underlying totals surfaced alongside the score."),
     },
@@ -1860,11 +1960,29 @@ export function registerPgTools(
         return r;
       };
 
+      // Cash-group whitelist for the liquid-assets filter (issue #235). Not
+      // an exhaustive list of "user-defined cash groups" — a starting point
+      // mirroring the load-bearing branching shape used by /api/goals
+      // currentAmount and the account-balance rule. If validation surfaces
+      // accounts that should be liquid but aren't, extend this list rather
+      // than reverting to substring matching on `group`.
+      const CASH_GROUPS = new Set([
+        "Banks",
+        "Cash Accounts",
+        "Cash",
+        "Savings",
+        "Chequing",
+        "Checking",
+      ]);
+
       const now = new Date();
       const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
       const threeAgo = new Date(now); threeAgo.setMonth(threeAgo.getMonth() - 3);
       const threeStart = `${threeAgo.getFullYear()}-${String(threeAgo.getMonth() + 1).padStart(2, "0")}-01`;
+      const twelveAgo = new Date(now); twelveAgo.setFullYear(twelveAgo.getFullYear() - 1);
+      const twelveStart = twelveAgo.toISOString().split("T")[0];
 
+      // 3-month window for savings-rate (existing semantics).
       const incomeExpenses = await q(db, sql`
         SELECT TO_CHAR(t.date::date, 'YYYY-MM') AS month, c.type AS cat_type,
                COALESCE(t.currency, a.currency) AS currency,
@@ -1886,12 +2004,46 @@ export function registerPgTools(
 
       const savingsRateScore = totalIncome > 0 ? Math.min(100, Math.max(0, ((totalIncome - totalExpenses) / totalIncome) * 500)) : 0;
 
+      // 12-month window for DTI (issue #235). Annualizing income from a 3m
+      // window distorts in months with skewed payment timing — Q1 lump sums
+      // get multiplied by 4. Compute trailing-12m on both sides directly.
+      const incomeDebt12m = await q(db, sql`
+        SELECT c.type AS cat_type,
+               COALESCE(t.currency, a.currency) AS currency,
+               SUM(t.amount) AS total
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        LEFT JOIN accounts a ON a.id = t.account_id
+        WHERE t.user_id = ${userId} AND t.date >= ${twelveStart}
+          AND (c.type = 'I' OR (a.type = 'L' AND t.amount < 0))
+        GROUP BY c.type, COALESCE(t.currency, a.currency), a.type
+      `) as { cat_type: string | null; currency: string | null; total: number }[];
+
+      let income12m = 0;
+      let debtPayments12m = 0;
+      for (const r of incomeDebt12m) {
+        const fx = await fxFor(String(r.currency ?? reporting));
+        const converted = Number(r.total) * fx;
+        if (r.cat_type === "I") {
+          income12m += converted;
+        } else {
+          // a.type = 'L' AND amount < 0 = payment INTO the liability (paying
+          // down the loan / paying the credit card). Flip sign so positive.
+          debtPayments12m += Math.abs(converted);
+        }
+      }
+
+      // Liquid-assets filter (issue #235). is_investment branching mirrors
+      // the load-bearing rule documented in CLAUDE.md (goals currentAmount,
+      // account-balance). Real estate / vehicles / locked-in retirement
+      // plans no longer slip through the substring filter.
       const balances = await q(db, sql`
-        SELECT a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) AS balance
+        SELECT a.type, a."group", a.currency, a.is_investment,
+               COALESCE(SUM(t.amount), 0) AS balance
         FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
         WHERE a.user_id = ${userId}
-        GROUP BY a.id, a.type, a."group", a.currency
-      `) as { type: string; group: string; currency: string | null; balance: number }[];
+        GROUP BY a.id, a.type, a."group", a.currency, a.is_investment
+      `) as { type: string; group: string; currency: string | null; is_investment: boolean | null; balance: number }[];
 
       let totalLiabilities = 0;
       let liquidAssets = 0;
@@ -1899,15 +2051,76 @@ export function registerPgTools(
         const fx = await fxFor(String(b.currency ?? reporting));
         const converted = Number(b.balance) * fx;
         if (b.type === "L") totalLiabilities += Math.abs(converted);
-        if (b.type === "A" && !b.group.toLowerCase().includes("invest") && !b.group.toLowerCase().includes("retire")) {
-          liquidAssets += converted;
+        if (b.type === "A") {
+          const groupTrim = (b.group ?? "").trim();
+          if (b.is_investment !== true && CASH_GROUPS.has(groupTrim)) {
+            liquidAssets += converted;
+          }
         }
       }
-      const annualIncome = totalIncome > 0 ? (totalIncome / 3) * 12 : 0;
-      const dtiScore = annualIncome > 0 ? Math.min(100, Math.max(0, (1 - totalLiabilities / annualIncome) * 100)) : (totalLiabilities === 0 ? 100 : 0);
+      const dtiRatio = income12m > 0 ? debtPayments12m / income12m : null;
+      const dtiScore = dtiRatio !== null
+        ? Math.min(100, Math.max(0, (1 - dtiRatio) * 100))
+        : (debtPayments12m === 0 ? 100 : 0);
 
       const avgMonthlyExpenses = totalExpenses / 3;
       const emergencyScore = avgMonthlyExpenses > 0 ? Math.min(100, Math.max(0, (liquidAssets / avgMonthlyExpenses / 6) * 100)) : (liquidAssets > 0 ? 50 : 0);
+
+      // Net Worth Trend (issue #235). Compute net worth today vs. ~90 days
+      // ago using the same balance roll-up shape as the balances query, but
+      // gated by t.date <= cutoff. Score the 3m delta on a centered scale:
+      // -10% magnitude => 0, +10% => 100, flat => 50.
+      const ninetyDaysAgo = new Date(now.getTime() - 90 * 86400000);
+      const ninetyDaysAgoStr = ninetyDaysAgo.toISOString().split("T")[0];
+      const balancesPast = await q(db, sql`
+        SELECT a.currency, COALESCE(SUM(t.amount), 0) AS balance
+        FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId} AND t.date <= ${ninetyDaysAgoStr}
+        WHERE a.user_id = ${userId}
+        GROUP BY a.id, a.currency
+      `) as { currency: string | null; balance: number }[];
+
+      let nwToday = 0;
+      let nwPast = 0;
+      for (const b of balances) {
+        const fx = await fxFor(String(b.currency ?? reporting));
+        nwToday += Number(b.balance) * fx;
+      }
+      for (const b of balancesPast) {
+        const fx = await fxFor(String(b.currency ?? reporting));
+        nwPast += Number(b.balance) * fx;
+      }
+
+      // Detect "not enough history" by checking how far back the user has
+      // any transaction at all. If the oldest tx is < 60d old, the trend
+      // signal is unreliable.
+      const oldestRow = await q(db, sql`
+        SELECT MIN(t.date) AS oldest FROM transactions t WHERE t.user_id = ${userId}
+      `) as { oldest: string | null }[];
+      const oldestStr = oldestRow[0]?.oldest ?? null;
+      const oldestAgeDays = oldestStr
+        ? Math.round((now.getTime() - new Date(oldestStr + "T00:00:00").getTime()) / 86400000)
+        : 0;
+      const insufficientHistory = !oldestStr || oldestAgeDays < 60;
+
+      const nwAbsBase = Math.max(Math.abs(nwToday), Math.abs(nwPast), 1);
+      const nwDelta = nwToday - nwPast;
+      const nwMagnitudePct = insufficientHistory ? 0 : Math.round((nwDelta / nwAbsBase) * 1000) / 10;
+      const nwDirection: "up" | "down" | "flat" = insufficientHistory
+        ? "flat"
+        : Math.abs(nwMagnitudePct) < 0.5
+          ? "flat"
+          : nwMagnitudePct > 0
+            ? "up"
+            : "down";
+      const nwDescriptor = insufficientHistory
+        ? "Not enough history"
+        : nwDirection === "flat"
+          ? "Flat over the last 3 months"
+          : `${nwDirection === "up" ? "Up" : "Down"} ${Math.abs(nwMagnitudePct).toFixed(1)}% over the last 3 months`;
+      // Score: 0 = -10% or worse, 50 = flat, 100 = +10% or better.
+      const nwScore = insufficientHistory
+        ? 0
+        : Math.min(100, Math.max(0, 50 + nwMagnitudePct * 5));
 
       const budgetsData = await q(db, sql`
         SELECT b.id, b.amount AS budget,
@@ -1919,31 +2132,108 @@ export function registerPgTools(
         GROUP BY b.id, b.amount
       `) as { budget: number; spent: number }[];
 
+      const budgetOnTrackCount = budgetsData.filter(b => Number(b.spent) <= Math.abs(Number(b.budget))).length;
       const budgetScore = budgetsData.length > 0
-        ? Math.round((budgetsData.filter(b => Number(b.spent) <= Math.abs(Number(b.budget))).length / budgetsData.length) * 100)
-        : 50;
+        ? (budgetOnTrackCount / budgetsData.length) * 100
+        : 0;
 
-      const components = [
-        { name: "Savings Rate", score: Math.round(savingsRateScore), weight: 0.3, weighted: Math.round(savingsRateScore * 0.3), detail: totalIncome > 0 ? `${Math.round(((totalIncome - totalExpenses) / totalIncome) * 100)}% savings rate` : "No income data" },
-        { name: "Debt-to-Income", score: Math.round(dtiScore), weight: 0.2, weighted: Math.round(dtiScore * 0.2), detail: annualIncome > 0 ? `${Math.round((totalLiabilities / annualIncome) * 100)}% debt-to-income` : "No income data" },
-        { name: "Emergency Fund", score: Math.round(emergencyScore), weight: 0.2, weighted: Math.round(emergencyScore * 0.2), detail: avgMonthlyExpenses > 0 ? `${(liquidAssets / avgMonthlyExpenses).toFixed(1)} months covered` : "No expense data" },
-        { name: "Net Worth Trend", score: 50, weight: 0.15, weighted: 8, detail: "Tracking" },
-        { name: "Budget Adherence", score: budgetScore, weight: 0.15, weighted: Math.round(budgetScore * 0.15), detail: budgetsData.length > 0 ? `${budgetsData.filter(b => Number(b.spent) <= Math.abs(Number(b.budget))).length}/${budgetsData.length} on track` : "No budgets set" },
+      // Build the candidate component list (un-rounded internally — we
+      // round ONCE at the end). Components with `excluded: true` are
+      // dropped from the weighted average and their weight is
+      // renormalized across the remaining ones.
+      const candidates: Array<{
+        name: string;
+        scoreRaw: number;
+        weightCanonical: number;
+        detail: unknown;
+        excluded: boolean;
+        excludeReason?: string;
+      }> = [
+        {
+          name: "Savings Rate",
+          scoreRaw: savingsRateScore,
+          weightCanonical: 0.3,
+          detail: totalIncome > 0 ? `${Math.round(((totalIncome - totalExpenses) / totalIncome) * 100)}% savings rate` : "No income data",
+          excluded: false,
+        },
+        {
+          name: "Debt-to-Income",
+          scoreRaw: dtiScore,
+          weightCanonical: 0.2,
+          detail: dtiRatio !== null ? `${Math.round(dtiRatio * 100)}% debt-to-income (12m)` : (debtPayments12m === 0 ? "No debt payments (12m)" : "No income data (12m)"),
+          excluded: false,
+        },
+        {
+          name: "Emergency Fund",
+          scoreRaw: emergencyScore,
+          weightCanonical: 0.2,
+          detail: avgMonthlyExpenses > 0 ? `${(liquidAssets / avgMonthlyExpenses).toFixed(1)} months covered` : "No expense data",
+          excluded: false,
+        },
+        {
+          name: "Net Worth Trend",
+          scoreRaw: nwScore,
+          weightCanonical: 0.15,
+          detail: { direction: nwDirection, magnitudePct: nwMagnitudePct, descriptor: nwDescriptor },
+          excluded: insufficientHistory,
+          excludeReason: insufficientHistory ? "insufficient_history" : undefined,
+        },
+        {
+          name: "Budget Adherence",
+          scoreRaw: budgetScore,
+          weightCanonical: 0.15,
+          detail: budgetsData.length > 0 ? `${budgetOnTrackCount}/${budgetsData.length} on track` : "No budgets set",
+          excluded: budgetsData.length === 0,
+          excludeReason: budgetsData.length === 0 ? "no_budgets" : undefined,
+        },
       ];
 
-      const totalScore = components.reduce((s, c) => s + c.weighted, 0);
+      // Renormalize the kept components' weights so they sum to 1.0.
+      const keptWeightSum = candidates.filter(c => !c.excluded).reduce((s, c) => s + c.weightCanonical, 0);
+      const components = candidates
+        .filter(c => !c.excluded)
+        .map(c => {
+          const weight = keptWeightSum > 0 ? c.weightCanonical / keptWeightSum : 0;
+          const weightedRaw = c.scoreRaw * weight;
+          return {
+            name: c.name,
+            score: Math.round(c.scoreRaw),
+            weight: Math.round(weight * 1000) / 1000,
+            weighted: Math.round(weightedRaw),
+            weightedRaw,
+            detail: c.detail,
+          };
+        });
+
+      const totalScoreRaw = components.reduce((s, c) => s + c.weightedRaw, 0);
+      const totalScore = Math.round(Math.min(100, Math.max(0, totalScoreRaw)));
       const grade = totalScore >= 80 ? "Excellent" : totalScore >= 60 ? "Good" : totalScore >= 40 ? "Fair" : "Needs Work";
 
-      return text({
-        score: Math.min(100, Math.max(0, totalScore)),
+      const excludedComponents = candidates
+        .filter(c => c.excluded)
+        .map(c => ({
+          name: c.name,
+          reason: c.excludeReason ?? "excluded",
+          detail: c.detail,
+        }));
+
+      return dataResponse({
+        score: totalScore,
         grade,
-        components,
+        // Strip the internal `weightedRaw` from the surface response (it's
+        // a computational helper, not user-facing).
+        components: components.map(({ weightedRaw: _wr, ...rest }) => rest),
+        excludedComponents,
         reportingCurrency: reporting,
         totals: {
           totalIncome3m: tagAmount(totalIncome, reporting, "reporting"),
           totalExpenses3m: tagAmount(totalExpenses, reporting, "reporting"),
+          totalIncome12m: tagAmount(income12m, reporting, "reporting"),
+          totalDebtPayments12m: tagAmount(debtPayments12m, reporting, "reporting"),
           totalLiabilities: tagAmount(totalLiabilities, reporting, "reporting"),
           liquidAssets: tagAmount(liquidAssets, reporting, "reporting"),
+          netWorthToday: tagAmount(nwToday, reporting, "reporting"),
+          netWorth90DaysAgo: tagAmount(nwPast, reporting, "reporting"),
         },
       });
     }
@@ -2035,7 +2325,7 @@ export function registerPgTools(
       }
 
       anomalies.sort((a, b) => Math.abs(b.percentDeviation) - Math.abs(a.percentDeviation));
-      return text({ month: currentMonth, reportingCurrency: reporting, anomalies, count: anomalies.length });
+      return dataResponse({ month: currentMonth, reportingCurrency: reporting, anomalies, count: anomalies.length });
     }
   );
 
@@ -2105,7 +2395,7 @@ export function registerPgTools(
 
       const order: Record<string, number> = { critical: 0, warning: 1, info: 2 };
       items.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
-      return text(items);
+      return dataResponse(items);
     }
   );
 
@@ -2222,7 +2512,7 @@ export function registerPgTools(
         };
       }));
 
-      return text({
+      return dataResponse({
         weekStart: ws,
         weekEnd: we,
         reportingCurrency: reporting,
@@ -2242,7 +2532,7 @@ export function registerPgTools(
   // ── get_cash_flow_forecast ─────────────────────────────────────────────────
   server.tool(
     "get_cash_flow_forecast",
-    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency). Issue #210: by default, `currentBalance` scopes to accounts in the 'Banks' or 'Cash Accounts' groups; the response surfaces `accountsIncluded` + `accountsExcluded` so callers see exactly which accounts are in scope. Pass `accountFilter` to override (include/exclude lists or set `includeInvestments: true` to fold investment-account cash sleeves into the projection).",
+    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency). Issue #210: by default, `currentBalance` scopes to accounts in the 'Banks' or 'Cash Accounts' groups; the response surfaces `accountsIncluded` + `accountsExcluded` so callers see exactly which accounts are in scope. Pass `accountFilter` to override (include/exclude lists or set `includeInvestments: true` to fold investment-account cash sleeves into the projection). Issue #235: response now includes `recurringContributions[]` with one row per detected-or-dropped candidate (`{ name, monthly, daysSinceLast, included, dropReason? }`); empty list explains a near-zero forecast. Stale recurrences (`daysSinceLast > 1.5 × cadence`) are dropped with `dropReason: 'stale'` rather than projected forward.",
     {
       days: z.number().optional().describe("Forecast horizon in days (default 90)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
@@ -2299,25 +2589,70 @@ export function registerPgTools(
         groups.set(key, [...(groups.get(key) ?? []), t]);
       }
 
-      const recurring: { payee: string; avgAmount: number; frequency: string; lastDate: string; nextDate: string }[] = [];
+      // Issue #235 — instead of `continue`-ing on every drop, accumulate
+      // dropped candidates with a `dropReason` so the response can explain
+      // a near-zero forecast. Stale recurrences are also dropped (don't
+      // project an item that's stopped charging).
+      type RecurringRow = {
+        payee: string;
+        avgAmount: number;
+        avgAmountSigned: number;
+        frequency: string;
+        avgInterval: number;
+        lastDate: string;
+        nextDate: string;
+        daysSinceLast: number;
+      };
+      type DroppedRow = {
+        payee: string;
+        avgMonthlySigned: number;
+        daysSinceLast: number;
+        dropReason: RecurringDropReason;
+      };
+      const recurring: RecurringRow[] = [];
+      const dropped: DroppedRow[] = [];
       for (const [, group] of groups) {
-        if (group.length < 3) continue;
-        const avg = group.reduce((s, t) => s + Number(t.amount), 0) / group.length;
-        if (Math.abs(avg) < 0.01) continue;
-        const consistent = group.every(t => Math.abs(Number(t.amount) - avg) / Math.abs(avg) < 0.2);
-        if (!consistent) continue;
-        const sorted = [...group].sort((a, b) => a.date.localeCompare(b.date));
-        const intervals: number[] = [];
-        for (let i = 1; i < sorted.length; i++) {
-          const d1 = new Date(sorted[i - 1].date + "T00:00:00").getTime();
-          const d2 = new Date(sorted[i].date + "T00:00:00").getTime();
-          intervals.push(Math.round((d2 - d1) / 86400000));
+        const cadence = analyzeRecurringGroup(group, todayStr);
+        const payee = group[0].payee;
+        const avgIntervalRaw = cadence.expectedCadenceDays;
+        const monthlyFrom = (avg: number) => {
+          if (avgIntervalRaw <= 0) return 0;
+          // Normalize avg row amount to a monthly cadence for the response.
+          return avg * (30 / avgIntervalRaw);
+        };
+        if (!cadence.detected) {
+          dropped.push({
+            payee,
+            avgMonthlySigned: Math.round(monthlyFrom(cadence.avg) * 100) / 100,
+            daysSinceLast: cadence.daysSinceLast,
+            dropReason: cadence.dropReason ?? "inconsistent",
+          });
+          continue;
         }
-        const avgInterval = intervals.reduce((s, d) => s + d, 0) / intervals.length;
+        if (isStale(cadence)) {
+          dropped.push({
+            payee,
+            avgMonthlySigned: Math.round(monthlyFrom(cadence.avg) * 100) / 100,
+            daysSinceLast: cadence.daysSinceLast,
+            dropReason: "stale",
+          });
+          continue;
+        }
+        const avgInterval = avgIntervalRaw;
         const freq = avgInterval <= 10 ? "weekly" : avgInterval <= 20 ? "biweekly" : avgInterval <= 45 ? "monthly" : "yearly";
-        const lastDate = sorted[sorted.length - 1].date;
+        const lastDate = cadence.lastDate;
         const nextDate = new Date(new Date(lastDate + "T00:00:00").getTime() + avgInterval * 86400000).toISOString().split("T")[0];
-        recurring.push({ payee: group[0].payee, avgAmount: Math.round(avg * 100) / 100, frequency: freq, lastDate, nextDate });
+        const avgRounded = Math.round(cadence.avg * 100) / 100;
+        recurring.push({
+          payee,
+          avgAmount: avgRounded,
+          avgAmountSigned: avgRounded,
+          frequency: freq,
+          avgInterval,
+          lastDate,
+          nextDate,
+          daysSinceLast: cadence.daysSinceLast,
+        });
       }
 
       // Issue #210 — partition every account by its `group` so we can
@@ -2347,9 +2682,14 @@ export function registerPgTools(
       }
 
       // Group out-of-scope by account group so the response is human-scannable.
+      // Issue #233 — coalesce empty string AND null to "(no group)" so legacy
+      // liability rows (group = '' from pre-#233 add_account writes) don't
+      // surface as empty `groupName` until the operator runs the backfill
+      // SQL.
       const excludedByGroup = new Map<string, number[]>();
       for (const a of outOfScope) {
-        const g = a.account_group ?? "(no group)";
+        const trimmed = (a.account_group ?? "").trim();
+        const g = trimmed ? trimmed : "(no group)";
         const list = excludedByGroup.get(g) ?? [];
         list.push(a.id);
         excludedByGroup.set(g, list);
@@ -2385,7 +2725,30 @@ export function registerPgTools(
       }
 
       const projectedBalance = milestones.length > 0 ? milestones[milestones.length - 1].balance : currentBalance;
-      return text({
+
+      // Issue #235 — per-recurring-item attribution. Empty
+      // recurringContributions is itself a load-bearing signal that
+      // explains a near-zero forecast.
+      const recurringContributions = [
+        ...recurring.map(r => {
+          const monthly = r.avgInterval > 0 ? r.avgAmountSigned * (30 / r.avgInterval) : 0;
+          return {
+            name: r.payee,
+            monthly: Math.round(monthly * 100) / 100,
+            daysSinceLast: r.daysSinceLast,
+            included: true,
+          };
+        }),
+        ...dropped.map(d => ({
+          name: d.payee,
+          monthly: d.avgMonthlySigned,
+          daysSinceLast: d.daysSinceLast,
+          included: false,
+          dropReason: d.dropReason,
+        })),
+      ];
+
+      return dataResponse({
         reportingCurrency: reporting,
         currentBalance: tagAmount(currentBalance, reporting, "reporting"),
         daysAhead: horizon,
@@ -2405,7 +2768,12 @@ export function registerPgTools(
             ...m,
             balanceTagged: tagAmount(m.balance, reporting, "reporting"),
           })),
-        recurringItems: recurring.length,
+        // Issue #235 — `recurringItems` becomes structured so callers see
+        // both included and dropped counts; `recurringContributions` lists
+        // each one with `included` + optional `dropReason`.
+        recurringItems: { included: recurring.length, dropped: dropped.length },
+        recurringContributions,
+        stalenessThresholdMultiplier: STALENESS_THRESHOLD_MULTIPLIER,
       });
     }
   );
@@ -2433,7 +2801,7 @@ export function registerPgTools(
       } else {
         await db.execute(sql`INSERT INTO budgets (user_id, category_id, month, amount) VALUES (${userId}, ${cat.id}, ${month}, ${amount})`);
       }
-      return text({ success: true, message: `Budget set: ${category} = $${amount} for ${month}` });
+      return text({ success: true, data: { message: `Budget set: ${category} = $${amount} for ${month}` } });
     }
   );
 
@@ -2495,9 +2863,11 @@ export function registerPgTools(
       }
       return text({
         success: true,
-        goalId,
-        accountIds: resolvedIds,
-        message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}${resolvedIds.length > 0 ? ` linked to ${resolvedIds.length} account(s)` : ""}`,
+        data: {
+          goalId,
+          accountIds: resolvedIds,
+          message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}${resolvedIds.length > 0 ? ` linked to ${resolvedIds.length} account(s)` : ""}`,
+        },
       });
     }
   );
@@ -2526,6 +2896,14 @@ export function registerPgTools(
       const aliasValue = alias && alias.trim() ? alias.trim() : null;
       const nameEnc = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const aliasEnc = dek ? encryptName(dek, aliasValue) : { ct: null, lookup: null };
+      // Issue #233 — liability accounts default to `"Liability"` when group
+      // is omitted/blank, matching the REST seam in `resolveDefaultGroup`.
+      // Asset accounts keep the historical empty-string behavior.
+      const resolvedGroup = (() => {
+        const trimmed = (group ?? "").trim();
+        if (trimmed) return trimmed;
+        return type === "L" ? "Liability" : "";
+      })();
       // Stream D Phase 4 — plaintext name/alias columns dropped.
       const result = await q(db, sql`
         INSERT INTO accounts (
@@ -2533,13 +2911,13 @@ export function registerPgTools(
           name_ct, name_lookup, alias_ct, alias_lookup
         )
         VALUES (
-          ${userId}, ${type}, ${group ?? ""}, ${currency ?? "CAD"}, ${note ?? ""},
+          ${userId}, ${type}, ${resolvedGroup}, ${currency ?? "CAD"}, ${note ?? ""},
           ${nameEnc.ct}, ${nameEnc.lookup}, ${aliasEnc.ct}, ${aliasEnc.lookup}
         )
         RETURNING id
       `);
 
-      return text({ success: true, accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})${aliasValue ? `, alias "${aliasValue}"` : ""}` });
+      return text({ success: true, data: { accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})${aliasValue ? `, alias "${aliasValue}"` : ""}` } });
     }
   );
 
@@ -2574,6 +2952,28 @@ export function registerPgTools(
       if (!rawAccounts.length) return err("No accounts found — create an account first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
       let acct: Row | null = null;
+      // Issue #234 (Phase 2) — when BOTH `account` (name) and `account_id`
+      // are supplied, run the name resolver and verify it agrees with the id.
+      // Mirrors the precedent at L2660-2662 (portfolioHolding/Id mismatch).
+      // Without this check, the existing "account_id wins" precedence would
+      // silently accept a name + id pair that disagree — re-introducing the
+      // class of bug the strict resolver exists to prevent.
+      if (account != null && account_id != null) {
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
+          }
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
+        }
+        if (Number(resolved.account.id) !== account_id) {
+          return err(`Account mismatch: "${account}" resolved to id #${Number(resolved.account.id)}, but account_id=${account_id} was passed. Pass only one, or make them agree.`);
+        }
+      }
       if (account_id != null) {
         acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
         if (!acct) return err(`Account #${account_id} not found or not owned by you.`);
@@ -2583,6 +2983,9 @@ export function registerPgTools(
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only (was full inventory).
           const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
           }
@@ -2723,20 +3126,22 @@ export function registerPgTools(
         // out and get the same fields back.
         return text({
           success: true,
-          dryRun: true,
-          wouldBeId: null,
-          resolvedAccount: resolvedAccountInfo,
-          resolvedCategory,
-          resolvedHolding,
-          amount: resolved.amount,
-          currency: resolved.currency,
-          enteredAmount: resolved.enteredAmount,
-          enteredCurrency: resolved.enteredCurrency,
-          enteredFxRate: resolved.enteredFxRate,
-          tradeLinkId: tradeLinkId ?? null,
-          date: txDate,
-          message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
-          warnings,
+          data: {
+            dryRun: true,
+            wouldBeId: null,
+            resolvedAccount: resolvedAccountInfo,
+            resolvedCategory,
+            resolvedHolding,
+            amount: resolved.amount,
+            currency: resolved.currency,
+            enteredAmount: resolved.enteredAmount,
+            enteredCurrency: resolved.enteredCurrency,
+            enteredFxRate: resolved.enteredFxRate,
+            tradeLinkId: tradeLinkId ?? null,
+            date: txDate,
+            message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
+            warnings,
+          },
         });
       }
 
@@ -2770,16 +3175,18 @@ export function registerPgTools(
       invalidateUserTxCache(userId);
       return text({
         success: true,
-        transactionId: result[0]?.id,
-        createdAt: result[0]?.created_at,
-        updatedAt: result[0]?.updated_at,
-        source: result[0]?.source,
-        tradeLinkId: result[0]?.trade_link_id ?? null,
-        resolvedAccount: resolvedAccountInfo,
-        resolvedCategory,
-        resolvedHolding,
-        message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
-        warnings,
+        data: {
+          transactionId: result[0]?.id,
+          createdAt: result[0]?.created_at,
+          updatedAt: result[0]?.updated_at,
+          source: result[0]?.source,
+          tradeLinkId: result[0]?.trade_link_id ?? null,
+          resolvedAccount: resolvedAccountInfo,
+          resolvedCategory,
+          resolvedHolding,
+          message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
+          warnings,
+        },
       });
     }
   );
@@ -2832,7 +3239,16 @@ export function registerPgTools(
             // Drizzle/pg returns jsonb as a parsed object; if a future
             // driver returns a string, parse defensively.
             const replay = typeof stored === "string" ? JSON.parse(stored) : stored;
-            return text({ ...replay, replayed: true });
+            // Issue #237 — wrap in the unified `{success, data}` envelope.
+            // Pre-3.1.0 caches stored the bare body and surface 3.1.0-shape
+            // on replay so callers always see the same outer envelope.
+            const replayHasNewEnvelope =
+              replay && typeof replay === "object" && "success" in replay && "data" in replay;
+            if (replayHasNewEnvelope) {
+              const data = (replay as { data?: Record<string, unknown> }).data ?? {};
+              return text({ success: true, data: { ...data, replayed: true } });
+            }
+            return text({ success: true, data: { ...(replay as Record<string, unknown>), replayed: true } });
           }
         } catch (e) {
           // Lookup failure must not block the live write path — log and fall
@@ -2974,6 +3390,27 @@ export function registerPgTools(
           }
           // Resolve account: per-row id > top-level id > strict fuzzy on name.
           let acct: Row | null = null;
+          // Issue #234 (Phase 2) — same per-row mismatch check as
+          // record_transaction. When the row supplies BOTH account (name)
+          // AND account_id, verify they agree before short-circuiting.
+          if (t.account != null && t.account_id != null) {
+            const r = resolveAccountStrict(t.account, allAccounts);
+            if (!r.ok) {
+              const suggestions = suggestionList(t.account, allAccounts);
+              if (r.reason === "ambiguous") {
+                results.push({ index: i, success: false, message: `Ambiguous: "${t.account}" matches ${r.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)` });
+              } else if (r.reason === "low_confidence") {
+                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)` });
+              } else {
+                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Did you mean: ${suggestions}?` });
+              }
+              continue;
+            }
+            if (Number(r.account.id) !== t.account_id) {
+              results.push({ index: i, success: false, message: `Account mismatch: "${t.account}" resolved to id #${Number(r.account.id)}, but account_id=${t.account_id} was passed. Pass only one, or make them agree.` });
+              continue;
+            }
+          }
           if (t.account_id != null) {
             acct = accountById.get(t.account_id) ?? null;
             if (!acct) {
@@ -2985,7 +3422,9 @@ export function registerPgTools(
             if (!r.ok) {
               // Issue #211 Bug e: top-N suggestions only (was full inventory).
               const suggestions = suggestionList(t.account, allAccounts);
-              if (r.reason === "low_confidence") {
+              if (r.reason === "ambiguous") {
+                results.push({ index: i, success: false, message: `Ambiguous: "${t.account}" matches ${r.candidates.length} accounts. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)` });
+              } else if (r.reason === "low_confidence") {
                 results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)` });
               } else {
                 results.push({ index: i, success: false, message: `Account not found: "${t.account}". Did you mean: ${suggestions}?` });
@@ -3056,9 +3495,12 @@ export function registerPgTools(
             if (!resolved.ok) {
               // Issue #211 Bug e: top-N suggestions only.
               const suggestions = suggestionList(t.category, allCats);
-              const message = resolved.reason === "low_confidence"
-                ? `Category "${t.category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-submit with the exact name to confirm.`
-                : `Category "${t.category}" not found. Did you mean: ${suggestions}?`;
+              const message =
+                resolved.reason === "ambiguous"
+                  ? `Ambiguous: "${t.category}" matches ${resolved.candidates.length} categories. Did you mean: ${suggestions}?`
+                  : resolved.reason === "low_confidence"
+                    ? `Category "${t.category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-submit with the exact name to confirm.`
+                    : `Category "${t.category}" not found. Did you mean: ${suggestions}?`;
               results.push({ index: i, success: false, message, resolvedAccount: resolvedAccountInfo });
               continue;
             }
@@ -3269,13 +3711,19 @@ export function registerPgTools(
         }
       }
 
+      // Issue #237 — wrap the per-batch metadata in the unified
+      // `{success: true, data: {...}}` envelope. Persistence and replay
+      // walk through the same shape so caches stay symmetric.
       const responseBody = {
-        ...(dryRun ? { dryRun: true } : {}),
-        imported: dryRun ? 0 : ok,
-        failed: results.length - ok,
-        ...(dryRun ? { previewed: ok } : {}),
-        results,
-        possibleDuplicates,
+        success: true as const,
+        data: {
+          ...(dryRun ? { dryRun: true } : {}),
+          imported: dryRun ? 0 : ok,
+          failed: results.length - ok,
+          ...(dryRun ? { previewed: ok } : {}),
+          results,
+          possibleDuplicates,
+        },
       };
 
       // Issue #98 — persist the redacted response under the caller-supplied
@@ -3293,7 +3741,7 @@ export function registerPgTools(
       if (idempotencyKey && !dryRun && ok > 0) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const redactedResults = (responseBody.results as any[]).map((r) => {
+          const redactedResults = (responseBody.data.results as any[]).map((r) => {
             const out = { ...r };
             if (typeof out.message === "string") {
               out.message = `row #${out.index}: redacted on replay`;
@@ -3306,7 +3754,10 @@ export function registerPgTools(
             }
             return out;
           });
-          const redactedBody = { ...responseBody, results: redactedResults };
+          const redactedBody = {
+            success: true as const,
+            data: { ...responseBody.data, results: redactedResults },
+          };
           await q(db, sql`
             INSERT INTO mcp_idempotency_keys (user_id, key, tool_name, response_json)
             VALUES (${userId}, ${idempotencyKey}::uuid, 'bulk_record_transactions', ${JSON.stringify(redactedBody)}::jsonb)
@@ -3372,10 +3823,14 @@ export function registerPgTools(
         const resolved = resolveCategoryStrict(category, allCats);
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only.
+          const suggestions = suggestionList(category, allCats);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${category}" matches ${resolved.candidates.length} categories. Did you mean: ${suggestions}?`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-call with the exact name to confirm.`);
           }
-          return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
+          return err(`Category "${category}" not found. Did you mean: ${suggestions}?`);
         }
         catId = Number(resolved.category.id);
         resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
@@ -3556,11 +4011,13 @@ export function registerPgTools(
       // per-row shape `bulk_record_transactions` already returns.
       return text({
         success: true,
-        message: `Transaction #${id} updated`,
-        fieldsUpdated,
-        ...(resolvedCategory ? { resolvedCategory } : {}),
-        updatedAt: after[0]?.updated_at,
-        warnings,
+        data: {
+          message: `Transaction #${id} updated`,
+          fieldsUpdated,
+          ...(resolvedCategory ? { resolvedCategory } : {}),
+          updatedAt: after[0]?.updated_at,
+          warnings,
+        },
       });
     }
   );
@@ -3579,7 +4036,7 @@ export function registerPgTools(
       const plainPayee = dek ? (decryptField(dek, String(t.payee ?? "")) ?? "") : t.payee;
       await db.execute(sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`);
       invalidateUserTxCache(userId);
-      return text({ success: true, message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}` });
+      return text({ success: true, data: { message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}` } });
     }
   );
 
@@ -3614,6 +4071,41 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
+      // Issue #234 (Phase 2) — when BOTH name + id are passed for either
+      // leg, run the resolver and fail loud if they disagree. Mirrors the
+      // record_transaction precedent.
+      if (fromAccount != null && from_account_id != null) {
+        const resolved = resolveAccountStrict(fromAccount, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(fromAccount, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${fromAccount}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only from_account_id to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only from_account_id to disambiguate.)`);
+          }
+          return err(`Source account "${fromAccount}" not found. Did you mean: ${suggestions}?`);
+        }
+        if (Number(resolved.account.id) !== from_account_id) {
+          return err(`Source account mismatch: "${fromAccount}" resolved to id #${Number(resolved.account.id)}, but from_account_id=${from_account_id} was passed. Pass only one, or make them agree.`);
+        }
+      }
+      if (toAccount != null && to_account_id != null) {
+        const resolved = resolveAccountStrict(toAccount, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(toAccount, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${toAccount}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only to_account_id to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only to_account_id to disambiguate.)`);
+          }
+          return err(`Destination account "${toAccount}" not found. Did you mean: ${suggestions}?`);
+        }
+        if (Number(resolved.account.id) !== to_account_id) {
+          return err(`Destination account mismatch: "${toAccount}" resolved to id #${Number(resolved.account.id)}, but to_account_id=${to_account_id} was passed. Pass only one, or make them agree.`);
+        }
+      }
       let fromAcct: Row | null = null;
       if (from_account_id != null) {
         fromAcct = allAccounts.find(a => Number(a.id) === from_account_id) ?? null;
@@ -3624,6 +4116,9 @@ export function registerPgTools(
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only (was full inventory).
           const suggestions = suggestionList(fromAccount, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${fromAccount}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass from_account_id to disambiguate.)`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass from_account_id to disambiguate.)`);
           }
@@ -3641,6 +4136,9 @@ export function registerPgTools(
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only.
           const suggestions = suggestionList(toAccount, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${toAccount}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass to_account_id to disambiguate.)`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass to_account_id to disambiguate.)`);
           }
@@ -3698,20 +4196,22 @@ export function registerPgTools(
         : "";
       return text({
         success: true,
-        linkId: result.linkId,
-        fromTransactionId: result.fromTransactionId,
-        toTransactionId: result.toTransactionId,
-        fromAmount: result.fromAmount,
-        fromCurrency: result.fromCurrency,
-        toAmount: result.toAmount,
-        toCurrency: result.toCurrency,
-        enteredFxRate: result.enteredFxRate,
-        resolvedFromAccount: { id: Number(fromAcct.id), name: String(fromAcct.name ?? "") },
-        resolvedToAccount: { id: Number(toAcct.id), name: String(toAcct.name ?? "") },
-        ...(result.holding ? { holding: result.holding } : {}),
-        message: result.isCrossCurrency
-          ? `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})${inKindNote}`
-          : `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name}${inKindNote}`,
+        data: {
+          linkId: result.linkId,
+          fromTransactionId: result.fromTransactionId,
+          toTransactionId: result.toTransactionId,
+          fromAmount: result.fromAmount,
+          fromCurrency: result.fromCurrency,
+          toAmount: result.toAmount,
+          toCurrency: result.toCurrency,
+          enteredFxRate: result.enteredFxRate,
+          resolvedFromAccount: { id: Number(fromAcct.id), name: String(fromAcct.name ?? "") },
+          resolvedToAccount: { id: Number(toAcct.id), name: String(toAcct.name ?? "") },
+          ...(result.holding ? { holding: result.holding } : {}),
+          message: result.isCrossCurrency
+            ? `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})${inKindNote}`
+            : `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name}${inKindNote}`,
+        },
       });
     }
   );
@@ -3753,6 +4253,23 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
+      // Issue #234 (Phase 2) — name + id mismatch check.
+      if (account != null && account_id != null) {
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
+          }
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
+        }
+        if (Number(resolved.account.id) !== account_id) {
+          return err(`Account mismatch: "${account}" resolved to id #${Number(resolved.account.id)}, but account_id=${account_id} was passed. Pass only one, or make them agree.`);
+        }
+      }
       let acct: Row | null = null;
       if (account_id != null) {
         acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
@@ -3763,6 +4280,9 @@ export function registerPgTools(
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only.
           const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
           }
@@ -3934,21 +4454,23 @@ export function registerPgTools(
       invalidateUserTxCache(userId);
       return text({
         success: true,
-        side,
-        symbol: trimmedSymbol,
-        linkId: transferResult.linkId,
-        fromTransactionId: transferResult.fromTransactionId,
-        toTransactionId: transferResult.toTransactionId,
-        cashHoldingId,
-        symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
-        cashAmount: cashAmountTrade,
-        cashAmountAccountCurrency: cashAmountAcct,
-        tradeCurrency,
-        accountCurrency: acctCurrency,
-        fxRate: fx,
-        resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
-        ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
-        message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
+        data: {
+          side,
+          symbol: trimmedSymbol,
+          linkId: transferResult.linkId,
+          fromTransactionId: transferResult.fromTransactionId,
+          toTransactionId: transferResult.toTransactionId,
+          cashHoldingId,
+          symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
+          cashAmount: cashAmountTrade,
+          cashAmountAccountCurrency: cashAmountAcct,
+          tradeCurrency,
+          accountCurrency: acctCurrency,
+          fxRate: fx,
+          resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
+          ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
+          message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
+        },
       });
     }
   );
@@ -4024,16 +4546,18 @@ export function registerPgTools(
       if (!result.ok) return err(result.message);
       return text({
         success: true,
-        linkId: result.linkId,
-        fromTransactionId: result.fromTransactionId,
-        toTransactionId: result.toTransactionId,
-        fromAmount: result.fromAmount,
-        fromCurrency: result.fromCurrency,
-        toAmount: result.toAmount,
-        toCurrency: result.toCurrency,
-        enteredFxRate: result.enteredFxRate,
-        ...(result.holding ? { holding: result.holding } : {}),
-        message: `Transfer updated (linkId ${result.linkId})`,
+        data: {
+          linkId: result.linkId,
+          fromTransactionId: result.fromTransactionId,
+          toTransactionId: result.toTransactionId,
+          fromAmount: result.fromAmount,
+          fromCurrency: result.fromCurrency,
+          toAmount: result.toAmount,
+          toCurrency: result.toCurrency,
+          enteredFxRate: result.enteredFxRate,
+          ...(result.holding ? { holding: result.holding } : {}),
+          message: `Transfer updated (linkId ${result.linkId})`,
+        },
       });
     }
   );
@@ -4052,9 +4576,11 @@ export function registerPgTools(
       if (!result.ok) return err(result.message);
       return text({
         success: true,
-        linkId: result.linkId,
-        deletedCount: result.deletedCount,
-        message: `Transfer deleted (${result.deletedCount} rows)`,
+        data: {
+          linkId: result.linkId,
+          deletedCount: result.deletedCount,
+          message: `Transfer deleted (${result.deletedCount} rows)`,
+        },
       });
     }
   );
@@ -4087,29 +4613,191 @@ export function registerPgTools(
       // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
       // any future budget-aware tx surface.
       invalidateUserTxCache(userId);
-      return text({ success: true, message: `Budget deleted: ${cat.name} for ${month}` });
+      return text({ success: true, data: { message: `Budget deleted: ${cat.name} for ${month}` } });
+    }
+  );
+
+  // ── preview_delete_category ────────────────────────────────────────────────
+  // Issue #237 — confirmation-token preview/execute pattern. Mirrors
+  // `preview_bulk_categorize` / `execute_bulk_categorize`. Read-prefix
+  // (`preview_`) so it lands in `mcp:read` scope; the actual destructive
+  // step is `delete_category` and falls into the `mcp:write` default.
+  server.tool(
+    "preview_delete_category",
+    "Preview deletion of a category. Returns the resolved category id/name plus FK row counts (transactions / rules / subscriptions still referencing it) and a confirmationToken for `delete_category`. The execute step refuses if any FK count is non-zero — reassign or delete dependents first via `preview_bulk_categorize` / `execute_bulk_categorize` (transactions), `update_rule` / `delete_rule` (auto-categorize rules), and `update_subscription` (subscriptions).",
+    {
+      id: z.number().int().positive().optional().describe("Category FK (categories.id). Exact match — preferred. Pass exactly one of id or name."),
+      name: z.string().optional().describe("Category name (fuzzy matched against decrypted name). Requires an unlocked DEK because category names live in encrypted columns post Stream D Phase 4. Pass `id` instead when no DEK is available."),
+    },
+    async ({ id, name }) => {
+      if (id == null && (name == null || name === "")) {
+        return err("Pass exactly one of `id` (numeric) or `name` (fuzzy).");
+      }
+      // Resolve the category id. Same Stream-D-Phase-4 pattern as `delete_budget`.
+      let cat: Row | null = null;
+      if (id != null) {
+        const rows = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId} AND id = ${id}`);
+        if (!rows.length) return err(`Category #${id} not found.`);
+        cat = decryptNameish(rows, dek)[0];
+      } else {
+        if (!dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4). Pass `id` instead.");
+        const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+        const allCats = decryptNameish(rawCats, dek);
+        const found = fuzzyFind(name!, allCats);
+        if (!found) {
+          return err(`Category "${name}" not found. Did you mean: ${suggestionList(name!, allCats)}?`);
+        }
+        cat = found;
+      }
+      const catId = Number(cat.id);
+      const catName = String(cat.name ?? `#${catId}`);
+
+      // Count FK references. All three tables scope by user_id so cross-tenant
+      // counts can never leak. PG returns BIGINT-as-string; cast to Number.
+      const txCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${catId}`) as { cnt: string | number }[];
+      const ruleCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transaction_rules WHERE user_id = ${userId} AND assign_category_id = ${catId}`) as { cnt: string | number }[];
+      const subCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${catId}`) as { cnt: string | number }[];
+      const txCount = Number(txCountRow[0]?.cnt ?? 0);
+      const ruleCount = Number(ruleCountRow[0]?.cnt ?? 0);
+      const subscriptionCount = Number(subCountRow[0]?.cnt ?? 0);
+      const inUse = txCount + ruleCount + subscriptionCount > 0;
+
+      // Sign the confirmation token even when FKs are non-zero — execute will
+      // re-check and refuse atomically. This way the preview shape is stable
+      // and Claude can decide whether to reassign first or pick a new target.
+      const confirmationToken = signConfirmationToken(userId, "delete_category", { id: catId });
+
+      return text({
+        success: true,
+        data: {
+          id: catId,
+          name: catName,
+          txCount,
+          ruleCount,
+          subscriptionCount,
+          inUse,
+          confirmationToken,
+          ...(inUse
+            ? { hint: "Reassign dependents before delete: use `preview_bulk_categorize` + `execute_bulk_categorize` to move transactions, `update_rule` / `delete_rule` for rules, `update_subscription` for subscriptions." }
+            : {}),
+        },
+      });
+    }
+  );
+
+  // ── delete_category ────────────────────────────────────────────────────────
+  // Issue #237 — destructive (`delete_*`); falls into `mcp:write` default in
+  // `src/lib/oauth-scopes.ts`. Auto-annotations infer `destructiveHint: true`
+  // from the `delete_` prefix in `mcp-server/auto-annotations.ts`.
+  server.tool(
+    "delete_category",
+    "Delete a category. Refuses if any transactions / auto-categorize rules / subscriptions still reference it (use `preview_bulk_categorize` / `execute_bulk_categorize` to reassign first). MUST be preceded by `preview_delete_category` with a matching id — pass that call's `confirmationToken` here verbatim. The token is single-use and expires after 5 minutes.",
+    {
+      id: z.number().int().positive().describe("Category FK (categories.id) — must match the id from the preview that issued the token."),
+      confirmation_token: z.string().describe("Token returned by `preview_delete_category` for this exact id. Single-use; 5-minute TTL."),
+    },
+    async ({ id, confirmation_token }) => {
+      const check = verifyConfirmationToken(confirmation_token, userId, "delete_category", { id });
+      if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_delete_category.`);
+
+      const existing = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId} AND id = ${id}`);
+      if (!existing.length) return err(`Category #${id} not found.`);
+      const catRow = decryptNameish(existing, dek)[0];
+      const catName = String(catRow.name ?? `#${id}`);
+
+      // Re-check FK references atomically — token is bound to id only; a row
+      // could have been categorized between preview and execute.
+      const txCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${id}`) as { cnt: string | number }[];
+      const ruleCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transaction_rules WHERE user_id = ${userId} AND assign_category_id = ${id}`) as { cnt: string | number }[];
+      const subCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${id}`) as { cnt: string | number }[];
+      const txCount = Number(txCountRow[0]?.cnt ?? 0);
+      const ruleCount = Number(ruleCountRow[0]?.cnt ?? 0);
+      const subscriptionCount = Number(subCountRow[0]?.cnt ?? 0);
+      if (txCount + ruleCount + subscriptionCount > 0) {
+        return err(
+          `Category "${catName}" still referenced by ${txCount} transaction(s), ${ruleCount} rule(s), ${subscriptionCount} subscription(s). Reassign dependents first (use bulk_categorize for transactions, update_rule/delete_rule for rules, update_subscription for subscriptions).`
+        );
+      }
+
+      await db.execute(sql`DELETE FROM categories WHERE id = ${id} AND user_id = ${userId}`);
+      // Load-bearing per CLAUDE.md: every MCP tx-mutating write invalidates
+      // the per-user tx cache. Mirrors `delete_budget` precedent.
+      invalidateUserTxCache(userId);
+      return text({ success: true, data: { id, message: `Category "${catName}" deleted` } });
     }
   );
 
   // ── update_account ─────────────────────────────────────────────────────────
+  // Issue #234 (Phase 2) — added `accountId` exact-match param + switched
+  // from `fuzzyFind` (which silently returned the first match on
+  // ambiguity / `lo.includes("")` reverse-includes collapse) to
+  // `resolveAccountStrict`. Same bug class as #230 (delete_account).
   server.tool(
     "update_account",
-    "Update name, group, currency, note, or alias of an account",
+    "Update name, group, currency, note, or alias of an account. Pass exactly ONE of `accountId` (preferred, exact) or `account` (name/alias, fuzzy). Supplying both is allowed only when they resolve to the same account — a mismatch fails loud and does NOT update.",
     {
-      account: z.string().describe("Current account name or alias (fuzzy matched against name; exact match on alias)"),
+      accountId: z.number().int().positive().optional().describe("Account FK (accounts.id). Exact match — preferred. The only path that works without an unlocked DEK."),
+      account: z.string().optional().describe("Current account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK because account names live in encrypted columns post Stream D Phase 4. Pass `accountId` instead when no DEK is available."),
       name: z.string().optional().describe("New name"),
       group: z.string().optional().describe("New group"),
       currency: supportedCurrencyEnum.optional().describe("New ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       note: z.string().optional().describe("New note"),
       alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports (e.g. last 4 digits of a card). Pass an empty string to clear."),
     },
-    async ({ account, name, group, currency, note, alias }) => {
-      const rawAccounts = await q(db, sql`
-        SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
-      `);
-      const allAccounts = decryptNameish(rawAccounts, dek);
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return err(`Account "${account}" not found`);
+    async ({ accountId, account, name, group, currency, note, alias }) => {
+      if (accountId == null && (account == null || account === "")) {
+        return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
+      }
+
+      // Resolve via id first when supplied — the safe path that never depends
+      // on the DEK. SELECT both encrypted columns so we can echo a name on
+      // success when a DEK happens to be available.
+      let acct: Row | null = null;
+      if (accountId != null) {
+        const rows = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId} AND id = ${accountId}
+        `);
+        if (!rows.length) return err(`Account #${accountId} not found.`);
+        acct = decryptNameish(rows, dek)[0];
+      }
+
+      // Resolve via name (fuzzy). Refuses without a DEK — same shape as
+      // delete_account (issue #230) and the stdio counterpart's refusal at
+      // register-core-tools.ts.
+      let resolvedByName: Row | null = null;
+      if (account != null && account !== "") {
+        if (!dek) {
+          return err("Cannot resolve account by name without an unlocked DEK (Stream D Phase 4). Pass `accountId` instead.");
+        }
+        const rawAccounts = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass accountId to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass accountId to disambiguate.)`);
+          }
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
+        }
+        resolvedByName = resolved.account;
+      }
+
+      // BOTH supplied — fail loud on mismatch, never silently prefer one.
+      if (acct && resolvedByName) {
+        if (Number(acct.id) !== Number(resolvedByName.id)) {
+          return err(`Account mismatch: "${account}" resolves to #${Number(resolvedByName.id)}, but accountId=${Number(acct.id)} was supplied.`);
+        }
+      } else if (!acct && resolvedByName) {
+        acct = resolvedByName;
+      }
+      if (!acct) {
+        return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
+      }
 
       // Stream D Phase 4 — plaintext name/alias dropped; only encrypted columns.
       const updates: ReturnType<typeof sql>[] = [];
@@ -4139,32 +4827,116 @@ export function registerPgTools(
         (result && typeof result === "object" && "rowCount" in result && typeof (result as { rowCount: unknown }).rowCount === "number")
           ? (result as { rowCount: number }).rowCount
           : null;
-      if (affected === 0) return err(`Account "${acct.name}" not found or not owned by this user`);
-      return text({ success: true, message: `Account "${acct.name}" updated` });
+      const acctNameLabel = (acct.name as string | undefined) ?? "<encrypted>";
+      const acctIdLabel = Number(acct.id);
+      if (affected === 0) return err(`Account #${acctIdLabel} ("${acctNameLabel}") not found or not owned by this user`);
+      return text({ success: true, data: { accountId: acctIdLabel, message: `Account #${acctIdLabel} ("${acctNameLabel}") updated` } });
     }
   );
 
   // ── delete_account ─────────────────────────────────────────────────────────
+  // Issue #230 (HOTFIX, 2026-05-10): the previous handler called `fuzzyFind`
+  // on rows that only carried `name_ct` / `alias_ct` (Stream D Phase 4) and
+  // never decrypted them. With every `o.name === undefined`, `fuzzyFind`'s
+  // last-resort `lo.includes(String(o.name ?? "").toLowerCase())` waterfall
+  // step collapsed to `lo.includes("")` — unconditionally true — and quietly
+  // returned the FIRST account in the SELECT result. Combined with `force=true`
+  // and FK CASCADE on `accounts → transactions / holding_accounts /
+  // goal_accounts`, the wrong-target was a data-loss-risk class. Same bug
+  // class as #211 (delete_budget / delete_loan) and #214 (create_rule).
+  //
+  // Fix: add an `accountId` (numeric, exact) param, mark `account` optional,
+  // require exactly one. Refuse the name path without an unlocked DEK (stdio
+  // already does this — `register-core-tools.ts` lines 1322-1326). Decrypt
+  // BEFORE fuzzy-matching. Echo both id + name in success/error messages so
+  // the caller can verify the resolved target.
+  //
+  // FK CASCADE remains DB-side: deleting an account drops its `transactions`,
+  // `holding_accounts`, and `goal_accounts` rows automatically — no
+  // application-layer child DELETEs needed.
   server.tool(
     "delete_account",
-    "Delete an account (only if it has no transactions)",
+    "Delete an account (only if it has no transactions). Pass exactly ONE of `accountId` (preferred, exact) or `account` (name/alias, fuzzy). Supplying both is allowed only when they resolve to the same account — a mismatch fails loud and does NOT delete.",
     {
-      account: z.string().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
-      force: z.boolean().optional().describe("Delete even if transactions exist (moves them to uncategorized)"),
+      accountId: z.number().int().positive().optional().describe("Account FK (accounts.id). Exact match — preferred and the only way to delete an account when the user's DEK is not unlocked."),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK because account names live in encrypted columns post Stream D Phase 4. Pass `accountId` instead when no DEK is available."),
+      force: z.boolean().optional().describe("Delete even if transactions exist. FK CASCADE removes the account's transactions, holding_accounts, and goal_accounts rows — irreversible."),
     },
-    async ({ account, force }) => {
-      const allAccounts = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return err(`Account "${account}" not found`);
-
-      const txnCount = await q(db, sql`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ${userId} AND account_id = ${acct.id}`);
-      const count = Number(txnCount[0]?.cnt ?? 0);
-      if (count > 0 && !force) {
-        return err(`Account "${acct.name}" has ${count} transaction(s). Pass force=true to delete anyway.`);
+    async ({ accountId, account, force }) => {
+      if (accountId == null && (account == null || account === "")) {
+        return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
       }
 
-      await db.execute(sql`DELETE FROM accounts WHERE id = ${acct.id} AND user_id = ${userId}`);
-      return text({ success: true, message: `Account "${acct.name}" deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` });
+      // Resolve via id first when supplied — the safe path that never depends
+      // on the DEK. SELECT both encrypted columns so we can echo a name on
+      // success when a DEK happens to be available.
+      let acct: Row | null = null;
+      if (accountId != null) {
+        const rows = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId} AND id = ${accountId}
+        `);
+        if (!rows.length) return err(`Account #${accountId} not found.`);
+        acct = decryptNameish(rows, dek)[0];
+      }
+
+      // Resolve via name (fuzzy). Refuses without a DEK — same shape as the
+      // stdio counterpart's refusal at register-core-tools.ts:1322-1326.
+      let resolvedByName: Row | null = null;
+      if (account != null && account !== "") {
+        if (!dek) {
+          return err("Cannot resolve account by name without an unlocked DEK (Stream D Phase 4). Pass `accountId` instead.");
+        }
+        const rawAccounts = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
+        resolvedByName = fuzzyFind(account, allAccounts);
+        if (!resolvedByName) {
+          return err(`Account "${account}" not found. Did you mean: ${suggestionList(account, allAccounts)}?`);
+        }
+      }
+
+      // When BOTH params supplied, fail loud on mismatch — never silently
+      // prefer one. (Matching ids: pick the id-resolved row so the success
+      // message uses its decrypted name.)
+      if (acct && resolvedByName) {
+        if (Number(acct.id) !== Number(resolvedByName.id)) {
+          return err(`Account mismatch: "${account}" resolves to #${Number(resolvedByName.id)}, but accountId=${Number(acct.id)} was supplied.`);
+        }
+        // Same row — id branch already populated `acct`, keep it.
+      } else if (!acct && resolvedByName) {
+        acct = resolvedByName;
+      }
+
+      if (!acct) {
+        // Defense in depth — the input-shape guard above should have caught this.
+        return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
+      }
+
+      const acctName = (acct.name as string | undefined) ?? "<encrypted>";
+      const acctId = Number(acct.id);
+
+      const txnCount = await q(db, sql`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ${userId} AND account_id = ${acctId}`);
+      const count = Number(txnCount[0]?.cnt ?? 0);
+      if (count > 0 && !force) {
+        return err(`Account #${acctId} ("${acctName}") has ${count} transaction(s). Pass force=true to delete anyway.`);
+      }
+
+      // FK CASCADE: this DELETE drops `transactions`, `holding_accounts`, and
+      // `goal_accounts` rows for this account in the same DB transaction. No
+      // application-layer child DELETEs needed (CLAUDE.md "wipe-account is
+      // single-transaction" gotcha).
+      await db.execute(sql`DELETE FROM accounts WHERE id = ${acctId} AND user_id = ${userId}`);
+      // CLAUDE.md invariant: every MCP tx-mutating write must invalidate the
+      // per-user tx cache. Mirrors `delete_budget` precedent at line ~4089.
+      invalidateUserTxCache(userId);
+      return text({
+        success: true,
+        data: {
+          accountId: acctId,
+          message: `Account #${acctId} ("${acctName}") deleted${count > 0 ? ` (${count} transactions also removed)` : ""}`,
+        },
+      });
     }
   );
 
@@ -4241,8 +5013,10 @@ export function registerPgTools(
 
       return text({
         success: true,
-        accountIds: account_ids ?? null,
-        message: `Goal "${g.name}" updated`,
+        data: {
+          accountIds: account_ids ?? null,
+          message: `Goal "${g.name}" updated`,
+        },
       });
     }
   );
@@ -4261,7 +5035,7 @@ export function registerPgTools(
       if (!g) return err(`Goal "${goal}" not found`);
 
       await db.execute(sql`DELETE FROM goals WHERE id = ${g.id} AND user_id = ${userId}`);
-      return text({ success: true, message: `Goal "${g.name}" deleted` });
+      return text({ success: true, data: { message: `Goal "${g.name}" deleted` } });
     }
   );
 
@@ -4295,7 +5069,7 @@ export function registerPgTools(
         VALUES (${userId}, ${type}, ${group ?? ""}, ${note ?? ""}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
-      return text({ success: true, categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` });
+      return text({ success: true, data: { categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` } });
     }
   );
 
@@ -4345,7 +5119,7 @@ export function registerPgTools(
           (${userId}, ${synthName}, 'payee', 'contains', ${cleanedValue},
            ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, 1, ${todayISO})
       `);
-      return text({ success: true, message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` });
+      return text({ success: true, data: { message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` } });
     }
   );
 
@@ -4374,7 +5148,7 @@ export function registerPgTools(
         INSERT INTO net_worth_snapshots (user_id, date, balances, note)
         VALUES (${userId}, ${snapshotDate}, ${JSON.stringify(totalByCurrency)}, ${note ?? ""})
       `);
-      return text({ success: true, date: snapshotDate, balances: totalByCurrency });
+      return text({ success: true, data: { date: snapshotDate, balances: totalByCurrency } });
     }
   );
 
@@ -4393,7 +5167,7 @@ export function registerPgTools(
         WHERE user_id = ${userId} AND (category_id IS NULL OR category_id = 0)
         ORDER BY date DESC LIMIT ${maxRows}
       `);
-      if (!txns.length) return text({ message: "No uncategorized transactions found", updated: 0 });
+      if (!txns.length) return text({ success: true, data: { message: "No uncategorized transactions found", updated: 0 } });
 
       // Issue #214 — schema is (match_field, match_type, match_value), NOT
       // `match_payee`. Pull the new column set; SQL-filter to active rules
@@ -4465,11 +5239,14 @@ export function registerPgTools(
 
       if (!dry_run && updated > 0) invalidateUserTxCache(userId);
       return text({
-        dry_run: dry_run ?? false,
-        updated,
-        scanned: txns.length,
-        matches: preview.slice(0, 20),
-        message: dry_run ? `Would update ${updated} of ${txns.length} transactions` : `Updated ${updated} of ${txns.length} transactions`,
+        success: true,
+        data: {
+          dry_run: dry_run ?? false,
+          updated,
+          scanned: txns.length,
+          matches: preview.slice(0, 20),
+          message: dry_run ? `Would update ${updated} of ${txns.length} transactions` : `Updated ${updated} of ${txns.length} transactions`,
+        },
       });
     }
   );
@@ -4485,17 +5262,20 @@ export function registerPgTools(
     async ({ topic, tool_name }) => {
       if (tool_name) {
         const docs: Record<string, string> = {
-          record_transaction: "record_transaction(amount, payee, account, date?, category?, note?, tags?) — Account is REQUIRED: ask the user which account if unclear, never guess. Category auto-detected from payee rules/history when omitted.",
-          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Each item requires account. Returns per-item success/failure.",
-          update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?) — Update any field by transaction ID.",
+          record_transaction: "record_transaction(amount, payee, account_id? OR account?, date?, category?, ...) — PREFER `account_id` (exact, no ambiguity). The `account` name path uses strict fuzzy: when the same prefix matches ≥2 accounts the call is REJECTED with an ambiguity error and a candidate list — pass `account_id` to disambiguate. When BOTH `account` and `account_id` are passed and disagree, the call fails loud (no silent prefer-id). Category auto-detected from payee rules/history when omitted.",
+          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Per-row `account_id` (preferred) or `account` (name; strict fuzzy with fail-loud ambiguity). Per-row mismatch between `account` and `account_id` fails that row only. Returns per-item success/failure.",
+          update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?) — Update any field by transaction ID. The `category` name path is strict fuzzy: ambiguous prefix collisions are REJECTED.",
           delete_transaction: "delete_transaction(id) — Permanently delete. Cannot be undone.",
           set_budget: "set_budget(category, month, amount) — Upsert budget. month=YYYY-MM.",
           delete_budget: "delete_budget(category, month) — Remove budget entry.",
+          preview_delete_category: "preview_delete_category(id? OR name?) — Preview deletion of a category. Returns {id, name, txCount, ruleCount, subscriptionCount, inUse, confirmationToken}. Issue #237.",
+          delete_category: "delete_category(id, confirmation_token) — Delete a category. Refuses if any transactions/rules/subscriptions still reference it. MUST be preceded by preview_delete_category. Issue #237.",
           add_account: "add_account(name, type, group?, currency?, note?, alias?) — type: 'A'=asset, 'L'=liability. alias is a short shorthand (e.g. last 4 digits of a card) used when receipts/imports reference the account by a non-canonical name.",
-          update_account: "update_account(account, name?, group?, currency?, note?, alias?) — Fuzzy account name or alias. Pass empty alias to clear.",
-          delete_account: "delete_account(account, force?) — force=true to delete with transactions.",
+          update_account: "update_account(accountId? OR account?, name?, group?, currency?, note?, alias?) — Issue #234: accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Strict fuzzy: ambiguous prefixes are REJECTED with a candidate list. Pass empty alias to clear. When both accountId and account are passed and disagree, fails loud.",
+          delete_account: "delete_account(accountId? OR account?, force?) — accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Pass exactly one (mismatch fails loud). force=true deletes even if transactions exist.",
           add_goal: "add_goal(name, type, target_amount, deadline?, account?, account_ids?) — type: savings|debt_payoff|investment|emergency_fund. account_ids: number[] for multi-account linking (issue #130).",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?, account_ids?) — status: active|completed|paused. account_ids: replace linked-account set ([] = unlink all).",
+          get_goals: "get_goals() — Returns every goal with progress numbers (issue #233): currentAmount (in goal currency), progress and percentComplete (0..100, 1dp), remaining, monthlyNeeded. Investment accounts contribute market value; cash accounts contribute SUM(transactions.amount); each linked-account contribution is FX-converted into the goal currency.",
           delete_goal: "delete_goal(goal) — Fuzzy goal name.",
           create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'R'=transfer.",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?) — match_payee supports % wildcards.",
@@ -4503,20 +5283,23 @@ export function registerPgTools(
           get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
-          record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair between two accounts. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
-          record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
+          record_transfer: "record_transfer(from_account_id? OR fromAccount, to_account_id? OR toAccount, amount, ...) — Atomic transfer pair between two accounts. PREFER from_account_id/to_account_id (exact); the name path is strict fuzzy with fail-loud ambiguity. Mismatched name+id pairs fail loud. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
+          record_trade: "record_trade(account_id? OR account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. PREFER account_id (exact); the account name path is strict fuzzy with fail-loud ambiguity, mismatched name+id fails loud. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
           preview_bulk_update: "preview_bulk_update(filter, changes) — accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker → id), tags ({mode: append|replace|remove, value}). Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. Stdio surface is narrower (no quantity/holding fields).",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Same `changes` keys as preview_bulk_update. Stdio: category-by-name only; quantity/holding writes refused.",
+          get_financial_health_score: "get_financial_health_score(reportingCurrency?) — Score 0-100 with 5 components (Savings Rate, Debt-to-Income, Emergency Fund, Net Worth Trend, Budget Adherence). Issue #235: final score is summed un-rounded then rounded once at the end (no off-by-one). DTI uses trailing-12m debt payments / trailing-12m income (not 3m × 4). Liquid assets EXCLUDE illiquid asset accounts (uses is_investment + cash-group whitelist; real estate / vehicles / locked-in retirement no longer slip through). Net Worth Trend is a real 3M delta returning {direction, magnitudePct, descriptor}. Components with no data (no budgets, insufficient history) are EXCLUDED from the weighted average and surfaced in `excludedComponents` — remaining weights renormalize to 1.0.",
+          get_recurring_transactions: "get_recurring_transactions(reportingCurrency?) — Detected recurring transactions over the last year. Issue #210: `avgAmount` is always positive; `direction` carries inflow/outflow. Issue #235: each row also surfaces `daysSinceLast`, `expectedCadenceDays`, `flagged: boolean` (true when `daysSinceLast > expectedCadenceDays * 1.5`). `stalenessThresholdMultiplier` is surfaced at the top level so callers can recompute the threshold.",
+          get_cash_flow_forecast: "get_cash_flow_forecast(days?, reportingCurrency?, accountFilter?) — Project cash flow for the next 30/60/90 days. Issue #210: scopes `currentBalance` to Banks+Cash by default; surfaces `accountsIncluded` + `accountsExcluded`. `accountFilter` overrides (include[], exclude[], includeInvestments). Issue #235: response includes `recurringContributions[]` — one row per detected OR dropped candidate `{ name, monthly, daysSinceLast, included, dropReason? }` where dropReason ∈ 'too_few_occurrences' | 'amount_too_small' | 'inconsistent' | 'stale'. Stale recurrences are dropped from the projection (don't forward-project an item that's stopped charging). Empty `recurringContributions` is itself a load-bearing signal that explains a near-zero forecast.",
         };
-        return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
+        return dataResponse({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
       }
 
       const t = topic ?? "tools";
 
       if (t === "tools") {
-        return text({
-          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
-          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
+        return dataResponse({
+          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast", "preview_delete_category"],
+          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           trade_tools: ["record_transfer", "record_trade"],
           tip: "Use tool_name='record_transaction' for detailed usage of any tool. For brokerage buys/sells prefer record_trade; record_transfer is the manual fallback for non-trade in-kind moves (e.g. forex sleeve, ACATS).",
@@ -4524,20 +5307,20 @@ export function registerPgTools(
       }
 
       if (t === "write") {
-        return text({
+        return dataResponse({
           primary_add: "record_transaction — account required, fuzzy matching on account/category names",
           bulk_add: "bulk_record_transactions — array of transactions (account required per item)",
           edits: ["update_transaction(id, ...fields)", "delete_transaction(id)"],
           budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
           accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
           goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
-          categories: ["create_category(name, type)", "create_rule(match_payee, assign_category)"],
+          categories: ["create_category(name, type)", "delete_category(id, confirmation_token) — preview via preview_delete_category", "create_rule(match_payee, assign_category)"],
           note: "All name inputs use fuzzy matching — partial names work. Each account can also have an `alias` (e.g. last 4 digits of a card); account lookups exact-match on alias in addition to fuzzy-matching on name, so you can pass either. Set category via update_transaction(id, category=...).",
         });
       }
 
       if (t === "schema") {
-        return text({
+        return dataResponse({
           key_tables: {
             transactions: "id, user_id, date, account_id, category_id, currency, amount, payee, note, tags, import_hash, fit_id",
             accounts: "id, user_id, type(A/L), group, name, currency, note, archived, alias",
@@ -4553,7 +5336,7 @@ export function registerPgTools(
       }
 
       if (t === "examples") {
-        return text({
+        return dataResponse({
           examples: [
             { task: "Log a coffee purchase", call: 'record_transaction(amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
             { task: "Log salary deposit", call: 'record_transaction(amount=3500, payee="Employer", account="RBC Chequing", category="Salary")' },
@@ -4573,7 +5356,7 @@ export function registerPgTools(
       }
 
       if (t === "portfolio") {
-        return text({
+        return dataResponse({
           tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
           disclaimer: PORTFOLIO_DISCLAIMER,
@@ -4581,7 +5364,7 @@ export function registerPgTools(
         });
       }
 
-      return text({ error: "Unknown topic" });
+      return err("Unknown topic");
     }
   );
 
@@ -4673,8 +5456,10 @@ export function registerPgTools(
         }
         return text({
           success: true,
-          holdingId,
-          message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
+          data: {
+            holdingId,
+            message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
+          },
         });
       } catch (e) {
         // 23505 = unique_violation on the partial index (race with another
@@ -4764,7 +5549,7 @@ export function registerPgTools(
             ? (result as { rowCount: number }).rowCount
             : null;
         if (affected === 0) return err(`Holding "${h.name}" not found or not owned by this user`);
-        return text({ success: true, holdingId: h.id, message: `Holding "${h.name}" updated` });
+        return text({ success: true, data: { holdingId: h.id, message: `Holding "${h.name}" updated` } });
       } catch (e) {
         // 23505 = unique_violation: tried to rename into an existing
         // (account_id, name_lookup) pair.
@@ -4821,9 +5606,11 @@ export function registerPgTools(
       invalidateUserTxCache(userId);
       return text({
         success: true,
-        message: count > 0
-          ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
-          : `Holding "${matchedName}" deleted.`,
+        data: {
+          message: count > 0
+            ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
+            : `Holding "${matchedName}" deleted.`,
+        },
       });
     }
   );
@@ -4868,7 +5655,12 @@ export function registerPgTools(
         const allAccounts = decryptNameish(rawAccounts, dek);
         const resolved = resolveAccountStrict(account, allAccounts);
         if (!resolved.ok) {
-          if (resolved.reason === "low_confidence") {
+          if (resolved.reason === "ambiguous") {
+            const list = resolved.candidates
+              .map(c => `${String(c.name ?? "")} id=${Number(c.id)}`)
+              .join(", ");
+            accountWarnings.push(`${account}: ambiguous (matches ${resolved.candidates.length} accounts: ${list}). Pass account_id to disambiguate.`);
+          } else if (resolved.reason === "low_confidence") {
             accountWarnings.push(`${account}: no matching account (did you mean ${resolved.suggestion.name} id=${Number(resolved.suggestion.id)}?)`);
           } else {
             accountWarnings.push(`${account}: no matching account`);
@@ -4896,7 +5688,7 @@ export function registerPgTools(
       // `lifetimeCostBasis` / etc. fields — only `*Reporting` siblings remain
       // (currency-converted, the canonical totals).
       if (scopeRejected) {
-        return text({
+        return dataResponse({
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "Account scope did not resolve — no holdings returned. See `warnings` for details.",
           totalHoldings: 0,
@@ -5186,7 +5978,7 @@ export function registerPgTools(
           : []),
       ];
 
-      return text({
+      return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics. Results are per-holdingId — two holdings sharing a name across accounts return as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear in `holdings[]` with `status: 'cash_only'` and `totalReturnPct: null`.",
         totalHoldings: results.length,
@@ -5411,7 +6203,7 @@ export function registerPgTools(
         }
       }
 
-      return text({
+      return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         note: "unrealizedGain requires live prices. Use the portfolio page for full metrics. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear with `status: 'cash_only'` and percentages suppressed.",
         period: period ?? "all",
@@ -5569,7 +6361,7 @@ export function registerPgTools(
               account: (t.account_name ?? null) as string | null,
             });
           }
-          return text({
+          return dataResponse({
             disclaimer: PORTFOLIO_DISCLAIMER,
             ambiguous,
             note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call analyze_holding with one of these holdingId values to scope the analysis.`,
@@ -5714,7 +6506,7 @@ export function registerPgTools(
 
       const fxToReporting = await getRate(holdingCurrency, reporting, todayStr, userId);
 
-      return text({
+      return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         note: "unrealizedGain requires live prices — not available in MCP.",
         // FK to portfolio_holdings.id — pass as portfolioHoldingId on
@@ -5840,7 +6632,7 @@ export function registerPgTools(
               account: accountNameById.get(Number(m.account_id)) ?? null,
             };
           });
-          return text({
+          return dataResponse({
             ambiguous,
             note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call trace_holding_quantity with one of these holdingId values.`,
           });
@@ -5921,7 +6713,7 @@ export function registerPgTools(
         qty: Math.round(e.qty * 10000) / 10000,
       }));
 
-      return text({
+      return dataResponse({
         holdingId: resolvedHoldingId,
         totalLegs: legs.length,
         totalQty,
@@ -5974,7 +6766,11 @@ export function registerPgTools(
 
       if (m === "rebalancing") {
         if (!targets?.length) return err("targets is required when mode='rebalancing'");
-        const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
+        // Issue #236: drop the `buysOnly: true` SQL pre-filter — it silently
+        // dropped WP-imported buys (`amt>0+qty>0`). `accumulate()` already
+        // populates `buy_amount` only for `qty > 0` rows, so the buy-bucket
+        // semantic is preserved.
+        const aggs = await aggregateHoldings(db, userId, dek);
         // Convert each holding's book_value to reporting currency before
         // building the allocation map — otherwise mixing CAD + USD book
         // values produces nonsense percentages.
@@ -6065,7 +6861,7 @@ export function registerPgTools(
         }
         const targetedTotal = totalBV - untargetedTotal;
 
-        return text({
+        return dataResponse({
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "rebalancing",
           reportingCurrency: reporting,
@@ -6111,7 +6907,7 @@ export function registerPgTools(
           GROUP BY COALESCE(t.currency, a.currency)
         `);
         if (!investedRows.length) {
-          return text({ disclaimer: PORTFOLIO_DISCLAIMER, mode: "benchmark", message: "No investment transactions found" });
+          return dataResponse({ disclaimer: PORTFOLIO_DISCLAIMER, mode: "benchmark", message: "No investment transactions found" });
         }
         let totalInvested = 0;
         let firstDateStr: string | null = null;
@@ -6131,7 +6927,7 @@ export function registerPgTools(
         const benchmarkFinalValue = totalInvested * Math.pow(1 + bmInfo.annualizedReturn / 100, yearsHeld);
         const benchmarkGain = benchmarkFinalValue - totalInvested;
 
-        return text({
+        return dataResponse({
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "benchmark",
           reportingCurrency: reporting,
@@ -6198,7 +6994,9 @@ export function registerPgTools(
         .slice(-12)
         .map(([month, invested]) => ({ month, invested: Math.round(invested * 100) / 100 }));
 
-      const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
+      // Issue #236: drop the `buysOnly: true` SQL pre-filter — see the
+      // mode='rebalancing' branch above for the full rationale.
+      const aggs = await aggregateHoldings(db, userId, dek);
       // Issue #86: aggregator now returns one row per holding_id. For the
       // top-positions display, sum book_value across same-name rows so
       // VUN.TO across TFSA + RRSP shows as a single "VUN.TO" line item with
@@ -6244,7 +7042,7 @@ export function registerPgTools(
       // of the trailing-12 window).
       const monthlyContributionsDisplayed = monthlyContributionsAll.slice(-6);
 
-      return text({
+      return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         mode: "patterns",
         reportingCurrency: reporting,
@@ -6644,12 +7442,24 @@ export function registerPgTools(
       const warnings: string[] = [];
       if (fromLookup.source === "fallback") warnings.push(`No historical rate available for ${fromCode}; using hardcoded fallback.`);
       if (toLookup.source === "fallback") warnings.push(`No historical rate available for ${toCode}; using hardcoded fallback.`);
+      // Issue #231 — top-level `source` is the worst-case across legs so a
+      // "yahoo" response can't silently hide a "stale" leg. The earliest
+      // (most-stale) effectiveDate is also surfaced.
+      const collapsedSource = collapseLegSources([fromLookup, toLookup]);
+      const effectiveDate =
+        fromLookup.effectiveDate < toLookup.effectiveDate
+          ? fromLookup.effectiveDate
+          : toLookup.effectiveDate;
       // Issue #208 — `roundFxRate` (8dp) is the bank-standard rate precision.
       return text({ success: true, data: {
         from: fromCode, to: toCode, date: d,
         rate: roundFxRate(rate),
-        source: fromLookup.source === "override" || toLookup.source === "override" ? "override" : fromLookup.source,
-        legs: { from: fromLookup, to: toLookup },
+        source: collapsedSource,
+        effectiveDate,
+        legs: {
+          from: { ...fromLookup, currency: fromCode },
+          to: { ...toLookup, currency: toCode },
+        },
         ...(warnings.length ? { warnings } : {}),
       } });
     }
@@ -6762,12 +7572,33 @@ export function registerPgTools(
       if (fromCode === toCode) {
         return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: 1, converted: amount, source: "identity" } });
       }
-      const rate = await getRate(fromCode, toCode, d, userId);
+      // Issue #231 — resolve each leg explicitly (matching get_fx_rate) so we
+      // can surface per-leg `source`/`effectiveDate` and collapse to the
+      // worst-case top-level `source`. Previously this returned a flat
+      // "triangulated" label that hid stale fallback legs.
+      const fromLookup = await getRateToUsdDetailed(fromCode, d, userId);
+      const toLookup = await getRateToUsdDetailed(toCode, d, userId);
+      if (toLookup.rate === 0) return err(`Cannot convert into ${toCode} (rate is zero)`);
+      const rate = fromLookup.rate / toLookup.rate;
       // Issue #208 — `converted` is a money amount (target-currency precision);
       // `rate` is a divisor (8dp, bank standard). Helpers name the contract.
       const converted = roundMoney(amount * rate, toCode);
       const ratePrecise = roundFxRate(rate);
-      return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: ratePrecise, converted, date: d, source: "triangulated" } });
+      const collapsedSource = collapseLegSources([fromLookup, toLookup]);
+      const effectiveDate =
+        fromLookup.effectiveDate < toLookup.effectiveDate
+          ? fromLookup.effectiveDate
+          : toLookup.effectiveDate;
+      return text({ success: true, data: {
+        amount, from: fromCode, to: toCode,
+        rate: ratePrecise, converted, date: d,
+        source: collapsedSource,
+        effectiveDate,
+        legs: {
+          from: { ...fromLookup, currency: fromCode },
+          to: { ...toLookup, currency: toCode },
+        },
+      } });
     }
   );
 
@@ -7641,7 +8472,13 @@ export function registerPgTools(
       const allCats = decryptNameish(rawCats, dek);
       const r = resolveCategoryStrict(changes.category, allCats);
       if (!r.ok) {
-        if (r.reason === "low_confidence") {
+        if (r.reason === "ambiguous") {
+          unapplied.push({
+            field: "category",
+            requestedValue: changes.category,
+            reason: `Category "${changes.category}" is ambiguous (matches ${r.candidates.length} categories). Did you mean: ${suggestionList(changes.category, allCats)}? Pass category_id to disambiguate.`,
+          });
+        } else if (r.reason === "low_confidence") {
           unapplied.push({
             field: "category",
             requestedValue: changes.category,
@@ -8875,7 +9712,7 @@ export function registerPgTools(
         }),
       );
 
-      return text({ imports: enriched, count: enriched.length, status: filterStatus });
+      return dataResponse({ imports: enriched, count: enriched.length, status: filterStatus });
     },
   );
 
@@ -8944,7 +9781,7 @@ export function registerPgTools(
         };
       });
 
-      return text({
+      return dataResponse({
         staged: {
           id: staged.id,
           source: staged.source,
@@ -9051,7 +9888,7 @@ export function registerPgTools(
         };
       });
 
-      return text({ rows: decrypted, count: decrypted.length });
+      return dataResponse({ rows: decrypted, count: decrypted.length });
     },
   );
 
@@ -9240,31 +10077,33 @@ export function registerPgTools(
       const u = updatedRows[0];
       const t = String(u.encryption_tier ?? "service");
       return text({
-        ok: true,
-        row: {
-          id: u.id,
-          stagedImportId: u.staged_import_id,
-          date: u.date,
-          amount: Number(u.amount),
-          currency: u.currency,
-          payee: decodeStagedField(u.payee as string | null, t),
-          category: decodeStagedField(u.category as string | null, t),
-          accountName: decodeStagedField(u.account_name as string | null, t),
-          note: decodeStagedField(u.note as string | null, t),
-          rowIndex: Number(u.row_index ?? 0),
-          isDuplicate: Boolean(u.is_duplicate),
-          encryptionTier: t,
-          dedupStatus: u.dedup_status,
-          rowStatus: u.row_status,
-          txType: u.tx_type,
-          quantity: u.quantity != null ? Number(u.quantity) : null,
-          portfolioHoldingId: u.portfolio_holding_id,
-          enteredAmount: u.entered_amount != null ? Number(u.entered_amount) : null,
-          enteredCurrency: u.entered_currency,
-          tags: u.tags,
-          fitId: u.fit_id,
-          peerStagedId: u.peer_staged_id,
-          targetAccountId: u.target_account_id,
+        success: true,
+        data: {
+          row: {
+            id: u.id,
+            stagedImportId: u.staged_import_id,
+            date: u.date,
+            amount: Number(u.amount),
+            currency: u.currency,
+            payee: decodeStagedField(u.payee as string | null, t),
+            category: decodeStagedField(u.category as string | null, t),
+            accountName: decodeStagedField(u.account_name as string | null, t),
+            note: decodeStagedField(u.note as string | null, t),
+            rowIndex: Number(u.row_index ?? 0),
+            isDuplicate: Boolean(u.is_duplicate),
+            encryptionTier: t,
+            dedupStatus: u.dedup_status,
+            rowStatus: u.row_status,
+            txType: u.tx_type,
+            quantity: u.quantity != null ? Number(u.quantity) : null,
+            portfolioHoldingId: u.portfolio_holding_id,
+            enteredAmount: u.entered_amount != null ? Number(u.entered_amount) : null,
+            enteredCurrency: u.entered_currency,
+            tags: u.tags,
+            fitId: u.fit_id,
+            peerStagedId: u.peer_staged_id,
+            targetAccountId: u.target_account_id,
+          },
         },
       });
     },
@@ -9328,7 +10167,7 @@ export function registerPgTools(
         sql`UPDATE staged_transactions SET tx_type = 'R', peer_staged_id = ${rowAId}, target_account_id = NULL WHERE id = ${rowBId} AND user_id = ${userId}`,
       );
 
-      return text({ ok: true, paired: { rowAId, rowBId } });
+      return dataResponse({ paired: { rowAId, rowBId } });
     },
   );
 
@@ -9407,7 +10246,18 @@ export function registerPgTools(
               typeof hit[0].response_json === "string"
                 ? JSON.parse(hit[0].response_json as string)
                 : hit[0].response_json;
-            return text(stored);
+            // Issue #237 — replay the stored envelope verbatim and inject
+            // `replayed: true` inside `data`. Pre-3.1.0 cached envelopes
+            // stored under the old `{ ok, imported, ... }` shape are wrapped
+            // defensively so a 72h-old replay still emerges as the canonical
+            // 3.1.0 shape.
+            const storedHasNewEnvelope =
+              stored && typeof stored === "object" && "success" in stored && "data" in stored;
+            if (storedHasNewEnvelope) {
+              const data = (stored as { data?: Record<string, unknown> }).data ?? {};
+              return text({ success: true, data: { ...data, replayed: true } });
+            }
+            return text({ success: true, data: { ...(stored as Record<string, unknown>), replayed: true } });
           }
         } catch (e) {
           // Fall through — better to re-execute than to break on a transient
@@ -9484,7 +10334,7 @@ export function registerPgTools(
           };
         });
         const token = signConfirmationToken(userId, "approve_staged_rows", tokenPayload);
-        return text({
+        return dataResponse({
           preview: true,
           summary: {
             stagedImportId,
@@ -9844,11 +10694,17 @@ export function registerPgTools(
         );
       }
 
+      // Issue #237 — unified envelope. The persisted JSON now stores the
+      // canonical `{ success: true, data: {...} }` shape so replays return
+      // the same outer shape as live calls (plus `replayed: true` injected
+      // on the lookup branch).
       const responseBody = {
-        ok: true,
-        imported,
-        errors: importErrors,
-        stagedImportId,
+        success: true,
+        data: {
+          imported,
+          errors: importErrors,
+          stagedImportId,
+        },
       };
 
       // Persist idempotency-keyed response. Body is metadata-only (no
@@ -9902,7 +10758,7 @@ export function registerPgTools(
 
       if (!confirmation_token) {
         const token = signConfirmationToken(userId, "reject_staged_import", tokenPayload);
-        return text({
+        return dataResponse({
           preview: true,
           summary: {
             stagedImportId,
@@ -9935,7 +10791,7 @@ export function registerPgTools(
         sql`DELETE FROM staged_imports WHERE id = ${stagedImportId} AND user_id = ${userId}`,
       );
 
-      return text({ ok: true, stagedImportId });
+      return dataResponse({ stagedImportId });
     },
   );
 }
