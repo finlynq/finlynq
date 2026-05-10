@@ -6,6 +6,19 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-10 — Data fixes: receipt-OCR sign flip + FX-reval rounding (#229)
+
+One-time historical data migration — non-destructive UPDATE-in-place fixes for residual rows that pre-date the pipeline guards from PR #225 (issue #212, sign-vs-category validator) and PR #221 (issue #208, IEEE-754 rounding hygiene). Forward-going writers are confirmed clean ([src/lib/currency-conversion.ts](src/lib/currency-conversion.ts) `round2()` at line 39 + 87, and [src/lib/cron/settle-future-fx.ts](src/lib/cron/settle-future-fx.ts) routes through `convertToAccountCurrency` which round2()s the amount). Tracked migration auto-applied by `deploy.sh`; loose destructive bucket not used (operation is non-destructive UPDATE-in-place, idempotent, globally scoped).
+
+- **Part A — receipt-OCR April 2026 sign flip.** Pre-validator E-type rows ingested with positive amounts on 2026-04 dates. Dev-side SELECT (2026-05-10) showed 8 rows on the auditor's user/account 605 totalling ~$1341 — the issue described "~7 rows / ~$880 net swing" but the slight count/sum drift is expected and the issue tolerates "If the count != 7 or the row list differs, narrow further." The predicate scopes to E-type + `amount > 0` + 2026-04 date window so the cohort is captured cleanly without touching older legitimate data-entry mistakes (out of scope per the issue) or other users' rows. Post-state: every flipped row has `amount < 0` and passes `validateSignVsCategory` (E => `amount <= 0`).
+- **Part B — round to 2dp.** Dev-side SELECT showed 54 rows with sub-cent precision (4-8 decimals) from older write paths prior to PR #221's rounding hygiene. Auditor's specific rows id 37619 (4dp: 9.8252) and id 37898 (8dp: 1.96511214) are in the set. All affected rows are CAD or USD — no JPY/BTC sub-cent-intentional currencies in the population today (out-of-scope per the source review). The display layer already rounds these on read; this aligns the persisted column.
+- **Audit-trio invariant** ([CLAUDE.md](../CLAUDE.md) "Audit trio (issue #28)") — both UPDATEs bump `updated_at = NOW()`; `source` is INSERT-only and is NOT in the SET clause (originally-`manual` rows stay `manual`).
+- **Idempotency** — both UPDATEs are predicate-self-guarded. Re-run on Part A finds no E+ April rows; re-run on Part B finds no sub-cent rows. Each is a no-op the second time. Tracked via `schema_migrations` so the runner only applies once per env regardless.
+- **Files touched** — NEW: [scripts/migrations/20260510_data-fix-receipt-sign-and-fx-reval-rounding.sql](scripts/migrations/20260510_data-fix-receipt-sign-and-fx-reval-rounding.sql). CHANGELOG.md.
+- **Out of scope** — adding a `CHECK` constraint on `transactions.amount` precision (would need to handle non-2dp currencies — JPY/BTC); other potential bug-class historical rows not flagged in the verification (e.g. pre-2026-04 receipt-OCR rows, older long-tail E+ rows on the same user); pipeline-side fixes already shipped in #225 + #221.
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes. Migration runner picks up the file on the next `deploy.sh` cycle (dev first, then prod).
+
 ## 2026-05-09 — MCP rules subsystem: stale `match_payee` column + missing `decryptNameish` resolver (#214)
 
 Fixes two compounding bugs in the MCP rules subsystem flagged by the auditor in `reviews/2026-05-09/07-rules-subsystem-is-active-and-resolver.md`. Both surface today in HTTP `create_rule` + `apply_rules_to_uncategorized` and stdio `create_rule` + the `autoCategory` helper called by stdio `record_transaction` / `bulk_record_transactions`.
