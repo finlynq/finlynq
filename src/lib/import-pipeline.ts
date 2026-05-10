@@ -7,6 +7,10 @@ import { encryptField, decryptField, tryDecryptField } from "./crypto/envelope";
 import { nameLookup } from "./crypto/encrypted-columns";
 import { buildHoldingResolver } from "./external-import/portfolio-holding-resolver";
 import { getInvestmentAccountIds } from "./investment-account";
+import {
+  validateSignVsCategory,
+  getCategoryTypeMap,
+} from "./transactions/sign-category-invariant";
 import { safeConvertToAccountCurrency } from "./currency-conversion";
 import { prewarmRates } from "./fx-service";
 import {
@@ -564,6 +568,53 @@ export async function executeImport(
   }
   if (rejected.length > 0) {
     const rejectedSet = new Set(rejected);
+    for (let i = toInsert.length - 1; i >= 0; i--) {
+      if (rejectedSet.has(i)) toInsert.splice(i, 1);
+    }
+  }
+
+  // Issue #212 — sign-vs-category invariant pass. Pre-fetch the (id → type)
+  // map once per batch (one SELECT for every distinct categoryId in the
+  // pending rows), then per-row reject violations into importErrors[]. The
+  // legacy investment-account-rejection block above is the canonical
+  // pattern for "fail this row, keep the batch going" and we mirror its
+  // shape exactly.
+  let signRejected: number[] = [];
+  try {
+    const distinctCatIds = new Set<number>();
+    for (const row of toInsert) {
+      if (row.categoryId != null) distinctCatIds.add(row.categoryId);
+    }
+    if (distinctCatIds.size > 0) {
+      const catTypeMap = await getCategoryTypeMap(userId, userDek ?? null, distinctCatIds);
+      signRejected = toInsert
+        .map((row, i) => {
+          if (row.categoryId == null) return -1;
+          const cat = catTypeMap.get(row.categoryId);
+          if (!cat) return -1;
+          const sErr = validateSignVsCategory({
+            amount: row.amount,
+            categoryType: cat.type,
+            categoryName: cat.name,
+          });
+          return sErr ? i : -1;
+        })
+        .filter((i) => i >= 0);
+      for (const idx of signRejected) {
+        const row = toInsert[idx];
+        const cat = catTypeMap.get(row.categoryId!);
+        importErrors.push(
+          `Row ${row.rowIndex + 1}: category "${cat?.name ?? "?"}" (type ${cat?.type ?? "?"}) disagrees with amount sign (${row.amount}). Flip the sign or pick a different category.`,
+        );
+      }
+    }
+  } catch (err) {
+    importErrors.push(
+      `Sign-vs-category check failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+    );
+  }
+  if (signRejected.length > 0) {
+    const rejectedSet = new Set(signRejected);
     for (let i = toInsert.length - 1; i >= 0; i--) {
       if (rejectedSet.has(i)) toInsert.splice(i, 1);
     }

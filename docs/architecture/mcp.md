@@ -250,7 +250,9 @@ For most positions, cost basis is the sum of `enteredAmount` (in `enteredCurrenc
 
 `record_transaction` / `bulk_record_transactions` / `update_transaction` (HTTP) include a `warnings: string[]` field on success when a row binds a `portfolioHoldingId` and moves cash (`amount != 0`) but omits `quantity`. The transaction is still written; the warning is advisory — without `quantity`, the holding's unit count doesn't move and the portfolio aggregator drifts from the cash ledger.
 
-- Single check today: `portfolioHoldingId != null && amount != 0 && quantity == null` → `"quantity not set — holding unit count was not updated"`. Centralized in [`deriveTxWriteWarnings`](../../src/lib/queries.ts) so future advisory checks land in one place.
+- Two checks today, both centralized in [`deriveTxWriteWarnings`](../../src/lib/queries.ts):
+  - `[quantity_missing_for_bound_holding]` — `portfolioHoldingId != null && amount != 0 && quantity == null`. Emitted as `"[quantity_missing_for_bound_holding] quantity not set — holding unit count was not updated"`.
+  - `[amount_overridden_by_entered]` ([#211](https://github.com/finlynq/finlynq/issues/211) Bug h) — both `amount` and `enteredAmount` were passed; the docstring already documents that `amount` is silently ignored, this surfaces it loudly. Message format `"[amount_overridden_by_entered] \`amount\`=X was overridden by \`enteredAmount\`=Y CCY; written value is Z after FX."` so callers can verify the override matched their intent.
 - `record_transaction` puts `warnings` at the top level of the success response. `bulk_record_transactions` attaches `warnings` to per-row results only when non-empty (keeps the common case unchanged for callers that don't read it). `update_transaction` warns only when the user *explicitly bound a holding on this update* without also passing `quantity` — touching unrelated fields (e.g. date) on a previously-bound row doesn't fire.
 - Stdio MCP doesn't expose `portfolioHoldingId`/`quantity` on write tools and refuses investment-account writes outright, so the warning condition can't trigger there.
 

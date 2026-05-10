@@ -295,10 +295,35 @@ export async function POST(request: NextRequest) {
     }
 
     if (d.portfolioHoldings?.length) {
-      await db
+      // Issue #205 — capture inserted ids so we can dual-write the matching
+      // holding_accounts pairings. Every aggregator (issue #25) JOINs through
+      // holding_accounts on (holding_id, account_id, user_id); an inserted
+      // holding without that pairing is silently invisible to the portfolio
+      // page, get_portfolio_analysis, etc.
+      const stripped = strip(d.portfolioHoldings, userId, { accountIdMap }) as (typeof schema.portfolioHoldings.$inferInsert)[];
+      const insertedHoldings = await db
         .insert(schema.portfolioHoldings)
-        .values(strip(d.portfolioHoldings, userId, { accountIdMap }) as (typeof schema.portfolioHoldings.$inferInsert)[])
-        ;
+        .values(stripped)
+        .returning({ id: schema.portfolioHoldings.id, accountId: schema.portfolioHoldings.accountId });
+
+      // Bulk-insert holding_accounts using the freshly-RETURNING-ed ids and
+      // the already-remapped accountIds. Skip rows where accountId is null
+      // (no pairing target). is_primary=true mirrors the legacy
+      // portfolio_holdings.account_id column. qty=0/cost_basis=0 are CACHED
+      // defaults — aggregators read live values from transactions.
+      const haRows = insertedHoldings
+        .filter((h): h is { id: number; accountId: number } => h.accountId != null)
+        .map((h) => ({
+          holdingId: h.id,
+          accountId: h.accountId,
+          userId,
+          qty: 0,
+          costBasis: 0,
+          isPrimary: true,
+        }));
+      if (haRows.length > 0) {
+        await db.insert(schema.holdingAccounts).values(haRows).onConflictDoNothing();
+      }
     }
 
     // Insert transactions, remapping FK references. Plaintext text fields are

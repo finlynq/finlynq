@@ -454,7 +454,11 @@ export async function importPortfolio(csvText: string, userId: string, dek: Buff
           name: row["Portfolio holding name"],
           symbol: row["Symbol"] || null,
         });
-        await db.insert(schema.portfolioHoldings)
+        // Issue #205 — capture id via RETURNING + dual-write holding_accounts.
+        // Without the pairing, every aggregator (issue #25) silently drops
+        // transactions for this holding because the JOIN through
+        // holding_accounts on (holding_id, account_id, user_id) misses.
+        const insertedRow = await db.insert(schema.portfolioHoldings)
           .values({
             userId,
             accountId: account.id,
@@ -462,7 +466,34 @@ export async function importPortfolio(csvText: string, userId: string, dek: Buff
             note: row["Note"] ?? "",
             ...enc,
           })
-          ;
+          .returning({ id: schema.portfolioHoldings.id });
+        const inserted = Array.isArray(insertedRow) ? insertedRow[0] : insertedRow;
+        const holdingId = inserted?.id;
+        if (holdingId != null) {
+          try {
+            await db
+              .insert(schema.holdingAccounts)
+              .values({
+                holdingId,
+                accountId: account.id,
+                userId,
+                qty: 0,
+                costBasis: 0,
+                isPrimary: true,
+              })
+              .onConflictDoNothing();
+          } catch (pairingErr) {
+            await db
+              .delete(schema.portfolioHoldings)
+              .where(
+                and(
+                  eq(schema.portfolioHoldings.id, holdingId),
+                  eq(schema.portfolioHoldings.userId, userId),
+                ),
+              );
+            throw pairingErr;
+          }
+        }
         imported++;
       }
     } catch (e) {

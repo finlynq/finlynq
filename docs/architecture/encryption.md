@@ -88,7 +88,7 @@ Both [src/app/api/transactions/suggest/route.ts](../../src/app/api/transactions/
 
 The historical-frequency fallback (payee-equality against existing rows) also runs in memory after decryption when a DEK is present.
 
-**Other MCP rule-management tools** (`apply_rules_to_uncategorized`, `create_rule`, `list_rules`, `update_rule` HTTP + stdio versions) all reference `match_payee` similarly and are similarly broken — pre-existing, no regression — needs a parallel migration in a follow-up sweep.
+**MCP rule-management tools were similarly broken until [#214](https://github.com/finlynq/finlynq/issues/214)** — `create_rule` (HTTP + stdio), `apply_rules_to_uncategorized` (HTTP), and the stdio `autoCategory` helper all referenced the dropped `match_payee` column and 500'd the moment any active rule existed. The fix on the `create_rule` write path is twofold: rewrite the INSERT to the current `(name, match_field='payee', match_type='contains', match_value=<stripped pattern>, created_at=<today>)` shape, AND call `decryptNameish` on the categories SELECT before passing to `fuzzyFind` — without decryption every category row had `name === undefined`, the `fuzzyFind` waterfall's last step `lo.includes(String(o.name ?? "").toLowerCase())` collapsed to `lo.includes("")` (always true), and the resolver silently returned the first category in the table. `update_rule` (HTTP) and stdio `apply_rules_to_uncategorized` were already on the new schema. `is_active` is INTEGER (`= 1`), not BOOLEAN — converting the column is a separate cross-cutting migration touching ~6 callsites and is not in scope for #214.
 
 ### Portfolio aggregation — `qty>0` is a buy regardless of amount sign
 

@@ -91,6 +91,39 @@ export async function POST(request: NextRequest) {
         })
         .returning()
         .get();
+      // Issue #205 — dual-write holding_accounts pairing. Every aggregator
+      // (issue #25) JOINs through holding_accounts on (holding_id, account_id,
+      // user_id); without the pairing, the holding is invisible to
+      // get_portfolio_analysis / get_portfolio_performance / analyze_holding
+      // (live SUM(transactions.quantity) evaluates to 0). is_primary=true on
+      // the fresh row mirrors the legacy portfolio_holdings.account_id column.
+      // qty=0/cost_basis=0 are CACHED defaults — aggregators read live values
+      // from transactions (CLAUDE.md #99 trap; do NOT compute live sums here).
+      // On pairing failure, DELETE the orphan portfolio_holdings row so we
+      // never leave the user with an aggregator-invisible holding.
+      try {
+        await db
+          .insert(schema.holdingAccounts)
+          .values({
+            holdingId: holding.id,
+            accountId,
+            userId: auth.userId,
+            qty: 0,
+            costBasis: 0,
+            isPrimary: true,
+          })
+          .onConflictDoNothing();
+      } catch (pairingErr) {
+        await db
+          .delete(schema.portfolioHoldings)
+          .where(
+            and(
+              eq(schema.portfolioHoldings.id, holding.id),
+              eq(schema.portfolioHoldings.userId, auth.userId),
+            ),
+          );
+        throw pairingErr;
+      }
       return NextResponse.json(holding, { status: 201 });
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);

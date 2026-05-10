@@ -21,19 +21,27 @@ import {
   calculateDebtPayoff,
   type Debt,
 } from "../src/lib/loan-calculator";
-import { getLatestFxRate, getRate, getRateToUsdDetailed } from "../src/lib/fx-service";
+import {
+  getLatestFxRate,
+  getRate,
+  getRateToUsdDetailed,
+  validateCurrencyCode,
+  validateFxDate,
+} from "../src/lib/fx-service";
+import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies";
 import {
   computeAllAccountsUnrealizedPnL,
   summarizeUnrealizedPnL,
 } from "../src/lib/unrealized-pnl";
 import { resolveTxAmountsCore } from "../src/lib/currency-conversion";
+import { roundMoney, roundFxRate } from "../src/lib/money";
 import { deriveTxWriteWarnings } from "../src/lib/queries";
 import {
   createTransferPair,
   updateTransferPair,
   deleteTransferPair,
 } from "../src/lib/transfer";
-import { resolveReportingCurrency } from "./reporting-currency";
+import { resolveReportingCurrency, aggregateInReporting } from "./reporting-currency";
 import { tagAmount } from "./currency-tagging";
 import {
   invalidateUser as invalidateUserTxCache,
@@ -83,6 +91,12 @@ import {
 import { decryptStaged, encryptStaged } from "../src/lib/crypto/staging-envelope";
 import { getHoldingsValueByAccount } from "../src/lib/holdings-value";
 import { sourceTagFor, isFormatTag, type FormatTag } from "../src/lib/tx-source";
+import {
+  validateSignVsCategory,
+  getCategoryTypeMap,
+  SignCategoryMismatchError,
+} from "../src/lib/transactions/sign-category-invariant";
+import { ymdDate, ymPeriod, parseYmdSafe } from "./lib/date-validators";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -168,6 +182,76 @@ function text(data: unknown) {
 function err(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
 }
+
+/**
+ * Build a top-N "did you mean ..." list for error messages without dumping
+ * the user's whole inventory into LLM logs / Sentry / browser network panel.
+ *
+ * Issue #211 (Bug e): the previous `Available: <full list>` formatter
+ * leaked every account/category name (including liability labels) into
+ * any error path. Now we surface at most `maxCount` near-matches ranked by
+ * a cheap edit-distance signal:
+ *   1) startsWith(query)
+ *   2) substring of query
+ *   3) shortest edit distance
+ *
+ * Names only — no `(id=N)` suffix unless `includeIds: true` is passed
+ * (the few callsites that genuinely need the id, e.g. `update_holding`,
+ * opt in explicitly so the default is privacy-safe).
+ */
+function suggestionList(
+  query: string,
+  options: Row[],
+  opts?: { maxCount?: number; includeIds?: boolean; field?: "name" | "symbol" }
+): string {
+  const maxCount = opts?.maxCount ?? 5;
+  const includeIds = opts?.includeIds ?? false;
+  const field = opts?.field ?? "name";
+  if (!options.length) return "(no candidates)";
+  const lo = (query ?? "").toLowerCase().trim();
+  const editDistance = (a: string, b: string): number => {
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    const m = a.length, n = b.length;
+    let prev = new Array<number>(n + 1).fill(0);
+    let cur = new Array<number>(n + 1).fill(0);
+    for (let j = 0; j <= n; j++) prev[j] = j;
+    for (let i = 1; i <= m; i++) {
+      cur[0] = i;
+      for (let j = 1; j <= n; j++) {
+        const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      }
+      [prev, cur] = [cur, prev];
+    }
+    return prev[n];
+  };
+  const scored = options
+    .map(o => {
+      const name = String(o[field] ?? "").trim();
+      if (!name) return null;
+      const lname = name.toLowerCase();
+      let bucket = 3;
+      if (lo && lname.startsWith(lo)) bucket = 0;
+      else if (lo && lname.includes(lo)) bucket = 1;
+      else if (lo && lo.includes(lname)) bucket = 2;
+      const dist = lo ? editDistance(lname, lo) : 0;
+      return { o, name, bucket, dist };
+    })
+    .filter((x): x is NonNullable<typeof x> => x != null)
+    .sort((a, b) => (a.bucket - b.bucket) || (a.dist - b.dist) || a.name.localeCompare(b.name))
+    .slice(0, maxCount);
+  if (!scored.length) return "(no candidates)";
+  return scored
+    .map(s => includeIds ? `"${s.name}" (id=${Number(s.o.id)})` : `"${s.name}"`)
+    .join(", ");
+}
+
+// Issue #206 — currency enum widened to the full SUPPORTED_CURRENCIES list
+// (32 fiats + 4 cryptos + 4 metals). Zod requires the literal-tuple cast.
+const supportedCurrencyEnum = z.enum(
+  SUPPORTED_CURRENCIES as unknown as [string, ...string[]]
+);
 
 /**
  * Fuzzy match against a row list: exact-name → exact-alias → startsWith-name →
@@ -1043,28 +1127,41 @@ export function registerPgTools(
 
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
-      const fxByCcy = new Map<string, number>();
-      for (const ccy of new Set(rows.map(r => String(r.currency)))) {
-        fxByCcy.set(ccy, await getRate(ccy, reporting, today, userId));
-      }
 
-      let totalReporting = 0;
-      const enriched = rows.map((r) => {
+      // Issue #210 — round-once aggregation. Callers MUST NOT round per-item
+      // before summing or `totalReporting` will drift 1c from `get_net_worth`
+      // for users with many multi-currency accounts. Aggregate the raw
+      // (unrounded) balance/currency tuples; render per-row display values
+      // separately from the inputs we pass to the helper.
+      const items = rows.map((r) => ({
+        amount: Number(r.balance),
+        currency: String(r.currency),
+      }));
+      const agg = await aggregateInReporting(
+        items,
+        reporting,
+        (from, to) => getRate(from, to, today, userId),
+      );
+
+      const enriched = rows.map((r, i) => {
         const ccy = String(r.currency);
-        const fx = fxByCcy.get(ccy) ?? 1;
-        const balanceReporting = Math.round(Number(r.balance) * fx * 100) / 100;
-        totalReporting += balanceReporting;
+        // Issue #208 — round the raw `balance` to crush IEEE-754 leaks
+        // (`-3.6e-11`-class noise from SUM(t.amount)). `tagAmount` already
+        // 2dp-rounds the tagged variants; this fixes the bypassed field.
+        const rawBalance = roundMoney(Number(r.balance), ccy);
+        const reportingAmount = agg.perItem[i].reportingAmount;
         return {
           ...r,
-          balanceTagged: tagAmount(Number(r.balance), ccy, "account"),
-          balanceReporting: tagAmount(balanceReporting, reporting, "reporting"),
+          balance: rawBalance,
+          balanceTagged: tagAmount(rawBalance, ccy, "account"),
+          balanceReporting: tagAmount(reportingAmount, reporting, "reporting"),
         };
       });
 
       return text({
         accounts: enriched,
         reportingCurrency: reporting,
-        totalReporting: tagAmount(totalReporting, reporting, "reporting"),
+        totalReporting: tagAmount(agg.totalReporting, reporting, "reporting"),
       });
     }
   );
@@ -1077,8 +1174,8 @@ export function registerPgTools(
       payee: z.string().optional().describe("Partial payee/merchant name match"),
       min_amount: z.number().optional().describe("Minimum amount"),
       max_amount: z.number().optional().describe("Maximum amount"),
-      start_date: z.string().optional().describe("Start date (YYYY-MM-DD)"),
-      end_date: z.string().optional().describe("End date (YYYY-MM-DD)"),
+      start_date: ymdDate.optional().describe("Start date (YYYY-MM-DD)"),
+      end_date: ymdDate.optional().describe("End date (YYYY-MM-DD)"),
       category: z.string().optional().describe("Category name (exact)"),
       tags: z.string().optional().describe("Tag to search for (partial match)"),
       account_id: z.number().int().optional().describe("Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses)."),
@@ -1183,7 +1280,7 @@ export function registerPgTools(
     "get_budget_summary",
     "Get budget vs actual spending for a specific month. Amounts are in the user's display currency (default reporting); pass reportingCurrency to override.",
     {
-      month: z.string().describe("Month in YYYY-MM format"),
+      month: ymPeriod.describe("Month in YYYY-MM format"),
       reportingCurrency: z.string().optional().describe("ISO code for unified totals; defaults to user's display currency."),
     },
     async ({ month, reportingCurrency }) => {
@@ -1217,16 +1314,23 @@ export function registerPgTools(
   // ── get_spending_trends ────────────────────────────────────────────────────
   server.tool(
     "get_spending_trends",
-    "Get spending trends over time grouped by category. Totals are in the user's display currency by default; pass reportingCurrency to override.",
+    "Get spending trends over time grouped by category. Totals are in the user's display currency by default; pass reportingCurrency to override. Issue #210: `priorMonths: N` returns N+1 monthly buckets — the current (partial) month plus N priors. `months` is accepted as a deprecated alias.",
     {
       period: z.enum(["weekly", "monthly", "yearly"]).describe("Aggregation period"),
-      months: z.number().optional().describe("Months to look back (default 12)"),
+      priorMonths: z.number().optional().describe("Months to look back, in addition to the current (partial) month. Default 12 → returns 13 buckets (current + 12 priors)."),
+      months: z.number().optional().describe("DEPRECATED (issue #210) — alias for priorMonths."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
-    async ({ period, months, reportingCurrency }) => {
+    async ({ period, priorMonths, months, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
-      const lookback = months ?? 12;
-      const startDate = new Date(new Date().getFullYear(), new Date().getMonth() - lookback, 1)
+      if (months !== undefined && priorMonths === undefined) {
+        // eslint-disable-next-line no-console
+        console.warn("[mcp] get_spending_trends: `months` is deprecated (issue #210); use `priorMonths`.");
+      }
+      const lookback = priorMonths ?? months ?? 12;
+      const now = new Date();
+      const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const startDate = new Date(now.getFullYear(), now.getMonth() - lookback, 1)
         .toISOString().split("T")[0];
 
       // Postgres date truncation
@@ -1256,7 +1360,15 @@ export function registerPgTools(
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
-      return text({ rows, reportingCurrency: reporting });
+      // Issue #210 — surface `currentMonth` + `priorMonths` so downstream
+      // dashboards can flag the partial-month row, and echo `reportingCurrency`
+      // for shape symmetry with the current-totals branch.
+      return text({
+        rows,
+        reportingCurrency: reporting,
+        priorMonths: lookback,
+        currentMonth: currentMonthStr,
+      });
     }
   );
 
@@ -1265,8 +1377,8 @@ export function registerPgTools(
     "get_income_statement",
     "Generate income statement for a period. Totals are in the user's display currency by default; pass reportingCurrency to override.",
     {
-      start_date: z.string().describe("Start date"),
-      end_date: z.string().describe("End date"),
+      start_date: ymdDate.describe("Start date (YYYY-MM-DD)"),
+      end_date: ymdDate.describe("End date (YYYY-MM-DD)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
     async ({ start_date, end_date, reportingCurrency }) => {
@@ -1287,8 +1399,12 @@ export function registerPgTools(
       `);
       const rows = rawRows.map((r) => {
         const { category_ct, ...rest } = r;
+        // Issue #208 — round per-row `total` (raw SUM(t.amount) leaks
+        // IEEE-754 noise) and cast `count` (PG BIGINT-as-string) to Number.
         return {
           ...rest,
+          total: roundMoney(Number(r.total), reporting),
+          count: Number(r.count),
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
@@ -1305,12 +1421,15 @@ export function registerPgTools(
         rows,
         reportingCurrency: reporting,
         unrealized: {
+          // Issue #208 — round all totals and per-account fields at the
+          // response shape; the helpers themselves keep full precision so
+          // internal math doesn't compound rounding errors.
           totals: {
-            costBasis: unrealizedTotals.costBasis,
-            marketValue: unrealizedTotals.marketValue,
-            valuationGL: unrealizedTotals.valuationGL,
-            fxGL: unrealizedTotals.fxGL,
-            totalGL: unrealizedTotals.totalGL,
+            costBasis: roundMoney(unrealizedTotals.costBasis, reporting),
+            marketValue: roundMoney(unrealizedTotals.marketValue, reporting),
+            valuationGL: roundMoney(unrealizedTotals.valuationGL, reporting),
+            fxGL: roundMoney(unrealizedTotals.fxGL, reporting),
+            totalGL: roundMoney(unrealizedTotals.totalGL, reporting),
           },
           accounts: unrealized
             .filter((a) => a.hasHoldings || Math.abs(a.fxGL) > 0.005 || Math.abs(a.valuationGL) > 0.005)
@@ -1318,15 +1437,15 @@ export function registerPgTools(
               accountId: a.accountId,
               accountName: a.accountName,
               accountCurrency: a.accountCurrency,
-              // periodEnd snapshot for context
-              costBasis: a.end.costBasis,
-              marketValue: a.end.marketValue,
+              // periodEnd snapshot for context — already in reporting ccy
+              costBasis: roundMoney(a.end.costBasis, reporting),
+              marketValue: roundMoney(a.end.marketValue, reporting),
               // Period delta = end_snapshot - start_snapshot, what moved
-              valuationGL: a.valuationGL,
-              fxGL: a.fxGL,
-              totalGL: a.totalGL,
-              startMarketValue: a.start.marketValue,
-              endMarketValue: a.end.marketValue,
+              valuationGL: roundMoney(a.valuationGL, reporting),
+              fxGL: roundMoney(a.fxGL, reporting),
+              totalGL: roundMoney(a.totalGL, reporting),
+              startMarketValue: roundMoney(a.start.marketValue, reporting),
+              endMarketValue: roundMoney(a.end.marketValue, reporting),
               hasHoldings: a.hasHoldings,
               costBasisMissing: a.costBasisMissing,
             })),
@@ -1338,16 +1457,27 @@ export function registerPgTools(
   // ── get_net_worth ──────────────────────────────────────────────────────────
   server.tool(
     "get_net_worth",
-    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). Pass `months` > 0 for a month-by-month trend; omit for current totals only.",
+    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). Pass `priorMonths` > 0 for a month-by-month trend (returns the current month plus N priors, with `currentMonth` flagged separately); omit for current totals only. Issue #210: legacy `months` param is accepted as a deprecated alias.",
     {
       currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency (per-row)"),
-      months: z.number().optional().describe("If set, return a trend over the last N months. Omit or set to 0 for current totals."),
+      priorMonths: z.number().optional().describe("If set, return a trend covering the current (partial) month plus N prior months. Omit or set to 0 for current totals."),
+      months: z.number().optional().describe("DEPRECATED (issue #210) — alias for priorMonths. New callers should use priorMonths."),
       reportingCurrency: z.string().optional().describe("ISO code — unified total currency. Defaults to user's display currency."),
     },
-    async ({ currency, months, reportingCurrency }) => {
+    async ({ currency, priorMonths, months, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
-      if (!months || months <= 0) {
+      // Issue #210 — `priorMonths` is the new contract; `months` is a
+      // deprecated alias kept for at least one release. If both are passed,
+      // priorMonths wins. The off-by-one bug was that `months: 3` returned 4
+      // distinct months (current + 3 priors) — now `priorMonths: 3` is exactly
+      // what callers asked for, and `months: 3` keeps the legacy behavior.
+      const lookback = priorMonths ?? months;
+      if (months !== undefined && priorMonths === undefined) {
+        // eslint-disable-next-line no-console
+        console.warn("[mcp] get_net_worth: `months` is deprecated (issue #210); use `priorMonths`.");
+      }
+      if (!lookback || lookback <= 0) {
         const rows = await q(db, sql`
           SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) AS total
           FROM accounts a
@@ -1366,27 +1496,44 @@ export function registerPgTools(
           summary[c].net = summary[c].assets + summary[c].liabilities;
         }
 
-        // Unified reporting total: convert each currency's net via FX.
-        let totalAssets = 0, totalLiabilities = 0, totalNet = 0;
+        // Issue #210 — round-once aggregation. Same helper as
+        // `get_account_balances` so `total.net.amount` agrees byte-for-byte
+        // with `get_account_balances.totalReporting.amount` on the same state.
+        const fxLookup = (from: string, to: string) => getRate(from, to, today, userId);
+        const assetItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.assets, currency: ccy }));
+        const liabItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.liabilities, currency: ccy }));
+        const netItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.net, currency: ccy }));
+        const aggAssets = await aggregateInReporting(assetItems, reporting, fxLookup);
+        const aggLiab = await aggregateInReporting(liabItems, reporting, fxLookup);
+        const aggNet = await aggregateInReporting(netItems, reporting, fxLookup);
+
+        // Issue #208 — round per-currency assets/liabilities/net at the
+        // response boundary (raw SUM(t.amount) leaks IEEE-754 noise like
+        // `5598.589999990002`). Round in each currency's own precision.
+        const roundedSummary: Record<string, { assets: number; liabilities: number; net: number }> = {};
         for (const [ccy, vals] of Object.entries(summary)) {
-          const fx = await getRate(ccy, reporting, today, userId);
-          totalAssets += vals.assets * fx;
-          totalLiabilities += vals.liabilities * fx;
-          totalNet += vals.net * fx;
+          roundedSummary[ccy] = {
+            assets: roundMoney(vals.assets, ccy),
+            liabilities: roundMoney(vals.liabilities, ccy),
+            net: roundMoney(vals.net, ccy),
+          };
         }
         return text({
-          byCurrency: summary,
+          byCurrency: roundedSummary,
           reportingCurrency: reporting,
           total: {
-            assets: tagAmount(totalAssets, reporting, "reporting"),
-            liabilities: tagAmount(totalLiabilities, reporting, "reporting"),
-            net: tagAmount(totalNet, reporting, "reporting"),
+            assets: tagAmount(aggAssets.totalReporting, reporting, "reporting"),
+            liabilities: tagAmount(aggLiab.totalReporting, reporting, "reporting"),
+            net: tagAmount(aggNet.totalReporting, reporting, "reporting"),
           },
         });
       }
 
-      const startDate = new Date();
-      startDate.setMonth(startDate.getMonth() - months);
+      // Issue #210 — `priorMonths: N` returns N+1 months (current partial
+      // month + N priors). `currentMonth` flags which row is the partial one.
+      const now = new Date();
+      const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const startDate = new Date(now.getFullYear(), now.getMonth() - lookback, 1);
       const startStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-01`;
 
       const rows = await q(db, sql`
@@ -1411,15 +1558,42 @@ export function registerPgTools(
       const running = new Map<string, number>();
       for (const b of baselines) running.set(b.currency, Number(b.total));
 
+      // Issue #210 — pre-fetch FX once per currency for the per-row
+      // `cumulativeNetWorthReporting` field. TODO once issue #04 lands: use
+      // each row's end-of-month FX rate; today's rate is a placeholder so
+      // the contract shape is forward-compatible.
+      const fxByCcy = new Map<string, number>();
+      for (const ccy of new Set(rows.map((r) => r.currency ?? "CAD"))) {
+        if (!fxByCcy.has(ccy)) {
+          fxByCcy.set(ccy, await getRate(ccy, reporting, today, userId));
+        }
+      }
+
       const trend = rows.map(row => {
         const c = row.currency ?? "CAD";
         const prev = running.get(c) ?? 0;
         const newTotal = prev + Number(row.total);
         running.set(c, newTotal);
-        return { month: row.month, currency: c, monthlyChange: Math.round(Number(row.total) * 100) / 100, cumulativeNetWorth: Math.round(newTotal * 100) / 100 };
+        const fx = fxByCcy.get(c) ?? 1;
+        return {
+          month: row.month,
+          currency: c,
+          monthlyChange: roundMoney(Number(row.total), c),
+          cumulativeNetWorth: roundMoney(newTotal, c),
+          cumulativeNetWorthReporting: tagAmount(newTotal * fx, reporting, "reporting"),
+          isCurrentMonth: row.month === currentMonthStr,
+        };
       });
 
-      return text({ months, trend });
+      return text({
+        priorMonths: lookback,
+        // Backwards-compat: keep `months` echoed in the response for callers
+        // that still parse it. Will be dropped in a future release.
+        months: lookback,
+        currentMonth: currentMonthStr,
+        reportingCurrency: reporting,
+        trend,
+      });
     }
   );
 
@@ -1519,8 +1693,17 @@ export function registerPgTools(
         WHERE s.user_id = ${userId}
         ORDER BY s.status
       `);
+      // Issue #207 — explicit whitelist so *_ct ciphertexts never escape via
+      // the downstream `taggedSubs` spread. Building a clean shape here means
+      // `taggedSubs.map(s => ({ ...s, ... }))` below carries no ciphertext.
       const subs: Row[] = rawSubs.map((r) => ({
-        ...r,
+        id: r.id,
+        amount: r.amount,
+        currency: r.currency,
+        frequency: r.frequency,
+        next_date: r.next_date,
+        status: r.status,
+        category_id: r.category_id,
         name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
         category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
       }));
@@ -1583,7 +1766,7 @@ export function registerPgTools(
   // ── get_recurring_transactions ─────────────────────────────────────────────
   server.tool(
     "get_recurring_transactions",
-    "Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly.",
+    "Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly. Issue #210 — sign convention: `avgAmount` is always POSITIVE; the `direction` field carries the inflow/outflow semantic. Matches the storage convention used by `subscriptions.amount` / `add_subscription` / `list_subscriptions`. (Pre-issue-#210 callers that read raw `avgAmount` to decide sign should switch to `direction`.)",
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
@@ -1636,11 +1819,17 @@ export function registerPgTools(
           // Convert avg via the dominant row currency in the group.
           const ccy = group[0].rowCurrency;
           const fx = fxByCcy.get(ccy) ?? 1;
-          const avgReporting = avg * fx;
+          // Issue #210 — surface positive `avgAmount` to match the storage
+          // convention on `subscriptions.amount`. `direction` carries what
+          // sign used to (raw outflow → "outflow"; salary credit → "inflow").
+          const direction: "inflow" | "outflow" = avg >= 0 ? "inflow" : "outflow";
+          const avgAbs = Math.abs(avg);
+          const avgReporting = avgAbs * fx;
           recurring.push({
             payee: group[0].payee,
-            avgAmount: Math.round(avg * 100) / 100,
-            avgAmountTagged: tagAmount(avg, ccy, "account"),
+            avgAmount: roundMoney(avgAbs, ccy),
+            direction,
+            avgAmountTagged: tagAmount(avgAbs, ccy, "account"),
             avgAmountReporting: tagAmount(avgReporting, reporting, "reporting"),
             count: group.length,
             lastDate: group[group.length - 1].date,
@@ -1925,7 +2114,7 @@ export function registerPgTools(
     "get_weekly_recap",
     "Get a weekly financial recap: spending summary, income, net cash flow, notable transactions. Totals are converted to reportingCurrency (defaults to user's display currency).",
     {
-      date: z.string().optional().describe("End date for the week (YYYY-MM-DD). Defaults to current week."),
+      date: ymdDate.optional().describe("End date for the week (YYYY-MM-DD). Defaults to current week."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
     async ({ date, reportingCurrency }) => {
@@ -2053,12 +2242,17 @@ export function registerPgTools(
   // ── get_cash_flow_forecast ─────────────────────────────────────────────────
   server.tool(
     "get_cash_flow_forecast",
-    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency).",
+    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency). Issue #210: by default, `currentBalance` scopes to accounts in the 'Banks' or 'Cash Accounts' groups; the response surfaces `accountsIncluded` + `accountsExcluded` so callers see exactly which accounts are in scope. Pass `accountFilter` to override (include/exclude lists or set `includeInvestments: true` to fold investment-account cash sleeves into the projection).",
     {
       days: z.number().optional().describe("Forecast horizon in days (default 90)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
+      accountFilter: z.object({
+        include: z.array(z.number().int()).optional().describe("Whitelist of account ids — only these contribute to currentBalance. Mutually exclusive with `exclude`."),
+        exclude: z.array(z.number().int()).optional().describe("Blacklist of account ids removed from the default Banks+Cash set."),
+        includeInvestments: z.boolean().optional().describe("If true, also include accounts where `is_investment=true` (uses their cash-sleeve balance)."),
+      }).optional().describe("Override the default Banks+Cash scope (issue #210)."),
     },
-    async ({ days, reportingCurrency }) => {
+    async ({ days, reportingCurrency, accountFilter }) => {
       const horizon = days ?? 90;
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const todayStr = new Date().toISOString().split("T")[0];
@@ -2126,13 +2320,44 @@ export function registerPgTools(
         recurring.push({ payee: group[0].payee, avgAmount: Math.round(avg * 100) / 100, frequency: freq, lastDate, nextDate });
       }
 
-      const bankRows = await q(db, sql`
-        SELECT a.id, a.currency FROM accounts a
-        WHERE a.user_id = ${userId} AND a."group" IN ('Banks', 'Cash Accounts')
-      `) as { id: number; currency: string | null }[];
+      // Issue #210 — partition every account by its `group` so we can
+      // surface what's in / out of scope. Default scope is Banks + Cash
+      // Accounts (preserves prior behavior); `accountFilter` overrides.
+      const allAccountsRaw = await q(db, sql`
+        SELECT a.id, a.currency, a."group" AS account_group, a.is_investment
+        FROM accounts a WHERE a.user_id = ${userId}
+      `) as { id: number; currency: string | null; account_group: string | null; is_investment: boolean | null }[];
+
+      const isDefaultBankCash = (g: string | null) => g === "Banks" || g === "Cash Accounts";
+      const includeSet = accountFilter?.include ? new Set(accountFilter.include) : null;
+      const excludeSet = accountFilter?.exclude ? new Set(accountFilter.exclude) : null;
+      const includeInvestments = accountFilter?.includeInvestments ?? false;
+
+      const inScope: typeof allAccountsRaw = [];
+      const outOfScope: typeof allAccountsRaw = [];
+      for (const a of allAccountsRaw) {
+        let inc: boolean;
+        if (includeSet) {
+          inc = includeSet.has(a.id);
+        } else {
+          inc = isDefaultBankCash(a.account_group) || (includeInvestments && a.is_investment === true);
+          if (excludeSet && excludeSet.has(a.id)) inc = false;
+        }
+        if (inc) inScope.push(a); else outOfScope.push(a);
+      }
+
+      // Group out-of-scope by account group so the response is human-scannable.
+      const excludedByGroup = new Map<string, number[]>();
+      for (const a of outOfScope) {
+        const g = a.account_group ?? "(no group)";
+        const list = excludedByGroup.get(g) ?? [];
+        list.push(a.id);
+        excludedByGroup.set(g, list);
+      }
+      const accountsExcluded = Array.from(excludedByGroup.entries()).map(([groupName, ids]) => ({ groupName, ids }));
 
       let currentBalance = 0;
-      for (const ba of bankRows) {
+      for (const ba of inScope) {
         const r = await q(db, sql`SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE user_id = ${userId} AND account_id = ${ba.id}`);
         const fx = await fxFor(String(ba.currency ?? reporting));
         currentBalance += Number(r[0]?.total ?? 0) * fx;
@@ -2165,6 +2390,11 @@ export function registerPgTools(
         currentBalance: tagAmount(currentBalance, reporting, "reporting"),
         daysAhead: horizon,
         projectedBalance: tagAmount(projectedBalance, reporting, "reporting"),
+        // Issue #210 — surface scope so the user sees why `currentBalance`
+        // differs from `get_account_balances.totalReporting` (different
+        // aggregations, different scope).
+        accountsIncluded: inScope.map((a) => a.id),
+        accountsExcluded,
         warnings: milestones.filter(p => p.balance < 500).map(p => ({
           date: p.date,
           balance: p.balance,
@@ -2186,8 +2416,8 @@ export function registerPgTools(
     "Set or update a budget for a category in a specific month",
     {
       category: z.string().describe("Category name"),
-      month: z.string().describe("Month (YYYY-MM)"),
-      amount: z.number().describe("Budget amount (positive number)"),
+      month: ymPeriod.describe("Month (YYYY-MM)"),
+      amount: z.number().positive().describe("Budget amount (must be > 0)"),
     },
     async ({ category, month, amount }) => {
       // Stream D Phase 4 — match by name_lookup HMAC.
@@ -2214,8 +2444,8 @@ export function registerPgTools(
     {
       name: z.string().describe("Goal name"),
       type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
-      target_amount: z.number().describe("Target amount"),
-      deadline: z.string().optional().describe("Deadline (YYYY-MM-DD)"),
+      target_amount: z.number().positive().describe("Target amount (must be > 0)"),
+      deadline: ymdDate.optional().describe("Deadline (YYYY-MM-DD)"),
       account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). Prefer `account_ids` for multi-account goals."),
       account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking)."),
     },
@@ -2280,7 +2510,7 @@ export function registerPgTools(
       name: z.string().describe("Account name (must be unique)"),
       type: z.enum(["A", "L"]).describe("Account type: 'A' for asset, 'L' for liability"),
       group: z.string().optional().describe("Account group (e.g. 'Banks', 'Credit Cards', 'Investment')"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("Currency (default CAD)"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: any currency in SUPPORTED_CURRENCIES is accepted; FX engine triangulates through USD."),
       note: z.string().optional().describe("Optional note"),
       alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },
@@ -2322,7 +2552,7 @@ export function registerPgTools(
       payee: z.string().describe("Payee or merchant name"),
       account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
       account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known — e.g. resolved from a prior `get_account_balances` or `search_transactions` call. If both this and `account` are passed, this wins."),
-      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
       note: z.string().optional().describe("Optional note"),
       tags: z.string().optional().describe("Comma-separated tags"),
@@ -2351,11 +2581,12 @@ export function registerPgTools(
         if (!account) return err("Pass either `account_id` or `account` (name/alias).");
         const resolved = resolveAccountStrict(account, allAccounts);
         if (!resolved.ok) {
-          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+          // Issue #211 Bug e: top-N suggestions only (was full inventory).
+          const suggestions = suggestionList(account, allAccounts);
           if (resolved.reason === "low_confidence") {
-            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
           }
-          return err(`Account "${account}" not found. Available: ${list}`);
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
         }
         acct = resolved.account;
       }
@@ -2368,7 +2599,10 @@ export function registerPgTools(
         const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
         const cat = fuzzyFind(category, allCats);
-        if (!cat) return err(`Category "${category}" not found. Available: ${allCats.map(c => c.name).join(", ")}`);
+        if (!cat) {
+          // Issue #211 Bug e: top-N suggestions only.
+          return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
+        }
         catId = Number(cat.id);
       } else {
         catId = await autoCategory(db, userId, payee, dek, isInvestment);
@@ -2443,18 +2677,41 @@ export function registerPgTools(
         }
       }
 
-      // Look up the resolved category name once — used by both the dry-run
-      // preview and the success message. Stream D Phase 4: decrypt name_ct.
+      // Look up the resolved category name + type once — used by both the
+      // dry-run preview, the success message, and the issue #212 sign-vs-
+      // category validator. Stream D Phase 4: decrypt name_ct. `type` is
+      // plaintext and DEK-free.
       let catName: string = "uncategorized";
+      let catType: string | null = null;
       if (catId) {
-        const row = (await q(db, sql`SELECT name_ct FROM categories WHERE id = ${catId}`))[0];
+        const row = (await q(db, sql`SELECT name_ct, type FROM categories WHERE id = ${catId}`))[0];
         const ct = row?.name_ct as string | null | undefined;
         catName = (ct && dek ? decryptField(dek, String(ct)) : ct ?? "") || "uncategorized";
+        catType = row?.type != null ? String(row.type) : null;
       }
+      // Issue #212 — sign-vs-category invariant (HARD REJECT). 'E' must be
+      // ≤ 0; 'I' must be ≥ 0; 'R'/'T' exempt. Runs on resolved.amount AFTER
+      // FX so the rule is evaluated on the value that lands in the DB. dryRun
+      // returns a structured 400-equivalent envelope; non-dryRun never inserts.
+      const sErr = validateSignVsCategory({
+        amount: resolved.amount,
+        categoryType: catType,
+        categoryName: catName,
+      });
+      if (sErr) {
+        return err(sErr.message);
+      }
+      // Issue #211 Bug h: when both `amount` and `enteredAmount` are
+      // passed, surface a structured warning so the caller knows the
+      // resolved value diverged from their literal `amount` arg.
       const warnings = deriveTxWriteWarnings({
         portfolioHoldingId: resolvedHoldingId,
         amount: resolved.amount,
         quantity,
+        originalAmount: enteredAmount != null && amount != null ? amount : null,
+        enteredAmount: enteredAmount != null && amount != null ? enteredAmount : null,
+        resolvedAmount: enteredAmount != null && amount != null ? resolved.amount : null,
+        enteredCurrency: enteredCurrency ?? null,
       });
       const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
       const resolvedCategory = catId ? { id: catId, name: String(catName ?? "") } : null;
@@ -2490,13 +2747,23 @@ export function registerPgTools(
       const encNote = dek ? encryptField(dek, note ?? "") : (note ?? "");
       const encTags = dek ? encryptField(dek, tags ?? "") : (tags ?? "");
 
+      // Issue #208 — round `entered_amount` to currency precision before INSERT.
+      // `convertToAccountCurrency` already round2's `resolved.amount`, but
+      // `enteredAmount` flows through unrounded — Claude can pass
+      // `enteredAmount: 1.96511214` and it lands raw in the DB, then compounds
+      // forever in every aggregator's SUM(t.amount). Persist precision with
+      // intent. `entered_fx_rate` is NOT a money field — it's a divisor, full
+      // FP precision preserved.
+      const persistedEnteredAmount = roundMoney(resolved.enteredAmount, resolved.enteredCurrency);
+      const persistedAmount = roundMoney(resolved.amount, resolved.currency);
+
       // Issue #28: stamp source explicitly + return audit timestamps so
       // the AI assistant can verify the write landed and self-attributed.
       // Issue #96: trade_link_id stamped from validated `tradeLinkId` arg
       // (NULL when absent — legacy / unpaired rows).
       const result = await q(db, sql`
         INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source, trade_link_id)
-        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null}, ${'mcp_http'}, ${tradeLinkId ?? null})
+        VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${persistedAmount}, ${resolved.enteredCurrency}, ${persistedEnteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${resolvedHoldingId}, ${quantity ?? null}, ${'mcp_http'}, ${tradeLinkId ?? null})
         RETURNING id, created_at, updated_at, source, trade_link_id
       `);
 
@@ -2609,9 +2876,13 @@ export function registerPgTools(
       // accidentally worked because Postgres still had the column; now `c.name` is
       // undefined and the map produced empty strings (resolvedCategory.name was ""
       // in every per-row response — issue #93 follow-up).
-      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const rawCats = await q(db, sql`SELECT id, name_ct, type FROM categories WHERE user_id = ${userId}`);
       const allCats = decryptNameish(rawCats, dek);
       const catNameById = new Map<number, string>(allCats.map(c => [Number(c.id), String(c.name ?? "")]));
+      // Issue #212 — sign-vs-category invariant. Build (id → type) once for
+      // the per-row validator. `type` is plaintext on `categories` so it
+      // round-trips through `decryptNameish` unchanged.
+      const catTypeById = new Map<number, string>(rawCats.map((c: Row) => [Number(c.id), String(c.type ?? "")]));
       // Cache user-owned holding ids in one SELECT instead of one ownership
       // check per row.
       const ownedHoldings = await q(db, sql`SELECT id FROM portfolio_holdings WHERE user_id = ${userId}`);
@@ -2672,6 +2943,11 @@ export function registerPgTools(
         index: number;
         success: boolean;
         message: string;
+        // Issue #212: per-row failure code so callers can distinguish
+        // sign-vs-category violations from generic resolution errors.
+        // Aligns with the #203 envelope shape (code is set only on
+        // success: false rows; success rows omit it).
+        code?: string;
         resolvedAccount?: { id: number; name: string };
         resolvedCategory?: { id: number; name: string } | null;
         resolvedHolding?: { id: number } | null;
@@ -2707,11 +2983,12 @@ export function registerPgTools(
           } else if (t.account) {
             const r = resolveAccountStrict(t.account, allAccounts);
             if (!r.ok) {
-              const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+              // Issue #211 Bug e: top-N suggestions only (was full inventory).
+              const suggestions = suggestionList(t.account, allAccounts);
               if (r.reason === "low_confidence") {
-                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" (id=${Number(r.suggestion.id)}) but no shared whitespace token. Re-submit with account_id=${Number(r.suggestion.id)} if that's right, or pick another from: ${list}` });
+                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)` });
               } else {
-                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Available: ${list}` });
+                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Did you mean: ${suggestions}?` });
               }
               continue;
             }
@@ -2764,8 +3041,28 @@ export function registerPgTools(
 
           let catId: number | null = null;
           if (t.category) {
-            const cat = fuzzyFind(t.category, allCats);
-            catId = cat ? Number(cat.id) : null;
+            // Issue #203: explicit category names must fail loud when they
+            // don't resolve. The previous `fuzzyFind` + silent-null branch
+            // coerced unknown categories to `category_id = NULL` and
+            // reported the row as `success: true` — symmetric gap to the
+            // `unapplied[]` contract on `execute_bulk_update` (issue #61)
+            // and the strict-resolve pattern on `record_transaction`/
+            // `update_transaction`. Mirror `update_transaction`'s use of
+            // `resolveCategoryStrict` so low-confidence substring hits
+            // also surface a "did you mean..." hint instead of misrouting.
+            // The truthy `if (t.category)` check preserves the intentional
+            // "auto-categorize on no input" branch via `autoCategory`.
+            const resolved = resolveCategoryStrict(t.category, allCats);
+            if (!resolved.ok) {
+              // Issue #211 Bug e: top-N suggestions only.
+              const suggestions = suggestionList(t.category, allCats);
+              const message = resolved.reason === "low_confidence"
+                ? `Category "${t.category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-submit with the exact name to confirm.`
+                : `Category "${t.category}" not found. Did you mean: ${suggestions}?`;
+              results.push({ index: i, success: false, message, resolvedAccount: resolvedAccountInfo });
+              continue;
+            }
+            catId = Number(resolved.category.id);
           } else {
             catId = await autoCategory(
               db,
@@ -2777,6 +3074,19 @@ export function registerPgTools(
           }
 
           const txDate = t.date ?? today;
+          // Issue #213 — per-row date validation. Schema keeps
+          // `date: z.string().optional()` so a single bad row doesn't
+          // collapse the whole zod parse; we validate here so per-row
+          // failures show up in `results[]` like other resolution errors.
+          if (t.date !== undefined && parseYmdSafe(t.date) === null) {
+            results.push({
+              index: i,
+              success: false,
+              message: `Invalid date "${t.date}" — expected YYYY-MM-DD calendar date.`,
+              resolvedAccount: resolvedAccountInfo,
+            });
+            continue;
+          }
           const resolved = await resolveTxAmountsCore({
             accountCurrency: String(acct.currency),
             date: txDate,
@@ -2790,10 +3100,39 @@ export function registerPgTools(
             continue;
           }
 
+          // Issue #212 — sign-vs-category invariant per row. Fail this row
+          // only (matches the #203 unknown-category envelope: results[i]
+          // gets `success: false` + `code: 'sign_category_mismatch'`); the
+          // batch keeps going. The check runs on `resolved.amount` (after
+          // FX) so the rule is evaluated against the value the DB will see.
+          if (catId != null) {
+            const sErr = validateSignVsCategory({
+              amount: resolved.amount,
+              categoryType: catTypeById.get(catId) ?? null,
+              categoryName: catNameById.get(catId) ?? `category #${catId}`,
+            });
+            if (sErr) {
+              results.push({
+                index: i,
+                success: false,
+                message: sErr.message,
+                code: sErr.code,
+                resolvedAccount: resolvedAccountInfo,
+                resolvedCategory: { id: catId, name: catNameById.get(catId) ?? "" },
+              });
+              continue;
+            }
+          }
+
+          // Issue #211 Bug h: amount-vs-enteredAmount override warning.
           const rowWarnings = deriveTxWriteWarnings({
             portfolioHoldingId: rowHoldingId,
             amount: resolved.amount,
             quantity: t.quantity,
+            originalAmount: t.enteredAmount != null && t.amount != null ? t.amount : null,
+            enteredAmount: t.enteredAmount != null && t.amount != null ? t.enteredAmount : null,
+            resolvedAmount: t.enteredAmount != null && t.amount != null ? resolved.amount : null,
+            enteredCurrency: t.enteredCurrency ?? null,
           });
           const rowCategory = catId != null ? { id: catId, name: catNameById.get(catId) ?? "" } : null;
           const rowHolding = rowHoldingId != null ? { id: rowHoldingId } : null;
@@ -2836,9 +3175,14 @@ export function registerPgTools(
           // validated the group, stamp the minted UUID into trade_link_id.
           const tgKey = (t as { tradeGroupKey?: unknown }).tradeGroupKey;
           const rowTradeLinkId = typeof tgKey === "string" ? (tradeGroupUuid.get(tgKey) ?? null) : null;
+          // Issue #208 — round persisted money fields to currency precision.
+          // `entered_fx_rate` (divisor) keeps full FP; only the amount columns
+          // are rounded so SUM(t.amount) stops drifting.
+          const persistedEnteredAmount = roundMoney(resolved.enteredAmount, resolved.enteredCurrency);
+          const persistedAmount = roundMoney(resolved.amount, resolved.currency);
           const insRows = await q(db, sql`
             INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, entered_currency, entered_amount, entered_fx_rate, payee, note, tags, portfolio_holding_id, quantity, source, trade_link_id)
-            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${resolved.amount}, ${resolved.enteredCurrency}, ${resolved.enteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'}, ${rowTradeLinkId})
+            VALUES (${userId}, ${txDate}, ${acct.id}, ${catId}, ${resolved.currency}, ${persistedAmount}, ${resolved.enteredCurrency}, ${persistedEnteredAmount}, ${resolved.enteredFxRate}, ${encPayee}, ${encNote}, ${encTags}, ${rowHoldingId}, ${t.quantity ?? null}, ${'mcp_http'}, ${rowTradeLinkId})
             RETURNING id
           `);
           const newTxId = insRows[0]?.id != null ? Number(insRows[0].id) : null;
@@ -2986,7 +3330,7 @@ export function registerPgTools(
     "Update fields of an existing transaction by ID. Pass enteredAmount + enteredCurrency to re-lock a cross-currency rate (rare); passing just `amount` keeps the entered side unchanged. To backfill a share count on an existing portfolio row, pass `quantity` (positive=buy/long, negative=sell, or null to clear).",
     {
       id: z.number().describe("Transaction ID"),
-      date: z.string().optional(),
+      date: ymdDate.optional(),
       amount: z.number().optional().describe("New amount in account currency. Doesn't touch the entered_* side."),
       payee: z.string().optional(),
       category: z.string().optional().describe("Category name (fuzzy matched)"),
@@ -3000,7 +3344,7 @@ export function registerPgTools(
     },
     async ({ id, date, amount, payee, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
       const existing = await q(db, sql`
-        SELECT t.id, t.account_id, t.date, t.amount, a.currency AS account_currency
+        SELECT t.id, t.account_id, t.category_id, t.date, t.amount, a.currency AS account_currency
           FROM transactions t
           LEFT JOIN accounts a ON a.id = t.account_id
          WHERE t.user_id = ${userId} AND t.id = ${id}
@@ -3009,6 +3353,10 @@ export function registerPgTools(
       const accountCurrency = String(existing[0].account_currency ?? "CAD");
       const txAccountId = existing[0].account_id != null ? Number(existing[0].account_id) : undefined;
       const existingAmount = existing[0].amount != null ? Number(existing[0].amount) : null;
+      // Issue #212 — capture existing category_id for the post-merge
+      // sign-vs-category check below (when the patch only touches amount,
+      // we still need the existing category to evaluate the invariant).
+      const existingCategoryId = existing[0].category_id != null ? Number(existing[0].category_id) : null;
 
       // Stream D: pull `name_ct` and decrypt before resolving. Without this,
       // Phase-3 NULL-plaintext rows end up with `name === null` and
@@ -3023,11 +3371,11 @@ export function registerPgTools(
         const allCats = decryptNameish(rawCats, dek);
         const resolved = resolveCategoryStrict(category, allCats);
         if (!resolved.ok) {
+          // Issue #211 Bug e: top-N suggestions only.
           if (resolved.reason === "low_confidence") {
-            return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
+            return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-call with the exact name to confirm.`);
           }
-          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
-          return err(`Category "${category}" not found. Available: ${list}`);
+          return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
         }
         catId = Number(resolved.category.id);
         resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
@@ -3078,12 +3426,19 @@ export function registerPgTools(
       // success-message ambiguity that masked silent category drops.
       const fieldsUpdated: string[] = [];
       let postMergeAmount: number | null = existingAmount;
-      if (date !== undefined) {
-        await db.execute(sql`UPDATE transactions SET date = ${date}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
-        fieldsUpdated.push("date");
-      }
-      // Entered-side update — re-locks the FX rate at the row's (possibly
-      // updated) date. Triangulates and refuses on fallback.
+      // Pre-compute the post-merge amount when an FX-aware enteredAmount
+      // patch is in flight. This lets us validate the invariant BEFORE any
+      // UPDATE runs (issue #212) — otherwise a sign-vs-category violation
+      // would land on the row partially before being caught.
+      let preResolvedEntered:
+        | {
+            amount: number;
+            currency: string;
+            enteredAmount: number;
+            enteredCurrency: string;
+            enteredFxRate: number;
+          }
+        | null = null;
       if (enteredAmount !== undefined) {
         const txDate = date ?? String(existing[0].date);
         const resolved = await resolveTxAmountsCore({
@@ -3094,23 +3449,63 @@ export function registerPgTools(
           enteredCurrency,
         });
         if (!resolved.ok) return err(resolved.message);
+        preResolvedEntered = {
+          amount: resolved.amount,
+          currency: resolved.currency,
+          enteredAmount: resolved.enteredAmount,
+          enteredCurrency: resolved.enteredCurrency,
+          enteredFxRate: resolved.enteredFxRate,
+        };
+        postMergeAmount = resolved.amount;
+      } else if (amount !== undefined) {
+        postMergeAmount = amount;
+      }
+      // Issue #212 — sign-vs-category invariant on the post-merge state.
+      // Resolve type + name from the post-merge category. When the patch
+      // doesn't touch category, fall back to the existing row's category.
+      // Runs BEFORE every UPDATE so a violation aborts the whole patch
+      // cleanly — no partial application.
+      if (postMergeAmount != null) {
+        const postMergeCategoryId = catId !== undefined ? catId : existingCategoryId;
+        if (postMergeCategoryId != null) {
+          const cat = (await q(db, sql`SELECT id, type, name_ct FROM categories WHERE id = ${postMergeCategoryId} AND user_id = ${userId}`))[0] as Row | undefined;
+          if (cat) {
+            const ct = cat.name_ct as string | null | undefined;
+            const catName =
+              (ct && dek ? decryptField(dek, String(ct)) : ct ?? "") ||
+              `category #${postMergeCategoryId}`;
+            const sErr = validateSignVsCategory({
+              amount: postMergeAmount,
+              categoryType: cat.type as string | null | undefined,
+              categoryName: catName,
+            });
+            if (sErr) return err(sErr.message);
+          }
+        }
+      }
+      if (date !== undefined) {
+        await db.execute(sql`UPDATE transactions SET date = ${date}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
+        fieldsUpdated.push("date");
+      }
+      // Entered-side update — uses the pre-resolved values from the
+      // pre-flight pass above. No second resolveTxAmountsCore call.
+      if (preResolvedEntered) {
+        const r = preResolvedEntered;
         await db.execute(sql`
           UPDATE transactions
-             SET amount = ${resolved.amount},
-                 currency = ${resolved.currency},
-                 entered_amount = ${resolved.enteredAmount},
-                 entered_currency = ${resolved.enteredCurrency},
-                 entered_fx_rate = ${resolved.enteredFxRate},
+             SET amount = ${r.amount},
+                 currency = ${r.currency},
+                 entered_amount = ${r.enteredAmount},
+                 entered_currency = ${r.enteredCurrency},
+                 entered_fx_rate = ${r.enteredFxRate},
                  updated_at = NOW()
            WHERE id = ${id} AND user_id = ${userId}
         `);
         fieldsUpdated.push("amount", "currency", "entered_amount", "entered_currency", "entered_fx_rate");
-        postMergeAmount = resolved.amount;
       } else if (amount !== undefined) {
         // Account-side-only update: leave entered_* alone.
         await db.execute(sql`UPDATE transactions SET amount = ${amount}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         fieldsUpdated.push("amount");
-        postMergeAmount = amount;
       }
       if (catId !== undefined) {
         await db.execute(sql`UPDATE transactions SET category_id = ${catId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
@@ -3202,7 +3597,7 @@ export function registerPgTools(
       from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `fromAccount` are passed, this wins."),
       to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `toAccount` are passed, this wins."),
       amount: z.number().nonnegative().describe("Cash amount the user sent, in the SOURCE account's currency. > 0 for cash transfers; 0 is allowed only when `holding` + `quantity` are also set (pure in-kind transfer)."),
-      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination account, in DESTINATION's currency. When set, FX rate is locked to receivedAmount/amount. Ignored for same-currency transfers."),
       holding: z.string().optional().describe("Source-side holding name for an in-kind (share) transfer. MUST already exist in fromAccount. Pair with `quantity`."),
       destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding` (auto-created in toAccount if missing). Set this only when the destination uses a different label for the same instrument (e.g. source 'Gold Ounce' → dest 'Au Bullion')."),
@@ -3219,7 +3614,6 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
       let fromAcct: Row | null = null;
       if (from_account_id != null) {
         fromAcct = allAccounts.find(a => Number(a.id) === from_account_id) ?? null;
@@ -3228,10 +3622,12 @@ export function registerPgTools(
         if (!fromAccount) return err("Pass either `from_account_id` or `fromAccount` (name/alias).");
         const resolved = resolveAccountStrict(fromAccount, allAccounts);
         if (!resolved.ok) {
+          // Issue #211 Bug e: top-N suggestions only (was full inventory).
+          const suggestions = suggestionList(fromAccount, allAccounts);
           if (resolved.reason === "low_confidence") {
-            return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with from_account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+            return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass from_account_id to disambiguate.)`);
           }
-          return err(`Source account "${fromAccount}" not found. Available: ${list}`);
+          return err(`Source account "${fromAccount}" not found. Did you mean: ${suggestions}?`);
         }
         fromAcct = resolved.account;
       }
@@ -3243,10 +3639,12 @@ export function registerPgTools(
         if (!toAccount) return err("Pass either `to_account_id` or `toAccount` (name/alias).");
         const resolved = resolveAccountStrict(toAccount, allAccounts);
         if (!resolved.ok) {
+          // Issue #211 Bug e: top-N suggestions only.
+          const suggestions = suggestionList(toAccount, allAccounts);
           if (resolved.reason === "low_confidence") {
-            return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with to_account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+            return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass to_account_id to disambiguate.)`);
           }
-          return err(`Destination account "${toAccount}" not found. Available: ${list}`);
+          return err(`Destination account "${toAccount}" not found. Did you mean: ${suggestions}?`);
         }
         toAcct = resolved.account;
       }
@@ -3340,7 +3738,7 @@ export function registerPgTools(
       currency: z.string().optional().describe("ISO code (USD/CAD/...) of the trade — the cash sleeve and symbol holding both inherit this. Defaults to the account's currency."),
       fees: z.number().nonnegative().optional().describe("Optional commission/fees in `currency`. Booked as a separate negative-amount cash transaction on the cash sleeve (not part of the trade pair). Defaults to 0."),
       fxRate: z.number().positive().optional().describe("Trade-currency → account-currency rate for cross-currency trades. REQUIRED when `currency` differs from the account's currency. Ignored when currencies match (rate=1)."),
-      date: z.string().optional().describe("Trade/settlement date YYYY-MM-DD (default: today). Applied to both legs and the optional fees row."),
+      date: ymdDate.optional().describe("Trade/settlement date YYYY-MM-DD (default: today). Applied to both legs and the optional fees row."),
       note: z.string().optional().describe("Optional note applied to both legs."),
     },
     async ({ account, account_id, side, symbol, quantity, price, currency, fees, fxRate, date, note }) => {
@@ -3363,11 +3761,12 @@ export function registerPgTools(
         if (!account) return err("Pass either `account_id` or `account` (name/alias).");
         const resolved = resolveAccountStrict(account, allAccounts);
         if (!resolved.ok) {
-          const list = allAccounts.map(a => `"${a.name}" (id=${Number(a.id)})`).join(", ");
+          // Issue #211 Bug e: top-N suggestions only.
+          const suggestions = suggestionList(account, allAccounts);
           if (resolved.reason === "low_confidence") {
-            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" (id=${Number(resolved.suggestion.id)}) but no shared whitespace token. Re-call with account_id=${Number(resolved.suggestion.id)} if that's right, or pick another from: ${list}`);
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
           }
-          return err(`Account "${account}" not found. Available: ${list}`);
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
         }
         acct = resolved.account;
       }
@@ -3442,6 +3841,23 @@ export function registerPgTools(
         `);
         cashHoldingId = Number(ins[0]?.id);
         cashHoldingName = cashName;
+        // Issue #205 — dual-write holding_accounts pairing. Mirrors the
+        // canonical pattern at register-tools-pg.ts:4190-4201 in
+        // add_portfolio_holding. Without the pairing, every aggregator (issue
+        // #25) silently drops trades against this sleeve. On pairing failure,
+        // DELETE the orphan portfolio_holdings row.
+        try {
+          await q(db, sql`
+            INSERT INTO holding_accounts (holding_id, account_id, user_id, qty, cost_basis, is_primary)
+            VALUES (${cashHoldingId}, ${acct.id}, ${userId}, 0, 0, true)
+            ON CONFLICT (holding_id, account_id) DO NOTHING
+          `);
+        } catch (pairingErr) {
+          await q(db, sql`
+            DELETE FROM portfolio_holdings WHERE id = ${cashHoldingId} AND user_id = ${userId}
+          `);
+          throw pairingErr;
+        }
       }
 
       // For BUY: cash sleeve is the source (must exist — done above);
@@ -3496,9 +3912,11 @@ export function registerPgTools(
       // by the user's existing rule engine on next read. Tagged so it can be
       // tied back to the trade pair if needed.
       let feeTxId: number | null = null;
-      const feeAmountTrade = fees != null && fees > 0 ? Math.round(fees * 100) / 100 : 0;
+      // Issue #208 — round fee amounts via the helper (currency-aware).
+      // `tradeCurrency` is the trade's own ccy; `acctCurrency` is the account ccy.
+      const feeAmountTrade = fees != null && fees > 0 ? roundMoney(fees, tradeCurrency) : 0;
       if (feeAmountTrade > 0) {
-        const feeAmountAcct = Math.round(feeAmountTrade * fx * 100) / 100;
+        const feeAmountAcct = roundMoney(feeAmountTrade * fx, acctCurrency);
         const feePayee = `Trade fee — ${trimmedSymbol}`;
         const encPayee = encryptField(dek, feePayee);
         const encNote = encryptField(dek, "");
@@ -3545,7 +3963,7 @@ export function registerPgTools(
       fromAccount: z.string().optional().describe("New source account name or alias. Re-runs FX if currency changes."),
       toAccount: z.string().optional().describe("New destination account name or alias."),
       amount: z.number().nonnegative().optional().describe("New amount sent (source currency); 0 only allowed when in-kind side is set."),
-      date: z.string().optional().describe("New date (YYYY-MM-DD); applied to both legs."),
+      date: ymdDate.optional().describe("New date (YYYY-MM-DD); applied to both legs."),
       receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override; rebuilds the destination leg's amount + locked FX rate."),
       holding: z.string().optional().describe("(Re)bind the in-kind source-side to this holding name. Pair with `quantity`."),
       destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding`. Use when destination uses a different label."),
@@ -3647,17 +4065,28 @@ export function registerPgTools(
     "Delete a budget entry for a category/month",
     {
       category: z.string().describe("Category name"),
-      month: z.string().describe("Month (YYYY-MM)"),
+      month: ymPeriod.describe("Month (YYYY-MM)"),
     },
     async ({ category, month }) => {
-      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      // Issue #211 (Bug a): the SELECT only returns `name_ct` (encrypted)
+      // after Stream D Phase 4. Without `decryptNameish`, `fuzzyFind` runs
+      // against ciphertext and never matches — so `cat` was always null
+      // and `delete_budget` was a tool outage for every caller.
+      if (!dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4).");
+      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const allCats = decryptNameish(rawCats, dek);
       const cat = fuzzyFind(category, allCats);
-      if (!cat) return err(`Category "${category}" not found`);
+      if (!cat) {
+        return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
+      }
 
       const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
       if (!existing.length) return err(`No budget found for "${cat.name}" in ${month}`);
 
       await db.execute(sql`DELETE FROM budgets WHERE id = ${existing[0].id} AND user_id = ${userId}`);
+      // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
+      // any future budget-aware tx surface.
+      invalidateUserTxCache(userId);
       return text({ success: true, message: `Budget deleted: ${cat.name} for ${month}` });
     }
   );
@@ -3670,7 +4099,7 @@ export function registerPgTools(
       account: z.string().describe("Current account name or alias (fuzzy matched against name; exact match on alias)"),
       name: z.string().optional().describe("New name"),
       group: z.string().optional().describe("New group"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("New currency"),
+      currency: supportedCurrencyEnum.optional().describe("New ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       note: z.string().optional().describe("New note"),
       alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports (e.g. last 4 digits of a card). Pass an empty string to clear."),
     },
@@ -3745,8 +4174,8 @@ export function registerPgTools(
     "Update a financial goal's target, deadline, status, or linked accounts. `account_ids` (issue #130) replaces the existing account-link set atomically — pass `[]` to unlink all, or omit to leave links unchanged.",
     {
       goal: z.string().describe("Goal name (fuzzy matched)"),
-      target_amount: z.number().optional(),
-      deadline: z.string().optional().describe("YYYY-MM-DD"),
+      target_amount: z.number().positive().optional().describe("Target amount (must be > 0)"),
+      deadline: ymdDate.optional().describe("YYYY-MM-DD"),
       status: z.enum(["active", "completed", "paused"]).optional(),
       name: z.string().optional().describe("Rename the goal"),
       account_ids: z.array(z.number().int()).optional().describe("Replace the goal's linked accounts (issue #130). When supplied, the existing goal_accounts rows are deleted and replaced with the new set in a single transaction. Pass `[]` to unlink all. Omit to leave links unchanged."),
@@ -3842,7 +4271,12 @@ export function registerPgTools(
     "Create a new transaction category",
     {
       name: z.string().describe("Category name (must be unique)"),
-      type: z.enum(["E", "I", "T"]).describe("Type: 'E'=expense, 'I'=income, 'T'=transfer"),
+      // Issue #211 (Bug d): enum was `["E", "I", "T"]` but every other
+      // surface (transfer.ts, staged_transactions.tx_type CHECK, MCP
+      // bulk_record_transactions, schema-pg) uses `'R'` for transfer.
+      // `'T'` rows persisted as orphans no other code path could render.
+      // Migration 20260509c flips any extant `type='T'` rows to `'R'`.
+      type: z.enum(["E", "I", "R"]).describe("Type: 'E'=expense, 'I'=income, 'R'=transfer"),
       group: z.string().optional().describe("Group label (e.g. 'Housing', 'Food')"),
       note: z.string().optional(),
     },
@@ -3866,26 +4300,52 @@ export function registerPgTools(
   );
 
   // ── create_rule ────────────────────────────────────────────────────────────
+  // Issue #214 — two-bug fix:
+  //   (a) `match_payee` column does NOT exist in `transaction_rules` (schema is
+  //       (match_field, match_type, match_value)). Synthesize the three target
+  //       fields from the user-facing `match_payee` alias and write the new
+  //       schema. `created_at` is NOT NULL with no DB default — set it.
+  //   (b) `decryptNameish` was missing on the categories SELECT, so every row
+  //       had `name === undefined`. The `fuzzyFind` waterfall's last step
+  //       (`lo.includes(String(o.name ?? "").toLowerCase())`) collapses to
+  //       `lo.includes("")` which is always true — silently returning the
+  //       first category in the result set as a "match". Mirror what
+  //       `update_rule` does so unknown categories error out cleanly.
   server.tool(
     "create_rule",
     "Create an auto-categorization rule for future imports",
     {
-      match_payee: z.string().describe("Payee pattern to match (supports LIKE wildcards: %)"),
+      match_payee: z.string().describe("Payee pattern to match (substring, case-insensitive; legacy `%` wildcards are stripped)"),
       assign_category: z.string().describe("Category name to assign (fuzzy matched)"),
       rename_to: z.string().optional().describe("Optionally rename matched payee to this"),
       assign_tags: z.string().optional().describe("Tags to assign (comma-separated)"),
       priority: z.number().optional().describe("Rule priority (higher = checked first, default 0)"),
     },
     async ({ match_payee, assign_category, rename_to, assign_tags, priority }) => {
-      const allCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+      const allCats = decryptNameish(rawCats, dek);
       const cat = fuzzyFind(assign_category, allCats);
       if (!cat) return err(`Category "${assign_category}" not found`);
 
+      // Strip legacy `%` wildcards — the new schema's `match_type='contains'`
+      // is substring-only. Mirrors what apply_rules_to_uncategorized already
+      // did at the matcher layer.
+      const cleanedValue = match_payee.replace(/%/g, "");
+      // Synthesize a `name` (NOT NULL on transaction_rules). Truncate to fit
+      // text columns comfortably; the user's actual matching pattern lives in
+      // `match_value`, this is just the human label.
+      const synthName = `Match "${cleanedValue}" → ${String(cat.name ?? "")}`.slice(0, 200);
+      const todayISO = new Date().toISOString().split("T")[0];
+
       await db.execute(sql`
-        INSERT INTO transaction_rules (user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active)
-        VALUES (${userId}, ${match_payee}, ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, 1)
+        INSERT INTO transaction_rules
+          (user_id, name, match_field, match_type, match_value,
+           assign_category_id, rename_to, assign_tags, priority, is_active, created_at)
+        VALUES
+          (${userId}, ${synthName}, 'payee', 'contains', ${cleanedValue},
+           ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, 1, ${todayISO})
       `);
-      return text({ success: true, message: `Rule created: "${match_payee}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` });
+      return text({ success: true, message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` });
     }
   );
 
@@ -3894,7 +4354,7 @@ export function registerPgTools(
     "add_snapshot",
     "Record a net-worth snapshot for tracking wealth over time",
     {
-      date: z.string().optional().describe("YYYY-MM-DD (default: today)"),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
       note: z.string().optional(),
     },
     async ({ date, note }) => {
@@ -3929,15 +4389,23 @@ export function registerPgTools(
     async ({ dry_run, limit }) => {
       const maxRows = limit ?? 500;
       const txns = await q(db, sql`
-        SELECT id, payee, amount FROM transactions
+        SELECT id, payee, amount, tags FROM transactions
         WHERE user_id = ${userId} AND (category_id IS NULL OR category_id = 0)
         ORDER BY date DESC LIMIT ${maxRows}
       `);
       if (!txns.length) return text({ message: "No uncategorized transactions found", updated: 0 });
 
+      // Issue #214 — schema is (match_field, match_type, match_value), NOT
+      // `match_payee`. Pull the new column set; SQL-filter to active rules
+      // and iterate in priority order in memory (same shape as the import
+      // pipeline preview at the bottom of this file).
       const rules = await q(db, sql`
-        SELECT match_payee, assign_category_id, rename_to, assign_tags, priority
-        FROM transaction_rules WHERE user_id = ${userId} AND is_active = 1
+        SELECT match_field, match_type, match_value,
+               assign_category_id, rename_to, assign_tags, priority
+        FROM transaction_rules
+        WHERE user_id = ${userId}
+          AND is_active = 1
+          AND assign_category_id IS NOT NULL
         ORDER BY priority DESC
       `);
 
@@ -3945,11 +4413,34 @@ export function registerPgTools(
       const preview: { id: number; payee: string; categoryId: number }[] = [];
 
       for (const txn of txns) {
-        // Decrypt the payee so we can match against the plaintext rule pattern.
+        // Decrypt payee + tags in memory so we can match against plaintext
+        // rule values. Tags-rules need plaintext too (matchesRule reads
+        // `txn.tags` for `match_field='tags'`).
         const plainPayee = dek ? (decryptField(dek, String(txn.payee ?? "")) ?? "") : String(txn.payee ?? "");
+        const plainTags = dek ? (decryptField(dek, String(txn.tags ?? "")) ?? "") : String(txn.tags ?? "");
+        const amt = Number(txn.amount);
         for (const rule of rules) {
-          const pattern = String(rule.match_payee ?? "").toLowerCase().replace(/%/g, "");
-          if (plainPayee.toLowerCase().includes(pattern)) {
+          const field = String(rule.match_field ?? "");
+          const type = String(rule.match_type ?? "");
+          const value = String(rule.match_value ?? "");
+          let hit = false;
+          if (field === "amount") {
+            const ruleAmount = parseFloat(value);
+            if (isNaN(ruleAmount)) { hit = false; }
+            else if (type === "greater_than") hit = amt > ruleAmount;
+            else if (type === "less_than") hit = amt < ruleAmount;
+            else if (type === "exact") hit = Math.abs(amt - ruleAmount) < 0.01;
+          } else {
+            const fieldVal = (field === "tags" ? plainTags : plainPayee).toLowerCase();
+            const valueLower = value.toLowerCase();
+            if (type === "contains") hit = fieldVal.includes(valueLower);
+            else if (type === "exact") hit = fieldVal === valueLower;
+            else if (type === "regex") {
+              try { hit = new RegExp(value, "i").test(field === "tags" ? plainTags : plainPayee); }
+              catch { hit = false; }
+            }
+          }
+          if (hit) {
             if (!dry_run) {
               // rule.rename_to / rule.assign_tags are plaintext; encrypt
               // them before writing to the encrypted transaction columns.
@@ -4006,7 +4497,7 @@ export function registerPgTools(
           add_goal: "add_goal(name, type, target_amount, deadline?, account?, account_ids?) — type: savings|debt_payoff|investment|emergency_fund. account_ids: number[] for multi-account linking (issue #130).",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?, account_ids?) — status: active|completed|paused. account_ids: replace linked-account set ([] = unlink all).",
           delete_goal: "delete_goal(goal) — Fuzzy goal name.",
-          create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'T'=transfer.",
+          create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'R'=transfer.",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?) — match_payee supports % wildcards.",
           apply_rules_to_uncategorized: "apply_rules_to_uncategorized(dry_run?, limit?) — Batch-apply rules to uncategorized transactions.",
           get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
@@ -4053,7 +4544,7 @@ export function registerPgTools(
             categories: "id, user_id, type(E/I/T), group, name, note",
             budgets: "id, user_id, category_id, month(YYYY-MM), amount, currency",
             goals: "id, user_id, name, type, target_amount, current_amount, deadline, status, account_id",
-            transaction_rules: "id, user_id, match_payee, assign_category_id, rename_to, assign_tags, priority, is_active",
+            transaction_rules: "id, user_id, name, match_field, match_type, match_value, assign_category_id, rename_to, assign_tags, priority, is_active, created_at",
             portfolio_holdings: "id, user_id, account_id, name, symbol, currency, note",
           },
           amount_convention: "Negative=expense/debit, Positive=income/credit",
@@ -4102,7 +4593,7 @@ export function registerPgTools(
       name: z.string().min(1).max(200).describe("Display name of the holding (e.g. 'Vanguard All-Equity ETF')"),
       account: z.string().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required because uniqueness is scoped per (account, name)."),
       symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("Currency (default: parent account's currency)"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
       isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
       note: z.string().max(500).optional(),
     },
@@ -4206,7 +4697,7 @@ export function registerPgTools(
       name: z.string().min(1).max(200).optional().describe("New name"),
       symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
       account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) to move shares between accounts; update individual transactions to re-attribute history."),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       isCrypto: z.boolean().optional(),
       note: z.string().max(500).optional(),
     },
@@ -4401,6 +4892,9 @@ export function registerPgTools(
       // resolve, short-circuit to empty holdings + the warnings array. Same
       // shape as a successful empty result (no error) so callers stay
       // monomorphic — mirrors the symbols-all-unmatched warnings contract.
+      // Issue #209: dropped the mixed-currency raw `totalCostBasis` /
+      // `lifetimeCostBasis` / etc. fields — only `*Reporting` siblings remain
+      // (currency-converted, the canonical totals).
       if (scopeRejected) {
         return text({
           disclaimer: PORTFOLIO_DISCLAIMER,
@@ -4409,12 +4903,6 @@ export function registerPgTools(
           reportingCurrency: reporting,
           warnings: accountWarnings,
           summary: {
-            totalCostBasis: 0,
-            lifetimeCostBasis: 0,
-            totalRealizedGain: 0,
-            totalDividends: 0,
-            totalReturn: 0,
-            totalReturnPct: null,
             lifetimeCostBasisReporting: tagAmount(0, reporting, "reporting"),
             totalRealizedGainReporting: tagAmount(0, reporting, "reporting"),
             totalDividendsReporting: tagAmount(0, reporting, "reporting"),
@@ -4471,9 +4959,23 @@ export function registerPgTools(
         : null;
 
       const today = new Date();
+      // Issue #209 — threshold guard for `totalReturnPct`. Below this floor in
+      // the holding's own currency, the return % is suppressed (set to null)
+      // and a row warning surfaces the reason. Cash sleeves with $0.04 cost
+      // basis used to overflow to `18,501,638.9%`; legitimate near-zero
+      // positions (rounding dust on closed positions) get the same treatment.
+      const PERCENT_FLOOR_NATIVE = 1.0;
+      // Issue #209 — surfaced per row when the percentage is suppressed for
+      // any reason (cash sleeve, cost basis below floor).
+      type RowWarning = { holdingId: number | null; code: string; message: string };
+      const rowWarnings: RowWarning[] = [];
+      // Issue #209 — explicit status field so callers don't infer state from
+      // null patterns on totalCostBasis/daysHeld/firstPurchaseDate.
+      type HoldingStatus = "active" | "zero_position" | "cash_only" | "sold_out";
       type HoldingResult = {
         id: number | null;
         name: unknown; symbol: unknown; account: unknown; currency: string;
+        status: HoldingStatus;
         quantity: number; avgCostPerShare: number | null; totalCostBasis: number | null;
         lifetimeCostBasis: number; realizedGain: number; dividendsReceived: number;
         totalReturn: number | null; totalReturnPct: number | null;
@@ -4534,12 +5036,62 @@ export function registerPgTools(
         const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
         const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
         const totalReturn = realizedGain + divs; // unrealized excluded (no live prices in MCP)
-        const totalReturnPct = buyAmt > 0 ? (totalReturn / buyAmt) * 100 : null;
         const fpDate = m.first_purchase ?? null;
         const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
         const ccy = String(info?.currency ?? "CAD");
         const fx = await fxFor(ccy);
 
+        // Issue #209 — cash-sleeve detection. Cash sleeves are
+        // `name='Cash', symbol=NULL/empty` per the investment-account
+        // constraint (CLAUDE.md). A $9.90 dividend posted to a $0-cost cash
+        // sleeve must NOT report `100%+ return`. Detection guards on `info?`
+        // (when DEK is missing the symbol/name decrypt to null and detection
+        // silently fails — accepted soft-fallback per CLAUDE.md "Read vs
+        // write auth guards"; without the DEK every other display field is
+        // also blank).
+        const symbolStr = String(info?.symbol ?? "").trim();
+        const nameLower = String(m.name ?? "").trim().toLowerCase();
+        const isCashSleeve = symbolStr === "" && nameLower === "cash";
+
+        // Issue #209 — derive explicit status. Clients should branch on this
+        // field, not on null patterns of totalCostBasis/daysHeld.
+        const status: HoldingStatus = isCashSleeve
+          ? "cash_only"
+          : remainingQty > 0
+            ? "active"
+            : buyQty > 0 && remainingQty <= 0
+              ? "sold_out"
+              : "zero_position";
+
+        // Issue #209 — threshold-guard `totalReturnPct`. Cash sleeves never
+        // get a percentage. Below the native-currency floor, suppress and
+        // surface a row warning so the LLM can explain the suppression.
+        let totalReturnPct: number | null;
+        if (isCashSleeve) {
+          totalReturnPct = null;
+          rowWarnings.push({
+            holdingId: m.holding_id ?? null,
+            code: "cash_sleeve_no_return_pct",
+            message: "Cash sleeve — return % not meaningful (no cost basis convention).",
+          });
+        } else if (buyAmt >= PERCENT_FLOOR_NATIVE) {
+          totalReturnPct = (totalReturn / buyAmt) * 100;
+        } else {
+          totalReturnPct = null;
+          if (buyAmt > 0) {
+            rowWarnings.push({
+              holdingId: m.holding_id ?? null,
+              code: "cost_basis_too_small",
+              message: `Cost basis below ${PERCENT_FLOOR_NATIVE} ${ccy} — return % suppressed (would otherwise overflow).`,
+            });
+          }
+        }
+
+        // Issue #208 — round at the response boundary using the helper so
+        // IEEE-754 noise (`-3.6e-11`-class drift, `5598.589999990002`-class
+        // leaks) is crushed everywhere these fields land. The aggregator
+        // (`accumulate()`) keeps full precision internally; we only round
+        // here.
         results.push({
           // FK to portfolio_holdings.id — pass this as portfolioHoldingId on
           // record_transaction / update_transaction to bind a transaction to
@@ -4549,21 +5101,22 @@ export function registerPgTools(
           symbol: info?.symbol ?? null,
           account: info?.account_name ?? null,
           currency: ccy,
+          status,
           quantity: Math.round(remainingQty * 10000) / 10000,
-          avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
+          avgCostPerShare: avgCost ? roundMoney(avgCost, ccy) : null,
           avgCostPerShareTagged: avgCost ? tagAmount(avgCost, ccy, "account") : null,
-          totalCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
-          lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
+          totalCostBasis: costBasis ? roundMoney(costBasis, ccy) : null,
+          lifetimeCostBasis: roundMoney(buyAmt, ccy),
           lifetimeCostBasisTagged: tagAmount(buyAmt, ccy, "account"),
           lifetimeCostBasisReporting: tagAmount(buyAmt * fx, reporting, "reporting"),
-          realizedGain: Math.round(realizedGain * 100) / 100,
+          realizedGain: roundMoney(realizedGain, ccy),
           realizedGainTagged: tagAmount(realizedGain, ccy, "account"),
           realizedGainReporting: tagAmount(realizedGain * fx, reporting, "reporting"),
-          dividendsReceived: Math.round(divs * 100) / 100,
+          dividendsReceived: roundMoney(divs, ccy),
           dividendsReceivedTagged: tagAmount(divs, ccy, "account"),
           dividendsReceivedReporting: tagAmount(divs * fx, reporting, "reporting"),
-          totalReturn: Math.round(totalReturn * 100) / 100,
-          totalReturnPct: totalReturnPct ? Math.round(totalReturnPct * 100) / 100 : null,
+          totalReturn: roundMoney(totalReturn, ccy),
+          totalReturnPct: totalReturnPct !== null ? Math.round(totalReturnPct * 100) / 100 : null,
           firstPurchaseDate: fpDate,
           daysHeld,
         });
@@ -4571,34 +5124,62 @@ export function registerPgTools(
 
       results.sort((a, b) => (b.lifetimeCostBasis ?? 0) - (a.lifetimeCostBasis ?? 0));
 
-      // Summary aggregates: convert each holding's lifetimeCostBasis et al
-      // into reporting currency before summing. The legacy sums were in
-      // mixed currencies — preserved here for backward compat but the
-      // *Reporting fields are the canonical totals.
-      const totalCostBasis = results.reduce((s, r) => s + (r.totalCostBasis ?? 0), 0);
-      const totalLifetime = results.reduce((s, r) => s + r.lifetimeCostBasis, 0);
-      const totalRealized = results.reduce((s, r) => s + r.realizedGain, 0);
-      const totalDivs = results.reduce((s, r) => s + r.dividendsReceived, 0);
-      const totalReturn = totalRealized + totalDivs;
-
+      // Issue #209 — dropped mixed-currency raw sums from the summary. The
+      // pre-209 code published `totalCostBasis` / `lifetimeCostBasis` /
+      // `totalRealizedGain` / `totalDividends` / `totalReturn` /
+      // `totalReturnPct` as raw arithmetic sums of per-row values that are
+      // each in their own currency — the result is mathematically
+      // meaningless ("615648.4 USD-ish + CAD-ish"). The `*Reporting` siblings
+      // (FX-converted into the user's reporting currency) are the canonical
+      // totals and are now the only summary money fields.
       let totalLifetimeReporting = 0;
       let totalRealizedReporting = 0;
       let totalDivsReporting = 0;
       for (const r of results) {
+        // Cash sleeves contribute $0 cost basis to the reporting sum (they
+        // hold cash, not invested capital) — keeping their per-row inputs in
+        // would understate the "total return %" denominator and inflate the
+        // numerator with dividends-on-cash. Realized gain / dividends from
+        // genuine holdings stay in.
+        if (r.status === "cash_only") {
+          totalRealizedReporting += r.realizedGainReporting.amount;
+          totalDivsReporting += r.dividendsReceivedReporting.amount;
+          continue;
+        }
         totalLifetimeReporting += r.lifetimeCostBasisReporting.amount;
         totalRealizedReporting += r.realizedGainReporting.amount;
         totalDivsReporting += r.dividendsReceivedReporting.amount;
       }
       const totalReturnReporting = totalRealizedReporting + totalDivsReporting;
 
+      // Issue #209 — threshold guard for the summary `totalReturnPctReporting`.
+      // Below this floor in reporting currency, the percentage is suppressed
+      // (set to null) and a top-level warning surfaces the reason.
+      const PERCENT_FLOOR_REPORTING = 10;
+      const summaryWarnings: string[] = [];
+      let totalReturnPctReporting: number | null;
+      if (totalLifetimeReporting >= PERCENT_FLOOR_REPORTING) {
+        totalReturnPctReporting = Math.round((totalReturnReporting / totalLifetimeReporting) * 10000) / 100;
+      } else {
+        totalReturnPctReporting = null;
+        if (totalLifetimeReporting > 0) {
+          summaryWarnings.push(
+            `Aggregate cost basis below ${PERCENT_FLOOR_REPORTING} ${reporting} — return % suppressed (would otherwise overflow).`
+          );
+        }
+      }
+
       // Issue #86: surface unmatched `symbols` filter entries as warnings so
       // the caller can correct typos/missing positions instead of silently
       // getting an empty result.
       // Issue #123: merge any account-scope warnings (e.g. account_id not
       // owned, or low-confidence fuzzy account match) into the same array.
-      // The contract is strings only — no objects — to keep callers simple.
+      // Issue #209: include the summary-level threshold-guard warning here.
+      // The contract is strings only — no objects — to keep callers simple;
+      // per-row warnings live on the response's `rowWarnings[]` array.
       const warnings: string[] = [
         ...accountWarnings,
+        ...summaryWarnings,
         ...(symbolFilters
           ? symbols!.filter(s => !matchedFilters.has(s.toLowerCase()))
               .map(s => `${s}: no matching holding found`)
@@ -4607,23 +5188,20 @@ export function registerPgTools(
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics. Results are per-holdingId — two holdings sharing a name across accounts return as separate rows.",
+        note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics. Results are per-holdingId — two holdings sharing a name across accounts return as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear in `holdings[]` with `status: 'cash_only'` and `totalReturnPct: null`.",
         totalHoldings: results.length,
         reportingCurrency: reporting,
         warnings,
+        rowWarnings,
+        // Issue #209 — only `*Reporting` siblings remain. These are the
+        // canonical totals (FX-converted into the user's reporting currency).
+        // Cash-sleeve `lifetimeCostBasis` is excluded from the denominator.
         summary: {
-          totalCostBasis: Math.round(totalCostBasis * 100) / 100,
-          lifetimeCostBasis: Math.round(totalLifetime * 100) / 100,
-          totalRealizedGain: Math.round(totalRealized * 100) / 100,
-          totalDividends: Math.round(totalDivs * 100) / 100,
-          totalReturn: Math.round(totalReturn * 100) / 100,
-          totalReturnPct: totalLifetime > 0 ? Math.round((totalReturn / totalLifetime) * 10000) / 100 : null,
-          // Currency-converted aggregates — these are the canonical totals.
-          lifetimeCostBasisReporting: tagAmount(totalLifetimeReporting, reporting, "reporting"),
-          totalRealizedGainReporting: tagAmount(totalRealizedReporting, reporting, "reporting"),
-          totalDividendsReporting: tagAmount(totalDivsReporting, reporting, "reporting"),
-          totalReturnReporting: tagAmount(totalReturnReporting, reporting, "reporting"),
-          totalReturnPctReporting: totalLifetimeReporting > 0 ? Math.round((totalReturnReporting / totalLifetimeReporting) * 10000) / 100 : null,
+          lifetimeCostBasisReporting: tagAmount(roundMoney(totalLifetimeReporting, reporting), reporting, "reporting"),
+          totalRealizedGainReporting: tagAmount(roundMoney(totalRealizedReporting, reporting), reporting, "reporting"),
+          totalDividendsReporting: tagAmount(roundMoney(totalDivsReporting, reporting), reporting, "reporting"),
+          totalReturnReporting: tagAmount(roundMoney(totalReturnReporting, reporting), reporting, "reporting"),
+          totalReturnPctReporting,
         },
         holdings: results,
       });
@@ -4654,7 +5232,67 @@ export function registerPgTools(
       const dividendsCategoryId = await resolveDividendsCategoryId(db, userId, dek);
       const perf = await aggregateHoldings(db, userId, dek, { since, dividendsCategoryId });
 
-      const results = perf.map(p => {
+      // Issue #209 — load portfolio_holdings.symbol_ct so we can detect cash
+      // sleeves (`name='Cash', symbol=NULL/empty`) and suppress percentage
+      // overflow on rows like a $9.90 dividend posted to a $0-cost cash leg.
+      // Without the symbol we can't disambiguate a real holding called "Cash"
+      // from the auto-created cash sleeve.
+      const phRaw = await q(db, sql`
+        SELECT id, symbol_ct FROM portfolio_holdings WHERE user_id = ${userId}
+      `);
+      const symbolByHoldingId = new Map<number, string>();
+      for (const p of phRaw) {
+        const sym = p.symbol_ct && dek
+          ? (() => { try { return decryptField(dek, String(p.symbol_ct)) ?? ""; } catch { return ""; } })()
+          : "";
+        symbolByHoldingId.set(Number(p.id), String(sym ?? "").trim());
+      }
+
+      // Issue #209 — threshold guard for `*Pct` overflow. Below this floor in
+      // the holding's own currency the percentage is suppressed (set to null)
+      // so a $0.04 cost-basis row stops emitting `18,501,638.9%`.
+      const PERCENT_FLOOR_NATIVE = 1.0;
+      // Issue #209 — surfaced per row when the percentage is suppressed.
+      type PerfRowWarning = { holdingId: number | null; code: string; message: string };
+      const perfRowWarnings: PerfRowWarning[] = [];
+      // Issue #209 — explicit status field, mirrors get_portfolio_analysis.
+      type PerfHoldingStatus = "active" | "zero_position" | "cash_only" | "sold_out";
+
+      // Issue #209 — FX cache so we can roll up a `*Reporting` summary in
+      // the user's reporting currency (no more raw mixed-currency sums).
+      const todayStr = new Date().toISOString().split("T")[0];
+      const fxCache = new Map<string, number>();
+      const fxFor = async (ccy: string): Promise<number> => {
+        const k = (ccy || reporting).toUpperCase();
+        if (fxCache.has(k)) return fxCache.get(k)!;
+        const r = await getRate(k, reporting, todayStr, userId);
+        fxCache.set(k, r);
+        return r;
+      };
+
+      const results: Array<{
+        holdingId: number | null;
+        holding: unknown;
+        status: PerfHoldingStatus;
+        txCount: number;
+        quantity: number;
+        lifetimeCostBasis: number;
+        lifetimeCostBasisReporting: ReturnType<typeof tagAmount>;
+        currentCostBasis: number | null;
+        avgCostPerShare: number | null;
+        realizedGain: number;
+        realizedGainReporting: ReturnType<typeof tagAmount>;
+        realizedGainPct: number | null;
+        dividendsReceived: number;
+        dividendsReceivedReporting: ReturnType<typeof tagAmount>;
+        totalReturn: number;
+        totalReturnReporting: ReturnType<typeof tagAmount>;
+        totalReturnPct: number | null;
+        firstPurchase: unknown;
+        lastActivity: unknown;
+        daysHeld: number | null;
+      }> = [];
+      for (const p of perf) {
         const buyQty = Number(p.buy_qty ?? 0);
         const buyAmt = Number(p.buy_amount ?? 0);
         const sellQty = Number(p.sell_qty ?? 0);
@@ -4667,45 +5305,129 @@ export function registerPgTools(
         const totalReturn = realizedGain + divs;
         const fpDate = p.first_purchase ?? null;
         const daysHeld = fpDate ? Math.floor((today.getTime() - new Date(String(fpDate)).getTime()) / 86400000) : null;
-        return {
+        // Issue #208 — per-row money fields stay in the holding's own
+        // currency; round at this boundary, not in `aggregateHoldings`.
+        const rowCcy = String(p.currency ?? reporting);
+        const fx = await fxFor(rowCcy);
+
+        // Issue #209 — cash-sleeve detection via symbol map. Same rule as
+        // get_portfolio_analysis: `symbol IS NULL/empty AND name='cash'` (case-
+        // insensitive). When DEK is missing the symbol decrypts to empty and
+        // detection silently fails — accepted soft-fallback per CLAUDE.md.
+        const symbolStr = p.holding_id != null
+          ? (symbolByHoldingId.get(Number(p.holding_id)) ?? "")
+          : "";
+        const nameLower = String(p.name ?? "").trim().toLowerCase();
+        const isCashSleeve = symbolStr === "" && nameLower === "cash";
+
+        const status: PerfHoldingStatus = isCashSleeve
+          ? "cash_only"
+          : remainingQty > 0
+            ? "active"
+            : buyQty > 0 && remainingQty <= 0
+              ? "sold_out"
+              : "zero_position";
+
+        // Issue #209 — threshold-guard both percentages and skip cash sleeves.
+        let realizedGainPct: number | null;
+        let totalReturnPct: number | null;
+        if (isCashSleeve) {
+          realizedGainPct = null;
+          totalReturnPct = null;
+          perfRowWarnings.push({
+            holdingId: p.holding_id ?? null,
+            code: "cash_sleeve_no_return_pct",
+            message: "Cash sleeve — return % not meaningful (no cost basis convention).",
+          });
+        } else if (buyAmt >= PERCENT_FLOOR_NATIVE) {
+          realizedGainPct = Math.round((realizedGain / buyAmt) * 10000) / 100;
+          totalReturnPct = Math.round((totalReturn / buyAmt) * 10000) / 100;
+        } else {
+          realizedGainPct = null;
+          totalReturnPct = null;
+          if (buyAmt > 0) {
+            perfRowWarnings.push({
+              holdingId: p.holding_id ?? null,
+              code: "cost_basis_too_small",
+              message: `Cost basis below ${PERCENT_FLOOR_NATIVE} ${rowCcy} — return % suppressed (would otherwise overflow).`,
+            });
+          }
+        }
+
+        results.push({
           // Issue #86: surface the FK id so callers can disambiguate
           // same-name holdings (e.g. VUN.TO in TFSA vs RRSP).
           holdingId: p.holding_id ?? null,
           holding: p.name,
+          status,
           txCount: Number(p.tx_count),
           quantity: Math.round(remainingQty * 10000) / 10000,
-          lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
-          currentCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
-          avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
-          realizedGain: Math.round(realizedGain * 100) / 100,
-          realizedGainPct: buyAmt > 0 ? Math.round((realizedGain / buyAmt) * 10000) / 100 : null,
-          dividendsReceived: Math.round(divs * 100) / 100,
-          totalReturn: Math.round(totalReturn * 100) / 100,
-          totalReturnPct: buyAmt > 0 ? Math.round((totalReturn / buyAmt) * 10000) / 100 : null,
+          lifetimeCostBasis: roundMoney(buyAmt, rowCcy),
+          lifetimeCostBasisReporting: tagAmount(buyAmt * fx, reporting, "reporting"),
+          currentCostBasis: costBasis ? roundMoney(costBasis, rowCcy) : null,
+          avgCostPerShare: avgCost ? roundMoney(avgCost, rowCcy) : null,
+          realizedGain: roundMoney(realizedGain, rowCcy),
+          realizedGainReporting: tagAmount(realizedGain * fx, reporting, "reporting"),
+          realizedGainPct,
+          dividendsReceived: roundMoney(divs, rowCcy),
+          dividendsReceivedReporting: tagAmount(divs * fx, reporting, "reporting"),
+          totalReturn: roundMoney(totalReturn, rowCcy),
+          totalReturnReporting: tagAmount(totalReturn * fx, reporting, "reporting"),
+          totalReturnPct,
           firstPurchase: fpDate,
           lastActivity: p.last_activity,
           daysHeld,
-        };
-      });
+        });
+      }
 
-      const totLifetime = results.reduce((s, r) => s + r.lifetimeCostBasis, 0);
-      const totRealized = results.reduce((s, r) => s + r.realizedGain, 0);
-      const totDivs = results.reduce((s, r) => s + r.dividendsReceived, 0);
-      const totReturn = totRealized + totDivs;
+      // Issue #209 — drop mixed-currency raw sums; only `*Reporting` siblings
+      // remain in summary. Cash sleeves contribute realized/dividend amounts
+      // (still real money) but $0 cost basis, mirroring get_portfolio_analysis.
+      let totalLifetimeReporting = 0;
+      let totalRealizedReporting = 0;
+      let totalDivsReporting = 0;
+      for (const r of results) {
+        if (r.status !== "cash_only") {
+          totalLifetimeReporting += r.lifetimeCostBasisReporting.amount;
+        }
+        totalRealizedReporting += r.realizedGainReporting.amount;
+        totalDivsReporting += r.dividendsReceivedReporting.amount;
+      }
+      const totalReturnReporting = totalRealizedReporting + totalDivsReporting;
+
+      // Issue #209 — threshold guard for the summary aggregate. Mirrors
+      // get_portfolio_analysis (10 reporting-currency units).
+      const PERCENT_FLOOR_REPORTING = 10;
+      const summaryWarnings: string[] = [];
+      let totalReturnPctReporting: number | null;
+      if (totalLifetimeReporting >= PERCENT_FLOOR_REPORTING) {
+        totalReturnPctReporting = Math.round((totalReturnReporting / totalLifetimeReporting) * 10000) / 100;
+      } else {
+        totalReturnPctReporting = null;
+        if (totalLifetimeReporting > 0) {
+          summaryWarnings.push(
+            `Aggregate cost basis below ${PERCENT_FLOOR_REPORTING} ${reporting} — return % suppressed (would otherwise overflow).`
+          );
+        }
+      }
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "unrealizedGain requires live prices. Use the portfolio page for full metrics.",
+        note: "unrealizedGain requires live prices. Use the portfolio page for full metrics. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear with `status: 'cash_only'` and percentages suppressed.",
         period: period ?? "all",
         since,
         reportingCurrency: reporting,
+        warnings: summaryWarnings,
+        rowWarnings: perfRowWarnings,
+        // Issue #209 — only `*Reporting` siblings remain. Cash-sleeve
+        // `lifetimeCostBasis` is excluded from the denominator.
         summary: {
           holdings: results.length,
-          lifetimeCostBasis: Math.round(totLifetime * 100) / 100,
-          totalRealizedGain: Math.round(totRealized * 100) / 100,
-          totalDividends: Math.round(totDivs * 100) / 100,
-          totalReturn: Math.round(totReturn * 100) / 100,
-          totalReturnPct: totLifetime > 0 ? Math.round((totReturn / totLifetime) * 10000) / 100 : null,
+          lifetimeCostBasisReporting: tagAmount(roundMoney(totalLifetimeReporting, reporting), reporting, "reporting"),
+          totalRealizedGainReporting: tagAmount(roundMoney(totalRealizedReporting, reporting), reporting, "reporting"),
+          totalDividendsReporting: tagAmount(roundMoney(totalDivsReporting, reporting), reporting, "reporting"),
+          totalReturnReporting: tagAmount(roundMoney(totalReturnReporting, reporting), reporting, "reporting"),
+          totalReturnPctReporting,
         },
         holdings: results,
       });
@@ -5004,24 +5726,24 @@ export function registerPgTools(
         holding: holdingName,
         currency: holdingCurrency,
         reportingCurrency: reporting,
-        // Position
+        // Position — Issue #208 round at the response boundary.
         currentShares: Math.round(remainingQty * 10000) / 10000,
-        avgCostPerShare: avgCost ? Math.round(avgCost * 100) / 100 : null,
+        avgCostPerShare: avgCost ? roundMoney(avgCost, holdingCurrency) : null,
         avgCostPerShareTagged: avgCost ? tagAmount(avgCost, holdingCurrency, "account") : null,
-        currentCostBasis: costBasis ? Math.round(costBasis * 100) / 100 : null,
+        currentCostBasis: costBasis ? roundMoney(costBasis, holdingCurrency) : null,
         currentCostBasisTagged: costBasis !== null ? tagAmount(costBasis, holdingCurrency, "account") : null,
-        lifetimeCostBasis: Math.round(buyAmt * 100) / 100,
+        lifetimeCostBasis: roundMoney(buyAmt, holdingCurrency),
         lifetimeCostBasisTagged: tagAmount(buyAmt, holdingCurrency, "account"),
         lifetimeCostBasisReporting: tagAmount(buyAmt * fxToReporting, reporting, "reporting"),
         // Performance
-        realizedGain: Math.round(realizedGain * 100) / 100,
+        realizedGain: roundMoney(realizedGain, holdingCurrency),
         realizedGainTagged: tagAmount(realizedGain, holdingCurrency, "account"),
         realizedGainReporting: tagAmount(realizedGain * fxToReporting, reporting, "reporting"),
         realizedGainPct: buyAmt > 0 ? Math.round((realizedGain / buyAmt) * 10000) / 100 : null,
-        dividendsReceived: Math.round(divAmt * 100) / 100,
+        dividendsReceived: roundMoney(divAmt, holdingCurrency),
         dividendsReceivedTagged: tagAmount(divAmt, holdingCurrency, "account"),
         dividendsReceivedReporting: tagAmount(divAmt * fxToReporting, reporting, "reporting"),
-        totalReturn: Math.round(totalReturn * 100) / 100,
+        totalReturn: roundMoney(totalReturn, holdingCurrency),
         totalReturnTagged: tagAmount(totalReturn, holdingCurrency, "account"),
         totalReturnReporting: tagAmount(totalReturn * fxToReporting, reporting, "reporting"),
         totalReturnPct: buyAmt > 0 ? Math.round((totalReturn / buyAmt) * 10000) / 100 : null,
@@ -5034,20 +5756,21 @@ export function registerPgTools(
         sales: sales.length,
         dividendPayments: dividends.length,
         totalTransactions: txns.length,
-        // Recent history
+        // Recent history — Issue #208 round per-row amount.
         recentTransactions: txns.slice(-8).map(t => {
           const txCcy = String(t.currency ?? holdingCurrency);
+          const rawAmt = Number(t.amount);
           return {
             date: t.date,
-            amount: t.amount,
+            amount: roundMoney(rawAmt, txCcy),
             quantity: t.quantity,
             currency: txCcy,
-            amountTagged: tagAmount(Number(t.amount), txCcy, "account"),
+            amountTagged: tagAmount(rawAmt, txCcy, "account"),
             type: Number(t.quantity ?? 0) > 0
               ? "buy"
               : Number(t.quantity ?? 0) < 0
                 ? "sell"
-                : Number(t.amount) > 0 ? "dividend" : "other",
+                : rawAmt > 0 ? "dividend" : "other",
             account: t.account_name,
             note: t.note || undefined,
           };
@@ -5298,9 +6021,17 @@ export function registerPgTools(
           v.pct = (v.value / totalBV) * 100;
         }
 
+        // Issue #209 — track which currentAlloc keys were matched by a target
+        // so we can surface the rest in `untargetedHoldings`. Without this,
+        // a user passing two targets against a 60-holding portfolio gets
+        // "BUY $X / BUY $Y" advice with no signal that the other 58 holdings
+        // exist and remain at their current weight.
+        const matchedAllocKeys = new Set<string>();
         const suggestions = targets.map(t => {
           const lo = t.holding.toLowerCase();
-          const current = [...currentAlloc.entries()].find(([k]) => k.includes(lo) || lo.includes(k))?.[1];
+          const matched = [...currentAlloc.entries()].find(([k]) => k.includes(lo) || lo.includes(k));
+          if (matched) matchedAllocKeys.add(matched[0]);
+          const current = matched?.[1];
           const currentPct = current?.pct ?? 0;
           const currentValue = current?.value ?? 0;
           const targetValue = (t.target_pct / 100) * totalBV;
@@ -5319,12 +6050,37 @@ export function registerPgTools(
           };
         });
 
+        // Issue #209 — surface untargeted holdings explicitly so the caller
+        // can decide whether the rebalancing recommendation is meaningful.
+        // The user-facing total (`totalPortfolioValue`) is the WHOLE portfolio
+        // book value across ALL holdings — never a subset — so the subset
+        // truncation symptom in the audit cannot recur.
+        let untargetedCount = 0;
+        let untargetedTotal = 0;
+        for (const [k, v] of currentAlloc.entries()) {
+          if (!matchedAllocKeys.has(k)) {
+            untargetedCount += 1;
+            untargetedTotal += v.value;
+          }
+        }
+        const targetedTotal = totalBV - untargetedTotal;
+
         return text({
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "rebalancing",
           reportingCurrency: reporting,
+          // Issue #209 — `totalPortfolioValue` is the whole-portfolio book
+          // value sum across ALL holdings, never a top-N slice.
           totalPortfolioValue: Math.round(totalBV * 100) / 100,
           totalPortfolioValueReporting: tagAmount(totalBV, reporting, "reporting"),
+          targetedPortfolioValueReporting: tagAmount(targetedTotal, reporting, "reporting"),
+          untargetedHoldings: {
+            count: untargetedCount,
+            totalBookValueReporting: tagAmount(untargetedTotal, reporting, "reporting"),
+            note: untargetedCount > 0
+              ? "These holdings are not covered by `targets`; they remain at their current weight in the suggestions below."
+              : "All holdings were matched by a target.",
+          },
           suggestions,
           note: "Values based on book cost, not market price. Get current prices for accurate rebalancing.",
         });
@@ -5425,12 +6181,21 @@ export function registerPgTools(
       const monthlyByMonth = new Map<string, number>();
       for (const c of contributions) {
         const fx = await fxFor(String(c.currency ?? reporting));
-        const key = String(c.month);
+        // Issue #209 — slice DATE_TRUNC's timestamp output to "YYYY-MM" so
+        // the response month label is shape-stable across the project (matches
+        // get_spending_trends + get_net_worth). Slicing BEFORE the map insert
+        // is safe because the SQL groups by DATE_TRUNC('month', ...) so each
+        // calendar month has exactly one row per currency.
+        const key = String(c.month).slice(0, 7);
         monthlyByMonth.set(key, (monthlyByMonth.get(key) ?? 0) + Number(c.invested) * fx);
       }
-      const monthlyContributions = [...monthlyByMonth.entries()]
-        .sort(([a], [b]) => b.localeCompare(a))
-        .slice(0, 12)
+      // Issue #209 — sort ascending (earliest → latest) so the response is
+      // monotonic-by-time. Keep the trailing-12-months window for the average
+      // (more statistically meaningful than the 6 we display); document the
+      // population window in the response so callers can reconcile.
+      const monthlyContributionsAll = [...monthlyByMonth.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(-12)
         .map(([month, invested]) => ({ month, invested: Math.round(invested * 100) / 100 }));
 
       const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
@@ -5462,13 +6227,22 @@ export function registerPgTools(
       const positions = Array.from(positionsByName.values());
       positions.sort((a, b) => b.book_value - a.book_value);
 
+      // Issue #209: `totalInvested` reduces over the FULL `positions` array
+      // (sum across all holdings, not the top-5 displayed). `topPositions` is
+      // the display-only slice further down.
       const totalInvested = positions.reduce((s, p) => s + Number(p.book_value), 0);
       const top3Pct = positions.slice(0, 3).reduce((s, p) => s + Number(p.book_value), 0) / (totalInvested || 1);
       const diversificationScore = Math.max(0, Math.round((1 - top3Pct) * 100));
 
-      const avgMonthlyContrib = monthlyContributions.length > 0
-        ? monthlyContributions.reduce((s, c) => s + Number(c.invested), 0) / monthlyContributions.length
+      // Issue #209 — average reconciles against the trailing-12 population,
+      // documented explicitly in the response. `monthlyContributions[]` is
+      // sliced to 6 for display further down.
+      const avgMonthlyContrib = monthlyContributionsAll.length > 0
+        ? monthlyContributionsAll.reduce((s, c) => s + Number(c.invested), 0) / monthlyContributionsAll.length
         : 0;
+      // Issue #209 — display window is the most-recent 6 (the trailing edge
+      // of the trailing-12 window).
+      const monthlyContributionsDisplayed = monthlyContributionsAll.slice(-6);
 
       return text({
         disclaimer: PORTFOLIO_DISCLAIMER,
@@ -5480,7 +6254,15 @@ export function registerPgTools(
           totalInvestedReporting: tagAmount(totalInvested, reporting, "reporting"),
           avgMonthlyContribution: Math.round(avgMonthlyContrib * 100) / 100,
           avgMonthlyContributionReporting: tagAmount(avgMonthlyContrib, reporting, "reporting"),
+          // Issue #209 — explicit population window so callers can reconcile
+          // `avgMonthlyContribution` against the listed `monthlyContributions[]`
+          // (which is sliced to 6 for display).
+          avgMonthlyContributionPopulation: "trailing-12-months",
+          monthlyContributionsDisplayedCount: monthlyContributionsDisplayed.length,
           diversificationScore,
+          // Issue #209 — explicit scale documentation. The score is 0–100,
+          // higher = more diversified; previously implicit.
+          diversificationScoreMax: 100,
           diversificationLabel: diversificationScore > 70 ? "Well diversified" : diversificationScore > 40 ? "Moderately diversified" : "Concentrated",
           concentration: `Top 3 positions = ${Math.round(top3Pct * 1000) / 10}% of portfolio`,
         },
@@ -5492,7 +6274,9 @@ export function registerPgTools(
           pct: Math.round((Number(p.book_value) / totalInvested) * 1000) / 10,
           purchases: Number(p.purchases),
         })),
-        monthlyContributions: monthlyContributions.slice(0, 6).map(c => ({
+        // Issue #209 — already sorted ASC by month and sliced to the trailing
+        // 6 (most recent) above. Months are formatted as "YYYY-MM".
+        monthlyContributions: monthlyContributionsDisplayed.map(c => ({
           month: c.month,
           invested: c.invested,
           investedReporting: tagAmount(c.invested, reporting, "reporting"),
@@ -5528,6 +6312,22 @@ export function registerPgTools(
       }));
       const today = new Date().toISOString().split("T")[0];
       const enriched = rows.map((r) => {
+        // Issue #213 — guard against pre-validator legacy bad rows. One bad
+        // start_date previously poisoned the whole list with
+        // `RangeError: Invalid time value`. Surface it per row instead.
+        if (parseYmdSafe(String(r.start_date)) === null) {
+          return {
+            ...r,
+            monthlyPayment: null,
+            totalInterest: null,
+            payoffDate: null,
+            remainingBalance: null,
+            principalPaid: null,
+            interestPaid: null,
+            periodsRemaining: null,
+            dataIntegrity: { error: "invalid start_date", value: r.start_date },
+          };
+        }
         const summary = generateAmortizationSchedule(
           Number(r.principal),
           Number(r.annual_rate),
@@ -5561,15 +6361,15 @@ export function registerPgTools(
     {
       name: z.string().describe("Loan name"),
       type: z.string().describe("Loan type (e.g. 'mortgage', 'auto', 'student', 'personal')"),
-      principal: z.number().describe("Original loan principal"),
-      annual_rate: z.number().describe("Annual interest rate (e.g. 5.5 for 5.5%)"),
+      principal: z.number().positive().describe("Original loan principal (must be > 0)"),
+      annual_rate: z.number().nonnegative().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0; zero allowed for 0% promo)"),
       term_months: z.number().int().positive().describe("Loan term in months"),
-      start_date: z.string().describe("Loan start date (YYYY-MM-DD)"),
+      start_date: ymdDate.describe("Loan start date (YYYY-MM-DD)"),
       account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
-      payment_amount: z.number().optional().describe("Override computed monthly payment"),
+      payment_amount: z.number().positive().optional().describe("Override computed monthly payment (must be > 0)"),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional().describe("Default monthly"),
-      extra_payment: z.number().optional().describe("Extra principal per payment (default 0)"),
-      min_payment: z.number().optional().describe("Alias for payment_amount — minimum required payment"),
+      extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0; default 0)"),
+      min_payment: z.number().positive().optional().describe("Alias for payment_amount — minimum required payment (must be > 0)"),
       note: z.string().optional(),
     },
     async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
@@ -5603,13 +6403,13 @@ export function registerPgTools(
       id: z.number().describe("Loan id"),
       name: z.string().optional(),
       type: z.string().optional(),
-      principal: z.number().optional(),
-      annual_rate: z.number().optional(),
+      principal: z.number().positive().optional().describe("Original loan principal (must be > 0)"),
+      annual_rate: z.number().nonnegative().optional().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0)"),
       term_months: z.number().int().positive().optional(),
-      start_date: z.string().optional(),
-      payment_amount: z.number().optional(),
+      start_date: ymdDate.optional(),
+      payment_amount: z.number().positive().optional().describe("Monthly payment override (must be > 0)"),
       payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
-      extra_payment: z.number().optional(),
+      extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0)"),
       account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias). Pass empty string to clear."),
       note: z.string().optional(),
     },
@@ -5662,10 +6462,22 @@ export function registerPgTools(
     "Delete a loan by id",
     { id: z.number().describe("Loan id to delete") },
     async ({ id }) => {
+      // Issue #211 (Bug b): SELECT returns `name_ct` (encrypted) but the
+      // success message referenced `existing[0].name` — undefined post
+      // Stream D Phase 4. Decrypt BEFORE the DELETE so the message is
+      // informative; falls back to "#id" when DEK is absent.
       const existing = await q(db, sql`SELECT id, name_ct FROM loans WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Loan #${id} not found`);
+      const decrypted = decryptNameish(existing, dek);
+      const loanName = String(decrypted[0]?.name ?? "").trim();
       await db.execute(sql`DELETE FROM loans WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, data: { id, message: `Loan "${existing[0].name}" deleted` } });
+      return text({
+        success: true,
+        data: {
+          id,
+          message: loanName ? `Loan "${loanName}" deleted` : `Loan #${id} deleted`,
+        },
+      });
     }
   );
 
@@ -5675,7 +6487,7 @@ export function registerPgTools(
     "Full amortization schedule for a loan. Returns every payment period with principal/interest/balance. Amounts are in the loan's own currency; the response includes both the loan currency and the resolved reportingCurrency for context.",
     {
       loan_id: z.number().describe("Loan id"),
-      as_of_date: z.string().optional().describe("YYYY-MM-DD — summarises paid-to-date at this point (default: today)"),
+      as_of_date: ymdDate.optional().describe("YYYY-MM-DD — summarises paid-to-date at this point (default: today)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Surfaced in the response for cross-currency context."),
     },
     async ({ loan_id, as_of_date, reportingCurrency }) => {
@@ -5688,6 +6500,16 @@ export function registerPgTools(
       `);
       if (!rows.length) return err(`Loan #${loan_id} not found`);
       const loan = decryptNameish(rows, dek)[0];
+      // Issue #213 — early-return on legacy bad rows so this tool no longer
+      // throws Invalid time value when one slipped past pre-validator code paths.
+      if (parseYmdSafe(String(loan.start_date)) === null) {
+        return text({
+          success: false,
+          error: "invalid start_date",
+          loanId: loan_id,
+          value: loan.start_date,
+        });
+      }
       const summary = generateAmortizationSchedule(
         Number(loan.principal),
         Number(loan.annual_rate),
@@ -5745,7 +6567,18 @@ export function registerPgTools(
       if (!loansRaw.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
       const loans = decryptNameish(loansRaw, dek);
       const today = new Date().toISOString().split("T")[0];
-      const debts: Debt[] = loans.map((l) => {
+      // Issue #213 — split out legacy bad rows so one bad start_date no
+      // longer poisons the whole strategy computation. The bad rows still
+      // surface to the caller (`excluded`) so they can be fixed.
+      const excluded: Array<{ loanId: number; error: string; value: unknown }> = [];
+      const validLoans = loans.filter((l) => {
+        if (parseYmdSafe(String(l.start_date)) === null) {
+          excluded.push({ loanId: Number(l.id), error: "invalid start_date", value: l.start_date });
+          return false;
+        }
+        return true;
+      });
+      const debts: Debt[] = validLoans.map((l) => {
         const summary = generateAmortizationSchedule(
           Number(l.principal),
           Number(l.annual_rate),
@@ -5769,6 +6602,7 @@ export function registerPgTools(
       const strat = strategy ?? "both";
       const extra = extra_payment ?? 0;
       const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts }, reportingCurrency: reporting };
+      if (excluded.length) result.excluded = excluded;
       if (strat === "avalanche" || strat === "both") {
         result.avalanche = calculateDebtPayoff(debts, extra, "avalanche");
       }
@@ -5786,20 +6620,37 @@ export function registerPgTools(
     {
       from: z.string().describe("Source currency (ISO 4217 code, e.g. USD)"),
       to: z.string().describe("Target currency (ISO 4217 code, e.g. CAD)"),
-      date: z.string().optional().describe("YYYY-MM-DD — defaults to today"),
+      date: ymdDate.optional().describe("YYYY-MM-DD — defaults to today"),
     },
     async ({ from, to, date }) => {
-      const d = date ?? new Date().toISOString().split("T")[0];
-      if (from === to) return text({ success: true, data: { from, to, date: d, rate: 1, source: "identity" } });
-      const fromLookup = await getRateToUsdDetailed(from, d, userId);
-      const toLookup = await getRateToUsdDetailed(to, d, userId);
-      if (toLookup.rate === 0) return err(`Cannot convert into ${to} (rate is zero)`);
+      // Issue #206 — validate currencies + date at the MCP boundary.
+      let fromCode: string;
+      let toCode: string;
+      let d: string;
+      try {
+        fromCode = validateCurrencyCode(from);
+        toCode = validateCurrencyCode(to);
+        d = validateFxDate(date ?? new Date().toISOString().split("T")[0]);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      if (fromCode === toCode) {
+        return text({ success: true, data: { from: fromCode, to: toCode, date: d, rate: 1, source: "identity" } });
+      }
+      const fromLookup = await getRateToUsdDetailed(fromCode, d, userId);
+      const toLookup = await getRateToUsdDetailed(toCode, d, userId);
+      if (toLookup.rate === 0) return err(`Cannot convert into ${toCode} (rate is zero)`);
       const rate = fromLookup.rate / toLookup.rate;
+      const warnings: string[] = [];
+      if (fromLookup.source === "fallback") warnings.push(`No historical rate available for ${fromCode}; using hardcoded fallback.`);
+      if (toLookup.source === "fallback") warnings.push(`No historical rate available for ${toCode}; using hardcoded fallback.`);
+      // Issue #208 — `roundFxRate` (8dp) is the bank-standard rate precision.
       return text({ success: true, data: {
-        from, to, date: d,
-        rate: Math.round(rate * 100000000) / 100000000,
+        from: fromCode, to: toCode, date: d,
+        rate: roundFxRate(rate),
         source: fromLookup.source === "override" || toLookup.source === "override" ? "override" : fromLookup.source,
         legs: { from: fromLookup, to: toLookup },
+        ...(warnings.length ? { warnings } : {}),
       } });
     }
   );
@@ -5826,14 +6677,30 @@ export function registerPgTools(
     {
       from: z.string().describe("Source currency (e.g. USD)"),
       to: z.string().describe("Target currency (e.g. CAD)"),
-      date: z.string().describe("YYYY-MM-DD"),
+      date: ymdDate.describe("YYYY-MM-DD"),
       rate: z.number().positive().describe("Exchange rate — 1 {from} = rate {to}"),
-      dateTo: z.string().optional().describe("Optional end date YYYY-MM-DD; defaults to a single-day override"),
+      dateTo: ymdDate.optional().describe("Optional end date YYYY-MM-DD; defaults to a single-day override"),
       note: z.string().optional().describe("Optional note (e.g. 'bank rate at Wise on this day')"),
     },
     async ({ from, to, date, rate, dateTo, note }) => {
-      const fromU = from.trim().toUpperCase();
-      const toU = to.trim().toUpperCase();
+      // Issue #206 — validate currencies + dates at the MCP boundary so a
+      // future-dated or unknown-currency override can't poison the cache
+      // via findNearestCached's nearest-row lookup.
+      let fromU: string;
+      let toU: string;
+      let dateFrom: string;
+      let dateToFinal: string;
+      try {
+        fromU = validateCurrencyCode(from);
+        toU = validateCurrencyCode(to);
+        dateFrom = validateFxDate(date);
+        dateToFinal = validateFxDate(dateTo ?? date);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      if (dateToFinal < dateFrom) {
+        return err(`dateTo (${dateToFinal}) must be on or after date (${dateFrom}).`);
+      }
       let currency: string;
       let rateToUsd: number;
       if (fromU === "USD") {
@@ -5849,10 +6716,10 @@ export function registerPgTools(
       }
       const result = await q(db, sql`
         INSERT INTO fx_overrides (user_id, currency, date_from, date_to, rate_to_usd, note)
-        VALUES (${userId}, ${currency}, ${date}, ${dateTo ?? date}, ${rateToUsd}, ${note ?? ""})
+        VALUES (${userId}, ${currency}, ${dateFrom}, ${dateToFinal}, ${rateToUsd}, ${note ?? ""})
         RETURNING id
       `);
-      return text({ success: true, data: { id: Number(result[0]?.id), currency, dateFrom: date, dateTo: dateTo ?? date, rateToUsd, action: "created" } });
+      return text({ success: true, data: { id: Number(result[0]?.id), currency, dateFrom, dateTo: dateToFinal, rateToUsd, action: "created" } });
     }
   );
 
@@ -5878,14 +6745,29 @@ export function registerPgTools(
       amount: z.number().describe("Amount to convert"),
       from: z.string().describe("Source currency"),
       to: z.string().describe("Target currency"),
-      date: z.string().optional().describe("YYYY-MM-DD — defaults to today"),
+      date: ymdDate.optional().describe("YYYY-MM-DD — defaults to today"),
     },
     async ({ amount, from, to, date }) => {
-      const d = date ?? new Date().toISOString().split("T")[0];
-      if (from === to) return text({ success: true, data: { amount, from, to, rate: 1, converted: amount, source: "identity" } });
-      const rate = await getRate(from, to, d, userId);
-      const converted = Math.round(amount * rate * 100) / 100;
-      return text({ success: true, data: { amount, from, to, rate, converted, date: d, source: "triangulated" } });
+      // Issue #206 — validate currencies + date at the MCP boundary.
+      let fromCode: string;
+      let toCode: string;
+      let d: string;
+      try {
+        fromCode = validateCurrencyCode(from);
+        toCode = validateCurrencyCode(to);
+        d = validateFxDate(date ?? new Date().toISOString().split("T")[0]);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      if (fromCode === toCode) {
+        return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: 1, converted: amount, source: "identity" } });
+      }
+      const rate = await getRate(fromCode, toCode, d, userId);
+      // Issue #208 — `converted` is a money amount (target-currency precision);
+      // `rate` is a divisor (8dp, bank standard). Helpers name the contract.
+      const converted = roundMoney(amount * rate, toCode);
+      const ratePrecise = roundFxRate(rate);
+      return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: ratePrecise, converted, date: d, source: "triangulated" } });
     }
   );
 
@@ -5895,7 +6777,7 @@ export function registerPgTools(
   // account, for editing flows.
   server.tool(
     "list_subscriptions",
-    "List all subscriptions with full detail (status, next billing, category, account, notes)",
+    "List all subscriptions with full detail (status, next billing, category, account, notes). Issue #210 — `amount` is always positive (the storage convention); a subscription is by definition an outflow.",
     { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
     async ({ status }) => {
       // Stream D Phase 4: s.name + c.name + a.name dropped — read *_ct only.
@@ -5911,8 +6793,20 @@ export function registerPgTools(
           ${status && status !== "all" ? sql`AND s.status = ${status}` : sql``}
         ORDER BY s.status
       `);
+      // Issue #207 — explicit field whitelist so *_ct ciphertexts never escape
+      // the encryption boundary. Spreading `r` (`...r`) would carry name_ct,
+      // category_name_ct, and account_name_ct through to the client.
       const rows = raw.map((r) => ({
-        ...r,
+        id: r.id,
+        amount: r.amount,
+        currency: r.currency,
+        frequency: r.frequency,
+        next_date: r.next_date,
+        status: r.status,
+        cancel_reminder_date: r.cancel_reminder_date,
+        notes: r.notes,
+        category_id: r.category_id,
+        account_id: r.account_id,
         name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
         category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
         account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : null,
@@ -5924,13 +6818,13 @@ export function registerPgTools(
   // ── add_subscription ──────────────────────────────────────────────────────
   server.tool(
     "add_subscription",
-    "Create a new subscription",
+    "Create a new subscription. Issue #210 — `amount` MUST be positive (the storage convention). A subscription is by definition an outflow; the sign is implicit, not in the value.",
     {
       name: z.string().describe("Subscription name (unique per user)"),
-      amount: z.number().describe("Amount per billing cycle (positive number)"),
+      amount: z.number().positive().describe("Amount per billing cycle (must be > 0)"),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
-      next_billing_date: z.string().describe("Next billing date (YYYY-MM-DD)"),
-      currency: z.enum(["CAD", "USD"]).optional().describe("Default CAD"),
+      next_billing_date: ymdDate.describe("Next billing date (YYYY-MM-DD)"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
       category: z.string().optional().describe("Category name (fuzzy matched)"),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
       notes: z.string().optional(),
@@ -5982,14 +6876,14 @@ export function registerPgTools(
     {
       id: z.number().describe("Subscription id"),
       name: z.string().optional(),
-      amount: z.number().optional(),
+      amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0)"),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
-      next_billing_date: z.string().optional().describe("YYYY-MM-DD"),
-      currency: z.enum(["CAD", "USD"]).optional(),
+      next_billing_date: ymdDate.optional().describe("YYYY-MM-DD"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       category: z.string().optional().describe("Category name (fuzzy). Empty string clears."),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
       status: z.enum(["active", "paused", "cancelled"]).optional(),
-      cancel_reminder_date: z.string().optional().describe("YYYY-MM-DD"),
+      cancel_reminder_date: ymdDate.optional().describe("YYYY-MM-DD"),
       notes: z.string().optional(),
     },
     async ({ id, name, amount, cadence, next_billing_date, currency, category, account, status, cancel_reminder_date, notes }) => {
@@ -6572,8 +7466,8 @@ export function registerPgTools(
   // Claude doesn't have to fetch ids first.
   const bulkFilterSchema = z.object({
     ids: z.array(z.number()).optional().describe("Explicit transaction ids"),
-    start_date: z.string().optional().describe("YYYY-MM-DD inclusive"),
-    end_date: z.string().optional().describe("YYYY-MM-DD inclusive"),
+    start_date: ymdDate.optional().describe("YYYY-MM-DD inclusive"),
+    end_date: ymdDate.optional().describe("YYYY-MM-DD inclusive"),
     category_id: z.number().nullable().optional().describe("Exact category id (null matches uncategorized)"),
     account_id: z.number().optional().describe("Exact account id"),
     payee_match: z.string().optional().describe("Substring match against plaintext payee (case-insensitive)"),
@@ -6598,7 +7492,11 @@ export function registerPgTools(
     category_id: z.number().nullable().optional(),
     category: z.string().optional().describe("Category name (resolved server-side via the strict resolver — exact / startsWith / token-overlapping substring). Errors with 'did you mean …?' on ambiguous matches."),
     account_id: z.number().optional(),
-    date: z.string().optional(),
+    // Issue #213 — date validation runs in `resolveBulkChanges` (not the
+    // schema) so a single bad date surfaces in `unappliedChanges` rather
+    // than collapsing the whole zod parse. When `date` is the ONLY
+    // requested change AND it fails, no confirmation token is issued.
+    date: z.string().optional().describe("YYYY-MM-DD calendar date. Invalid values are dropped and surfaced via `unappliedChanges`; never silently committed."),
     note: z.string().optional(),
     payee: z.string().optional(),
     is_business: z.number().optional().describe("0 or 1"),
@@ -6713,7 +7611,24 @@ export function registerPgTools(
     // when resolving `category` (id wins on conflict).
     if (changes.category_id !== undefined) resolved.category_id = changes.category_id;
     if (changes.account_id !== undefined) resolved.account_id = changes.account_id;
-    if (changes.date !== undefined) resolved.date = changes.date;
+    // Issue #213 — date validation gate. A bad date NEVER lands in
+    // `resolved.date` (commitBulkUpdate writes unconditionally when the
+    // key is present), and is surfaced to the caller via `unappliedChanges`.
+    // The previous schema-level `z.string().optional()` accepted garbage
+    // verbatim; `preview_bulk_update({ changes: { date: 'not-a-date' } })`
+    // returned a confirmation token whose `execute_bulk_update` would
+    // silently corrupt every matched row.
+    if (changes.date !== undefined) {
+      if (parseYmdSafe(changes.date) === null) {
+        unapplied.push({
+          field: "date",
+          requestedValue: changes.date,
+          reason: `Invalid date "${changes.date}" — expected YYYY-MM-DD calendar date.`,
+        });
+      } else {
+        resolved.date = changes.date;
+      }
+    }
     if (changes.note !== undefined) resolved.note = changes.note;
     if (changes.payee !== undefined) resolved.payee = changes.payee;
     if (changes.is_business !== undefined) resolved.is_business = changes.is_business;
@@ -6733,11 +7648,11 @@ export function registerPgTools(
             reason: `Category "${changes.category}" did not match strongly — did you mean "${r.suggestion.name}" (id=${Number(r.suggestion.id)})?`,
           });
         } else {
-          const list = allCats.map(c => `"${c.name}" (id=${Number(c.id)})`).join(", ");
+          // Issue #211 Bug e: top-N suggestions only (was full inventory).
           unapplied.push({
             field: "category",
             requestedValue: changes.category,
-            reason: `Category "${changes.category}" not found. Available: ${list}`,
+            reason: `Category "${changes.category}" not found. Did you mean: ${suggestionList(changes.category, allCats)}?`,
           });
         }
       } else {
@@ -6878,6 +7793,26 @@ export function registerPgTools(
     });
     const before = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
     const after = before.map((r) => applyChangesToRow(r, resolved));
+    // Issue #213 — refuse to mint a confirmation token when every requested
+    // change failed to resolve. Without this gate, `preview_bulk_update`
+    // accepted `changes: { date: 'not-a-date' }`, the date dropped out at
+    // resolveBulkChanges, but a token still signed the (now-empty) update
+    // and `execute_bulk_update` would silently bump `updated_at` on every
+    // matched row. `category_name` is preview-only metadata; ignore it
+    // here — the same logic already excludes it in `commitBulkUpdate`.
+    const writableKeys = (Object.keys(resolved) as Array<keyof typeof resolved>).filter(
+      (k) => k !== "category_name",
+    );
+    if (writableKeys.length === 0 && unapplied.length > 0) {
+      return {
+        affectedCount: ids.length,
+        sampleBefore: before,
+        sampleAfter: after,
+        unappliedChanges: unapplied,
+        ids: [],
+        confirmationToken: "",
+      };
+    }
     // The token payload encodes the resolved ids — not the filter — so Claude
     // can't widen the scope between preview and execute. We sign the
     // user-supplied `changes` (not the resolved form) so the execute caller
@@ -7163,7 +8098,7 @@ export function registerPgTools(
   // ── detect_subscriptions ───────────────────────────────────────────────────
   server.tool(
     "detect_subscriptions",
-    "Scan recent transactions (via the decrypted tx cache) and return candidate subscriptions — payees with 3+ regular-cadence occurrences and stable amounts. Returns a confirmationToken for bulk_add_subscriptions.",
+    "Scan recent transactions (via the decrypted tx cache) and return candidate subscriptions — payees with 3+ regular-cadence occurrences and stable amounts. Returns a confirmationToken for bulk_add_subscriptions. Issue #210 — `avgAmount` on each candidate is always positive (matches the `subscriptions.amount` storage convention).",
     {
       lookback_months: z.number().optional().describe("Months of history to scan (default 6)"),
     },
@@ -7290,7 +8225,7 @@ export function registerPgTools(
         payee: z.string(),
         amount: z.number(),
         cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
-        next_billing_date: z.string().optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
+        next_billing_date: ymdDate.optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
         category_id: z.number().optional(),
       })).min(1),
       confirmation_token: z.string(),
