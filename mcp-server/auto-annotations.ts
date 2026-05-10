@@ -3,7 +3,7 @@
  *
  * The Anthropic Connectors Directory submission requires every tool to expose
  * `title` and either `readOnlyHint` or `destructiveHint` annotations. We have
- * 90 HTTP / 86 stdio tools across four registration files; rather than touch
+ * 91 HTTP / 87 stdio tools across four registration files; rather than touch
  * every callsite, we monkey-patch `server.tool()` once per server instance to
  * inject inferred annotations from the tool name.
  *

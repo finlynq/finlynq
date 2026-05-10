@@ -6,6 +6,35 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-10 — [BREAKING] MCP API hygiene Phase 3: envelopes 3.1.0 + delete_category (#237)
+
+Third and final phase of the MCP API hygiene cluster from #211. **BREAKING change to MCP envelope shape — version bump 3.0.0 → 3.1.0 at both stdio and HTTP entry points.** Tool count goes 90 HTTP / 86 stdio → **91 HTTP / 87 stdio**.
+
+### Breaking changes
+
+- **Envelope unification.** Every MCP read/write tool now returns the canonical `{ success: true, data: <T> }` envelope. Out-of-shape responses (raw arrays, `{ ok: true, ... }`, `{ success: true, <inline-fields> }`) all collapse onto the unified shape. Callers that destructure top-level fields (`result.transactionId`, `result.imported`, raw arrays at `result[0]`) MUST switch to `result.data.transactionId`, `result.data.imported`, `result.data[0]`. Most clients reading `result.success` and `result.data` already worked because `{ success: true, transactionId, message }` was a superset; the formal contract is now consistent across every tool.
+- **Server version bump 3.0.0 → 3.1.0** at `mcp-server/index.ts:55` (stdio) and `src/app/api/mcp/route.ts:157` (HTTP).
+- **Anthropic Connectors Directory submission impact.** Clients connected mid-rollout will see `serverInfo.version: 3.1.0` after deploy. The directory entry still says `3.0.0` until the founder updates the form (Page 3 — `MCP server version`). HANDOVER_2026-05-08.md has the updated copy block.
+
+### Added
+
+- **`preview_delete_category` + `delete_category`** (HTTP). Confirmation-token preview/execute pattern (mirrors `preview_bulk_categorize` / `execute_bulk_categorize`). Preview returns `{ id, name, txCount, ruleCount, subscriptionCount, inUse, confirmationToken }` with a 5-min TTL token; execute verifies + re-checks FK references atomically + commits. Refuses with explicit row counts when any `transactions.category_id` / `transaction_rules.assign_category_id` / `subscriptions.category_id` still references the row. Resolves `id` exact-match OR fuzzy-by-name when a DEK is available (Stream D Phase 4 read pattern: `decryptNameish` + `fuzzyFind`).
+- **`delete_category`** (stdio). Numeric `id` only — refuses `name` cleanly with the Phase-4 error template (no DEK). FK refuse-check enforced unconditionally.
+- **`dataResponse(data)` helper** added to both `mcp-server/register-tools-pg.ts` and `mcp-server/register-core-tools.ts` (next to `text()` / `txt()` / `err()` / `sqliteErr()`). Single source of truth for the unified envelope shape — same wire encoding as `text()`, only the JSON shape differs.
+
+### Changed
+
+- **`get_loans` deprecated.** Description prefixed with `[DEPRECATED — use list_loans]`. Same-resource peer `list_loans` already returns the unified envelope. Removal planned for v3.2.0.
+- **Idempotency-key replay paths** in `bulk_record_transactions` and `approve_staged_rows` now defensively wrap pre-3.1.0 cached envelopes on the lookup branch (72h window). Cached responses written under the new shape replay as `{ success: true, data: { ...originalData, replayed: true } }`; older envelopes get the same wrapper applied to the bare body.
+- **`finlynq_help` tool catalog updates** on both transports — `delete_category` added to the categories section + write-tools list.
+
+### Internal
+
+- `mcp-server/auto-annotations.ts` header comment refreshed (90 → 91 HTTP / 86 → 87 stdio).
+- `pf-app/src/app/mcp-guide/page.tsx` tool-count copy updated.
+- `OAuth scope classification`: `delete_category` falls into `mcp:write` by default (the "everything else is a write" rule); `preview_delete_category` matches the `preview_*` read prefix and lands in `mcp:read`. No change to `src/lib/oauth-scopes.ts` needed.
+- `Auto-annotations`: `delete_category` is `destructiveHint: true` / `readOnlyHint: false` automatically (inferred by `delete_*` prefix); `preview_delete_category` is `readOnlyHint: true` (inferred by `preview_*`).
+
 ## 2026-05-10 — MCP `get_investment_insights`: full-portfolio scoping + valuationGL fall-through + label fix (#236)
 
 Three residual defects in MCP HTTP `get_investment_insights` after PR #228 (issue #209) — all surfaced by the auditor's reviews/2026-05-10/04-portfolio-analysis-fullscope-and-label-fixes.md.
