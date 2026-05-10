@@ -91,6 +91,7 @@ import {
 } from "../src/lib/auto-categorize";
 import { decryptStaged, encryptStaged } from "../src/lib/crypto/staging-envelope";
 import { getHoldingsValueByAccount } from "../src/lib/holdings-value";
+import { computeGoalProgress } from "../src/lib/goals-progress";
 import { sourceTagFor, isFormatTag, type FormatTag } from "../src/lib/tx-source";
 import {
   validateSignVsCategory,
@@ -1599,9 +1600,9 @@ export function registerPgTools(
   );
 
   // ── get_goals ─────────────────────────────────────────────────────────────
-  server.tool("get_goals", "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking.", {}, async () => {
+  server.tool("get_goals", "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking. Numeric progress fields (issue #233): `currentAmount` (in goal currency, summed across linked accounts using market value for investment accounts and SUM(amount) for cash accounts, FX-converted into goal currency), `progress` and `percentComplete` (0..100, 1dp), `remaining`, `monthlyNeeded` (when a deadline is set).", {}, async () => {
     const goalsRaw = await q(db, sql`
-      SELECT g.id, g.name_ct, g.type, g.target_amount, g.deadline, g.status, g.priority
+      SELECT g.id, g.name_ct, g.type, g.target_amount, g.currency, g.deadline, g.status, g.priority
       FROM goals g
       WHERE g.user_id = ${userId}
       ORDER BY g.priority
@@ -1632,14 +1633,36 @@ export function registerPgTools(
       entry.names.push(acctName ?? "");
       linksByGoal.set(goalId, entry);
     }
+    // Issue #233 — surface progress numbers via the shared helper so MCP
+    // HTTP and REST `/api/goals` can't drift. Pure aggregation; no name
+    // decryption involved.
+    const progressByGoal = await computeGoalProgress(
+      userId,
+      dek,
+      goalsRaw.map((r) => ({
+        id: Number(r.id),
+        currency: (r.currency as string | null) ?? null,
+        targetAmount: Number(r.target_amount ?? 0),
+        deadline: (r.deadline as string | null) ?? null,
+        accountIds: linksByGoal.get(Number(r.id))?.ids ?? [],
+      })),
+    );
     const rows = goalsRaw.map((r) => {
       const { name_ct, ...rest } = r;
       const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [] };
+      const progress = progressByGoal.get(Number(r.id));
       return {
         ...rest,
         name: name_ct && dek ? decryptField(dek, name_ct) : null,
         accountIds: links.ids,
         accounts: links.names,
+        currentAmount: progress?.currentAmount ?? 0,
+        progress: progress?.progress ?? 0,
+        // Alias matches the docstring's "with progress" promise; some
+        // existing consumers expect a literal `percentComplete` field.
+        percentComplete: progress?.progress ?? 0,
+        remaining: progress?.remaining ?? Number(r.target_amount ?? 0),
+        monthlyNeeded: progress?.monthlyNeeded ?? 0,
       };
     });
     return text(rows);
@@ -2348,9 +2371,14 @@ export function registerPgTools(
       }
 
       // Group out-of-scope by account group so the response is human-scannable.
+      // Issue #233 — coalesce empty string AND null to "(no group)" so legacy
+      // liability rows (group = '' from pre-#233 add_account writes) don't
+      // surface as empty `groupName` until the operator runs the backfill
+      // SQL.
       const excludedByGroup = new Map<string, number[]>();
       for (const a of outOfScope) {
-        const g = a.account_group ?? "(no group)";
+        const trimmed = (a.account_group ?? "").trim();
+        const g = trimmed ? trimmed : "(no group)";
         const list = excludedByGroup.get(g) ?? [];
         list.push(a.id);
         excludedByGroup.set(g, list);
@@ -2527,6 +2555,14 @@ export function registerPgTools(
       const aliasValue = alias && alias.trim() ? alias.trim() : null;
       const nameEnc = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const aliasEnc = dek ? encryptName(dek, aliasValue) : { ct: null, lookup: null };
+      // Issue #233 — liability accounts default to `"Liability"` when group
+      // is omitted/blank, matching the REST seam in `resolveDefaultGroup`.
+      // Asset accounts keep the historical empty-string behavior.
+      const resolvedGroup = (() => {
+        const trimmed = (group ?? "").trim();
+        if (trimmed) return trimmed;
+        return type === "L" ? "Liability" : "";
+      })();
       // Stream D Phase 4 — plaintext name/alias columns dropped.
       const result = await q(db, sql`
         INSERT INTO accounts (
@@ -2534,7 +2570,7 @@ export function registerPgTools(
           name_ct, name_lookup, alias_ct, alias_lookup
         )
         VALUES (
-          ${userId}, ${type}, ${group ?? ""}, ${currency ?? "CAD"}, ${note ?? ""},
+          ${userId}, ${type}, ${resolvedGroup}, ${currency ?? "CAD"}, ${note ?? ""},
           ${nameEnc.ct}, ${nameEnc.lookup}, ${aliasEnc.ct}, ${aliasEnc.lookup}
         )
         RETURNING id
@@ -4577,6 +4613,7 @@ export function registerPgTools(
           delete_account: "delete_account(accountId? OR account?, force?) — accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Pass exactly one. force=true deletes even if transactions exist.",
           add_goal: "add_goal(name, type, target_amount, deadline?, account?, account_ids?) — type: savings|debt_payoff|investment|emergency_fund. account_ids: number[] for multi-account linking (issue #130).",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?, account_ids?) — status: active|completed|paused. account_ids: replace linked-account set ([] = unlink all).",
+          get_goals: "get_goals() — Returns every goal with progress numbers (issue #233): currentAmount (in goal currency), progress and percentComplete (0..100, 1dp), remaining, monthlyNeeded. Investment accounts contribute market value; cash accounts contribute SUM(transactions.amount); each linked-account contribution is FX-converted into the goal currency.",
           delete_goal: "delete_goal(goal) — Fuzzy goal name.",
           create_category: "create_category(name, type, group?, note?) — type: 'E'=expense, 'I'=income, 'R'=transfer.",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?) — match_payee supports % wildcards.",

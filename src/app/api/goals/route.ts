@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and, sql, inArray } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, AppError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
-import { getHoldingsValueByAccount } from "@/lib/holdings-value";
-import { getLatestFxRate } from "@/lib/fx-service";
+import { computeGoalProgress } from "@/lib/goals-progress";
 
 const postSchema = z.object({
   name: z.string(),
@@ -155,123 +154,36 @@ export async function GET(request: NextRequest) {
   // Calculate current amount summed across ALL linked accounts (issue #130).
   // JOIN grain is `(goal_id, account_id, user_id)` — see CLAUDE.md.
   //
-  // Issue #151: branch on `accounts.is_investment` per linked account.
-  //   - Investment accounts: use market value from `getHoldingsValueByAccount`
-  //     (same aggregator the dashboard / accounts page uses). Cash sleeve is
-  //     already inside `holdings.value` via the currency-as-holding pattern,
-  //     so this matches the accounts-page balance for the same account.
-  //   - Cash accounts: keep `SUM(transactions.amount)` path (unchanged).
-  // Each per-account contribution is FX-converted into the goal's currency
-  // before summing — multi-currency goals (e.g. CAD goal linked to a USD
-  // account) now report a meaningful `progress = currentAmount / targetAmount`.
-  // CLAUDE.md "Account balance for accounts with holdings = `holdings.value`"
-  // is the same rule the goals page now follows.
-
-  // Resolve the union of linked account ids across all goals so we hit the
-  // metadata table once instead of once per goal.
-  const allAccountIds = Array.from(
-    new Set(goals.flatMap((g) => g.accountIds)),
+  // Issue #233: extracted into the shared `computeGoalProgress` helper so the
+  // MCP HTTP `get_goals` tool can return the same progress numbers as REST.
+  // Per-account branching on `accounts.is_investment` (CLAUDE.md issue #151)
+  // and per-currency FX into the goal currency (issue #129) are owned by the
+  // helper.
+  const progressByGoal = await computeGoalProgress(
+    userId,
+    auth.context.dek,
+    goals.map((g) => ({
+      id: g.id,
+      currency: g.currency ?? null,
+      targetAmount: g.targetAmount,
+      deadline: g.deadline ?? null,
+      accountIds: g.accountIds,
+    })),
   );
-  const accountMeta: Map<number, { currency: string; isInvestment: boolean }> =
-    allAccountIds.length > 0
-      ? new Map(
-          (
-            await db
-              .select({
-                id: schema.accounts.id,
-                currency: schema.accounts.currency,
-                isInvestment: schema.accounts.isInvestment,
-              })
-              .from(schema.accounts)
-              .where(
-                and(
-                  eq(schema.accounts.userId, userId),
-                  inArray(schema.accounts.id, allAccountIds),
-                ),
-              )
-          ).map((a) => [a.id, { currency: a.currency, isInvestment: !!a.isInvestment }]),
-        )
-      : new Map();
 
-  // Pull the holdings-value snapshot once (shared across goals). Internally
-  // it computes per-account market value with full per-currency cost-basis
-  // bucketing (issue #129) and cash-leg substitution (issue #96).
-  const holdingsByAccount = await getHoldingsValueByAccount(userId, auth.context.dek);
-
-  // Per-account cash-flow basis (cash accounts only). One query, grouped by
-  // accountId — same SUM the legacy code computed but batched.
-  const cashRows = allAccountIds.length > 0
-    ? await db
-        .select({
-          accountId: schema.transactions.accountId,
-          total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)::float8`,
-        })
-        .from(schema.transactions)
-        .where(
-          and(
-            eq(schema.transactions.userId, userId),
-            inArray(schema.transactions.accountId, allAccountIds),
-          ),
-        )
-        .groupBy(schema.transactions.accountId)
-    : [];
-  const cashByAccount = new Map<number, number>();
-  for (const r of cashRows) {
-    if (r.accountId == null) continue;
-    cashByAccount.set(r.accountId, Number(r.total ?? 0));
-  }
-
-  // FX cache shared across goals — most users have ≤3 distinct currencies.
-  const fxCache = new Map<string, number>();
-  const getFx = async (from: string, to: string): Promise<number> => {
-    if (from === to) return 1;
-    const key = `${from}->${to}`;
-    if (fxCache.has(key)) return fxCache.get(key)!;
-    const rate = await getLatestFxRate(from, to, userId);
-    fxCache.set(key, rate);
-    return rate;
-  };
-
-  const withProgress = await Promise.all(goals.map(async (g) => {
-    let currentAmount = 0;
-    const goalCurrency = (g.currency ?? "CAD").toUpperCase();
-    for (const accountId of g.accountIds) {
-      const meta = accountMeta.get(accountId);
-      if (!meta) continue; // account got deleted under us; skip silently
-      // Investment accounts: holdings.value (market value) in account currency.
-      // Cash accounts: transaction sum in account currency.
-      let valueInAccountCcy: number;
-      if (meta.isInvestment) {
-        valueInAccountCcy = holdingsByAccount.get(accountId)?.value ?? 0;
-      } else {
-        valueInAccountCcy = cashByAccount.get(accountId) ?? 0;
-      }
-      const fx = await getFx(meta.currency, goalCurrency);
-      currentAmount += valueInAccountCcy * fx;
-    }
-
-    const progress = g.targetAmount > 0 ? Math.min((currentAmount / g.targetAmount) * 100, 100) : 0;
-    const remaining = Math.max(g.targetAmount - currentAmount, 0);
-
-    let monthlyNeeded = 0;
-    if (g.deadline && remaining > 0) {
-      const now = new Date();
-      const deadline = new Date(g.deadline + "T00:00:00");
-      const monthsLeft = Math.max(
-        (deadline.getFullYear() - now.getFullYear()) * 12 + deadline.getMonth() - now.getMonth(),
-        1
-      );
-      monthlyNeeded = Math.round((remaining / monthsLeft) * 100) / 100;
-    }
-
+  const withProgress = goals.map((g) => {
+    const p = progressByGoal.get(g.id);
     return {
       ...g,
-      currentAmount: Math.round(currentAmount * 100) / 100,
-      progress: Math.round(progress * 10) / 10,
-      remaining: Math.round(remaining * 100) / 100,
-      monthlyNeeded,
+      currentAmount: p?.currentAmount ?? 0,
+      progress: p?.progress ?? 0,
+      // Issue #233: alias `percentComplete` matches the MCP `get_goals`
+      // docstring's "with progress" promise. Same number as `progress`.
+      percentComplete: p?.progress ?? 0,
+      remaining: p?.remaining ?? g.targetAmount,
+      monthlyNeeded: p?.monthlyNeeded ?? 0,
     };
-  }));
+  });
 
   return NextResponse.json(withProgress);
 }
