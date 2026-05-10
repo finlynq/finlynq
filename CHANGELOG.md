@@ -6,6 +6,42 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-10 — MCP read tools: financial-health math, recurring staleness, cash-flow attribution (#235)
+
+Fixes the residual math + UX defects in three MCP aggregator tools that PR #228 (issue #210) didn't touch. Auditor file: `reviews/2026-05-10/07-readtool-aggregator-math-and-staleness.md`.
+
+### Bug fixes
+
+- **`get_financial_health_score` — five independent fixes.**
+  - **Round once at the end.** Sub-component `weighted` values stay un-rounded internally (`weightedRaw`); the surface response rounds each component for display + sums the un-rounded values for `score`, then rounds once. The previous code summed `Math.round(component.weighted)` and produced an off-by-one vs. the un-rounded sum (auditor saw 66 displayed when true total was 65).
+  - **Liquid-assets filter.** Replaced the substring blacklist (`!group.includes("invest") && !group.includes("retire")`) with explicit `is_investment` branching + a cash-group whitelist (`Banks`, `Cash Accounts`, `Cash`, `Savings`, `Chequing`, `Checking`). Mirrors the load-bearing rule documented in [CLAUDE.md](../CLAUDE.md) ("Account balance for accounts with holdings = `holdings.value`") so real estate / vehicles / locked-in retirement no longer slip through. Custom user-defined cash groups need to be added to the whitelist; that's intentional — extending the list is preferable to reverting to substring matching.
+  - **Net Worth Trend.** Replaced the hardcoded `score: 50, weighted: 8, detail: "Tracking"` placeholder with a real 3-month delta. The detail field now returns `{ direction: 'up' | 'down' | 'flat', magnitudePct: number, descriptor: string }` derived from net worth today vs. 90 days ago. Score scales from 0 (≤ -10% mom) to 100 (≥ +10% mom). When the user has < 60 days of transaction history, the component is excluded (see no-data exclusion below).
+  - **No-budget exclusion.** When `budgetsData.length === 0`, the Budget Adherence component is now EXCLUDED from the weighted average (not penalized at 50/100); the remaining components reweight proportionally to sum to 1.0. The same exclusion applies to Net Worth Trend when history is insufficient. Response surfaces `excludedComponents: [{ name, reason, detail }]` so callers can explain the omission. **Score-arithmetic change:** users without budgets typically see their score move UP since 50/100 was a soft penalty.
+  - **DTI denominator.** Switched from `(totalIncome / 3) * 12` 3m × 4 extrapolation to a real trailing-12m income / trailing-12m debt-payment ratio (`SUM(amount<0) WHERE accounts.type='L'` over 12m vs. `SUM` of income-typed transactions over 12m). The 3m × 4 estimator distorted in months with skewed payment timing (Q1 lump sums got multiplied by 4). Savings-rate keeps its 3m window.
+
+- **`get_recurring_transactions` — staleness flagging.** Each row now also surfaces `daysSinceLast: number`, `expectedCadenceDays: number` (already computed internally), and `flagged: boolean` (true when `daysSinceLast > expectedCadenceDays * 1.5`). Threshold lives in a named constant `STALENESS_THRESHOLD_MULTIPLIER` in [src/lib/recurring-detection.ts](src/lib/recurring-detection.ts) so it's tweakable in one place. The constant is also surfaced at the top level of the response so callers can recompute their own threshold.
+
+- **`get_cash_flow_forecast` — per-recurring-item attribution.** Response now includes `recurringContributions: Array<{ name, monthly, daysSinceLast, included, dropReason? }>` listing every detected-or-dropped candidate. Empty `recurringContributions` is itself a load-bearing signal that explains a near-zero forecast (the auditor saw $12.81 of swing over 90 days with no explanation). `dropReason` ∈ `'too_few_occurrences' | 'amount_too_small' | 'inconsistent' | 'stale'`. **Stale recurrences are dropped from the projection** (`dropReason: 'stale'`) — don't forward-project an item that's stopped charging. `recurringItems` is now structured as `{ included, dropped }` for clarity.
+
+### Improvements
+
+- **Shared helper.** Both `get_recurring_transactions` and `get_cash_flow_forecast` now route their cadence + staleness logic through [src/lib/recurring-detection.ts](src/lib/recurring-detection.ts) (pure, no DB I/O — testable in isolation). Both tools move in lockstep on threshold or drop-reason taxonomy changes — no forking.
+- **Read-only auth context preserved.** All three handlers continue to use `requireAuth()` + nullable DEK (no promotion to `requireEncryption()` — that would re-introduce 423 cascades on deploy restart).
+
+### Files touched
+
+- [mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts) — `get_financial_health_score`, `get_recurring_transactions`, `get_cash_flow_forecast`, `finlynq_help` cribs
+- [src/lib/recurring-detection.ts](src/lib/recurring-detection.ts) — new shared helper
+- [tests/recurring-detection.test.ts](tests/recurring-detection.test.ts) — 7 unit tests covering drop-reason buckets + stale boundary
+
+### Out of scope
+
+- Reworking `accounts.group` taxonomy itself; changing the recurring-detection algorithm; cohort/historical tracking on the score; user-customizable cash-group whitelist (constant for now).
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes, 7 new unit tests pass. Manual MCP HTTP probes pending validator pass on dev.
+
+---
+
 ## 2026-05-10 — MCP API hygiene Phase 2: fail-loud fuzzy match + accountId on update_account (#234)
 
 Tightens the `resolveAccountStrict` and `resolveCategoryStrict` waterfalls so that ≥2 collisions on the same tier (`startsWith` or substring + token-overlap) now return an `ambiguous` result with up to five candidate rows — instead of silently routing the write to the first match. Adds the `accountId` exact-match escape hatch to `update_account` (was on the legacy `fuzzyFind` path) and a name+id mismatch check to every account-fuzzy MCP write tool.
