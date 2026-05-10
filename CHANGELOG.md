@@ -6,6 +6,34 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-10 — MCP API hygiene Phase 2: fail-loud fuzzy match + accountId on update_account (#234)
+
+Tightens the `resolveAccountStrict` and `resolveCategoryStrict` waterfalls so that ≥2 collisions on the same tier (`startsWith` or substring + token-overlap) now return an `ambiguous` result with up to five candidate rows — instead of silently routing the write to the first match. Adds the `accountId` exact-match escape hatch to `update_account` (was on the legacy `fuzzyFind` path) and a name+id mismatch check to every account-fuzzy MCP write tool.
+
+### Bug fixes
+- **Strict resolver — new `ambiguous` variant.** Both `resolveAccountStrict` ([mcp-server/register-tools-pg.ts:303-339](mcp-server/register-tools-pg.ts)) and `resolveCategoryStrict` ([:382-417](mcp-server/register-tools-pg.ts)) now return `{ ok: false, reason: "ambiguous", tier, candidates: Row[≤5] }` when the same prefix or substring tier has ≥2 hits. Exact-name and exact-alias still take a single match (alias-uniqueness is enforced at create time). Single-match continues to return `{ ok: true, ... }` unchanged — no regression on the common path. The discriminated-union typing means every existing `if (!resolved.ok)` callsite gets a fresh exhaustive-check from the type system, so adding the new `ambiguous` reason was type-safe across all 12 affected callers.
+- **All 12 callsites updated with an explicit `ambiguous` branch.** `record_transaction`, `bulk_record_transactions` (per-row account + per-row category), `update_transaction` (category), `record_transfer` (both legs), `record_trade`, `update_account`, `get_portfolio_analysis` (account-scope filter, surfaces an `accountWarnings[]` entry rather than erroring), and the bulk-update path's category resolver. Each includes "Pass account_id to disambiguate" in the user-facing error so the AI knows which exact-id field to use.
+- **`update_account`: switched from `fuzzyFind` to `resolveAccountStrict`, added `accountId` exact param.** Same bug class as #230 (`delete_account` hotfix): the previous handler called `fuzzyFind` against `name_ct`-only rows after `decryptNameish`, so a typo or ambiguous prefix could silently pick the first row from the SELECT. Now mirrors `delete_account`'s shape — pass exactly one of `accountId` (numeric, works without DEK) or `account` (name/alias, requires DEK), with a name+id mismatch check when both are supplied. Success message now echoes both id and name.
+- **Name+id mismatch check on every account-fuzzy write tool.** When `account` (name) AND `account_id` (or `from_account_id`/`to_account_id`) are both supplied, the resolver runs upfront and the result must agree with the supplied id — otherwise the call fails loud with `Account mismatch: "<name>" resolved to id #N, but account_id=M was passed.` Mirrors the precedent at `record_transaction` for `portfolioHolding`/`portfolioHoldingId`. Without this check, the existing "id wins" precedence would silently accept disagreeing pairs — re-introducing the silent-bind class of bug the strict resolver exists to prevent.
+- **Stdio MCP unchanged.** Stdio counterparts already require numeric ids and refuse `account` (name) post Stream D Phase 4; the new HTTP behavior doesn't apply there. `finlynq_help` cribs on both transports updated to mention the strict-fuzzy + fail-loud-ambiguity contract and the id escape hatch.
+- **No new tools, no MCP version bump.** Server stays at `3.0.0` with 90 HTTP / 86 stdio tools — version + envelope changes are gated to Phase 3.
+
+### Files touched
+- [mcp-server/register-tools-pg.ts](mcp-server/register-tools-pg.ts) — resolver type unions, ambiguity branches, `update_account` schema + handler, `finlynq_help` cribs
+- [mcp-server/register-core-tools.ts](mcp-server/register-core-tools.ts) — stdio `finlynq_help` cribs only (no behavior change)
+
+### Out of scope
+- Envelope unification (`{success, data}` everywhere) — Phase 3.
+- Version bump 3.0.0 → 3.1.0 — Phase 3.
+- New `delete_category` tool — Phase 3.
+- Edit-distance fuzzy matching — separate concern.
+- `transaction_rules.is_active` INTEGER → BOOLEAN migration — separate cross-cutting follow-up tracked under #214.
+- Switching `delete_budget`'s `fuzzyFind` to `resolveCategoryStrict` — recommended but deferable; the existing decrypt fix from #211 is enough for Phase 2's stated goal.
+
+Verification: `npx tsc --noEmit` clean, `npm run build` passes. Live MCP HTTP probes (4 scenarios per the issue's smoke plan: ambiguity, exact via id, mismatched pair, single-match regression) pending against dev — validator agent.
+
+---
+
 ## 2026-05-10 — MCP get_goals progress fields + liability-account group default (#233)
 
 Bug fixes for two LOW-priority surfaces flagged in `reviews/2026-05-10/08-goals-progress-and-account-group-shape.md` — original audit issues #46 (`get_goals` missing progress fields) and #2 (empty `group` on liability accounts), bundled per the issue plan.

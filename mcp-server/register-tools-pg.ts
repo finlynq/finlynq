@@ -298,20 +298,37 @@ type AccountResolveTier = "exact" | "alias" | "startsWith" | "substring";
 type AccountResolveResult =
   | { ok: true; account: Row; tier: AccountResolveTier }
   | { ok: false; reason: "missing" }
-  | { ok: false; reason: "low_confidence"; suggestion: Row };
+  | { ok: false; reason: "low_confidence"; suggestion: Row }
+  | { ok: false; reason: "ambiguous"; tier: "startsWith" | "substring"; candidates: Row[] };
 function resolveAccountStrict(input: string, options: Row[]): AccountResolveResult {
   if (!input || !options.length) return { ok: false, reason: "missing" };
   const lo = input.toLowerCase().trim();
+  // Exact-name and exact-alias tiers can never be ambiguous between
+  // themselves (alias-uniqueness within a user is enforced at create time;
+  // exact equality on a normalized lowercased trim is a single bucket). If
+  // somehow two rows carry the same exact name, prefer the first — silent
+  // here is fine because the operator already has a duplicate-rows
+  // pathology to clean up that the resolver can't fix.
   const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
   if (exact) return { ok: true, account: exact, tier: "exact" };
   const alias = options.find(o => String(o.alias ?? "").toLowerCase() === lo);
   if (alias) return { ok: true, account: alias, tier: "alias" };
-  const starts = options.find(o => {
+  // Issue #234 (Phase 2) — fail loud when ≥2 distinct names share a prefix
+  // hit. Previously the resolver did `options.find(...startsWith(lo))` and
+  // silently routed to the first — e.g. "Test RBC" with two child accounts
+  // "Test RBC TFSA" and "Test RBC RRSP" would silently land in whichever
+  // came back first from the SELECT. Now the caller gets an
+  // `ambiguous` result and surfaces a "did you mean …? Pass account_id."
+  // error so the AI can disambiguate via the exact-id escape hatch.
+  const starts = options.filter(o => {
     const n = String(o.name ?? "").toLowerCase();
     return n !== "" && n.startsWith(lo);
   });
-  if (starts) return { ok: true, account: starts, tier: "startsWith" };
-  // Substring/reverse-substring tier — gate on token overlap.
+  if (starts.length === 1) return { ok: true, account: starts[0], tier: "startsWith" };
+  if (starts.length >= 2) return { ok: false, reason: "ambiguous", tier: "startsWith", candidates: starts.slice(0, 5) };
+  // Substring/reverse-substring tier — gate on token overlap. Same
+  // ambiguity rule applies: any tie among token-overlap-passing rows
+  // forces the caller into the id escape hatch.
   const tokenize = (s: string) =>
     new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
   const inputTokens = tokenize(lo);
@@ -320,13 +337,14 @@ function resolveAccountStrict(input: string, options: Row[]): AccountResolveResu
     for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
     return false;
   };
-  const sub = options.find(o => {
+  const subs = options.filter(o => {
     const n = String(o.name ?? "").toLowerCase();
     if (n === "") return false;
     if (!n.includes(lo) && !lo.includes(n)) return false;
     return sharesToken(n);
   });
-  if (sub) return { ok: true, account: sub, tier: "substring" };
+  if (subs.length === 1) return { ok: true, account: subs[0], tier: "substring" };
+  if (subs.length >= 2) return { ok: false, reason: "ambiguous", tier: "substring", candidates: subs.slice(0, 5) };
   // No strong match. Surface what fuzzyFind WOULD have picked so the caller
   // can include it in the error message ("did you mean …?").
   const legacy =
@@ -359,17 +377,22 @@ type CategoryResolveTier = "exact" | "startsWith" | "substring";
 type CategoryResolveResult =
   | { ok: true; category: Row; tier: CategoryResolveTier }
   | { ok: false; reason: "missing" }
-  | { ok: false; reason: "low_confidence"; suggestion: Row };
+  | { ok: false; reason: "low_confidence"; suggestion: Row }
+  | { ok: false; reason: "ambiguous"; tier: "startsWith" | "substring"; candidates: Row[] };
 function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveResult {
   if (!input || !options.length) return { ok: false, reason: "missing" };
   const lo = input.toLowerCase().trim();
   const exact = options.find(o => String(o.name ?? "").toLowerCase() === lo);
   if (exact) return { ok: true, category: exact, tier: "exact" };
-  const starts = options.find(o => {
+  // Issue #234 (Phase 2) — fail loud on ≥2 prefix collisions. e.g. with
+  // "Groceries" and "Groceries — Bulk", input "Groce" used to silently route
+  // to the first; now the caller surfaces an ambiguity error.
+  const starts = options.filter(o => {
     const n = String(o.name ?? "").toLowerCase();
     return n !== "" && n.startsWith(lo);
   });
-  if (starts) return { ok: true, category: starts, tier: "startsWith" };
+  if (starts.length === 1) return { ok: true, category: starts[0], tier: "startsWith" };
+  if (starts.length >= 2) return { ok: false, reason: "ambiguous", tier: "startsWith", candidates: starts.slice(0, 5) };
   const tokenize = (s: string) =>
     new Set(s.split(/\s+/).map(t => t.replace(/[^a-z0-9]/g, "")).filter(t => t.length >= 3));
   const inputTokens = tokenize(lo);
@@ -378,13 +401,14 @@ function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveRe
     for (const t of tokenize(name)) if (inputTokens.has(t)) return true;
     return false;
   };
-  const sub = options.find(o => {
+  const subs = options.filter(o => {
     const n = String(o.name ?? "").toLowerCase();
     if (n === "") return false;
     if (!n.includes(lo) && !lo.includes(n)) return false;
     return sharesToken(n);
   });
-  if (sub) return { ok: true, category: sub, tier: "substring" };
+  if (subs.length === 1) return { ok: true, category: subs[0], tier: "substring" };
+  if (subs.length >= 2) return { ok: false, reason: "ambiguous", tier: "substring", candidates: subs.slice(0, 5) };
   // No strong match. Surface what fuzzyFind WOULD have picked so the caller
   // can include it in the error message.
   const legacy =
@@ -2611,6 +2635,28 @@ export function registerPgTools(
       if (!rawAccounts.length) return err("No accounts found — create an account first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
       let acct: Row | null = null;
+      // Issue #234 (Phase 2) — when BOTH `account` (name) and `account_id`
+      // are supplied, run the name resolver and verify it agrees with the id.
+      // Mirrors the precedent at L2660-2662 (portfolioHolding/Id mismatch).
+      // Without this check, the existing "account_id wins" precedence would
+      // silently accept a name + id pair that disagree — re-introducing the
+      // class of bug the strict resolver exists to prevent.
+      if (account != null && account_id != null) {
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
+          }
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
+        }
+        if (Number(resolved.account.id) !== account_id) {
+          return err(`Account mismatch: "${account}" resolved to id #${Number(resolved.account.id)}, but account_id=${account_id} was passed. Pass only one, or make them agree.`);
+        }
+      }
       if (account_id != null) {
         acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
         if (!acct) return err(`Account #${account_id} not found or not owned by you.`);
@@ -2620,6 +2666,9 @@ export function registerPgTools(
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only (was full inventory).
           const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
           }
@@ -3011,6 +3060,27 @@ export function registerPgTools(
           }
           // Resolve account: per-row id > top-level id > strict fuzzy on name.
           let acct: Row | null = null;
+          // Issue #234 (Phase 2) — same per-row mismatch check as
+          // record_transaction. When the row supplies BOTH account (name)
+          // AND account_id, verify they agree before short-circuiting.
+          if (t.account != null && t.account_id != null) {
+            const r = resolveAccountStrict(t.account, allAccounts);
+            if (!r.ok) {
+              const suggestions = suggestionList(t.account, allAccounts);
+              if (r.reason === "ambiguous") {
+                results.push({ index: i, success: false, message: `Ambiguous: "${t.account}" matches ${r.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)` });
+              } else if (r.reason === "low_confidence") {
+                results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)` });
+              } else {
+                results.push({ index: i, success: false, message: `Account not found: "${t.account}". Did you mean: ${suggestions}?` });
+              }
+              continue;
+            }
+            if (Number(r.account.id) !== t.account_id) {
+              results.push({ index: i, success: false, message: `Account mismatch: "${t.account}" resolved to id #${Number(r.account.id)}, but account_id=${t.account_id} was passed. Pass only one, or make them agree.` });
+              continue;
+            }
+          }
           if (t.account_id != null) {
             acct = accountById.get(t.account_id) ?? null;
             if (!acct) {
@@ -3022,7 +3092,9 @@ export function registerPgTools(
             if (!r.ok) {
               // Issue #211 Bug e: top-N suggestions only (was full inventory).
               const suggestions = suggestionList(t.account, allAccounts);
-              if (r.reason === "low_confidence") {
+              if (r.reason === "ambiguous") {
+                results.push({ index: i, success: false, message: `Ambiguous: "${t.account}" matches ${r.candidates.length} accounts. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)` });
+              } else if (r.reason === "low_confidence") {
                 results.push({ index: i, success: false, message: `Account "${t.account}" did not match strongly — closest is "${r.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)` });
               } else {
                 results.push({ index: i, success: false, message: `Account not found: "${t.account}". Did you mean: ${suggestions}?` });
@@ -3093,9 +3165,12 @@ export function registerPgTools(
             if (!resolved.ok) {
               // Issue #211 Bug e: top-N suggestions only.
               const suggestions = suggestionList(t.category, allCats);
-              const message = resolved.reason === "low_confidence"
-                ? `Category "${t.category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-submit with the exact name to confirm.`
-                : `Category "${t.category}" not found. Did you mean: ${suggestions}?`;
+              const message =
+                resolved.reason === "ambiguous"
+                  ? `Ambiguous: "${t.category}" matches ${resolved.candidates.length} categories. Did you mean: ${suggestions}?`
+                  : resolved.reason === "low_confidence"
+                    ? `Category "${t.category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-submit with the exact name to confirm.`
+                    : `Category "${t.category}" not found. Did you mean: ${suggestions}?`;
               results.push({ index: i, success: false, message, resolvedAccount: resolvedAccountInfo });
               continue;
             }
@@ -3409,10 +3484,14 @@ export function registerPgTools(
         const resolved = resolveCategoryStrict(category, allCats);
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only.
+          const suggestions = suggestionList(category, allCats);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${category}" matches ${resolved.candidates.length} categories. Did you mean: ${suggestions}?`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-call with the exact name to confirm.`);
           }
-          return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
+          return err(`Category "${category}" not found. Did you mean: ${suggestions}?`);
         }
         catId = Number(resolved.category.id);
         resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
@@ -3651,6 +3730,41 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
+      // Issue #234 (Phase 2) — when BOTH name + id are passed for either
+      // leg, run the resolver and fail loud if they disagree. Mirrors the
+      // record_transaction precedent.
+      if (fromAccount != null && from_account_id != null) {
+        const resolved = resolveAccountStrict(fromAccount, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(fromAccount, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${fromAccount}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only from_account_id to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only from_account_id to disambiguate.)`);
+          }
+          return err(`Source account "${fromAccount}" not found. Did you mean: ${suggestions}?`);
+        }
+        if (Number(resolved.account.id) !== from_account_id) {
+          return err(`Source account mismatch: "${fromAccount}" resolved to id #${Number(resolved.account.id)}, but from_account_id=${from_account_id} was passed. Pass only one, or make them agree.`);
+        }
+      }
+      if (toAccount != null && to_account_id != null) {
+        const resolved = resolveAccountStrict(toAccount, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(toAccount, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${toAccount}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only to_account_id to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only to_account_id to disambiguate.)`);
+          }
+          return err(`Destination account "${toAccount}" not found. Did you mean: ${suggestions}?`);
+        }
+        if (Number(resolved.account.id) !== to_account_id) {
+          return err(`Destination account mismatch: "${toAccount}" resolved to id #${Number(resolved.account.id)}, but to_account_id=${to_account_id} was passed. Pass only one, or make them agree.`);
+        }
+      }
       let fromAcct: Row | null = null;
       if (from_account_id != null) {
         fromAcct = allAccounts.find(a => Number(a.id) === from_account_id) ?? null;
@@ -3661,6 +3775,9 @@ export function registerPgTools(
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only (was full inventory).
           const suggestions = suggestionList(fromAccount, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${fromAccount}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass from_account_id to disambiguate.)`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Source account "${fromAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass from_account_id to disambiguate.)`);
           }
@@ -3678,6 +3795,9 @@ export function registerPgTools(
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only.
           const suggestions = suggestionList(toAccount, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${toAccount}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass to_account_id to disambiguate.)`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Destination account "${toAccount}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass to_account_id to disambiguate.)`);
           }
@@ -3790,6 +3910,23 @@ export function registerPgTools(
       `);
       if (!rawAccounts.length) return err("No accounts found — create accounts first.");
       const allAccounts = decryptNameish(rawAccounts, dek);
+      // Issue #234 (Phase 2) — name + id mismatch check.
+      if (account != null && account_id != null) {
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
+          }
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
+        }
+        if (Number(resolved.account.id) !== account_id) {
+          return err(`Account mismatch: "${account}" resolved to id #${Number(resolved.account.id)}, but account_id=${account_id} was passed. Pass only one, or make them agree.`);
+        }
+      }
       let acct: Row | null = null;
       if (account_id != null) {
         acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
@@ -3800,6 +3937,9 @@ export function registerPgTools(
         if (!resolved.ok) {
           // Issue #211 Bug e: top-N suggestions only.
           const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
+          }
           if (resolved.reason === "low_confidence") {
             return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
           }
@@ -4129,24 +4269,76 @@ export function registerPgTools(
   );
 
   // ── update_account ─────────────────────────────────────────────────────────
+  // Issue #234 (Phase 2) — added `accountId` exact-match param + switched
+  // from `fuzzyFind` (which silently returned the first match on
+  // ambiguity / `lo.includes("")` reverse-includes collapse) to
+  // `resolveAccountStrict`. Same bug class as #230 (delete_account).
   server.tool(
     "update_account",
-    "Update name, group, currency, note, or alias of an account",
+    "Update name, group, currency, note, or alias of an account. Pass exactly ONE of `accountId` (preferred, exact) or `account` (name/alias, fuzzy). Supplying both is allowed only when they resolve to the same account — a mismatch fails loud and does NOT update.",
     {
-      account: z.string().describe("Current account name or alias (fuzzy matched against name; exact match on alias)"),
+      accountId: z.number().int().positive().optional().describe("Account FK (accounts.id). Exact match — preferred. The only path that works without an unlocked DEK."),
+      account: z.string().optional().describe("Current account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK because account names live in encrypted columns post Stream D Phase 4. Pass `accountId` instead when no DEK is available."),
       name: z.string().optional().describe("New name"),
       group: z.string().optional().describe("New group"),
       currency: supportedCurrencyEnum.optional().describe("New ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
       note: z.string().optional().describe("New note"),
       alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports (e.g. last 4 digits of a card). Pass an empty string to clear."),
     },
-    async ({ account, name, group, currency, note, alias }) => {
-      const rawAccounts = await q(db, sql`
-        SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
-      `);
-      const allAccounts = decryptNameish(rawAccounts, dek);
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return err(`Account "${account}" not found`);
+    async ({ accountId, account, name, group, currency, note, alias }) => {
+      if (accountId == null && (account == null || account === "")) {
+        return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
+      }
+
+      // Resolve via id first when supplied — the safe path that never depends
+      // on the DEK. SELECT both encrypted columns so we can echo a name on
+      // success when a DEK happens to be available.
+      let acct: Row | null = null;
+      if (accountId != null) {
+        const rows = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId} AND id = ${accountId}
+        `);
+        if (!rows.length) return err(`Account #${accountId} not found.`);
+        acct = decryptNameish(rows, dek)[0];
+      }
+
+      // Resolve via name (fuzzy). Refuses without a DEK — same shape as
+      // delete_account (issue #230) and the stdio counterpart's refusal at
+      // register-core-tools.ts.
+      let resolvedByName: Row | null = null;
+      if (account != null && account !== "") {
+        if (!dek) {
+          return err("Cannot resolve account by name without an unlocked DEK (Stream D Phase 4). Pass `accountId` instead.");
+        }
+        const rawAccounts = await q(db, sql`
+          SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
+        `);
+        const allAccounts = decryptNameish(rawAccounts, dek);
+        const resolved = resolveAccountStrict(account, allAccounts);
+        if (!resolved.ok) {
+          const suggestions = suggestionList(account, allAccounts);
+          if (resolved.reason === "ambiguous") {
+            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass accountId to disambiguate.)`);
+          }
+          if (resolved.reason === "low_confidence") {
+            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass accountId to disambiguate.)`);
+          }
+          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
+        }
+        resolvedByName = resolved.account;
+      }
+
+      // BOTH supplied — fail loud on mismatch, never silently prefer one.
+      if (acct && resolvedByName) {
+        if (Number(acct.id) !== Number(resolvedByName.id)) {
+          return err(`Account mismatch: "${account}" resolves to #${Number(resolvedByName.id)}, but accountId=${Number(acct.id)} was supplied.`);
+        }
+      } else if (!acct && resolvedByName) {
+        acct = resolvedByName;
+      }
+      if (!acct) {
+        return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
+      }
 
       // Stream D Phase 4 — plaintext name/alias dropped; only encrypted columns.
       const updates: ReturnType<typeof sql>[] = [];
@@ -4176,8 +4368,10 @@ export function registerPgTools(
         (result && typeof result === "object" && "rowCount" in result && typeof (result as { rowCount: unknown }).rowCount === "number")
           ? (result as { rowCount: number }).rowCount
           : null;
-      if (affected === 0) return err(`Account "${acct.name}" not found or not owned by this user`);
-      return text({ success: true, message: `Account "${acct.name}" updated` });
+      const acctNameLabel = (acct.name as string | undefined) ?? "<encrypted>";
+      const acctIdLabel = Number(acct.id);
+      if (affected === 0) return err(`Account #${acctIdLabel} ("${acctNameLabel}") not found or not owned by this user`);
+      return text({ success: true, accountId: acctIdLabel, message: `Account #${acctIdLabel} ("${acctNameLabel}") updated` });
     }
   );
 
@@ -4602,15 +4796,15 @@ export function registerPgTools(
     async ({ topic, tool_name }) => {
       if (tool_name) {
         const docs: Record<string, string> = {
-          record_transaction: "record_transaction(amount, payee, account, date?, category?, note?, tags?) — Account is REQUIRED: ask the user which account if unclear, never guess. Category auto-detected from payee rules/history when omitted.",
-          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Each item requires account. Returns per-item success/failure.",
-          update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?) — Update any field by transaction ID.",
+          record_transaction: "record_transaction(amount, payee, account_id? OR account?, date?, category?, ...) — PREFER `account_id` (exact, no ambiguity). The `account` name path uses strict fuzzy: when the same prefix matches ≥2 accounts the call is REJECTED with an ambiguity error and a candidate list — pass `account_id` to disambiguate. When BOTH `account` and `account_id` are passed and disagree, the call fails loud (no silent prefer-id). Category auto-detected from payee rules/history when omitted.",
+          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Per-row `account_id` (preferred) or `account` (name; strict fuzzy with fail-loud ambiguity). Per-row mismatch between `account` and `account_id` fails that row only. Returns per-item success/failure.",
+          update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?) — Update any field by transaction ID. The `category` name path is strict fuzzy: ambiguous prefix collisions are REJECTED.",
           delete_transaction: "delete_transaction(id) — Permanently delete. Cannot be undone.",
           set_budget: "set_budget(category, month, amount) — Upsert budget. month=YYYY-MM.",
           delete_budget: "delete_budget(category, month) — Remove budget entry.",
           add_account: "add_account(name, type, group?, currency?, note?, alias?) — type: 'A'=asset, 'L'=liability. alias is a short shorthand (e.g. last 4 digits of a card) used when receipts/imports reference the account by a non-canonical name.",
-          update_account: "update_account(account, name?, group?, currency?, note?, alias?) — Fuzzy account name or alias. Pass empty alias to clear.",
-          delete_account: "delete_account(accountId? OR account?, force?) — accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Pass exactly one. force=true deletes even if transactions exist.",
+          update_account: "update_account(accountId? OR account?, name?, group?, currency?, note?, alias?) — Issue #234: accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Strict fuzzy: ambiguous prefixes are REJECTED with a candidate list. Pass empty alias to clear. When both accountId and account are passed and disagree, fails loud.",
+          delete_account: "delete_account(accountId? OR account?, force?) — accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Pass exactly one (mismatch fails loud). force=true deletes even if transactions exist.",
           add_goal: "add_goal(name, type, target_amount, deadline?, account?, account_ids?) — type: savings|debt_payoff|investment|emergency_fund. account_ids: number[] for multi-account linking (issue #130).",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?, account_ids?) — status: active|completed|paused. account_ids: replace linked-account set ([] = unlink all).",
           get_goals: "get_goals() — Returns every goal with progress numbers (issue #233): currentAmount (in goal currency), progress and percentComplete (0..100, 1dp), remaining, monthlyNeeded. Investment accounts contribute market value; cash accounts contribute SUM(transactions.amount); each linked-account contribution is FX-converted into the goal currency.",
@@ -4621,8 +4815,8 @@ export function registerPgTools(
           get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
-          record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair between two accounts. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
-          record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
+          record_transfer: "record_transfer(from_account_id? OR fromAccount, to_account_id? OR toAccount, amount, ...) — Atomic transfer pair between two accounts. PREFER from_account_id/to_account_id (exact); the name path is strict fuzzy with fail-loud ambiguity. Mismatched name+id pairs fail loud. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
+          record_trade: "record_trade(account_id? OR account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. PREFER account_id (exact); the account name path is strict fuzzy with fail-loud ambiguity, mismatched name+id fails loud. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
           preview_bulk_update: "preview_bulk_update(filter, changes) — accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker → id), tags ({mode: append|replace|remove, value}). Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. Stdio surface is narrower (no quantity/holding fields).",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Same `changes` keys as preview_bulk_update. Stdio: category-by-name only; quantity/holding writes refused.",
         };
@@ -4986,7 +5180,12 @@ export function registerPgTools(
         const allAccounts = decryptNameish(rawAccounts, dek);
         const resolved = resolveAccountStrict(account, allAccounts);
         if (!resolved.ok) {
-          if (resolved.reason === "low_confidence") {
+          if (resolved.reason === "ambiguous") {
+            const list = resolved.candidates
+              .map(c => `${String(c.name ?? "")} id=${Number(c.id)}`)
+              .join(", ");
+            accountWarnings.push(`${account}: ambiguous (matches ${resolved.candidates.length} accounts: ${list}). Pass account_id to disambiguate.`);
+          } else if (resolved.reason === "low_confidence") {
             accountWarnings.push(`${account}: no matching account (did you mean ${resolved.suggestion.name} id=${Number(resolved.suggestion.id)}?)`);
           } else {
             accountWarnings.push(`${account}: no matching account`);
@@ -7792,7 +7991,13 @@ export function registerPgTools(
       const allCats = decryptNameish(rawCats, dek);
       const r = resolveCategoryStrict(changes.category, allCats);
       if (!r.ok) {
-        if (r.reason === "low_confidence") {
+        if (r.reason === "ambiguous") {
+          unapplied.push({
+            field: "category",
+            requestedValue: changes.category,
+            reason: `Category "${changes.category}" is ambiguous (matches ${r.candidates.length} categories). Did you mean: ${suggestionList(changes.category, allCats)}? Pass category_id to disambiguate.`,
+          });
+        } else if (r.reason === "low_confidence") {
           unapplied.push({
             field: "category",
             requestedValue: changes.category,
