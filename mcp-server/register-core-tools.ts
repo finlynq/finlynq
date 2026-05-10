@@ -1711,15 +1711,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ topic, tool_name }) => {
       if (tool_name) {
         const docs: Record<string, string> = {
-          record_transaction: "record_transaction(amount, payee, account, date?, category?, note?, tags?) — Account is REQUIRED: ask the user which account if unclear, never guess. Category auto-detected from payee rules/history when omitted.",
-          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Each item requires account. Returns per-item success/failure.",
-          update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?)",
+          record_transaction: "record_transaction(amount, payee, account_id, date?, category?, note?, tags?) — stdio requires numeric `account_id`. (HTTP MCP also accepts `account` (name) with strict fuzzy + fail-loud ambiguity per issue #234.)",
+          bulk_record_transactions: "bulk_record_transactions(transactions[]) — Refused on stdio post Stream D Phase 4. Use HTTP MCP. (HTTP per-row strict fuzzy fail-loud ambiguity, issue #234.)",
+          update_transaction: "update_transaction(id, date?, amount?, payee?, category?, note?, tags?) — stdio: category by id (name path needs DEK).",
           delete_transaction: "delete_transaction(id) — Permanently delete.",
           set_budget: "set_budget(category, month, amount) — Upsert budget. month=YYYY-MM.",
           delete_budget: "delete_budget(category, month)",
-          add_account: "add_account(name, type, group?, currency?, note?) — type: 'A'=asset, 'L'=liability.",
-          update_account: "update_account(account, name?, group?, currency?, note?)",
-          delete_account: "delete_account(account_id, force?) — stdio refuses `account` (name) post Stream D Phase 4; pass account_id (numeric).",
+          add_account: "add_account(name, type, group?, currency?, note?) — Refused on stdio post Stream D Phase 4. Use HTTP MCP.",
+          update_account: "update_account(account, name?, group?, currency?, note?) — Refused on stdio post Stream D Phase 4. Use HTTP MCP. (HTTP also accepts `accountId` exact, issue #234.)",
+          delete_account: "delete_account(account_id, force?) — stdio refuses `account` (name) post Stream D Phase 4; pass account_id (numeric). (HTTP MCP supports both `accountId` and `account` with strict fuzzy + fail-loud ambiguity per issue #234.)",
           add_goal: "add_goal(name, type, target_amount, deadline?, account?)",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?)",
           get_goals: "get_goals() — Stdio returns ids + accountIds only (no decrypted names, no progress numbers per issue #233 — use HTTP MCP for `currentAmount`/`progress`/`percentComplete`).",
@@ -1728,8 +1728,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?)",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark'",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
-          record_transfer: "record_transfer(fromAccount, toAccount, amount, ...) — Atomic transfer pair. In-kind: holding+quantity.",
-          record_trade: "record_trade(account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. Cross-currency requires fxRate.",
+          record_transfer: "record_transfer(from_account_id, to_account_id, amount, ...) — Atomic transfer pair. Stdio requires numeric ids; HTTP MCP also accepts fromAccount/toAccount (strict fuzzy fail-loud ambiguity per issue #234). In-kind: holding+quantity.",
+          record_trade: "record_trade(account_id, side, symbol, quantity, price, currency?, fees?, fxRate?) — Refused on stdio post Stream D Phase 4 (no DEK to resolve symbol → holding). HTTP MCP only.",
           preview_bulk_update: "preview_bulk_update(filter, changes) — stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. (HTTP transport adds quantity, portfolioHoldingId, portfolioHolding.)",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Stdio: category-by-name only (HTTP supports quantity/holding writes too).",
         };
