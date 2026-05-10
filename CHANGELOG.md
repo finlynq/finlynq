@@ -6,6 +6,29 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## 2026-05-10 — MCP `get_investment_insights`: full-portfolio scoping + valuationGL fall-through + label fix (#236)
+
+Three residual defects in MCP HTTP `get_investment_insights` after PR #228 (issue #209) — all surfaced by the auditor's reviews/2026-05-10/04-portfolio-analysis-fullscope-and-label-fixes.md.
+
+### Bug fixes
+
+- **Drop the `buysOnly` SQL pre-filter from `aggregateHoldings()`.** The `mode='patterns'` and `mode='rebalancing'` branches of `get_investment_insights` previously called `aggregateHoldings(..., { buysOnly: true })`, which pre-filtered `t.amount < 0`. That violated the four-aggregator alignment invariant (CLAUDE.md "Portfolio aggregator: qty>0 is a buy regardless of amount sign") and silently dropped every WP-imported buy row (Finlynq-native is `amt<0+qty>0`, WP convention is `amt>0+qty>0`). Symptom: `summary.totalInvested` reported the subset of holdings whose buy rows happened to have `amount < 0` ($32,678.92 in the audit repro) against ~$580k of additional WP-imported holdings the user actually owns. Fix removes the opt entirely from the function signature so it can't be re-introduced; the buy-bucket semantic is preserved by `accumulate()`'s `qty > 0` branch — `a.buy_amount` only accumulates from rows where `qty > 0`. After the fix, `totalInvested` reduces over the FULL `positions` array and reconciles to `get_portfolio_analysis.summary.lifetimeCostBasisReporting` for the same user. The rebalancing `untargetedHoldings` block is preserved and now reports the correct count + book value of genuinely-untargeted holdings.
+
+- **`unrealized.accounts[].valuationGL` start==end fall-through.** When `start.marketValueNative === end.marketValueNative` AND `start.costBasisNative === end.costBasisNative`, both `*AtDate` values equal `(market - cost) * fx` and the period delta rounds to 0. For inactive holdings whose cost basis ≠ market value (audit repro: account id 612, costBasis 2920.27, marketValue 2918.04, expected `valuationGL ≈ -2.23`), the open UGL was being silently dropped. The period semantic now falls through to the cumulative-since-acquisition figure when `Math.abs(period delta) < 0.005 AND Math.abs(end.valuationGLAtDate) >= 0.005`. Each per-account row carries a new `valuationGLBasis: 'period' | 'cumulative'` field that discloses which semantic produced the value, so consumers can reconcile. Brand-new holdings near par (cumulative ~ 0 too) keep `valuationGL: 0` with `basis: 'period'` — only the start==end-but-non-zero-cumulative edge is rerouted.
+
+- **`unrealized.accounts[].accountCurrency` label drift (non-breaking).** Every monetary field on the per-account row (`costBasis` / `marketValue` / `valuationGL` / `fxGL` / `totalGL` / `startMarketValue` / `endMarketValue`) is FX-converted to the reporting currency by `roundMoney(..., reporting)`, but the row was labeled with the underlying account's ISO code (e.g. `accountCurrency: 'USD'` while the values were CAD-converted). The new authoritative field is `reportingCurrency: a.displayCurrency`; `accountCurrency` is kept as a deprecated alias for one release with a JSDoc warning. The full BREAKING rename will land alongside the 3.x envelope unification (issue #237) — coordinate any consumer migration to read `reportingCurrency` first to avoid a hard cutover.
+
+### Docs
+
+- **CLAUDE.md "Portfolio aggregator" load-bearing paragraph extended** — appended a note that `get_investment_insights` (HTTP-only, modes `patterns` + `rebalancing`) is the fifth caller of the canonical aggregator and inherits the invariant. **DO NOT pre-filter `t.amount < 0` in `aggregateHoldings()` SQL or any new aggregator path** — buy-classification is `accumulate()`'s job, keying on `qty > 0` direction. Adding the filter back silently drops WP-imported buys.
+
+### Files touched
+
+- `pf-app/mcp-server/register-tools-pg.ts` — `aggregateHoldings()` signature + SQL (drop `buysOnly`); two `aggregateHoldings(...)` callsites in `get_investment_insights`; `unrealized.accounts[]` response shape (add `reportingCurrency` + `valuationGLBasis`, mark `accountCurrency` deprecated)
+- `pf-app/src/lib/unrealized-pnl.ts` — `UnrealizedPnL` type (add `valuationGLBasis`); `computeAllAccountsUnrealizedPnL` (start==end fall-through)
+- `pf-app/CHANGELOG.md` — this entry
+- `CLAUDE.md` — extend "Portfolio aggregator" load-bearing paragraph
+
 ## 2026-05-10 — MCP read tools: financial-health math, recurring staleness, cash-flow attribution (#235)
 
 Fixes the residual math + UX defects in three MCP aggregator tools that PR #228 (issue #210) didn't touch. Auditor file: `reviews/2026-05-10/07-readtool-aggregator-math-and-staleness.md`.

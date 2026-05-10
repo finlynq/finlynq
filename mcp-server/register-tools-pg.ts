@@ -868,11 +868,19 @@ async function aggregateHoldings(
   db: DbLike,
   userId: string,
   dek: Buffer | null,
-  opts?: { buysOnly?: boolean; since?: string; dividendsCategoryId?: number | null }
+  opts?: { since?: string; dividendsCategoryId?: number | null }
 ): Promise<(HoldingAggRow & { tx_count: number; net_quantity: number; last_activity: string | null; holding_id: number | null; currency: string })[]> {
-  const buysFilter = opts?.buysOnly
-    ? sql`AND t.amount < 0`
-    : sql``;
+  // Issue #236 (2026-05-10): the legacy `buysOnly: true` opt SQL-prefiltered
+  // `t.amount < 0`, which silently dropped every WP-imported buy row
+  // (Finlynq-native is `amt<0+qty>0`, WP convention is `amt>0+qty>0`). Buy
+  // classification is `accumulate()`'s job — keying off `qty>0` per the
+  // CLAUDE.md "Portfolio aggregator" invariant — and consumers that want
+  // only the buy bucket read `a.buy_amount` (which `accumulate()` only
+  // populates for `qty > 0` rows). Removing the opt entirely is safer than
+  // leaving a footgun: a future caller passing `buysOnly: true` would
+  // re-introduce the WP-drop bug. The patterns + rebalancing modes of
+  // `get_investment_insights` (the only previous callers) now use the
+  // canonical aggregator and reconcile against `get_portfolio_analysis`.
   const dateFilter = opts?.since ? sql`AND t.date >= ${opts.since}` : sql``;
   const dividendsCategoryId = opts?.dividendsCategoryId ?? null;
 
@@ -934,7 +942,6 @@ async function aggregateHoldings(
      AND COALESCE(cash.quantity, 0) = 0
     WHERE t.user_id = ${userId}
       AND t.portfolio_holding_id IS NOT NULL
-      ${buysFilter}
       ${dateFilter}
   `);
 
@@ -1468,12 +1475,27 @@ export function registerPgTools(
             .map((a) => ({
               accountId: a.accountId,
               accountName: a.accountName,
+              // Issue #236 (2026-05-10): every monetary field on this row
+              // is converted to the reporting currency by `roundMoney(...,
+              // reporting)`, but the legacy field name was `accountCurrency`
+              // which suggested they were in the account's native currency.
+              // The label drift is fixed non-breakingly: `reportingCurrency`
+              // is the new authoritative label, `accountCurrency` is kept
+              // as a deprecated alias for one release. Future bumps may
+              // rename in 3.x BREAKING (see issue #237).
+              reportingCurrency: a.displayCurrency,
+              /** @deprecated since 2026-05-10 (issue #236) — use `reportingCurrency`. The values are in reporting currency, NOT this account's native currency. Will be removed in a future BREAKING release. */
               accountCurrency: a.accountCurrency,
               // periodEnd snapshot for context — already in reporting ccy
               costBasis: roundMoney(a.end.costBasis, reporting),
               marketValue: roundMoney(a.end.marketValue, reporting),
-              // Period delta = end_snapshot - start_snapshot, what moved
+              // Period delta = end_snapshot - start_snapshot, what moved.
+              // Issue #236: when start==end AND cost basis ≠ market value,
+              // `valuationGL` falls through to the cumulative open UGL so
+              // inactive holdings still surface a non-zero figure.
+              // `valuationGLBasis` discloses which semantic was used.
               valuationGL: roundMoney(a.valuationGL, reporting),
+              valuationGLBasis: a.valuationGLBasis,
               fxGL: roundMoney(a.fxGL, reporting),
               totalGL: roundMoney(a.totalGL, reporting),
               startMarketValue: roundMoney(a.start.marketValue, reporting),
@@ -6570,7 +6592,11 @@ export function registerPgTools(
 
       if (m === "rebalancing") {
         if (!targets?.length) return err("targets is required when mode='rebalancing'");
-        const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
+        // Issue #236: drop the `buysOnly: true` SQL pre-filter — it silently
+        // dropped WP-imported buys (`amt>0+qty>0`). `accumulate()` already
+        // populates `buy_amount` only for `qty > 0` rows, so the buy-bucket
+        // semantic is preserved.
+        const aggs = await aggregateHoldings(db, userId, dek);
         // Convert each holding's book_value to reporting currency before
         // building the allocation map — otherwise mixing CAD + USD book
         // values produces nonsense percentages.
@@ -6794,7 +6820,9 @@ export function registerPgTools(
         .slice(-12)
         .map(([month, invested]) => ({ month, invested: Math.round(invested * 100) / 100 }));
 
-      const aggs = await aggregateHoldings(db, userId, dek, { buysOnly: true });
+      // Issue #236: drop the `buysOnly: true` SQL pre-filter — see the
+      // mode='rebalancing' branch above for the full rationale.
+      const aggs = await aggregateHoldings(db, userId, dek);
       // Issue #86: aggregator now returns one row per holding_id. For the
       // top-positions display, sum book_value across same-name rows so
       // VUN.TO across TFSA + RRSP shows as a single "VUN.TO" line item with
