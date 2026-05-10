@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff, Globe, Plus, Shield, Upload, Wand2, Radar, Landmark, Globe2, Scissors, Scale, Lightbulb, Briefcase } from "lucide-react";
+import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff, Globe, Plus, Shield, Upload, Wand2, Radar, Landmark, Globe2, Scissors, Scale, Lightbulb, Briefcase, LifeBuoy } from "lucide-react";
 
 type ClientTab = "claude-desktop" | "claude-web" | "cursor" | "cline" | "windsurf" | "custom";
 type StatusState = "checking" | "connected" | "disconnected";
@@ -905,6 +905,149 @@ export default function McpGuidePage() {
               payload between steps without invalidating the token.
             </p>
           </div>
+        </section>
+
+        {/* Troubleshooting */}
+        <section className="mt-10 mb-10">
+          <h2 className="mb-4 text-lg font-semibold text-foreground flex items-center gap-2">
+            <LifeBuoy className="h-5 w-5 text-primary" />
+            Troubleshooting
+          </h2>
+          <p className="mb-4 text-sm text-muted-foreground">
+            Common issues and fixes when connecting an AI assistant to Finlynq. Click any item to expand.
+          </p>
+          <div className="rounded-xl border border-border bg-card divide-y divide-border">
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span>&ldquo;Failed to connect&rdquo; or OAuth flow stuck</span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                Sign out of the integration (<strong>Settings → Integrations → Finlynq → Sign out</strong>),
+                then restart the OAuth flow from the Claude side. Most common cause: your session expired
+                after a Finlynq deploy. We rotate <code className="bg-muted px-1 rounded text-xs">DEPLOY_GENERATION</code>{" "}
+                on every release, which force-logs out in-flight tokens for security. Re-OAuth and you&apos;re
+                back in within seconds.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span><code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono">HTTP 401 Unauthorized</code> from <code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono">/api/mcp</code></span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                Bearer token expired or missing. For Claude.ai web, re-add the integration from{" "}
+                <strong>Settings → Integrations</strong>. For Claude Desktop / Cursor / Windsurf using
+                API-key auth, generate a fresh key at{" "}
+                <a href="/settings/account" className="underline underline-offset-2 hover:text-foreground">
+                  finlynq.com/settings/account
+                </a>{" "}
+                and replace the old one in your client config.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span><code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono">HTTP 403 Forbidden</code></span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                The request <code className="bg-muted px-1 rounded text-xs">Origin</code> header isn&apos;t on
+                our allowlist. Custom MCP clients should send <code className="bg-muted px-1 rounded text-xs">Origin</code>{" "}
+                as one of:{" "}
+                <code className="bg-muted px-1 rounded text-xs">claude.ai</code>,{" "}
+                <code className="bg-muted px-1 rounded text-xs">claude.com</code>,{" "}
+                <code className="bg-muted px-1 rounded text-xs">chatgpt.com</code>,{" "}
+                <code className="bg-muted px-1 rounded text-xs">cursor.com</code>,{" "}
+                <code className="bg-muted px-1 rounded text-xs">windsurf.dev</code>, or{" "}
+                <code className="bg-muted px-1 rounded text-xs">codeium.com</code>. CLI clients that send
+                no <code className="bg-muted px-1 rounded text-xs">Origin</code> header at all are allowed
+                through.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span><code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono">HTTP 423 Locked</code></span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                Your encryption key (DEK) isn&apos;t loaded for the current session. This happens after a
+                long idle (&gt;2h) or a Finlynq deploy. Sign out of finlynq.com and sign back in to reload
+                the DEK, then retry the tool call.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span>&ldquo;No holdings tracked&rdquo; when running portfolio analysis</span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                If you&apos;re on the public demo account, portfolio data is reseeded nightly — querying
+                right after a deploy may return a stale cache. Open a fresh chat and re-query. On your own
+                account, ensure every transaction in an investment account is bound to a holding: Finlynq
+                requires <code className="bg-muted px-1 rounded text-xs">portfolio_holding_id</code> on
+                every row in an <code className="bg-muted px-1 rounded text-xs">is_investment=true</code>{" "}
+                account. Cash legs are auto-bound to a per-account Cash sleeve.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span>Tool call returns &ldquo;stale data&rdquo; after a write</span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                Per-user transaction-aggregation caches are invalidated automatically on every MCP write.
+                If you ever see truly stale data in Claude.ai, sign out and back in to clear the per-user
+                cache. Long-running conversations don&apos;t hold cached results — every tool call hits the
+                live database.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span>Self-hosted: stdio MCP exits at startup</span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                Set BOTH <code className="bg-muted px-1 rounded text-xs">DATABASE_URL</code> and{" "}
+                <code className="bg-muted px-1 rounded text-xs">PF_USER_ID</code> (a UUID matching a row in{" "}
+                <code className="bg-muted px-1 rounded text-xs">users.id</code>). The stdio transport has
+                no HTTP auth layer — it binds to one user at process startup. Without{" "}
+                <code className="bg-muted px-1 rounded text-xs">PF_USER_ID</code> the process exits 1
+                immediately.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span>Self-hosted: stdio refuses create / update on accounts, categories, goals, loans, subscriptions, or holdings</span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                As of the Stream D Phase 4 rollout (2026-05-03), plaintext name columns are physically
+                dropped from those six tables — names are stored encrypted under your DEK. The stdio
+                transport has no DEK, so it can&apos;t compute the encrypted-name siblings on write. Use
+                the HTTP MCP transport or the Finlynq web UI for create/update on those tables. Read tools
+                across all six tables continue to work on stdio (names render as &ldquo;—&rdquo; without a DEK).
+              </div>
+            </details>
+          </div>
+          <p className="mt-4 text-xs text-muted-foreground">
+            Issue not listed? Open a GitHub issue at{" "}
+            <a
+              href="https://github.com/finlynq/finlynq/issues"
+              className="underline underline-offset-2 hover:text-foreground"
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              github.com/finlynq/finlynq/issues
+            </a>{" "}
+            — we triage daily.
+          </p>
         </section>
       </div>
     </div>
