@@ -21,8 +21,10 @@ import {
 import {
   getLatestFxRate,
   getRate,
+  getRateToUsdDetailed,
   validateCurrencyCode,
   validateFxDate,
+  collapseLegSources,
 } from "../src/lib/fx-service.js";
 import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies.js";
 import { resolveTxAmountsCore } from "../src/lib/currency-conversion.js";
@@ -2013,9 +2015,27 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (fromCode === toCode) {
         return txt({ success: true, data: { from: fromCode, to: toCode, date: d, rate: 1, source: "identity" } });
       }
-      const rate = await getRate(fromCode, toCode, d, userId);
+      // Issue #231 — surface per-leg source + worst-case top-level source.
+      const fromLookup = await getRateToUsdDetailed(fromCode, d, userId);
+      const toLookup = await getRateToUsdDetailed(toCode, d, userId);
+      if (toLookup.rate === 0) return sqliteErr(`Cannot convert into ${toCode} (rate is zero)`);
+      const rate = fromLookup.rate / toLookup.rate;
       const ratePrecise = Math.round(rate * 100000000) / 100000000;
-      return txt({ success: true, data: { from: fromCode, to: toCode, date: d, rate: ratePrecise, source: "triangulated" } });
+      const collapsedSource = collapseLegSources([fromLookup, toLookup]);
+      const effectiveDate =
+        fromLookup.effectiveDate < toLookup.effectiveDate
+          ? fromLookup.effectiveDate
+          : toLookup.effectiveDate;
+      return txt({ success: true, data: {
+        from: fromCode, to: toCode, date: d,
+        rate: ratePrecise,
+        source: collapsedSource,
+        effectiveDate,
+        legs: {
+          from: { ...fromLookup, currency: fromCode },
+          to: { ...toLookup, currency: toCode },
+        },
+      } });
     }
   );
 
@@ -2115,10 +2135,28 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (fromCode === toCode) {
         return txt({ success: true, data: { amount, from: fromCode, to: toCode, rate: 1, converted: amount } });
       }
-      const rate = await getRate(fromCode, toCode, d, userId);
+      // Issue #231 — per-leg source + worst-case top-level source (mirrors HTTP).
+      const fromLookup = await getRateToUsdDetailed(fromCode, d, userId);
+      const toLookup = await getRateToUsdDetailed(toCode, d, userId);
+      if (toLookup.rate === 0) return sqliteErr(`Cannot convert into ${toCode} (rate is zero)`);
+      const rate = fromLookup.rate / toLookup.rate;
       const converted = Math.round(amount * rate * 100) / 100;
       const ratePrecise = Math.round(rate * 100000000) / 100000000;
-      return txt({ success: true, data: { amount, from: fromCode, to: toCode, rate: ratePrecise, converted, date: d, source: "triangulated" } });
+      const collapsedSource = collapseLegSources([fromLookup, toLookup]);
+      const effectiveDate =
+        fromLookup.effectiveDate < toLookup.effectiveDate
+          ? fromLookup.effectiveDate
+          : toLookup.effectiveDate;
+      return txt({ success: true, data: {
+        amount, from: fromCode, to: toCode,
+        rate: ratePrecise, converted, date: d,
+        source: collapsedSource,
+        effectiveDate,
+        legs: {
+          from: { ...fromLookup, currency: fromCode },
+          to: { ...toLookup, currency: toCode },
+        },
+      } });
     }
   );
 

@@ -27,6 +27,7 @@ import {
   getRateToUsdDetailed,
   validateCurrencyCode,
   validateFxDate,
+  collapseLegSources,
 } from "../src/lib/fx-service";
 import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies";
 import {
@@ -6724,12 +6725,24 @@ export function registerPgTools(
       const warnings: string[] = [];
       if (fromLookup.source === "fallback") warnings.push(`No historical rate available for ${fromCode}; using hardcoded fallback.`);
       if (toLookup.source === "fallback") warnings.push(`No historical rate available for ${toCode}; using hardcoded fallback.`);
+      // Issue #231 — top-level `source` is the worst-case across legs so a
+      // "yahoo" response can't silently hide a "stale" leg. The earliest
+      // (most-stale) effectiveDate is also surfaced.
+      const collapsedSource = collapseLegSources([fromLookup, toLookup]);
+      const effectiveDate =
+        fromLookup.effectiveDate < toLookup.effectiveDate
+          ? fromLookup.effectiveDate
+          : toLookup.effectiveDate;
       // Issue #208 — `roundFxRate` (8dp) is the bank-standard rate precision.
       return text({ success: true, data: {
         from: fromCode, to: toCode, date: d,
         rate: roundFxRate(rate),
-        source: fromLookup.source === "override" || toLookup.source === "override" ? "override" : fromLookup.source,
-        legs: { from: fromLookup, to: toLookup },
+        source: collapsedSource,
+        effectiveDate,
+        legs: {
+          from: { ...fromLookup, currency: fromCode },
+          to: { ...toLookup, currency: toCode },
+        },
         ...(warnings.length ? { warnings } : {}),
       } });
     }
@@ -6842,12 +6855,33 @@ export function registerPgTools(
       if (fromCode === toCode) {
         return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: 1, converted: amount, source: "identity" } });
       }
-      const rate = await getRate(fromCode, toCode, d, userId);
+      // Issue #231 — resolve each leg explicitly (matching get_fx_rate) so we
+      // can surface per-leg `source`/`effectiveDate` and collapse to the
+      // worst-case top-level `source`. Previously this returned a flat
+      // "triangulated" label that hid stale fallback legs.
+      const fromLookup = await getRateToUsdDetailed(fromCode, d, userId);
+      const toLookup = await getRateToUsdDetailed(toCode, d, userId);
+      if (toLookup.rate === 0) return err(`Cannot convert into ${toCode} (rate is zero)`);
+      const rate = fromLookup.rate / toLookup.rate;
       // Issue #208 — `converted` is a money amount (target-currency precision);
       // `rate` is a divisor (8dp, bank standard). Helpers name the contract.
       const converted = roundMoney(amount * rate, toCode);
       const ratePrecise = roundFxRate(rate);
-      return text({ success: true, data: { amount, from: fromCode, to: toCode, rate: ratePrecise, converted, date: d, source: "triangulated" } });
+      const collapsedSource = collapseLegSources([fromLookup, toLookup]);
+      const effectiveDate =
+        fromLookup.effectiveDate < toLookup.effectiveDate
+          ? fromLookup.effectiveDate
+          : toLookup.effectiveDate;
+      return text({ success: true, data: {
+        amount, from: fromCode, to: toCode,
+        rate: ratePrecise, converted, date: d,
+        source: collapsedSource,
+        effectiveDate,
+        legs: {
+          from: { ...fromLookup, currency: fromCode },
+          to: { ...toLookup, currency: toCode },
+        },
+      } });
     }
   );
 
