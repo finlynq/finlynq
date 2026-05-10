@@ -1717,7 +1717,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           delete_budget: "delete_budget(category, month)",
           add_account: "add_account(name, type, group?, currency?, note?) — type: 'A'=asset, 'L'=liability.",
           update_account: "update_account(account, name?, group?, currency?, note?)",
-          delete_account: "delete_account(account, force?)",
+          delete_account: "delete_account(account_id, force?) — stdio refuses `account` (name) post Stream D Phase 4; pass account_id (numeric).",
           add_goal: "add_goal(name, type, target_amount, deadline?, account?)",
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?)",
           delete_goal: "delete_goal(goal)",
