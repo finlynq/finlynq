@@ -99,6 +99,12 @@ import {
   SignCategoryMismatchError,
 } from "../src/lib/transactions/sign-category-invariant";
 import { ymdDate, ymPeriod, parseYmdSafe } from "./lib/date-validators";
+import {
+  analyzeRecurringGroup,
+  isStale,
+  STALENESS_THRESHOLD_MULTIPLIER,
+  type RecurringDropReason,
+} from "../src/lib/recurring-detection";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -1814,7 +1820,7 @@ export function registerPgTools(
   // ── get_recurring_transactions ─────────────────────────────────────────────
   server.tool(
     "get_recurring_transactions",
-    "Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly. Issue #210 — sign convention: `avgAmount` is always POSITIVE; the `direction` field carries the inflow/outflow semantic. Matches the storage convention used by `subscriptions.amount` / `add_subscription` / `list_subscriptions`. (Pre-issue-#210 callers that read raw `avgAmount` to decide sign should switch to `direction`.)",
+    `Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly. Issue #210 — sign convention: \`avgAmount\` is always POSITIVE; the \`direction\` field carries the inflow/outflow semantic. Matches the storage convention used by \`subscriptions.amount\` / \`add_subscription\` / \`list_subscriptions\`. (Pre-issue-#210 callers that read raw \`avgAmount\` to decide sign should switch to \`direction\`.) Issue #235 — also surfaces \`daysSinceLast\`, \`expectedCadenceDays\`, and \`flagged\` per row (flagged when \`daysSinceLast > expectedCadenceDays * ${STALENESS_THRESHOLD_MULTIPLIER}\`) so callers can spot stale recurrences.`,
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },
@@ -1859,40 +1865,47 @@ export function registerPgTools(
 
       const recurring: Array<Record<string, unknown>> = [];
       for (const [, group] of groups) {
-        if (group.length < 3) continue;
-        const avg = group.reduce((s, t) => s + Number(t.amount), 0) / group.length;
-        if (Math.abs(avg) < 0.01) continue;
-        const consistent = group.every(t => Math.abs(Number(t.amount) - avg) / Math.abs(avg) < 0.2);
-        if (consistent) {
-          // Convert avg via the dominant row currency in the group.
-          const ccy = group[0].rowCurrency;
-          const fx = fxByCcy.get(ccy) ?? 1;
-          // Issue #210 — surface positive `avgAmount` to match the storage
-          // convention on `subscriptions.amount`. `direction` carries what
-          // sign used to (raw outflow → "outflow"; salary credit → "inflow").
-          const direction: "inflow" | "outflow" = avg >= 0 ? "inflow" : "outflow";
-          const avgAbs = Math.abs(avg);
-          const avgReporting = avgAbs * fx;
-          recurring.push({
-            payee: group[0].payee,
-            avgAmount: roundMoney(avgAbs, ccy),
-            direction,
-            avgAmountTagged: tagAmount(avgAbs, ccy, "account"),
-            avgAmountReporting: tagAmount(avgReporting, reporting, "reporting"),
-            count: group.length,
-            lastDate: group[group.length - 1].date,
-            currency: ccy,
-          });
-        }
+        // Shared with get_cash_flow_forecast (issue #235) — both tools must
+        // move in lockstep on the staleness threshold + drop-reason taxonomy.
+        const cadence = analyzeRecurringGroup(group, today);
+        if (!cadence.detected) continue;
+        // Convert avg via the dominant row currency in the group.
+        const ccy = group[0].rowCurrency;
+        const fx = fxByCcy.get(ccy) ?? 1;
+        // Issue #210 — surface positive `avgAmount` to match the storage
+        // convention on `subscriptions.amount`. `direction` carries what
+        // sign used to (raw outflow → "outflow"; salary credit → "inflow").
+        const direction: "inflow" | "outflow" = cadence.avg >= 0 ? "inflow" : "outflow";
+        const avgAbs = Math.abs(cadence.avg);
+        const avgReporting = avgAbs * fx;
+        recurring.push({
+          payee: group[0].payee,
+          avgAmount: roundMoney(avgAbs, ccy),
+          direction,
+          avgAmountTagged: tagAmount(avgAbs, ccy, "account"),
+          avgAmountReporting: tagAmount(avgReporting, reporting, "reporting"),
+          count: group.length,
+          lastDate: cadence.lastDate,
+          // Issue #235 — surface staleness signal so callers can flag
+          // subscriptions that have stopped charging without a cancellation.
+          daysSinceLast: cadence.daysSinceLast,
+          expectedCadenceDays: Math.round(cadence.expectedCadenceDays * 10) / 10,
+          flagged: isStale(cadence),
+          currency: ccy,
+        });
       }
-      return text({ reportingCurrency: reporting, recurring });
+      return text({
+        reportingCurrency: reporting,
+        recurring,
+        stalenessThresholdMultiplier: STALENESS_THRESHOLD_MULTIPLIER,
+      });
     }
   );
 
   // ── get_financial_health_score ─────────────────────────────────────────────
   server.tool(
     "get_financial_health_score",
-    "Calculate a financial health score 0-100 with breakdown by component. Component scores are currency-independent ratios; the underlying totals (income, expenses, liabilities, liquid assets) are converted to reportingCurrency (defaults to user's display currency).",
+    `Calculate a financial health score 0-100 with breakdown by component. Component scores are currency-independent ratios; the underlying totals (income, expenses, liabilities, liquid assets) are converted to reportingCurrency (defaults to user's display currency). Issue #235 changes: (a) final score is summed from un-rounded sub-components and rounded once at the end (no off-by-one); (b) liquid assets exclude illiquid asset accounts (uses \`accounts.is_investment\` + a cash-group whitelist); (c) Net Worth Trend is a real 3M delta with \`{ direction, magnitudePct, descriptor }\` payload; (d) when there are no budgets the Budget Adherence component is EXCLUDED (not penalized at 50/100) and the remaining weights renormalize — \`excludedComponents\` lists what was dropped; (e) DTI uses trailing-12-month debt payments / trailing-12-month income (no 3m × 4 extrapolation).`,
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Affects the underlying totals surfaced alongside the score."),
     },
@@ -1908,11 +1921,29 @@ export function registerPgTools(
         return r;
       };
 
+      // Cash-group whitelist for the liquid-assets filter (issue #235). Not
+      // an exhaustive list of "user-defined cash groups" — a starting point
+      // mirroring the load-bearing branching shape used by /api/goals
+      // currentAmount and the account-balance rule. If validation surfaces
+      // accounts that should be liquid but aren't, extend this list rather
+      // than reverting to substring matching on `group`.
+      const CASH_GROUPS = new Set([
+        "Banks",
+        "Cash Accounts",
+        "Cash",
+        "Savings",
+        "Chequing",
+        "Checking",
+      ]);
+
       const now = new Date();
       const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
       const threeAgo = new Date(now); threeAgo.setMonth(threeAgo.getMonth() - 3);
       const threeStart = `${threeAgo.getFullYear()}-${String(threeAgo.getMonth() + 1).padStart(2, "0")}-01`;
+      const twelveAgo = new Date(now); twelveAgo.setFullYear(twelveAgo.getFullYear() - 1);
+      const twelveStart = twelveAgo.toISOString().split("T")[0];
 
+      // 3-month window for savings-rate (existing semantics).
       const incomeExpenses = await q(db, sql`
         SELECT TO_CHAR(t.date::date, 'YYYY-MM') AS month, c.type AS cat_type,
                COALESCE(t.currency, a.currency) AS currency,
@@ -1934,12 +1965,46 @@ export function registerPgTools(
 
       const savingsRateScore = totalIncome > 0 ? Math.min(100, Math.max(0, ((totalIncome - totalExpenses) / totalIncome) * 500)) : 0;
 
+      // 12-month window for DTI (issue #235). Annualizing income from a 3m
+      // window distorts in months with skewed payment timing — Q1 lump sums
+      // get multiplied by 4. Compute trailing-12m on both sides directly.
+      const incomeDebt12m = await q(db, sql`
+        SELECT c.type AS cat_type,
+               COALESCE(t.currency, a.currency) AS currency,
+               SUM(t.amount) AS total
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        LEFT JOIN accounts a ON a.id = t.account_id
+        WHERE t.user_id = ${userId} AND t.date >= ${twelveStart}
+          AND (c.type = 'I' OR (a.type = 'L' AND t.amount < 0))
+        GROUP BY c.type, COALESCE(t.currency, a.currency), a.type
+      `) as { cat_type: string | null; currency: string | null; total: number }[];
+
+      let income12m = 0;
+      let debtPayments12m = 0;
+      for (const r of incomeDebt12m) {
+        const fx = await fxFor(String(r.currency ?? reporting));
+        const converted = Number(r.total) * fx;
+        if (r.cat_type === "I") {
+          income12m += converted;
+        } else {
+          // a.type = 'L' AND amount < 0 = payment INTO the liability (paying
+          // down the loan / paying the credit card). Flip sign so positive.
+          debtPayments12m += Math.abs(converted);
+        }
+      }
+
+      // Liquid-assets filter (issue #235). is_investment branching mirrors
+      // the load-bearing rule documented in CLAUDE.md (goals currentAmount,
+      // account-balance). Real estate / vehicles / locked-in retirement
+      // plans no longer slip through the substring filter.
       const balances = await q(db, sql`
-        SELECT a.type, a."group", a.currency, COALESCE(SUM(t.amount), 0) AS balance
+        SELECT a.type, a."group", a.currency, a.is_investment,
+               COALESCE(SUM(t.amount), 0) AS balance
         FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
         WHERE a.user_id = ${userId}
-        GROUP BY a.id, a.type, a."group", a.currency
-      `) as { type: string; group: string; currency: string | null; balance: number }[];
+        GROUP BY a.id, a.type, a."group", a.currency, a.is_investment
+      `) as { type: string; group: string; currency: string | null; is_investment: boolean | null; balance: number }[];
 
       let totalLiabilities = 0;
       let liquidAssets = 0;
@@ -1947,15 +2012,76 @@ export function registerPgTools(
         const fx = await fxFor(String(b.currency ?? reporting));
         const converted = Number(b.balance) * fx;
         if (b.type === "L") totalLiabilities += Math.abs(converted);
-        if (b.type === "A" && !b.group.toLowerCase().includes("invest") && !b.group.toLowerCase().includes("retire")) {
-          liquidAssets += converted;
+        if (b.type === "A") {
+          const groupTrim = (b.group ?? "").trim();
+          if (b.is_investment !== true && CASH_GROUPS.has(groupTrim)) {
+            liquidAssets += converted;
+          }
         }
       }
-      const annualIncome = totalIncome > 0 ? (totalIncome / 3) * 12 : 0;
-      const dtiScore = annualIncome > 0 ? Math.min(100, Math.max(0, (1 - totalLiabilities / annualIncome) * 100)) : (totalLiabilities === 0 ? 100 : 0);
+      const dtiRatio = income12m > 0 ? debtPayments12m / income12m : null;
+      const dtiScore = dtiRatio !== null
+        ? Math.min(100, Math.max(0, (1 - dtiRatio) * 100))
+        : (debtPayments12m === 0 ? 100 : 0);
 
       const avgMonthlyExpenses = totalExpenses / 3;
       const emergencyScore = avgMonthlyExpenses > 0 ? Math.min(100, Math.max(0, (liquidAssets / avgMonthlyExpenses / 6) * 100)) : (liquidAssets > 0 ? 50 : 0);
+
+      // Net Worth Trend (issue #235). Compute net worth today vs. ~90 days
+      // ago using the same balance roll-up shape as the balances query, but
+      // gated by t.date <= cutoff. Score the 3m delta on a centered scale:
+      // -10% magnitude => 0, +10% => 100, flat => 50.
+      const ninetyDaysAgo = new Date(now.getTime() - 90 * 86400000);
+      const ninetyDaysAgoStr = ninetyDaysAgo.toISOString().split("T")[0];
+      const balancesPast = await q(db, sql`
+        SELECT a.currency, COALESCE(SUM(t.amount), 0) AS balance
+        FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId} AND t.date <= ${ninetyDaysAgoStr}
+        WHERE a.user_id = ${userId}
+        GROUP BY a.id, a.currency
+      `) as { currency: string | null; balance: number }[];
+
+      let nwToday = 0;
+      let nwPast = 0;
+      for (const b of balances) {
+        const fx = await fxFor(String(b.currency ?? reporting));
+        nwToday += Number(b.balance) * fx;
+      }
+      for (const b of balancesPast) {
+        const fx = await fxFor(String(b.currency ?? reporting));
+        nwPast += Number(b.balance) * fx;
+      }
+
+      // Detect "not enough history" by checking how far back the user has
+      // any transaction at all. If the oldest tx is < 60d old, the trend
+      // signal is unreliable.
+      const oldestRow = await q(db, sql`
+        SELECT MIN(t.date) AS oldest FROM transactions t WHERE t.user_id = ${userId}
+      `) as { oldest: string | null }[];
+      const oldestStr = oldestRow[0]?.oldest ?? null;
+      const oldestAgeDays = oldestStr
+        ? Math.round((now.getTime() - new Date(oldestStr + "T00:00:00").getTime()) / 86400000)
+        : 0;
+      const insufficientHistory = !oldestStr || oldestAgeDays < 60;
+
+      const nwAbsBase = Math.max(Math.abs(nwToday), Math.abs(nwPast), 1);
+      const nwDelta = nwToday - nwPast;
+      const nwMagnitudePct = insufficientHistory ? 0 : Math.round((nwDelta / nwAbsBase) * 1000) / 10;
+      const nwDirection: "up" | "down" | "flat" = insufficientHistory
+        ? "flat"
+        : Math.abs(nwMagnitudePct) < 0.5
+          ? "flat"
+          : nwMagnitudePct > 0
+            ? "up"
+            : "down";
+      const nwDescriptor = insufficientHistory
+        ? "Not enough history"
+        : nwDirection === "flat"
+          ? "Flat over the last 3 months"
+          : `${nwDirection === "up" ? "Up" : "Down"} ${Math.abs(nwMagnitudePct).toFixed(1)}% over the last 3 months`;
+      // Score: 0 = -10% or worse, 50 = flat, 100 = +10% or better.
+      const nwScore = insufficientHistory
+        ? 0
+        : Math.min(100, Math.max(0, 50 + nwMagnitudePct * 5));
 
       const budgetsData = await q(db, sql`
         SELECT b.id, b.amount AS budget,
@@ -1967,31 +2093,108 @@ export function registerPgTools(
         GROUP BY b.id, b.amount
       `) as { budget: number; spent: number }[];
 
+      const budgetOnTrackCount = budgetsData.filter(b => Number(b.spent) <= Math.abs(Number(b.budget))).length;
       const budgetScore = budgetsData.length > 0
-        ? Math.round((budgetsData.filter(b => Number(b.spent) <= Math.abs(Number(b.budget))).length / budgetsData.length) * 100)
-        : 50;
+        ? (budgetOnTrackCount / budgetsData.length) * 100
+        : 0;
 
-      const components = [
-        { name: "Savings Rate", score: Math.round(savingsRateScore), weight: 0.3, weighted: Math.round(savingsRateScore * 0.3), detail: totalIncome > 0 ? `${Math.round(((totalIncome - totalExpenses) / totalIncome) * 100)}% savings rate` : "No income data" },
-        { name: "Debt-to-Income", score: Math.round(dtiScore), weight: 0.2, weighted: Math.round(dtiScore * 0.2), detail: annualIncome > 0 ? `${Math.round((totalLiabilities / annualIncome) * 100)}% debt-to-income` : "No income data" },
-        { name: "Emergency Fund", score: Math.round(emergencyScore), weight: 0.2, weighted: Math.round(emergencyScore * 0.2), detail: avgMonthlyExpenses > 0 ? `${(liquidAssets / avgMonthlyExpenses).toFixed(1)} months covered` : "No expense data" },
-        { name: "Net Worth Trend", score: 50, weight: 0.15, weighted: 8, detail: "Tracking" },
-        { name: "Budget Adherence", score: budgetScore, weight: 0.15, weighted: Math.round(budgetScore * 0.15), detail: budgetsData.length > 0 ? `${budgetsData.filter(b => Number(b.spent) <= Math.abs(Number(b.budget))).length}/${budgetsData.length} on track` : "No budgets set" },
+      // Build the candidate component list (un-rounded internally — we
+      // round ONCE at the end). Components with `excluded: true` are
+      // dropped from the weighted average and their weight is
+      // renormalized across the remaining ones.
+      const candidates: Array<{
+        name: string;
+        scoreRaw: number;
+        weightCanonical: number;
+        detail: unknown;
+        excluded: boolean;
+        excludeReason?: string;
+      }> = [
+        {
+          name: "Savings Rate",
+          scoreRaw: savingsRateScore,
+          weightCanonical: 0.3,
+          detail: totalIncome > 0 ? `${Math.round(((totalIncome - totalExpenses) / totalIncome) * 100)}% savings rate` : "No income data",
+          excluded: false,
+        },
+        {
+          name: "Debt-to-Income",
+          scoreRaw: dtiScore,
+          weightCanonical: 0.2,
+          detail: dtiRatio !== null ? `${Math.round(dtiRatio * 100)}% debt-to-income (12m)` : (debtPayments12m === 0 ? "No debt payments (12m)" : "No income data (12m)"),
+          excluded: false,
+        },
+        {
+          name: "Emergency Fund",
+          scoreRaw: emergencyScore,
+          weightCanonical: 0.2,
+          detail: avgMonthlyExpenses > 0 ? `${(liquidAssets / avgMonthlyExpenses).toFixed(1)} months covered` : "No expense data",
+          excluded: false,
+        },
+        {
+          name: "Net Worth Trend",
+          scoreRaw: nwScore,
+          weightCanonical: 0.15,
+          detail: { direction: nwDirection, magnitudePct: nwMagnitudePct, descriptor: nwDescriptor },
+          excluded: insufficientHistory,
+          excludeReason: insufficientHistory ? "insufficient_history" : undefined,
+        },
+        {
+          name: "Budget Adherence",
+          scoreRaw: budgetScore,
+          weightCanonical: 0.15,
+          detail: budgetsData.length > 0 ? `${budgetOnTrackCount}/${budgetsData.length} on track` : "No budgets set",
+          excluded: budgetsData.length === 0,
+          excludeReason: budgetsData.length === 0 ? "no_budgets" : undefined,
+        },
       ];
 
-      const totalScore = components.reduce((s, c) => s + c.weighted, 0);
+      // Renormalize the kept components' weights so they sum to 1.0.
+      const keptWeightSum = candidates.filter(c => !c.excluded).reduce((s, c) => s + c.weightCanonical, 0);
+      const components = candidates
+        .filter(c => !c.excluded)
+        .map(c => {
+          const weight = keptWeightSum > 0 ? c.weightCanonical / keptWeightSum : 0;
+          const weightedRaw = c.scoreRaw * weight;
+          return {
+            name: c.name,
+            score: Math.round(c.scoreRaw),
+            weight: Math.round(weight * 1000) / 1000,
+            weighted: Math.round(weightedRaw),
+            weightedRaw,
+            detail: c.detail,
+          };
+        });
+
+      const totalScoreRaw = components.reduce((s, c) => s + c.weightedRaw, 0);
+      const totalScore = Math.round(Math.min(100, Math.max(0, totalScoreRaw)));
       const grade = totalScore >= 80 ? "Excellent" : totalScore >= 60 ? "Good" : totalScore >= 40 ? "Fair" : "Needs Work";
 
+      const excludedComponents = candidates
+        .filter(c => c.excluded)
+        .map(c => ({
+          name: c.name,
+          reason: c.excludeReason ?? "excluded",
+          detail: c.detail,
+        }));
+
       return text({
-        score: Math.min(100, Math.max(0, totalScore)),
+        score: totalScore,
         grade,
-        components,
+        // Strip the internal `weightedRaw` from the surface response (it's
+        // a computational helper, not user-facing).
+        components: components.map(({ weightedRaw: _wr, ...rest }) => rest),
+        excludedComponents,
         reportingCurrency: reporting,
         totals: {
           totalIncome3m: tagAmount(totalIncome, reporting, "reporting"),
           totalExpenses3m: tagAmount(totalExpenses, reporting, "reporting"),
+          totalIncome12m: tagAmount(income12m, reporting, "reporting"),
+          totalDebtPayments12m: tagAmount(debtPayments12m, reporting, "reporting"),
           totalLiabilities: tagAmount(totalLiabilities, reporting, "reporting"),
           liquidAssets: tagAmount(liquidAssets, reporting, "reporting"),
+          netWorthToday: tagAmount(nwToday, reporting, "reporting"),
+          netWorth90DaysAgo: tagAmount(nwPast, reporting, "reporting"),
         },
       });
     }
@@ -2290,7 +2493,7 @@ export function registerPgTools(
   // ── get_cash_flow_forecast ─────────────────────────────────────────────────
   server.tool(
     "get_cash_flow_forecast",
-    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency). Issue #210: by default, `currentBalance` scopes to accounts in the 'Banks' or 'Cash Accounts' groups; the response surfaces `accountsIncluded` + `accountsExcluded` so callers see exactly which accounts are in scope. Pass `accountFilter` to override (include/exclude lists or set `includeInvestments: true` to fold investment-account cash sleeves into the projection).",
+    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency). Issue #210: by default, `currentBalance` scopes to accounts in the 'Banks' or 'Cash Accounts' groups; the response surfaces `accountsIncluded` + `accountsExcluded` so callers see exactly which accounts are in scope. Pass `accountFilter` to override (include/exclude lists or set `includeInvestments: true` to fold investment-account cash sleeves into the projection). Issue #235: response now includes `recurringContributions[]` with one row per detected-or-dropped candidate (`{ name, monthly, daysSinceLast, included, dropReason? }`); empty list explains a near-zero forecast. Stale recurrences (`daysSinceLast > 1.5 × cadence`) are dropped with `dropReason: 'stale'` rather than projected forward.",
     {
       days: z.number().optional().describe("Forecast horizon in days (default 90)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
@@ -2347,25 +2550,70 @@ export function registerPgTools(
         groups.set(key, [...(groups.get(key) ?? []), t]);
       }
 
-      const recurring: { payee: string; avgAmount: number; frequency: string; lastDate: string; nextDate: string }[] = [];
+      // Issue #235 — instead of `continue`-ing on every drop, accumulate
+      // dropped candidates with a `dropReason` so the response can explain
+      // a near-zero forecast. Stale recurrences are also dropped (don't
+      // project an item that's stopped charging).
+      type RecurringRow = {
+        payee: string;
+        avgAmount: number;
+        avgAmountSigned: number;
+        frequency: string;
+        avgInterval: number;
+        lastDate: string;
+        nextDate: string;
+        daysSinceLast: number;
+      };
+      type DroppedRow = {
+        payee: string;
+        avgMonthlySigned: number;
+        daysSinceLast: number;
+        dropReason: RecurringDropReason;
+      };
+      const recurring: RecurringRow[] = [];
+      const dropped: DroppedRow[] = [];
       for (const [, group] of groups) {
-        if (group.length < 3) continue;
-        const avg = group.reduce((s, t) => s + Number(t.amount), 0) / group.length;
-        if (Math.abs(avg) < 0.01) continue;
-        const consistent = group.every(t => Math.abs(Number(t.amount) - avg) / Math.abs(avg) < 0.2);
-        if (!consistent) continue;
-        const sorted = [...group].sort((a, b) => a.date.localeCompare(b.date));
-        const intervals: number[] = [];
-        for (let i = 1; i < sorted.length; i++) {
-          const d1 = new Date(sorted[i - 1].date + "T00:00:00").getTime();
-          const d2 = new Date(sorted[i].date + "T00:00:00").getTime();
-          intervals.push(Math.round((d2 - d1) / 86400000));
+        const cadence = analyzeRecurringGroup(group, todayStr);
+        const payee = group[0].payee;
+        const avgIntervalRaw = cadence.expectedCadenceDays;
+        const monthlyFrom = (avg: number) => {
+          if (avgIntervalRaw <= 0) return 0;
+          // Normalize avg row amount to a monthly cadence for the response.
+          return avg * (30 / avgIntervalRaw);
+        };
+        if (!cadence.detected) {
+          dropped.push({
+            payee,
+            avgMonthlySigned: Math.round(monthlyFrom(cadence.avg) * 100) / 100,
+            daysSinceLast: cadence.daysSinceLast,
+            dropReason: cadence.dropReason ?? "inconsistent",
+          });
+          continue;
         }
-        const avgInterval = intervals.reduce((s, d) => s + d, 0) / intervals.length;
+        if (isStale(cadence)) {
+          dropped.push({
+            payee,
+            avgMonthlySigned: Math.round(monthlyFrom(cadence.avg) * 100) / 100,
+            daysSinceLast: cadence.daysSinceLast,
+            dropReason: "stale",
+          });
+          continue;
+        }
+        const avgInterval = avgIntervalRaw;
         const freq = avgInterval <= 10 ? "weekly" : avgInterval <= 20 ? "biweekly" : avgInterval <= 45 ? "monthly" : "yearly";
-        const lastDate = sorted[sorted.length - 1].date;
+        const lastDate = cadence.lastDate;
         const nextDate = new Date(new Date(lastDate + "T00:00:00").getTime() + avgInterval * 86400000).toISOString().split("T")[0];
-        recurring.push({ payee: group[0].payee, avgAmount: Math.round(avg * 100) / 100, frequency: freq, lastDate, nextDate });
+        const avgRounded = Math.round(cadence.avg * 100) / 100;
+        recurring.push({
+          payee,
+          avgAmount: avgRounded,
+          avgAmountSigned: avgRounded,
+          frequency: freq,
+          avgInterval,
+          lastDate,
+          nextDate,
+          daysSinceLast: cadence.daysSinceLast,
+        });
       }
 
       // Issue #210 — partition every account by its `group` so we can
@@ -2438,6 +2686,29 @@ export function registerPgTools(
       }
 
       const projectedBalance = milestones.length > 0 ? milestones[milestones.length - 1].balance : currentBalance;
+
+      // Issue #235 — per-recurring-item attribution. Empty
+      // recurringContributions is itself a load-bearing signal that
+      // explains a near-zero forecast.
+      const recurringContributions = [
+        ...recurring.map(r => {
+          const monthly = r.avgInterval > 0 ? r.avgAmountSigned * (30 / r.avgInterval) : 0;
+          return {
+            name: r.payee,
+            monthly: Math.round(monthly * 100) / 100,
+            daysSinceLast: r.daysSinceLast,
+            included: true,
+          };
+        }),
+        ...dropped.map(d => ({
+          name: d.payee,
+          monthly: d.avgMonthlySigned,
+          daysSinceLast: d.daysSinceLast,
+          included: false,
+          dropReason: d.dropReason,
+        })),
+      ];
+
       return text({
         reportingCurrency: reporting,
         currentBalance: tagAmount(currentBalance, reporting, "reporting"),
@@ -2458,7 +2729,12 @@ export function registerPgTools(
             ...m,
             balanceTagged: tagAmount(m.balance, reporting, "reporting"),
           })),
-        recurringItems: recurring.length,
+        // Issue #235 — `recurringItems` becomes structured so callers see
+        // both included and dropped counts; `recurringContributions` lists
+        // each one with `included` + optional `dropReason`.
+        recurringItems: { included: recurring.length, dropped: dropped.length },
+        recurringContributions,
+        stalenessThresholdMultiplier: STALENESS_THRESHOLD_MULTIPLIER,
       });
     }
   );
@@ -4819,6 +5095,9 @@ export function registerPgTools(
           record_trade: "record_trade(account_id? OR account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. PREFER account_id (exact); the account name path is strict fuzzy with fail-loud ambiguity, mismatched name+id fails loud. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
           preview_bulk_update: "preview_bulk_update(filter, changes) — accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker → id), tags ({mode: append|replace|remove, value}). Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. Stdio surface is narrower (no quantity/holding fields).",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Same `changes` keys as preview_bulk_update. Stdio: category-by-name only; quantity/holding writes refused.",
+          get_financial_health_score: "get_financial_health_score(reportingCurrency?) — Score 0-100 with 5 components (Savings Rate, Debt-to-Income, Emergency Fund, Net Worth Trend, Budget Adherence). Issue #235: final score is summed un-rounded then rounded once at the end (no off-by-one). DTI uses trailing-12m debt payments / trailing-12m income (not 3m × 4). Liquid assets EXCLUDE illiquid asset accounts (uses is_investment + cash-group whitelist; real estate / vehicles / locked-in retirement no longer slip through). Net Worth Trend is a real 3M delta returning {direction, magnitudePct, descriptor}. Components with no data (no budgets, insufficient history) are EXCLUDED from the weighted average and surfaced in `excludedComponents` — remaining weights renormalize to 1.0.",
+          get_recurring_transactions: "get_recurring_transactions(reportingCurrency?) — Detected recurring transactions over the last year. Issue #210: `avgAmount` is always positive; `direction` carries inflow/outflow. Issue #235: each row also surfaces `daysSinceLast`, `expectedCadenceDays`, `flagged: boolean` (true when `daysSinceLast > expectedCadenceDays * 1.5`). `stalenessThresholdMultiplier` is surfaced at the top level so callers can recompute the threshold.",
+          get_cash_flow_forecast: "get_cash_flow_forecast(days?, reportingCurrency?, accountFilter?) — Project cash flow for the next 30/60/90 days. Issue #210: scopes `currentBalance` to Banks+Cash by default; surfaces `accountsIncluded` + `accountsExcluded`. `accountFilter` overrides (include[], exclude[], includeInvestments). Issue #235: response includes `recurringContributions[]` — one row per detected OR dropped candidate `{ name, monthly, daysSinceLast, included, dropReason? }` where dropReason ∈ 'too_few_occurrences' | 'amount_too_small' | 'inconsistent' | 'stale'. Stale recurrences are dropped from the projection (don't forward-project an item that's stopped charging). Empty `recurringContributions` is itself a load-bearing signal that explains a near-zero forecast.",
         };
         return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
       }
