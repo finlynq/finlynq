@@ -6,6 +6,8 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+- Add public Terms of Service at `/terms` covering the managed cloud service. Required for Anthropic Connectors Directory submission Page 6 attestation. AGPL v3 governs self-hosted use of the source; these Terms govern finlynq.com only.
+
 ## 2026-05-10 — [BREAKING] MCP API hygiene Phase 3: envelopes 3.1.0 + delete_category (#237)
 
 Third and final phase of the MCP API hygiene cluster from #211. **BREAKING change to MCP envelope shape — version bump 3.0.0 → 3.1.0 at both stdio and HTTP entry points.** Tool count goes 90 HTTP / 86 stdio → **91 HTTP / 87 stdio**.
