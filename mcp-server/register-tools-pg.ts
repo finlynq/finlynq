@@ -187,6 +187,20 @@ function text(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
+/**
+ * Issue #237 — unified envelope helper for read tools that previously
+ * returned raw arrays/objects via `text(rawValue)`. Wraps the value in the
+ * canonical `{ success: true, data: <T> }` envelope so every MCP read tool
+ * returns the same outer shape. Same wire encoding as `text()` — only the
+ * shape of the JSON inside differs.
+ *
+ * Use this for new read-tool surfaces and when normalizing legacy callsites.
+ * Existing `text({ success: true, data: ... })` writes don't need to change.
+ */
+function dataResponse(data: unknown) {
+  return text({ success: true, data });
+}
+
 function err(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
 }
@@ -1197,7 +1211,7 @@ export function registerPgTools(
         };
       });
 
-      return text({
+      return dataResponse({
         accounts: enriched,
         reportingCurrency: reporting,
         totalReporting: tagAmount(agg.totalReporting, reporting, "reporting"),
@@ -1310,7 +1324,7 @@ export function registerPgTools(
         };
       });
 
-      return text({ results: tagged, count: tagged.length, reportingCurrency: reporting });
+      return dataResponse({ results: tagged, count: tagged.length, reportingCurrency: reporting });
     }
   );
 
@@ -1346,7 +1360,7 @@ export function registerPgTools(
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
-      return text({ rows, reportingCurrency: reporting });
+      return dataResponse({ rows, reportingCurrency: reporting });
     }
   );
 
@@ -1402,7 +1416,7 @@ export function registerPgTools(
       // Issue #210 — surface `currentMonth` + `priorMonths` so downstream
       // dashboards can flag the partial-month row, and echo `reportingCurrency`
       // for shape symmetry with the current-totals branch.
-      return text({
+      return dataResponse({
         rows,
         reportingCurrency: reporting,
         priorMonths: lookback,
@@ -1456,7 +1470,7 @@ export function registerPgTools(
         dek,
       });
       const unrealizedTotals = summarizeUnrealizedPnL(unrealized);
-      return text({
+      return dataResponse({
         rows,
         reportingCurrency: reporting,
         unrealized: {
@@ -1572,7 +1586,7 @@ export function registerPgTools(
             net: roundMoney(vals.net, ccy),
           };
         }
-        return text({
+        return dataResponse({
           byCurrency: roundedSummary,
           reportingCurrency: reporting,
           total: {
@@ -1639,7 +1653,7 @@ export function registerPgTools(
         };
       });
 
-      return text({
+      return dataResponse({
         priorMonths: lookback,
         // Backwards-compat: keep `months` echoed in the response for callers
         // that still parse it. Will be dropped in a future release.
@@ -1659,7 +1673,7 @@ export function registerPgTools(
       WHERE g.user_id = ${userId}
       ORDER BY g.priority
     `);
-    if (!goalsRaw.length) return text([]);
+    if (!goalsRaw.length) return dataResponse([]);
     const goalIds = goalsRaw.map((g) => Number(g.id));
     // Pull every (goal_id, account_id, account_name_ct) link in one query.
     // Note: Drizzle's `sql` tag interpolates a JS array as separate scalar
@@ -1717,7 +1731,7 @@ export function registerPgTools(
         monthlyNeeded: progress?.monthlyNeeded ?? 0,
       };
     });
-    return text(rows);
+    return dataResponse(rows);
   });
 
   // ── get_categories ─────────────────────────────────────────────────────────
@@ -1734,11 +1748,14 @@ export function registerPgTools(
       void name_ct;
       return rest;
     });
-    return text(rows);
+    return dataResponse(rows);
   });
 
   // ── get_loans ─────────────────────────────────────────────────────────────
-  server.tool("get_loans", "Get all loans with amortization summary", {}, async () => {
+  // Issue #237 — DEPRECATED in favor of `list_loans`. The two tools return
+  // the same logical resource; `list_loans` has been the canonical surface
+  // since v3 envelope unification. Plan removal in v3.2.0.
+  server.tool("get_loans", "[DEPRECATED — use list_loans] Get all loans with amortization summary. Returned in the unified `{ success: true, data: [...] }` envelope as of v3.1.0.", {}, async () => {
     const raw = await q(db, sql`
       SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
              payment_frequency, extra_payment
@@ -1750,7 +1767,7 @@ export function registerPgTools(
       void name_ct;
       return rest;
     });
-    return text(rows);
+    return dataResponse(rows);
   });
 
   // ── get_subscription_summary ───────────────────────────────────────────────
@@ -1827,7 +1844,7 @@ export function registerPgTools(
         })
         .sort((a, b) => String(a.date ?? "").localeCompare(String(b.date ?? "")));
 
-      return text({
+      return dataResponse({
         reportingCurrency: reporting,
         totalMonthlyCost: tagAmount(totalMonthlyCostReporting, reporting, "reporting"),
         totalAnnualCost: tagAmount(totalMonthlyCostReporting * 12, reporting, "reporting"),
@@ -1916,7 +1933,7 @@ export function registerPgTools(
           currency: ccy,
         });
       }
-      return text({
+      return dataResponse({
         reportingCurrency: reporting,
         recurring,
         stalenessThresholdMultiplier: STALENESS_THRESHOLD_MULTIPLIER,
@@ -2200,7 +2217,7 @@ export function registerPgTools(
           detail: c.detail,
         }));
 
-      return text({
+      return dataResponse({
         score: totalScore,
         grade,
         // Strip the internal `weightedRaw` from the surface response (it's
@@ -2308,7 +2325,7 @@ export function registerPgTools(
       }
 
       anomalies.sort((a, b) => Math.abs(b.percentDeviation) - Math.abs(a.percentDeviation));
-      return text({ month: currentMonth, reportingCurrency: reporting, anomalies, count: anomalies.length });
+      return dataResponse({ month: currentMonth, reportingCurrency: reporting, anomalies, count: anomalies.length });
     }
   );
 
@@ -2378,7 +2395,7 @@ export function registerPgTools(
 
       const order: Record<string, number> = { critical: 0, warning: 1, info: 2 };
       items.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
-      return text(items);
+      return dataResponse(items);
     }
   );
 
@@ -2495,7 +2512,7 @@ export function registerPgTools(
         };
       }));
 
-      return text({
+      return dataResponse({
         weekStart: ws,
         weekEnd: we,
         reportingCurrency: reporting,
@@ -2731,7 +2748,7 @@ export function registerPgTools(
         })),
       ];
 
-      return text({
+      return dataResponse({
         reportingCurrency: reporting,
         currentBalance: tagAmount(currentBalance, reporting, "reporting"),
         daysAhead: horizon,
@@ -2784,7 +2801,7 @@ export function registerPgTools(
       } else {
         await db.execute(sql`INSERT INTO budgets (user_id, category_id, month, amount) VALUES (${userId}, ${cat.id}, ${month}, ${amount})`);
       }
-      return text({ success: true, message: `Budget set: ${category} = $${amount} for ${month}` });
+      return text({ success: true, data: { message: `Budget set: ${category} = $${amount} for ${month}` } });
     }
   );
 
@@ -2846,9 +2863,11 @@ export function registerPgTools(
       }
       return text({
         success: true,
-        goalId,
-        accountIds: resolvedIds,
-        message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}${resolvedIds.length > 0 ? ` linked to ${resolvedIds.length} account(s)` : ""}`,
+        data: {
+          goalId,
+          accountIds: resolvedIds,
+          message: `Goal created: "${name}" — target $${target_amount}${deadline ? ` by ${deadline}` : ""}${resolvedIds.length > 0 ? ` linked to ${resolvedIds.length} account(s)` : ""}`,
+        },
       });
     }
   );
@@ -2898,7 +2917,7 @@ export function registerPgTools(
         RETURNING id
       `);
 
-      return text({ success: true, accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})${aliasValue ? `, alias "${aliasValue}"` : ""}` });
+      return text({ success: true, data: { accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})${aliasValue ? `, alias "${aliasValue}"` : ""}` } });
     }
   );
 
@@ -3107,20 +3126,22 @@ export function registerPgTools(
         // out and get the same fields back.
         return text({
           success: true,
-          dryRun: true,
-          wouldBeId: null,
-          resolvedAccount: resolvedAccountInfo,
-          resolvedCategory,
-          resolvedHolding,
-          amount: resolved.amount,
-          currency: resolved.currency,
-          enteredAmount: resolved.enteredAmount,
-          enteredCurrency: resolved.enteredCurrency,
-          enteredFxRate: resolved.enteredFxRate,
-          tradeLinkId: tradeLinkId ?? null,
-          date: txDate,
-          message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
-          warnings,
+          data: {
+            dryRun: true,
+            wouldBeId: null,
+            resolvedAccount: resolvedAccountInfo,
+            resolvedCategory,
+            resolvedHolding,
+            amount: resolved.amount,
+            currency: resolved.currency,
+            enteredAmount: resolved.enteredAmount,
+            enteredCurrency: resolved.enteredCurrency,
+            enteredFxRate: resolved.enteredFxRate,
+            tradeLinkId: tradeLinkId ?? null,
+            date: txDate,
+            message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
+            warnings,
+          },
         });
       }
 
@@ -3154,16 +3175,18 @@ export function registerPgTools(
       invalidateUserTxCache(userId);
       return text({
         success: true,
-        transactionId: result[0]?.id,
-        createdAt: result[0]?.created_at,
-        updatedAt: result[0]?.updated_at,
-        source: result[0]?.source,
-        tradeLinkId: result[0]?.trade_link_id ?? null,
-        resolvedAccount: resolvedAccountInfo,
-        resolvedCategory,
-        resolvedHolding,
-        message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
-        warnings,
+        data: {
+          transactionId: result[0]?.id,
+          createdAt: result[0]?.created_at,
+          updatedAt: result[0]?.updated_at,
+          source: result[0]?.source,
+          tradeLinkId: result[0]?.trade_link_id ?? null,
+          resolvedAccount: resolvedAccountInfo,
+          resolvedCategory,
+          resolvedHolding,
+          message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → ${acct.name} (${catName})${resolved.enteredCurrency !== resolved.currency ? ` [entered: ${resolved.enteredAmount} ${resolved.enteredCurrency} @ rate ${resolved.enteredFxRate}]` : ""}`,
+          warnings,
+        },
       });
     }
   );
@@ -3216,7 +3239,16 @@ export function registerPgTools(
             // Drizzle/pg returns jsonb as a parsed object; if a future
             // driver returns a string, parse defensively.
             const replay = typeof stored === "string" ? JSON.parse(stored) : stored;
-            return text({ ...replay, replayed: true });
+            // Issue #237 — wrap in the unified `{success, data}` envelope.
+            // Pre-3.1.0 caches stored the bare body and surface 3.1.0-shape
+            // on replay so callers always see the same outer envelope.
+            const replayHasNewEnvelope =
+              replay && typeof replay === "object" && "success" in replay && "data" in replay;
+            if (replayHasNewEnvelope) {
+              const data = (replay as { data?: Record<string, unknown> }).data ?? {};
+              return text({ success: true, data: { ...data, replayed: true } });
+            }
+            return text({ success: true, data: { ...(replay as Record<string, unknown>), replayed: true } });
           }
         } catch (e) {
           // Lookup failure must not block the live write path — log and fall
@@ -3679,13 +3711,19 @@ export function registerPgTools(
         }
       }
 
+      // Issue #237 — wrap the per-batch metadata in the unified
+      // `{success: true, data: {...}}` envelope. Persistence and replay
+      // walk through the same shape so caches stay symmetric.
       const responseBody = {
-        ...(dryRun ? { dryRun: true } : {}),
-        imported: dryRun ? 0 : ok,
-        failed: results.length - ok,
-        ...(dryRun ? { previewed: ok } : {}),
-        results,
-        possibleDuplicates,
+        success: true as const,
+        data: {
+          ...(dryRun ? { dryRun: true } : {}),
+          imported: dryRun ? 0 : ok,
+          failed: results.length - ok,
+          ...(dryRun ? { previewed: ok } : {}),
+          results,
+          possibleDuplicates,
+        },
       };
 
       // Issue #98 — persist the redacted response under the caller-supplied
@@ -3703,7 +3741,7 @@ export function registerPgTools(
       if (idempotencyKey && !dryRun && ok > 0) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const redactedResults = (responseBody.results as any[]).map((r) => {
+          const redactedResults = (responseBody.data.results as any[]).map((r) => {
             const out = { ...r };
             if (typeof out.message === "string") {
               out.message = `row #${out.index}: redacted on replay`;
@@ -3716,7 +3754,10 @@ export function registerPgTools(
             }
             return out;
           });
-          const redactedBody = { ...responseBody, results: redactedResults };
+          const redactedBody = {
+            success: true as const,
+            data: { ...responseBody.data, results: redactedResults },
+          };
           await q(db, sql`
             INSERT INTO mcp_idempotency_keys (user_id, key, tool_name, response_json)
             VALUES (${userId}, ${idempotencyKey}::uuid, 'bulk_record_transactions', ${JSON.stringify(redactedBody)}::jsonb)
@@ -3970,11 +4011,13 @@ export function registerPgTools(
       // per-row shape `bulk_record_transactions` already returns.
       return text({
         success: true,
-        message: `Transaction #${id} updated`,
-        fieldsUpdated,
-        ...(resolvedCategory ? { resolvedCategory } : {}),
-        updatedAt: after[0]?.updated_at,
-        warnings,
+        data: {
+          message: `Transaction #${id} updated`,
+          fieldsUpdated,
+          ...(resolvedCategory ? { resolvedCategory } : {}),
+          updatedAt: after[0]?.updated_at,
+          warnings,
+        },
       });
     }
   );
@@ -3993,7 +4036,7 @@ export function registerPgTools(
       const plainPayee = dek ? (decryptField(dek, String(t.payee ?? "")) ?? "") : t.payee;
       await db.execute(sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`);
       invalidateUserTxCache(userId);
-      return text({ success: true, message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}` });
+      return text({ success: true, data: { message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}` } });
     }
   );
 
@@ -4153,20 +4196,22 @@ export function registerPgTools(
         : "";
       return text({
         success: true,
-        linkId: result.linkId,
-        fromTransactionId: result.fromTransactionId,
-        toTransactionId: result.toTransactionId,
-        fromAmount: result.fromAmount,
-        fromCurrency: result.fromCurrency,
-        toAmount: result.toAmount,
-        toCurrency: result.toCurrency,
-        enteredFxRate: result.enteredFxRate,
-        resolvedFromAccount: { id: Number(fromAcct.id), name: String(fromAcct.name ?? "") },
-        resolvedToAccount: { id: Number(toAcct.id), name: String(toAcct.name ?? "") },
-        ...(result.holding ? { holding: result.holding } : {}),
-        message: result.isCrossCurrency
-          ? `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})${inKindNote}`
-          : `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name}${inKindNote}`,
+        data: {
+          linkId: result.linkId,
+          fromTransactionId: result.fromTransactionId,
+          toTransactionId: result.toTransactionId,
+          fromAmount: result.fromAmount,
+          fromCurrency: result.fromCurrency,
+          toAmount: result.toAmount,
+          toCurrency: result.toCurrency,
+          enteredFxRate: result.enteredFxRate,
+          resolvedFromAccount: { id: Number(fromAcct.id), name: String(fromAcct.name ?? "") },
+          resolvedToAccount: { id: Number(toAcct.id), name: String(toAcct.name ?? "") },
+          ...(result.holding ? { holding: result.holding } : {}),
+          message: result.isCrossCurrency
+            ? `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})${inKindNote}`
+            : `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name}${inKindNote}`,
+        },
       });
     }
   );
@@ -4409,21 +4454,23 @@ export function registerPgTools(
       invalidateUserTxCache(userId);
       return text({
         success: true,
-        side,
-        symbol: trimmedSymbol,
-        linkId: transferResult.linkId,
-        fromTransactionId: transferResult.fromTransactionId,
-        toTransactionId: transferResult.toTransactionId,
-        cashHoldingId,
-        symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
-        cashAmount: cashAmountTrade,
-        cashAmountAccountCurrency: cashAmountAcct,
-        tradeCurrency,
-        accountCurrency: acctCurrency,
-        fxRate: fx,
-        resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
-        ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
-        message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
+        data: {
+          side,
+          symbol: trimmedSymbol,
+          linkId: transferResult.linkId,
+          fromTransactionId: transferResult.fromTransactionId,
+          toTransactionId: transferResult.toTransactionId,
+          cashHoldingId,
+          symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
+          cashAmount: cashAmountTrade,
+          cashAmountAccountCurrency: cashAmountAcct,
+          tradeCurrency,
+          accountCurrency: acctCurrency,
+          fxRate: fx,
+          resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
+          ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
+          message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
+        },
       });
     }
   );
@@ -4499,16 +4546,18 @@ export function registerPgTools(
       if (!result.ok) return err(result.message);
       return text({
         success: true,
-        linkId: result.linkId,
-        fromTransactionId: result.fromTransactionId,
-        toTransactionId: result.toTransactionId,
-        fromAmount: result.fromAmount,
-        fromCurrency: result.fromCurrency,
-        toAmount: result.toAmount,
-        toCurrency: result.toCurrency,
-        enteredFxRate: result.enteredFxRate,
-        ...(result.holding ? { holding: result.holding } : {}),
-        message: `Transfer updated (linkId ${result.linkId})`,
+        data: {
+          linkId: result.linkId,
+          fromTransactionId: result.fromTransactionId,
+          toTransactionId: result.toTransactionId,
+          fromAmount: result.fromAmount,
+          fromCurrency: result.fromCurrency,
+          toAmount: result.toAmount,
+          toCurrency: result.toCurrency,
+          enteredFxRate: result.enteredFxRate,
+          ...(result.holding ? { holding: result.holding } : {}),
+          message: `Transfer updated (linkId ${result.linkId})`,
+        },
       });
     }
   );
@@ -4527,9 +4576,11 @@ export function registerPgTools(
       if (!result.ok) return err(result.message);
       return text({
         success: true,
-        linkId: result.linkId,
-        deletedCount: result.deletedCount,
-        message: `Transfer deleted (${result.deletedCount} rows)`,
+        data: {
+          linkId: result.linkId,
+          deletedCount: result.deletedCount,
+          message: `Transfer deleted (${result.deletedCount} rows)`,
+        },
       });
     }
   );
@@ -4562,7 +4613,117 @@ export function registerPgTools(
       // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
       // any future budget-aware tx surface.
       invalidateUserTxCache(userId);
-      return text({ success: true, message: `Budget deleted: ${cat.name} for ${month}` });
+      return text({ success: true, data: { message: `Budget deleted: ${cat.name} for ${month}` } });
+    }
+  );
+
+  // ── preview_delete_category ────────────────────────────────────────────────
+  // Issue #237 — confirmation-token preview/execute pattern. Mirrors
+  // `preview_bulk_categorize` / `execute_bulk_categorize`. Read-prefix
+  // (`preview_`) so it lands in `mcp:read` scope; the actual destructive
+  // step is `delete_category` and falls into the `mcp:write` default.
+  server.tool(
+    "preview_delete_category",
+    "Preview deletion of a category. Returns the resolved category id/name plus FK row counts (transactions / rules / subscriptions still referencing it) and a confirmationToken for `delete_category`. The execute step refuses if any FK count is non-zero — reassign or delete dependents first via `preview_bulk_categorize` / `execute_bulk_categorize` (transactions), `update_rule` / `delete_rule` (auto-categorize rules), and `update_subscription` (subscriptions).",
+    {
+      id: z.number().int().positive().optional().describe("Category FK (categories.id). Exact match — preferred. Pass exactly one of id or name."),
+      name: z.string().optional().describe("Category name (fuzzy matched against decrypted name). Requires an unlocked DEK because category names live in encrypted columns post Stream D Phase 4. Pass `id` instead when no DEK is available."),
+    },
+    async ({ id, name }) => {
+      if (id == null && (name == null || name === "")) {
+        return err("Pass exactly one of `id` (numeric) or `name` (fuzzy).");
+      }
+      // Resolve the category id. Same Stream-D-Phase-4 pattern as `delete_budget`.
+      let cat: Row | null = null;
+      if (id != null) {
+        const rows = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId} AND id = ${id}`);
+        if (!rows.length) return err(`Category #${id} not found.`);
+        cat = decryptNameish(rows, dek)[0];
+      } else {
+        if (!dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4). Pass `id` instead.");
+        const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+        const allCats = decryptNameish(rawCats, dek);
+        const found = fuzzyFind(name!, allCats);
+        if (!found) {
+          return err(`Category "${name}" not found. Did you mean: ${suggestionList(name!, allCats)}?`);
+        }
+        cat = found;
+      }
+      const catId = Number(cat.id);
+      const catName = String(cat.name ?? `#${catId}`);
+
+      // Count FK references. All three tables scope by user_id so cross-tenant
+      // counts can never leak. PG returns BIGINT-as-string; cast to Number.
+      const txCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${catId}`) as { cnt: string | number }[];
+      const ruleCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transaction_rules WHERE user_id = ${userId} AND assign_category_id = ${catId}`) as { cnt: string | number }[];
+      const subCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${catId}`) as { cnt: string | number }[];
+      const txCount = Number(txCountRow[0]?.cnt ?? 0);
+      const ruleCount = Number(ruleCountRow[0]?.cnt ?? 0);
+      const subscriptionCount = Number(subCountRow[0]?.cnt ?? 0);
+      const inUse = txCount + ruleCount + subscriptionCount > 0;
+
+      // Sign the confirmation token even when FKs are non-zero — execute will
+      // re-check and refuse atomically. This way the preview shape is stable
+      // and Claude can decide whether to reassign first or pick a new target.
+      const confirmationToken = signConfirmationToken(userId, "delete_category", { id: catId });
+
+      return text({
+        success: true,
+        data: {
+          id: catId,
+          name: catName,
+          txCount,
+          ruleCount,
+          subscriptionCount,
+          inUse,
+          confirmationToken,
+          ...(inUse
+            ? { hint: "Reassign dependents before delete: use `preview_bulk_categorize` + `execute_bulk_categorize` to move transactions, `update_rule` / `delete_rule` for rules, `update_subscription` for subscriptions." }
+            : {}),
+        },
+      });
+    }
+  );
+
+  // ── delete_category ────────────────────────────────────────────────────────
+  // Issue #237 — destructive (`delete_*`); falls into `mcp:write` default in
+  // `src/lib/oauth-scopes.ts`. Auto-annotations infer `destructiveHint: true`
+  // from the `delete_` prefix in `mcp-server/auto-annotations.ts`.
+  server.tool(
+    "delete_category",
+    "Delete a category. Refuses if any transactions / auto-categorize rules / subscriptions still reference it (use `preview_bulk_categorize` / `execute_bulk_categorize` to reassign first). MUST be preceded by `preview_delete_category` with a matching id — pass that call's `confirmationToken` here verbatim. The token is single-use and expires after 5 minutes.",
+    {
+      id: z.number().int().positive().describe("Category FK (categories.id) — must match the id from the preview that issued the token."),
+      confirmation_token: z.string().describe("Token returned by `preview_delete_category` for this exact id. Single-use; 5-minute TTL."),
+    },
+    async ({ id, confirmation_token }) => {
+      const check = verifyConfirmationToken(confirmation_token, userId, "delete_category", { id });
+      if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_delete_category.`);
+
+      const existing = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId} AND id = ${id}`);
+      if (!existing.length) return err(`Category #${id} not found.`);
+      const catRow = decryptNameish(existing, dek)[0];
+      const catName = String(catRow.name ?? `#${id}`);
+
+      // Re-check FK references atomically — token is bound to id only; a row
+      // could have been categorized between preview and execute.
+      const txCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${id}`) as { cnt: string | number }[];
+      const ruleCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transaction_rules WHERE user_id = ${userId} AND assign_category_id = ${id}`) as { cnt: string | number }[];
+      const subCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${id}`) as { cnt: string | number }[];
+      const txCount = Number(txCountRow[0]?.cnt ?? 0);
+      const ruleCount = Number(ruleCountRow[0]?.cnt ?? 0);
+      const subscriptionCount = Number(subCountRow[0]?.cnt ?? 0);
+      if (txCount + ruleCount + subscriptionCount > 0) {
+        return err(
+          `Category "${catName}" still referenced by ${txCount} transaction(s), ${ruleCount} rule(s), ${subscriptionCount} subscription(s). Reassign dependents first (use bulk_categorize for transactions, update_rule/delete_rule for rules, update_subscription for subscriptions).`
+        );
+      }
+
+      await db.execute(sql`DELETE FROM categories WHERE id = ${id} AND user_id = ${userId}`);
+      // Load-bearing per CLAUDE.md: every MCP tx-mutating write invalidates
+      // the per-user tx cache. Mirrors `delete_budget` precedent.
+      invalidateUserTxCache(userId);
+      return text({ success: true, data: { id, message: `Category "${catName}" deleted` } });
     }
   );
 
@@ -4669,7 +4830,7 @@ export function registerPgTools(
       const acctNameLabel = (acct.name as string | undefined) ?? "<encrypted>";
       const acctIdLabel = Number(acct.id);
       if (affected === 0) return err(`Account #${acctIdLabel} ("${acctNameLabel}") not found or not owned by this user`);
-      return text({ success: true, accountId: acctIdLabel, message: `Account #${acctIdLabel} ("${acctNameLabel}") updated` });
+      return text({ success: true, data: { accountId: acctIdLabel, message: `Account #${acctIdLabel} ("${acctNameLabel}") updated` } });
     }
   );
 
@@ -4771,8 +4932,10 @@ export function registerPgTools(
       invalidateUserTxCache(userId);
       return text({
         success: true,
-        accountId: acctId,
-        message: `Account #${acctId} ("${acctName}") deleted${count > 0 ? ` (${count} transactions also removed)` : ""}`,
+        data: {
+          accountId: acctId,
+          message: `Account #${acctId} ("${acctName}") deleted${count > 0 ? ` (${count} transactions also removed)` : ""}`,
+        },
       });
     }
   );
@@ -4850,8 +5013,10 @@ export function registerPgTools(
 
       return text({
         success: true,
-        accountIds: account_ids ?? null,
-        message: `Goal "${g.name}" updated`,
+        data: {
+          accountIds: account_ids ?? null,
+          message: `Goal "${g.name}" updated`,
+        },
       });
     }
   );
@@ -4870,7 +5035,7 @@ export function registerPgTools(
       if (!g) return err(`Goal "${goal}" not found`);
 
       await db.execute(sql`DELETE FROM goals WHERE id = ${g.id} AND user_id = ${userId}`);
-      return text({ success: true, message: `Goal "${g.name}" deleted` });
+      return text({ success: true, data: { message: `Goal "${g.name}" deleted` } });
     }
   );
 
@@ -4904,7 +5069,7 @@ export function registerPgTools(
         VALUES (${userId}, ${type}, ${group ?? ""}, ${note ?? ""}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
-      return text({ success: true, categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` });
+      return text({ success: true, data: { categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` } });
     }
   );
 
@@ -4954,7 +5119,7 @@ export function registerPgTools(
           (${userId}, ${synthName}, 'payee', 'contains', ${cleanedValue},
            ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, 1, ${todayISO})
       `);
-      return text({ success: true, message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` });
+      return text({ success: true, data: { message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` } });
     }
   );
 
@@ -4983,7 +5148,7 @@ export function registerPgTools(
         INSERT INTO net_worth_snapshots (user_id, date, balances, note)
         VALUES (${userId}, ${snapshotDate}, ${JSON.stringify(totalByCurrency)}, ${note ?? ""})
       `);
-      return text({ success: true, date: snapshotDate, balances: totalByCurrency });
+      return text({ success: true, data: { date: snapshotDate, balances: totalByCurrency } });
     }
   );
 
@@ -5002,7 +5167,7 @@ export function registerPgTools(
         WHERE user_id = ${userId} AND (category_id IS NULL OR category_id = 0)
         ORDER BY date DESC LIMIT ${maxRows}
       `);
-      if (!txns.length) return text({ message: "No uncategorized transactions found", updated: 0 });
+      if (!txns.length) return text({ success: true, data: { message: "No uncategorized transactions found", updated: 0 } });
 
       // Issue #214 — schema is (match_field, match_type, match_value), NOT
       // `match_payee`. Pull the new column set; SQL-filter to active rules
@@ -5074,11 +5239,14 @@ export function registerPgTools(
 
       if (!dry_run && updated > 0) invalidateUserTxCache(userId);
       return text({
-        dry_run: dry_run ?? false,
-        updated,
-        scanned: txns.length,
-        matches: preview.slice(0, 20),
-        message: dry_run ? `Would update ${updated} of ${txns.length} transactions` : `Updated ${updated} of ${txns.length} transactions`,
+        success: true,
+        data: {
+          dry_run: dry_run ?? false,
+          updated,
+          scanned: txns.length,
+          matches: preview.slice(0, 20),
+          message: dry_run ? `Would update ${updated} of ${txns.length} transactions` : `Updated ${updated} of ${txns.length} transactions`,
+        },
       });
     }
   );
@@ -5100,6 +5268,8 @@ export function registerPgTools(
           delete_transaction: "delete_transaction(id) — Permanently delete. Cannot be undone.",
           set_budget: "set_budget(category, month, amount) — Upsert budget. month=YYYY-MM.",
           delete_budget: "delete_budget(category, month) — Remove budget entry.",
+          preview_delete_category: "preview_delete_category(id? OR name?) — Preview deletion of a category. Returns {id, name, txCount, ruleCount, subscriptionCount, inUse, confirmationToken}. Issue #237.",
+          delete_category: "delete_category(id, confirmation_token) — Delete a category. Refuses if any transactions/rules/subscriptions still reference it. MUST be preceded by preview_delete_category. Issue #237.",
           add_account: "add_account(name, type, group?, currency?, note?, alias?) — type: 'A'=asset, 'L'=liability. alias is a short shorthand (e.g. last 4 digits of a card) used when receipts/imports reference the account by a non-canonical name.",
           update_account: "update_account(accountId? OR account?, name?, group?, currency?, note?, alias?) — Issue #234: accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Strict fuzzy: ambiguous prefixes are REJECTED with a candidate list. Pass empty alias to clear. When both accountId and account are passed and disagree, fails loud.",
           delete_account: "delete_account(accountId? OR account?, force?) — accountId for exact match (preferred, works without DEK); account is name/alias fuzzy (requires unlocked DEK). Pass exactly one (mismatch fails loud). force=true deletes even if transactions exist.",
@@ -5121,15 +5291,15 @@ export function registerPgTools(
           get_recurring_transactions: "get_recurring_transactions(reportingCurrency?) — Detected recurring transactions over the last year. Issue #210: `avgAmount` is always positive; `direction` carries inflow/outflow. Issue #235: each row also surfaces `daysSinceLast`, `expectedCadenceDays`, `flagged: boolean` (true when `daysSinceLast > expectedCadenceDays * 1.5`). `stalenessThresholdMultiplier` is surfaced at the top level so callers can recompute the threshold.",
           get_cash_flow_forecast: "get_cash_flow_forecast(days?, reportingCurrency?, accountFilter?) — Project cash flow for the next 30/60/90 days. Issue #210: scopes `currentBalance` to Banks+Cash by default; surfaces `accountsIncluded` + `accountsExcluded`. `accountFilter` overrides (include[], exclude[], includeInvestments). Issue #235: response includes `recurringContributions[]` — one row per detected OR dropped candidate `{ name, monthly, daysSinceLast, included, dropReason? }` where dropReason ∈ 'too_few_occurrences' | 'amount_too_small' | 'inconsistent' | 'stale'. Stale recurrences are dropped from the projection (don't forward-project an item that's stopped charging). Empty `recurringContributions` is itself a load-bearing signal that explains a near-zero forecast.",
         };
-        return text({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
+        return dataResponse({ tool: tool_name, usage: docs[tool_name] ?? "No specific docs. Use topic='tools' for full list." });
       }
 
       const t = topic ?? "tools";
 
       if (t === "tools") {
-        return text({
-          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
-          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
+        return dataResponse({
+          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast", "preview_delete_category"],
+          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           trade_tools: ["record_transfer", "record_trade"],
           tip: "Use tool_name='record_transaction' for detailed usage of any tool. For brokerage buys/sells prefer record_trade; record_transfer is the manual fallback for non-trade in-kind moves (e.g. forex sleeve, ACATS).",
@@ -5137,20 +5307,20 @@ export function registerPgTools(
       }
 
       if (t === "write") {
-        return text({
+        return dataResponse({
           primary_add: "record_transaction — account required, fuzzy matching on account/category names",
           bulk_add: "bulk_record_transactions — array of transactions (account required per item)",
           edits: ["update_transaction(id, ...fields)", "delete_transaction(id)"],
           budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
           accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
           goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
-          categories: ["create_category(name, type)", "create_rule(match_payee, assign_category)"],
+          categories: ["create_category(name, type)", "delete_category(id, confirmation_token) — preview via preview_delete_category", "create_rule(match_payee, assign_category)"],
           note: "All name inputs use fuzzy matching — partial names work. Each account can also have an `alias` (e.g. last 4 digits of a card); account lookups exact-match on alias in addition to fuzzy-matching on name, so you can pass either. Set category via update_transaction(id, category=...).",
         });
       }
 
       if (t === "schema") {
-        return text({
+        return dataResponse({
           key_tables: {
             transactions: "id, user_id, date, account_id, category_id, currency, amount, payee, note, tags, import_hash, fit_id",
             accounts: "id, user_id, type(A/L), group, name, currency, note, archived, alias",
@@ -5166,7 +5336,7 @@ export function registerPgTools(
       }
 
       if (t === "examples") {
-        return text({
+        return dataResponse({
           examples: [
             { task: "Log a coffee purchase", call: 'record_transaction(amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
             { task: "Log salary deposit", call: 'record_transaction(amount=3500, payee="Employer", account="RBC Chequing", category="Salary")' },
@@ -5186,7 +5356,7 @@ export function registerPgTools(
       }
 
       if (t === "portfolio") {
-        return text({
+        return dataResponse({
           tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
           disclaimer: PORTFOLIO_DISCLAIMER,
@@ -5194,7 +5364,7 @@ export function registerPgTools(
         });
       }
 
-      return text({ error: "Unknown topic" });
+      return err("Unknown topic");
     }
   );
 
@@ -5286,8 +5456,10 @@ export function registerPgTools(
         }
         return text({
           success: true,
-          holdingId,
-          message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
+          data: {
+            holdingId,
+            message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
+          },
         });
       } catch (e) {
         // 23505 = unique_violation on the partial index (race with another
@@ -5377,7 +5549,7 @@ export function registerPgTools(
             ? (result as { rowCount: number }).rowCount
             : null;
         if (affected === 0) return err(`Holding "${h.name}" not found or not owned by this user`);
-        return text({ success: true, holdingId: h.id, message: `Holding "${h.name}" updated` });
+        return text({ success: true, data: { holdingId: h.id, message: `Holding "${h.name}" updated` } });
       } catch (e) {
         // 23505 = unique_violation: tried to rename into an existing
         // (account_id, name_lookup) pair.
@@ -5434,9 +5606,11 @@ export function registerPgTools(
       invalidateUserTxCache(userId);
       return text({
         success: true,
-        message: count > 0
-          ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
-          : `Holding "${matchedName}" deleted.`,
+        data: {
+          message: count > 0
+            ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
+            : `Holding "${matchedName}" deleted.`,
+        },
       });
     }
   );
@@ -5514,7 +5688,7 @@ export function registerPgTools(
       // `lifetimeCostBasis` / etc. fields — only `*Reporting` siblings remain
       // (currency-converted, the canonical totals).
       if (scopeRejected) {
-        return text({
+        return dataResponse({
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "Account scope did not resolve — no holdings returned. See `warnings` for details.",
           totalHoldings: 0,
@@ -5804,7 +5978,7 @@ export function registerPgTools(
           : []),
       ];
 
-      return text({
+      return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics. Results are per-holdingId — two holdings sharing a name across accounts return as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear in `holdings[]` with `status: 'cash_only'` and `totalReturnPct: null`.",
         totalHoldings: results.length,
@@ -6029,7 +6203,7 @@ export function registerPgTools(
         }
       }
 
-      return text({
+      return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         note: "unrealizedGain requires live prices. Use the portfolio page for full metrics. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear with `status: 'cash_only'` and percentages suppressed.",
         period: period ?? "all",
@@ -6187,7 +6361,7 @@ export function registerPgTools(
               account: (t.account_name ?? null) as string | null,
             });
           }
-          return text({
+          return dataResponse({
             disclaimer: PORTFOLIO_DISCLAIMER,
             ambiguous,
             note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call analyze_holding with one of these holdingId values to scope the analysis.`,
@@ -6332,7 +6506,7 @@ export function registerPgTools(
 
       const fxToReporting = await getRate(holdingCurrency, reporting, todayStr, userId);
 
-      return text({
+      return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         note: "unrealizedGain requires live prices — not available in MCP.",
         // FK to portfolio_holdings.id — pass as portfolioHoldingId on
@@ -6458,7 +6632,7 @@ export function registerPgTools(
               account: accountNameById.get(Number(m.account_id)) ?? null,
             };
           });
-          return text({
+          return dataResponse({
             ambiguous,
             note: `Substring "${symbol}" matched ${ambiguous.length} distinct holdings. Re-call trace_holding_quantity with one of these holdingId values.`,
           });
@@ -6539,7 +6713,7 @@ export function registerPgTools(
         qty: Math.round(e.qty * 10000) / 10000,
       }));
 
-      return text({
+      return dataResponse({
         holdingId: resolvedHoldingId,
         totalLegs: legs.length,
         totalQty,
@@ -6687,7 +6861,7 @@ export function registerPgTools(
         }
         const targetedTotal = totalBV - untargetedTotal;
 
-        return text({
+        return dataResponse({
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "rebalancing",
           reportingCurrency: reporting,
@@ -6733,7 +6907,7 @@ export function registerPgTools(
           GROUP BY COALESCE(t.currency, a.currency)
         `);
         if (!investedRows.length) {
-          return text({ disclaimer: PORTFOLIO_DISCLAIMER, mode: "benchmark", message: "No investment transactions found" });
+          return dataResponse({ disclaimer: PORTFOLIO_DISCLAIMER, mode: "benchmark", message: "No investment transactions found" });
         }
         let totalInvested = 0;
         let firstDateStr: string | null = null;
@@ -6753,7 +6927,7 @@ export function registerPgTools(
         const benchmarkFinalValue = totalInvested * Math.pow(1 + bmInfo.annualizedReturn / 100, yearsHeld);
         const benchmarkGain = benchmarkFinalValue - totalInvested;
 
-        return text({
+        return dataResponse({
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "benchmark",
           reportingCurrency: reporting,
@@ -6868,7 +7042,7 @@ export function registerPgTools(
       // of the trailing-12 window).
       const monthlyContributionsDisplayed = monthlyContributionsAll.slice(-6);
 
-      return text({
+      return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         mode: "patterns",
         reportingCurrency: reporting,
@@ -9538,7 +9712,7 @@ export function registerPgTools(
         }),
       );
 
-      return text({ imports: enriched, count: enriched.length, status: filterStatus });
+      return dataResponse({ imports: enriched, count: enriched.length, status: filterStatus });
     },
   );
 
@@ -9607,7 +9781,7 @@ export function registerPgTools(
         };
       });
 
-      return text({
+      return dataResponse({
         staged: {
           id: staged.id,
           source: staged.source,
@@ -9714,7 +9888,7 @@ export function registerPgTools(
         };
       });
 
-      return text({ rows: decrypted, count: decrypted.length });
+      return dataResponse({ rows: decrypted, count: decrypted.length });
     },
   );
 
@@ -9903,31 +10077,33 @@ export function registerPgTools(
       const u = updatedRows[0];
       const t = String(u.encryption_tier ?? "service");
       return text({
-        ok: true,
-        row: {
-          id: u.id,
-          stagedImportId: u.staged_import_id,
-          date: u.date,
-          amount: Number(u.amount),
-          currency: u.currency,
-          payee: decodeStagedField(u.payee as string | null, t),
-          category: decodeStagedField(u.category as string | null, t),
-          accountName: decodeStagedField(u.account_name as string | null, t),
-          note: decodeStagedField(u.note as string | null, t),
-          rowIndex: Number(u.row_index ?? 0),
-          isDuplicate: Boolean(u.is_duplicate),
-          encryptionTier: t,
-          dedupStatus: u.dedup_status,
-          rowStatus: u.row_status,
-          txType: u.tx_type,
-          quantity: u.quantity != null ? Number(u.quantity) : null,
-          portfolioHoldingId: u.portfolio_holding_id,
-          enteredAmount: u.entered_amount != null ? Number(u.entered_amount) : null,
-          enteredCurrency: u.entered_currency,
-          tags: u.tags,
-          fitId: u.fit_id,
-          peerStagedId: u.peer_staged_id,
-          targetAccountId: u.target_account_id,
+        success: true,
+        data: {
+          row: {
+            id: u.id,
+            stagedImportId: u.staged_import_id,
+            date: u.date,
+            amount: Number(u.amount),
+            currency: u.currency,
+            payee: decodeStagedField(u.payee as string | null, t),
+            category: decodeStagedField(u.category as string | null, t),
+            accountName: decodeStagedField(u.account_name as string | null, t),
+            note: decodeStagedField(u.note as string | null, t),
+            rowIndex: Number(u.row_index ?? 0),
+            isDuplicate: Boolean(u.is_duplicate),
+            encryptionTier: t,
+            dedupStatus: u.dedup_status,
+            rowStatus: u.row_status,
+            txType: u.tx_type,
+            quantity: u.quantity != null ? Number(u.quantity) : null,
+            portfolioHoldingId: u.portfolio_holding_id,
+            enteredAmount: u.entered_amount != null ? Number(u.entered_amount) : null,
+            enteredCurrency: u.entered_currency,
+            tags: u.tags,
+            fitId: u.fit_id,
+            peerStagedId: u.peer_staged_id,
+            targetAccountId: u.target_account_id,
+          },
         },
       });
     },
@@ -9991,7 +10167,7 @@ export function registerPgTools(
         sql`UPDATE staged_transactions SET tx_type = 'R', peer_staged_id = ${rowAId}, target_account_id = NULL WHERE id = ${rowBId} AND user_id = ${userId}`,
       );
 
-      return text({ ok: true, paired: { rowAId, rowBId } });
+      return dataResponse({ paired: { rowAId, rowBId } });
     },
   );
 
@@ -10070,7 +10246,18 @@ export function registerPgTools(
               typeof hit[0].response_json === "string"
                 ? JSON.parse(hit[0].response_json as string)
                 : hit[0].response_json;
-            return text(stored);
+            // Issue #237 — replay the stored envelope verbatim and inject
+            // `replayed: true` inside `data`. Pre-3.1.0 cached envelopes
+            // stored under the old `{ ok, imported, ... }` shape are wrapped
+            // defensively so a 72h-old replay still emerges as the canonical
+            // 3.1.0 shape.
+            const storedHasNewEnvelope =
+              stored && typeof stored === "object" && "success" in stored && "data" in stored;
+            if (storedHasNewEnvelope) {
+              const data = (stored as { data?: Record<string, unknown> }).data ?? {};
+              return text({ success: true, data: { ...data, replayed: true } });
+            }
+            return text({ success: true, data: { ...(stored as Record<string, unknown>), replayed: true } });
           }
         } catch (e) {
           // Fall through — better to re-execute than to break on a transient
@@ -10147,7 +10334,7 @@ export function registerPgTools(
           };
         });
         const token = signConfirmationToken(userId, "approve_staged_rows", tokenPayload);
-        return text({
+        return dataResponse({
           preview: true,
           summary: {
             stagedImportId,
@@ -10507,11 +10694,17 @@ export function registerPgTools(
         );
       }
 
+      // Issue #237 — unified envelope. The persisted JSON now stores the
+      // canonical `{ success: true, data: {...} }` shape so replays return
+      // the same outer shape as live calls (plus `replayed: true` injected
+      // on the lookup branch).
       const responseBody = {
-        ok: true,
-        imported,
-        errors: importErrors,
-        stagedImportId,
+        success: true,
+        data: {
+          imported,
+          errors: importErrors,
+          stagedImportId,
+        },
       };
 
       // Persist idempotency-keyed response. Body is metadata-only (no
@@ -10565,7 +10758,7 @@ export function registerPgTools(
 
       if (!confirmation_token) {
         const token = signConfirmationToken(userId, "reject_staged_import", tokenPayload);
-        return text({
+        return dataResponse({
           preview: true,
           summary: {
             stagedImportId,
@@ -10598,7 +10791,7 @@ export function registerPgTools(
         sql`DELETE FROM staged_imports WHERE id = ${stagedImportId} AND user_id = ${userId}`,
       );
 
-      return text({ ok: true, stagedImportId });
+      return dataResponse({ stagedImportId });
     },
   );
 }

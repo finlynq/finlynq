@@ -348,6 +348,17 @@ function txt(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
+/**
+ * Issue #237 — unified envelope helper for stdio read tools that previously
+ * returned raw arrays/objects via inline `JSON.stringify(...)` or
+ * `txt(rawValue)`. Wraps the value in the canonical `{ success: true, data: <T> }`
+ * envelope so every MCP read tool returns the same outer shape across HTTP +
+ * stdio. Same wire encoding as `txt()` — only the shape of the JSON differs.
+ */
+function dataResponse(data: unknown) {
+  return txt({ success: true, data });
+}
+
 function sqliteErr(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
 }
@@ -467,7 +478,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           else summary[row.currency].liabilities = row.total;
           summary[row.currency].net = summary[row.currency].assets + summary[row.currency].liabilities;
         }
-        return { content: [{ type: "text" as const, text: JSON.stringify({ byCurrency: summary, reportingCurrency: reporting }, null, 2) }] };
+        return dataResponse({ byCurrency: summary, reportingCurrency: reporting });
       }
 
       const startDate = new Date();
@@ -497,7 +508,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         return { month: row.month, currency: c, monthlyChange: Math.round(Number(row.total) * 100) / 100, cumulativeNetWorth: Math.round(newTotal * 100) / 100 };
       });
 
-      return { content: [{ type: "text" as const, text: JSON.stringify({ months, trend, reportingCurrency: reporting }, null, 2) }] };
+      return dataResponse({ months, trend, reportingCurrency: reporting });
     }
   );
 
@@ -521,7 +532,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     // hop to HTTP MCP / web UI for names.
     const goals = await sqlite.prepare(`SELECT g.id, g.type, g.target_amount, g.deadline, g.status, g.priority FROM goals g WHERE g.user_id = ? ORDER BY g.priority`).all(userId) as Array<{ id: number }>;
     if (!goals.length) {
-      return { content: [{ type: "text" as const, text: JSON.stringify([], null, 2) }] };
+      return dataResponse([]);
     }
     // Issue #130 — JOIN through goal_accounts. Don't decrypt account names.
     const goalIds = goals.map((g) => g.id);
@@ -540,7 +551,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: null,
       accountIds: linksByGoal.get(g.id) ?? [],
     }));
-    return { content: [{ type: "text" as const, text: JSON.stringify(out, null, 2) }] };
+    return dataResponse(out);
   });
 
   server.tool(
@@ -568,7 +579,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           recurring.push({ payee: group[0].payee, avgAmount: Math.round(avg * 100) / 100, count: group.length, lastDate: group[group.length - 1].date });
         }
       }
-      return { content: [{ type: "text" as const, text: JSON.stringify({ recurring, reportingCurrency: reporting }, null, 2) }] };
+      return dataResponse({ recurring, reportingCurrency: reporting });
     }
   );
 
@@ -641,7 +652,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
          WHERE r.user_id = ?
          ORDER BY r.priority DESC`
       ).all(userId);
-      return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+      return dataResponse(rows);
     }
   );
 
@@ -666,7 +677,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }>;
 
       if (rules.length === 0) {
-        return { content: [{ type: "text" as const, text: "No active rules found." }] };
+        return dataResponse({ message: "No active rules found.", applied: 0 });
       }
 
       const uncategorized = await sqlite.prepare(
@@ -675,7 +686,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       ).all(userId, maxRows) as Array<{ id: number; payee: string; amount: number; tags: string }>;
 
       if (uncategorized.length === 0) {
-        return { content: [{ type: "text" as const, text: "No uncategorized transactions found." }] };
+        return dataResponse({ message: "No uncategorized transactions found.", applied: 0 });
       }
 
       let applied = 0;
@@ -705,12 +716,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }
 
       if (applied > 0) invalidateUserTxCache(userId);
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Processed ${uncategorized.length} uncategorized transactions. Applied rules to ${applied} transactions.`,
-        }],
-      };
+      return dataResponse({
+        scanned: uncategorized.length,
+        applied,
+        message: `Processed ${uncategorized.length} uncategorized transactions. Applied rules to ${applied} transactions.`,
+      });
     }
   );
 
@@ -833,17 +843,19 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (dryRun) {
         return txt({
           success: true,
-          dryRun: true,
-          wouldBeId: null,
-          resolvedAccount: resolvedAccountInfo,
-          resolvedCategory,
-          amount: resolved.amount,
-          currency: resolved.currency,
-          enteredAmount: resolved.enteredAmount,
-          enteredCurrency: resolved.enteredCurrency,
-          enteredFxRate: resolved.enteredFxRate,
-          date: txDate,
-          message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → account #${Number(acct.id)}${catId != null ? ` (category #${catId})` : ""}`,
+          data: {
+            dryRun: true,
+            wouldBeId: null,
+            resolvedAccount: resolvedAccountInfo,
+            resolvedCategory,
+            amount: resolved.amount,
+            currency: resolved.currency,
+            enteredAmount: resolved.enteredAmount,
+            enteredCurrency: resolved.enteredCurrency,
+            enteredFxRate: resolved.enteredFxRate,
+            date: txDate,
+            message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → account #${Number(acct.id)}${catId != null ? ` (category #${catId})` : ""}`,
+          },
         });
       }
 
@@ -855,13 +867,15 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       invalidateUserTxCache(userId);
       return txt({
         success: true,
-        transactionId: result?.id,
-        createdAt: result?.created_at,
-        updatedAt: result?.updated_at,
-        source: result?.source,
-        resolvedAccount: resolvedAccountInfo,
-        resolvedCategory,
-        message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → account #${Number(acct.id)}${catId != null ? ` (category #${catId})` : ""}`,
+        data: {
+          transactionId: result?.id,
+          createdAt: result?.created_at,
+          updatedAt: result?.updated_at,
+          source: result?.source,
+          resolvedAccount: resolvedAccountInfo,
+          resolvedCategory,
+          message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → account #${Number(acct.id)}${catId != null ? ` (category #${catId})` : ""}`,
+        },
       });
     }
   );
@@ -1027,10 +1041,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const after = await sqlite.prepare(`SELECT updated_at FROM transactions WHERE id = ? AND user_id = ?`).get(id, userId) as { updated_at?: string } | undefined;
       return txt({
         success: true,
-        message: `Transaction #${id} updated`,
-        fieldsUpdated,
-        ...(resolvedCategory ? { resolvedCategory } : {}),
-        updatedAt: after?.updated_at,
+        data: {
+          message: `Transaction #${id} updated`,
+          fieldsUpdated,
+          ...(resolvedCategory ? { resolvedCategory } : {}),
+          updatedAt: after?.updated_at,
+        },
       });
     }
   );
@@ -1045,7 +1061,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!t) return sqliteErr(`Transaction #${id} not found or not owned by user`);
       await sqlite.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).run(id, userId);
       invalidateUserTxCache(userId);
-      return txt({ success: true, message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}` });
+      return txt({ success: true, data: { message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}` } });
     }
   );
 
@@ -1120,19 +1136,21 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!result.ok) return sqliteErr(result.message);
       return txt({
         success: true,
-        linkId: result.linkId,
-        fromTransactionId: result.fromTransactionId,
-        toTransactionId: result.toTransactionId,
-        fromAmount: result.fromAmount,
-        fromCurrency: result.fromCurrency,
-        toAmount: result.toAmount,
-        toCurrency: result.toCurrency,
-        enteredFxRate: result.enteredFxRate,
-        resolvedFromAccount: { id: Number(fromAcct.id) },
-        resolvedToAccount: { id: Number(toAcct.id) },
-        message: result.isCrossCurrency
-          ? `Transferred ${amount} ${result.fromCurrency} from account #${Number(fromAcct.id)} to account #${Number(toAcct.id)} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})`
-          : `Transferred ${amount} ${result.fromCurrency} from account #${Number(fromAcct.id)} to account #${Number(toAcct.id)}`,
+        data: {
+          linkId: result.linkId,
+          fromTransactionId: result.fromTransactionId,
+          toTransactionId: result.toTransactionId,
+          fromAmount: result.fromAmount,
+          fromCurrency: result.fromCurrency,
+          toAmount: result.toAmount,
+          toCurrency: result.toCurrency,
+          enteredFxRate: result.enteredFxRate,
+          resolvedFromAccount: { id: Number(fromAcct.id) },
+          resolvedToAccount: { id: Number(toAcct.id) },
+          message: result.isCrossCurrency
+            ? `Transferred ${amount} ${result.fromCurrency} from account #${Number(fromAcct.id)} to account #${Number(toAcct.id)} — landed as ${result.toAmount} ${result.toCurrency} (rate ${result.enteredFxRate.toFixed(6)})`
+            : `Transferred ${amount} ${result.fromCurrency} from account #${Number(fromAcct.id)} to account #${Number(toAcct.id)}`,
+        },
       });
     }
   );
@@ -1210,15 +1228,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!result.ok) return sqliteErr(result.message);
       return txt({
         success: true,
-        linkId: result.linkId,
-        fromTransactionId: result.fromTransactionId,
-        toTransactionId: result.toTransactionId,
-        fromAmount: result.fromAmount,
-        fromCurrency: result.fromCurrency,
-        toAmount: result.toAmount,
-        toCurrency: result.toCurrency,
-        enteredFxRate: result.enteredFxRate,
-        message: `Transfer updated (linkId ${result.linkId})`,
+        data: {
+          linkId: result.linkId,
+          fromTransactionId: result.fromTransactionId,
+          toTransactionId: result.toTransactionId,
+          fromAmount: result.fromAmount,
+          fromCurrency: result.fromCurrency,
+          toAmount: result.toAmount,
+          toCurrency: result.toCurrency,
+          enteredFxRate: result.enteredFxRate,
+          message: `Transfer updated (linkId ${result.linkId})`,
+        },
       });
     }
   );
@@ -1238,9 +1258,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (!result.ok) return sqliteErr(result.message);
       return txt({
         success: true,
-        linkId: result.linkId,
-        deletedCount: result.deletedCount,
-        message: `Transfer deleted (${result.deletedCount} rows)`,
+        data: {
+          linkId: result.linkId,
+          deletedCount: result.deletedCount,
+          message: `Transfer deleted (${result.deletedCount} rows)`,
+        },
       });
     }
   );
@@ -1268,7 +1290,55 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const existing = await sqlite.prepare(`SELECT id FROM budgets WHERE user_id = ? AND category_id = ? AND month = ?`).get(userId, cat.id, month) as { id: number } | undefined;
       if (!existing) return sqliteErr(`No budget for category #${Number(cat.id)} in ${month}`);
       await sqlite.prepare(`DELETE FROM budgets WHERE id = ? AND user_id = ?`).run(existing.id, userId);
-      return txt({ success: true, message: `Budget deleted: category #${Number(cat.id)} for ${month}` });
+      return txt({ success: true, data: { message: `Budget deleted: category #${Number(cat.id)} for ${month}` } });
+    }
+  );
+
+  // ── delete_category ────────────────────────────────────────────────────────
+  // Issue #237 — stdio mirror of the HTTP delete_category. Stream D Phase 4:
+  // stdio has no DEK so it can't resolve a category by name (the `name`
+  // column was dropped, only `name_ct` remains). Pass `id` (numeric) and
+  // a `confirmation_token` minted by the HTTP MCP `preview_delete_category`,
+  // OR omit the token and pass `id` for the simpler stdio refuse-on-FK path.
+  // Refuses with the row count if any FK still references it.
+  server.tool(
+    "delete_category",
+    "Delete a category by id. Refuses if any transactions/rules/subscriptions still reference it. Stream D Phase 4 (stdio): the `name` parameter is refused — pass `id` (numeric). `confirmation_token` is optional on stdio (mirrors the HTTP envelope but not strictly required since the operation already takes an explicit numeric id).",
+    {
+      id: z.number().int().positive().describe("Category FK (categories.id)."),
+      name: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `id` instead."),
+      confirmation_token: z.string().optional().describe("Optional token from HTTP preview_delete_category (5-min TTL). Stdio accepts the call without one — the FK refuse-check is enforced unconditionally."),
+    },
+    async ({ id, name, confirmation_token }) => {
+      void confirmation_token;
+      if (name != null) {
+        return sqliteErr("`name` is refused on stdio after Stream D Phase 4. Pass `id` (numeric) instead — get it from get_categories.");
+      }
+      const cat = await sqlite.prepare(
+        `SELECT id FROM categories WHERE user_id = ? AND id = ?`
+      ).get(userId, id) as { id: number } | undefined;
+      if (!cat) return sqliteErr(`Category #${id} not found or not owned by you.`);
+
+      const txCount = (await sqlite.prepare(
+        `SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND category_id = ?`
+      ).get(userId, id) as { cnt: number }).cnt;
+      const ruleCount = (await sqlite.prepare(
+        `SELECT COUNT(*) as cnt FROM transaction_rules WHERE user_id = ? AND assign_category_id = ?`
+      ).get(userId, id) as { cnt: number }).cnt;
+      const subscriptionCount = (await sqlite.prepare(
+        `SELECT COUNT(*) as cnt FROM subscriptions WHERE user_id = ? AND category_id = ?`
+      ).get(userId, id) as { cnt: number }).cnt;
+
+      if (Number(txCount) + Number(ruleCount) + Number(subscriptionCount) > 0) {
+        return sqliteErr(
+          `Category #${id} still referenced by ${txCount} transaction(s), ${ruleCount} rule(s), ${subscriptionCount} subscription(s). Reassign dependents first.`
+        );
+      }
+
+      await sqlite.prepare(`DELETE FROM categories WHERE id = ? AND user_id = ?`).run(id, userId);
+      // Per CLAUDE.md "Every MCP tx-mutating write must call invalidateUser".
+      invalidateUserTxCache(userId);
+      return txt({ success: true, data: { id, message: `Category #${id} deleted` } });
     }
   );
 
@@ -1334,7 +1404,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const count = (await sqlite.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND account_id = ?`).get(userId, acct.id) as { cnt: number }).cnt;
       if (count > 0 && !force) return sqliteErr(`Account #${Number(acct.id)} has ${count} transaction(s). Pass force=true to delete.`);
       await sqlite.prepare(`DELETE FROM accounts WHERE id = ? AND user_id = ?`).run(acct.id, userId);
-      return txt({ success: true, message: `Account #${Number(acct.id)} deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` });
+      return txt({ success: true, data: { message: `Account #${Number(acct.id)} deleted${count > 0 ? ` (${count} transactions also removed)` : ""}` } });
     }
   );
 
@@ -1377,7 +1447,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       ).get(userId, goal_id) as { id: number } | undefined;
       if (!g) return sqliteErr(`Goal #${goal_id} not found or not owned by you.`);
       await sqlite.prepare(`DELETE FROM goals WHERE id = ? AND user_id = ?`).run(g.id, userId);
-      return txt({ success: true, message: `Goal #${Number(g.id)} deleted` });
+      return txt({ success: true, data: { message: `Goal #${Number(g.id)} deleted` } });
     }
   );
 
@@ -1439,7 +1509,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             assign_category_id, rename_to, assign_tags, priority, is_active, created_at)
          VALUES (?, ?, 'payee', 'contains', ?, ?, ?, ?, ?, 1, ?)`
       ).run(userId, synthName, cleanedValue, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0, todayISO);
-      return txt({ success: true, message: `Rule created: "${cleanedValue}" → category #${Number(cat.id)}` });
+      return txt({ success: true, data: { message: `Rule created: "${cleanedValue}" → category #${Number(cat.id)}` } });
     }
   );
 
@@ -1535,9 +1605,11 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       invalidateUserTxCache(userId);
       return txt({
         success: true,
-        message: count > 0
-          ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
-          : `Holding "${matchedName}" deleted.`,
+        data: {
+          message: count > 0
+            ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
+            : `Holding "${matchedName}" deleted.`,
+        },
       });
     }
   );
@@ -1670,7 +1742,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         qty: Math.round(e.qty * 10000) / 10000,
       }));
 
-      return txt({
+      return dataResponse({
         holdingId,
         totalLegs: legs.length,
         totalQty,
@@ -1724,7 +1796,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           update_goal: "update_goal(goal, target_amount?, deadline?, status?, name?)",
           get_goals: "get_goals() — Stdio returns ids + accountIds only (no decrypted names, no progress numbers per issue #233 — use HTTP MCP for `currentAmount`/`progress`/`percentComplete`).",
           delete_goal: "delete_goal(goal)",
-          create_category: "create_category(name, type, group?, note?) — type: E/I/R",
+          create_category: "create_category(name, type, group?, note?) — type: E/I/R. Refused on stdio post Stream D Phase 4 (no DEK).",
+          delete_category: "delete_category(id) — Stdio: numeric id only (name refused per Stream D Phase 4). Refuses if any transactions/rules/subscriptions still reference the category — reassign dependents first. Issue #237.",
           create_rule: "create_rule(match_payee, assign_category, rename_to?, assign_tags?, priority?)",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark'",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
@@ -1733,20 +1806,20 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           preview_bulk_update: "preview_bulk_update(filter, changes) — stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. (HTTP transport adds quantity, portfolioHoldingId, portfolioHolding.)",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Stdio: category-by-name only (HTTP supports quantity/holding writes too).",
         };
-        return txt({ tool: tool_name, usage: docs[tool_name] ?? "Use topic='tools' for full list." });
+        return dataResponse({ tool: tool_name, usage: docs[tool_name] ?? "Use topic='tools' for full list." });
       }
 
       const t = topic ?? "tools";
 
-      if (t === "tools") return txt({
+      if (t === "tools") return dataResponse({
         read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_net_worth", "get_categories", "get_loans", "get_goals", "get_recurring_transactions", "get_income_statement", "get_spotlight_items", "get_weekly_recap", "get_transaction_rules"],
-        write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
+        write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
         portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
         trade_tools: ["record_transfer", "record_trade"],
         tip: "Use tool_name='record_transaction' for usage details. For brokerage buys/sells prefer record_trade; record_transfer is the manual fallback for non-trade in-kind moves (e.g. forex sleeve, ACATS).",
       });
 
-      if (t === "schema") return txt({
+      if (t === "schema") return dataResponse({
         key_tables: {
           transactions: "id, date, account_id, category_id, currency, amount, payee, note, tags",
           accounts: "id, type(A/L), group, name, currency, note",
@@ -1759,7 +1832,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         date_format: "YYYY-MM-DD strings",
       });
 
-      if (t === "examples") return txt({ examples: [
+      if (t === "examples") return dataResponse({ examples: [
         { task: "Log a coffee", call: 'record_transaction(amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
         { task: "Log salary", call: 'record_transaction(amount=3500, payee="Employer", category="Salary")' },
         { task: "Set budget", call: 'set_budget(category="Groceries", month="2026-04", amount=600)' },
@@ -1769,24 +1842,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         { task: "Rebalance", call: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}])' },
       ]});
 
-      if (t === "portfolio") return txt({
+      if (t === "portfolio") return dataResponse({
         tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
         modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
         disclaimer: PORTFOLIO_DISCLAIMER,
       });
 
-      if (t === "write") return txt({
+      if (t === "write") return dataResponse({
         primary_add: "record_transaction — smart defaults, fuzzy matching",
         bulk: "bulk_record_transactions(transactions[])",
         edits: ["update_transaction(id, ...)", "delete_transaction(id)"],
         budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
         accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
         goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
-        categories: ["create_category(name, type)", "create_rule(match_payee, assign_category)"],
+        categories: ["create_category(name, type)", "delete_category(id) — refuses if FKs exist", "create_rule(match_payee, assign_category)"],
         note: "Set category via update_transaction(id, category=...).",
       });
 
-      return txt({ error: "Unknown topic" });
+      return sqliteErr("Unknown topic");
     }
   );
 
