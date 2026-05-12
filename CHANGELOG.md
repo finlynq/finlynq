@@ -9,6 +9,22 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - Add public Terms of Service at `/terms` covering the managed cloud service. Required for Anthropic Connectors Directory submission Page 6 attestation. AGPL v3 governs self-hosted use of the source; these Terms govern finlynq.com only.
 - Add Troubleshooting section to public `/mcp-guide` covering connection failures (401/403/423), OAuth stuck, stale data, self-hosted gotchas (`PF_USER_ID`, Stream D Phase 4 stdio refusals). Eight collapsible `<details>` entries lifted from `docs/faq.md` plus a closing GitHub-issues triage line. Required for Anthropic Connectors Directory submission Page 6 documentation attestation — the page now satisfies all three sub-requirements (setup + tool descriptions + troubleshooting).
 
+## 2026-05-12 — Transfer dialog: unblock same-account in-kind rebalance (#252)
+
+UI-only bug fix. On `/transactions` → Record transfer, picking an investment account in **From** previously removed that account from the **To** dropdown (and vice versa), making it impossible to reach the "both selected, both investment" state required for an in-kind rebalance inside a single brokerage (e.g. moving shares between holdings in the same TFSA / RRSP / taxable account). The backend's `createTransferPair` has always supported this case — the UI was the gate.
+
+### Fixed
+
+- **Picker filter at [src/app/(app)/transactions/page.tsx:2317-2365](src/app/%28app%29/transactions/page.tsx).** Replaced the strict `bothInvestment = fromAcctPicker?.isInvestment && toAcctPicker?.isInvestment` predicate with a permissive `allowSameAccount = (fromIsInv && toIsInv) || (fromIsInv && !toAcctPicker) || (!fromAcctPicker && toIsInv)`. When only one side is filled and that side is an investment account, the same-account guard is relaxed so the user can reach the both-investment state. Symmetric whether the user picks From or To first.
+- **Non-investment accounts still cannot be selected on both sides.** Either picker being a non-investment account collapses `allowSameAccount` to `false`, restoring the strict "the opposite account is filtered out" behavior. The existing safeguard against trivial same-account cash no-op transfers is preserved.
+- **Submit-time validation unchanged.** The guard at line 1330 (`if (fromAccountId === toAccountId && !bothInv) error`) already used the correct post-selection `bothInv` check and composes correctly with the relaxed picker.
+
+### Out of scope
+
+- Same-account *cash* transfers (intentional no-op guard stays).
+- The in-kind UI itself (source holding + qty + dest holding + dest qty fields, line 2384+).
+- The four-check transfer-pair rule on the server in `src/lib/transfer.ts`.
+
 ## 2026-05-10 — [BREAKING] MCP API hygiene Phase 3: envelopes 3.1.0 + delete_category (#237)
 
 Third and final phase of the MCP API hygiene cluster from #211. **BREAKING change to MCP envelope shape — version bump 3.0.0 → 3.1.0 at both stdio and HTTP entry points.** Tool count goes 90 HTTP / 86 stdio → **91 HTTP / 87 stdio**.
