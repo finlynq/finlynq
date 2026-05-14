@@ -45,7 +45,7 @@ docker compose up -d`}</code>
               http://localhost:3000
             </code>{" "}
             and register your account. Remember to change the default
-            PostgreSQL password and <code className="rounded bg-muted px-1 py-0.5 text-xs">NEXTAUTH_SECRET</code>
+            PostgreSQL password and <code className="rounded bg-muted px-1 py-0.5 text-xs">PF_JWT_SECRET</code>
             {" "}before exposing the container to anything but localhost.
           </p>
         </section>
@@ -74,8 +74,16 @@ docker compose up -d`}</code>
               — PostgreSQL connection string (required)
             </li>
             <li>
-              <code className="rounded bg-muted px-1 py-0.5 text-xs">NEXTAUTH_SECRET</code>{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">PF_JWT_SECRET</code>{" "}
               — JWT signing secret, at least 32 chars of entropy (required)
+            </li>
+            <li>
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">PF_PEPPER</code>{" "}
+              — scrypt password peppering, at least 32 chars (required in production)
+            </li>
+            <li>
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">PF_STAGING_KEY</code>{" "}
+              — wraps email-staged transactions, at least 32 chars (required in production)
             </li>
             <li>
               <code className="rounded bg-muted px-1 py-0.5 text-xs">PORT</code>{" "}

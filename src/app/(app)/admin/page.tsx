@@ -39,6 +39,7 @@ interface AdminUser {
   planExpiresAt: string | null;
   createdAt: string;
   updatedAt: string;
+  transactionCount: number;
 }
 
 interface LoginActivityRow {
@@ -63,9 +64,6 @@ interface UsageStats {
   activeUsersLast7Days: number;
   activeUsersLast30Days: number;
   loginsLast24Hours?: number;
-  // Finding #18 — recentLogins list was dropped from the API. Field kept optional
-  // for source-compat in case any callers still reference it; new renders should
-  // use loginsLast24Hours for the aggregate count.
   recentLogins?: LoginActivityRow[];
 }
 
@@ -348,6 +346,7 @@ export default function AdminPage() {
                       <TableHead>Plan</TableHead>
                       <TableHead>Verified</TableHead>
                       <TableHead>MFA</TableHead>
+                      <TableHead className="text-right">Txns</TableHead>
                       <TableHead>Joined</TableHead>
                       <TableHead className="text-right">Actions</TableHead>
                     </TableRow>
@@ -385,6 +384,9 @@ export default function AdminPage() {
                             <span className="text-muted-foreground">—</span>
                           )}
                         </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {(user.transactionCount ?? 0).toLocaleString()}
+                        </TableCell>
                         <TableCell className="text-sm text-muted-foreground">
                           {new Date(user.createdAt).toLocaleDateString()}
                         </TableCell>
@@ -418,7 +420,7 @@ export default function AdminPage() {
                     {users.length === 0 && (
                       <TableRow>
                         <TableCell
-                          colSpan={7}
+                          colSpan={8}
                           className="text-center py-8 text-muted-foreground"
                         >
                           No users found.

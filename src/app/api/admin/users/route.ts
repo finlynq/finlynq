@@ -7,7 +7,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { getDialect } from "@/db";
+import { db, getDialect } from "@/db";
+import * as pgSchema from "@/db/schema-pg";
+import { count, inArray } from "drizzle-orm";
 import { requireAdmin } from "@/lib/auth/require-admin";
 import {
   listUsers,
@@ -40,7 +42,30 @@ export async function GET(request: NextRequest) {
   const users = await listUsers({ limit, offset });
   const total = await getUserCount();
 
-  return NextResponse.json({ users, total, limit, offset });
+  // Transaction count per user — single GROUP BY query scoped to the page's
+  // user ids, joined into the response in JS. Avoids an N+1 over users.
+  const userIds = users.map((u) => u.id);
+  const txCounts: Record<string, number> = {};
+  if (userIds.length > 0) {
+    const rows = await db
+      .select({
+        userId: pgSchema.transactions.userId,
+        total: count(),
+      })
+      .from(pgSchema.transactions)
+      .where(inArray(pgSchema.transactions.userId, userIds))
+      .groupBy(pgSchema.transactions.userId);
+    for (const r of rows) {
+      txCounts[r.userId as string] = Number(r.total ?? 0);
+    }
+  }
+
+  const usersWithCounts = users.map((u) => ({
+    ...u,
+    transactionCount: txCounts[u.id] ?? 0,
+  }));
+
+  return NextResponse.json({ users: usersWithCounts, total, limit, offset });
 }
 
 const updateSchema = z.object({
