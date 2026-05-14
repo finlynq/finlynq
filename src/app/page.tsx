@@ -207,7 +207,7 @@ function FeatureViz({ kind }: { kind: (typeof FEATURES)[number]["viz"] }) {
     case "pips":
       return (
         <div className="viz pips">
-          <span>DOCKER</span>·<b>00.02.14</b>·<span>AES-256</span>·<b>✓</b>·<span>SQLCIPHER</span>
+          <span>DOCKER</span>·<b>00.02.14</b>·<span>AES-256-GCM</span>·<b>✓</b>·<span>POSTGRES</span>
         </div>
       );
   }

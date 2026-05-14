@@ -9,6 +9,44 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - Add public Terms of Service at `/terms` covering the managed cloud service. Required for Anthropic Connectors Directory submission Page 6 attestation. AGPL v3 governs self-hosted use of the source; these Terms govern finlynq.com only.
 - Add Troubleshooting section to public `/mcp-guide` covering connection failures (401/403/423), OAuth stuck, stale data, self-hosted gotchas (`PF_USER_ID`, Stream D Phase 4 stdio refusals). Eight collapsible `<details>` entries lifted from `docs/faq.md` plus a closing GitHub-issues triage line. Required for Anthropic Connectors Directory submission Page 6 documentation attestation — the page now satisfies all three sub-requirements (setup + tool descriptions + troubleshooting).
 
+## 2026-05-13 — Admin dashboard: restore recent-logins panel + per-user transaction count
+
+Operator-facing only; admin route is behind `requireAdmin`. Two adjacent fixes to the `/admin` dashboard, plus a bundled cleanup of four stale doc / landing-copy lines.
+
+### Fixed
+
+- **Recent logins panel populated.** The UI section was already rendering but stuck on "No login activity yet" because `/api/admin/stats` had dropped the `recentLogins` field. Restored: top 15 users by `lastLoginAt` desc with `{ id, username, email, displayName, loginCount, lastLoginAt }`. The original Finding #18 privacy concern (this surfaces other users' email + display name + login count to every admin on every dashboard hit) is acknowledged but accepted — visibility into who's logging in is what the operator needs the admin panel for, and the route is behind `requireAdmin`.
+- **Per-user transaction count in users table.** New "Txns" column between MFA and Joined. The `/api/admin/users` response now runs one `SELECT user_id, COUNT(*) FROM transactions WHERE user_id IN (...) GROUP BY user_id` query scoped to the current page of users (no N+1) and merges the count into each row as `transactionCount`.
+
+### Changed (bundled doc/copy fixes)
+
+- **MCP tool count `27 → 91 HTTP / 87 stdio`** on the user-facing docs at [docs/faq.md](docs/faq.md) and [docs/getting-started.md](docs/getting-started.md).
+- **Landing `pips` strip** at [src/app/page.tsx](src/app/page.tsx): `SQLCIPHER → POSTGRES`, `AES-256 → AES-256-GCM` (was claiming SQLCipher months after the PostgreSQL-only migration).
+- **Self-hosted env-var docs** at [src/app/self-hosted/page.tsx](src/app/self-hosted/page.tsx): `NEXTAUTH_SECRET → PF_JWT_SECRET` (NextAuth was never used) plus the previously-missing `PF_PEPPER` and `PF_STAGING_KEY` rows — both are required in production per CLAUDE.md.
+
+### Files touched
+
+- [src/app/api/admin/stats/route.ts](src/app/api/admin/stats/route.ts)
+- [src/app/api/admin/users/route.ts](src/app/api/admin/users/route.ts)
+- [src/app/(app)/admin/page.tsx](src/app/%28app%29/admin/page.tsx)
+- [docs/faq.md](docs/faq.md), [docs/getting-started.md](docs/getting-started.md), [src/app/page.tsx](src/app/page.tsx), [src/app/self-hosted/page.tsx](src/app/self-hosted/page.tsx)
+
+## 2026-05-12 — Transfer dialog: unblock same-account in-kind rebalance (#252)
+
+UI-only bug fix. On `/transactions` → Record transfer, picking an investment account in **From** previously removed that account from the **To** dropdown (and vice versa), making it impossible to reach the "both selected, both investment" state required for an in-kind rebalance inside a single brokerage (e.g. moving shares between holdings in the same TFSA / RRSP / taxable account). The backend's `createTransferPair` has always supported this case — the UI was the gate.
+
+### Fixed
+
+- **Picker filter at [src/app/(app)/transactions/page.tsx:2317-2365](src/app/%28app%29/transactions/page.tsx).** Replaced the strict `bothInvestment = fromAcctPicker?.isInvestment && toAcctPicker?.isInvestment` predicate with a permissive `allowSameAccount = (fromIsInv && toIsInv) || (fromIsInv && !toAcctPicker) || (!fromAcctPicker && toIsInv)`. When only one side is filled and that side is an investment account, the same-account guard is relaxed so the user can reach the both-investment state. Symmetric whether the user picks From or To first.
+- **Non-investment accounts still cannot be selected on both sides.** Either picker being a non-investment account collapses `allowSameAccount` to `false`, restoring the strict "the opposite account is filtered out" behavior. The existing safeguard against trivial same-account cash no-op transfers is preserved.
+- **Submit-time validation unchanged.** The guard at line 1330 (`if (fromAccountId === toAccountId && !bothInv) error`) already used the correct post-selection `bothInv` check and composes correctly with the relaxed picker.
+
+### Out of scope
+
+- Same-account *cash* transfers (intentional no-op guard stays).
+- The in-kind UI itself (source holding + qty + dest holding + dest qty fields, line 2384+).
+- The four-check transfer-pair rule on the server in `src/lib/transfer.ts`.
+
 ## 2026-05-10 — [BREAKING] MCP API hygiene Phase 3: envelopes 3.1.0 + delete_category (#237)
 
 Third and final phase of the MCP API hygiene cluster from #211. **BREAKING change to MCP envelope shape — version bump 3.0.0 → 3.1.0 at both stdio and HTTP entry points.** Tool count goes 90 HTTP / 86 stdio → **91 HTTP / 87 stdio**.

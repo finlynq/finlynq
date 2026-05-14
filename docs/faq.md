@@ -30,7 +30,7 @@ No. PF follows a "bring your own AI" approach. You connect your own LLM through 
 
 ### What can the AI assistant do?
 
-The MCP server provides 27 tools (21 read, 6 write) that let your AI assistant query accounts, transactions, budgets, portfolio data, and more. It can also create transactions, update budgets, and perform other write operations.
+The MCP server provides 90 HTTP tools / 86 stdio tools (read + write) that let your AI assistant query and manage accounts, transactions, budgets, portfolio data, goals, loans, subscriptions, recurring transactions, and more. It can record transactions, log transfers between accounts, create budgets and rules, run portfolio analysis, build debt-payoff plans, and any other operation surfaced by the tool list.
 
 ## Data Import
 

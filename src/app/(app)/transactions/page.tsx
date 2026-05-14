@@ -2320,8 +2320,19 @@ function TransactionsPageInner() {
                 // Allow same-account when both are investment (in-kind rebalance
                 // within one brokerage). Otherwise, hide the selected opposite
                 // account from the picker to prevent trivial no-op transfers.
-                const bothInvestment =
-                  fromAcctPicker?.isInvestment === true && toAcctPicker?.isInvestment === true;
+                //
+                // Issue #252: when only one side is filled and that side is
+                // an investment account, also allow same-account selection so
+                // the user can reach the "both selected, both investment"
+                // state. Otherwise picking From first hid that account from
+                // the To list, blocking same-account in-kind rebalances even
+                // though the backend (createTransferPair) supports them.
+                const fromIsInv = fromAcctPicker?.isInvestment === true;
+                const toIsInv = toAcctPicker?.isInvestment === true;
+                const allowSameAccount =
+                  (fromIsInv && toIsInv) ||
+                  (fromIsInv && !toAcctPicker) ||
+                  (!fromAcctPicker && toIsInv);
                 return (
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1.5">
@@ -2331,7 +2342,7 @@ function TransactionsPageInner() {
                         onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v })}
                         items={sortAccount(
                           accounts
-                            .filter((a) => bothInvestment || String(a.id) !== transferForm.toAccountId)
+                            .filter((a) => allowSameAccount || String(a.id) !== transferForm.toAccountId)
                             .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
                           (a) => Number(a.value),
                           (a, z) => a.label.localeCompare(z.label),
@@ -2349,7 +2360,7 @@ function TransactionsPageInner() {
                         onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v })}
                         items={sortAccount(
                           accounts
-                            .filter((a) => bothInvestment || String(a.id) !== transferForm.fromAccountId)
+                            .filter((a) => allowSameAccount || String(a.id) !== transferForm.fromAccountId)
                             .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
                           (a) => Number(a.value),
                           (a, z) => a.label.localeCompare(z.label),

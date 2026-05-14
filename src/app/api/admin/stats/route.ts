@@ -54,14 +54,32 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // Finding #18 — dropped the per-user recent-logins list. It exposed
-  // email + displayName + loginCount of other users on every admin dashboard
-  // hit, which isn't needed for operational awareness. Aggregate counts
-  // below cover the same need.
   const loginsLast24h = allUsers.filter((u) => {
     if (!u.lastLoginAt) return false;
     return new Date(u.lastLoginAt as string).getTime() >= now - 24 * 60 * 60 * 1000;
   }).length;
+
+  // Recent logins — last 15 users who signed in, most recent first. Admin-only
+  // (this whole route is behind requireAdmin). The earlier privacy concern
+  // (Finding #18) was that this data was rendered to all admins on every page
+  // load; that's still the case but it's the operator's own dashboard, which
+  // is what they need to see who's actually using the platform.
+  const recentLogins = allUsers
+    .filter((u) => u.lastLoginAt)
+    .sort(
+      (a, b) =>
+        new Date(b.lastLoginAt as string).getTime() -
+        new Date(a.lastLoginAt as string).getTime()
+    )
+    .slice(0, 15)
+    .map((u) => ({
+      id: u.id,
+      username: u.username ?? null,
+      email: u.email ?? null,
+      displayName: u.displayName ?? null,
+      loginCount: Number(u.loginCount ?? 0),
+      lastLoginAt: u.lastLoginAt ?? null,
+    }));
 
   return NextResponse.json({
     ...stats,
@@ -74,5 +92,6 @@ export async function GET(request: NextRequest) {
     activeUsersLast7Days: activeLast7,
     activeUsersLast30Days: activeLast30,
     loginsLast24Hours: loginsLast24h,
+    recentLogins,
   });
 }
