@@ -115,7 +115,7 @@ Add to your Claude Desktop config (`~/.claude/claude_desktop_config.json`):
 }
 ```
 
-The MCP server exposes 27 tools (21 read, 6 write) for querying accounts, transactions, budgets, portfolio, and more.
+The MCP server exposes 90 HTTP tools / 86 stdio tools (read + write) for querying and managing accounts, transactions, budgets, portfolio holdings, goals, loans, subscriptions, recurring transactions, and more. Streamable HTTP supports OAuth 2.1 + Dynamic Client Registration for Claude Web/Mobile and other web-based MCP clients; stdio is for Claude Desktop and similar local clients.
 
 ## Next Steps
 
