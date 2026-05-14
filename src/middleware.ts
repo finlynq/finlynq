@@ -261,15 +261,18 @@ export function middleware(request: NextRequest) {
     response.headers.set(key, value);
   }
 
-  // GA loads only on public marketing pages (/, /cloud, /self-hosted), so its
-  // hosts are added to script-src/img-src/connect-src for those routes only.
+  // GA loads only on public marketing pages (/, /cloud, /self-hosted, /vs/*),
+  // so its hosts are added to script-src/img-src/connect-src for those routes
+  // only. The /vs/<competitor> comparison pages are public research-mode reads
+  // and need analytics to measure which comparisons drive signups.
   const pathname = request.nextUrl.pathname;
   const isWebsite =
     pathname === "/" ||
     pathname === "/cloud" ||
     pathname === "/self-hosted" ||
     pathname.startsWith("/cloud/") ||
-    pathname.startsWith("/self-hosted/");
+    pathname.startsWith("/self-hosted/") ||
+    pathname.startsWith("/vs/");
 
   // CSP `script-src` policy — per-request nonce + 'strict-dynamic'
   // (B10 / finding C-8).

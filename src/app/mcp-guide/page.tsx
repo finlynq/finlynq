@@ -852,10 +852,10 @@ export default function McpGuidePage() {
         <section>
           <h2 className="mb-1 text-lg font-semibold text-foreground">What Claude can do</h2>
           <p className="mb-4 text-sm text-muted-foreground">
-            91 tools (HTTP) / 87 (stdio) organized by task. Claude picks the right ones — you describe the outcome in plain English.
-            For the full alphabetical tool list with parameters, see{" "}
-            <code className="bg-muted px-1 rounded">/api-docs</code> or{" "}
-            <code className="bg-muted px-1 rounded">/.well-known/mcp.json</code>.
+            Capability groups below; for the exhaustive name-by-name list (with category, transport, and OAuth scope per tool) see the{" "}
+            <a href="/mcp-guide/tools" className="underline underline-offset-2 text-foreground hover:text-primary transition-colors">full MCP tool catalog</a>.
+            Or use <code className="bg-muted px-1 rounded">/api-docs</code> /{" "}
+            <code className="bg-muted px-1 rounded">/.well-known/mcp.json</code> for the JSON-Schema view.
           </p>
           <div className="grid gap-4 md:grid-cols-2">
             {toolGroups.map((group) => {

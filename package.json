@@ -8,7 +8,9 @@
   ],
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/generate-mcp-tool-catalog.mjs",
     "build": "next build",
+    "generate:mcp-catalog": "node scripts/generate-mcp-tool-catalog.mjs",
     "start": "next start",
     "lint": "eslint",
     "build:mcp": "npx tsx mcp-server/index.ts",
