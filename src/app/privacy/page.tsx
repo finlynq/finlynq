@@ -329,8 +329,18 @@ export default function PrivacyPage() {
           </p>
 
           <p className="mt-12 text-xs text-muted-foreground">
-            The full encryption design, including the key-derivation parameters
-            and threat model, is published at{" "}
+            For a plain-English walkthrough of how the encryption works in
+            practice — including the honest tradeoffs (lose your password, lose
+            your data; the operator can see anonymized amounts and dates) —
+            see{" "}
+            <Link
+              href="/blog/how-finlynq-encrypts-your-money"
+              className="underline underline-offset-2 hover:text-primary"
+            >
+              How Finlynq encrypts your money
+            </Link>
+            . The full encryption design, including the key-derivation
+            parameters and threat model, is published at{" "}
             <a
               href="https://github.com/finlynq/finlynq/blob/main/pf-app/docs/architecture/encryption.md"
               className="underline underline-offset-2 hover:text-primary"

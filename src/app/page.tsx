@@ -609,6 +609,9 @@ export default function LandingPage() {
                 <Link href="/mcp-guide" className="btn btn-ghost">
                   View MCP guide <span aria-hidden="true">→</span>
                 </Link>
+                <Link href="/mcp-guide/tools" className="btn btn-ghost">
+                  Full tool catalog <span aria-hidden="true">→</span>
+                </Link>
               </div>
             </div>
           </div>
@@ -627,7 +630,7 @@ export default function LandingPage() {
               </h2>
             </div>
             <p className="lede reveal d2">
-              Your financial data is encrypted with your password before it ever touches a server.
+              Your financial data* is encrypted with your password before it ever touches a server.
               We designed the system so we cannot read it — not a marketing claim, a math one.
             </p>
           </div>
@@ -655,11 +658,11 @@ export default function LandingPage() {
               },
               {
                 h: "Your password is the key.",
-                p: "Your encryption key is derived from your password via memory-hard scrypt (PBKDF2 is also used to wrap optional backup-export passphrases). Finlynq never sees your passphrase or your plaintext data.",
+                p: "Your encryption key is derived from your password via memory-hard scrypt (PBKDF2 also wraps optional backup-export passphrases). Finlynq never sees your passphrase or your plaintext data*.",
               },
               {
                 h: "Zero-knowledge architecture.",
-                p: "We cannot see your transactions, balances, or accounts. It is mathematically impossible to read your data without your password.",
+                p: "We cannot see your transactions, balances, or accounts.* It is mathematically impossible to read your data without your password.",
               },
               {
                 h: "Self-host free, forever.",
@@ -674,6 +677,35 @@ export default function LandingPage() {
               </div>
             ))}
           </div>
+
+          <p
+            className="reveal"
+            style={{
+              marginTop: 32,
+              maxWidth: 760,
+              fontSize: 13,
+              lineHeight: 1.7,
+              color: "#6b737d",
+            }}
+          >
+            <span style={{ color: "#9aa3ad" }}>*</span> Numeric amounts, dates, and unique IDs are stored unencrypted because they&apos;re required for database operations (totals, sorting, joins, indexes). Everything else &mdash; merchant names, account names, payees, notes, tags, and categories &mdash; is encrypted with a key derived only from your password. Read the{" "}
+            <Link
+              href="/blog/how-finlynq-encrypts-your-money"
+              style={{ color: "#f5a623", textDecoration: "underline" }}
+            >
+              plain-English writeup
+            </Link>
+            {" "}or the{" "}
+            <a
+              href="https://github.com/finlynq/finlynq/blob/main/pf-app/docs/architecture/encryption.md"
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "#f5a623", textDecoration: "underline" }}
+            >
+              full encryption design
+            </a>
+            .
+          </p>
         </div>
       </section>
 
@@ -798,6 +830,7 @@ export default function LandingPage() {
                 <li><a href="#flow">How it works</a></li>
                 <li><Link href="/mcp-guide">MCP guide</Link></li>
                 <li><Link href="/api-docs">API docs</Link></li>
+                <li><Link href="/blog">Blog</Link></li>
                 <li>
                   <a href="https://github.com/finlynq/finlynq" target="_blank" rel="noreferrer">
                     GitHub
@@ -815,6 +848,14 @@ export default function LandingPage() {
                     Docker image
                   </a>
                 </li>
+              </ul>
+            </div>
+            <div>
+              <h5>Compare</h5>
+              <ul>
+                <li><Link href="/vs/era">Finlynq vs Era</Link></li>
+                <li><Link href="/vs/firefly-iii">Finlynq vs Firefly III</Link></li>
+                <li><Link href="/vs/alderfi">Finlynq vs Alderfi</Link></li>
               </ul>
             </div>
             <div>

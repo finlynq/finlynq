@@ -867,7 +867,7 @@ html:has(.fl-landing) body {
 }
 .fl-landing .footer-grid {
   display: grid;
-  grid-template-columns: 1.4fr repeat(3, 1fr);
+  grid-template-columns: 1.4fr repeat(4, 1fr);
   gap: 48px;
   padding-bottom: 48px;
   border-bottom: 1px solid var(--fl-rule);
