@@ -214,7 +214,7 @@ describe("Cross-tenant FK rejection at route boundary (B4 / H-1)", () => {
       vi.doMock("@/lib/auth/require-auth", () => ({
         requireAuth: vi.fn(async () => ({
           authenticated: true,
-          context: { userId: "userA", method: "passphrase" as const, mfaVerified: false },
+          context: { userId: "userA", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" },
         })),
       }));
       const { POST } = await import("@/app/api/snapshots/route");
@@ -238,7 +238,7 @@ describe("Cross-tenant FK rejection at route boundary (B4 / H-1)", () => {
       vi.doMock("@/lib/auth/require-auth", () => ({
         requireAuth: vi.fn(async () => ({
           authenticated: true,
-          context: { userId: "userA", method: "passphrase" as const, mfaVerified: false },
+          context: { userId: "userA", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" },
         })),
       }));
       vi.doMock("@/lib/queries", () => ({
@@ -296,7 +296,7 @@ describe("Cross-tenant FK rejection at route boundary (B4 / H-1)", () => {
       vi.doMock("@/lib/auth/require-auth", () => ({
         requireAuth: vi.fn(async () => ({
           authenticated: true,
-          context: { userId: "userA", method: "passphrase" as const, mfaVerified: false },
+          context: { userId: "userA", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" },
         })),
       }));
       vi.doMock("@/lib/auth/require-encryption", () => ({
@@ -317,7 +317,7 @@ describe("Cross-tenant FK rejection at route boundary (B4 / H-1)", () => {
       vi.doMock("@/lib/auth/require-auth", () => ({
         requireAuth: vi.fn(async () => ({
           authenticated: true,
-          context: { userId: "userA", method: "passphrase" as const, mfaVerified: false },
+          context: { userId: "userA", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" },
         })),
       }));
       vi.doMock("@/lib/auth/require-encryption", () => ({
