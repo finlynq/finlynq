@@ -50,7 +50,7 @@ describe("API /api/rules", () => {
 
   describe("GET", () => {
     it("returns all rules", async () => {
-      const rules = [{ id: 1, name: "Coffee", matchField: "payee", matchType: "contains", matchValue: "Starbucks", isActive: 1 }];
+      const rules = [{ id: 1, name: "Coffee", matchField: "payee", matchType: "contains", matchValue: "Starbucks", isActive: true }];
       mockDbChain.all!.mockReturnValueOnce(rules);
       const req = createMockRequest("http://localhost:3000/api/rules");
       const res = await GET(req);

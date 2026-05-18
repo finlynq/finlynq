@@ -26,7 +26,7 @@ const putSchema = z.object({
   assignCategoryId: z.number().optional(),
   assignTags: z.string().optional(),
   renameTo: z.string().optional(),
-  isActive: z.number().optional(),
+  isActive: z.boolean().optional(),
   priority: z.number().optional(),
 });
 
@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
         assignCategoryId: assignCategoryId || null,
         assignTags: assignTags || null,
         renameTo: renameTo || null,
-        isActive: 1,
+        isActive: true,
         priority: priority ?? 0,
         createdAt: new Date().toISOString().split("T")[0],
       })

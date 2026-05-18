@@ -386,7 +386,7 @@ export const transactionRules = pgTable("transaction_rules", {
   ),
   assignTags: text("assign_tags"),
   renameTo: text("rename_to"),
-  isActive: integer("is_active").notNull().default(1),
+  isActive: boolean("is_active").notNull().default(true),
   priority: integer("priority").notNull().default(0),
   createdAt: text("created_at").notNull(),
 });

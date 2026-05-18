@@ -640,7 +640,7 @@ async function autoCategory(
     SELECT match_type, match_value, assign_category_id, priority
       FROM transaction_rules
      WHERE user_id = ${userId}
-       AND is_active = 1
+       AND is_active = true
        AND match_field = 'payee'
        AND assign_category_id IS NOT NULL
      ORDER BY priority DESC
@@ -5117,7 +5117,7 @@ export function registerPgTools(
            assign_category_id, rename_to, assign_tags, priority, is_active, created_at)
         VALUES
           (${userId}, ${synthName}, 'payee', 'contains', ${cleanedValue},
-           ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, 1, ${todayISO})
+           ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, true, ${todayISO})
       `);
       return text({ success: true, data: { message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` } });
     }
@@ -5178,7 +5178,7 @@ export function registerPgTools(
                assign_category_id, rename_to, assign_tags, priority
         FROM transaction_rules
         WHERE user_id = ${userId}
-          AND is_active = 1
+          AND is_active = true
           AND assign_category_id IS NOT NULL
         ORDER BY priority DESC
       `);
@@ -7863,7 +7863,7 @@ export function registerPgTools(
       if (assignCategoryIdUpdate !== undefined) updates.push(sql`assign_category_id = ${assignCategoryIdUpdate}`);
       if (assign_tags !== undefined) updates.push(sql`assign_tags = ${assign_tags}`);
       if (rename_to !== undefined) updates.push(sql`rename_to = ${rename_to}`);
-      if (is_active !== undefined) updates.push(sql`is_active = ${is_active ? 1 : 0}`);
+      if (is_active !== undefined) updates.push(sql`is_active = ${is_active}`);
       if (priority !== undefined) updates.push(sql`priority = ${priority}`);
       if (!updates.length) return err("No fields to update");
 
@@ -8029,7 +8029,7 @@ export function registerPgTools(
       const rules = await q(db, sql`
         SELECT id, name, match_field, match_type, match_value, assign_category_id, assign_tags, rename_to, priority
         FROM transaction_rules
-        WHERE user_id = ${userId} AND is_active = 1
+        WHERE user_id = ${userId} AND is_active = true
         ORDER BY priority DESC, id
       `);
       const payeeLower = payee.toLowerCase();
@@ -9359,7 +9359,7 @@ export function registerPgTools(
         const rules = await q(db, sql`
           SELECT match_field, match_type, match_value, assign_category_id
           FROM transaction_rules
-          WHERE user_id = ${userId} AND is_active = 1 AND assign_category_id IS NOT NULL
+          WHERE user_id = ${userId} AND is_active = true AND assign_category_id IS NOT NULL
           ORDER BY priority DESC
         `);
         const ruleSet: TransactionRule[] = rules.map((r) => ({
@@ -9371,7 +9371,7 @@ export function registerPgTools(
           assignCategoryId: r.assign_category_id == null ? null : Number(r.assign_category_id),
           assignTags: null,
           renameTo: null,
-          isActive: 1,
+          isActive: true,
           priority: 0,
           createdAt: "",
         })) as unknown as TransactionRule[];

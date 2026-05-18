@@ -13,12 +13,12 @@ import {
 function makeRule(overrides: Partial<{
   id: number; userId: string; name: string; matchField: string; matchType: string;
   matchValue: string; assignCategoryId: number | null; assignTags: string | null;
-  renameTo: string | null; isActive: number; priority: number; createdAt: string;
+  renameTo: string | null; isActive: boolean; priority: number; createdAt: string;
 }>) {
   return {
     id: 1, userId: "default", name: "Rule", matchField: "payee", matchType: "contains",
     matchValue: "", assignCategoryId: null, assignTags: null,
-    renameTo: null, isActive: 1, priority: 0, createdAt: "2024-01-01",
+    renameTo: null, isActive: true, priority: 0, createdAt: "2024-01-01",
     ...overrides,
   };
 }
@@ -74,7 +74,7 @@ describe("applyRules", () => {
   });
 
   it("skips inactive rules", () => {
-    const rules = [makeRule({ isActive: 0, matchField: "payee", matchType: "contains", matchValue: "test" })];
+    const rules = [makeRule({ isActive: false, matchField: "payee", matchType: "contains", matchValue: "test" })];
     expect(applyRules({ payee: "test" }, rules)).toBeNull();
   });
 
