@@ -15,7 +15,7 @@ const instrumentSerif = Instrument_Serif({
 
 export const metadata: Metadata = {
   title: "Finlynq",
-  description: "Track your money here, analyze it anywhere — Finlynq",
+  description: "Finlynq — open-source personal finance with a first-party MCP server. Free hosted at finlynq.com/cloud, or self-host with Docker. AGPL v3.",
   icons: {
     icon: [
       { url: "/favicon.svg", type: "image/svg+xml" },
