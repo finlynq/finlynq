@@ -18,7 +18,7 @@ vi.mock("@/db", () => ({
 }));
 
 vi.mock("@/lib/auth/require-auth", () => ({
-  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
 }));
 vi.mock("drizzle-orm", () => ({
   eq: vi.fn(), and: vi.fn(), gte: vi.fn(), lte: vi.fn(), sql: vi.fn(),

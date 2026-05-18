@@ -2,6 +2,38 @@ import { vi } from "vitest";
 import { NextRequest } from "next/server";
 
 /**
+ * Default test DEK — 32 bytes of 0xAA. Routes that call `requireEncryption()`
+ * pull `dek` + `sessionId` out of the `requireAuth()` AuthContext; if either
+ * is null the route returns 423 Locked.
+ *
+ * Use {@link mockAuthContext} to mint an AuthContext-shaped object for inline
+ * `vi.mock("@/lib/auth/require-auth", ...)` stubs in API route tests.
+ */
+export const TEST_DEK = Buffer.alloc(32, 0xaa);
+export const TEST_SESSION_ID = "test-session-jti";
+
+/**
+ * Build a fully-populated AuthContext for use in `requireAuth` mocks. Includes
+ * a non-null `dek` + `sessionId` so routes wrapped in `requireEncryption()` do
+ * not return 423 under test. Spread `...overrides` to customize `userId` etc.
+ */
+export function mockAuthContext(overrides?: {
+  userId?: string;
+  method?: "passphrase" | "account" | "api_key" | "oauth";
+  mfaVerified?: boolean;
+  dek?: Buffer | null;
+  sessionId?: string | null;
+}) {
+  return {
+    userId: overrides?.userId ?? "default",
+    method: overrides?.method ?? ("passphrase" as const),
+    mfaVerified: overrides?.mfaVerified ?? false,
+    dek: overrides?.dek === undefined ? TEST_DEK : overrides.dek,
+    sessionId: overrides?.sessionId === undefined ? TEST_SESSION_ID : overrides.sessionId,
+  };
+}
+
+/**
  * Create a mock NextRequest for API route testing.
  */
 export function createMockRequest(

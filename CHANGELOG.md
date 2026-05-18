@@ -9,6 +9,14 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - Add public Terms of Service at `/terms` covering the managed cloud service. Required for Anthropic Connectors Directory submission Page 6 attestation. AGPL v3 governs self-hosted use of the source; these Terms govern finlynq.com only.
 - Add Troubleshooting section to public `/mcp-guide` covering connection failures (401/403/423), OAuth stuck, stale data, self-hosted gotchas (`PF_USER_ID`, Stream D Phase 4 stdio refusals). Eight collapsible `<details>` entries lifted from `docs/faq.md` plus a closing GitHub-issues triage line. Required for Anthropic Connectors Directory submission Page 6 documentation attestation — the page now satisfies all three sub-requirements (setup + tool descriptions + troubleshooting).
 
+## 2026-05-17 — test hygiene: shared test auth helper unlocks DEK (FINLYNQ-7)
+
+Test-only change. No production code, schema, or deploy impact.
+
+- **Bucket 1 of the 79-failure triage** ([CHANGELOG.md "Test hygiene — partial triage"](#)): inline `vi.mock("@/lib/auth/require-auth", ...)` stubs across 33 API route tests previously returned an `AuthContext` without `dek` or `sessionId`. Any route wrapped in `requireEncryption()` (which forces a 423 when either field is null) failed the test even when the route logic was correct. Added a non-null `dek` (32 bytes of 0xAA) and `sessionId` (`"test-session-jti"`) to every such mock via a one-shot sed across `tests/api/**/*.test.ts`.
+- **Shared helper added.** New `mockAuthContext()` factory + exported `TEST_DEK` / `TEST_SESSION_ID` constants in [tests/helpers/api-test-utils.ts](tests/helpers/api-test-utils.ts) for any new API route test that wants the same shape without re-typing the literal.
+- **Failure count: 81 → 76** (5 recovered: `import-execute.test.ts` (3) + `transactions.test.ts` (2)). All 8 explicit `"expected 423 to be X"` assertions are gone. The remaining failures in the same files now fail at deeper layers (e.g., the route's resolver call hits a 500 because additional dependencies aren't mocked) — those belong to other buckets (FINLYNQ-8/9/10) and are out of scope for bucket 1.
+
 ## 2026-05-13 — Admin dashboard: restore recent-logins panel + per-user transaction count
 
 Operator-facing only; admin route is behind `requireAdmin`. Two adjacent fixes to the `/admin` dashboard, plus a bundled cleanup of four stale doc / landing-copy lines.
