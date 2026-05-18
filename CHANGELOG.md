@@ -9,6 +9,10 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - Add public Terms of Service at `/terms` covering the managed cloud service. Required for Anthropic Connectors Directory submission Page 6 attestation. AGPL v3 governs self-hosted use of the source; these Terms govern finlynq.com only.
 - Add Troubleshooting section to public `/mcp-guide` covering connection failures (401/403/423), OAuth stuck, stale data, self-hosted gotchas (`PF_USER_ID`, Stream D Phase 4 stdio refusals). Eight collapsible `<details>` entries lifted from `docs/faq.md` plus a closing GitHub-issues triage line. Required for Anthropic Connectors Directory submission Page 6 documentation attestation — the page now satisfies all three sub-requirements (setup + tool descriptions + troubleshooting).
 
+## 2026-05-17 — docs: README leads with dual deployment offering (FINLYNQ-31)
+
+- Rewrote `pf-app/README.md` (the README GitHub renders on github.com/finlynq/finlynq) so the first paragraph names both the managed cloud (finlynq.com/cloud) and self-host modes explicitly. Mitigates the Gemini-misread-as-self-host-only issue where an LLM quoting only the opening lines of an AGPL OSS README defaulted to "self-host only". Feature bullets mirror landing-page `PLAN_FEATS`; the Docker quick start uses the verbatim snippet from `src/app/self-hosted/page.tsx`. No code changes; pure docs.
+
 ## 2026-05-17 — test hygiene: shared test auth helper unlocks DEK (FINLYNQ-7)
 
 Test-only change. No production code, schema, or deploy impact.
