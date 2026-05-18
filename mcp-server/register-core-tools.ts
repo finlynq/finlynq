@@ -318,7 +318,7 @@ async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): 
             assign_category_id, assign_tags, rename_to, is_active, priority
      FROM transaction_rules
      WHERE user_id = ?
-       AND is_active = 1
+       AND is_active = true
        AND match_field = 'payee'
        AND assign_category_id IS NOT NULL
      ORDER BY priority DESC`
@@ -326,7 +326,7 @@ async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): 
     id: number; name: string; match_field: string; match_type: string;
     match_value: string; assign_category_id: number | null;
     assign_tags: string | null; rename_to: string | null;
-    is_active: number; priority: number;
+    is_active: boolean; priority: number;
   }>;
   for (const rule of rules) {
     // autoCategory only resolves on payee at write-time; amount/tags rules
@@ -668,12 +668,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const rules = await sqlite.prepare(
         `SELECT id, name, match_field, match_type, match_value,
                 assign_category_id, assign_tags, rename_to, is_active, priority
-         FROM transaction_rules WHERE user_id = ? AND is_active = 1 ORDER BY priority DESC`
+         FROM transaction_rules WHERE user_id = ? AND is_active = true ORDER BY priority DESC`
       ).all(userId) as Array<{
         id: number; name: string; match_field: string; match_type: string;
         match_value: string; assign_category_id: number | null;
         assign_tags: string | null; rename_to: string | null;
-        is_active: number; priority: number;
+        is_active: boolean; priority: number;
       }>;
 
       if (rules.length === 0) {
@@ -1507,7 +1507,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         `INSERT INTO transaction_rules
            (user_id, name, match_field, match_type, match_value,
             assign_category_id, rename_to, assign_tags, priority, is_active, created_at)
-         VALUES (?, ?, 'payee', 'contains', ?, ?, ?, ?, ?, 1, ?)`
+         VALUES (?, ?, 'payee', 'contains', ?, ?, ?, ?, ?, true, ?)`
       ).run(userId, synthName, cleanedValue, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0, todayISO);
       return txt({ success: true, data: { message: `Rule created: "${cleanedValue}" → category #${Number(cat.id)}` } });
     }
@@ -2375,7 +2375,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       if (assignCategoryIdUpdate !== undefined) { updates.push(`assign_category_id = ?`); params.push(assignCategoryIdUpdate); }
       if (assign_tags !== undefined) { updates.push(`assign_tags = ?`); params.push(assign_tags); }
       if (rename_to !== undefined) { updates.push(`rename_to = ?`); params.push(rename_to); }
-      if (is_active !== undefined) { updates.push(`is_active = ?`); params.push(is_active ? 1 : 0); }
+      if (is_active !== undefined) { updates.push(`is_active = ?`); params.push(is_active); }
       if (priority !== undefined) { updates.push(`priority = ?`); params.push(priority); }
       if (!updates.length) return sqliteErr("No fields to update");
       params.push(id, userId);

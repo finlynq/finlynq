@@ -485,7 +485,7 @@ export async function executeImport(
     const activeRules = await db
       .select()
       .from(schema.transactionRules)
-      .where(eq(schema.transactionRules.isActive, 1))
+      .where(eq(schema.transactionRules.isActive, true))
       .all() as TransactionRule[];
 
     if (activeRules.length > 0) {
