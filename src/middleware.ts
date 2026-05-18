@@ -349,20 +349,51 @@ export function middleware(request: NextRequest) {
   // 'object-src none' + 'frame-ancestors none' + nonce-based script-src
   // already block the more direct exfiltration paths; style-based exfil is
   // narrow but real. Worth eventually closing.
+  const cspDirectives = [
+    "default-src 'self'",
+    scriptSrc,
+    "style-src 'self' 'unsafe-inline'",
+    imgSrc,
+    "font-src 'self'",
+    connectSrc,
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ];
+  response.headers.set("Content-Security-Policy", cspDirectives.join("; "));
+
+  // Sibling Content-Security-Policy-Report-Only header — identical to the
+  // enforcing CSP above EXCEPT `style-src` omits `'unsafe-inline'`. The
+  // browser evaluates this policy in parallel with the enforcing one and
+  // emits `Refused to apply inline style` reports for every violation,
+  // without actually blocking the style (the enforcing policy still allows
+  // it). This gives us the inventory of inline-style callsites we need
+  // before we can remove `'unsafe-inline'` from the enforcing policy.
+  //
+  // No `report-uri` / `report-to` configured yet — browsers still surface
+  // violations in DevTools Console, which is the inventory channel the
+  // migration plan needs. Adding a server-side report endpoint is a
+  // separate follow-up once we know the violation volume.
+  //
+  // Route-aware in the same way as the enforcing CSP: `scriptSrc`,
+  // `imgSrc`, and `connectSrc` are already computed per-request based on
+  // `isWebsite`, so reusing them here keeps the two policies in sync.
+  const reportOnlyDirectives = [
+    "default-src 'self'",
+    scriptSrc,
+    "style-src 'self'",
+    imgSrc,
+    "font-src 'self'",
+    connectSrc,
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ];
   response.headers.set(
-    "Content-Security-Policy",
-    [
-      "default-src 'self'",
-      scriptSrc,
-      "style-src 'self' 'unsafe-inline'",
-      imgSrc,
-      "font-src 'self'",
-      connectSrc,
-      "object-src 'none'",
-      "frame-ancestors 'none'",
-      "base-uri 'self'",
-      "form-action 'self'",
-    ].join("; ")
+    "Content-Security-Policy-Report-Only",
+    reportOnlyDirectives.join("; ")
   );
 
   // Expose the nonce on the response so route handlers / debugging tools
