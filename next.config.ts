@@ -47,8 +47,9 @@ const nextConfig: NextConfig = {
   // Standalone output for Docker deployments (produces .next/standalone)
   output: "standalone",
   typescript: {
-    // TypeScript errors are checked in CI, skip during production build
-    ignoreBuildErrors: true,
+    // Strict typecheck enforced on production build (FINLYNQ-11, 2026-05-17).
+    // CI also runs `tsc --noEmit`; this is defense in depth.
+    ignoreBuildErrors: false,
   },
   serverExternalPackages: ["pg", "pdf-parse", "@napi-rs/canvas"],
   // Compile .ts workspace packages directly (they ship source, not dist).
