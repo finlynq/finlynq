@@ -1,42 +1,70 @@
 # Frequently Asked Questions
 
+## Hosting & Deployment
+
+### Does Finlynq offer a hosted service?
+
+Yes. The free managed cloud lives at **[finlynq.com/cloud](https://finlynq.com/cloud)** — same code, same features as the self-hosted release. Donations via [GitHub Sponsors](https://github.com/sponsors/finlynq) or [Ko-fi](https://ko-fi.com/finlynq) are welcome but never required.
+
+### What's the difference between hosted and self-hosted?
+
+- **Hosted (finlynq.com/cloud)** — zero infra on your end. We run PostgreSQL and the Next.js app. You supply your password; the envelope-encryption key for your sensitive fields is derived from it, lives only in memory while you're signed in, and the operator never sees it.
+- **Self-hosted** — you run PostgreSQL and the app yourself (Docker Compose or a Node + Postgres setup on your own VPS). Same encryption guarantees, you control the storage. The DEK still lives only in your running process's memory, derived from your password at login.
+
+Both modes share one codebase and one database schema. The only difference is who operates the server.
+
+### Is there a paid tier?
+
+No. Finlynq is open source under **AGPL v3** and donation-funded ([GitHub Sponsors](https://github.com/sponsors/finlynq), [Ko-fi](https://ko-fi.com/finlynq)). There are no paid plans, feature gates, or seat licenses on either the hosted or self-hosted version.
+
 ## Security & Privacy
 
 ### Is my data safe?
 
-Yes. PF encrypts your entire database with **AES-256 (SQLCipher)**. Your passphrase is used to derive the encryption key and never leaves your device. Without the passphrase, the database file is unreadable.
+Sensitive text columns (payees, transaction notes, tags, account names, category names, goal names, loan names, subscription names, portfolio holding names + symbols) are encrypted at rest with **AES-256-GCM** using a per-user **DEK** (data encryption key). Your password is run through **scrypt** to derive a KEK that wraps the DEK on disk; the DEK itself lives only in memory while you're signed in (cleared on logout and on every deploy restart).
 
-### What happens if I forget my passphrase?
+Amounts, dates, and foreign keys stay plaintext so aggregations (budgets, portfolio rollups, MCP queries) can run server-side without an unwrap step. Full design in [architecture/encryption.md](./architecture/encryption.md).
 
-**Your data cannot be recovered.** There is no password reset, no master key, and no backdoor. This is by design -- your privacy is the top priority. We strongly recommend storing your passphrase in a password manager.
+### What happens if I forget my password?
 
-### Does PF send my financial data anywhere?
+You can reset your **login** (standard password-reset flow over email), but the **encrypted content cannot be recovered**. The reset issues you a new login credential, but the old DEK was wrapped with a KEK derived from your previous password — without that password we cannot unwrap it, and we never stored it in any form that lets us bypass that.
 
-No. In **Local** mode, all data stays on your machine. In **Cloud Sync** mode, the encrypted database file is stored in your own cloud drive (Google Drive, OneDrive, or Dropbox) -- PF never operates a server that holds your data.
+In practical terms: after a reset you can sign back in, but any pre-reset encrypted fields (payees, notes, tags, account/category/goal/loan/subscription/holding names) will render as `—`. Plaintext fields (amounts, dates, account FKs) are unaffected. **Store your password in a password manager.**
 
-### Can I change my passphrase?
+### Does Finlynq send my financial data anywhere?
 
-Yes. Go to **Settings > Security** to re-key your database with a new passphrase.
+In **hosted mode**, your encrypted database lives on our server. In **self-hosted mode**, it lives on yours. Either way, the operator never has your DEK — the wrapped DEK is on disk, the unwrap happens in memory after you authenticate, and the cleartext key is discarded on logout / process restart. Outbound calls are limited to public price providers (Yahoo Finance, CoinGecko, Stooq) keyed by ticker symbol only.
 
-## AI & LLM Integration
+### Can I change my password?
 
-### How do I connect an AI assistant?
+Yes. Go to **Settings → Security** to re-key. The flow decrypts your DEK with the old password and re-wraps it with the new one in a single transaction; encrypted content stays intact.
 
-PF includes an MCP (Model Context Protocol) server. You configure your AI tool (Claude Desktop, ChatGPT, or any MCP-compatible client) to connect to PF's MCP server. See the [Getting Started guide](./getting-started.md#connecting-an-ai-assistant-optional) for setup instructions.
+## AI & MCP
 
-### Does PF have a built-in AI?
+### Does Finlynq have a built-in AI assistant?
 
-No. PF follows a "bring your own AI" approach. You connect your own LLM through the MCP server. This means your data is only shared with the AI provider you choose, and only when you explicitly connect it.
+Yes. The web UI ships a built-in AI chat that runs natural-language queries over your financial data using the same MCP tool surface external clients use — you don't need to wire up an outside AI client to ask "how much did I spend on groceries last month?". The chat is opt-in and runs against your own session, so the same encryption rules apply.
+
+### How do I connect an external AI client?
+
+Finlynq runs an MCP (Model Context Protocol) server that external clients can connect to:
+
+- **HTTP transport** at `/api/mcp` (Streamable HTTP). Auth via session cookie or Bearer API key (`pf_*` prefix). For Claude Web / Claude Mobile / ChatGPT (via the Anthropic Connectors Directory) the server supports **OAuth 2.1 with Dynamic Client Registration**.
+- **Stdio transport** for Claude Desktop and other CLI-style clients. Self-hosters set `PF_USER_ID` + `DATABASE_URL` in the client's MCP config.
+
+See the [Getting Started guide](./getting-started.md#connecting-an-ai-assistant-optional) for client-specific setup steps.
 
 ### What can the AI assistant do?
 
-The MCP server provides 90 HTTP tools / 86 stdio tools (read + write) that let your AI assistant query and manage accounts, transactions, budgets, portfolio data, goals, loans, subscriptions, recurring transactions, and more. It can record transactions, log transfers between accounts, create budgets and rules, run portfolio analysis, build debt-payoff plans, and any other operation surfaced by the tool list.
+The MCP server registers **91 tools on HTTP / 87 tools on stdio** (as of server v3.1.0). They cover reads + writes across accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, recurring transactions, rules, imports, and the staging-review queue. Typical operations: record a transaction, log a transfer between accounts, create a budget or auto-categorize rule, run portfolio analysis, build a debt-payoff plan, review a pending CSV/email import.
+
+Destructive operations (delete account, delete category, bulk-categorize) use a **confirmation-token preview/execute pattern** so the AI has to show you the impact before it can act.
 
 ## Data Import
 
 ### What file formats can I import?
 
-PF supports five import methods:
+Finlynq supports five import methods:
 
 | Format | Description |
 |--------|-------------|
@@ -44,64 +72,61 @@ PF supports five import methods:
 | **Excel** (.xlsx/.xls) | Spreadsheets with visual column mapper |
 | **PDF** | Bank statements with automatic table extraction |
 | **OFX/QFX** | Standard bank statement format |
-| **Email** | Forward bank statements to your per-user `import-<uuid>@finlynq.com` address. Rows land in a review queue at `/import/pending` — nothing is imported until you approve. See [resend-inbound-setup.md](./resend-inbound-setup.md) for the ops side. |
+| **Email** | Forward bank statements to your per-user `import-<hex>@finlynq.com` address. See [resend-inbound-setup.md](./resend-inbound-setup.md) for the ops side. |
+
+Every import path lands in a **unified staging queue at `/import/pending`** — you review, edit (payee / category / note / tags / holding / amount + currency), flag transfer pairs, and approve before any row is materialized into your transactions table. Nothing is auto-committed.
 
 ### Will importing the same file create duplicates?
 
-No. PF has a built-in **deduplication engine** that fingerprints transactions by date, account, amount, and payee. Duplicate transactions are detected and skipped automatically.
+No. Finlynq fingerprints each incoming row with a **SHA-256 hash over the plaintext payee + bank fitId** (computed at ingest, stable across edits and across the staging-encryption upgrade). Re-imports of the same file are detected and skipped.
 
 ### Can I connect directly to my bank?
 
-Not in v1. Direct bank connections (via Plaid or Open Banking) are planned for a future release. For now, use file-based import by downloading statements from your bank's website.
+Not today. Bank-feed aggregator integration (Plaid / SnapTrade / SimpleFIN / Enable Banking / Inverite — research is open) is on the roadmap, but no shipping date yet. For now, use file-based import: download statements from your bank's website (CSV / OFX / PDF), or forward email statements to your per-user import address.
 
-## Syncing & Multi-Device
+## Multi-Device & Mobile
 
-### How do I access PF from multiple devices?
+### How do I access Finlynq from multiple devices?
 
-Two options:
+- **Hosted (finlynq.com/cloud)** — just log in from any device. Sessions are per-device; there's no single-writer lock.
+- **Self-hosted** — run the Next.js app on a machine, then log in over your LAN from a browser or the mobile app. For a self-hosted setup reachable outside your LAN, put the app behind a reverse proxy (Caddy, nginx, Cloudflare Tunnel) with TLS.
 
-1. **Cloud Sync** -- Store your encrypted database in a Google Drive, OneDrive, or Dropbox synced folder. Only one device can write at a time (single-writer lock); others open in read-only mode.
-2. **Mobile app** -- Run the PF web server on your computer and connect the React Native mobile app over your local network, or use a hosted deployment.
+### Is there a mobile app?
 
-See the [Mobile Setup guide](./mobile-setup.md) for details on connecting the mobile app.
+Yes — a React Native (Expo) mobile app that talks to your Finlynq backend (hosted or self-hosted). It covers Dashboard, Transactions, Import, Budgets, and Settings. Setup steps in the [Mobile Setup guide](./mobile-setup.md).
 
-### Can two people edit at the same time?
+### Do I need to run the web app for mobile to work?
 
-No. PF uses a single-writer lock to prevent conflicts. When one device has write access, other devices open in read-only mode. The lock is released when the writing device closes PF or after a heartbeat timeout.
+Yes. The mobile app is a client; it talks to the Finlynq Next.js backend over HTTP. For hosted users, that backend is finlynq.com — you just point the app at it. For self-hosters, the backend has to be running and reachable on the network the phone is on.
 
 ## Budgets & Tracking
 
 ### How do budgets work?
 
-Create a budget by picking a category and setting a monthly limit. PF automatically tracks your spending in that category against the budget. Progress bars show how much you have spent and how much remains.
+Create a budget by picking a category and setting a monthly limit. Finlynq tracks spending in that category against the budget; progress bars show how much you've spent and how much remains.
 
 ### Can I use multiple currencies?
 
-Yes. PF supports multi-currency accounts with automatic FX rate fetching. You can set a currency per account and view reports in your base currency with converted amounts.
-
-## Mobile App
-
-### Is there a mobile app?
-
-Yes. PF has a React Native (Expo) mobile app that connects to your PF web server. It includes Dashboard, Transactions, Import, Budgets, and Settings screens. See the [Mobile Setup guide](./mobile-setup.md).
-
-### Do I need to run the web app for mobile to work?
-
-Yes. The mobile app connects to the PF Next.js backend (running on your computer or a hosted server). The web server must be running for the mobile app to access your data.
+Yes. Finlynq supports multi-currency accounts with automatic FX-rate fetching (Yahoo Finance for fiat, CoinGecko for crypto, Stooq for precious metals). Each account has its own currency; reports convert to your base currency on the fly. Triangulated rates (e.g. EUR → USD → CAD) are computed via the USD hop and surface the worst-case per-leg source so you can see when a rate is stale or overridden.
 
 ## Troubleshooting
 
-### The app shows "Database locked"
+### Encrypted fields show as "—" or `v1:...`
 
-Another device or process has the write lock. Close PF on other devices, or wait for the heartbeat timeout (usually a few minutes). You can also check lock status in **Settings > Storage**.
+This means the server has a row but no DEK to decrypt it. Most common cause: the in-memory DEK cache was cleared by a deploy restart (hosted) or a process restart (self-hosted). Sign out and back in — that re-unwraps your DEK and the names + payees come back.
+
+If they're still missing after a clean re-login, your DEK may have been wrapped with a different password than the one you're using (the "Pathfinder DEK mismatch" footgun in `architecture/encryption.md`). File an issue with a screenshot if so.
 
 ### Import failed with an error
 
 Common causes:
-- **CSV**: Column headers don't match expected format. Use the column mapper to align fields.
-- **PDF**: Some bank statement layouts aren't recognized. Try exporting as CSV or OFX from your bank instead.
-- **Large files**: Very large imports may time out. Try splitting into smaller batches.
 
-### The unlock screen won't accept my passphrase
+- **CSV** — column headers don't match the expected format. Use the column mapper to align fields, then re-upload.
+- **PDF** — some bank-statement layouts aren't recognized by the table extractor. Try exporting as CSV or OFX from your bank instead.
+- **Large files** — very large uploads may time out. Split into smaller batches.
 
-Ensure you're typing the exact passphrase (case-sensitive, including spaces). If you've changed your passphrase recently, use the new one. There is no recovery option if the passphrase is lost.
+For email imports that don't show up in `/import/pending`, check that you sent from an address registered on your account and that the receiving address matches your per-user `import-<hex>@finlynq.com` exactly.
+
+### The login screen won't accept my password
+
+Passwords are case-sensitive (spaces included). If you changed your password recently, use the new one. There's no recovery for **encrypted content** if the password is lost, but you can always reset your login via the standard email-based password-reset flow (see "What happens if I forget my password?" above).
