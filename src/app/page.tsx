@@ -286,9 +286,13 @@ export default function LandingPage() {
               questions about your finances in plain English.
             </p>
 
+            <p className="lede" style={{ marginTop: 12, fontSize: 15, opacity: 0.8 }}>
+              Free hosted cloud, or self-host with Docker — same features either way.
+            </p>
+
             <div className="hero-cta">
               <Link href="/cloud?tab=register" className="btn btn-primary">
-                Get started free <span aria-hidden="true">→</span>
+                Try the hosted cloud <span aria-hidden="true">→</span>
               </Link>
               <Link href="/self-hosted" className="btn btn-ghost">
                 Self-host with Docker
