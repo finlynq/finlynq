@@ -66,14 +66,21 @@ export async function parseResponse(response: Response): Promise<{ status: numbe
 /**
  * Create a chainable mock for Drizzle ORM query builder.
  * Supports: select().from().where().orderBy().groupBy().leftJoin().limit().offset().all().get().run()
+ *
+ * The chain is also a thenable: `await chain` resolves to the configured
+ * `returnValue` array. Real Drizzle SELECT chains are thenables — route code
+ * frequently calls `const rows = await db.select()...where(...)` without a
+ * trailing `.all()`. Without `then`, `await chain` returns the chain object
+ * itself and `rows.map/length` blows up.
  */
 export function createDrizzleMock(returnValue: unknown = []) {
+  const rows = Array.isArray(returnValue) ? returnValue : [];
   const chain: Record<string, unknown> = {};
   const methods = ["select", "from", "where", "orderBy", "groupBy", "leftJoin", "limit", "offset", "values", "set", "returning"];
   for (const method of methods) {
     chain[method] = vi.fn().mockReturnValue(chain);
   }
-  chain.all = vi.fn().mockReturnValue(Array.isArray(returnValue) ? returnValue : []);
+  chain.all = vi.fn().mockReturnValue(rows);
   chain.get = vi.fn().mockReturnValue(Array.isArray(returnValue) ? returnValue[0] : returnValue);
   chain.run = vi.fn().mockReturnValue(undefined);
 
@@ -81,6 +88,10 @@ export function createDrizzleMock(returnValue: unknown = []) {
   chain.insert = vi.fn().mockReturnValue(chain);
   chain.update = vi.fn().mockReturnValue(chain);
   chain.delete = vi.fn().mockReturnValue(chain);
+
+  // Thenable shim: awaiting the chain resolves to the rows array, matching the
+  // shape real Drizzle SELECTs produce when awaited without a terminator.
+  chain.then = (resolve: (v: unknown) => unknown) => resolve(rows);
 
   return chain;
 }

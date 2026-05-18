@@ -6,6 +6,11 @@ for (const m of chainMethods) {
   mockDbChain[m] = vi.fn().mockReturnValue(mockDbChain);
 }
 mockDbChain.run = vi.fn();
+// Make the chain awaitable — real Drizzle chains are thenables; without this,
+// `await db.delete(...).where(...)` returns the chain object itself (not the rows),
+// causing `rows.map`/`rows.length` to blow up in route code.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(mockDbChain as any).then = (resolve: (v: unknown) => unknown) => resolve([]);
 
 vi.mock("@/db", () => ({
   db: new Proxy({}, {

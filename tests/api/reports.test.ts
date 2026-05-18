@@ -7,6 +7,11 @@ for (const m of chainMethods) {
 }
 mockDbChain.all = vi.fn().mockReturnValue([]);
 mockDbChain.get = vi.fn().mockReturnValue(undefined);
+// Make the chain awaitable — real Drizzle SELECT chains are thenables; awaiting
+// them runs the query and returns the rows array. Without this, `await db.select()...`
+// in route code returns the chain Proxy, and rows.map/length blow up.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(mockDbChain as any).then = (resolve: (v: unknown) => unknown) => resolve([]);
 
 vi.mock("@/db", () => ({
   db: new Proxy({}, {
