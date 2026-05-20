@@ -128,11 +128,41 @@ export async function POST(
   // skipped_duplicate back to unmatched if the user re-uploads": the marker
   // is only set at INSERT; user overrides on this approve path are not
   // re-stamped back onto the row.
-  const selected = rowIds
+  const allSelected = rowIds
     ? allRows.filter((r) => rowIds!.includes(r.id))
     : allRows.filter((r) => r.reconcileState !== "skipped_duplicate");
 
-  if (selected.length === 0) {
+  // FINLYNQ-56 — rows that the user already linked to an existing
+  // `transactions` row via the two-pane reconciliation UI don't go
+  // through the materialization pipeline (the target row already exists).
+  // They get de-queued: deleted from `staged_transactions` at the
+  // cleanup step alongside the materialized rows, with no INSERT into
+  // `transactions`. This is what the test plan tc-1's "approve
+  // materializes only unmatched/auto_suggested rows" assertion checks.
+  // Half-pair transfer enforcement on linked rows still applies: a
+  // tx_type='R' row whose peer_staged_id is set but whose peer is NOT
+  // also 'linked' is refused here (otherwise the user could approve one
+  // leg of a transfer pair via the link path while the other materializes
+  // through executeImport).
+  const linkedRows = allSelected.filter((r) => r.reconcileState === "linked");
+  for (const r of linkedRows) {
+    if (r.txType === "R" && r.peerStagedId) {
+      const peer = allSelected.find((p) => p.id === r.peerStagedId);
+      if (!peer || peer.reconcileState !== "linked") {
+        return NextResponse.json(
+          {
+            success: false,
+            code: "half_pair_link",
+            error: `Row ${r.rowIndex + 1}: transfer peer must also be linked, or unlink this row first.`,
+          },
+          { status: 400 },
+        );
+      }
+    }
+  }
+  const selected = allSelected.filter((r) => r.reconcileState !== "linked");
+
+  if (selected.length === 0 && linkedRows.length === 0) {
     return NextResponse.json({ error: "No rows selected" }, { status: 400 });
   }
 
@@ -591,6 +621,14 @@ export async function POST(
 
   if (imported > 0) invalidateUserTxCache(userId);
 
+  // FINLYNQ-56 — linked rows are de-queued, not materialized. Add them to
+  // materializedRowIds so the cleanup pass below deletes them from the
+  // staging queue. The live `transactions` row they reference is left
+  // untouched. NOTE: NO `invalidateUserTxCache` for the linked bucket —
+  // we didn't INSERT into `transactions`, so the per-user payee cache is
+  // unchanged.
+  for (const r of linkedRows) materializedRowIds.add(r.id);
+
   // ─── Step 5: cleanup staged rows ───────────────────────────────────────
   //
   // Delete rows that were materialized; preserve the rest for re-edit.
@@ -630,8 +668,9 @@ export async function POST(
 
   return NextResponse.json({
     imported,
+    linked: linkedRows.length,
     skippedDuplicates: 0, // accounted for inside executeImport's per-call result
-    total: selected.length,
+    total: allSelected.length,
     errors: importErrors.length > 0 ? importErrors : undefined,
   });
 }

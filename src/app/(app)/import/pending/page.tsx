@@ -51,6 +51,11 @@ import { AccountSelector, type AccountOption } from "@/components/import/reconci
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
 import { FilePane } from "@/components/import/reconcile/file-pane";
 import { DbPane, type DbTransactionRow } from "@/components/import/reconcile/db-pane";
+import {
+  SuggestionsGroup,
+  type SuggestionDisplay,
+} from "@/components/import/reconcile/suggestions-group";
+import { Link as LinkIcon, Flag, X as XIcon } from "lucide-react";
 
 interface StagedRow {
   id: string;
@@ -129,6 +134,18 @@ function PendingImportsPageInner() {
   const [accountId, setAccountId] = useState<number | null>(null);
   const [dbRows, setDbRows] = useState<DbTransactionRow[]>([]);
   const [dbRowsLoading, setDbRowsLoading] = useState(false);
+  // Phase 3 — match-action state.
+  // Local-only set of rejected suggestion pairs ("stagedRowId:transactionId").
+  // Per sub-item FINLYNQ-71 the reject is intentionally NOT persisted —
+  // the matcher re-runs on every GET and we just hide the rejected pair
+  // for the lifetime of this page state.
+  const [rejectedSuggestions, setRejectedSuggestions] = useState<Set<string>>(new Set());
+  // When set, the user clicked "Link" on a staged row and is awaiting a
+  // DB-row click to complete the pair.
+  const [linkMode, setLinkMode] = useState<{ stagedRowId: string } | null>(null);
+  // The suggestion-card or row whose action is currently in flight —
+  // disables its buttons so a double-click can't double-fire the PATCH.
+  const [busyKey, setBusyKey] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -413,6 +430,265 @@ function PendingImportsPageInner() {
       };
     });
   }, []);
+
+  // ─── Phase 3 — match-action helpers ──────────────────────────────────────
+
+  /** Generic PATCH wrapper that hits the staged-row endpoint, updates the
+   *  local row on success, and surfaces a toast on failure. Used by every
+   *  staged-side action (accept-suggestion, unlink, skip, unskip, link). */
+  const patchStagedRow = useCallback(
+    async (
+      rowId: string,
+      updates: Partial<{
+        reconcileState: "unmatched" | "auto_suggested" | "linked" | "skipped_duplicate";
+        linkedTransactionId: number | null;
+      }>,
+      busyKeyForCall: string,
+    ): Promise<StagedEditableRow | null> => {
+      if (!openId) return null;
+      setBusyKey(busyKeyForCall);
+      try {
+        const res = await fetch(
+          `/api/import/staged/${openId}/rows/${rowId}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(updates),
+          },
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error || "Failed to update row");
+        }
+        const updated = data.row as StagedEditableRow;
+        setDetail((d) => {
+          if (!d) return d;
+          return {
+            ...d,
+            rows: d.rows.map((x) => (x.id === updated.id ? updated : x)),
+          };
+        });
+        return updated;
+      } catch (e) {
+        setToast({
+          type: "error",
+          msg: e instanceof Error ? e.message : "Failed to update row",
+        });
+        return null;
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [openId],
+  );
+
+  /** Mirror the back-reference on a DB row in local state so the
+   *  "linked to staged #X" indicator updates within the 500ms target.
+   *  The server doesn't carry an inverse FK on `transactions`; the
+   *  on-screen state is the source of truth between fetches. */
+  const updateDbRowLink = useCallback(
+    (transactionId: number, linkedStagedRowId: string | null) => {
+      setDbRows((rows) =>
+        rows.map((r) =>
+          r.id === transactionId ? { ...r, linkedStagedRowId } : r,
+        ),
+      );
+    },
+    [],
+  );
+
+  const updateDbRowFlag = useCallback(
+    (transactionId: number, flag: { kind: string; note: string | null } | null) => {
+      setDbRows((rows) =>
+        rows.map((r) =>
+          r.id === transactionId ? { ...r, reconciliationFlag: flag } : r,
+        ),
+      );
+    },
+    [],
+  );
+
+  const acceptSuggestion = useCallback(
+    async (s: SuggestionDisplay) => {
+      const key = `accept:${s.stagedRowId}:${s.transactionId}`;
+      const updated = await patchStagedRow(
+        s.stagedRowId,
+        { reconcileState: "linked", linkedTransactionId: s.transactionId },
+        key,
+      );
+      if (updated) {
+        updateDbRowLink(s.transactionId, s.stagedRowId);
+      }
+    },
+    [patchStagedRow, updateDbRowLink],
+  );
+
+  const rejectSuggestion = useCallback((s: SuggestionDisplay) => {
+    const key = `${s.stagedRowId}:${s.transactionId}`;
+    setRejectedSuggestions((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
+
+  const unlinkStagedRow = useCallback(
+    async (rowId: string) => {
+      const row = detail?.rows.find((r) => r.id === rowId);
+      const prevLinkedTx = row?.linkedTransactionId ?? null;
+      const updated = await patchStagedRow(
+        rowId,
+        { reconcileState: "unmatched", linkedTransactionId: null },
+        `unlink:${rowId}`,
+      );
+      if (updated && prevLinkedTx != null) {
+        updateDbRowLink(prevLinkedTx, null);
+      }
+    },
+    [detail, patchStagedRow, updateDbRowLink],
+  );
+
+  const skipStagedRow = useCallback(
+    async (rowId: string) => {
+      await patchStagedRow(
+        rowId,
+        { reconcileState: "skipped_duplicate" },
+        `skip:${rowId}`,
+      );
+      // Skipping a row removes it from the approve set by default.
+      setSelected((s) => {
+        const next = new Set(s);
+        next.delete(rowId);
+        return next;
+      });
+    },
+    [patchStagedRow],
+  );
+
+  const unskipStagedRow = useCallback(
+    async (rowId: string) => {
+      await patchStagedRow(
+        rowId,
+        { reconcileState: "unmatched" },
+        `unskip:${rowId}`,
+      );
+    },
+    [patchStagedRow],
+  );
+
+  const beginLink = useCallback((stagedRowId: string) => {
+    setLinkMode({ stagedRowId });
+  }, []);
+
+  const cancelLink = useCallback(() => {
+    setLinkMode(null);
+  }, []);
+
+  const completeLink = useCallback(
+    async (transactionId: number) => {
+      if (!linkMode) return;
+      const updated = await patchStagedRow(
+        linkMode.stagedRowId,
+        { reconcileState: "linked", linkedTransactionId: transactionId },
+        `link:${linkMode.stagedRowId}`,
+      );
+      if (updated) {
+        updateDbRowLink(transactionId, linkMode.stagedRowId);
+        setLinkMode(null);
+      }
+    },
+    [linkMode, patchStagedRow, updateDbRowLink],
+  );
+
+  const flagDbRow = useCallback(
+    async (transactionId: number) => {
+      setBusyKey(`flag:${transactionId}`);
+      try {
+        const res = await fetch(
+          `/api/transactions/${transactionId}/reconciliation-flag`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ flag_kind: "missing_from_statement" }),
+          },
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error || "Failed to flag transaction");
+        }
+        updateDbRowFlag(transactionId, { kind: "missing_from_statement", note: null });
+      } catch (e) {
+        setToast({
+          type: "error",
+          msg: e instanceof Error ? e.message : "Failed to flag transaction",
+        });
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [updateDbRowFlag],
+  );
+
+  const unflagDbRow = useCallback(
+    async (transactionId: number) => {
+      setBusyKey(`unflag:${transactionId}`);
+      try {
+        const res = await fetch(
+          `/api/transactions/${transactionId}/reconciliation-flag`,
+          { method: "DELETE" },
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error || "Failed to remove flag");
+        }
+        updateDbRowFlag(transactionId, null);
+      } catch (e) {
+        setToast({
+          type: "error",
+          msg: e instanceof Error ? e.message : "Failed to remove flag",
+        });
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [updateDbRowFlag],
+  );
+
+  // Derive the displayable suggestion cards from the matcher's pairs,
+  // filtering out (a) rejected pairs, (b) staged rows already at 'linked'
+  // or 'skipped_duplicate', (c) DB rows already linked to a different
+  // staged row in this batch. Enriches with decoded payee/date/amount
+  // from both sides so the SuggestionsGroup card doesn't need a second
+  // lookup pass.
+  const displaySuggestions: SuggestionDisplay[] = useMemo(() => {
+    if (!detail?.suggestedMatches) return [];
+    const stagedById = new Map(detail.rows.map((r) => [r.id, r]));
+    const dbById = new Map(dbRows.map((r) => [r.id, r]));
+    const out: SuggestionDisplay[] = [];
+    for (const s of detail.suggestedMatches) {
+      const key = `${s.stagedRowId}:${s.transactionId}`;
+      if (rejectedSuggestions.has(key)) continue;
+      const sRow = stagedById.get(s.stagedRowId);
+      const dRow = dbById.get(s.transactionId);
+      if (!sRow || !dRow) continue;
+      if (sRow.reconcileState === "linked" || sRow.reconcileState === "skipped_duplicate") continue;
+      if (dRow.linkedStagedRowId != null && dRow.linkedStagedRowId !== sRow.id) continue;
+      out.push({
+        stagedRowId: s.stagedRowId,
+        transactionId: s.transactionId,
+        confidence: s.confidence,
+        stagedPayee: sRow.payee,
+        stagedDate: sRow.date,
+        stagedAmount: Number(sRow.amount ?? 0),
+        stagedCurrency: sRow.currency ?? "CAD",
+        dbPayee: dRow.payee,
+        dbDate: dRow.date,
+        dbAmount: dRow.amount,
+        dbCurrency: dRow.currency,
+      });
+    }
+    return out;
+  }, [detail, dbRows, rejectedSuggestions]);
 
   const approve = useCallback(async () => {
     if (!openId || selected.size === 0) return;
@@ -748,6 +1024,24 @@ function PendingImportsPageInner() {
         />
       )}
 
+      {linkMode && (
+        <Card className="border-sky-300 bg-sky-50/50">
+          <CardContent className="py-2 px-3 text-sm flex items-center justify-between gap-3">
+            <span>
+              <LinkIcon className="h-3.5 w-3.5 inline mr-1.5" />
+              Pick a transaction on the left pane to link to staged row{" "}
+              <span className="font-mono">
+                #{detail?.rows.find((r) => r.id === linkMode.stagedRowId)?.rowIndex ?? "?"}
+              </span>
+            </span>
+            <Button size="sm" variant="ghost" onClick={cancelLink}>
+              <XIcon className="h-3.5 w-3.5 mr-1" />
+              Cancel
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       <div className="flex-1 min-h-0">
         {detailLoading ? (
           <Card>
@@ -759,7 +1053,70 @@ function PendingImportsPageInner() {
           <TwoPaneLayout
             leftLabel="What's in Finlynq (existing)"
             left={
-              <DbPane rows={dbRows} loading={dbRowsLoading} />
+              <DbPane
+                rows={dbRows}
+                loading={dbRowsLoading}
+                rowActions={(r) => {
+                  // In link-mode: show a Pick button on rows that aren't
+                  // already linked to a DIFFERENT staged row. The staged
+                  // row being linked may itself already be the back-ref
+                  // (re-linking), which we allow.
+                  const eligibleForLink =
+                    !r.linkedStagedRowId ||
+                    r.linkedStagedRowId === linkMode?.stagedRowId;
+                  const linkBusy = busyKey === `link:${linkMode?.stagedRowId}`;
+                  if (linkMode) {
+                    if (!eligibleForLink) {
+                      return (
+                        <span className="text-[10px] text-muted-foreground italic">
+                          already linked
+                        </span>
+                      );
+                    }
+                    return (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => completeLink(r.id)}
+                        disabled={linkBusy}
+                        className="h-7 px-2"
+                      >
+                        <Check className="h-3.5 w-3.5 mr-1" />
+                        Pick
+                      </Button>
+                    );
+                  }
+                  // Default mode: flag / unflag toggle.
+                  const flagBusy =
+                    busyKey === `flag:${r.id}` || busyKey === `unflag:${r.id}`;
+                  if (r.reconciliationFlag) {
+                    return (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => unflagDbRow(r.id)}
+                        disabled={flagBusy}
+                        className="h-7 px-2 text-rose-700"
+                        title="Remove 'missing from statement' flag"
+                      >
+                        <XIcon className="h-3.5 w-3.5" />
+                      </Button>
+                    );
+                  }
+                  return (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => flagDbRow(r.id)}
+                      disabled={flagBusy}
+                      className="h-7 px-2 text-muted-foreground hover:text-rose-700"
+                      title="Mark as missing from this statement"
+                    >
+                      <Flag className="h-3.5 w-3.5" />
+                    </Button>
+                  );
+                }}
+              />
             }
             rightLabel="From the file (staged)"
             right={
@@ -773,6 +1130,79 @@ function PendingImportsPageInner() {
                 onToggleSelect={toggleSelect}
                 onToggleExpand={toggleExpanded}
                 onRowUpdated={onRowUpdated}
+                header={
+                  displaySuggestions.length > 0 && (
+                    <SuggestionsGroup
+                      suggestions={displaySuggestions}
+                      onAccept={acceptSuggestion}
+                      onReject={rejectSuggestion}
+                      busyId={
+                        busyKey?.startsWith("accept:")
+                          ? busyKey.replace(/^accept:/, "")
+                          : null
+                      }
+                    />
+                  )
+                }
+                rowActions={(r) => {
+                  const linkBusy = busyKey === `link:${r.id}`;
+                  const skipBusy =
+                    busyKey === `skip:${r.id}` || busyKey === `unskip:${r.id}`;
+                  const unlinkBusy = busyKey === `unlink:${r.id}`;
+                  if (r.reconcileState === "linked") {
+                    return (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => unlinkStagedRow(r.id)}
+                        disabled={unlinkBusy}
+                        className="h-7 px-2 text-muted-foreground"
+                        title="Unlink"
+                      >
+                        <XIcon className="h-3.5 w-3.5" />
+                      </Button>
+                    );
+                  }
+                  if (r.reconcileState === "skipped_duplicate") {
+                    return (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => unskipStagedRow(r.id)}
+                        disabled={skipBusy}
+                        className="h-7 px-2 text-muted-foreground"
+                        title="Un-skip"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      </Button>
+                    );
+                  }
+                  // Default state — show Link + Skip.
+                  return (
+                    <div className="flex items-center gap-1 justify-end">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => beginLink(r.id)}
+                        disabled={linkBusy || linkMode != null}
+                        className="h-7 px-2"
+                        title="Link to a DB row"
+                      >
+                        <LinkIcon className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => skipStagedRow(r.id)}
+                        disabled={skipBusy}
+                        className="h-7 px-2 text-muted-foreground"
+                        title="Mark as already imported"
+                      >
+                        <XIcon className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  );
+                }}
               />
             }
           />
