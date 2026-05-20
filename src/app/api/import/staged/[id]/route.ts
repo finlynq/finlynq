@@ -11,13 +11,14 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { and, eq, asc, sql } from "drizzle-orm";
+import { and, eq, asc, gte, lte, sql, isNotNull } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { getRate } from "@/lib/fx-service";
+import { findAutoMatches } from "@/lib/import/auto-match";
 
 export const dynamic = "force-dynamic";
 
@@ -210,6 +211,101 @@ export async function GET(
     }
   }
 
+  // ─── FINLYNQ-56 — auto-match suggestions ───────────────────────────────
+  // Server-side helper computes candidate (staged, db) pairs in the ±7d
+  // window around the batch's date range. Surfaces them on the response
+  // so the right pane can render a pinned Suggestions group.
+  //
+  // Only runs when boundAccountId is set — without it we have no
+  // accountId to scope DB rows against (the matcher requires same
+  // accountId by design). Pre-FINLYNQ-58 batches with NULL
+  // dateRangeStart/End fall back to min/max of staged-row dates.
+  const suggestedMatches: ReturnType<typeof findAutoMatches> = [];
+  if (staged.boundAccountId != null && decryptedRows.length > 0) {
+    const stagedDates = rows
+      .map((r) => r.date)
+      .filter((d): d is string => !!d)
+      .sort();
+    const minStagedDate = staged.dateRangeStart ?? stagedDates[0] ?? null;
+    const maxStagedDate =
+      staged.dateRangeEnd ?? stagedDates[stagedDates.length - 1] ?? null;
+
+    if (minStagedDate && maxStagedDate) {
+      const from = shiftDays(minStagedDate, -7);
+      const to = shiftDays(maxStagedDate, 7);
+
+      // Pull DB rows in the window for the bound account. Single query
+      // per pane render — cheaper than per-row lookups. Same shape the
+      // /api/transactions/reconciliation endpoint uses, minus the joins
+      // (the matcher only needs id/date/amount/currency/accountId).
+      const dbRows = await db
+        .select({
+          id: schema.transactions.id,
+          date: schema.transactions.date,
+          amount: schema.transactions.amount,
+          currency: schema.transactions.currency,
+          accountId: schema.transactions.accountId,
+        })
+        .from(schema.transactions)
+        .where(and(
+          eq(schema.transactions.userId, userId),
+          eq(schema.transactions.accountId, staged.boundAccountId),
+          gte(schema.transactions.date, from),
+          lte(schema.transactions.date, to),
+          isNotNull(schema.transactions.accountId),
+        ))
+        .all();
+
+      // alreadyLinked: a DB row is excluded from candidates if any
+      // staged_transactions.linked_transaction_id already references it
+      // (could be from THIS batch — if the user has manually linked one
+      // row, the matcher shouldn't suggest the same DB row to another).
+      const dbIds = dbRows.map((r) => r.id);
+      const linkedSet = new Set<number>();
+      if (dbIds.length > 0) {
+        const linkedRefs = await db
+          .select({
+            linkedTransactionId: schema.stagedTransactions.linkedTransactionId,
+          })
+          .from(schema.stagedTransactions)
+          .where(and(
+            eq(schema.stagedTransactions.userId, userId),
+            isNotNull(schema.stagedTransactions.linkedTransactionId),
+          ))
+          .all();
+        for (const r of linkedRefs) {
+          if (r.linkedTransactionId != null) {
+            linkedSet.add(r.linkedTransactionId);
+          }
+        }
+      }
+
+      const matcherInput = {
+        staged: decryptedRows.map((r) => ({
+          id: r.id,
+          date: r.date,
+          amount: Number(r.amount ?? 0),
+          currency: r.currency ?? "CAD",
+          reconcileState: r.reconcileState,
+          // Every row in this batch is on the bound account today (the
+          // upload flow binds at ingest); future multi-account batches
+          // would resolve per-row from the decoded accountName via
+          // categories-style HMAC lookup.
+          accountId: staged.boundAccountId,
+        })),
+        db: dbRows.map((r) => ({
+          id: r.id,
+          date: r.date,
+          amount: Number(r.amount ?? 0),
+          currency: r.currency ?? "CAD",
+          accountId: r.accountId as number,
+          alreadyLinked: linkedSet.has(r.id),
+        })),
+      };
+      suggestedMatches.push(...findAutoMatches(matcherInput));
+    }
+  }
+
   return NextResponse.json({
     staged,
     rows: decryptedRows,
@@ -219,7 +315,16 @@ export async function GET(
       pendingDelta,
       boundAccountCurrency,
     },
+    suggestedMatches,
   });
+}
+
+/** Shift a YYYY-MM-DD date string by N days (positive or negative).
+ *  Used for the ±7d auto-match window. */
+function shiftDays(date: string, days: number): string {
+  const d = new Date(date + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().split("T")[0];
 }
 
 export async function DELETE(
