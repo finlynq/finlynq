@@ -1,254 +1,442 @@
-# Two-pane reconciliation on `/import/pending` — design plan
+# Two-pane reconciliation on `/import/pending` — implementation-ready plan
 
-**DevManager item:** FINLYNQ-56 (F-53C). Parent FINLYNQ-53. Schema dependencies
-F-53A (FINLYNQ-54) + F-53B (FINLYNQ-55) shipped 2026-05-20.
+**DevManager item:** FINLYNQ-56 (F-53C). Parent FINLYNQ-53. Shipped
+dependencies: FINLYNQ-54 (parser knobs), FINLYNQ-55 (`reconcile_state`
+column + `transaction_reconciliation_flags` table), FINLYNQ-57
+(unresolved-category gate), FINLYNQ-58 (overlap-merge + `import_hash`
+index). All work is captured in the five phases below — no separate
+sub-items.
+
+## Context
+
+`/import/pending` today is a single-pane Approve/Reject dialog. After
+F-53A/B/E shipped, `staged_transactions` now carries `reconcile_state`
+(`unmatched | auto_suggested | linked | skipped_duplicate`) and
+`linked_transaction_id`, plus a sibling `transaction_reconciliation_flags`
+table — but **the UI never surfaces or sets them**. The verifier-facing
+problem is that a user importing a 60-row statement has no way to compare
+it side-by-side with what's already in their account, has to eyeball
+duplicates, and can't mark "the bank's statement is missing this
+transaction I entered manually." This change closes that gap.
+
+Four user decisions taken (2026-05-20):
+
+1. **Auto-match window**: `|Δamount| ≤ 0.01` AND `|Δdate| ≤ 1 day`.
+2. **Compute locus**: server-side helper at `src/lib/import/auto-match.ts`;
+   results surfaced as `suggestedMatches[]` on the GET staged-detail
+   response.
+3. **Left-pane endpoint**: `GET /api/transactions/reconciliation?accountId=…&from=…&to=…`
+   with `requireEncryption()` (decoded names; no soft fallback).
+4. **Phase 1 gate dropped** — threshold no longer load-bearing across
+   releases.
 
 ## Scope summary
 
 Rebuild `/import/pending` from a single-pane Approve/Reject dialog into a
-per-account two-pane reconciliation surface. The right pane shows file rows
-from `staged_transactions` for one selected account; the left pane shows
-existing `transactions` rows on that account within ±7 days of the file's
-date range. The user has four matching actions: accept an auto-match
-suggestion, manually link/unlink a file row to a DB row, mark a file row as
-`skipped_duplicate`, or flag a DB row as `missing_from_statement`. Every
-action persists immediately so a tab close and reopen restores all four
-decisions verbatim. The existing reconciliation balance callout
-(`Statement says / Finlynq has now / After approval`) is wired to live-
-recompute (≤500ms) as each action lands.
+per-account two-pane reconciliation surface. The right pane shows file
+rows from `staged_transactions` for one selected account; the left pane
+shows existing `transactions` rows on that account within ±7 days of the
+file's date range. The user has four matching actions: accept an
+auto-match suggestion, manually link/unlink a file row to a DB row, mark
+a file row as `skipped_duplicate`, or flag a DB row as
+`missing_from_statement`. Every action persists immediately so a tab
+close and reopen restores all four decisions verbatim. The existing
+reconciliation balance callout (`Statement says / Finlynq has now / After
+approval`) is wired to live-recompute (≤500ms) as each action lands.
 
-## File / endpoint inventory
+## Critical files
 
-### Existing files we touch
+### Modify
 
-| Path | Role | Phase |
-|---|---|---|
-| `pf-app/src/app/(app)/import/pending/page.tsx` | Single-pane dialog today. Rebuild into two-pane shell (account selector + URL state) wrapping the existing `StagedRowEditor` and `ReconciliationCallout`. | 2, 3, 4 |
-| `pf-app/src/app/api/import/staged/[id]/route.ts` (GET) | Already returns staged rows + reconciliation block. Extend response to include suggested matches + per-row `reconcileState` / `linkedTransactionId` (already on schema, just not selected). | 1 |
-| `pf-app/src/app/api/import/staged/[id]/rows/[rowId]/route.ts` (PATCH) | Extend the Zod schema + update set to accept `reconcileState` (enum) and `linkedTransactionId` (nullable int). Validate the CHECK enum + verify the linked transaction belongs to the same user. Preserve every existing invariant — `import_hash` MUST NOT be recomputed; per-row encryption tier MUST NOT flip; mutual exclusion of `peer_staged_id` vs `target_account_id` unchanged. | 1 |
-| `pf-app/src/app/api/import/staged/[id]/approve/route.ts` (POST) | No-op for most of phase 1, but: when materializing rows whose `reconcile_state='linked'`, the existing transaction row already exists — we DO NOT re-insert it; we just delete the staged row from the queue. Skip `reconcile_state='skipped_duplicate'` rows entirely (no insert, no flag). The half-pair transfer invariant, sign-vs-category invariant, and `import_hash` invariant remain unchanged. | 3 |
-| `pf-app/src/components/staging/reconciliation-callout.tsx` | Reuse as-is; phase 4 just wires a wider `liveDelta` calculation that subtracts linked + skipped rows in addition to the existing `dedupStatus='existing'` exclusion. | 4 |
-| `pf-app/src/components/staging/staged-row-editor.tsx` | Reuse; the editor stays per-row. Phase 3 adds a new "reconcile" action surface on the row (the badge + actions) without changing the editor itself. | 3 |
-| `pf-app/CHANGELOG.md` | Unreleased entry per phase commit. | every |
-| `C:\Users\halaw\Projects\PF\CLAUDE.md` | Workspace project-instructions. Add a load-bearing gotcha for the four-action invariant (no `flagged_missing` in `reconcile_state`, no `import_hash` recompute, no tier flip) once phase 1 lands. | 1 |
-| `pf-app/docs/architecture/database.md` | Update the `staged_transactions` reconciliation columns section with reader/writer routes and link from the load-bearing-gotchas. | 1 |
+| Path | Role |
+|---|---|
+| `pf-app/src/app/(app)/import/pending/page.tsx` | Wholesale rebuild from single-pane dialog into two-pane shell. Keep `StagedRowEditor` + `ReconciliationCallout` + `UnresolvedCategoriesBanner`. |
+| `pf-app/src/app/api/import/staged/[id]/route.ts` (GET) | Add `suggestedMatches: { stagedRowId, transactionId, confidence }[]`. Compute by calling `findAutoMatches()` after the per-tier decode loop. |
+| `pf-app/src/app/api/import/staged/[id]/rows/[rowId]/route.ts` (PATCH) | Extend Zod schema with `reconcileState` (enum) + `linkedTransactionId` (nullable int). Validate the linked transaction belongs to the same user. Preserve every existing invariant — `import_hash` MUST NOT be recomputed; per-row encryption tier MUST NOT flip; mutual exclusion of `peer_staged_id` vs `target_account_id` unchanged. |
+| `pf-app/src/app/api/import/staged/[id]/approve/route.ts` (POST) | Add a fourth bucket BEFORE the three existing buckets: rows where `reconcile_state='linked'` are de-queued (DELETE from staging) with no INSERT into `transactions`. `skipped_duplicate` rows are already filtered by the default-rowIds path. |
+| `pf-app/src/components/staging/reconciliation-callout.tsx` | No signature change. Live-delta calculation moves into the parent page (already client-side); the callout stays display-only. |
+| `pf-app/src/components/staging/staged-row-editor.tsx` | No body change. The new "reconcile" action surface (Skip / Link / Unlink badges) lives in the new `RowBadge` component rendered next to the editor on each row. |
+| `pf-app/CHANGELOG.md` | Unreleased entry per phase commit. |
+| `CLAUDE.md` (workspace) | Add load-bearing gotcha "PATCH `reconcileState` writes do NOT recompute `import_hash` or flip `encryption_tier`" once phase 1 lands. |
+| `pf-app/docs/architecture/database.md` | Link reconciliation columns section to the new endpoint + page. |
 
-### New files we create
+### Create
 
-| Path | Role | Phase |
-|---|---|---|
-| `pf-app/src/app/api/transactions/[id]/reconciliation-flag/route.ts` | New endpoint. `POST` inserts into `transaction_reconciliation_flags(flag_kind='missing_from_statement')`. `DELETE` removes it. Both `user_id`-scoped; cross-tenant attacks return 404. Body accepts an optional `note`. | 1 |
-| `pf-app/src/lib/import/auto-match.ts` | Pure server-side function — given a list of decoded staged rows + a list of DB transactions in the ±7d window, return `{ stagedId, transactionId, confidence }[]`. **Algorithm is an open question** (see below); first cut: exact `date` AND exact `amount` AND DB row not already linked. | 1 |
-| `pf-app/src/app/api/import/staged/[id]/db-rows/route.ts` | New endpoint. `GET ?accountId=N&from=YYYY-MM-DD&to=YYYY-MM-DD` returns the left pane: existing `transactions` rows for the selected account, ±7d window around the staged batch's date range. User-scoped. Returns decoded payee/category names so the UI doesn't have to re-implement the per-tier decode. (Live `transactions.payee` is `v1:` ciphertext only — no staging-tier branch needed.) | 2 |
-| `pf-app/src/components/import/reconcile/*` | UI components: `AccountSelector`, `TwoPaneLayout`, `FilePane`, `DbPane`, `SuggestionsGroup`, `RowBadge`. Each is a thin client component; the page composes them. | 2, 3 |
+| Path | Role |
+|---|---|
+| `pf-app/src/app/api/transactions/[id]/reconciliation-flag/route.ts` | `POST` + `DELETE`. POST body: `{ flag_kind: 'missing_from_statement', note?: string }`. Both routes scope on `user_id`; cross-tenant returns 404. |
+| `pf-app/src/app/api/transactions/reconciliation/route.ts` | `GET ?accountId=N&from=YYYY-MM-DD&to=YYYY-MM-DD`. Returns decoded rows + the `staged_transactions.id` of any row whose `linked_transaction_id` references each transaction. `requireEncryption()`. |
+| `pf-app/src/lib/import/auto-match.ts` | Pure: `findAutoMatches(staged, db): Suggestion[]`. Algorithm in §"Auto-match algorithm" below. |
+| `pf-app/src/components/import/reconcile/account-selector.tsx` | |
+| `pf-app/src/components/import/reconcile/two-pane-layout.tsx` | |
+| `pf-app/src/components/import/reconcile/file-pane.tsx` | |
+| `pf-app/src/components/import/reconcile/db-pane.tsx` | |
+| `pf-app/src/components/import/reconcile/suggestions-group.tsx` | |
+| `pf-app/src/components/import/reconcile/row-badge.tsx` | |
 
-## Phases
+## Concrete contracts
 
-Five phases total. Effort assumes phase-isolated commits with passing
-`npm run build` self-check.
+### PATCH `/api/import/staged/[id]/rows/[rowId]` — new Zod fields
 
-### Phase 1 — Backend (PATCH extension + flag endpoint + auto-match)
+```ts
+reconcileState: z.enum(['unmatched', 'auto_suggested', 'linked', 'skipped_duplicate']).optional(),
+linkedTransactionId: z.number().int().nullable().optional(),
+```
 
-**Effort:** 1–3h
+Server-side validation rules:
 
-Extend the per-row PATCH endpoint to accept two new optional fields:
-`reconcileState` (enum: `unmatched | auto_suggested | linked | skipped_duplicate`)
-and `linkedTransactionId` (nullable int). Validate the CHECK enum
-client-side via Zod; verify the linked transaction belongs to
-`userId`. Add the new `POST /api/transactions/[id]/reconciliation-flag`
-endpoint (+ `DELETE`) for the DB-side `missing_from_statement` flag.
-Add the pure auto-match helper at `src/lib/import/auto-match.ts`
-returning candidate pairs from same-day, same-amount, not-already-linked
-DB rows. Surface suggestions in the GET staged-detail response under a
-new `suggestedMatches: []` field.
+- `reconcileState === 'linked'` ⇒ `linkedTransactionId` must be non-null
+  AND owned by `userId`.
+- `reconcileState !== 'linked'` ⇒ server forces `linkedTransactionId = null`
+  (no orphan refs).
+- DB row owned-by check:
+  `SELECT 1 FROM transactions WHERE id = $1 AND user_id = $2`. 404 on
+  miss (not 403 — avoids existence-disclosure).
+- Half-pair transfer rule: if `row.tx_type === 'R'` AND
+  `row.peer_staged_id IS NOT NULL`, refuse PATCH with
+  `code: 'half_pair_link'` unless the peer row also has
+  `reconcile_state='linked'`. The UI links peers together in one batched
+  PATCH; server validates the post-state.
+
+Invariants preserved (existing PATCH behaviour):
+
+- `update_set` MUST NOT include `import_hash`.
+- `update_set` MUST NOT include `encryption_tier`.
+
+### GET `/api/import/staged/[id]` — new response field
+
+```ts
+suggestedMatches: Array<{
+  stagedRowId: string;
+  transactionId: number;
+  confidence: 'exact' | 'fuzzy';  // 'exact' = same date + same amount;
+                                  // 'fuzzy' = within ±1d / ±0.01
+}>;
+```
+
+Computed after the per-tier decode loop. Excludes (a) staged rows
+already at `reconcile_state IN ('linked', 'skipped_duplicate')`,
+(b) DB rows already referenced by some `staged_transactions.linked_transaction_id`.
+
+### GET `/api/transactions/reconciliation`
+
+```
+?accountId=<int>              required
+&from=<YYYY-MM-DD>            required
+&to=<YYYY-MM-DD>              required
+```
+
+Window calculation (caller):
+`from = staged_imports.date_range_start - 7d`,
+`to = staged_imports.date_range_end + 7d`. Batch-level window — single
+query per pane render.
+
+Response:
+
+```ts
+{
+  success: true,
+  data: {
+    transactions: Array<{
+      id: number;
+      date: string;
+      amount: number;
+      currency: string;
+      payee: string | null;       // decoded; null if decrypt failed
+      category: string | null;    // decoded
+      note: string | null;        // decoded
+      txType: 'E' | 'I' | 'R' | 'T';
+      linkedStagedRowId: string | null;  // back-reference
+      reconciliationFlag: { kind: string; note: string | null } | null;
+    }>;
+  }
+}
+```
+
+`requireEncryption()` at the route head — soft fallback rejected per
+user decision. User-scoped (`WHERE user_id = $1 AND account_id = $2`).
+Cross-tenant returns 404.
+
+### POST/DELETE `/api/transactions/[id]/reconciliation-flag`
+
+POST body:
+
+```ts
+{ flag_kind: 'missing_from_statement'; note?: string }
+```
+
+Returns 201 + the new row id. `requireEncryption()` (uniform surface; the
+flags table itself is plaintext but the route stays consistent).
+User-scoped INSERT; cross-tenant 404 on the parent `transactions` row.
+
+DELETE:
+
+- Idempotent: 200 on first delete, 200 with `data: { removed: 0 }` on
+  second.
+- `WHERE transaction_id = $1 AND user_id = $2 AND flag_kind = $3`
+  (defaults `flag_kind` to `'missing_from_statement'` if not in query).
+
+## Auto-match algorithm
+
+`src/lib/import/auto-match.ts`:
+
+```ts
+type Input = {
+  staged: Array<{
+    id: string; date: string; amount: number; currency: string;
+    reconcileState: string; accountId: number | null;
+  }>;
+  db: Array<{
+    id: number; date: string; amount: number; currency: string;
+    accountId: number; alreadyLinked: boolean;
+  }>;
+};
+
+type Suggestion = {
+  stagedRowId: string;
+  transactionId: number;
+  confidence: 'exact' | 'fuzzy';
+};
+
+function findAutoMatches({ staged, db }: Input): Suggestion[] {
+  const eligibleDb = db.filter(d => !d.alreadyLinked);
+  const out: Suggestion[] = [];
+  for (const s of staged) {
+    if (s.reconcileState === 'linked' ||
+        s.reconcileState === 'skipped_duplicate') continue;
+    const candidates = eligibleDb.filter(d =>
+      d.accountId === s.accountId &&
+      d.currency === s.currency &&
+      Math.abs(d.amount - s.amount) <= 0.01 &&
+      Math.abs(dayDiff(d.date, s.date)) <= 1
+    );
+    for (const c of candidates) {
+      const confidence =
+        (c.date === s.date && Math.abs(c.amount - s.amount) < 1e-9)
+          ? 'exact' : 'fuzzy';
+      out.push({ stagedRowId: s.id, transactionId: c.id, confidence });
+    }
+  }
+  return out;
+}
+```
+
+Same currency required. Multi-candidate cases — surface all; the
+SuggestionsGroup renders each as a separate accept/reject pair.
+Cross-currency rows (rare on a single statement) stay `unmatched` — by
+design.
+
+## Phased delivery
+
+Five phases, each a single isolated commit with passing `npm run build`.
+
+### Phase 1 — Backend (PATCH extension + flag endpoint + db-rows endpoint + auto-match)
+
+**Effort:** 2–3h.
+
+Touches: PATCH route, GET staged-detail route, two new routes, one new
+lib file.
 
 **Acceptance:**
 
-- `PATCH /api/import/staged/:id/rows/:rowId` accepts the two new fields
-  and rejects an invalid enum with HTTP 400.
+- `PATCH /api/import/staged/:id/rows/:rowId` accepts `reconcileState` +
+  `linkedTransactionId`; rejects invalid enum with HTTP 400; rejects
+  cross-tenant `linkedTransactionId` with HTTP 404.
 - `POST /api/transactions/:id/reconciliation-flag` returns HTTP 201 and
-  inserts a row in `transaction_reconciliation_flags`; `DELETE` returns
-  HTTP 200 and removes the matching row (idempotent on second DELETE).
-- `GET /api/import/staged/:id` includes a non-null `suggestedMatches`
-  field; empty array when no candidates.
+  INSERTs into `transaction_reconciliation_flags`; `DELETE` is
+  idempotent (200 on second call).
+- `GET /api/transactions/reconciliation?accountId=…&from=…&to=…` returns
+  decoded rows with `linkedStagedRowId` back-reference; cross-tenant
+  `accountId` returns 404.
+- `GET /api/import/staged/:id` includes `suggestedMatches: []` (empty
+  array when no candidates).
+- `import_hash` byte-identical before vs after PATCH on the new fields
+  (verify via SQL).
+- `encryption_tier` unchanged after PATCH on the new fields (verify via
+  SQL).
 - `npm run build` passes.
 
 ### Phase 2 — UI shell (account selector, URL state, two-pane scaffold)
 
-**Effort:** 1–3h
+**Effort:** 2–3h.
 
-Rebuild `/import/pending` as a two-pane shell. Above the panes: an
-`AccountSelector` populated from the staged batch's accounts (which
-account names appear on staged rows). Selection persists in URL
-(`?id=<batchId>&account=<accountId>`) so tab-close + reopen restores
-state. Right pane renders the existing staged rows for the chosen
-account (no new actions yet, just badges from `reconcileState`). Left
-pane fetches the DB rows from the new `db-rows` endpoint and renders
-them with a "linked to staged #X" indicator where applicable.
+Touches: `page.tsx` (rebuild), 4 new components.
+
+URL state: `?id=<batchId>&account=<accountId>`. Account list derived
+from already-loaded staged rows. Default to first account when
+`?account` absent.
 
 **Acceptance:**
 
-- Account selector narrows both panes; URL updates without a reload.
-- Right pane renders staged rows for the chosen account with the
-  current `reconcileState` shown as a badge.
-- Left pane renders DB rows in the ±7d window.
+- Account selector narrows BOTH panes; URL updates without a navigation
+  reload (`history.replaceState`).
+- Right pane (FilePane) renders staged rows for the chosen account with
+  the current `reconcileState` as a `<RowBadge>`.
+- Left pane (DbPane) renders DB rows from
+  `/api/transactions/reconciliation` in the ±7d batch window.
 - Closing + reopening the tab with the URL intact restores both panes.
+- Mixed-tier rows (one `sv1:` + one `v1:` in the same batch) both render
+  decoded payee correctly.
 
 ### Phase 3 — Match actions (auto / link / unlink / skip / flag)
 
-**Effort:** half-day
+**Effort:** half-day.
 
-Add the four matching actions. Auto-match suggestions render in a pinned
-group at the top of the right pane; Accept/Reject each. Manual link is
-"click file row" → "click DB row" → both flip to `linked` (file row
-PATCH writes `reconcile_state='linked'` + `linked_transaction_id=N`).
-Unlink reverts both. Mark-skipped writes `reconcile_state='skipped_duplicate'`.
-Mark-missing on a DB row POSTs to the flag endpoint. Approve endpoint
-gains the "skip materialize when `reconcile_state='linked' or
-'skipped_duplicate'`" logic — linked rows just delete from staging
-(the DB row is already there); skipped rows delete from staging with no
-DB insert.
+Touches: `page.tsx`, `SuggestionsGroup`, `RowBadge`, approve route.
+
+Auto-match suggestions render in a pinned `<SuggestionsGroup>` at the
+top of the FilePane. Accept ⇒ PATCH staged row
+`{ reconcileState: 'linked', linkedTransactionId: N }`. Reject ⇒ hide
+locally (client state only; no persist).
+
+Manual link: click file row → "Link" mode → click DB row → both flip.
+Refuse if DB row's `linkedStagedRowId !== null` (toast).
+
+Unlink: PATCH staged row
+`{ reconcileState: 'unmatched', linkedTransactionId: null }`.
+
+Skip / unskip: PATCH staged row
+`{ reconcileState: 'skipped_duplicate' | 'unmatched' }`.
+
+Mark-missing: POST `/api/transactions/[id]/reconciliation-flag` with
+`{ flag_kind: 'missing_from_statement' }`. Un-flag: DELETE same path.
+
+Half-pair transfer enforcement: when the user clicks Link on a
+`tx_type='R'` row with `peer_staged_id`, the UI batches TWO PATCHes (one
+per leg). Server-side validator refuses a half-pair PATCH.
+
+Approve endpoint extension: route `reconcile_state='linked'` rows to a
+new "de-queue only" bucket — DELETE from `staged_transactions`, NO
+INSERT into `transactions`. `skipped_duplicate` rows already
+default-excluded.
 
 **Acceptance:**
 
-- Accept-suggestion writes `linked` + `linked_transaction_id` on the
-  staged row; the DB row's "linked to staged #X" indicator appears.
+- Accept-suggestion writes both fields; DB pane's "linked to staged #X"
+  indicator appears within 500ms.
 - Unlink reverts both rows to `unmatched` and clears
   `linked_transaction_id`.
-- Mark-skipped flips the staged row's badge and excludes it from
-  approve.
-- Flag-missing inserts in `transaction_reconciliation_flags`; approve
-  the rest of the batch still succeeds.
-- All four actions persist across a tab close and reopen.
+- Mark-skipped excludes the row from the next approve (verify via SELECT
+  before/after).
+- Flag-missing inserts one row in `transaction_reconciliation_flags`;
+  approve of the rest of the batch still succeeds (flag is a no-op for
+  approve).
+- Half-pair link refused with `code: 'half_pair_link'`.
+- All four actions persist across tab close + reopen.
 
 ### Phase 4 — Live balance callout
 
-**Effort:** ≤30m
+**Effort:** ≤30m.
 
-Wire the existing `ReconciliationCallout`'s `liveDelta` calculation to
-also subtract rows where `reconcileState IN ('linked', 'skipped_duplicate')`
-(the linked DB row is already in the live balance; skipped rows won't
-materialize). Recompute target: within 500ms of any action.
+The existing `ReconciliationCallout` is display-only; the page already
+computes `projectedBalance` for the eligible-rows set. Extend the
+eligible-rows predicate in `page.tsx` to:
+
+```ts
+const eligible = rows.filter(r =>
+  r.dedupStatus !== 'existing' &&
+  r.reconcileState !== 'skipped_duplicate' &&
+  r.reconcileState !== 'linked'  // linked rows already in DB balance
+);
+```
+
+Recompute is already synchronous on every `setRows` call — the 500ms
+target is trivially met in client memory.
 
 **Acceptance:**
 
 - "After approval" updates within 500ms of every match/skip/flag/link/
   unlink action.
-- Same currency-mismatch caveat as today; no new FX hops.
+- Currency-mismatch caveat unchanged from today (no new FX hops).
 
 ### Phase 5 — Polish + edge cases
 
-**Effort:** 1–3h
+**Effort:** 1–3h.
 
-Empty states (no DB rows in ±7d, no staged rows for the selected
-account, no auto-match candidates). Error toast paths for the new
-endpoints. Transfer-pair handling on link/unlink (a `tx_type='R'` row's
-peer must be linked too, or neither — same half-pair invariant as
-approve). Sign-vs-category invariant still enforced on materialize
-(unchanged from FINLYNQ-57 / issue #212). Decimal-tolerance probing on
-auto-match (±0.01 acceptable? — see open questions). E2E human-walked
-verification per `tc-1-end-to-end-ui` in the test plan.
+- Empty states: no DB rows in ±7d window, no staged rows on selected
+  account, no auto-match candidates.
+- Error toasts: HTTP 400 from PATCH (invalid enum), 404 from PATCH
+  (cross-tenant), 404 from db-rows endpoint, 423 if DEK expires
+  mid-session.
+- Decimal-tolerance edge: confirm 0.005 rounds correctly (it's accepted;
+  we only reject `|Δ| > 0.01`).
+- E2E human-walked tc-1.
 
 **Acceptance:**
 
-- All four `tc-*` test cases in the DevManager test plan execute
-  cleanly.
-- No regressions on existing approve / reject / PATCH paths
+- All four `tc-*` test cases on FINLYNQ-56 execute cleanly.
+- No regression on existing approve / reject / PATCH paths
   (sign-vs-category, half-pair transfer, sv1↔v1 tier preservation,
   `import_hash` stability across edits).
 
-## Open questions
-
-1. **Auto-match scoring threshold.** The item body says "staged.date ± 0
-   days AND staged.amount = db.amount". Strict equality means a
-   `49.999` cent rounding diff in CAD won't match. Should the helper
-   accept ±0.01 tolerance, ±0.05, or strict equality only? Note the
-   stored values are `numeric` so float drift isn't the concern;
-   bank reporting precision is. **Default for phase 1 if user doesn't
-   weigh in: strict equality (matches the item body verbatim).**
-2. **Multi-candidate behaviour.** If two DB rows on the same day match
-   the same staged amount (e.g., two $20 ATM withdrawals), do we
-   surface BOTH as candidates and ask the user to pick, or skip the
-   ambiguous case and leave both `unmatched`? **Default for phase 1:
-   surface all candidates; the SuggestionsGroup renders each as a
-   separate accept/reject pair.**
-3. **DB-row pane scope.** ±7 days is in the spec, but for an investment
-   account a statement-period CSV typically spans 30+ days. Is ±7
-   relative to the staged batch's date range (min staged date − 7 to
-   max staged date + 7) or to each row individually? **Default: batch-
-   level window — query once per pane render, not once per row.**
-4. **`flag_kind` UI visibility off /import/pending.** The CLAUDE.md
-   gotcha says flags persist past approval. Should the transactions
-   list (`/transactions`) also surface the flag badge? **Out of scope
-   for FINLYNQ-56**; defer to a follow-up item if the user wants it.
-5. **Transfer-pair link/unlink semantics.** When a `tx_type='R'` row is
-   manually linked to a DB row, does linking imply both peer legs are
-   linked, or only the one the user clicked? Item body's "Don't" says:
-   "link/unlink on a tx_type='R' row must still validate the half-pair
-   rule — both peer-linked rows selected, or neither". So linking one
-   without the peer should refuse. **Default for phase 3: refuse with
-   an inline error.**
-
-The phase-1 gate fails on open question #1 alone — the auto-match
-behavior is exposed on the API response and changing the threshold
-later means re-running every existing batch's suggestions. So phase 1
-defers until the user picks.
-
 ## Cross-cutting `Don't` rules
 
-Verbatim from CLAUDE.md + FINLYNQ-56 body. Each phase MUST honour all of
-these:
+Verbatim from CLAUDE.md + FINLYNQ-56 body. Each phase MUST honour:
 
 - **Do NOT recompute `import_hash`** on any row edit, including
   `reconcile_state` toggles, link/unlink, or any new PATCH field
-  introduced here. Bank-side dedup keys on the ingest-time hash. Load-
-  bearing per CLAUDE.md "`import_hash` always over plaintext payee" and
-  "Staged-transactions reads MUST branch on `encryption_tier` per row".
+  introduced here. Bank-side dedup keys on the ingest-time hash. The
+  PATCH's set-builder must STILL exclude `import_hash` defensively.
 - **Do NOT flip the per-row `encryption_tier` mid-edit.** Even when the
   user edits payee on a row that was ingested at `service` tier, the
   re-encrypt stays at `service` (`sv1:`). The login-time upgrade job is
   the only path that promotes service → user.
 - **Do NOT route `flagged_missing` through `staged_transactions.reconcile_state`.**
-  It belongs on the new `transaction_reconciliation_flags` table from
-  F-53B. The CHECK constraint will reject `flagged_missing` at the SQL
-  layer anyway, but the helper / UI MUST be explicit about which path
-  takes each action.
+  That value is intentionally NOT in the CHECK enum. Flags belong on
+  `transaction_reconciliation_flags`.
 - **Do NOT skip the sign-vs-category invariant on approve** (issue
-  #212). Even rows the user manually linked must satisfy it for the
-  staging-side leg to materialize — but `reconcile_state='linked'`
-  rows DON'T materialize (the DB row already exists), so the gate
-  applies only to rows that go through `executeImport`. For linked
-  rows, the gate is skipped because the staged row never lands in
-  `transactions`.
+  #212). Linked rows skip materialize entirely so the gate doesn't
+  apply; non-linked rows still must satisfy it.
 - **Do NOT bypass transfer-pair routing** (issue #155). Link/unlink on
   a `tx_type='R'` row must still validate the half-pair rule from the
   approve endpoint — both peer-linked rows are linked together, or
   neither.
 - **Do NOT add a SQL filter to `aggregateHoldings()` or any aggregator**
-  while wiring the left pane (issue #236). The pane fetches
+  while wiring the left pane (issue #236). The pane reads
   `transactions` raw; no aggregator changes here.
-- **Do NOT bypass `requireEncryption`** on the PATCH or new flag
-  endpoint. Both touch encrypted columns directly or indirectly (PATCH
-  re-encrypts payee/category/note on edit; the flag endpoint just
-  needs a logged-in user, but `requireEncryption` is cheap and keeps
-  the surface uniform).
-- **Do NOT accept client-supplied `linkId` or `trade_link_id`**
-  anywhere new (CLAUDE.md load-bearing gotchas). Neither field is in
-  scope for this work, but if a future merge prompt or auto-link path
-  wants one, mint server-side only.
+- **Do NOT bypass `requireEncryption`** on the PATCH, the new flag
+  endpoint, or the new db-rows endpoint. All three need decoded names
+  or re-encryption.
+- **Do NOT accept client-supplied `linkId` or `trade_link_id`** anywhere
+  new. Out of scope for this work, but flagged defensively in case a
+  future merge prompt or auto-link path wants one.
 
-## Decomposition mapping
+## Verification
 
-FINLYNQ-56 already has 8 children filed in DevManager
-(FINLYNQ-68..75). The phases above map onto them as follows:
+Map to the 4 live test cases on FINLYNQ-56:
 
-| Phase | DevManager sub-item(s) |
-|---|---|
-| Phase 1 (backend) | FINLYNQ-74 (flag endpoint) — the PATCH-extension + auto-match cohort doesn't have a dedicated sub-item; it's implicit infrastructure across FINLYNQ-72/73 child surfaces. |
-| Phase 2 (UI shell) | FINLYNQ-68 (account selector + URL state), FINLYNQ-69 (right pane), FINLYNQ-70 (left pane) |
-| Phase 3 (match actions) | FINLYNQ-71 (auto-match suggestions), FINLYNQ-72 (manual link/unlink), FINLYNQ-73 (skipped_duplicate), FINLYNQ-74 (mark-missing) |
-| Phase 4 (live balance) | FINLYNQ-75 (balance callout live recompute) |
-| Phase 5 (polish) | none — covered as the closing pass for FINLYNQ-56 itself |
+| Test case | Phase | Verification |
+|---|---|---|
+| **tc-1-full-reconciliation-flow** (primary, human) | Phase 5 | Human walk-through on dev. Setup: dev user, CSV upload with ≥10 rows at `encryption_tier='user'`, ≥3 pre-existing DB tx matching staged amounts. Verify: account-selector narrows panes; auto-match surfaces; accept/manual-link/skip/flag all four work; ≤500ms callout updates; tab-close + reopen preserves all four decisions; approve materializes only `unmatched`/`auto_suggested` rows; `import_hash` byte-identical before vs after; 1 new row in `transaction_reconciliation_flags`. Evidence: `SELECT id, reconcile_state, linked_transaction_id, import_hash FROM staged_transactions WHERE staged_import_id='<uuid>'` before + after, plus 4 screenshots. |
+| **tc-2-auto-match-false-positive** (human) | Phase 5 | Setup: two same-day same-amount different-payee tx (e.g., two $20 ATMs). Accept auto-match, then unlink. Verify: both rows return to `unmatched`; `linked_transaction_id` becomes NULL; no orphan FK survives. Evidence: SQL before / mid / after. |
+| **tc-3-half-pair-transfer-still-errors** (code) | Phase 3 | Jest case in `pf-app/tests/staging-link-half-pair.test.ts`: PATCH one leg of a peer-linked `tx_type='R'` pair to `reconcileState='linked'`; expect HTTP 400 with `code: 'half_pair_link'`. Approve of the same batch with only one leg checked must continue to refuse with the existing half-pair error. |
+| **tc-4-mixed-tier-rows-render-correctly** (human) | Phase 2 | Setup: one staged batch with one `sv1:` row (email-ingest fixture) + one `v1:` row (upload fixture). Verify: both decode in the right pane; PATCH on either re-encrypts under its existing tier. Evidence: `SELECT id, encryption_tier, substring(payee_ct from 1 for 4) AS prefix FROM staged_transactions` before AND after PATCH on each row — prefix matches tier on both rows both times. |
 
-The sub-items can be drained independently in phase order once the user
-clears the auto-match open question.
+Plus the regression gate runs `cd pf-app && npm run audit:invariants` to
+confirm no new write-site missed `invalidateUserTxCache` /
+`buildNameFields` / etc. (Phase 1 + 3 each).
+
+Cross-suite spot-check after Phase 5:
+
+```bash
+cd pf-app
+npm run build                         # passes
+npm run audit:invariants              # exits 0
+psql $DATABASE_URL -c "SELECT reconcile_state, COUNT(*) FROM staged_transactions GROUP BY 1"
+```
+
+## Open questions (none remaining)
+
+All five open questions resolved:
+
+1. **Auto-match threshold**: `|Δamount| ≤ 0.01` AND `|Δdate| ≤ 1 day`.
+   (User decision 2026-05-20.)
+2. **Multi-candidate**: surface all; SuggestionsGroup renders each as
+   separate accept/reject.
+3. **DB-row pane scope**: batch-level window (min staged date − 7d to
+   max staged date + 7d), one query per pane render.
+4. **Flag visibility off `/import/pending`**: out of scope. Deferred to
+   a separate item if/when desired.
+5. **Transfer-pair link/unlink semantics**: refuse half-pair link
+   server-side with `code: 'half_pair_link'`; UI batches both legs
+   together.
