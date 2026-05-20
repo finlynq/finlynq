@@ -64,6 +64,7 @@ import {
   getInvestmentAccountIds,
 } from "@/lib/investment-account";
 import { generateImportHash } from "@/lib/import-hash";
+import { matchesRule, type TransactionRule } from "@/lib/auto-categorize";
 
 export const dynamic = "force-dynamic";
 
@@ -123,6 +124,68 @@ export async function POST(
 
   if (selected.length === 0) {
     return NextResponse.json({ error: "No rows selected" }, { status: 400 });
+  }
+
+  // ─── FINLYNQ-57: unresolved-category gate ──────────────────────────────
+  //
+  // Refuse approval up-front when any selected expense/income row has no
+  // category set AND no active `transaction_rules` row matches its payee.
+  // Transfers (tx_type='R') and true-ups (tx_type='T') are exempt —
+  // createTransferPair() resolves the type='R' category server-side, and
+  // true-ups don't need one. This gate runs BEFORE executeImport so failing
+  // rows are never INSERTed into `transactions`.
+  //
+  // Decrypt-per-tier: rows may be at 'service' tier (PF_STAGING_KEY, sv1:)
+  // or 'user' tier (user DEK, v1:). Same shape as the rest of the staging
+  // surface — see CLAUDE.md "Staged-transactions reads MUST branch on
+  // encryption_tier per row".
+  //
+  // Decoding helpers are defined below; we inline a tier-branched decode here
+  // so the gate can run before the rest of the route's setup. NOTE: we do
+  // NOT recompute import_hash for matched rows (load-bearing per CLAUDE.md).
+  const decodeForGate = (value: string | null, tier: string): string | null => {
+    if (value == null) return null;
+    return tier === "user" ? tryDecryptField(dek, value) : decryptStaged(value);
+  };
+  const activeRules = await db
+    .select()
+    .from(schema.transactionRules)
+    .where(and(
+      eq(schema.transactionRules.userId, userId),
+      eq(schema.transactionRules.isActive, true),
+    ))
+    .all() as TransactionRule[];
+
+  const unresolvedRowIds: string[] = [];
+  const unresolvedPayees: string[] = [];
+  for (const r of selected) {
+    // Transfer + true-up exempt. tx_type column is plaintext on staged_transactions.
+    if (r.txType === "R") continue;
+    if ((r.txType as string) === "T") continue;
+    // Already-resolved categories — the `category` column on staged is the
+    // encrypted category NAME (no FK on staged). A non-empty decoded name
+    // means the user (or the parser) already picked one.
+    const decodedCategory = decodeForGate(r.category, r.encryptionTier);
+    if (decodedCategory && decodedCategory.trim() !== "") continue;
+    // Probe rules. Use plaintext payee + amount + tags; matchesRule is pure
+    // (re-exported from auto-categorize for this gate). Tags are plaintext at
+    // staging time — no decode needed.
+    const decodedPayee = decodeForGate(r.payee, r.encryptionTier) ?? "";
+    const probe = { payee: decodedPayee, amount: r.amount, tags: r.tags ?? "" };
+    const hasRuleMatch = activeRules.some((rule) => matchesRule(probe, rule));
+    if (hasRuleMatch) continue;
+    unresolvedRowIds.push(r.id);
+    unresolvedPayees.push(decodedPayee);
+  }
+  if (unresolvedRowIds.length > 0) {
+    return NextResponse.json(
+      {
+        success: false,
+        code: "unresolved_categories",
+        data: { rowIds: unresolvedRowIds, payees: unresolvedPayees },
+      },
+      { status: 400 },
+    );
   }
 
   // Issue #62 + #153: per-row source tag stamps file shape into tags.

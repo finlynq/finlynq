@@ -47,6 +47,7 @@ import {
   type AccountOption,
   type HoldingOption,
 } from "@/components/staging/staged-row-editor";
+import { UnresolvedCategoriesBanner } from "@/components/staging/unresolved-categories-banner";
 
 interface StagedRow {
   id: string;
@@ -118,6 +119,10 @@ function PendingImportsPageInner() {
   // Per-row expansion: only the row(s) the user explicitly clicks render
   // the editor. Keeps the dialog responsive on large statements.
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  // FINLYNQ-57 — when approval is refused with code='unresolved_categories'
+  // we surface a banner listing the affected rows. The banner owns the
+  // inline rule-creation modal; the page just passes through callbacks.
+  const [unresolved, setUnresolved] = useState<{ rowIds: string[]; payees: string[] } | null>(null);
 
   const toggleExpanded = useCallback((rowId: string) => {
     setExpandedRows((s) => {
@@ -217,6 +222,7 @@ function PendingImportsPageInner() {
     setDetail(null);
     setSelected(new Set());
     setExpandedRows(new Set());
+    setUnresolved(null);
   }, []);
 
   // Auto-open the detail dialog when navigated with ?id=… (e.g. after the
@@ -260,6 +266,19 @@ function PendingImportsPageInner() {
         body: JSON.stringify({ rowIds: Array.from(selected) }),
       });
       const data = await res.json();
+      // FINLYNQ-57 — 400 with code='unresolved_categories' surfaces the
+      // inline rule-creation flow rather than a generic error toast.
+      if (!res.ok && data?.code === "unresolved_categories") {
+        setUnresolved({
+          rowIds: Array.isArray(data?.data?.rowIds) ? data.data.rowIds : [],
+          payees: Array.isArray(data?.data?.payees) ? data.data.payees : [],
+        });
+        setToast({
+          type: "error",
+          msg: `${data?.data?.rowIds?.length ?? 0} row${(data?.data?.rowIds?.length ?? 0) === 1 ? "" : "s"} need a category before import`,
+        });
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Approve failed");
       setToast({
         type: "success",
@@ -273,6 +292,38 @@ function PendingImportsPageInner() {
       setActing(false);
     }
   }, [openId, selected, closeDetail, loadList]);
+
+  // FINLYNQ-57 — after the banner applies a rule, re-fetch the staged detail
+  // so the dialog reflects newly-assigned categories. The unresolved set is
+  // re-evaluated client-side against the refreshed rows; banner clears when
+  // every previously-unresolved row now carries a category.
+  const refreshDetail = useCallback(async () => {
+    if (!openId) return;
+    try {
+      const res = await fetch(`/api/import/staged/${openId}`);
+      const data: StagedDetail = await res.json();
+      if (!res.ok) return;
+      setDetail(data);
+      // Drop banner entries whose row now has a category. Don't auto-clear
+      // the banner here — leave the surface visible so the user can see
+      // progress; the parent component recomputes the count next render.
+      setUnresolved((prev) => {
+        if (!prev) return prev;
+        const stillUnresolved = prev.rowIds.filter((rid) => {
+          const row = data.rows.find((r) => r.id === rid);
+          if (!row) return false;
+          return !row.category || row.category.trim() === "";
+        });
+        if (stillUnresolved.length === 0) return null;
+        const filteredPayees = prev.rowIds
+          .map((rid, idx) => (stillUnresolved.includes(rid) ? prev.payees[idx] : null))
+          .filter((p): p is string => p !== null);
+        return { rowIds: stillUnresolved, payees: filteredPayees };
+      });
+    } catch {
+      // Best-effort refresh; banner stays as-is.
+    }
+  }, [openId]);
 
   const reject = useCallback(async () => {
     if (!openId) return;
@@ -446,6 +497,21 @@ function PendingImportsPageInner() {
               />
             );
           })()}
+
+          {/* FINLYNQ-57 — unresolved-category banner. Rendered when the
+              approval endpoint returned `code: 'unresolved_categories'`.
+              The banner owns its own inline rule-creation modal and calls
+              `refreshDetail` after a rule applies so the dialog state +
+              banner count update in lockstep. */}
+          {detail && unresolved && unresolved.rowIds.length > 0 && (
+            <UnresolvedCategoriesBanner
+              stagedImportId={detail.staged.id}
+              rowIds={unresolved.rowIds}
+              payees={unresolved.payees}
+              onRuleApplied={refreshDetail}
+              onDismiss={() => setUnresolved(null)}
+            />
+          )}
 
           <div className="flex-1 overflow-auto border rounded-lg">
             {detailLoading && <p className="p-6 text-sm text-muted-foreground text-center">Loading rows…</p>}
