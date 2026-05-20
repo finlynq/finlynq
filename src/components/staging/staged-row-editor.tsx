@@ -45,6 +45,11 @@ export interface StagedEditableRow {
   encryptionTier: string;
   dedupStatus?: "new" | "existing" | "probable_duplicate";
   rowStatus?: string;
+  /** FINLYNQ-58 — reconciliation marker. 'skipped_duplicate' indicates the
+   *  row's import_hash collided with an existing `transactions` row for the
+   *  same user; the UI badges it and the approve handler excludes it by
+   *  default. The user can manually re-select the row to override. */
+  reconcileState?: "unmatched" | "auto_suggested" | "linked" | "skipped_duplicate";
   txType: "E" | "I" | "R";
   quantity: number | null;
   portfolioHoldingId: number | null;

@@ -160,6 +160,22 @@ Why the separate table: a flag's lifecycle is distinct from any column on `trans
 
 Backup-restore (`/api/data/import` `strip()`) gained a `transactionIdMap` remap arg in the same change. Pre-migration backups (column absent) fall back to the column default `'unmatched'` / `NULL`. The `transaction_reconciliation_flags` rows aren't in the backup format today — that's a separate decision (the table's contents are user-curated annotations on DB-side rows; if/when included they'd remap via the same `transactionIdMap`).
 
+## `staged_imports.date_range_*` + `idx_transactions_user_import_hash` (FINLYNQ-58)
+
+F-53E foundations for the overlap-merge prompt + already-imported marker, delivered 2026-05-20 by [`scripts/migrations/20260520_finlynq-58-date-range-and-import-hash-index.sql`](../../scripts/migrations/20260520_finlynq-58-date-range-and-import-hash-index.sql):
+
+| Addition | Type | Meaning |
+|---|---|---|
+| `staged_imports.date_range_start` | `TEXT NULL` (YYYY-MM-DD) | Min of the parsed transaction-row dates. Drives the overlap-detection predicate `lte(existing.date_range_start, new.date_range_end) AND gte(existing.date_range_end, new.date_range_start)`. Distinct from `statement_period_start` (which mirrors the file's declared period, e.g. OFX `<DTSTART>`) — `date_range_*` reflects the actual rows landed in `staged_transactions` and is therefore the truthful comparator. Today both columns are populated identically (min/max row date); the split keeps the door open for divergence. Pre-FINLYNQ-58 rows take NULL — overlap detection skips them cleanly (no overlap can be computed). |
+| `staged_imports.date_range_end` | `TEXT NULL` (YYYY-MM-DD) | Max of the parsed transaction-row dates. Pairs with `date_range_start`. |
+| `idx_transactions_user_import_hash` | partial composite index | `ON transactions (user_id, import_hash) WHERE import_hash IS NOT NULL`. Powers the per-upload "already-imported" probe in `POST /api/import/staging/upload`, which probes ~100–1000 hashes per batch against the full user history. Composite `(user_id, import_hash)` because every probe is user-scoped (cross-tenant guard); partial-NULL exclusion makes the index ~½ the size when many transactions have NULL import_hash (manual entries, restored-from-backup rows). |
+
+The two flows that depend on these:
+
+1. **Overlap-merge prompt.** First-pass upload returns `{ success: true, data: { mergeCandidate: ... } }` without inserting when an existing pending row matches; client re-fires with `action=merge` + `mergeIntoStagedImportId=<id>` (appends) or `action=new` (bypasses). Merge widens the target's `date_range_*` to encompass appended rows; drops in-batch `import_hash` collisions silently. Load-bearing: import_hash is NOT recomputed on merge; the existing `staged_imports.created_at` + parser knobs are NOT mutated; cross-tenant merge (`WHERE id = ? AND user_id = ?`) returns 404 with no information leak; merge into `status != 'pending'` returns 409.
+
+2. **Already-imported marker.** Per-row probe against `transactions.import_hash` for the same user; hits set `staged_transactions.reconcile_state = 'skipped_duplicate'` at INSERT (the same column added by FINLYNQ-55). Approve endpoint default-excludes `'skipped_duplicate'` rows when `rowIds` is omitted; the marker is set ONLY at INSERT — row PATCH preserves the existing value and the user can manually re-check to override (the approve endpoint honors the explicit `rowIds` list verbatim).
+
 ## `webhooks` + `webhook_deliveries` (FINLYNQ-60)
 
 Schema foundation for the v1 webhook delivery surface — first sub-item of the FINLYNQ-43 decomposition (F-43A). The vocabulary contract lives in [`webhook-events.md`](webhook-events.md); the worker (FINLYNQ-61 / F-43B), the tx-write wiring (FINLYNQ-62 / F-43C), and the settings UI (FINLYNQ-63 / F-43D) all depend on these two tables but ship separately. Migration: [`scripts/migrations/20260520_finlynq-60-webhooks.sql`](../../scripts/migrations/20260520_finlynq-60-webhooks.sql) (additive, idempotent, auto-applied by `deploy.sh` via the `schema_migrations` tracker).

@@ -635,6 +635,15 @@ export const stagedImports = pgTable("staged_imports", {
   // 'DD/MM/YYYY' | 'MM/DD/YYYY' | 'YYYY-MM-DD' | NULL (auto-detect)
   dateFormatOverride: text("date_format_override"),
   defaultCurrency: text("default_currency"), // ISO 4217 from supportedCurrencyEnum
+  // ─── Date-range bounds for F-53E overlap detection (FINLYNQ-58) ──────
+  // Min/max of the parsed transaction-row dates. Distinct from the
+  // statement_period_* columns (which mirror the file's declared period,
+  // when present) — date_range_* is the truthful comparator for the
+  // overlapping-upload merge prompt because it reflects the actual rows
+  // landed in staged_transactions. Both nullable for pre-FINLYNQ-58
+  // staged_imports rows; overlap detection skips NULL rows.
+  dateRangeStart: text("date_range_start"), // YYYY-MM-DD
+  dateRangeEnd: text("date_range_end"), // YYYY-MM-DD
 });
 
 export const stagedTransactions = pgTable("staged_transactions", {

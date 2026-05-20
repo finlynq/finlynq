@@ -11,6 +11,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { AlertCircle, ArrowLeft } from "lucide-react";
 import { ReconcileUploadCard } from "@/components/reconcile/upload-card";
 import type { AccountOption } from "@/components/reconcile/preview-table";
@@ -34,12 +42,28 @@ interface UploadResponse {
   redirectTo: string;
   format: "csv" | "ofx" | "qfx";
   counts: {
-    new: number;
-    existing: number;
-    probableDuplicate: number;
+    new?: number;
+    existing?: number;
+    probableDuplicate?: number;
+    skippedDuplicate?: number;
+    appended?: number;
+    alreadyInBatch?: number;
     errors: number;
   };
   tolerance: number;
+  merged?: boolean;
+}
+
+/** FINLYNQ-58 — overlap-detection response envelope. When the server sees a
+ *  pending staged_imports row for the same account with an overlapping date
+ *  range, it returns this BEFORE inserting anything; the client renders the
+ *  merge / create-new / cancel modal. */
+interface MergeCandidate {
+  stagedImportId: string;
+  dateRangeStart: string | null;
+  dateRangeEnd: string | null;
+  rowCount: number;
+  originalFilename: string | null;
 }
 
 interface UploadParams {
@@ -86,6 +110,15 @@ export default function ReconcilePage() {
     defaultCurrency: string | null;
   } | null>(null);
 
+  // FINLYNQ-58 — merge-prompt modal state. When the server detects an
+  // overlapping pending batch it returns a mergeCandidate descriptor; we
+  // stash the originally-uploaded file + params + the candidate, render the
+  // 3-button dialog, and re-fire the upload with `action=merge` or
+  // `action=new` based on the user's choice.
+  const [mergeCandidate, setMergeCandidate] = useState<MergeCandidate | null>(null);
+  const [mergePendingFile, setMergePendingFile] = useState<File | null>(null);
+  const [mergePendingParams, setMergePendingParams] = useState<UploadParams | null>(null);
+
   useEffect(() => {
     void Promise.all([
       fetch("/api/accounts").then((r) => (r.ok ? r.json() : [])),
@@ -111,17 +144,24 @@ export default function ReconcilePage() {
   }, []);
 
   const submitUpload = useCallback(
-    async ({
-      file,
-      accountId,
-      tolerance,
-      templateId,
-      statementBalance,
-      skipHeaderRows,
-      skipFooterRows,
-      dateFormatOverride,
-      defaultCurrency,
-    }: UploadParams) => {
+    async (
+      params: UploadParams,
+      /** FINLYNQ-58 — set on the second pass when the user picked a merge
+       *  action in the modal. 'merge' appends to `mergeIntoStagedImportId`;
+       *  'new' bypasses overlap detection and creates a fresh batch. */
+      mergeAction?: { action: "merge" | "new"; mergeIntoStagedImportId?: string },
+    ) => {
+      const {
+        file,
+        accountId,
+        tolerance,
+        templateId,
+        statementBalance,
+        skipHeaderRows,
+        skipFooterRows,
+        dateFormatOverride,
+        defaultCurrency,
+      } = params;
       setError(null);
       setUploadLoading(true);
       try {
@@ -142,11 +182,38 @@ export default function ReconcilePage() {
           fd.append("dateFormatOverride", dateFormatOverride);
         }
         if (defaultCurrency) fd.append("defaultCurrency", defaultCurrency);
+        // FINLYNQ-58 — merge action propagation
+        if (mergeAction) {
+          fd.append("action", mergeAction.action);
+          if (mergeAction.action === "merge" && mergeAction.mergeIntoStagedImportId) {
+            fd.append("mergeIntoStagedImportId", mergeAction.mergeIntoStagedImportId);
+          }
+        }
         const res = await fetch("/api/import/staging/upload", {
           method: "POST",
           body: fd,
         });
         const json = await res.json();
+        // FINLYNQ-58 — overlap-detection response. Server returns
+        // `{ success: true, data: { mergeCandidate: {...} } }` when an
+        // existing pending staged_imports row overlaps the new upload's
+        // date range for the same account. Stash the file + params and
+        // surface the modal; the user picks Merge / Create new / Cancel.
+        if (
+          res.ok &&
+          json &&
+          typeof json === "object" &&
+          json.success === true &&
+          json.data &&
+          typeof json.data === "object" &&
+          json.data.mergeCandidate
+        ) {
+          setMergeCandidate(json.data.mergeCandidate as MergeCandidate);
+          setMergePendingFile(file);
+          setMergePendingParams(params);
+          setUploadLoading(false);
+          return;
+        }
         if (!res.ok) {
           // 422 with type:"csv-needs-mapping" → open the column-mapping
           // dialog. The user maps columns, we POST /api/import/templates to
@@ -201,6 +268,32 @@ export default function ReconcilePage() {
     },
     [submitUpload],
   );
+
+  // FINLYNQ-58 — modal action handlers. Merge / Create new re-fire the
+  // same upload with the explicit `action` field; Cancel discards.
+  const handleMergeChoice = useCallback(
+    (choice: "merge" | "new") => {
+      if (!mergePendingFile || !mergePendingParams || !mergeCandidate) {
+        setMergeCandidate(null);
+        return;
+      }
+      const params = { ...mergePendingParams, file: mergePendingFile };
+      const action =
+        choice === "merge"
+          ? { action: "merge" as const, mergeIntoStagedImportId: mergeCandidate.stagedImportId }
+          : { action: "new" as const };
+      setMergeCandidate(null);
+      setMergePendingFile(null);
+      setMergePendingParams(null);
+      void submitUpload(params, action);
+    },
+    [mergePendingFile, mergePendingParams, mergeCandidate, submitUpload],
+  );
+  const handleMergeCancel = useCallback(() => {
+    setMergeCandidate(null);
+    setMergePendingFile(null);
+    setMergePendingParams(null);
+  }, []);
 
   // Column-mapping confirm — save the mapping as a template, then re-fire
   // the upload using that template so staging actually receives parsed rows.
@@ -350,6 +443,66 @@ export default function ReconcilePage() {
         onConfirm={handleMappingConfirm}
         submitting={mappingSubmitting}
       />
+
+      {/* FINLYNQ-58 — overlap-detection merge prompt. Server returns a
+          mergeCandidate when the upload's date range overlaps an existing
+          pending batch on the same account; this dialog lets the user
+          decide to (a) append into the existing batch, (b) create a new
+          batch anyway, or (c) cancel without inserting anything. */}
+      <Dialog
+        open={mergeCandidate !== null}
+        onOpenChange={(open) => {
+          if (!open) handleMergeCancel();
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Overlapping pending upload</DialogTitle>
+            <DialogDescription>
+              This account already has a pending upload covering{" "}
+              <span className="font-medium">
+                {mergeCandidate?.dateRangeStart ?? "(unknown)"}
+                {" "}to{" "}
+                {mergeCandidate?.dateRangeEnd ?? "(unknown)"}
+              </span>{" "}
+              ({mergeCandidate?.rowCount ?? 0}{" "}
+              {(mergeCandidate?.rowCount ?? 0) === 1 ? "row" : "rows"}
+              {mergeCandidate?.originalFilename ? (
+                <> from <span className="font-medium">{mergeCandidate.originalFilename}</span></>
+              ) : null}
+              ). Choose how to handle this upload:
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 text-sm text-muted-foreground">
+            <p>
+              <span className="font-medium text-foreground">Merge</span> — append
+              the new rows into the existing pending batch. Rows that match an
+              ingest-time hash already in the batch are dropped silently.
+            </p>
+            <p>
+              <span className="font-medium text-foreground">Create new batch</span>{" "}
+              — start a fresh review queue entry alongside the existing one.
+            </p>
+            <p>
+              <span className="font-medium text-foreground">Cancel</span> —
+              discard this upload entirely.
+            </p>
+          </div>
+          <DialogFooter className="gap-2 sm:justify-between">
+            <Button variant="ghost" onClick={handleMergeCancel}>
+              Cancel
+            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => handleMergeChoice("new")}>
+                Create new batch
+              </Button>
+              <Button onClick={() => handleMergeChoice("merge")}>
+                Merge
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

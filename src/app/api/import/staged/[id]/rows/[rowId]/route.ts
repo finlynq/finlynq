@@ -313,5 +313,9 @@ function shapeRowResponse(
     fitId: row.fitId,
     peerStagedId: row.peerStagedId,
     targetAccountId: row.targetAccountId,
+    // FINLYNQ-58 — already-imported marker. PATCH preserves the existing
+    // value (we never silently flip skipped_duplicate back to unmatched
+    // via row-edit — load-bearing per CLAUDE.md).
+    reconcileState: row.reconcileState,
   };
 }

@@ -118,9 +118,19 @@ export async function POST(
     .orderBy(asc(schema.stagedTransactions.rowIndex))
     .all();
 
+  // FINLYNQ-58 — when the client omits rowIds (approve-everything path), we
+  // default-exclude `reconcile_state='skipped_duplicate'` rows so the
+  // F-53E "already imported" marker actually keeps them out of the
+  // materialization pass. When rowIds IS specified, the user has explicitly
+  // picked the set in the UI (which may include a manual override that
+  // toggled a marked row back to 'unmatched' or kept a marked row checked) —
+  // honor the explicit list verbatim. Per CLAUDE.md "Do NOT silently flip
+  // skipped_duplicate back to unmatched if the user re-uploads": the marker
+  // is only set at INSERT; user overrides on this approve path are not
+  // re-stamped back onto the row.
   const selected = rowIds
     ? allRows.filter((r) => rowIds!.includes(r.id))
-    : allRows;
+    : allRows.filter((r) => r.reconcileState !== "skipped_duplicate");
 
   if (selected.length === 0) {
     return NextResponse.json({ error: "No rows selected" }, { status: 400 });

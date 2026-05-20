@@ -80,6 +80,9 @@ export async function GET(
       fitId: schema.stagedTransactions.fitId,
       peerStagedId: schema.stagedTransactions.peerStagedId,
       targetAccountId: schema.stagedTransactions.targetAccountId,
+      // FINLYNQ-58 — already-imported marker. 'skipped_duplicate' rows are
+      // default-excluded from approve and surface a UI badge.
+      reconcileState: schema.stagedTransactions.reconcileState,
     })
     .from(schema.stagedTransactions)
     .where(eq(schema.stagedTransactions.stagedImportId, id))
@@ -168,8 +171,15 @@ export async function GET(
       // is the common case. If a user hits a mixed-currency CSV the
       // projection will be slightly off — accepted tradeoff (display-
       // only, "user is the judge").
+      // FINLYNQ-58 — 'skipped_duplicate' rows are excluded by default from
+      // approve, so they MUST also be excluded from the projection here
+      // (otherwise "After approval" double-counts rows the user won't
+      // import on the next click).
       const eligibleRows = rows.filter(
-        (r) => r.rowStatus === "pending" && r.dedupStatus !== "existing",
+        (r) =>
+          r.rowStatus === "pending" &&
+          r.dedupStatus !== "existing" &&
+          r.reconcileState !== "skipped_duplicate",
       );
       pendingDelta = eligibleRows.reduce((acc, r) => acc + Number(r.amount ?? 0), 0);
 

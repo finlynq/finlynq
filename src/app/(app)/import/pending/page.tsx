@@ -169,8 +169,17 @@ function PendingImportsPageInner() {
         throw new Error((data as unknown as { error?: string }).error || "Failed to load");
       }
       setDetail(data);
-      // Default selection = all non-duplicate rows.
-      setSelected(new Set(data.rows.filter((r) => !r.isDuplicate).map((r) => r.id)));
+      // Default selection = all non-duplicate rows that aren't marked
+      // 'skipped_duplicate' (FINLYNQ-58 already-imported marker). User can
+      // manually re-check to override; the approve endpoint honors the
+      // explicit rowIds verbatim when provided.
+      setSelected(
+        new Set(
+          data.rows
+            .filter((r) => !r.isDuplicate && r.reconcileState !== "skipped_duplicate")
+            .map((r) => r.id),
+        ),
+      );
       if (acctRes.ok) {
         const acctRaw = (await acctRes.json()) as Array<{
           id: number;
@@ -540,7 +549,15 @@ function PendingImportsPageInner() {
                     const isExpanded = expandedRows.has(r.id);
                     return (
                       <RowFragment key={r.id}>
-                        <TableRow className={r.isDuplicate ? "opacity-60" : ""}>
+                        <TableRow
+                          className={
+                            r.reconcileState === "skipped_duplicate"
+                              ? "opacity-60 line-through"
+                              : r.isDuplicate
+                                ? "opacity-60"
+                                : ""
+                          }
+                        >
                           <TableCell>
                             <input
                               type="checkbox"
@@ -574,6 +591,19 @@ function PendingImportsPageInner() {
                               <Badge variant="outline" className="text-[10px]">Expense</Badge>
                             )}
                             {r.isDuplicate && <Badge variant="outline" className="ml-1 text-[10px]">dupe</Badge>}
+                            {/* FINLYNQ-58 — already-imported marker. The
+                                row's import_hash collided with an existing
+                                transactions row for this user; default-
+                                excluded from approve, user can re-check to
+                                override. */}
+                            {r.reconcileState === "skipped_duplicate" && (
+                              <Badge
+                                variant="outline"
+                                className="ml-1 text-[10px] bg-amber-50 text-amber-700 border-amber-200"
+                              >
+                                already imported
+                              </Badge>
+                            )}
                           </TableCell>
                           <TableCell className="text-right font-mono text-xs">
                             {formatCurrency(r.amount, r.currency || "CAD")}
