@@ -644,10 +644,21 @@ export default function ImportPage() {
             </div>
             <TemplateManager
               templates={templates}
+              accounts={accountNames}
               onDeleted={(id) => setTemplates((prev) => prev.filter((t) => t.id !== id))}
-              onRenamed={(id, name) =>
-                setTemplates((prev) => prev.map((t) => (t.id === id ? { ...t, name } : t)))
-              }
+              onUpdated={(updated) => {
+                if (updated.isDefault) {
+                  // Server-side branch clears isDefault on every OTHER template when this
+                  // one is set true; the PUT response only returns the updated row, so we
+                  // refetch to keep the "default" badge in sync across rows.
+                  fetch("/api/import/templates")
+                    .then((r) => r.json())
+                    .then((data) => { if (Array.isArray(data)) setTemplates(data); })
+                    .catch(() => {});
+                } else {
+                  setTemplates((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+                }
+              }}
             />
           </div>
         </TabsContent>
