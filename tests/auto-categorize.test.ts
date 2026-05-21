@@ -1,3 +1,15 @@
+/**
+ * FINLYNQ-84 — Tests rewritten against the v2 rule shape (JSONB conditions
+ * + actions). The legacy flat-column shape was retired 2026-05-21.
+ *
+ * Coverage:
+ *  - Single-condition rules across every field/op combo (payee/note/tags
+ *    string ops, amount gt/lt/eq/between, account is/is_not, currency
+ *    is/is_not, date weekday/day_of_month/between).
+ *  - AND-fold semantics over `conditions.all[]`.
+ *  - Priority DESC + first-match-wins.
+ *  - InvestmentCategoryHint helpers unchanged.
+ */
 import { describe, it, expect } from "vitest";
 import {
   applyRules,
@@ -6,95 +18,277 @@ import {
   pickInvestmentCategoryByPayee,
   fallbackInvestmentCategory,
   type TransactionInput,
-  type RuleMatch,
+  type TransactionRule,
   type InvestmentCategoryHint,
 } from "@/lib/auto-categorize";
+import { computePureActionPatch } from "@/lib/rules/execute";
+import type { Condition, Action } from "@/lib/rules/schema";
 
-function makeRule(overrides: Partial<{
-  id: number; userId: string; name: string; matchField: string; matchType: string;
-  matchValue: string; assignCategoryId: number | null; assignTags: string | null;
-  renameTo: string | null; isActive: boolean; priority: number; createdAt: string;
-}>) {
+function makeRule(overrides: {
+  id?: number;
+  name?: string;
+  conditions?: Condition[];
+  actions?: Action[];
+  isActive?: boolean;
+  priority?: number;
+}): TransactionRule {
   return {
-    id: 1, userId: "default", name: "Rule", matchField: "payee", matchType: "contains",
-    matchValue: "", assignCategoryId: null, assignTags: null,
-    renameTo: null, isActive: true, priority: 0, createdAt: "2024-01-01",
-    ...overrides,
+    id: overrides.id ?? 1,
+    name: overrides.name ?? "Rule",
+    conditions: { all: overrides.conditions ?? [] },
+    actions: overrides.actions ?? [],
+    isActive: overrides.isActive ?? true,
+    priority: overrides.priority ?? 0,
   };
 }
 
-describe("applyRules", () => {
+describe("applyRules (FINLYNQ-84 v2 shape)", () => {
   it("matches payee contains rule", () => {
-    const rules = [makeRule({ matchField: "payee", matchType: "contains", matchValue: "Starbucks", assignCategoryId: 5 })];
+    const rules = [makeRule({
+      conditions: [{ field: "payee", op: "contains", value: "Starbucks" }],
+      actions: [{ kind: "set_category", categoryId: 5 }],
+    })];
     const txn: TransactionInput = { payee: "Starbucks Coffee", amount: -5.50 };
     const result = applyRules(txn, rules);
     expect(result).not.toBeNull();
-    expect(result!.assignCategoryId).toBe(5);
+    expect(computePureActionPatch(result!.actions).categoryId).toBe(5);
   });
 
   it("is case-insensitive for string matching", () => {
-    const rules = [makeRule({ matchField: "payee", matchType: "contains", matchValue: "NETFLIX" })];
+    const rules = [makeRule({
+      conditions: [{ field: "payee", op: "contains", value: "NETFLIX" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     const result = applyRules({ payee: "netflix subscription" }, rules);
     expect(result).not.toBeNull();
   });
 
   it("matches payee exact rule", () => {
-    const rules = [makeRule({ matchField: "payee", matchType: "exact", matchValue: "Employer Inc." })];
+    const rules = [makeRule({
+      conditions: [{ field: "payee", op: "exact", value: "Employer Inc." }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ payee: "Employer Inc." }, rules)).not.toBeNull();
     expect(applyRules({ payee: "Employer Inc. Canada" }, rules)).toBeNull();
   });
 
   it("matches payee regex rule", () => {
-    const rules = [makeRule({ matchField: "payee", matchType: "regex", matchValue: "^Star.*ks$" })];
+    const rules = [makeRule({
+      conditions: [{ field: "payee", op: "regex", value: "^Star.*ks$" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ payee: "Starbucks" }, rules)).not.toBeNull();
     expect(applyRules({ payee: "Tim Hortons" }, rules)).toBeNull();
   });
 
   it("handles invalid regex gracefully", () => {
-    const rules = [makeRule({ matchField: "payee", matchType: "regex", matchValue: "[invalid" })];
+    const rules = [makeRule({
+      conditions: [{ field: "payee", op: "regex", value: "[invalid" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ payee: "test" }, rules)).toBeNull();
   });
 
-  it("matches amount greater_than", () => {
-    const rules = [makeRule({ matchField: "amount", matchType: "greater_than", matchValue: "100" })];
+  it("matches amount gt", () => {
+    const rules = [makeRule({
+      conditions: [{ field: "amount", op: "gt", value: 100 }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ amount: 150 }, rules)).not.toBeNull();
     expect(applyRules({ amount: 50 }, rules)).toBeNull();
   });
 
-  it("matches amount less_than", () => {
-    const rules = [makeRule({ matchField: "amount", matchType: "less_than", matchValue: "0" })];
+  it("matches amount lt", () => {
+    const rules = [makeRule({
+      conditions: [{ field: "amount", op: "lt", value: 0 }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ amount: -50 }, rules)).not.toBeNull();
     expect(applyRules({ amount: 50 }, rules)).toBeNull();
   });
 
-  it("matches amount exact", () => {
-    const rules = [makeRule({ matchField: "amount", matchType: "exact", matchValue: "99.99" })];
+  it("matches amount eq", () => {
+    const rules = [makeRule({
+      conditions: [{ field: "amount", op: "eq", value: 99.99 }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ amount: 99.99 }, rules)).not.toBeNull();
     expect(applyRules({ amount: 100 }, rules)).toBeNull();
   });
 
+  it("matches amount between", () => {
+    const rules = [makeRule({
+      conditions: [{ field: "amount", op: "between", min: 50, max: 500 }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
+    expect(applyRules({ amount: 100 }, rules)).not.toBeNull();
+    expect(applyRules({ amount: 49 }, rules)).toBeNull();
+    expect(applyRules({ amount: 501 }, rules)).toBeNull();
+    // Inclusive boundaries.
+    expect(applyRules({ amount: 50 }, rules)).not.toBeNull();
+    expect(applyRules({ amount: 500 }, rules)).not.toBeNull();
+  });
+
+  it("matches account is / is_not", () => {
+    const rules1 = [makeRule({
+      conditions: [{ field: "account", op: "is", accountId: 42 }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
+    expect(applyRules({ accountId: 42 }, rules1)).not.toBeNull();
+    expect(applyRules({ accountId: 43 }, rules1)).toBeNull();
+
+    const rules2 = [makeRule({
+      conditions: [{ field: "account", op: "is_not", accountId: 42 }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
+    expect(applyRules({ accountId: 43 }, rules2)).not.toBeNull();
+    expect(applyRules({ accountId: 42 }, rules2)).toBeNull();
+  });
+
+  it("matches currency is / is_not (case-insensitive)", () => {
+    const rules = [makeRule({
+      conditions: [{ field: "currency", op: "is", value: "USD" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
+    expect(applyRules({ enteredCurrency: "USD" }, rules)).not.toBeNull();
+    expect(applyRules({ enteredCurrency: "usd" }, rules)).not.toBeNull();
+    expect(applyRules({ enteredCurrency: "CAD" }, rules)).toBeNull();
+  });
+
+  it("matches date weekday (UTC)", () => {
+    // 2026-05-20 is a Wednesday → UTC weekday 3.
+    const rules = [makeRule({
+      conditions: [{ field: "date", op: "weekday", weekday: 3 }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
+    expect(applyRules({ date: "2026-05-20" }, rules)).not.toBeNull();
+    expect(applyRules({ date: "2026-05-21" }, rules)).toBeNull();
+  });
+
+  it("matches date day_of_month (UTC)", () => {
+    const rules = [makeRule({
+      conditions: [{ field: "date", op: "day_of_month", day: 1 }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
+    expect(applyRules({ date: "2026-05-01" }, rules)).not.toBeNull();
+    expect(applyRules({ date: "2026-05-15" }, rules)).toBeNull();
+  });
+
+  it("matches date between (inclusive)", () => {
+    const rules = [makeRule({
+      conditions: [{ field: "date", op: "between", from: "2026-05-01", to: "2026-05-31" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
+    expect(applyRules({ date: "2026-05-15" }, rules)).not.toBeNull();
+    expect(applyRules({ date: "2026-05-01" }, rules)).not.toBeNull();
+    expect(applyRules({ date: "2026-05-31" }, rules)).not.toBeNull();
+    expect(applyRules({ date: "2026-04-30" }, rules)).toBeNull();
+    expect(applyRules({ date: "2026-06-01" }, rules)).toBeNull();
+  });
+
+  it("AND-folds multiple conditions", () => {
+    const rules = [makeRule({
+      conditions: [
+        { field: "payee", op: "contains", value: "Whole Foods" },
+        { field: "amount", op: "between", min: 50, max: 500 },
+      ],
+      actions: [{ kind: "set_category", categoryId: 5 }],
+    })];
+    // Both conds satisfied.
+    expect(applyRules({ payee: "Whole Foods Market", amount: 80 }, rules)).not.toBeNull();
+    // Payee matches but amount fails.
+    expect(applyRules({ payee: "Whole Foods Market", amount: 5 }, rules)).toBeNull();
+    // Amount matches but payee fails.
+    expect(applyRules({ payee: "Trader Joes", amount: 80 }, rules)).toBeNull();
+  });
+
   it("skips inactive rules", () => {
-    const rules = [makeRule({ isActive: false, matchField: "payee", matchType: "contains", matchValue: "test" })];
+    const rules = [makeRule({
+      isActive: false,
+      conditions: [{ field: "payee", op: "contains", value: "test" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ payee: "test" }, rules)).toBeNull();
   });
 
-  it("uses highest priority rule", () => {
+  it("uses highest priority rule (first-match-wins after priority DESC)", () => {
     const rules = [
-      makeRule({ id: 1, matchField: "payee", matchType: "contains", matchValue: "coffee", assignCategoryId: 1, priority: 0 }),
-      makeRule({ id: 2, matchField: "payee", matchType: "contains", matchValue: "coffee", assignCategoryId: 2, priority: 10 }),
+      makeRule({
+        id: 1,
+        conditions: [{ field: "payee", op: "contains", value: "coffee" }],
+        actions: [{ kind: "set_category", categoryId: 1 }],
+        priority: 0,
+      }),
+      makeRule({
+        id: 2,
+        conditions: [{ field: "payee", op: "contains", value: "coffee" }],
+        actions: [{ kind: "set_category", categoryId: 2 }],
+        priority: 10,
+      }),
     ];
     const result = applyRules({ payee: "coffee shop" }, rules);
-    expect(result!.assignCategoryId).toBe(2);
+    expect(computePureActionPatch(result!.actions).categoryId).toBe(2);
   });
 
   it("returns null when no rules match", () => {
-    const rules = [makeRule({ matchField: "payee", matchType: "exact", matchValue: "XYZ Corp" })];
+    const rules = [makeRule({
+      conditions: [{ field: "payee", op: "exact", value: "XYZ Corp" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ payee: "ABC Inc" }, rules)).toBeNull();
   });
 
   it("matches tags field", () => {
-    const rules = [makeRule({ matchField: "tags", matchType: "contains", matchValue: "business" })];
+    const rules = [makeRule({
+      conditions: [{ field: "tags", op: "contains", value: "business" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
     expect(applyRules({ tags: "business,travel" }, rules)).not.toBeNull();
+  });
+
+  it("matches note field", () => {
+    const rules = [makeRule({
+      conditions: [{ field: "note", op: "contains", value: "client" }],
+      actions: [{ kind: "set_category", categoryId: 1 }],
+    })];
+    expect(applyRules({ note: "Lunch with client" }, rules)).not.toBeNull();
+    expect(applyRules({ note: "Lunch alone" }, rules)).toBeNull();
+  });
+});
+
+describe("computePureActionPatch", () => {
+  it("ignores side-effect actions", () => {
+    const patch = computePureActionPatch([
+      { kind: "set_category", categoryId: 5 },
+      { kind: "set_account", accountId: 99 },
+      { kind: "create_transfer", destAccountId: 100 },
+    ]);
+    expect(patch.categoryId).toBe(5);
+    expect(patch).not.toHaveProperty("accountId");
+    expect(patch).not.toHaveProperty("destAccountId");
+  });
+
+  it("collects pure actions into a single patch", () => {
+    const patch = computePureActionPatch([
+      { kind: "set_category", categoryId: 5 },
+      { kind: "set_tags", tags: "groceries,food" },
+      { kind: "rename_payee", to: "Whole Foods Market" },
+      { kind: "set_entered_currency", currency: "USD" },
+      { kind: "set_portfolio_holding", holdingId: 12 },
+    ]);
+    expect(patch.categoryId).toBe(5);
+    expect(patch.tags).toBe("groceries,food");
+    expect(patch.payee).toBe("Whole Foods Market");
+    expect(patch.enteredCurrency).toBe("USD");
+    expect(patch.portfolioHoldingId).toBe(12);
+  });
+
+  it("last-action-wins on field collision", () => {
+    const patch = computePureActionPatch([
+      { kind: "set_category", categoryId: 1 },
+      { kind: "set_category", categoryId: 2 },
+    ]);
+    expect(patch.categoryId).toBe(2);
   });
 });
 
@@ -130,7 +324,10 @@ describe("suggestCategory", () => {
 
 describe("applyRulesToBatch", () => {
   it("applies rules to multiple transactions", () => {
-    const rules = [makeRule({ matchField: "payee", matchType: "contains", matchValue: "coffee", assignCategoryId: 5 })];
+    const rules = [makeRule({
+      conditions: [{ field: "payee", op: "contains", value: "coffee" }],
+      actions: [{ kind: "set_category", categoryId: 5 }],
+    })];
     const txns: TransactionInput[] = [
       { payee: "Coffee Shop" },
       { payee: "Grocery Store" },
@@ -145,9 +342,6 @@ describe("applyRulesToBatch", () => {
 });
 
 describe("pickInvestmentCategoryByPayee", () => {
-  // Realistic mix: a few expense categories the legacy auto-categorizer
-  // could have picked, plus the income / transfer ones we want for
-  // brokerage rows.
   const cats: InvestmentCategoryHint[] = [
     { id: 1, name: "Groceries", type: "E" },
     { id: 2, name: "Bank Fees", type: "E" },
@@ -174,7 +368,6 @@ describe("pickInvestmentCategoryByPayee", () => {
   });
 
   it("does NOT match the bare letters 'fx' inside another word", () => {
-    // \bfx\b — "affix" must not trigger the forex branch.
     expect(pickInvestmentCategoryByPayee("Affixed plate", cats)).toBeNull();
   });
 

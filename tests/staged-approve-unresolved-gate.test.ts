@@ -11,6 +11,8 @@
 
 import { describe, it, expect } from "vitest";
 import { matchesRule, type TransactionRule } from "@/lib/auto-categorize";
+import { computePureActionPatch } from "@/lib/rules/execute";
+import type { Condition, Action } from "@/lib/rules/schema";
 
 type GateRow = {
   id: string;
@@ -27,27 +29,29 @@ function isUnresolved(row: GateRow, activeRules: TransactionRule[]): boolean {
   if (row.txType === "R" || row.txType === "T") return false;
   // Already-resolved (non-empty decoded category name).
   if (row.decodedCategory && row.decodedCategory.trim() !== "") return false;
-  // Rule-match exemption.
+  // Rule-match exemption — FINLYNQ-84: only rules whose pure-action patch
+  // includes a categoryId count as resolving the gate.
   const probe = { payee: row.decodedPayee, amount: row.amount, tags: row.tags ?? "" };
-  if (activeRules.some((r) => matchesRule(probe, r))) return false;
+  if (activeRules.some((r) => {
+    if (!matchesRule(probe, r)) return false;
+    return computePureActionPatch(r.actions).categoryId != null;
+  })) return false;
   return true;
 }
 
-function rule(overrides: Partial<TransactionRule> = {}): TransactionRule {
+function rule(overrides: {
+  conditions?: Condition[];
+  actions?: Action[];
+  isActive?: boolean;
+  priority?: number;
+} = {}): TransactionRule {
   return {
     id: 1,
-    userId: "u1",
     name: "Rule",
-    matchField: "payee",
-    matchType: "contains",
-    matchValue: "",
-    assignCategoryId: 10,
-    assignTags: null,
-    renameTo: null,
-    isActive: true,
-    priority: 0,
-    createdAt: "2026-05-20",
-    ...overrides,
+    conditions: { all: overrides.conditions ?? [{ field: "payee", op: "contains", value: "" }] },
+    actions: overrides.actions ?? [{ kind: "set_category", categoryId: 10 }],
+    isActive: overrides.isActive ?? true,
+    priority: overrides.priority ?? 0,
   };
 }
 
@@ -97,7 +101,9 @@ describe("approval unresolved-category gate", () => {
       amount: -5.5,
       tags: null,
     };
-    const rules = [rule({ matchType: "contains", matchValue: "starbucks" })];
+    const rules = [rule({
+      conditions: [{ field: "payee", op: "contains", value: "starbucks" }],
+    })];
     expect(isUnresolved(row, rules)).toBe(false);
   });
 
@@ -110,7 +116,10 @@ describe("approval unresolved-category gate", () => {
       amount: -5.5,
       tags: null,
     };
-    const rules = [rule({ matchValue: "starbucks", isActive: false })];
+    const rules = [rule({
+      conditions: [{ field: "payee", op: "contains", value: "starbucks" }],
+      isActive: false,
+    })];
     expect(isUnresolved(row, rules)).toBe(true);
   });
 

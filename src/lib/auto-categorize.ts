@@ -1,132 +1,172 @@
-import type { InferSelectModel } from "drizzle-orm";
-import type { transactionRules } from "@/db/schema-pg";
-
-export type TransactionRule = InferSelectModel<typeof transactionRules>;
+/**
+ * FINLYNQ-84 — Transaction rules v2 matcher.
+ *
+ * Replaces the legacy flat `(match_field, match_type, match_value, ...)` shape
+ * with a Zod-validated JSONB pair of `conditions` (AND-only ConditionGroup)
+ * and `actions` (typed action array). Schemas: `src/lib/rules/schema.ts`.
+ * Pure-action patcher + side-effect runner: `src/lib/rules/execute.ts`.
+ *
+ * Load-bearing invariants enforced here:
+ * - AND-only composition (`conditions.all[]`) — no OR groups in v2.
+ * - `applyRules()` returns the FIRST matching rule after priority DESC sort —
+ *   keeps the legacy first-match-wins semantics so existing rule-priority
+ *   intuition still holds.
+ * - `matchesRule()` is pure (no DB I/O). Caller decrypts plaintext payee/note/
+ *   tags ahead of time and hands a populated TransactionInput.
+ */
+import type { Condition, ConditionGroup, Action, Rule as RuleSchema } from "./rules/schema";
 
 export interface TransactionInput {
   payee?: string | null;
-  amount?: number | null;
+  note?: string | null;
   tags?: string | null;
+  amount?: number | null;
+  accountId?: number | null;
+  enteredCurrency?: string | null;
+  /** YYYY-MM-DD. Used by date predicates (weekday/day_of_month/between). */
+  date?: string | null;
+}
+
+/**
+ * The persistable rule shape. Conditions + actions are JSONB; the matcher
+ * parses them as the union types from `rules/schema.ts`. Caller is responsible
+ * for narrowing the unknown JSONB into ConditionGroup + Action[] (typically
+ * via the Zod schemas on the write path; reads trust the DB shape).
+ */
+export interface TransactionRule {
+  id: number;
+  name: string;
+  conditions: ConditionGroup;
+  actions: Action[];
+  isActive: boolean;
+  priority: number;
 }
 
 export interface RuleMatch {
   rule: TransactionRule;
-  assignCategoryId: number | null;
-  assignTags: string | null;
-  renameTo: string | null;
+  /** All actions on the matched rule. Caller picks via `computePureActionPatch` / `executeSideEffectActions`. */
+  actions: Action[];
+}
+
+function evalStringOp(haystack: string, op: "contains" | "exact" | "regex", needle: string): boolean {
+  if (op === "regex") {
+    try {
+      return new RegExp(needle, "i").test(haystack);
+    } catch {
+      return false;
+    }
+  }
+  const a = haystack.toLowerCase();
+  const b = needle.toLowerCase();
+  if (op === "contains") return a.includes(b);
+  if (op === "exact") return a === b;
+  return false;
+}
+
+function evalNumberOp(value: number, op: "gt" | "lt" | "eq", target: number): boolean {
+  if (op === "gt") return value > target;
+  if (op === "lt") return value < target;
+  if (op === "eq") return Math.abs(value - target) < 0.01;
+  return false;
+}
+
+function evalSetOp<T>(value: T, op: "is" | "is_not", target: T): boolean {
+  const eq = value === target;
+  return op === "is" ? eq : !eq;
 }
 
 /**
- * Test whether a single rule matches a transaction.
- *
- * Exported (FINLYNQ-57) so the staging-approval gate can probe each pending
- * row against the user's active rules WITHOUT running the full assign
- * pipeline. Pure — caller owns rule pre-fetch + plaintext payee decryption.
+ * UTC weekday from a YYYY-MM-DD string. Returns -1 on parse failure so the
+ * condition trivially fails rather than throwing.
  */
-export function matchesRule(txn: TransactionInput, rule: TransactionRule): boolean {
-  if (!rule.isActive) return false;
+function utcWeekday(dateStr: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return -1;
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return -1;
+  return d.getUTCDay();
+}
 
-  const field = rule.matchField; // 'payee', 'amount', 'tags'
-  const type = rule.matchType; // 'contains', 'exact', 'regex', 'greater_than', 'less_than'
-  const value = rule.matchValue;
+function utcDayOfMonth(dateStr: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return -1;
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return -1;
+  return d.getUTCDate();
+}
 
-  if (field === "amount") {
-    const txnAmount = txn.amount ?? 0;
-    const ruleAmount = parseFloat(value);
-    if (isNaN(ruleAmount)) return false;
-
-    switch (type) {
-      case "greater_than":
-        return txnAmount > ruleAmount;
-      case "less_than":
-        return txnAmount < ruleAmount;
-      case "exact":
-        return Math.abs(txnAmount - ruleAmount) < 0.01;
-      default:
-        return false;
+/**
+ * Evaluate a single condition against a transaction input. Pure.
+ */
+export function evalCondition(txn: TransactionInput, cond: Condition): boolean {
+  switch (cond.field) {
+    case "payee":
+    case "note":
+    case "tags": {
+      const value =
+        cond.field === "payee" ? (txn.payee ?? "") :
+        cond.field === "note" ? (txn.note ?? "") :
+        (txn.tags ?? "");
+      return evalStringOp(value, cond.op, cond.value);
     }
-  }
-
-  // String-based matching for payee and tags
-  const fieldValue = field === "payee" ? (txn.payee ?? "") : (txn.tags ?? "");
-  const fieldLower = fieldValue.toLowerCase();
-  const valueLower = value.toLowerCase();
-
-  switch (type) {
-    case "contains":
-      return fieldLower.includes(valueLower);
-    case "exact":
-      return fieldLower === valueLower;
-    case "regex":
-      try {
-        return new RegExp(value, "i").test(fieldValue);
-      } catch {
-        return false;
+    case "amount": {
+      const txAmount = txn.amount ?? 0;
+      if (cond.op === "between") {
+        return txAmount >= cond.min && txAmount <= cond.max;
       }
+      return evalNumberOp(txAmount, cond.op, cond.value);
+    }
+    case "account":
+      return evalSetOp(txn.accountId ?? null, cond.op, cond.accountId);
+    case "currency": {
+      const a = (txn.enteredCurrency ?? "").toUpperCase();
+      const b = cond.value.toUpperCase();
+      return evalSetOp(a, cond.op, b);
+    }
+    case "date": {
+      const dateStr = txn.date ?? "";
+      if (cond.op === "weekday") return utcWeekday(dateStr) === cond.weekday;
+      if (cond.op === "day_of_month") return utcDayOfMonth(dateStr) === cond.day;
+      if (cond.op === "between") {
+        // Lexical compare on YYYY-MM-DD is correct because the strings sort
+        // chronologically when zero-padded.
+        return dateStr >= cond.from && dateStr <= cond.to;
+      }
+      return false;
+    }
     default:
+      // Exhaustiveness fallback — every case above is exhaustive over the
+      // discriminated union, but TS narrowing makes this branch unreachable.
       return false;
   }
 }
 
 /**
- * Apply rules to a single transaction. Rules should be pre-sorted by priority (desc).
- * Returns the first matching rule, or null if none match.
+ * AND-fold over `conditions.all[]`. Empty group is always false (creating a
+ * rule with no conditions wouldn't pass Zod min(1) validation, but defensively
+ * we refuse to match anything).
+ */
+export function matchesRule(txn: TransactionInput, rule: TransactionRule): boolean {
+  if (!rule.isActive) return false;
+  const conds = rule.conditions?.all ?? [];
+  if (conds.length === 0) return false;
+  return conds.every((c) => evalCondition(txn, c));
+}
+
+/**
+ * Apply rules to a single transaction. Rules are sorted by priority DESC and
+ * the first match wins (legacy first-match-wins semantics preserved).
+ * Returns the matched rule + its full action list, or null if none match.
  */
 export function applyRules(
   txn: TransactionInput,
   rules: TransactionRule[],
 ): RuleMatch | null {
-  // Sort by priority descending (highest priority first)
   const sorted = [...rules].sort((a, b) => b.priority - a.priority);
-
   for (const rule of sorted) {
     if (matchesRule(txn, rule)) {
-      return {
-        rule,
-        assignCategoryId: rule.assignCategoryId,
-        assignTags: rule.assignTags,
-        renameTo: rule.renameTo,
-      };
+      return { rule, actions: rule.actions };
     }
   }
   return null;
-}
-
-/**
- * Suggest a category for a payee based on past transactions.
- * Returns the most common categoryId for the given payee, or null.
- */
-export function suggestCategory(
-  payee: string,
-  existingTransactions: Array<{ payee?: string | null; categoryId?: number | null }>,
-): number | null {
-  if (!payee.trim()) return null;
-
-  const payeeLower = payee.toLowerCase().trim();
-  const matches = existingTransactions.filter(
-    (t) => t.payee && t.payee.toLowerCase().trim() === payeeLower && t.categoryId,
-  );
-
-  if (matches.length === 0) return null;
-
-  // Count occurrences of each categoryId
-  const counts = new Map<number, number>();
-  for (const t of matches) {
-    const catId = t.categoryId!;
-    counts.set(catId, (counts.get(catId) ?? 0) + 1);
-  }
-
-  // Return the most common
-  let bestId: number | null = null;
-  let bestCount = 0;
-  for (const [id, count] of counts) {
-    if (count > bestCount) {
-      bestCount = count;
-      bestId = id;
-    }
-  }
-
-  return bestId;
 }
 
 /**
@@ -143,14 +183,45 @@ export function applyRulesToBatch(
   }));
 }
 
-// Investment-account-aware auto-categorization helpers (#32).
-//
-// When the MCP `record_transaction` / `bulk_record_transactions` tools write
-// to an `is_investment=true` account with no explicit `category`, the regular
-// rules+history fallback can land on an expense category meant for grocery /
-// transport tracking — corrupting spending reports. These helpers route those
-// writes to non-expense categories instead. Pure (no DB access) so the MCP
-// caller decrypts category names once and we can unit-test the routing logic.
+/**
+ * Suggest a category for a payee based on past transactions.
+ * Returns the most common categoryId for the given payee, or null.
+ *
+ * NOTE: unchanged from pre-FINLYNQ-84 — operates on `transactions` history,
+ * not rules. Kept here so callers don't have to import from a different module.
+ */
+export function suggestCategory(
+  payee: string,
+  existingTransactions: Array<{ payee?: string | null; categoryId?: number | null }>,
+): number | null {
+  if (!payee.trim()) return null;
+
+  const payeeLower = payee.toLowerCase().trim();
+  const matches = existingTransactions.filter(
+    (t) => t.payee && t.payee.toLowerCase().trim() === payeeLower && t.categoryId,
+  );
+
+  if (matches.length === 0) return null;
+
+  const counts = new Map<number, number>();
+  for (const t of matches) {
+    const catId = t.categoryId!;
+    counts.set(catId, (counts.get(catId) ?? 0) + 1);
+  }
+
+  let bestId: number | null = null;
+  let bestCount = 0;
+  for (const [id, count] of counts) {
+    if (count > bestCount) {
+      bestCount = count;
+      bestId = id;
+    }
+  }
+
+  return bestId;
+}
+
+// Investment-account-aware auto-categorization helpers (#32). Unchanged.
 
 export type InvestmentCategoryHint = {
   id: number;
@@ -168,18 +239,6 @@ function buildLowerNameIndex(categories: ReadonlyArray<InvestmentCategoryHint>):
   return out;
 }
 
-/**
- * Match a payee against a small set of investment-row keywords and return
- * the user's matching category id. Pattern (case-insensitive substrings):
- *   - `dividend`     → "Dividends"
- *   - `interest`     → "Credit Interest" / "Interest Income" / "Interest"
- *   - `forex` / `\bfx\b` / `currency` → "Currency Revaluation" / "Forex" / "Transfers"
- *   - `disbursement` / `withdrawal`   → "Transfers" / "Withdrawals"
- *
- * Returns null when nothing matches OR the user has no category by any of the
- * candidate names — caller should fall through to {@link fallbackInvestmentCategory}
- * or leave the row uncategorized.
- */
 export function pickInvestmentCategoryByPayee(
   payee: string,
   categories: ReadonlyArray<InvestmentCategoryHint>,
@@ -216,11 +275,6 @@ export function pickInvestmentCategoryByPayee(
   return null;
 }
 
-/**
- * Final fallback when no rule, keyword, or non-expense history match was
- * found for an investment-account write — prefer "Transfers", then a generic
- * "Investment Activity". Returns null when neither category exists.
- */
 export function fallbackInvestmentCategory(
   categories: ReadonlyArray<InvestmentCategoryHint>,
 ): number | null {
@@ -231,3 +285,6 @@ export function fallbackInvestmentCategory(
   if (investActivity !== undefined) return investActivity;
   return null;
 }
+
+// Re-export so callers don't need a second import.
+export type { RuleSchema };

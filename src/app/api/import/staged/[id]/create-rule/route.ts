@@ -5,44 +5,37 @@
  * approve endpoint refuses with `code: 'unresolved_categories'`, the UI lets
  * the user create an auto-categorize rule that's applied to the CURRENT
  * staged batch only (not to historical `transactions` — they keep their
- * existing category). This is the surface that endpoint POSTs to.
+ * existing category).
  *
- * Body:
- *   {
- *     "matchField":         'payee'           // gate today only covers payee
- *     "matchType":          'contains' | 'exact' | 'regex'
- *     "matchValue":         string             // the user's match pattern
- *     "assignCategoryId":   number             // FK into categories.id
- *   }
+ * FINLYNQ-84 (2026-05-21): body accepts BOTH the legacy shorthand
+ *   `{ matchField, matchType, matchValue, assignCategoryId }`
+ * AND the new v2 shape
+ *   `{ conditions: ConditionGroup, actions: Action[] }`.
+ *
+ * Legacy shorthand is synthesized into a v2 rule with a single payee/string
+ * condition and a single `set_category` action, then written to the new
+ * JSONB columns. Either path applies the resulting rule to matching rows
+ * in this batch only.
  *
  * Behavior:
- *   1. Insert into `transaction_rules` with synthesized `name` + `is_active=true`
- *      + `created_at` (NOT NULL columns; no DB defaults).
- *   2. Walk staged_transactions rows in THIS batch, decoded per-tier, and
- *      UPDATE rows whose plaintext payee matches the new rule. The staged
- *      `category` column is the encrypted category NAME (not a FK), so we
- *      look up the picked category's name once and re-encrypt under the
- *      row's existing tier before writing.
- *   3. Return `{ success: true, data: { ruleId, updatedRowIds: [...] } }`.
+ *   1. Validate body — accept either shape.
+ *   2. Synthesize ConditionGroup + Action[] (legacy) or pass through (v2).
+ *   3. Insert into `transaction_rules` (new JSONB columns).
+ *   4. Walk staged_transactions in THIS batch, decoded per-tier, applying
+ *      `computePureActionPatch` to matched rows.
+ *   5. Return `{ success: true, data: { ruleId, updatedRowIds: [...] } }`.
  *
  * Load-bearing (CLAUDE.md):
- *   - `import_hash` is NEVER recomputed when the user assigns a category —
- *     we only mutate `category` here, not the payee or the hash.
- *   - `decryptNameish`-before-`fuzzyFind` invariant — we accept
- *     `assignCategoryId` directly (no name resolution), so the resolver
- *     class is sidestepped entirely. The category name fetch DOES decrypt
- *     via `decryptNameish` before any read of `.name` (defensive — keeps
- *     us inside the audit-invariants pattern even though we don't fuzzy-
- *     match here).
- *   - Per-row encryption tier: rows at `encryption_tier='service'` re-encrypt
- *     the new category name under PF_STAGING_KEY (sv1:); rows at 'user'
- *     re-encrypt under the user's DEK (v1:). We NEVER flip a row's tier.
+ *   - `import_hash` is NEVER recomputed when assigning a category. We
+ *     only mutate the staged row's `category` column.
+ *   - Per-row encryption tier: rows at `encryption_tier='service'`
+ *     re-encrypt under PF_STAGING_KEY (sv1:); rows at 'user' re-encrypt
+ *     under the user DEK (v1:). We NEVER flip a row's tier.
  *   - HTTP only — stdio MCP has no DEK on the staging tier; out of scope.
- *
- * Sign-vs-category invariant (issue #212) — the approve endpoint enforces
- * this via the import-pipeline per-row reject path. Assigning a category
- * here doesn't bypass that gate; an E-type category on a positive-amount
- * row will still be rejected at approve time. We don't double-validate.
+ *   - Side-effect actions (`set_account` / `create_transfer`) on the v2
+ *     payload are REFUSED here. They need approve-time context, not the
+ *     inline-create surface. Use the full /api/rules endpoint to create
+ *     such rules + let them fire at approve time.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -53,14 +46,31 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptStaged, encryptStaged } from "@/lib/crypto/staging-envelope";
 import { tryDecryptField, encryptField, decryptField } from "@/lib/crypto/envelope";
 import { matchesRule, type TransactionRule } from "@/lib/auto-categorize";
+import { computePureActionPatch } from "@/lib/rules/execute";
+import {
+  ConditionGroup,
+  Action,
+  collectActionFKs,
+  ruleHasSideEffects,
+  type ConditionGroup as ConditionGroupType,
+  type Action as ActionType,
+} from "@/lib/rules/schema";
 
 export const dynamic = "force-dynamic";
 
-const BodySchema = z.object({
+// Legacy shorthand: matchField=payee|tags, matchType, matchValue, assignCategoryId.
+const LegacyBodySchema = z.object({
   matchField: z.enum(["payee", "tags"]).default("payee"),
   matchType: z.enum(["contains", "exact", "regex"]).default("contains"),
   matchValue: z.string().min(1).max(2000),
   assignCategoryId: z.number().int().positive(),
+});
+
+// FINLYNQ-84 advanced shape.
+const AdvancedBodySchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  conditions: ConditionGroup,
+  actions: z.array(Action).min(1).max(10),
 });
 
 export async function POST(
@@ -72,20 +82,56 @@ export async function POST(
   const { userId, dek } = auth;
   const { id } = await params;
 
-  let body: z.infer<typeof BodySchema>;
+  let raw: unknown;
   try {
-    const json = await request.json();
-    body = BodySchema.parse(json);
-  } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof z.ZodError ? e.issues[0]?.message ?? "Invalid body" : "Invalid JSON" },
-      { status: 400 },
-    );
+    raw = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  // Verify staged_import ownership. Cross-tenant attacks return 404 without
-  // leaking that the id exists for another user — same shape as the per-row
-  // PATCH endpoint.
+  // Try advanced shape first; fall back to legacy on a fail. Either way we
+  // end up with a (conditions, actions, displayName) tuple to write.
+  let conditions: ConditionGroupType;
+  let actions: ActionType[];
+  let displayName: string | undefined;
+  let legacyAssignCategoryId: number | undefined;
+
+  const advancedParse = AdvancedBodySchema.safeParse(raw);
+  if (advancedParse.success) {
+    conditions = advancedParse.data.conditions;
+    actions = advancedParse.data.actions;
+    displayName = advancedParse.data.name;
+    // Reject side-effect actions here — inline-create from staging review is
+    // a "fix this category and the batch" surface; full rule lifecycle is on
+    // /api/rules where approve-time wiring is in scope.
+    if (ruleHasSideEffects(actions)) {
+      return NextResponse.json(
+        {
+          error: "Side-effect actions (set_account, create_transfer) are not allowed on inline-create. Create the rule via /api/rules and re-trigger approve.",
+          code: "side_effect_action_disallowed",
+        },
+        { status: 400 },
+      );
+    }
+  } else {
+    const legacyParse = LegacyBodySchema.safeParse(raw);
+    if (!legacyParse.success) {
+      return NextResponse.json(
+        { error: legacyParse.error.issues[0]?.message ?? "Invalid body" },
+        { status: 400 },
+      );
+    }
+    const lb = legacyParse.data;
+    // Synthesize a v2 rule: single string-condition + single set_category action.
+    const cleanedValue = lb.matchValue.replace(/%/g, "");
+    conditions = {
+      all: [{ field: lb.matchField, op: lb.matchType, value: cleanedValue }],
+    } as ConditionGroupType;
+    actions = [{ kind: "set_category", categoryId: lb.assignCategoryId }] as ActionType[];
+    legacyAssignCategoryId = lb.assignCategoryId;
+  }
+
+  // Verify staged_import ownership.
   const staged = await db
     .select({ id: schema.stagedImports.id, status: schema.stagedImports.status })
     .from(schema.stagedImports)
@@ -104,38 +150,100 @@ export async function POST(
     );
   }
 
-  // Verify category ownership + fetch its encrypted name so we can re-encrypt
-  // it for each matched staged row's tier. Same cross-tenant guard pattern.
-  const catRow = await db
-    .select({
-      id: schema.categories.id,
-      nameCt: schema.categories.nameCt,
-    })
-    .from(schema.categories)
-    .where(and(
-      eq(schema.categories.id, body.assignCategoryId),
-      eq(schema.categories.userId, userId),
-    ))
-    .get();
-  if (!catRow) {
-    return NextResponse.json({ error: "Category not found" }, { status: 404 });
+  // Cross-tenant FK guard on every id inside actions + conditions.
+  const fks = collectActionFKs(actions);
+  for (const c of conditions.all) {
+    if (c.field === "account") fks.accountIds.push(c.accountId);
   }
-  // Decrypt the category name once. CLAUDE.md "decryptNameish-before-fuzzyFind"
-  // doesn't strictly apply here (no fuzzyFind — id is exact) but we still
-  // decrypt before reading the plaintext to keep the audit invariant clean.
-  const categoryNamePlain = catRow.nameCt
-    ? (decryptField(dek, catRow.nameCt) ?? "")
-    : "";
+  const uniqueCats = [...new Set(fks.categoryIds)];
+  const uniqueAccts = [...new Set(fks.accountIds)];
+  const uniqueHoldings = [...new Set(fks.holdingIds)];
+  if (uniqueCats.length > 0) {
+    const owned = await db
+      .select({ id: schema.categories.id })
+      .from(schema.categories)
+      .where(and(
+        eq(schema.categories.userId, userId),
+      ))
+      .all();
+    const ownedSet = new Set(owned.map((r) => r.id));
+    for (const cid of uniqueCats) {
+      if (!ownedSet.has(cid)) {
+        return NextResponse.json({ error: "Category not found" }, { status: 404 });
+      }
+    }
+  }
+  if (uniqueAccts.length > 0) {
+    const owned = await db
+      .select({ id: schema.accounts.id })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.userId, userId))
+      .all();
+    const ownedSet = new Set(owned.map((r) => r.id));
+    for (const aid of uniqueAccts) {
+      if (!ownedSet.has(aid)) {
+        return NextResponse.json({ error: "Account not found" }, { status: 404 });
+      }
+    }
+  }
+  if (uniqueHoldings.length > 0) {
+    const owned = await db
+      .select({ id: schema.portfolioHoldings.id })
+      .from(schema.portfolioHoldings)
+      .where(eq(schema.portfolioHoldings.userId, userId))
+      .all();
+    const ownedSet = new Set(owned.map((r) => r.id));
+    for (const hid of uniqueHoldings) {
+      if (!ownedSet.has(hid)) {
+        return NextResponse.json({ error: "Holding not found" }, { status: 404 });
+      }
+    }
+  }
 
-  // ─── Step 1: insert the new transaction_rules row ──────────────────────
-  //
-  // Schema columns: (user_id, name, match_field, match_type, match_value,
-  // assign_category_id, assign_tags, rename_to, is_active, priority,
-  // created_at). `name` is NOT NULL — synthesize a human label.
-  // `is_active` is now BOOLEAN per the 2026-05-18 FINLYNQ-12 migration.
-  // `created_at` has no DB default; supply ISO date.
-  const cleanedValue = body.matchValue.replace(/%/g, "");
-  const synthName = `Match "${cleanedValue}" → ${categoryNamePlain || `category #${catRow.id}`}`.slice(0, 200);
+  // For the legacy shorthand we need the category name for both the rule's
+  // display label and the staged-row re-encryption. For the advanced path
+  // we may have multiple categories referenced; we re-encrypt per matched
+  // row using the FIRST `set_category` action's id (since pure patch's
+  // categoryId is the last-wins value).
+  const targetCategoryId = (() => {
+    for (const a of actions) {
+      if (a.kind === "set_category") return a.categoryId;
+    }
+    return legacyAssignCategoryId ?? null;
+  })();
+
+  let categoryNamePlain = "";
+  if (targetCategoryId != null) {
+    const catRow = await db
+      .select({ nameCt: schema.categories.nameCt })
+      .from(schema.categories)
+      .where(and(
+        eq(schema.categories.id, targetCategoryId),
+        eq(schema.categories.userId, userId),
+      ))
+      .get();
+    if (catRow?.nameCt) {
+      categoryNamePlain = decryptField(dek, catRow.nameCt) ?? "";
+    }
+  }
+
+  // Synthesize a display label if the caller didn't supply one.
+  const synthName = (() => {
+    if (displayName && displayName.trim().length > 0) return displayName.slice(0, 200);
+    // For legacy shorthand: "Match "<value>" → <category>".
+    if (legacyAssignCategoryId != null) {
+      const firstCond = conditions.all[0];
+      const val =
+        firstCond && firstCond.field !== "amount" && firstCond.field !== "account" &&
+        firstCond.field !== "date" && firstCond.field !== "currency"
+          ? firstCond.value
+          : "";
+      return `Match "${val}" → ${categoryNamePlain || `category #${targetCategoryId}`}`.slice(0, 200);
+    }
+    // Advanced path — describe by condition count + action count.
+    return `Rule (${conditions.all.length} cond / ${actions.length} action)`.slice(0, 200);
+  })();
+
   const todayISO = new Date().toISOString().split("T")[0];
 
   const inserted = await db
@@ -143,10 +251,8 @@ export async function POST(
     .values({
       userId,
       name: synthName,
-      matchField: body.matchField,
-      matchType: body.matchType,
-      matchValue: cleanedValue,
-      assignCategoryId: catRow.id,
+      conditions: conditions as unknown as object,
+      actions: actions as unknown as object,
       isActive: true,
       priority: 0,
       createdAt: todayISO,
@@ -154,11 +260,7 @@ export async function POST(
     .returning({ id: schema.transactionRules.id });
   const ruleId = inserted[0]?.id;
 
-  // ─── Step 2: walk the current batch + apply to matching rows ───────────
-  //
-  // Scoped to THIS staged_import only (item spec): "applies to the current
-  // batch only, not historical transactions". Historical rows in
-  // `transactions` are untouched.
+  // Walk current batch + apply patch to matching rows.
   const stagedRows = await db
     .select({
       id: schema.stagedTransactions.id,
@@ -181,43 +283,33 @@ export async function POST(
     return tier === "user" ? tryDecryptField(dek, v) : decryptStaged(v);
   };
 
-  // Build a minimal TransactionRule-shaped object for matchesRule (same
-  // shape the import pipeline uses — InferSelectModel of schema.transactionRules
-  // covers the fields we read).
   const probeRule: TransactionRule = {
     id: ruleId ?? 0,
-    userId,
     name: synthName,
-    matchField: body.matchField,
-    matchType: body.matchType,
-    matchValue: cleanedValue,
-    assignCategoryId: catRow.id,
-    assignTags: null,
-    renameTo: null,
+    conditions,
+    actions,
     isActive: true,
     priority: 0,
-    createdAt: todayISO,
   };
 
   const updatedRowIds: string[] = [];
   for (const r of stagedRows) {
-    // Skip rows that already have a category (don't clobber user choices).
     const existing = decode(r.category, r.encryptionTier);
     if (existing && existing.trim() !== "") continue;
-    // Transfers + true-ups don't need a category — skip even if matched.
     if (r.txType === "R") continue;
     if ((r.txType as string) === "T") continue;
     const decodedPayee = decode(r.payee, r.encryptionTier) ?? "";
     const probe = { payee: decodedPayee, amount: r.amount, tags: r.tags ?? "" };
     if (!matchesRule(probe, probeRule)) continue;
-    // Re-encrypt the category NAME under the row's existing tier. We never
-    // flip tiers mid-edit; the login-time upgrade job is the only path that
-    // promotes service → user.
+    // Apply pure patch — staged-row inline-create only supports set_category
+    // for now (we already refused side-effect actions above). The patch tells
+    // us which category id to encrypt onto the row.
+    const patch = computePureActionPatch(actions);
+    if (patch.categoryId == null) continue;
     const newCategoryCt = r.encryptionTier === "user"
       ? encryptField(dek, categoryNamePlain)
       : encryptStaged(categoryNamePlain);
-    // CLAUDE.md load-bearing: `import_hash` is NEVER recomputed on edit. We
-    // only touch the `category` column.
+    // Load-bearing: import_hash NEVER recomputed on edit.
     await db
       .update(schema.stagedTransactions)
       .set({ category: newCategoryCt })
@@ -228,16 +320,14 @@ export async function POST(
     updatedRowIds.push(r.id);
   }
 
-  // No invalidateUserTxCache call — we didn't write to `transactions`. The
-  // user-tx-cache invalidation happens at approve time when rows materialize.
-  // Silence the lint helper used by the audit script — explicit no-op.
+  // No invalidateUserTxCache — we didn't write to `transactions`.
   void sql;
 
   return NextResponse.json({
     success: true,
     data: {
       ruleId,
-      categoryId: catRow.id,
+      categoryId: targetCategoryId,
       categoryName: categoryNamePlain,
       updatedRowIds,
       updatedCount: updatedRowIds.length,

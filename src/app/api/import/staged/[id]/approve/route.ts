@@ -65,6 +65,8 @@ import {
 } from "@/lib/investment-account";
 import { generateImportHash } from "@/lib/import-hash";
 import { matchesRule, type TransactionRule } from "@/lib/auto-categorize";
+import { computePureActionPatch } from "@/lib/rules/execute";
+import type { ConditionGroup, Action } from "@/lib/rules/schema";
 
 export const dynamic = "force-dynamic";
 
@@ -187,14 +189,33 @@ export async function POST(
     if (value == null) return null;
     return tier === "user" ? tryDecryptField(dek, value) : decryptStaged(value);
   };
-  const activeRules = await db
+  // FINLYNQ-84: rules table is v2 (JSONB conditions + actions). Probe via
+  // `matchesRule` over the parsed shape; a rule resolves the gate when any
+  // matched action would set a category (via `computePureActionPatch`).
+  const rawRules = await db
     .select()
     .from(schema.transactionRules)
     .where(and(
       eq(schema.transactionRules.userId, userId),
       eq(schema.transactionRules.isActive, true),
     ))
-    .all() as TransactionRule[];
+    .all() as Array<{
+      id: number;
+      userId: string;
+      name: string;
+      conditions: unknown;
+      actions: unknown;
+      isActive: boolean;
+      priority: number;
+    }>;
+  const activeRules: TransactionRule[] = rawRules.map((r) => ({
+    id: r.id,
+    name: r.name,
+    conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
+    actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
+    isActive: r.isActive,
+    priority: r.priority,
+  }));
 
   const unresolvedRowIds: string[] = [];
   const unresolvedPayees: string[] = [];
@@ -202,17 +223,27 @@ export async function POST(
     // Transfer + true-up exempt. tx_type column is plaintext on staged_transactions.
     if (r.txType === "R") continue;
     if ((r.txType as string) === "T") continue;
-    // Already-resolved categories — the `category` column on staged is the
-    // encrypted category NAME (no FK on staged). A non-empty decoded name
-    // means the user (or the parser) already picked one.
     const decodedCategory = decodeForGate(r.category, r.encryptionTier);
     if (decodedCategory && decodedCategory.trim() !== "") continue;
-    // Probe rules. Use plaintext payee + amount + tags; matchesRule is pure
-    // (re-exported from auto-categorize for this gate). Tags are plaintext at
-    // staging time — no decode needed.
     const decodedPayee = decodeForGate(r.payee, r.encryptionTier) ?? "";
-    const probe = { payee: decodedPayee, amount: r.amount, tags: r.tags ?? "" };
-    const hasRuleMatch = activeRules.some((rule) => matchesRule(probe, rule));
+    const probe = {
+      payee: decodedPayee,
+      amount: r.amount,
+      tags: r.tags ?? "",
+      note: null,
+      date: r.date,
+      accountId: null,
+      enteredCurrency: r.enteredCurrency ?? null,
+    };
+    // The gate resolves when ANY active rule both matches the probe AND
+    // its pure-action patch lands a categoryId (so the row gets a category
+    // at materialization). Rules without `set_category` (e.g. only
+    // `rename_payee` or `set_tags`) do NOT count as resolving the gate.
+    const hasRuleMatch = activeRules.some((rule) => {
+      if (!matchesRule(probe, rule)) return false;
+      const patch = computePureActionPatch(rule.actions);
+      return patch.categoryId != null;
+    });
     if (hasRuleMatch) continue;
     unresolvedRowIds.push(r.id);
     unresolvedPayees.push(decodedPayee);

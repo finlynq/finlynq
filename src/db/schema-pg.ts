@@ -374,21 +374,24 @@ export const settings = pgTable(
   (table) => [primaryKey({ columns: [table.key, table.userId] })]
 );
 
+// FINLYNQ-84 — transaction rules v2: multi-condition matching + richer actions.
+// Replaces the legacy flat columns (match_field/match_type/match_value +
+// assign_category_id/assign_tags/rename_to) with JSONB conditions + actions.
+// Zod schemas at src/lib/rules/schema.ts; matcher at src/lib/auto-categorize.ts.
+//
+// Migration: pf-app/scripts/migrate-finlynq-84-rules-v2.sql (LOOSE — destructive,
+// requires manual code-FIRST-then-SQL flow per docs/migrations.md). TRUNCATE on
+// apply per user decision 2026-05-21 (no backfill; users re-enter rules).
 export const transactionRules = pgTable("transaction_rules", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
   name: text("name").notNull(),
-  matchField: text("match_field").notNull(),
-  matchType: text("match_type").notNull(),
-  matchValue: text("match_value").notNull(),
-  assignCategoryId: integer("assign_category_id").references(
-    () => categories.id
-  ),
-  assignTags: text("assign_tags"),
-  renameTo: text("rename_to"),
+  conditions: jsonb("conditions").notNull(),
+  actions: jsonb("actions").notNull(),
   isActive: boolean("is_active").notNull().default(true),
   priority: integer("priority").notNull().default(0),
   createdAt: text("created_at").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const budgetTemplates = pgTable("budget_templates", {

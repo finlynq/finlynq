@@ -9361,26 +9361,21 @@ export function registerPgTools(
           }
         }
 
-        // Category coverage via the active rule set (plaintext match_value).
+        // Category coverage via the active rule set (FINLYNQ-84: JSONB conditions+actions).
         const rules = await q(db, sql`
-          SELECT match_field, match_type, match_value, assign_category_id
+          SELECT id, name, conditions, actions, priority
           FROM transaction_rules
-          WHERE user_id = ${userId} AND is_active = true AND assign_category_id IS NOT NULL
+          WHERE user_id = ${userId} AND is_active = true
           ORDER BY priority DESC
         `);
         const ruleSet: TransactionRule[] = rules.map((r) => ({
-          id: 0,
-          name: "",
-          matchField: String(r.match_field ?? "payee"),
-          matchType: String(r.match_type ?? "contains"),
-          matchValue: String(r.match_value ?? ""),
-          assignCategoryId: r.assign_category_id == null ? null : Number(r.assign_category_id),
-          assignTags: null,
-          renameTo: null,
+          id: Number(r.id),
+          name: String(r.name ?? ""),
+          conditions: (r.conditions ?? { all: [] }) as TransactionRule["conditions"],
+          actions: (Array.isArray(r.actions) ? r.actions : []) as TransactionRule["actions"],
           isActive: true,
-          priority: 0,
-          createdAt: "",
-        })) as unknown as TransactionRule[];
+          priority: Number(r.priority ?? 0),
+        }));
         let matchedCat = 0;
         if (ruleSet.length > 0 && rows.length > 0) {
           const results = applyRulesToBatch(
@@ -9388,7 +9383,10 @@ export function registerPgTools(
             ruleSet,
           );
           for (const res of results) {
-            if (res.match?.assignCategoryId) matchedCat++;
+            if (!res.match) continue;
+            // Coverage means a category will land — only set_category counts.
+            const willCategorize = res.match.actions.some((a) => a.kind === "set_category");
+            if (willCategorize) matchedCat++;
           }
         }
         // Rows that already carry an explicit category name also count.

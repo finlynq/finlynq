@@ -9,6 +9,8 @@ import {
   type ExactDuplicateMatchInfo,
 } from "./import-hash";
 import { applyRulesToBatch, type TransactionRule } from "./auto-categorize";
+import { computePureActionPatch } from "./rules/execute";
+import type { ConditionGroup, Action } from "./rules/schema";
 import { normalizeDate, parseAmount as parseAmountStr } from "./csv-parser";
 import { encryptField, decryptField, tryDecryptField } from "./crypto/envelope";
 import { nameLookup } from "./crypto/encrypted-columns";
@@ -515,28 +517,70 @@ export async function executeImport(
     return true;
   });
 
-  // Auto-categorize uncategorized transactions using rules
+  // Auto-categorize uncategorized transactions using rules.
+  //
+  // FINLYNQ-84: pipeline path applies PURE actions only via
+  // `computePureActionPatch`. Side-effect actions (`set_account`,
+  // `create_transfer`) are skipped here — they need approve-time context
+  // and run only via the staging-approve materialization path. The import
+  // pipeline never sees a `staged_imports` id; if a user's rule has a
+  // side-effect action and matches a pre-pipeline row, the row falls
+  // through uncategorized and the user resolves it at approve time.
   try {
-    const activeRules = await db
+    const rawRules = await db
       .select()
       .from(schema.transactionRules)
-      .where(eq(schema.transactionRules.isActive, true))
-      .all() as TransactionRule[];
+      .where(and(
+        eq(schema.transactionRules.userId, userId),
+        eq(schema.transactionRules.isActive, true),
+      ))
+      .all() as Array<{
+        id: number;
+        userId: string;
+        name: string;
+        conditions: unknown;
+        actions: unknown;
+        isActive: boolean;
+        priority: number;
+      }>;
+    const activeRules: TransactionRule[] = rawRules.map((r) => ({
+      id: r.id,
+      name: r.name,
+      conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
+      actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
+      isActive: r.isActive,
+      priority: r.priority,
+    }));
 
     if (activeRules.length > 0) {
       const uncategorized = toInsert.filter((r) => !r.categoryId);
       if (uncategorized.length > 0) {
+        // accountId is intentionally null at the pre-pipeline stage: RawTransaction
+        // carries `account` (name string), not the resolved id. Rules with
+        // `account.is/is_not` predicates trivially fail here and the row falls
+        // through to the user at approve-time — accepted tradeoff (the row is
+        // still safely importable; user resolves at /import/pending).
         const results = applyRulesToBatch(
-          uncategorized.map((r) => ({ payee: r.payee, amount: r.amount, tags: r.tags })),
+          uncategorized.map((r) => ({
+            payee: r.payee,
+            amount: r.amount,
+            tags: r.tags,
+            note: r.note,
+            date: r.date,
+            accountId: null,
+            enteredCurrency: r.enteredCurrency ?? r.currency ?? null,
+          })),
           activeRules,
         );
         for (const { index, match } of results) {
-          if (match) {
-            const row = uncategorized[index];
-            if (match.assignCategoryId) row.categoryId = match.assignCategoryId;
-            if (match.assignTags) row.tags = match.assignTags;
-            if (match.renameTo) row.payee = match.renameTo;
-          }
+          if (!match) continue;
+          const row = uncategorized[index];
+          const patch = computePureActionPatch(match.actions);
+          if (patch.categoryId != null) row.categoryId = patch.categoryId;
+          if (patch.tags != null) row.tags = patch.tags;
+          if (patch.payee != null) row.payee = patch.payee;
+          if (patch.enteredCurrency != null) row.enteredCurrency = patch.enteredCurrency;
+          if (patch.portfolioHoldingId != null) row.portfolioHoldingId = patch.portfolioHoldingId;
         }
       }
     }

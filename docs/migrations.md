@@ -10,6 +10,17 @@ Per-environment psql commands, in chronological order, for every schema change s
 
 **Historical migrations** (everything below this section) live as `scripts/migrate-*.sql` (loose, not in the tracked dir) and are already applied to prod + dev — they remain in the repo as the canonical record for spinning up a fresh env. New self-hosters apply them in the order documented here, then `deploy.sh` takes over from `scripts/migrations/` onward.
 
+**FINLYNQ-84 — Transaction rules v2 (destructive, loose dir)**: `scripts/migrate-finlynq-84-rules-v2.sql` is the migration for the rules schema overhaul (TRUNCATE + DROP 6 columns + ADD 3 columns + new index). It lives in the LOOSE dir because it is destructive (TRUNCATE + DROP COLUMN). The auto-runner skips loose-dir SQL. Manual sequence per env, AFTER the matching code bundle is live:
+
+```sh
+# Dev
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_dev  -d pf_dev -f pf-app/scripts/migrate-finlynq-84-rules-v2.sql
+# Prod
+PGPASSWORD='...' psql -h 127.0.0.1 -U finlynq_prod -d pf     -f pf-app/scripts/migrate-finlynq-84-rules-v2.sql
+```
+
+Per user decision 2026-05-21 this wipes every existing `transaction_rules` row (TRUNCATE). Users re-enter rules on first visit to `/settings/rules`. No backfill from the legacy flat columns to JSONB — row count today is low.
+
 **Order-of-deploy edge cases:** for **destructive** migrations (e.g. `DROP COLUMN`) the rule is still "code FIRST, then SQL" — DON'T put those in `scripts/migrations/`. Apply them manually per env after the matching code release is live. The runner is for additive migrations that are safe to apply BEFORE the matching code lands.
 
 `npm run db:push` runs the PostgreSQL config (the SQLite config is a pre-open-source-pivot artifact). It's a **local-dev convenience** for iterating against your own dev DB; **`deploy.sh` does NOT run it on the deploy hosts** — see issue #5. New schema changes go through `scripts/migrations/` instead.

@@ -278,11 +278,11 @@ describe("Cross-tenant FK rejection at route boundary (B4 / H-1)", () => {
       const req = createMockRequest("http://localhost:3000/api/rules", {
         method: "POST",
         body: {
+          // FINLYNQ-84 v2 shape: cross-tenant FK still rejected via the
+          // verifyOwnership pass on action.categoryId.
           name: "Coffee",
-          matchField: "payee",
-          matchType: "contains",
-          matchValue: "Starbucks",
-          assignCategoryId: 210, // userB's category
+          conditions: { all: [{ field: "payee", op: "contains", value: "Starbucks" }] },
+          actions: [{ kind: "set_category", categoryId: 210 /* userB's category */ }],
         },
       });
       const res = await POST(req);
