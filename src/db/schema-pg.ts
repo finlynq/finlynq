@@ -386,7 +386,7 @@ export const transactionRules = pgTable("transaction_rules", {
   ),
   assignTags: text("assign_tags"),
   renameTo: text("rename_to"),
-  isActive: integer("is_active").notNull().default(1),
+  isActive: boolean("is_active").notNull().default(true),
   priority: integer("priority").notNull().default(0),
   createdAt: text("created_at").notNull(),
 });
@@ -625,6 +625,25 @@ export const stagedImports = pgTable("staged_imports", {
   // 'ofx' | 'qfx' | 'csv' | 'xlsx' | 'pdf' | 'plaid' | 'mcp'
   fileFormat: text("file_format"),
   originalFilename: text("original_filename"), // display only, e.g. "chase-2026-04.csv"
+  // ─── Parser knobs (FINLYNQ-54, 2026-05-20) ───────────────────────────
+  // Upload-step preprocessor configuration, persisted so the F-53E merge
+  // flow can read it back and re-run with the same shape. Defaults match
+  // pre-FINLYNQ-54 behavior (no skip, parser auto-detects date format,
+  // no per-statement currency fallback).
+  skipHeaderRows: integer("skip_header_rows").notNull().default(0),
+  skipFooterRows: integer("skip_footer_rows").notNull().default(0),
+  // 'DD/MM/YYYY' | 'MM/DD/YYYY' | 'YYYY-MM-DD' | NULL (auto-detect)
+  dateFormatOverride: text("date_format_override"),
+  defaultCurrency: text("default_currency"), // ISO 4217 from supportedCurrencyEnum
+  // ─── Date-range bounds for F-53E overlap detection (FINLYNQ-58) ──────
+  // Min/max of the parsed transaction-row dates. Distinct from the
+  // statement_period_* columns (which mirror the file's declared period,
+  // when present) — date_range_* is the truthful comparator for the
+  // overlapping-upload merge prompt because it reflects the actual rows
+  // landed in staged_transactions. Both nullable for pre-FINLYNQ-58
+  // staged_imports rows; overlap detection skips NULL rows.
+  dateRangeStart: text("date_range_start"), // YYYY-MM-DD
+  dateRangeEnd: text("date_range_end"), // YYYY-MM-DD
 });
 
 export const stagedTransactions = pgTable("staged_transactions", {
@@ -691,7 +710,67 @@ export const stagedTransactions = pgTable("staged_transactions", {
   // materialize-into-`transactions` step (today's behavior); the column lets
   // the MCP "approve a subset" path mark intent before the actual delete.
   rowStatus: text("row_status").notNull().default("pending"), // 'pending' | 'approved' | 'rejected'
+  // FINLYNQ-55 (2026-05-20) — reconciliation-decision columns for the
+  // two-pane reconciliation UI (F-53C). CHECK enforced in SQL:
+  //   'unmatched'          — default; no decision yet (the file row hasn't
+  //                          been auto-matched and the user hasn't acted).
+  //   'auto_suggested'     — system found a probable DB-side match; user
+  //                          hasn't confirmed.
+  //   'linked'             — user confirmed a link to linked_transaction_id.
+  //   'skipped_duplicate'  — F-53E "already imported" marker.
+  // 'flagged_missing' is intentionally NOT a value here — DB-side flags
+  // belong to transactionReconciliationFlags (different lifecycle: staging
+  // rows are ephemeral, flags persist past approval).
+  reconcileState: text("reconcile_state").notNull().default("unmatched"),
+  // FK into the live `transactions` table when the user manually links a
+  // file row to an existing DB row. transactions.id is serial(integer) so
+  // this column is integer, not uuid. ON DELETE SET NULL so a transaction
+  // wipe doesn't cascade into staging rows that the user may still want
+  // to re-link.
+  linkedTransactionId: integer("linked_transaction_id").references(
+    () => transactions.id,
+    { onDelete: "set null" },
+  ),
 });
+
+// ─── transaction_reconciliation_flags — DB-side reconciliation annotations
+//
+// FINLYNQ-55 (2026-05-20). Separate table (not a column on `transactions`)
+// because the per-transaction-and-user flag lifecycle is distinct from the
+// transaction row itself: a flag can be added, removed, or carry a note,
+// independently of any column on `transactions`. Keeping it out of the hot
+// `transactions` table also avoids touching every aggregator with a fresh
+// "is_flagged" predicate.
+//
+// Today's only `flag_kind` is `missing_from_statement` (the DB has a row
+// the statement file doesn't, and the user explicitly chose to keep it
+// rather than delete it). Future kinds — `requires_review`,
+// `manual_adjustment`, etc. — would slot in via a follow-up migration that
+// widens the CHECK list.
+//
+// CASCADE on `transaction_id` and `user_id` so a transaction delete or a
+// wipe-account run (CLAUDE.md "Wipe-account is single-transaction +
+// user_id-only filters") cleans up the flag automatically without the wipe
+// endpoint needing to know about this table.
+export const transactionReconciliationFlags = pgTable(
+  "transaction_reconciliation_flags",
+  {
+    id: uuid("id").primaryKey(),
+    transactionId: integer("transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
+    // text("user_id") — users.id is text (UUID stored as text), matches
+    // every other userId column in this schema.
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    flagKind: text("flag_kind").notNull(), // 'missing_from_statement' (CHECK in SQL)
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+);
 
 // ─── Email Import — Admin Inbox + Trash (Phase A) ──────────────────────────
 //
@@ -774,4 +853,77 @@ export const adminAudit = pgTable("admin_audit", {
 export const revokedJtis = pgTable("revoked_jtis", {
   jti: text("jti").primaryKey(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+// ─── Webhooks — schema for the v1 webhook delivery surface (FINLYNQ-60) ────
+//
+// Foundation for the FINLYNQ-43 cohort. Spec lives in
+// pf-app/docs/architecture/webhook-events.md; the worker (FINLYNQ-61), the
+// UI (FINLYNQ-63), and the tx-write wiring (FINLYNQ-62) ship separately.
+//
+// `secret` is plaintext on purpose — the delivery worker fires async from
+// background jobs (cron, retry queue) where the user DEK isn't in scope.
+// The secret is a row-scoped HMAC key, not user-derived data; rotation is
+// via revoke-and-recreate. Storing under user DEK would break the worker.
+// Do NOT add a `name_ct` sibling here.
+//
+// `event_filter` element type and `webhookDeliveries.event` MUST stay in
+// sync with webhook-events.md's v1 vocabulary — drift is a contract
+// breach. The SQL migration encodes the closed list as CHECK constraints
+// (`webhooks_event_filter_check`, `webhook_deliveries_event_check`); a new
+// event in v1 requires a follow-up migration widening BOTH CHECKs and a
+// CHANGELOG entry. v2-shape breaks rev `Content-Type`, not the column.
+//
+// FK cascades: `webhooks.user_id -> users(id) ON DELETE CASCADE` AND
+// `webhook_deliveries.webhook_id -> webhooks(id) ON DELETE CASCADE` — both
+// load-bearing for the wipe-account flow (CLAUDE.md "Wipe-account is
+// single-transaction + user_id-only filters"): deleting a user cleans up
+// the webhook rows automatically without the wipe endpoint touching this
+// table.
+//
+// `gen_random_uuid()` is built-in to Postgres 13+ (no pgcrypto extension
+// needed). Finlynq runs on Postgres 16.
+export const webhooks = pgTable("webhooks", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  // text("user_id") — users.id is text (UUID stored as text); matches the
+  // pattern across every other userId column in this schema.
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+  // Random >=32-char hex, server-generated on insert, NEVER accepted from
+  // client. Plaintext for worker access — see file header comment above.
+  secret: text("secret").notNull(),
+  // Closed v1 event list, enforced by CHECK at the SQL layer (see
+  // webhooks_event_filter_check in the matching migration). Drizzle's
+  // text-array column type is `text("...").array()`.
+  eventFilter: text("event_filter").array().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  // Surfaced as a warning dot on the settings UI after a delivery's retry
+  // budget is exhausted (3 attempts at 1m/5m/25m per webhook-events.md).
+  lastFailedAt: timestamp("last_failed_at", { withTimezone: true }),
+});
+
+// `event` mirrors the same v1 closed list as `webhooks.event_filter`'s
+// element type (enforced by `webhook_deliveries_event_check` in SQL).
+// `payload_hash` is SHA-256 hex of the raw request body bytes (NOT the
+// HMAC signature) — lets the UI display a delivery fingerprint without
+// storing the body itself (the "no PII in webhook payloads" rule from
+// webhook-events.md applies to anything we'd persist alongside the row).
+// `status_code` is NULL until the dispatcher attempts; on exhausted
+// retries the worker writes a negative sentinel (-1) per the retry
+// policy in webhook-events.md.
+export const webhookDeliveries = pgTable("webhook_deliveries", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  webhookId: uuid("webhook_id")
+    .notNull()
+    .references(() => webhooks.id, { onDelete: "cascade" }),
+  event: text("event").notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  statusCode: integer("status_code"),
+  attemptedAt: timestamp("attempted_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });

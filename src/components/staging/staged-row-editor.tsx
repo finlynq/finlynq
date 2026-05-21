@@ -45,6 +45,17 @@ export interface StagedEditableRow {
   encryptionTier: string;
   dedupStatus?: "new" | "existing" | "probable_duplicate";
   rowStatus?: string;
+  /** FINLYNQ-58 — reconciliation marker. 'skipped_duplicate' indicates the
+   *  row's import_hash collided with an existing `transactions` row for the
+   *  same user; the UI badges it and the approve handler excludes it by
+   *  default. The user can manually re-select the row to override.
+   *  FINLYNQ-56 added 'auto_suggested' (matcher hit) + 'linked' (user
+   *  confirmed link to a live `transactions` row). */
+  reconcileState?: "unmatched" | "auto_suggested" | "linked" | "skipped_duplicate";
+  /** FINLYNQ-56 — manual link back-reference to a live `transactions` row.
+   *  Server-validated for user-ownership in the PATCH endpoint. Non-null
+   *  iff reconcileState === 'linked'. */
+  linkedTransactionId?: number | null;
   txType: "E" | "I" | "R";
   quantity: number | null;
   portfolioHoldingId: number | null;

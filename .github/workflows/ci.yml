@@ -37,6 +37,12 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Audit load-bearing invariants (advisory)
+        # FINLYNQ-48 — grep-walk INSERT/UPDATE sites for required helpers.
+        # Advisory for one release cycle, then promote to blocking.
+        run: npm run audit:invariants
+        continue-on-error: true
+
       - name: Build
         run: npm run build
         env:

@@ -54,6 +54,18 @@ const PatchSchema = z.object({
   enteredCurrency: z.string().max(8).nullable().optional(),
   peerStagedId: z.string().nullable().optional(),
   targetAccountId: z.number().int().nullable().optional(),
+  // FINLYNQ-56 — two-pane reconciliation actions. PATCH accepts these
+  // verbatim; the half-pair transfer rule (tx_type='R' rows whose peer
+  // is also peer-linked) is enforced at APPROVE time by the existing
+  // half-pair classification logic in approve/route.ts. Validating
+  // post-state here would deadlock the two sequential PATCHes the UI
+  // issues for paired legs (first leg's "peer is linked" check would
+  // always fail). The user-decision (2026-05-20) is to keep enforcement
+  // at approve.
+  reconcileState: z
+    .enum(["unmatched", "auto_suggested", "linked", "skipped_duplicate"])
+    .optional(),
+  linkedTransactionId: z.number().int().nullable().optional(),
   // Reserved for the partial-approve flow that overrides
   // dedup_status='probable_duplicate' rows. Accepted but currently a no-op
   // here — the approve endpoint enforces dedup behavior, this PATCH only
@@ -221,6 +233,71 @@ export async function PATCH(
     }
   }
 
+  // ─── FINLYNQ-56 — reconciliation-state mutators ──────────────────────────
+  // The two-pane UI on /import/pending writes these as the user actions
+  // each row: auto-match accept → 'linked'; manual link → 'linked';
+  // unlink → 'unmatched'; mark-skipped → 'skipped_duplicate'.
+  //
+  // Resolve the post-state for BOTH fields up-front so the cross-field
+  // invariant (linkedTransactionId is non-null IFF state='linked') can be
+  // validated and forced consistent before we write. We never let
+  // linked_transaction_id stick around when the row leaves 'linked' — an
+  // orphan FK would re-link the row on a future state flip.
+  const stateAfter =
+    body.reconcileState !== undefined ? body.reconcileState : row.reconcileState;
+  let linkedAfter =
+    body.linkedTransactionId !== undefined
+      ? body.linkedTransactionId
+      : row.linkedTransactionId;
+
+  if (stateAfter === "linked" && linkedAfter == null) {
+    return NextResponse.json(
+      {
+        error: "reconcileState='linked' requires a non-null linkedTransactionId",
+        code: "missing_linked_transaction",
+      },
+      { status: 400 },
+    );
+  }
+  if (stateAfter !== "linked" && linkedAfter != null) {
+    // Server forces null when state is not 'linked'. Defensive against a
+    // client that sends a stale linkedTransactionId on an unlink.
+    linkedAfter = null;
+  }
+
+  // Verify the linked transaction belongs to this user. Same 404 shape
+  // as the rest of the surface — never 403, never leaks existence.
+  if (
+    body.linkedTransactionId !== undefined &&
+    linkedAfter != null &&
+    linkedAfter !== row.linkedTransactionId
+  ) {
+    const tx = await db
+      .select({ id: schema.transactions.id })
+      .from(schema.transactions)
+      .where(and(
+        eq(schema.transactions.id, linkedAfter),
+        eq(schema.transactions.userId, userId),
+      ))
+      .get();
+    if (!tx) {
+      return NextResponse.json(
+        { error: "linked_transaction_id not found" },
+        { status: 404 },
+      );
+    }
+  }
+
+  if (body.reconcileState !== undefined) {
+    update.reconcileState = stateAfter;
+  }
+  if (
+    body.linkedTransactionId !== undefined ||
+    (body.reconcileState !== undefined && linkedAfter !== row.linkedTransactionId)
+  ) {
+    update.linkedTransactionId = linkedAfter;
+  }
+
   // Re-encrypt edited text fields under the row's EXISTING tier.
   // service tier → encryptStaged (sv1: under PF_STAGING_KEY)
   // user tier    → encryptField (v1: under user DEK)
@@ -313,5 +390,12 @@ function shapeRowResponse(
     fitId: row.fitId,
     peerStagedId: row.peerStagedId,
     targetAccountId: row.targetAccountId,
+    // FINLYNQ-58 — already-imported marker. PATCH preserves the existing
+    // value (we never silently flip skipped_duplicate back to unmatched
+    // via row-edit — load-bearing per CLAUDE.md).
+    reconcileState: row.reconcileState,
+    // FINLYNQ-56 — manual link back-reference to a live transactions row.
+    // Server-validated for user-ownership at PATCH time.
+    linkedTransactionId: row.linkedTransactionId,
   };
 }

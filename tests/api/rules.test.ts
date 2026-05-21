@@ -8,6 +8,11 @@ for (const m of chainMethods) {
 mockDbChain.all = vi.fn().mockReturnValue([]);
 mockDbChain.get = vi.fn().mockReturnValue(undefined);
 mockDbChain.run = vi.fn();
+// Make the chain awaitable — real Drizzle chains are thenables; without this,
+// `await db.select()...` returns the chain object itself (not the rows),
+// causing `rows.map`/`rows.length` to blow up in route code.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(mockDbChain as any).then = (resolve: (v: unknown) => unknown) => resolve([]);
 
 vi.mock("@/db", () => ({
   db: new Proxy({}, {
@@ -20,7 +25,7 @@ vi.mock("@/db", () => ({
 }));
 
 vi.mock("@/lib/auth/require-auth", () => ({
-  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
 }));
 vi.mock("drizzle-orm", () => ({ eq: vi.fn(), asc: vi.fn(), and: vi.fn(), inArray: vi.fn() }));
 
@@ -45,7 +50,7 @@ describe("API /api/rules", () => {
 
   describe("GET", () => {
     it("returns all rules", async () => {
-      const rules = [{ id: 1, name: "Coffee", matchField: "payee", matchType: "contains", matchValue: "Starbucks", isActive: 1 }];
+      const rules = [{ id: 1, name: "Coffee", matchField: "payee", matchType: "contains", matchValue: "Starbucks", isActive: true }];
       mockDbChain.all!.mockReturnValueOnce(rules);
       const req = createMockRequest("http://localhost:3000/api/rules");
       const res = await GET(req);
@@ -76,6 +81,29 @@ describe("API /api/rules", () => {
       const res = await POST(req);
       expect(res.status).toBe(400);
     });
+
+    // FINLYNQ-66 — the Settings → Categorization form sends `null` for
+    // empty optional fields (`assignTags: ruleForm.assignTags || null`,
+    // same for `renameTo` and `assignCategoryId`). Before the fix, the
+    // POST schema declared these as `z.string().optional()` (= `string |
+    // undefined`) and Zod rejected `null` with "Invalid input: expected
+    // string, received null". Each of these payloads MUST succeed.
+    const finlynq66Payloads: Array<{ label: string; body: Record<string, unknown> }> = [
+      { label: "assignTags=null + renameTo=null", body: { name: "test", matchField: "payee", matchType: "contains", matchValue: "a", assignCategoryId: null, assignTags: null, renameTo: null, priority: 0 } },
+      { label: "assignTags=''", body: { name: "test", matchField: "payee", matchType: "contains", matchValue: "a", assignTags: "" } },
+      { label: "assignTags omitted", body: { name: "test", matchField: "payee", matchType: "contains", matchValue: "a" } },
+      { label: "renameTo='sas' + assignTags=null (exact repro)", body: { name: "test", matchField: "payee", matchType: "contains", matchValue: "a", assignCategoryId: null, assignTags: null, renameTo: "sas", priority: 1 } },
+    ];
+
+    for (const { label, body } of finlynq66Payloads) {
+      it(`FINLYNQ-66: accepts ${label}`, async () => {
+        const rule = { id: 1, name: "test", matchField: "payee", matchType: "contains", matchValue: "a" };
+        mockDbChain.get!.mockReturnValueOnce(rule);
+        const req = createMockRequest("http://localhost:3000/api/rules", { method: "POST", body });
+        const res = await POST(req);
+        expect(res.status).toBe(201);
+      });
+    }
   });
 
   describe("PUT", () => {

@@ -23,6 +23,8 @@ import {
   csvToRawTransactionsWithMapping,
   extractCsvHeaders,
   parseCSV,
+  trimCsvRows,
+  type DateFormatOverride,
 } from "@/lib/csv-parser";
 import {
   autoDetectColumnMapping,
@@ -48,6 +50,13 @@ export interface CsvPipelineRequest {
    * reconcile callers that pass an explicit `accountId`).
    */
   defaultAccountName?: string | null;
+  /**
+   * FINLYNQ-54 parser knobs. All default-equivalent to pre-FINLYNQ-54
+   * behavior so existing callers (`/api/import/preview`) are unaffected.
+   */
+  skipHeaderRows?: number;
+  skipFooterRows?: number;
+  dateFormatOverride?: DateFormatOverride | null;
 }
 
 export type CsvPipelineResult =
@@ -88,7 +97,19 @@ export type CsvPipelineResult =
 export async function parseCsvWithFallback(
   req: CsvPipelineRequest,
 ): Promise<CsvPipelineResult> {
-  const { text, userId, templateId, defaultAccountName } = req;
+  const {
+    userId,
+    templateId,
+    defaultAccountName,
+    skipHeaderRows = 0,
+    skipFooterRows = 0,
+    dateFormatOverride = null,
+  } = req;
+  // Apply header/footer trim BEFORE any header detection so the trim
+  // shapes what step 2 (canonical headers) and step 3 (auto-matched
+  // saved template) actually see (FINLYNQ-54). With both knobs at 0
+  // this is identity.
+  const text = trimCsvRows(req.text, skipHeaderRows, skipFooterRows);
   const headers = extractCsvHeaders(text);
 
   // 1. Explicit template selected by user — use its mapping directly.
@@ -107,7 +128,7 @@ export async function parseCsvWithFallback(
       return { kind: "template-not-found", templateId };
     }
     const tpl = deserializeTemplate(tplRow);
-    const mapped = parseWithMapping(text, tpl.columnMapping, tpl.defaultAccount ?? null);
+    const mapped = parseWithMapping(text, tpl.columnMapping, tpl.defaultAccount ?? null, dateFormatOverride);
     const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
     return {
       kind: "parsed",
@@ -119,7 +140,7 @@ export async function parseCsvWithFallback(
   }
 
   // 2. Try canonical headers (Date / Amount / Account / Payee).
-  const canonical = csvToRawTransactions(text);
+  const canonical = csvToRawTransactions(text, dateFormatOverride);
   if (canonical.rows.length > 0) {
     const filled = applyDefaultAccount(canonical.rows, defaultAccountName);
     return {
@@ -143,6 +164,7 @@ export async function parseCsvWithFallback(
       text,
       best.template.columnMapping,
       best.template.defaultAccount ?? null,
+      dateFormatOverride,
     );
     if (mapped.rows.length > 0) {
       const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
@@ -178,10 +200,12 @@ function parseWithMapping(
   text: string,
   mapping: ColumnMapping,
   defaultAccount: string | null,
+  dateFormatOverride?: DateFormatOverride | null,
 ): { rows: RawTransaction[]; errors: ParseError[] } {
   const result = csvToRawTransactionsWithMapping(
     text,
     mapping as unknown as Record<string, string>,
+    dateFormatOverride,
   );
   if (defaultAccount) {
     result.rows = result.rows.map((r) => ({

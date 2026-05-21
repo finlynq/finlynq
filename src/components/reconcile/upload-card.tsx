@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Combobox } from "@/components/ui/combobox";
 import { FileDropZone } from "@/app/(app)/import/components/file-drop-zone";
 import { Loader2 } from "lucide-react";
+import { SUPPORTED_CURRENCIES } from "@/lib/fx/supported-currencies";
 
 import type { AccountOption } from "./preview-table";
 
@@ -11,6 +12,17 @@ export interface TemplateOption {
   id: number;
   name: string;
 }
+
+/**
+ * FINLYNQ-54 parser knobs (Import options panel). Defaults match
+ * pre-FINLYNQ-54 behavior so existing uploads are unaffected when the
+ * panel is left collapsed.
+ */
+export type DateFormatOverrideUi =
+  | "auto"
+  | "DD/MM/YYYY"
+  | "MM/DD/YYYY"
+  | "YYYY-MM-DD";
 
 interface Props {
   accounts: AccountOption[];
@@ -25,6 +37,11 @@ interface Props {
      *  statements carry their own balance via <LEDGERBAL>, so this is
      *  primarily for CSVs where no balance is reliably parseable. */
     statementBalance: number | null;
+    /** FINLYNQ-54 — see the Import options panel below. */
+    skipHeaderRows: number;
+    skipFooterRows: number;
+    dateFormatOverride: DateFormatOverrideUi;
+    defaultCurrency: string | null;
   }) => void;
 }
 
@@ -41,6 +58,14 @@ export function ReconcileUploadCard({
   const [tolerance, setTolerance] = useState<string>("3");
   const [statementBalance, setStatementBalance] = useState<string>("");
 
+  // FINLYNQ-54 parser knobs. The panel is <details>-collapsed by default;
+  // defaults preserve the pre-FINLYNQ-54 behavior end-to-end.
+  const [skipHeaderRows, setSkipHeaderRows] = useState<string>("0");
+  const [skipFooterRows, setSkipFooterRows] = useState<string>("0");
+  const [dateFormatOverride, setDateFormatOverride] =
+    useState<DateFormatOverrideUi>("auto");
+  const [defaultCurrency, setDefaultCurrency] = useState<string>("");
+
   const accountItems = accounts.map((a) => ({
     value: String(a.id),
     label: `${a.name} (${a.currency})`,
@@ -49,6 +74,11 @@ export function ReconcileUploadCard({
   const templateItems = templates.map((t) => ({
     value: String(t.id),
     label: t.name,
+  }));
+
+  const currencyItems = SUPPORTED_CURRENCIES.map((c) => ({
+    value: c,
+    label: c,
   }));
 
   return (
@@ -117,6 +147,79 @@ export function ReconcileUploadCard({
         </div>
       </div>
 
+      <details className="rounded-md border bg-muted/30 p-3">
+        <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+          Import options (skip header / footer rows, date format, default currency)
+        </summary>
+        <div className="mt-3 space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Use when the parser&rsquo;s auto-detect mis-reads your bank&rsquo;s
+            export. Leave at defaults for canonical exports.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                Skip N header rows
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={skipHeaderRows}
+                onChange={(e) => setSkipHeaderRows(e.target.value)}
+                className="h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                Skip N footer rows
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={skipFooterRows}
+                onChange={(e) => setSkipFooterRows(e.target.value)}
+                className="h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+              />
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                Date format
+              </label>
+              <select
+                value={dateFormatOverride}
+                onChange={(e) =>
+                  setDateFormatOverride(e.target.value as DateFormatOverrideUi)
+                }
+                className="h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+              >
+                <option value="auto">Auto-detect</option>
+                <option value="DD/MM/YYYY">DD/MM/YYYY</option>
+                <option value="MM/DD/YYYY">MM/DD/YYYY</option>
+                <option value="YYYY-MM-DD">YYYY-MM-DD</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                Default currency (rows missing one)
+              </label>
+              <Combobox
+                value={defaultCurrency}
+                onValueChange={(v) => setDefaultCurrency(v ?? "")}
+                items={currencyItems}
+                placeholder="— None —"
+                searchPlaceholder="Search…"
+                emptyMessage="No matching currency"
+                className="w-full"
+              />
+            </div>
+          </div>
+        </div>
+      </details>
+
       <FileDropZone
         accept={ACCEPT}
         disabled={loading}
@@ -135,12 +238,18 @@ export function ReconcileUploadCard({
             const n = Number(statementBalance);
             if (!Number.isNaN(n) && Number.isFinite(n)) bal = n;
           }
+          const skipH = Number.parseInt(skipHeaderRows, 10);
+          const skipF = Number.parseInt(skipFooterRows, 10);
           onUpload({
             file,
             accountId,
             tolerance: Number.isNaN(tol) ? 3 : Math.max(0, Math.min(30, tol)),
             templateId,
             statementBalance: bal,
+            skipHeaderRows: Number.isNaN(skipH) ? 0 : Math.max(0, Math.min(100, skipH)),
+            skipFooterRows: Number.isNaN(skipF) ? 0 : Math.max(0, Math.min(100, skipF)),
+            dateFormatOverride,
+            defaultCurrency: defaultCurrency || null,
           });
         }}
       />

@@ -1,5 +1,11 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { AnalyticsConsent } from "@/components/analytics-consent";
+
+export const metadata: Metadata = {
+  description:
+    "Self-hosted Finlynq on your own infrastructure with Docker Compose. Same code as the managed cloud at finlynq.com/cloud. No license fees.",
+};
 
 export default function SelfHostedPage() {
   return (

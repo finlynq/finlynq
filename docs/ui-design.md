@@ -57,6 +57,7 @@ Scroll reveals via `IntersectionObserver` — elements get the `.in` class once 
 
 ## Layout & navigation
 
+- **(app)-shell content is uncapped** (FINLYNQ-52, 2026-05-20). `src/app/(app)/layout.tsx` wraps `{children}` in `px-4 py-6 sm:px-6 sm:py-8 lg:px-8` (gutters only) — NO `max-w-*` cap. Main content fills `100vw − sidebar` at every viewport ≥ the sidebar's breakpoint. The previous `mx-auto max-w-7xl` (1280px) clamp left ~400px of empty space on the right at 1920×1080 with the 240px sidebar. Per-page wrappers MAY still impose their own readability cap when the content is form-shaped (settings = `max-w-2xl`, api-docs = `max-w-4xl`, admin/inbox = `max-w-6xl`) — those are intentional and apply only to the specific page. Wide tables (`/transactions`, `/import/pending`) and grid pages (`/dashboard`, `/portfolio`, `/accounts`, `/budgets`, `/goals`, `/reports`) use a plain `space-y-6` wrapper and inherit the full viewport width. Do NOT reintroduce `max-w-7xl` on the shell — that was the FINLYNQ-52 regression.
 - Collapsible sidebar (240px ↔ 56px) with grouped nav items.
 - Mobile: fixed bottom tab bar (4 links + "More") + slide-up "More" panel. Sign out lives in the "More" panel on mobile.
 - Active nav items: `bg-white/[0.08]` with glowing 3px left-edge indicator in `--sidebar-primary` (amber).

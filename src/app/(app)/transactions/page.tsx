@@ -1810,13 +1810,12 @@ function TransactionsPageInner() {
   const splitBalanced = Math.abs(splitRemaining) < 0.01;
 
   return (
-    /* Issue #59 — opt out of the global `max-w-7xl mx-auto` layout clamp
-       (src/app/(app)/layout.tsx:17) so the transactions table can fill
-       the viewport width. Negative margins cancel the parent's px-4/6/8;
-       an inner full-width wrapper holds the original space-y-6 + page
-       content. The card body wraps the table in `overflow-x-auto` so
-       long column lists scroll horizontally rather than truncate. */
-    <div className="-mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 space-y-6 max-w-none">
+    /* FINLYNQ-52 (was issue #59 workaround): the (app)-shell width clamp
+       was removed in src/app/(app)/layout.tsx, so this page no longer
+       needs the negative-margin escape hatch. The card body still wraps
+       the table in `overflow-x-auto` so long column lists scroll
+       horizontally rather than truncate. */
+    <div className="space-y-6">
       <OnboardingTips page="transactions" />
       <div className="flex items-center justify-between">
         <div>

@@ -78,6 +78,13 @@ function strip(
     accountIdMap?: Map<number, number>;
     categoryIdMap?: Map<number, number>;
     goalIdMap?: Map<number, number>;
+    // FINLYNQ-55 — remaps `staged_transactions.linkedTransactionId` (and any
+    // future restore-target that carries a `linkedTransactionId` FK into
+    // `transactions`) through the old→new id map built when transactions
+    // are re-inserted earlier in the restore flow. Pre-migration backups
+    // (column absent) fall through the `hasOwnProperty` guard and land
+    // with the column's DB default ('unmatched' / NULL).
+    transactionIdMap?: Map<number, number>;
   } = {},
 ): Row[] {
   return (rows ?? []).map((row) => {
@@ -144,6 +151,27 @@ function strip(
           );
         }
         out.assignCategoryId = newId;
+      }
+    }
+
+    // FINLYNQ-55 — staged_transactions.linkedTransactionId FK into the
+    // restored `transactions` table. Same cross-tenant risk pattern as
+    // accountId/categoryId — silently writing the source-DB integer id
+    // would land the FK on whichever tenant's transactions.id happens to
+    // match. Unmapped FK is a soft drop (null out) rather than a hard
+    // throw because the user may have selected the link before the
+    // referenced transaction was filtered out of the backup; the staging
+    // row stays useful with reconcile_state preserved.
+    if (
+      remap.transactionIdMap &&
+      Object.prototype.hasOwnProperty.call(rest, "linkedTransactionId")
+    ) {
+      const oldId = (rest as { linkedTransactionId: unknown }).linkedTransactionId;
+      if (oldId === null || oldId === undefined) {
+        out.linkedTransactionId = null;
+      } else {
+        const newId = remap.transactionIdMap.get(oldId as number);
+        out.linkedTransactionId = newId ?? null;
       }
     }
 
@@ -483,7 +511,17 @@ export async function POST(request: NextRequest) {
       await db.insert(schema.subscriptions).values(strip(d.subscriptions, userId, { accountIdMap, categoryIdMap }) as (typeof schema.subscriptions.$inferInsert)[]);
     }
     if (d.transactionRules?.length) {
-      await db.insert(schema.transactionRules).values(strip(d.transactionRules, userId, { categoryIdMap }) as (typeof schema.transactionRules.$inferInsert)[]);
+      // FINLYNQ-12 — pre-migration backups carry `isActive` as 0/1 (INTEGER);
+      // post-migration the column is BOOLEAN. Coerce numeric values on import
+      // so old backups keep restoring cleanly. `Boolean(0) === false`,
+      // `Boolean(1) === true`; already-boolean values pass through unchanged.
+      const stripped = strip(d.transactionRules, userId, { categoryIdMap }).map((row) => {
+        if (Object.prototype.hasOwnProperty.call(row, "isActive")) {
+          (row as { isActive: unknown }).isActive = Boolean((row as { isActive: unknown }).isActive);
+        }
+        return row;
+      });
+      await db.insert(schema.transactionRules).values(stripped as (typeof schema.transactionRules.$inferInsert)[]);
     }
     if (d.importTemplates?.length) {
       await db.insert(schema.importTemplates).values(strip(d.importTemplates, userId) as (typeof schema.importTemplates.$inferInsert)[]);

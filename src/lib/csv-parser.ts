@@ -146,11 +146,28 @@ export function parseAmount(raw: string): number {
 }
 
 /**
+ * Date format override (FINLYNQ-54) — when the user picks an explicit format
+ * on the upload UI, the parser short-circuits the day-vs-month inference and
+ * uses the supplied layout. Three layouts mirror the upload-form dropdown.
+ */
+export type DateFormatOverride = "DD/MM/YYYY" | "MM/DD/YYYY" | "YYYY-MM-DD";
+
+/**
  * Normalize date strings to YYYY-MM-DD format.
  * Handles: YYYY-MM-DD, MM/DD/YYYY, DD-MM-YYYY, DD/MM/YYYY (when day > 12),
  * MMM DD YYYY, YYYY/MM/DD
+ *
+ * Optional `dateFormatOverride` (FINLYNQ-54): when set, slash-separated dates
+ * (`X/Y/ZZZZ`) are interpreted under that explicit layout — skips the
+ * "assume MM/DD/YYYY unless day > 12" inference that silently mis-parses
+ * EU/ME exports where every date in January–December falls into the
+ * ambiguous range. `YYYY-MM-DD` and `YYYY/MM/DD` keep their canonical
+ * interpretation regardless (they're unambiguous).
  */
-export function normalizeDate(raw: string): string | null {
+export function normalizeDate(
+  raw: string,
+  dateFormatOverride?: DateFormatOverride | null,
+): string | null {
   if (!raw || !raw.trim()) return null;
   const s = raw.trim();
 
@@ -166,13 +183,21 @@ export function normalizeDate(raw: string): string | null {
     return validateDate(d) ? d : null;
   }
 
-  // MM/DD/YYYY or DD/MM/YYYY (assume MM/DD/YYYY unless day > 12)
+  // MM/DD/YYYY or DD/MM/YYYY
   const slashMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (slashMatch) {
     const a = parseInt(slashMatch[1], 10);
     const b = parseInt(slashMatch[2], 10);
     const year = slashMatch[3];
-    // If first number > 12, it must be DD/MM/YYYY
+    if (dateFormatOverride === "DD/MM/YYYY") {
+      const d = `${year}-${String(b).padStart(2, "0")}-${String(a).padStart(2, "0")}`;
+      return validateDate(d) ? d : null;
+    }
+    if (dateFormatOverride === "MM/DD/YYYY") {
+      const d = `${year}-${String(a).padStart(2, "0")}-${String(b).padStart(2, "0")}`;
+      return validateDate(d) ? d : null;
+    }
+    // Auto-detect: if first number > 12, it must be DD/MM/YYYY
     if (a > 12 && b <= 12) {
       const d = `${year}-${String(b).padStart(2, "0")}-${String(a).padStart(2, "0")}`;
       return validateDate(d) ? d : null;
@@ -213,6 +238,37 @@ function validateDate(dateStr: string): boolean {
   return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
 }
 
+/**
+ * Trim N raw lines off the top and/or bottom of a CSV before header detection
+ * (FINLYNQ-54). Common on EU/ME bank exports that prepend a couple of
+ * title/metadata rows or append a summary/total row.
+ *
+ * Uses `splitCSVLines` so multiline-quoted fields are counted as a single
+ * "line" (matches what `parseCSV` sees as one row). UTF-8 BOM is preserved
+ * on the first emitted line if it was on the original first line — caller
+ * downstream still strips BOM via `parseCSV`.
+ *
+ * Both skips clamp to the available row count; if you ask to skip more rows
+ * than the file contains, the result is an empty string and callers will
+ * surface the standard "file is empty or contains only headers" error.
+ */
+export function trimCsvRows(
+  csvText: string,
+  skipHeaderRows: number,
+  skipFooterRows: number,
+): string {
+  if (skipHeaderRows <= 0 && skipFooterRows <= 0) return csvText;
+  if (!csvText) return csvText;
+  // splitCSVLines respects quoted-field newlines. We split, slice, rejoin.
+  const lines = splitCSVLines(csvText);
+  if (lines.length === 0) return csvText;
+  const head = Math.max(0, skipHeaderRows);
+  const foot = Math.max(0, skipFooterRows);
+  if (head + foot >= lines.length) return "";
+  const sliced = lines.slice(head, lines.length - foot);
+  return sliced.join("\n");
+}
+
 /** Extract just the header row from a CSV without parsing all rows. */
 export function extractCSVHeaders(csvText: string): string[] {
   const cleaned = csvText.replace(/^\uFEFF/, "");
@@ -222,7 +278,10 @@ export function extractCSVHeaders(csvText: string): string[] {
   return parseCSVRow(lines[0]);
 }
 
-export function csvToRawTransactions(csvText: string): { rows: RawTransaction[]; errors: Array<{ row: number; message: string }> } {
+export function csvToRawTransactions(
+  csvText: string,
+  dateFormatOverride?: DateFormatOverride | null,
+): { rows: RawTransaction[]; errors: Array<{ row: number; message: string }> } {
   const parsed = parseCSV(csvText);
   const rows: RawTransaction[] = [];
   const errors: Array<{ row: number; message: string }> = [];
@@ -236,7 +295,7 @@ export function csvToRawTransactions(csvText: string): { rows: RawTransaction[];
     const dateRaw = row["Date"] ?? "";
     const amountRaw = row["Amount"] ?? "";
 
-    const date = normalizeDate(dateRaw);
+    const date = normalizeDate(dateRaw, dateFormatOverride);
     if (!date) {
       errors.push({ row: i + 2, message: `Invalid date: "${dateRaw}"` });
       continue;
@@ -273,6 +332,7 @@ export function csvToRawTransactions(csvText: string): { rows: RawTransaction[];
 export function csvToRawTransactionsWithMapping(
   csvText: string,
   mapping: Record<string, string>,
+  dateFormatOverride?: DateFormatOverride | null,
 ): { rows: RawTransaction[]; errors: Array<{ row: number; message: string }> } {
   const parsed = parseCSV(csvText);
   const rows: RawTransaction[] = [];
@@ -295,7 +355,7 @@ export function csvToRawTransactionsWithMapping(
     const dateRaw = row[dateCol] ?? "";
     const amountRaw = row[amountCol] ?? "";
 
-    const date = normalizeDate(dateRaw);
+    const date = normalizeDate(dateRaw, dateFormatOverride);
     if (!date) {
       errors.push({ row: i + 2, message: `Invalid date: "${dateRaw}"` });
       continue;

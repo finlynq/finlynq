@@ -13,6 +13,10 @@ Self-hosters using stdio MCP must add `PF_USER_ID` to their Claude Desktop confi
 
 `.well-known/mcp.json` server card for discoverability.
 
+## Webhook events — forward link
+
+Tx-mutating MCP HTTP tools (`record_transaction`, `bulk_record_transactions`, `update_transaction`, `delete_transaction`, `record_transfer`, `record_trade`, `approve_staged_rows`) emit webhook events after commit + after `invalidateUser(userId)`. The event vocabulary, payload envelope, HMAC signing, and Content-Type versioning live in [webhook-events.md](webhook-events.md) — spec for FINLYNQ-60..64. The webhook envelope is intentionally simpler than the canonical `{ success, data }` MCP envelope (one body = one event; consumers parse directly), and the payload carries opaque ids + amounts + dates ONLY — no decrypted `payee` / `note` / `tags` / Stream D names. Consumers needing full detail round-trip back through MCP HTTP under their own auth scope.
+
 ## Tool surface — current count
 
 **91 tools registered on HTTP / 87 on stdio** as of 2026-05-10 (#237 — `delete_category` added on both transports).

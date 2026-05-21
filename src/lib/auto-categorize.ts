@@ -18,8 +18,12 @@ export interface RuleMatch {
 
 /**
  * Test whether a single rule matches a transaction.
+ *
+ * Exported (FINLYNQ-57) so the staging-approval gate can probe each pending
+ * row against the user's active rules WITHOUT running the full assign
+ * pipeline. Pure — caller owns rule pre-fetch + plaintext payee decryption.
  */
-function matchesRule(txn: TransactionInput, rule: TransactionRule): boolean {
+export function matchesRule(txn: TransactionInput, rule: TransactionRule): boolean {
   if (!rule.isActive) return false;
 
   const field = rule.matchField; // 'payee', 'amount', 'tags'

@@ -64,6 +64,7 @@ import {
   getInvestmentAccountIds,
 } from "@/lib/investment-account";
 import { generateImportHash } from "@/lib/import-hash";
+import { matchesRule, type TransactionRule } from "@/lib/auto-categorize";
 
 export const dynamic = "force-dynamic";
 
@@ -117,12 +118,114 @@ export async function POST(
     .orderBy(asc(schema.stagedTransactions.rowIndex))
     .all();
 
-  const selected = rowIds
+  // FINLYNQ-58 — when the client omits rowIds (approve-everything path), we
+  // default-exclude `reconcile_state='skipped_duplicate'` rows so the
+  // F-53E "already imported" marker actually keeps them out of the
+  // materialization pass. When rowIds IS specified, the user has explicitly
+  // picked the set in the UI (which may include a manual override that
+  // toggled a marked row back to 'unmatched' or kept a marked row checked) —
+  // honor the explicit list verbatim. Per CLAUDE.md "Do NOT silently flip
+  // skipped_duplicate back to unmatched if the user re-uploads": the marker
+  // is only set at INSERT; user overrides on this approve path are not
+  // re-stamped back onto the row.
+  const allSelected = rowIds
     ? allRows.filter((r) => rowIds!.includes(r.id))
-    : allRows;
+    : allRows.filter((r) => r.reconcileState !== "skipped_duplicate");
 
-  if (selected.length === 0) {
+  // FINLYNQ-56 — rows that the user already linked to an existing
+  // `transactions` row via the two-pane reconciliation UI don't go
+  // through the materialization pipeline (the target row already exists).
+  // They get de-queued: deleted from `staged_transactions` at the
+  // cleanup step alongside the materialized rows, with no INSERT into
+  // `transactions`. This is what the test plan tc-1's "approve
+  // materializes only unmatched/auto_suggested rows" assertion checks.
+  // Half-pair transfer enforcement on linked rows still applies: a
+  // tx_type='R' row whose peer_staged_id is set but whose peer is NOT
+  // also 'linked' is refused here (otherwise the user could approve one
+  // leg of a transfer pair via the link path while the other materializes
+  // through executeImport).
+  const linkedRows = allSelected.filter((r) => r.reconcileState === "linked");
+  for (const r of linkedRows) {
+    if (r.txType === "R" && r.peerStagedId) {
+      const peer = allSelected.find((p) => p.id === r.peerStagedId);
+      if (!peer || peer.reconcileState !== "linked") {
+        return NextResponse.json(
+          {
+            success: false,
+            code: "half_pair_link",
+            error: `Row ${r.rowIndex + 1}: transfer peer must also be linked, or unlink this row first.`,
+          },
+          { status: 400 },
+        );
+      }
+    }
+  }
+  const selected = allSelected.filter((r) => r.reconcileState !== "linked");
+
+  if (selected.length === 0 && linkedRows.length === 0) {
     return NextResponse.json({ error: "No rows selected" }, { status: 400 });
+  }
+
+  // ─── FINLYNQ-57: unresolved-category gate ──────────────────────────────
+  //
+  // Refuse approval up-front when any selected expense/income row has no
+  // category set AND no active `transaction_rules` row matches its payee.
+  // Transfers (tx_type='R') and true-ups (tx_type='T') are exempt —
+  // createTransferPair() resolves the type='R' category server-side, and
+  // true-ups don't need one. This gate runs BEFORE executeImport so failing
+  // rows are never INSERTed into `transactions`.
+  //
+  // Decrypt-per-tier: rows may be at 'service' tier (PF_STAGING_KEY, sv1:)
+  // or 'user' tier (user DEK, v1:). Same shape as the rest of the staging
+  // surface — see CLAUDE.md "Staged-transactions reads MUST branch on
+  // encryption_tier per row".
+  //
+  // Decoding helpers are defined below; we inline a tier-branched decode here
+  // so the gate can run before the rest of the route's setup. NOTE: we do
+  // NOT recompute import_hash for matched rows (load-bearing per CLAUDE.md).
+  const decodeForGate = (value: string | null, tier: string): string | null => {
+    if (value == null) return null;
+    return tier === "user" ? tryDecryptField(dek, value) : decryptStaged(value);
+  };
+  const activeRules = await db
+    .select()
+    .from(schema.transactionRules)
+    .where(and(
+      eq(schema.transactionRules.userId, userId),
+      eq(schema.transactionRules.isActive, true),
+    ))
+    .all() as TransactionRule[];
+
+  const unresolvedRowIds: string[] = [];
+  const unresolvedPayees: string[] = [];
+  for (const r of selected) {
+    // Transfer + true-up exempt. tx_type column is plaintext on staged_transactions.
+    if (r.txType === "R") continue;
+    if ((r.txType as string) === "T") continue;
+    // Already-resolved categories — the `category` column on staged is the
+    // encrypted category NAME (no FK on staged). A non-empty decoded name
+    // means the user (or the parser) already picked one.
+    const decodedCategory = decodeForGate(r.category, r.encryptionTier);
+    if (decodedCategory && decodedCategory.trim() !== "") continue;
+    // Probe rules. Use plaintext payee + amount + tags; matchesRule is pure
+    // (re-exported from auto-categorize for this gate). Tags are plaintext at
+    // staging time — no decode needed.
+    const decodedPayee = decodeForGate(r.payee, r.encryptionTier) ?? "";
+    const probe = { payee: decodedPayee, amount: r.amount, tags: r.tags ?? "" };
+    const hasRuleMatch = activeRules.some((rule) => matchesRule(probe, rule));
+    if (hasRuleMatch) continue;
+    unresolvedRowIds.push(r.id);
+    unresolvedPayees.push(decodedPayee);
+  }
+  if (unresolvedRowIds.length > 0) {
+    return NextResponse.json(
+      {
+        success: false,
+        code: "unresolved_categories",
+        data: { rowIds: unresolvedRowIds, payees: unresolvedPayees },
+      },
+      { status: 400 },
+    );
   }
 
   // Issue #62 + #153: per-row source tag stamps file shape into tags.
@@ -518,6 +621,14 @@ export async function POST(
 
   if (imported > 0) invalidateUserTxCache(userId);
 
+  // FINLYNQ-56 — linked rows are de-queued, not materialized. Add them to
+  // materializedRowIds so the cleanup pass below deletes them from the
+  // staging queue. The live `transactions` row they reference is left
+  // untouched. NOTE: NO `invalidateUserTxCache` for the linked bucket —
+  // we didn't INSERT into `transactions`, so the per-user payee cache is
+  // unchanged.
+  for (const r of linkedRows) materializedRowIds.add(r.id);
+
   // ─── Step 5: cleanup staged rows ───────────────────────────────────────
   //
   // Delete rows that were materialized; preserve the rest for re-edit.
@@ -557,8 +668,9 @@ export async function POST(
 
   return NextResponse.json({
     imported,
+    linked: linkedRows.length,
     skippedDuplicates: 0, // accounted for inside executeImport's per-call result
-    total: selected.length,
+    total: allSelected.length,
     errors: importErrors.length > 0 ? importErrors : undefined,
   });
 }

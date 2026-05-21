@@ -8,6 +8,11 @@ for (const m of chainMethods) {
 mockDbChain.all = vi.fn().mockReturnValue([]);
 mockDbChain.get = vi.fn().mockReturnValue(undefined);
 mockDbChain.run = vi.fn();
+// Make the chain awaitable — real Drizzle chains are thenables; without this,
+// `await db.select()...` returns the chain object itself (not the rows),
+// causing `rows.map`/`rows.length` to blow up in route code.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(mockDbChain as any).then = (resolve: (v: unknown) => unknown) => resolve([]);
 
 vi.mock("@/db", () => ({
   db: new Proxy({}, {
@@ -22,7 +27,7 @@ vi.mock("@/db", () => ({
 }));
 
 vi.mock("@/lib/auth/require-auth", () => ({
-  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false } })),
+  requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
 }));
 vi.mock("drizzle-orm", () => ({ eq: vi.fn() }));
 

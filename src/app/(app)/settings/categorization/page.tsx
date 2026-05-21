@@ -28,7 +28,7 @@ type Rule = {
   categoryName: string | null;
   assignTags: string | null;
   renameTo: string | null;
-  isActive: number;
+  isActive: boolean;
   priority: number;
   createdAt: string;
 };
@@ -132,7 +132,7 @@ export default function CategorizationSettingsPage() {
       await fetch("/api/rules", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: rule.id, isActive: rule.isActive ? 0 : 1 }),
+        body: JSON.stringify({ id: rule.id, isActive: !rule.isActive }),
       });
       loadRules();
     } catch {

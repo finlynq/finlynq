@@ -14,7 +14,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           <div className="flex flex-1">
             <Nav />
             <main className="flex-1 overflow-auto pb-16 md:pb-0 bg-dot-pattern ambient-glow">
-              <div className="relative z-10 mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+              {/* FINLYNQ-52: no width cap on the (app) shell — content fills
+                  the viewport to the right of the sidebar. Per-page wrappers
+                  may still impose their own readability cap (e.g. settings,
+                  api-docs); the shell does not. */}
+              <div className="relative z-10 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
                 {children}
               </div>
             </main>

@@ -17,6 +17,7 @@
     "db:generate": "drizzle-kit generate --config=drizzle-pg.config.ts",
     "db:push": "drizzle-kit push --config=drizzle-pg.config.ts",
     "seed:demo": "npx tsx scripts/seed-demo.ts",
+    "audit:invariants": "npx tsx scripts/audit-invariants.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
