@@ -349,6 +349,13 @@ export function middleware(request: NextRequest) {
   // 'object-src none' + 'frame-ancestors none' + nonce-based script-src
   // already block the more direct exfiltration paths; style-based exfil is
   // narrow but real. Worth eventually closing.
+  // Reporting endpoints (FINLYNQ-83 phase 1) — wired into BOTH the enforcing
+  // and Report-Only CSP directives below. `report-uri` is the legacy CSP-L2
+  // directive still required by older browsers; `report-to` is the modern
+  // Reporting-API channel, named via the matching `Report-To` response
+  // header set further down.
+  const cspReportDirectives = "report-uri /api/csp-report; report-to csp-endpoint";
+
   const cspDirectives = [
     "default-src 'self'",
     scriptSrc,
@@ -360,6 +367,7 @@ export function middleware(request: NextRequest) {
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",
+    cspReportDirectives,
   ];
   response.headers.set("Content-Security-Policy", cspDirectives.join("; "));
 
@@ -371,10 +379,10 @@ export function middleware(request: NextRequest) {
   // it). This gives us the inventory of inline-style callsites we need
   // before we can remove `'unsafe-inline'` from the enforcing policy.
   //
-  // No `report-uri` / `report-to` configured yet — browsers still surface
-  // violations in DevTools Console, which is the inventory channel the
-  // migration plan needs. Adding a server-side report endpoint is a
-  // separate follow-up once we know the violation volume.
+  // Reports flow into `/api/csp-report` (Phase 1) via both `report-uri`
+  // (legacy) and `report-to` (Reporting API). The endpoint logs structured
+  // JSON to stdout → journalctl, which the Phase 3/4 hash-extraction step
+  // greps to build the framework + library style-hash snapshot.
   //
   // Route-aware in the same way as the enforcing CSP: `scriptSrc`,
   // `imgSrc`, and `connectSrc` are already computed per-request based on
@@ -390,10 +398,24 @@ export function middleware(request: NextRequest) {
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",
+    cspReportDirectives,
   ];
   response.headers.set(
     "Content-Security-Policy-Report-Only",
     reportOnlyDirectives.join("; ")
+  );
+
+  // Report-To response header — names the `csp-endpoint` group referenced
+  // by the `report-to csp-endpoint` CSP directives above. Modern browsers
+  // use this Reporting API channel; older browsers fall back to the
+  // `report-uri /api/csp-report` directive. Both target the same handler.
+  response.headers.set(
+    "Report-To",
+    JSON.stringify({
+      group: "csp-endpoint",
+      max_age: 86400,
+      endpoints: [{ url: "/api/csp-report" }],
+    })
   );
 
   // Expose the nonce on the response so route handlers / debugging tools
