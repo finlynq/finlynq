@@ -1,5 +1,12 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { createDrizzleMock } from "./api-test-utils";
+
+// Chain methods on the mock are typed as `unknown` (the helper returns
+// Record<string, unknown>); cast to `any` for call-site ergonomics — a mock
+// helper is the right place for the looser typing.
+//
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ChainAny = any;
 
 describe("createDrizzleMock — Drizzle proxy shape regression test (FINLYNQ-9)", () => {
   it("awaiting the chain resolves to [] by default", async () => {
@@ -20,32 +27,27 @@ describe("createDrizzleMock — Drizzle proxy shape regression test (FINLYNQ-9)"
 
   it("composed chain remains awaitable through select().from().where().orderBy()", async () => {
     const rows = [{ id: 42 }];
-    const chain = createDrizzleMock(rows);
-    const composed = (chain.select as ReturnType<typeof vi.fn>)()
-      .from("t")
-      .where("x = 1")
-      .orderBy("id");
+    const chain: ChainAny = createDrizzleMock(rows);
+    const composed = chain.select().from("t").where("x = 1").orderBy("id");
     await expect(Promise.resolve(composed)).resolves.toEqual(rows);
   });
 
   it("insert().values().returning() chain stays composable and awaitable", async () => {
     const rows = [{ id: 1 }];
-    const chain = createDrizzleMock(rows);
-    const composed = (chain.insert as ReturnType<typeof vi.fn>)()
-      .values({ id: 1 })
-      .returning();
+    const chain: ChainAny = createDrizzleMock(rows);
+    const composed = chain.insert().values({ id: 1 }).returning();
     await expect(Promise.resolve(composed)).resolves.toEqual(rows);
   });
 
   it(".all() returns the rows array (legacy SQLite terminator parity)", () => {
     const rows = [{ id: 1 }, { id: 2 }];
-    const chain = createDrizzleMock(rows);
-    expect((chain.all as ReturnType<typeof vi.fn>)()).toEqual(rows);
+    const chain: ChainAny = createDrizzleMock(rows);
+    expect(chain.all()).toEqual(rows);
   });
 
   it(".get() returns the first row when supplied an array", () => {
     const rows = [{ id: 7 }, { id: 8 }];
-    const chain = createDrizzleMock(rows);
-    expect((chain.get as ReturnType<typeof vi.fn>)()).toEqual({ id: 7 });
+    const chain: ChainAny = createDrizzleMock(rows);
+    expect(chain.get()).toEqual({ id: 7 });
   });
 });
