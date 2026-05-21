@@ -25,6 +25,7 @@ import {
   HoldingEditForm,
   type HoldingEditFormHolding,
 } from "@/components/holdings/holding-edit-form";
+import { ColorDot, CspSafeColorBar } from "@/components/csp-safe-bar";
 
 // Mirror of /api/portfolio/overview's `canonicalKey()`. Keep in sync with
 // the server-side function — both must produce the same key for a given
@@ -208,7 +209,7 @@ function GlassTooltip({
       {label && <p className="text-xs text-muted-foreground mb-1">{label}</p>}
       {payload.map((entry, i) => (
         <div key={i} className="flex items-center gap-2 text-sm">
-          {entry.color && <div className="h-2 w-2 rounded-full" style={{ background: entry.color }} />}
+          {entry.color && <ColorDot color={entry.color} />}
           <span className="text-muted-foreground">{entry.name}:</span>
           <span className="font-semibold">
             {formatter ? formatter(entry.value, entry.name) : entry.value}
@@ -887,7 +888,16 @@ export default function PortfolioPage() {
                               <span className="font-medium text-sm">{r.name}</span>
                               <div className="flex items-center gap-1 mt-0.5">
                                 {r.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{r.symbol}</Badge>}
-                                <Badge variant="outline" className="text-[10px] h-4 px-1" style={{ borderColor: typeConf?.color, color: typeConf?.color }}>
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] h-4 px-1"
+                                  ref={(el) => {
+                                    if (el && typeConf?.color) {
+                                      el.style.borderColor = typeConf.color;
+                                      el.style.color = typeConf.color;
+                                    }
+                                  }}
+                                >
                                   {typeConf?.label ?? r.assetType}
                                 </Badge>
                               </div>
@@ -1173,9 +1183,12 @@ export default function PortfolioPage() {
                                 <Badge
                                   variant="outline"
                                   className="text-[10px]"
-                                  style={{
-                                    borderColor: SECTOR_COLORS[s.sector] ?? "#64748b",
-                                    color: SECTOR_COLORS[s.sector] ?? "#64748b",
+                                  ref={(el: HTMLElement | null) => {
+                                    if (el) {
+                                      const c = SECTOR_COLORS[s.sector] ?? "#64748b";
+                                      el.style.borderColor = c;
+                                      el.style.color = c;
+                                    }
                                   }}
                                 >
                                   {s.sector}
@@ -1192,7 +1205,9 @@ export default function PortfolioPage() {
                                 <div className="w-full h-1.5 rounded-full bg-muted overflow-hidden">
                                   <div
                                     className="h-full rounded-full bg-indigo-500"
-                                    style={{ width: `${Math.min(s.effectiveWeight * 10, 100)}%` }}
+                                    ref={(el) => {
+                                      if (el) el.style.width = `${Math.min(s.effectiveWeight * 10, 100)}%`;
+                                    }}
                                   />
                                 </div>
                               </TableCell>
@@ -1291,11 +1306,11 @@ export default function PortfolioPage() {
                     <div className="flex-1 space-y-2 min-w-0">
                       {regionData.map(d => (
                         <div key={d.name} className="flex items-center gap-2">
-                          <div className="h-3 w-3 rounded-full shrink-0" style={{ background: d.color }} />
+                          <ColorDot color={d.color} className="h-3 w-3" />
                           <span className="text-sm text-muted-foreground flex-1">{d.name}</span>
                           <div className="flex items-center gap-2">
                             <div className="w-24 h-2 rounded-full bg-muted overflow-hidden">
-                              <div className="h-full rounded-full" style={{ width: `${d.pct}%`, background: d.color }} />
+                              <CspSafeColorBar percent={d.pct} color={d.color} />
                             </div>
                             <span className="text-sm font-mono font-semibold w-12 text-right">{d.pct}%</span>
                           </div>
@@ -1339,11 +1354,11 @@ export default function PortfolioPage() {
                     <div className="flex-1 space-y-2 min-w-0">
                       {sectorData.map(d => (
                         <div key={d.name} className="flex items-center gap-2">
-                          <div className="h-3 w-3 rounded-full shrink-0" style={{ background: d.color }} />
+                          <ColorDot color={d.color} className="h-3 w-3" />
                           <span className="text-sm text-muted-foreground flex-1">{d.name}</span>
                           <div className="flex items-center gap-2">
                             <div className="w-24 h-2 rounded-full bg-muted overflow-hidden">
-                              <div className="h-full rounded-full" style={{ width: `${d.pct}%`, background: d.color }} />
+                              <CspSafeColorBar percent={d.pct} color={d.color} />
                             </div>
                             <span className="text-sm font-mono font-semibold w-12 text-right">{d.pct}%</span>
                           </div>
@@ -1394,7 +1409,9 @@ export default function PortfolioPage() {
                           <div className="w-full h-1.5 rounded-full bg-muted overflow-hidden">
                             <div
                               className="h-full rounded-full bg-indigo-500"
-                              style={{ width: `${Math.min(etf.weightPct, 100)}%` }}
+                              ref={(el) => {
+                                if (el) el.style.width = `${Math.min(etf.weightPct, 100)}%`;
+                              }}
                             />
                           </div>
                         </TableCell>
@@ -1445,7 +1462,7 @@ export default function PortfolioPage() {
               <div className="flex-1 space-y-2 min-w-0">
                 {allocationByType.map(d => (
                   <div key={d.name} className="flex items-center gap-2">
-                    <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: d.color }} />
+                    <ColorDot color={d.color} className="h-2.5 w-2.5" />
                     <span className="text-xs text-muted-foreground flex-1">{d.name}</span>
                     <span className="text-xs font-medium tabular-nums">{formatCurrency(d.value, displayCurrency)} ({d.pct}%)</span>
                   </div>
@@ -1490,7 +1507,7 @@ export default function PortfolioPage() {
               <div className="flex-1 space-y-1.5 min-w-0 max-h-36 overflow-y-auto">
                 {allocationByAccount.map((d, i) => (
                   <div key={d.name} className="flex items-center gap-2">
-                    <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                    <ColorDot color={PIE_COLORS[i % PIE_COLORS.length]} className="h-2.5 w-2.5" />
                     <span className="text-xs text-muted-foreground flex-1 truncate">{d.name}</span>
                     <span className="text-xs font-medium tabular-nums">{formatCurrency(d.value, displayCurrency)} ({d.pct}%)</span>
                   </div>
@@ -1576,7 +1593,7 @@ export default function PortfolioPage() {
               <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-3">
                 {benchmarks.map(b => (
                   <div key={b.symbol} className="flex items-center gap-2 p-2 rounded-lg bg-muted/30">
-                    <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: b.color }} />
+                    <ColorDot color={b.color} className="h-2.5 w-2.5" />
                     <div className="min-w-0 flex-1">
                       <p className="text-xs text-muted-foreground truncate">{b.name}</p>
                       <p className={`text-sm font-mono font-semibold ${b.returnPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
@@ -1644,10 +1661,62 @@ export default function PortfolioPage() {
                       {items.length} holding{items.length !== 1 ? "s" : ""}
                     </Badge>
                     <div className="hidden sm:flex items-center gap-1.5">
-                      {etfs > 0 && <Badge variant="secondary" className="text-[10px] h-4" style={{ borderColor: ASSET_TYPE_CONFIG.etf.color, color: ASSET_TYPE_CONFIG.etf.color }}>{etfs} ETF</Badge>}
-                      {stocks > 0 && <Badge variant="secondary" className="text-[10px] h-4" style={{ borderColor: ASSET_TYPE_CONFIG.stock.color, color: ASSET_TYPE_CONFIG.stock.color }}>{stocks} Stock</Badge>}
-                      {cryptos > 0 && <Badge variant="secondary" className="text-[10px] h-4" style={{ borderColor: ASSET_TYPE_CONFIG.crypto.color, color: ASSET_TYPE_CONFIG.crypto.color }}>{cryptos} Crypto</Badge>}
-                      {cash > 0 && <Badge variant="secondary" className="text-[10px] h-4" style={{ borderColor: ASSET_TYPE_CONFIG.cash.color, color: ASSET_TYPE_CONFIG.cash.color }}>{cash} Cash</Badge>}
+                      {etfs > 0 && (
+                        <Badge
+                          variant="secondary"
+                          className="text-[10px] h-4"
+                          ref={(el: HTMLElement | null) => {
+                            if (el) {
+                              el.style.borderColor = ASSET_TYPE_CONFIG.etf.color;
+                              el.style.color = ASSET_TYPE_CONFIG.etf.color;
+                            }
+                          }}
+                        >
+                          {etfs} ETF
+                        </Badge>
+                      )}
+                      {stocks > 0 && (
+                        <Badge
+                          variant="secondary"
+                          className="text-[10px] h-4"
+                          ref={(el: HTMLElement | null) => {
+                            if (el) {
+                              el.style.borderColor = ASSET_TYPE_CONFIG.stock.color;
+                              el.style.color = ASSET_TYPE_CONFIG.stock.color;
+                            }
+                          }}
+                        >
+                          {stocks} Stock
+                        </Badge>
+                      )}
+                      {cryptos > 0 && (
+                        <Badge
+                          variant="secondary"
+                          className="text-[10px] h-4"
+                          ref={(el: HTMLElement | null) => {
+                            if (el) {
+                              el.style.borderColor = ASSET_TYPE_CONFIG.crypto.color;
+                              el.style.color = ASSET_TYPE_CONFIG.crypto.color;
+                            }
+                          }}
+                        >
+                          {cryptos} Crypto
+                        </Badge>
+                      )}
+                      {cash > 0 && (
+                        <Badge
+                          variant="secondary"
+                          className="text-[10px] h-4"
+                          ref={(el: HTMLElement | null) => {
+                            if (el) {
+                              el.style.borderColor = ASSET_TYPE_CONFIG.cash.color;
+                              el.style.color = ASSET_TYPE_CONFIG.cash.color;
+                            }
+                          }}
+                        >
+                          {cash} Cash
+                        </Badge>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-4">

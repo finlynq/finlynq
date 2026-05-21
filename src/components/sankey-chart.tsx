@@ -27,6 +27,7 @@ function truncateLabel(text: string, maxLen: number): string {
 
 export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: SankeyChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const [hover, setHover] = useState<HoverInfo>(null);
 
@@ -39,6 +40,16 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
     obs.observe(containerRef.current);
     return () => obs.disconnect();
   }, []);
+
+  // CSP-safe positioning: mutate the tooltip element's style via a ref AFTER
+  // the browser has evaluated CSP on the HTML. CSP only inspects HTML-rendered
+  // `style="..."` attributes, not JS-set element.style mutations. (FINLYNQ-83)
+  useEffect(() => {
+    const el = tooltipRef.current;
+    if (!el || !hover) return;
+    el.style.left = `${hover.x}px`;
+    el.style.top = `${hover.y}px`;
+  }, [hover]);
 
   const totalIncome = incomeData.reduce((s, d) => s + d.value, 0);
   const totalExpenses = expenseData.reduce((s, d) => s + d.value, 0);
@@ -275,11 +286,11 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
         )}
       </svg>
 
-      {/* Tooltip */}
+      {/* Tooltip \u2014 position set via ref + useEffect to keep inline `style=` off the HTML (CSP) */}
       {hover && (
         <div
-          className="absolute z-50 pointer-events-none px-3 py-2 bg-popover text-popover-foreground border rounded-lg shadow-lg text-xs whitespace-nowrap"
-          style={{ left: hover.x, top: hover.y, transform: "translate(-50%, -100%)" }}
+          ref={tooltipRef}
+          className="absolute z-50 pointer-events-none px-3 py-2 bg-popover text-popover-foreground border rounded-lg shadow-lg text-xs whitespace-nowrap -translate-x-1/2 -translate-y-full"
         >
           <p className="font-semibold">{hover.from}{hover.to ? ` \u2192 ${hover.to}` : ""}</p>
           <p>{formatCurrency(hover.amount, currency)} ({hover.percentage.toFixed(1)}%)</p>

@@ -523,6 +523,36 @@ html:has(.fl-landing) body {
 }
 .fl-landing .bars i.hl { background: var(--fl-amber); }
 
+/* Bar heights — pulled out of inline `style="height: NN%"` to keep CSP
+   `style-src` free of `'unsafe-inline'` (FINLYNQ-83). The viz is decorative
+   so the exact %s are baked-in. */
+.fl-landing .bars i.h22 { height: 22%; }
+.fl-landing .bars i.h30 { height: 30%; }
+.fl-landing .bars i.h38 { height: 38%; }
+.fl-landing .bars i.h44 { height: 44%; }
+.fl-landing .bars i.h50 { height: 50%; }
+.fl-landing .bars i.h58 { height: 58%; }
+.fl-landing .bars i.h60 { height: 60%; }
+.fl-landing .bars i.h70 { height: 70%; }
+.fl-landing .bars i.h76 { height: 76%; }
+.fl-landing .bars i.h82 { height: 82%; }
+.fl-landing .bars i.h90 { height: 90%; }
+
+/* CSP-safe class replacements for previously-inline `style=` attrs on the
+   landing page (FINLYNQ-83). */
+.fl-landing .lede-mt-28 { margin-top: 28px; }
+.fl-landing .lede-tagline { margin-top: 12px; font-size: 15px; opacity: 0.8; }
+.fl-landing .chart-head-mt-28 { margin-top: 28px; }
+.fl-landing .mcp-cta-row { margin-top: 32px; display: flex; gap: 12px; flex-wrap: wrap; }
+.fl-landing .privacy-disclaimer { margin-top: 32px; max-width: 760px; font-size: 13px; line-height: 1.7; color: #6b737d; }
+.fl-landing .privacy-disclaimer .asterisk { color: #9aa3ad; }
+.fl-landing .amber-link { color: #f5a623; text-decoration: underline; }
+.fl-landing .plan-head-title { font-size: 26px; margin-top: 12px; letter-spacing: -0.02em; }
+.fl-landing .plan-cta-row { display: flex; gap: 12px; margin-top: 32px; flex-wrap: wrap; }
+.fl-landing .cta-eyebrow-mb-24 { margin-bottom: 24px; }
+.fl-landing .cta-display-xl { font-size: clamp(40px, 5.4vw, 76px); }
+.fl-landing .footer-logo-link { color: var(--fl-fg); }
+
 .fl-landing .pips {
   display: flex;
   gap: 6px;

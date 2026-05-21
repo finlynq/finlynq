@@ -159,7 +159,7 @@ function InlinePieChart({ data, currency = "CAD" }: { data: Record<string, unkno
           paddingAngle={2}
           label={({ name, percent }) => `${name} ${Math.round((percent ?? 0) * 100)}%`}
           labelLine={false}
-          style={{ fontSize: 10 }}
+          className="text-[10px]"
         >
           {data.map((_, i) => (
             <Cell key={i} fill={CHART_COLORS.categories[i % CHART_COLORS.categories.length]} />

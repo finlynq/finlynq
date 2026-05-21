@@ -21,6 +21,7 @@ import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from "recharts";
 import { Plus, Trash2, Landmark, CreditCard, FileText, Calendar } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
+import { CspSafeBar } from "@/components/csp-safe-bar";
 
 type Loan = {
   id: number; name: string; type: string; principal: number; annualRate: number;
@@ -333,12 +334,12 @@ function LoansPageContent() {
               </div>
               <div className="space-y-1">
                 <div className="flex justify-between text-xs"><span>Principal paid: {formatCurrency(loan.principalPaid, displayCurrency)}</span><span>{Math.round(paidPct)}%</span></div>
-                <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-rose-200">
-                  <div
-                    className="h-full rounded-full bg-emerald-500 transition-all"
-                    style={{ width: `${paidPct}%` }}
-                  />
-                </div>
+                <CspSafeBar
+                  percent={paidPct}
+                  className="bg-rose-200"
+                  fillClassName="bg-emerald-500"
+                  ariaLabel={`Loan ${loan.name} paid`}
+                />
               </div>
             </CardContent>
           </Card>

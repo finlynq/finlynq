@@ -108,19 +108,21 @@ function LogoMark() {
 function FeatureViz({ kind }: { kind: (typeof FEATURES)[number]["viz"] }) {
   switch (kind) {
     case "bars":
+      // Bar heights pulled into landing.css classes (.bars i.hNN) to keep
+      // CSP style-src free of 'unsafe-inline' (FINLYNQ-83).
       return (
         <div className="viz bars">
-          <i style={{ height: "22%" }} />
-          <i style={{ height: "38%" }} />
-          <i style={{ height: "30%" }} />
-          <i style={{ height: "58%" }} />
-          <i style={{ height: "44%" }} />
-          <i style={{ height: "70%" }} className="hl" />
-          <i style={{ height: "60%" }} />
-          <i style={{ height: "82%" }} className="hl" />
-          <i style={{ height: "50%" }} />
-          <i style={{ height: "76%" }} className="hl" />
-          <i style={{ height: "90%" }} className="hl" />
+          <i className="h22" />
+          <i className="h38" />
+          <i className="h30" />
+          <i className="h58" />
+          <i className="h44" />
+          <i className="hl h70" />
+          <i className="h60" />
+          <i className="hl h82" />
+          <i className="h50" />
+          <i className="hl h76" />
+          <i className="hl h90" />
         </div>
       );
     case "import":
@@ -281,12 +283,12 @@ export default function LandingPage() {
               any AI you choose.
             </h1>
 
-            <p className="lede" style={{ marginTop: 28 }}>
+            <p className="lede lede-mt-28">
               Encrypted, private, and yours. Import your bank data, connect Claude or Cursor, and ask
               questions about your finances in plain English.
             </p>
 
-            <p className="lede" style={{ marginTop: 12, fontSize: 15, opacity: 0.8 }}>
+            <p className="lede lede-tagline">
               Free hosted cloud, or self-host with Docker — same features either way.
             </p>
 
@@ -347,7 +349,7 @@ export default function LandingPage() {
               </div>
             </div>
 
-            <div className="chart-head" style={{ marginTop: 28 }}>
+            <div className="chart-head chart-head-mt-28">
               <div>
                 <div className="chart-title">Net worth · Last 12 months</div>
                 <div className="chart-val num">
@@ -606,7 +608,7 @@ export default function LandingPage() {
                   </li>
                 ))}
               </ul>
-              <div style={{ marginTop: 32, display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <div className="mcp-cta-row">
                 <Link href="/cloud?tab=register" className="btn btn-primary">
                   Get started
                 </Link>
@@ -682,21 +684,9 @@ export default function LandingPage() {
             ))}
           </div>
 
-          <p
-            className="reveal"
-            style={{
-              marginTop: 32,
-              maxWidth: 760,
-              fontSize: 13,
-              lineHeight: 1.7,
-              color: "#6b737d",
-            }}
-          >
-            <span style={{ color: "#9aa3ad" }}>*</span> Numeric amounts, dates, and unique IDs are stored unencrypted because they&apos;re required for database operations (totals, sorting, joins, indexes). Everything else &mdash; merchant names, account names, payees, notes, tags, and categories &mdash; is encrypted with a key derived only from your password. Read the{" "}
-            <Link
-              href="/blog/how-finlynq-encrypts-your-money"
-              style={{ color: "#f5a623", textDecoration: "underline" }}
-            >
+          <p className="reveal privacy-disclaimer">
+            <span className="asterisk">*</span> Numeric amounts, dates, and unique IDs are stored unencrypted because they&apos;re required for database operations (totals, sorting, joins, indexes). Everything else &mdash; merchant names, account names, payees, notes, tags, and categories &mdash; is encrypted with a key derived only from your password. Read the{" "}
+            <Link href="/blog/how-finlynq-encrypts-your-money" className="amber-link">
               plain-English writeup
             </Link>
             {" "}or the{" "}
@@ -704,7 +694,7 @@ export default function LandingPage() {
               href="https://github.com/finlynq/finlynq/blob/main/pf-app/docs/architecture/encryption.md"
               target="_blank"
               rel="noreferrer"
-              style={{ color: "#f5a623", textDecoration: "underline" }}
+              className="amber-link"
             >
               full encryption design
             </a>
@@ -737,7 +727,7 @@ export default function LandingPage() {
                   <span className="dot" />
                   FREE FOREVER · ALL FEATURES
                 </div>
-                <div style={{ fontSize: 26, marginTop: 12, letterSpacing: "-0.02em" }}>
+                <div className="plan-head-title">
                   Everything, included.
                 </div>
               </div>
@@ -753,7 +743,7 @@ export default function LandingPage() {
                 </li>
               ))}
             </ul>
-            <div style={{ display: "flex", gap: 12, marginTop: 32, flexWrap: "wrap" }}>
+            <div className="plan-cta-row">
               <Link href="/cloud?tab=register" className="btn btn-primary">
                 Get started free
               </Link>
@@ -769,11 +759,11 @@ export default function LandingPage() {
       <section className="fl-cta">
         <div className="fl-container cta-grid">
           <div className="reveal">
-            <div className="eyebrow" style={{ marginBottom: 24 }}>
+            <div className="eyebrow cta-eyebrow-mb-24">
               <span className="dot" />
               START TODAY
             </div>
-            <h2 className="display-xl" style={{ fontSize: "clamp(40px, 5.4vw, 76px)" }}>
+            <h2 className="display-xl cta-display-xl">
               Understand your<br />
               finances, <em>finally</em>.
             </h2>
@@ -819,7 +809,7 @@ export default function LandingPage() {
         <div className="fl-container">
           <div className="footer-grid">
             <div>
-              <Link href="/" className="fl-logo" style={{ color: "var(--fl-fg)" }}>
+              <Link href="/" className="fl-logo footer-logo-link">
                 <LogoMark />
                 Finlynq
               </Link>

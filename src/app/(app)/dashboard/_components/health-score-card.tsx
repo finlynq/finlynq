@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { motion, useMotionValue, useSpring } from "framer-motion";
+import { motion } from "framer-motion";
 import type { HealthData } from "./types";
 
 const itemVariants = {
@@ -17,15 +17,19 @@ function HealthRing({ score, size = 100 }: { score: number; size?: number }) {
   const progress = (score / 100) * circumference;
   const color = score > 70 ? "#10b981" : score >= 40 ? "#f59e0b" : "#ef4444";
 
-  const motionProgress = useMotionValue(0);
-  const springProgress = useSpring(motionProgress, { stiffness: 60, damping: 20 });
-
-  useEffect(() => {
-    motionProgress.set(progress);
-  }, [progress, motionProgress]);
-
+  // Container width/height set via ref-callback (CSP-safe, FINLYNQ-83) so the
+  // outer wrapper doesn't carry an HTML `style=` attribute. The inner <svg>
+  // takes width/height as attributes, which aren't CSP-gated.
   return (
-    <div className="relative" style={{ width: size, height: size }}>
+    <div
+      className="relative"
+      ref={(el) => {
+        if (el) {
+          el.style.width = `${size}px`;
+          el.style.height = `${size}px`;
+        }
+      }}
+    >
       <svg width={size} height={size} className="-rotate-90">
         <circle
           cx={size / 2}
@@ -36,6 +40,10 @@ function HealthRing({ score, size = 100 }: { score: number; size?: number }) {
           strokeWidth={strokeWidth}
           className="text-muted/20"
         />
+        {/* `initial` is the framer-motion-owned starting value; `animate`
+            drives it to the target. Removing the `style` prop drops the
+            initial inline `style=` that framer-motion would otherwise emit
+            on the SVG element. (FINLYNQ-83) */}
         <motion.circle
           cx={size / 2}
           cy={size / 2}
@@ -45,14 +53,21 @@ function HealthRing({ score, size = 100 }: { score: number; size?: number }) {
           strokeWidth={strokeWidth}
           strokeLinecap="round"
           strokeDasharray={circumference}
-          style={{ strokeDashoffset: springProgress.get() > 0 ? circumference - springProgress.get() : circumference }}
           initial={{ strokeDashoffset: circumference }}
           animate={{ strokeDashoffset: circumference - progress }}
           transition={{ duration: 1.5, ease: "easeOut" }}
         />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="text-2xl font-bold tabular-nums" style={{ color }}>{score}</span>
+        {/* Score color set via ref-callback (CSP, FINLYNQ-83) */}
+        <span
+          className="text-2xl font-bold tabular-nums"
+          ref={(el) => {
+            if (el) el.style.color = color;
+          }}
+        >
+          {score}
+        </span>
         <span className="text-[9px] text-muted-foreground font-medium tracking-wide">/ 100</span>
       </div>
     </div>
@@ -109,8 +124,13 @@ export function HealthScoreCard() {
               <div className="shrink-0 flex flex-col items-center">
                 <HealthRing score={health.score} size={96} />
                 <p
-                  className="mt-1.5 text-xs font-semibold"
-                  style={{ color: health.score > 70 ? "#10b981" : health.score >= 40 ? "#f59e0b" : "#ef4444" }}
+                  className={`mt-1.5 text-xs font-semibold ${
+                    health.score > 70
+                      ? "text-emerald-500"
+                      : health.score >= 40
+                        ? "text-amber-500"
+                        : "text-rose-500"
+                  }`}
                 >
                   {health.grade}
                 </p>

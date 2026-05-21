@@ -70,78 +70,40 @@ function GoogleAnalyticsScripts() {
 }
 
 function ConsentBanner({ onChoice }: { onChoice: (v: "accepted" | "declined") => void }) {
+  // All-static styles migrated to Tailwind atomic classes (FINLYNQ-83 phase 2).
+  // Arbitrary-color values are kept literal (the banner is intentionally dark
+  // theme regardless of route) — they would otherwise pull in the (app)
+  // theme palette and clash with the public marketing pages.
   return (
     <div
       role="dialog"
       aria-live="polite"
       aria-label="Analytics cookies"
-      style={{
-        position: "fixed",
-        left: 0,
-        right: 0,
-        bottom: 0,
-        zIndex: 9999,
-        background: "#0e1116",
-        borderTop: "1px solid #2a3139",
-        color: "#e8eaed",
-        padding: "14px 18px",
-        boxShadow: "0 -8px 24px rgba(0,0,0,0.35)",
-      }}
+      className="fixed left-0 right-0 bottom-0 z-[9999] bg-[#0e1116] border-t border-[#2a3139] text-[#e8eaed] px-[18px] py-[14px] shadow-[0_-8px_24px_rgba(0,0,0,0.35)]"
     >
-      <div
-        style={{
-          maxWidth: 1100,
-          margin: "0 auto",
-          display: "flex",
-          gap: 18,
-          alignItems: "center",
-          flexWrap: "wrap",
-          fontSize: 13,
-          lineHeight: 1.45,
-        }}
-      >
-        <p style={{ flex: "1 1 320px", margin: 0, color: "#cdd2d8" }}>
+      <div className="max-w-[1100px] mx-auto flex gap-[18px] items-center flex-wrap text-[13px] leading-[1.45]">
+        <p className="flex-[1_1_320px] m-0 text-[#cdd2d8]">
           We use Google Analytics on our public marketing pages to understand
           which posts bring people here. We don&apos;t use any analytics inside
           the app itself, and we never sell your data. You can decline below
           and the page works fine.{" "}
-          <a
-            href="/privacy"
-            style={{ color: "#f5a623", textDecoration: "underline" }}
-          >
+          <a href="/privacy" className="text-[#f5a623] underline">
             Privacy policy
           </a>
           .
         </p>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="flex gap-2">
           <button
             type="button"
             onClick={() => onChoice("declined")}
-            style={{
-              background: "transparent",
-              color: "#9aa3ad",
-              border: "1px solid #2a3139",
-              padding: "8px 14px",
-              borderRadius: 6,
-              cursor: "pointer",
-              fontSize: 13,
-            }}
+            className="bg-transparent text-[#9aa3ad] border border-[#2a3139] px-[14px] py-2 rounded-md cursor-pointer text-[13px]"
           >
             Decline
           </button>
           <button
             type="button"
             onClick={() => onChoice("accepted")}
-            style={{
-              background: "#f5a623",
-              color: "#0e1116",
-              border: "1px solid #f5a623",
-              padding: "8px 14px",
-              borderRadius: 6,
-              cursor: "pointer",
-              fontSize: 13,
-              fontWeight: 600,
-            }}
+            className="bg-[#f5a623] text-[#0e1116] border border-[#f5a623] px-[14px] py-2 rounded-md cursor-pointer text-[13px] font-semibold"
           >
             Accept
           </button>

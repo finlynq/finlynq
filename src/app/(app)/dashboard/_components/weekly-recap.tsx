@@ -7,6 +7,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recha
 import { Calendar, ChevronDown, ChevronUp, ArrowUpRight, ArrowDownRight } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { WeeklyRecapData } from "./types";
+import { CspSafeBar } from "@/components/csp-safe-bar";
 
 const itemVariants = {
   hidden: { opacity: 0, y: 16 },
@@ -143,12 +144,17 @@ export function WeeklyRecap() {
                                 {b.pctUsed}%
                               </span>
                             </div>
-                            <div className="w-full bg-muted/60 rounded-full h-1.5 overflow-hidden">
-                              <div
-                                className={`h-full rounded-full transition-all ${b.pctUsed > 100 ? "bg-rose-500" : b.pctUsed > 80 ? "bg-amber-500" : "bg-indigo-500"}`}
-                                style={{ width: `${Math.min(100, b.pctUsed)}%` }}
-                              />
-                            </div>
+                            <CspSafeBar
+                              percent={Math.min(100, b.pctUsed)}
+                              className="bg-muted/60 h-1.5"
+                              fillClassName={
+                                b.pctUsed > 100
+                                  ? "bg-rose-500"
+                                  : b.pctUsed > 80
+                                    ? "bg-amber-500"
+                                    : "bg-indigo-500"
+                              }
+                            />
                           </div>
                         ))}
                       </div>

@@ -66,15 +66,26 @@ export function SpendingCategoryChart({ data, currency = "CAD" }: { data: Spendi
                 return (
                   <div key={cat.name} className="group/legend">
                     <div className="flex items-center gap-2 mb-0.5">
-                      <div className="h-2 w-2 rounded-full shrink-0" style={{ background: CHART_COLORS[i] }} />
+                      {/* Dot color set via ref-callback (CSP, FINLYNQ-83) */}
+                      <div
+                        className="h-2 w-2 rounded-full shrink-0"
+                        ref={(el) => {
+                          if (el) el.style.background = CHART_COLORS[i];
+                        }}
+                      />
                       <span className="truncate text-[11px] text-muted-foreground flex-1">{cat.name}</span>
                       <span className="text-[11px] font-semibold tabular-nums">{pct}%</span>
                     </div>
-                    {/* Mini bar */}
+                    {/* Mini bar — width + color set via ref-callback (CSP, FINLYNQ-83) */}
                     <div className="ml-4 h-1 rounded-full bg-muted/40 overflow-hidden">
                       <div
                         className="h-full rounded-full transition-all"
-                        style={{ width: `${pct}%`, background: CHART_COLORS[i] }}
+                        ref={(el) => {
+                          if (el) {
+                            el.style.width = `${pct}%`;
+                            el.style.background = CHART_COLORS[i];
+                          }
+                        }}
                       />
                     </div>
                   </div>

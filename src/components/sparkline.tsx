@@ -11,7 +11,7 @@ export function Sparkline({ data, color }: SparklineProps) {
   const chartData = data.map((value, index) => ({ index, value }));
 
   return (
-    <div style={{ width: "100%", height: 30 }}>
+    <div className="w-full h-[30px]">
       <ResponsiveContainer width="100%" height={30} minWidth={0}>
         <AreaChart data={chartData} margin={{ top: 2, right: 2, bottom: 2, left: 2 }}>
           <defs>
