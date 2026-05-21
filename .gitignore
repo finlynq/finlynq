@@ -62,3 +62,8 @@ pf-server.log
 /test-results/
 /e2e/
 *.ps1
+
+# Triage plan working docs (per-feature implementation plans authored by
+# /triage, consumed by /drain-pending-tasks; living feature doc lands in
+# docs/<slug>.md at ship time and IS tracked).
+/plan/
