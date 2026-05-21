@@ -21,17 +21,25 @@ function CloudAuthPageInner() {
   const searchParams = useSearchParams();
   const initialTab = searchParams.get("tab") === "register" ? "register" : "login";
   const redirectTo = searchParams.get("redirect") ?? "/dashboard";
+  // ?demo=1 pre-fills the login form with the published demo credentials so
+  // a marketing link can drop users one click away from Sign In. Reuses the
+  // normal /api/auth/login path — no auto-submit — so the user explicitly
+  // consents to the action. For zero-click full auto-login + redirect, see
+  // the /try-demo route.
+  const demoPrefill = searchParams.get("demo") === "1";
   const [tab, setTab] = useState<Tab>(initialTab);
 
   // Login form: single 'identifier' field accepts username OR email.
-  const [identifier, setIdentifier] = useState("");
+  const [identifier, setIdentifier] = useState(
+    demoPrefill ? "demo@finlynq.com" : "",
+  );
 
   // Register form: username (required), email (optional), display name.
   const [username, setUsername] = useState("");
   const [registerEmail, setRegisterEmail] = useState("");
   const [acknowledgeNoRecovery, setAcknowledgeNoRecovery] = useState(false);
 
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState(demoPrefill ? "finlynq-demo" : "");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -240,6 +248,13 @@ function CloudAuthPageInner() {
           </form>
         ) : (
           <>
+            {demoPrefill && tab === "login" && (
+              <div className="mb-6 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5 text-xs text-foreground/90">
+                Demo credentials pre-filled — click <strong>Sign In</strong> to
+                enter the public demo. Data resets nightly.
+              </div>
+            )}
+
             {/* Tab switcher */}
             <div className="mb-6 flex rounded-xl border border-border bg-muted p-1">
               <button
