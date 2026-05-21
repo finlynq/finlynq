@@ -19,7 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertCircle, ArrowLeft } from "lucide-react";
+import { AlertCircle, ArrowLeft, Download } from "lucide-react";
 import { ReconcileUploadCard } from "@/components/reconcile/upload-card";
 import type { AccountOption } from "@/components/reconcile/preview-table";
 import { ColumnMappingDialog } from "@/app/(app)/import/components/column-mapping-dialog";
@@ -406,14 +406,27 @@ export default function ReconcilePage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Upload statement</CardTitle>
-          <CardDescription>
-            Supported: CSV (with <code>Date,Account,Amount,Payee</code>{" "}
-            headers, a saved template, or column-mapping on the fly) and
-            OFX/QFX (single-account statements — pick the destination
-            Finlynq account below). After upload you&rsquo;ll be redirected
-            to the review queue.
-          </CardDescription>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle>Upload statement</CardTitle>
+              <CardDescription>
+                Supported: CSV (with <code>Date,Account,Amount,Payee</code>{" "}
+                headers, a saved template, or column-mapping on the fly) and
+                OFX/QFX (single-account statements — pick the destination
+                Finlynq account below). After upload you&rsquo;ll be
+                redirected to the review queue.
+              </CardDescription>
+            </div>
+            <a
+              href="/sample-statement.ofx"
+              download
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors shrink-0"
+              aria-label="Download a sample OFX statement to try the upload flow"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Download sample OFX
+            </a>
+          </div>
         </CardHeader>
         <CardContent>
           <ReconcileUploadCard

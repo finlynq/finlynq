@@ -11,12 +11,33 @@
  */
 
 import pg from "pg";
+import { createHash } from "crypto";
 import bcrypt from "bcryptjs";
 import {
   createWrappedDEKForPassword,
   encryptField,
 } from "../src/lib/crypto/envelope";
 import { encryptName } from "../src/lib/crypto/encrypted-columns";
+import { stageSampleOfxImport } from "./seed-demo-pending-import";
+
+/** Mirror of src/lib/import-hash.ts generateImportHash(). Kept local so this
+ *  CLI script doesn't reach into the Next.js bundle graph. Drift here breaks
+ *  the "matches existing transaction" badge on the OFX overlap rows in the
+ *  pre-staged demo batch — see scripts/seed-demo-pending-import.ts. */
+function generateImportHash(
+  date: string,
+  accountId: number,
+  amount: number,
+  payee: string,
+): string {
+  const normalized = [
+    date.trim(),
+    String(accountId),
+    amount.toFixed(2),
+    (payee || "").trim().toLowerCase(),
+  ].join("|");
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 32);
+}
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -391,6 +412,9 @@ async function main() {
       "notifications",
       "import_templates",
       "settings",
+      // staged_transactions cascades from staged_imports via ON DELETE
+      // CASCADE; dropping the parent rows is enough.
+      "staged_imports",
     ];
     for (const t of tables) {
       await client.query(`DELETE FROM ${t} WHERE user_id = $1`, [userId]);
@@ -434,9 +458,21 @@ async function main() {
       const accountId = accountIds[tx.account];
       const categoryId = categoryIds[tx.category];
       if (!accountId || !categoryId) continue;
+      // import_hash on every seeded row so the OFX sample's dedup probe
+      // can find overlapping Chequing rows and flag them as "matches
+      // existing transaction" in the pre-staged demo batch. The hash is
+      // the same recipe the staging upload route uses (sha256 of
+      // date|accountId|amount|lowercased payee), so an OFX row that
+      // describes the same payment is byte-identical at this column.
+      const importHash = generateImportHash(
+        tx.date,
+        accountId,
+        tx.amount,
+        tx.payee,
+      );
       await client.query(
-        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, is_business, source)
-         VALUES ($1, $2, $3, $4, 'CAD', $5, $6, $7, $8, 0, 'sample_data')`,
+        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, is_business, source, import_hash)
+         VALUES ($1, $2, $3, $4, 'CAD', $5, $6, $7, $8, 0, 'sample_data', $9)`,
         [
           userId,
           tx.date,
@@ -446,6 +482,7 @@ async function main() {
           encryptField(demoDek, tx.payee),
           encryptField(demoDek, tx.note ?? ""),
           encryptField(demoDek, ""),
+          importHash,
         ]
       );
     }
@@ -552,6 +589,23 @@ async function main() {
          ($1, $3, $4, 'savings', 10000, NULL, $2, 1, 'active', 'Three months of expenses'),
          ($1, $5, $6, 'savings', 5000, '2027-03-01', $2, 2, 'active', '')`,
       [userId, accountIds["Savings"], efEnc.ct, efEnc.lookup, tjEnc.ct, tjEnc.lookup]
+    );
+
+    // 8. Pre-stage the sample OFX file as a pending import on the Chequing
+    //    account so users landing on /import/pending immediately see the
+    //    two-pane reconciliation surface without having to upload anything.
+    //    The same file is downloadable at /sample-statement.ofx for users
+    //    who want to try the upload flow themselves.
+    console.log(`[seed-demo] Pre-staging sample OFX on Chequing…`);
+    const staged = await stageSampleOfxImport({
+      client,
+      userId,
+      dek: demoDek,
+      accountId: accountIds["Chequing"],
+    });
+    console.log(
+      `[seed-demo] Pre-staged ${staged.rowCount} rows ` +
+        `(${staged.skippedDuplicateCount} flagged as already-imported).`,
     );
 
     // Note: login_count and last_login_at are intentionally NOT reset here
