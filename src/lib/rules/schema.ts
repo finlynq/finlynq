@@ -75,7 +75,16 @@ const DateBetweenCondition = z.object({
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
 
-export const Condition = z.discriminatedUnion("field", [
+// FINLYNQ-84 cycle 2 (2026-05-21): Zod v4 rejects discriminatedUnion when
+// two branches share a discriminator value. The original schema had
+// `field: "amount"` ×2 (single + between) and `field: "date"` ×3 (weekday +
+// day_of_month + between), which threw at union-build time and broke every
+// .safeParse() on the rule endpoints. Switched to top-level z.union so the
+// 8 leaf schemas can be tried in order. Tradeoff: error messages on parse
+// failure become "no schema matched" instead of "field=amount but op=foo
+// invalid"; existing tests don't depend on the Zod error fingerprint
+// (they assert HTTP status codes + body presence), so the trade is fine.
+export const Condition = z.union([
   StringCondition,
   AmountConditionSingle,
   AmountConditionBetween,
