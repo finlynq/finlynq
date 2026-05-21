@@ -57,6 +57,14 @@ export interface CsvPipelineRequest {
   skipHeaderRows?: number;
   skipFooterRows?: number;
   dateFormatOverride?: DateFormatOverride | null;
+  /**
+   * When true, step 3 (auto-match a saved template by header overlap) is
+   * skipped. The pipeline still runs step 2 (canonical headers) and step 4
+   * (column-mapping dialog) — this only disables the silent template
+   * auto-apply. Set by `/api/import/preview` when the user explicitly picks
+   * "Auto-detect" in the template-picker dialog.
+   */
+  skipAutoMatchTemplate?: boolean;
 }
 
 export type CsvPipelineResult =
@@ -104,6 +112,7 @@ export async function parseCsvWithFallback(
     skipHeaderRows = 0,
     skipFooterRows = 0,
     dateFormatOverride = null,
+    skipAutoMatchTemplate = false,
   } = req;
   // Apply header/footer trim BEFORE any header detection so the trim
   // shapes what step 2 (canonical headers) and step 3 (auto-matched
@@ -151,14 +160,17 @@ export async function parseCsvWithFallback(
     };
   }
 
-  // 3. Try an auto-matched saved template (≥80% header overlap).
-  const allTemplates = await db
-    .select()
-    .from(schema.importTemplates)
-    .where(eq(schema.importTemplates.userId, userId))
-    .all();
+  // 3. Try an auto-matched saved template (≥80% header overlap). Skipped
+  //    when the caller explicitly opted out (template-picker "Auto-detect").
+  const allTemplates = skipAutoMatchTemplate
+    ? []
+    : await db
+        .select()
+        .from(schema.importTemplates)
+        .where(eq(schema.importTemplates.userId, userId))
+        .all();
   const templates: ImportTemplate[] = allTemplates.map(deserializeTemplate);
-  const best = findBestTemplate(headers, templates);
+  const best = skipAutoMatchTemplate ? null : findBestTemplate(headers, templates);
   if (best) {
     const mapped = parseWithMapping(
       text,

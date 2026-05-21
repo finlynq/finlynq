@@ -26,6 +26,11 @@ export async function POST(request: NextRequest) {
       templateIdRaw && typeof templateIdRaw === "string" && templateIdRaw.trim()
         ? parseInt(templateIdRaw, 10)
         : null;
+    // When the user explicitly picks "Auto-detect" in the template picker we
+    // skip step 3 of the CSV pipeline (auto-match against saved templates).
+    // Otherwise the server would silently apply a template the user just
+    // chose not to use, which contradicts the picker's stated intent.
+    const noTemplate = formData.get("noTemplate") === "1";
 
     if (!file) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
@@ -39,11 +44,16 @@ export async function POST(request: NextRequest) {
         text,
         userId,
         templateId,
+        skipAutoMatchTemplate: noTemplate,
       });
       if (result.kind === "template-not-found") {
         // Original behavior: silently fall through to canonical/auto-match
         // when a stale templateId is passed. Re-run without it.
-        const fallback = await parseCsvWithFallback({ text, userId });
+        const fallback = await parseCsvWithFallback({
+          text,
+          userId,
+          skipAutoMatchTemplate: noTemplate,
+        });
         return await respondWithCsvResult(fallback, file.name, userId, auth.context.dek ?? undefined);
       }
       return await respondWithCsvResult(result, file.name, userId, auth.context.dek ?? undefined);

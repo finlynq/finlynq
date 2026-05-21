@@ -19,7 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { AlertCircle, AlertTriangle, BookTemplate, CheckCircle2, Copy } from "lucide-react";
+import { AlertCircle, AlertTriangle, ArrowLeft, BookTemplate, CheckCircle2, Copy } from "lucide-react";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { SaveTemplateDialog } from "./save-template-dialog";
 
@@ -58,6 +58,9 @@ interface ImportPreviewDialogProps {
   csvHeaders?: string[];
   accounts?: string[];
   appliedTemplateId?: number | null;
+  /** Optional — when provided, the dialog renders a "Change template" button
+   *  that lets the user pop back to the template picker for this same file. */
+  onChangeTemplate?: () => void;
   onTemplateSaved?: (template: { id: number; name: string }) => void;
 }
 
@@ -73,6 +76,7 @@ export function ImportPreviewDialog({
   csvHeaders = [],
   accounts = [],
   appliedTemplateId,
+  onChangeTemplate,
   onTemplateSaved,
 }: ImportPreviewDialogProps) {
   const [includeDuplicates, setIncludeDuplicates] = useState<Set<number>>(new Set());
@@ -132,7 +136,7 @@ export function ImportPreviewDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+      <DialogContent className="sm:max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle>Import Preview</DialogTitle>
           <DialogDescription>
@@ -147,13 +151,13 @@ export function ImportPreviewDialog({
             {validRows.length} new
           </Badge>
           {duplicateRows.length > 0 && (
-            <Badge variant="secondary" className="bg-amber-100 text-amber-800">
+            <Badge variant="secondary" className="bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30">
               <Copy className="h-3 w-3 mr-1" />
               {duplicateRows.length} duplicates
             </Badge>
           )}
           {probableDuplicates.length > 0 && (
-            <Badge variant="secondary" className="bg-orange-100 text-orange-800">
+            <Badge variant="secondary" className="bg-orange-500/20 text-orange-700 dark:text-orange-300 border border-orange-500/30">
               <AlertTriangle className="h-3 w-3 mr-1" />
               {probableDuplicates.length} probable duplicates
             </Badge>
@@ -165,7 +169,7 @@ export function ImportPreviewDialog({
             </Badge>
           )}
           {appliedTemplateId && (
-            <Badge variant="outline" className="text-[10px] text-blue-700 border-blue-200 bg-blue-50">
+            <Badge variant="outline" className="text-[10px] text-blue-700 dark:text-blue-300 border-blue-500/30 bg-blue-500/15">
               Template applied
             </Badge>
           )}
@@ -187,9 +191,9 @@ export function ImportPreviewDialog({
             to "commit anyway" (this is a warning, not a hard block) so the
             user can skip-all if they want every flagged row gone in one click. */}
         {probableDuplicates.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md border border-orange-200 bg-orange-50/60 px-3 py-2 text-xs">
-            <AlertTriangle className="h-3.5 w-3.5 text-orange-600" />
-            <span className="text-orange-800">
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-xs">
+            <AlertTriangle className="h-3.5 w-3.5 text-orange-600 dark:text-orange-400" />
+            <span className="text-orange-700 dark:text-orange-300 font-medium">
               {probableNotSkipped} of {probableDuplicates.length} probable duplicates will be imported
             </span>
             <div className="ml-auto flex items-center gap-1">
@@ -238,11 +242,11 @@ export function ImportPreviewDialog({
                 const isSkipped = isProbable && skipProbable.has(row.rowIndex);
                 const isExpanded = isProbable && expandedProbable.has(row.rowIndex);
                 const rowClass = isDuplicate && !isForced
-                  ? "opacity-50 bg-amber-50/50"
+                  ? "bg-amber-500/10 text-muted-foreground"
                   : isProbable
                     ? isSkipped
-                      ? "opacity-60 bg-orange-50/30"
-                      : "bg-orange-50/40"
+                      ? "bg-orange-500/5 text-muted-foreground"
+                      : "bg-orange-500/10"
                     : "";
                 return (
                   <>
@@ -276,7 +280,7 @@ export function ImportPreviewDialog({
                       <TableCell className="text-xs">{row.category || "—"}</TableCell>
                       <TableCell>
                         {isDuplicate ? (
-                          <Badge variant="secondary" className="text-[10px] bg-amber-100 text-amber-700">
+                          <Badge variant="secondary" className="text-[10px] bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30">
                             Duplicate
                           </Badge>
                         ) : isProbable ? (
@@ -286,34 +290,34 @@ export function ImportPreviewDialog({
                             className="inline-flex items-center gap-1"
                             title="Click to view match details"
                           >
-                            <Badge variant="secondary" className="text-[10px] bg-orange-100 text-orange-700 cursor-pointer">
+                            <Badge variant="secondary" className="text-[10px] bg-orange-500/20 text-orange-700 dark:text-orange-300 border border-orange-500/30 cursor-pointer hover:bg-orange-500/30">
                               <AlertTriangle className="h-3 w-3 mr-0.5" />
                               Probable dup
                             </Badge>
                           </button>
                         ) : (
-                          <Badge variant="secondary" className="text-[10px] bg-emerald-100 text-emerald-700">
+                          <Badge variant="secondary" className="text-[10px] bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
                             New
                           </Badge>
                         )}
                       </TableCell>
                     </TableRow>
                     {isProbable && isExpanded && probable && (
-                      <TableRow key={`${row.rowIndex}-detail`} className="bg-orange-50/20">
-                        <TableCell colSpan={7} className="text-[11px] text-orange-900 px-6 py-2">
-                          <div className="space-y-0.5">
+                      <TableRow key={`${row.rowIndex}-detail`} className="bg-orange-500/10 border-l-2 border-orange-500/50">
+                        <TableCell colSpan={7} className="text-xs text-foreground px-6 py-3">
+                          <div className="space-y-1">
                             <div>
-                              Matches existing transaction <span className="font-mono">#{probable.matchedTx.id}</span>
+                              Matches existing transaction <span className="font-mono text-orange-700 dark:text-orange-300">#{probable.matchedTx.id}</span>
                               {probable.matchedTx.source && (
                                 <> (source: <span className="font-mono">{probable.matchedTx.source}</span>)</>
                               )}
                             </div>
-                            <div>
-                              Existing: <span className="font-mono">{probable.matchedTx.date}</span> ${probable.matchedTx.amount.toFixed(2)} —
-                              {" "}<span className="font-medium">{probable.matchedTx.daysOff}d</span> off,
-                              {" "}delta ${probable.matchedTx.amountDeltaAbs.toFixed(2)} ({(probable.matchedTx.amountDeltaPct * 100).toFixed(2)}%)
+                            <div className="text-muted-foreground">
+                              Existing: <span className="font-mono text-foreground">{probable.matchedTx.date}</span> <span className="font-mono text-foreground">${probable.matchedTx.amount.toFixed(2)}</span> —
+                              {" "}<span className="font-medium text-foreground">{probable.matchedTx.daysOff}d</span> off,
+                              {" "}delta <span className="font-mono text-foreground">${probable.matchedTx.amountDeltaAbs.toFixed(2)}</span> ({(probable.matchedTx.amountDeltaPct * 100).toFixed(2)}%)
                             </div>
-                            <div className="text-orange-700">
+                            <div className="text-orange-700 dark:text-orange-300 font-medium">
                               Score {probable.matchScore.toFixed(2)} · {probable.matchReason}
                             </div>
                           </div>
@@ -336,28 +340,43 @@ export function ImportPreviewDialog({
 
         {/* Errors */}
         {errorRows.length > 0 && (
-          <div className="rounded-lg border border-rose-200 bg-rose-50/50 p-3 max-h-24 overflow-auto">
-            <p className="text-xs font-medium text-rose-700 mb-1">Errors ({errorRows.length})</p>
+          <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 max-h-32 overflow-auto">
+            <p className="text-xs font-medium text-rose-700 dark:text-rose-300 mb-1">Errors ({errorRows.length})</p>
             {errorRows.slice(0, 10).map((err) => (
-              <p key={err.rowIndex} className="text-xs text-rose-600">
+              <p key={err.rowIndex} className="text-xs text-rose-700 dark:text-rose-300/90">
                 Row {err.rowIndex + 1}: {err.message}
               </p>
             ))}
           </div>
         )}
 
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isImporting}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleConfirm}
-            disabled={isImporting || (importCount === 0)}
-          >
-            {isImporting
-              ? "Importing..."
-              : `Import ${importCount} transactions`}
-          </Button>
+        <DialogFooter className="sm:justify-between">
+          <div>
+            {onChangeTemplate && (
+              <Button
+                variant="ghost"
+                onClick={onChangeTemplate}
+                disabled={isImporting}
+                className="text-xs"
+              >
+                <ArrowLeft className="h-3.5 w-3.5 mr-1" />
+                Change template
+              </Button>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isImporting}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleConfirm}
+              disabled={isImporting || (importCount === 0)}
+            >
+              {isImporting
+                ? "Importing..."
+                : `Import ${importCount} transactions`}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
 
