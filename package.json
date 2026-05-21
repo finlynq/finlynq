@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
+    "postinstall": "node scripts/generate-mcp-tool-catalog.mjs",
     "dev": "next dev",
     "prebuild": "node scripts/generate-mcp-tool-catalog.mjs",
     "build": "next build",
