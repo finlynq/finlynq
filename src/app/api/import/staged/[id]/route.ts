@@ -19,6 +19,13 @@ import { tryDecryptField } from "@/lib/crypto/envelope";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { getRate } from "@/lib/fx-service";
 import { findAutoMatches } from "@/lib/import/auto-match";
+import {
+  validateBankBalances,
+  ANCHOR_SOURCES,
+  type BalanceAnchor,
+  type BalanceMismatch,
+  type AnchorSource,
+} from "@/lib/bank-ledger-balance";
 
 export const dynamic = "force-dynamic";
 
@@ -306,6 +313,76 @@ export async function GET(
     }
   }
 
+  // ─── 2026-05-24 — bank balance pre-flight warnings ─────────────────────
+  // Same algorithm as the approve endpoint, computed over the default-
+  // eligible set (the rows that would land if the user clicks Approve
+  // without unchecking anything). When mismatches surface, the
+  // /import/pending page renders a banner above the row list with the
+  // expected vs actual deltas. Approve still goes through regardless.
+  let balanceWarnings: BalanceMismatch[] = [];
+  if (staged.boundAccountId != null) {
+    const stagedAnchors: BalanceAnchor[] = [];
+    const parsed = staged.parsedAnchors;
+    if (Array.isArray(parsed)) {
+      for (const raw of parsed as unknown[]) {
+        if (!raw || typeof raw !== "object") continue;
+        const a = raw as Record<string, unknown>;
+        if (typeof a.date !== "string") continue;
+        if (typeof a.balance !== "number") continue;
+        const ccy = typeof a.currency === "string" ? a.currency : "CAD";
+        const src = typeof a.source === "string" ? a.source : "csv_column";
+        if (!(ANCHOR_SOURCES as readonly string[]).includes(src)) continue;
+        stagedAnchors.push({
+          date: a.date,
+          balance: a.balance,
+          currency: ccy,
+          source: src as AnchorSource,
+        });
+      }
+    }
+    if (
+      typeof staged.statementBalance === "number" &&
+      typeof staged.statementBalanceDate === "string"
+    ) {
+      stagedAnchors.push({
+        date: staged.statementBalanceDate,
+        balance: staged.statementBalance,
+        currency: staged.statementCurrency ?? "CAD",
+        source: "upload_form",
+      });
+    }
+    // Same de-dup as the approve route — parser-extracted source wins
+    // over the form-typed one when they share a date.
+    const byDate = new Map<string, BalanceAnchor>();
+    for (const a of stagedAnchors) {
+      const existing = byDate.get(a.date);
+      if (!existing || existing.source === "upload_form") {
+        byDate.set(a.date, a);
+      }
+    }
+    const dedupedAnchors = Array.from(byDate.values());
+    if (dedupedAnchors.length > 0) {
+      // Default eligibility mirrors the approve endpoint: pending +
+      // non-existing + non-skipped_duplicate. The banner under-reports
+      // for users who explicitly include skipped_duplicate rows in
+      // approve, but the approve response will surface the true result.
+      const projected = rows
+        .filter(
+          (r) =>
+            r.rowStatus === "pending" &&
+            r.dedupStatus !== "existing" &&
+            r.reconcileState !== "skipped_duplicate",
+        )
+        .map((r) => ({ date: r.date, amount: Number(r.amount ?? 0) }));
+      balanceWarnings = await validateBankBalances(
+        userId,
+        staged.boundAccountId,
+        dedupedAnchors,
+        projected,
+      );
+    }
+  }
+
   return NextResponse.json({
     staged,
     rows: decryptedRows,
@@ -316,6 +393,7 @@ export async function GET(
       boundAccountCurrency,
     },
     suggestedMatches,
+    balanceWarnings,
   });
 }
 

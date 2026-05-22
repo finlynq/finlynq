@@ -13,6 +13,11 @@ export interface ColumnMapping {
   currency?: string;
   note?: string;
   tags?: string;
+  // 2026-05-24 — per-row bank balance column. When set, the parser
+  // extracts the last-in-file-order balance per date and persists the
+  // resulting anchors on `staged_imports.parsed_anchors`. Approve-time
+  // validation compares them against the running total.
+  balance?: string;
 }
 
 /** Parser-knob shape persisted on `import_templates`. Mirrors the upload
@@ -113,6 +118,21 @@ export function autoDetectColumnMapping(headers: string[]): ColumnMapping | null
     findExact(["payee", "description", "merchant", "name", "memo", "narrative"]) ??
     findContains(["description", "merchant", "payee", "narrative", "memo"]);
 
+  // Balance column — exact-match first ("Balance", "Running Balance"),
+  // then contains. "balance after" / "closing balance" cover common
+  // bank export header variants. Skipped when the file has no such
+  // column (typical for OFX/QFX where LEDGERBAL carries the anchor
+  // out-of-band).
+  const balance =
+    findExact([
+      "balance",
+      "running balance",
+      "balance after",
+      "closing balance",
+      "ending balance",
+      "account balance",
+    ]) ?? findContains(["balance"]);
+
   return {
     date,
     amount,
@@ -122,6 +142,7 @@ export function autoDetectColumnMapping(headers: string[]): ColumnMapping | null
     currency: findExact(["currency", "ccy"]) ?? findContains(["currency"]),
     note: findExact(["note", "notes", "reference", "ref"]) ?? findContains(["note", "reference"]),
     tags: findExact(["tags", "labels", "label"]) ?? findContains(["tags", "labels"]),
+    balance,
   };
 }
 

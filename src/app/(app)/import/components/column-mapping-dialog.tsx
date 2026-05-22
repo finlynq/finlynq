@@ -48,6 +48,9 @@ const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
   currency: "Currency",
   note: "Note",
   tags: "Tags",
+  // 2026-05-24 — per-row "Balance" column. Optional. When mapped, the
+  // parser captures one anchor per date (last-in-file-order's value).
+  balance: "Balance (running)",
 };
 const MAPPING_FIELDS = Object.keys(FIELD_LABELS) as (keyof ColumnMapping)[];
 const NONE = "__none__";

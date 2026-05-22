@@ -82,6 +82,14 @@ const DEFAULT_DATE_TOLERANCE_DAYS = 3;
 
 type FileFormat = "csv" | "ofx" | "qfx";
 
+/** Parsed bank balance anchor (2026-05-24). Carried from parser → approve. */
+interface ParsedAnchor {
+  date: string;          // YYYY-MM-DD
+  balance: number;
+  currency: string;       // ISO 4217
+  source: "csv_column" | "ofx_ledgerbal";
+}
+
 interface ParseSuccess {
   rows: RawTransaction[];
   errors: ParseError[];
@@ -90,6 +98,10 @@ interface ParseSuccess {
   statementBalance?: number | null;
   statementBalanceDate?: string | null;
   statementCurrency?: string | null;
+  /** 2026-05-24 — per-day bank balance anchors. CSV path: extracted from
+   *  the Balance column (one per date, last-in-file-order's value).
+   *  OFX/QFX path: single anchor synthesized from <LEDGERBAL>. */
+  anchors: ParsedAnchor[];
 }
 
 interface ParseFailure {
@@ -257,6 +269,7 @@ export async function POST(request: NextRequest) {
       userId,
       defaultAccountName,
       { skipHeaderRows, skipFooterRows, dateFormatOverride },
+      boundAccountCurrency,
     );
     if ("status" in parseResult) {
       return NextResponse.json(parseResult.body, { status: parseResult.status });
@@ -566,6 +579,12 @@ export async function POST(request: NextRequest) {
         // today; column split lets divergence happen later.
         dateRangeStart,
         dateRangeEnd,
+        // 2026-05-24 — per-day bank balance anchors. CSV path: one per
+        // unique date with the last-in-file-order's balance. OFX path:
+        // single LEDGERBAL anchor. Null when no anchors were parsed —
+        // the upload form's typed statement_balance is a separate
+        // anchor source carried on the dedicated column above.
+        parsedAnchors: parseResult.anchors.length > 0 ? parseResult.anchors : null,
       });
 
       if (shaped.length > 0) {
@@ -611,6 +630,7 @@ async function parseStatement(
     skipFooterRows: number;
     dateFormatOverride: DateFormatOverride | null;
   },
+  boundAccountCurrency: string | null,
 ): Promise<ParseSuccess | ParseFailure> {
   if (ext === "csv") {
     const text = await file.text();
@@ -622,6 +642,7 @@ async function parseStatement(
       skipHeaderRows: knobs.skipHeaderRows,
       skipFooterRows: knobs.skipFooterRows,
       dateFormatOverride: knobs.dateFormatOverride,
+      anchorCurrency: boundAccountCurrency,
     });
     if (result.kind === "template-not-found") {
       return {
@@ -647,6 +668,12 @@ async function parseStatement(
       rows: result.rows,
       errors: result.errors,
       format: "csv",
+      anchors: result.anchors.map((a) => ({
+        date: a.date,
+        balance: a.balance,
+        currency: a.currency,
+        source: "csv_column" as const,
+      })),
     };
   }
 
@@ -685,12 +712,22 @@ async function parseStatement(
       // Investment statements may have multiple per-account balances;
       // surface the first one as the headline statement balance.
       const firstBal = canonical.balances[0];
+      const anchors: ParsedAnchor[] =
+        firstBal?.balanceAmount != null && firstBal?.balanceDate
+          ? [{
+              date: firstBal.balanceDate,
+              balance: firstBal.balanceAmount,
+              currency: boundAccountCurrency ?? "CAD",
+              source: "ofx_ledgerbal",
+            }]
+          : [];
       return {
         rows,
         errors: [],
         format: ext === "qfx" ? "qfx" : "ofx",
         statementBalance: firstBal?.balanceAmount ?? null,
         statementBalanceDate: firstBal?.balanceDate ?? null,
+        anchors,
       };
     }
 
@@ -711,6 +748,15 @@ async function parseStatement(
       note: t.memo || "",
       fitId: t.fitId,
     }));
+    const ofxAnchors: ParsedAnchor[] =
+      ofx.balanceAmount != null && ofx.balanceDate
+        ? [{
+            date: ofx.balanceDate,
+            balance: ofx.balanceAmount,
+            currency: ofx.currency,
+            source: "ofx_ledgerbal",
+          }]
+        : [];
     return {
       rows,
       errors: [],
@@ -718,6 +764,7 @@ async function parseStatement(
       statementBalance: ofx.balanceAmount,
       statementBalanceDate: ofx.balanceDate,
       statementCurrency: ofx.currency,
+      anchors: ofxAnchors,
     };
   }
 

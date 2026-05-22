@@ -65,6 +65,14 @@ import {
 } from "@/lib/investment-account";
 import { generateImportHash, assignOccurrenceIndices } from "@/lib/import-hash";
 import { upsertBankTransaction } from "@/lib/bank-ledger";
+import {
+  validateBankBalances,
+  upsertBankBalanceAnchors,
+  type BalanceAnchor,
+  type BalanceMismatch,
+  ANCHOR_SOURCES,
+  type AnchorSource,
+} from "@/lib/bank-ledger-balance";
 import { matchesRule, type TransactionRule } from "@/lib/auto-categorize";
 import { computePureActionPatch } from "@/lib/rules/execute";
 import type { ConditionGroup, Action } from "@/lib/rules/schema";
@@ -102,6 +110,15 @@ export async function POST(
       source: schema.stagedImports.source,
       fileFormat: schema.stagedImports.fileFormat,
       originalFilename: schema.stagedImports.originalFilename,
+      // 2026-05-24 — bank balance anchors carried from upload through to
+      // approve. `parsed_anchors` is the JSONB array of CSV/OFX anchors;
+      // `statement_balance` + date + currency carry the upload-form anchor
+      // (single value). All three are nullable.
+      boundAccountId: schema.stagedImports.boundAccountId,
+      parsedAnchors: schema.stagedImports.parsedAnchors,
+      statementBalance: schema.stagedImports.statementBalance,
+      statementBalanceDate: schema.stagedImports.statementBalanceDate,
+      statementCurrency: schema.stagedImports.statementCurrency,
     })
     .from(schema.stagedImports)
     .where(and(
@@ -290,6 +307,79 @@ export async function POST(
   // deletes only what actually went through.
   const materializedRowIds = new Set<string>();
   let imported = 0;
+
+  // ─── Bank balance pre-flight validation (2026-05-24) ───────────────────
+  //
+  // Gather anchors carried from the upload step (parsed_anchors JSONB)
+  // plus the form-typed statement_balance (single anchor with source
+  // 'upload_form'). Compare them to the rolling sum of bank rows
+  // produced by the materialization preview — surfaced as
+  // `balanceWarnings` on the response. Approve still goes through;
+  // user decision is warn-but-allow per CLAUDE.md "Bank balance anchors".
+  //
+  // Skipped when there's no bound account (multi-account CSVs don't
+  // carry a single coherent anchor) or no anchors at all.
+  const balanceAnchors: BalanceAnchor[] = [];
+  if (staged.boundAccountId != null) {
+    // JSONB array — runtime cast since Drizzle types it as `unknown`.
+    const parsed = staged.parsedAnchors;
+    if (Array.isArray(parsed)) {
+      for (const raw of parsed as unknown[]) {
+        if (!raw || typeof raw !== "object") continue;
+        const a = raw as Record<string, unknown>;
+        if (typeof a.date !== "string") continue;
+        if (typeof a.balance !== "number") continue;
+        const ccy = typeof a.currency === "string" ? a.currency : "CAD";
+        const src = typeof a.source === "string" ? a.source : "csv_column";
+        if (!(ANCHOR_SOURCES as readonly string[]).includes(src)) continue;
+        balanceAnchors.push({
+          date: a.date,
+          balance: a.balance,
+          currency: ccy,
+          source: src as AnchorSource,
+        });
+      }
+    }
+    if (
+      typeof staged.statementBalance === "number" &&
+      typeof staged.statementBalanceDate === "string"
+    ) {
+      balanceAnchors.push({
+        date: staged.statementBalanceDate,
+        balance: staged.statementBalance,
+        currency: staged.statementCurrency ?? "CAD",
+        source: "upload_form",
+      });
+    }
+  }
+  // De-dup across sources — if parsed_anchors already has the
+  // statement-balance date, prefer the parser-extracted one (more
+  // specific source label) and drop the upload-form duplicate.
+  const anchorByDate = new Map<string, BalanceAnchor>();
+  for (const a of balanceAnchors) {
+    const existing = anchorByDate.get(a.date);
+    if (!existing || existing.source === "upload_form") {
+      anchorByDate.set(a.date, a);
+    }
+  }
+  const dedupedAnchors = Array.from(anchorByDate.values());
+
+  // Projected rows = the bank rows the materialization step is about to
+  // upsert into bank_transactions. Mirror what the row-by-row classifier
+  // produces (cash + transfer-pair legs + target-transfers, both signs).
+  const projectedBankRows = selected
+    .filter((r) => staged.boundAccountId != null)
+    .map((r) => ({ date: r.date, amount: r.amount }));
+
+  let balanceWarnings: BalanceMismatch[] = [];
+  if (staged.boundAccountId != null && dedupedAnchors.length > 0) {
+    balanceWarnings = await validateBankBalances(
+      userId,
+      staged.boundAccountId,
+      dedupedAnchors,
+      projectedBankRows,
+    );
+  }
 
   // ─── Step 1: classify selected rows ─────────────────────────────────────
   //
@@ -844,6 +934,36 @@ export async function POST(
 
   if (imported > 0) invalidateUserTxCache(userId);
 
+  // ─── Bank balance anchors — INSERT (2026-05-24) ────────────────────────
+  //
+  // Persist anchors AFTER the materialization succeeds so we don't write
+  // anchors for an approve that rolled back. ON CONFLICT (user, account,
+  // date) DO UPDATE — newer balance wins (a corrected re-download from
+  // the bank should overwrite). Load-bearing per CLAUDE.md "Bank balance
+  // anchors". Skipped when the staged batch had no bound account or no
+  // anchors; balanceWarnings still surfaces above for context.
+  if (
+    staged.boundAccountId != null &&
+    dedupedAnchors.length > 0 &&
+    (imported > 0 || linkedRows.length > 0)
+  ) {
+    try {
+      await upsertBankBalanceAnchors(
+        userId,
+        staged.boundAccountId,
+        dedupedAnchors,
+        staged.originalFilename ?? null,
+      );
+    } catch (err) {
+      // Don't fail the whole approve over an anchor INSERT — the
+      // transactions and bank-ledger rows are already in. Surface as a
+      // soft error in the response payload.
+      importErrors.push(
+        `Bank balance anchors: insert failed (${err instanceof Error ? err.message : "unknown error"})`,
+      );
+    }
+  }
+
   // FINLYNQ-56 — linked rows are de-queued, not materialized. Add them to
   // materializedRowIds so the cleanup pass below deletes them from the
   // staging queue. The live `transactions` row they reference is left
@@ -895,5 +1015,11 @@ export async function POST(
     skippedDuplicates: 0, // accounted for inside executeImport's per-call result
     total: allSelected.length,
     errors: importErrors.length > 0 ? importErrors : undefined,
+    // 2026-05-24 — per-day bank balance mismatches surfaced by the
+    // pre-flight validation. Empty array means the new anchors line up
+    // with the running total; non-empty means at least one anchor's
+    // expected balance doesn't match what the bank reported. Approve
+    // still went through (warn-but-allow); the UI banner explains.
+    balanceWarnings: balanceWarnings.length > 0 ? balanceWarnings : undefined,
   });
 }

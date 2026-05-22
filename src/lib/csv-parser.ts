@@ -394,6 +394,51 @@ export function extractCsvHeaders(csvText: string): string[] {
   return parseCSVRow(lines[0]);
 }
 
+/**
+ * Extract per-day bank balance anchors from a CSV with a Balance column
+ * (2026-05-24). For each unique date in the file, keeps the LAST-in-file-
+ * order balance for that date \u2014 the "last effective balance of the day"
+ * semantic the user picked (handles ascending and descending file order
+ * alike: walking the rows and overwriting on every hit always leaves the
+ * last appearance, regardless of which sort direction the file uses).
+ *
+ * Returns an empty array when `mapping.balance` is unset, when no row has
+ * a parseable balance value, or when no row has a valid date. Invalid
+ * cells (empty, NaN, malformed date) are silently skipped \u2014 they're not
+ * an error condition since this column is optional.
+ *
+ * `import_hash` is NEVER recomputed by this helper. The anchor is a
+ * sibling fact, not a row attribute. Load-bearing per CLAUDE.md.
+ */
+export function extractBalanceAnchors(
+  csvText: string,
+  mapping: { date: string; balance?: string },
+  dateFormatOverride: DateFormatOverride | null | undefined,
+  currency: string,
+): Array<{ date: string; balance: number; currency: string }> {
+  if (!mapping.balance) return [];
+  const rows = parseCSV(csvText);
+  // Walk in file order; overwrite on every date hit so the final value
+  // per key is the last appearance in the file. Works for both ASC and
+  // DESC date sort \u2014 see CLAUDE.md "Bank balance anchors".
+  const perDay = new Map<string, number>();
+  for (const row of rows) {
+    const dateRaw = row[mapping.date] ?? "";
+    const balanceRaw = row[mapping.balance] ?? "";
+    if (!balanceRaw.trim()) continue;
+    const date = normalizeDate(dateRaw, dateFormatOverride);
+    if (!date) continue;
+    const balance = parseAmount(balanceRaw);
+    if (isNaN(balance)) continue;
+    perDay.set(date, balance);
+  }
+  return Array.from(perDay.entries()).map(([date, balance]) => ({
+    date,
+    balance,
+    currency,
+  }));
+}
+
 export async function importAccounts(csvText: string, userId: string, dek: Buffer | null = null) {
   const rows = parseCSV(csvText);
   if (rows.length === 0) return { total: 0, imported: 0, errors: ["File is empty or contains only headers"] };

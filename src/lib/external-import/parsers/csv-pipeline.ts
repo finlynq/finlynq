@@ -21,6 +21,7 @@ import { and, eq } from "drizzle-orm";
 import {
   csvToRawTransactions,
   csvToRawTransactionsWithMapping,
+  extractBalanceAnchors,
   extractCsvHeaders,
   parseCSV,
   trimCsvRows,
@@ -65,7 +66,18 @@ export interface CsvPipelineRequest {
    * "Auto-detect" in the template-picker dialog.
    */
   skipAutoMatchTemplate?: boolean;
+  /**
+   * 2026-05-24 — currency stamped on extracted balance anchors. Falls
+   * back to "CAD" when unset. The upload route passes the bound account's
+   * currency so anchors land in the bank-side display unit.
+   */
+  anchorCurrency?: string | null;
 }
+
+/** Per-day bank balance anchor extracted from a CSV's Balance column.
+ *  Empty when the mapping has no `balance` field or no row carried a
+ *  parseable value. */
+export type CsvAnchor = { date: string; balance: number; currency: string };
 
 export type CsvPipelineResult =
   | {
@@ -77,6 +89,10 @@ export type CsvPipelineResult =
       appliedTemplateId?: number;
       /** Set when step 3 (auto-match) succeeded — for UI hints. */
       suggestedTemplate?: { id: number; name: string; score: number };
+      /** 2026-05-24 — per-day bank balance anchors when the mapping has
+       *  a `balance` field. Empty array when the CSV lacks a Balance
+       *  column. Currency carries the upload's default currency. */
+      anchors: CsvAnchor[];
     }
   | {
       kind: "needs-mapping";
@@ -113,7 +129,9 @@ export async function parseCsvWithFallback(
     skipFooterRows = 0,
     dateFormatOverride = null,
     skipAutoMatchTemplate = false,
+    anchorCurrency = null,
   } = req;
+  const anchorCcy = anchorCurrency ?? "CAD";
   // Apply header/footer trim BEFORE any header detection so the trim
   // shapes what step 2 (canonical headers) and step 3 (auto-matched
   // saved template) actually see (FINLYNQ-54). With both knobs at 0
@@ -139,12 +157,19 @@ export async function parseCsvWithFallback(
     const tpl = deserializeTemplate(tplRow);
     const mapped = parseWithMapping(text, tpl.columnMapping, tpl.defaultAccount ?? null, dateFormatOverride);
     const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
+    const anchors = extractBalanceAnchors(
+      text,
+      tpl.columnMapping,
+      dateFormatOverride,
+      anchorCcy,
+    );
     return {
       kind: "parsed",
       rows: filled,
       errors: mapped.errors,
       headers,
       appliedTemplateId: tpl.id,
+      anchors,
     };
   }
 
@@ -152,11 +177,19 @@ export async function parseCsvWithFallback(
   const canonical = csvToRawTransactions(text, dateFormatOverride);
   if (canonical.rows.length > 0) {
     const filled = applyDefaultAccount(canonical.rows, defaultAccountName);
+    // Canonical path has no explicit ColumnMapping; reuse auto-detect to
+    // find a Balance column when present. Falls back to no anchors when
+    // the file doesn't carry one.
+    const auto = autoDetectColumnMapping(headers);
+    const anchors = auto
+      ? extractBalanceAnchors(text, auto, dateFormatOverride, anchorCcy)
+      : [];
     return {
       kind: "parsed",
       rows: filled,
       errors: canonical.errors,
       headers,
+      anchors,
     };
   }
 
@@ -180,6 +213,12 @@ export async function parseCsvWithFallback(
     );
     if (mapped.rows.length > 0) {
       const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
+      const anchors = extractBalanceAnchors(
+        text,
+        best.template.columnMapping,
+        dateFormatOverride,
+        anchorCcy,
+      );
       return {
         kind: "parsed",
         rows: filled,
@@ -191,6 +230,7 @@ export async function parseCsvWithFallback(
           name: best.template.name,
           score: best.score,
         },
+        anchors,
       };
     }
   }

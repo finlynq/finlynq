@@ -151,6 +151,7 @@ async function handleExport(request: NextRequest) {
       portfolioHoldings,
       bankTransactions,
       transactionBankLinks,
+      bankDailyBalances,
       budgets,
       budgetTemplates,
       loans,
@@ -173,6 +174,8 @@ async function handleExport(request: NextRequest) {
       db.select().from(schema.bankTransactions).where(eq(schema.bankTransactions.userId, userId)),
       // M:N reconcile join (2026-05-23). No encrypted fields — straight pass-through.
       db.select().from(schema.transactionBankLinks).where(eq(schema.transactionBankLinks.userId, userId)),
+      // Bank balance anchors (2026-05-24). No encrypted fields — straight pass-through.
+      db.select().from(schema.bankDailyBalances).where(eq(schema.bankDailyBalances.userId, userId)),
       db.select().from(schema.budgets).where(eq(schema.budgets.userId, userId)),
       db.select().from(schema.budgetTemplates).where(eq(schema.budgetTemplates.userId, userId)),
       db.select().from(schema.loans).where(eq(schema.loans.userId, userId)),
@@ -224,6 +227,7 @@ async function handleExport(request: NextRequest) {
         portfolioHoldings,
         bankTransactions: decryptedBankTransactions,
         transactionBankLinks,
+        bankDailyBalances,
         budgets,
         budgetTemplates,
         loans,

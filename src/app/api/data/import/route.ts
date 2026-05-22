@@ -573,6 +573,59 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // ─── Bank balance anchors (2026-05-24) ─────────────────────────────
+    //
+    // Pure additive — anchors carry only an account FK, so remap it via
+    // accountIdMap and re-INSERT. Anchors without a remappable account
+    // are dropped (their account isn't in this backup; orphan FK would
+    // throw on the actual INSERT). ON CONFLICT (user, account, date) DO
+    // NOTHING — running an import twice is harmless.
+    interface BackupAnchorRow {
+      accountId: number;
+      date: string;
+      balance: number;
+      currency?: string;
+      source?: string;
+      sourceFilenames?: string[];
+    }
+    const backupAnchors = (d as { bankDailyBalances?: BackupAnchorRow[] })
+      .bankDailyBalances;
+    if (backupAnchors?.length) {
+      const remappedAnchors = backupAnchors
+        .map((a) => {
+          const newAccountId = accountIdMap.get(a.accountId);
+          if (newAccountId == null) return null;
+          return {
+            userId,
+            accountId: newAccountId,
+            date: a.date,
+            balance: Number(a.balance),
+            currency: a.currency ?? "CAD",
+            // Pre-2026-05-24 backups have no source value; fall back
+            // to 'backup_restore' (CHECK constraint accepts it).
+            source: typeof a.source === "string" && a.source.length > 0
+              ? a.source
+              : "backup_restore",
+            sourceFilenames: Array.isArray(a.sourceFilenames)
+              ? a.sourceFilenames
+              : [],
+          };
+        })
+        .filter((r): r is NonNullable<typeof r> => r != null);
+      if (remappedAnchors.length > 0) {
+        await db
+          .insert(schema.bankDailyBalances)
+          .values(remappedAnchors)
+          .onConflictDoNothing({
+            target: [
+              schema.bankDailyBalances.userId,
+              schema.bankDailyBalances.accountId,
+              schema.bankDailyBalances.date,
+            ],
+          });
+      }
+    }
+
     // Insert transaction splits with remapped IDs (also encrypting text fields)
     //
     // C-5 (2026-05-07): unmapped FKs throw instead of silently inserting the

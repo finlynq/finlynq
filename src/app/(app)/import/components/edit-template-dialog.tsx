@@ -45,6 +45,7 @@ const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
   currency: "Currency",
   note: "Note",
   tags: "Tags",
+  balance: "Balance (running)",
 };
 
 const MAPPING_FIELDS = Object.keys(FIELD_LABELS) as (keyof ColumnMapping)[];

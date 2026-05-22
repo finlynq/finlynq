@@ -665,6 +665,16 @@ export const stagedImports = pgTable("staged_imports", {
   // staged_imports rows; overlap detection skips NULL rows.
   dateRangeStart: text("date_range_start"), // YYYY-MM-DD
   dateRangeEnd: text("date_range_end"), // YYYY-MM-DD
+  // ─── Bank balance anchors parsed at upload time (2026-05-24) ─────────
+  // JSONB array of { date, balance, currency, source }. Carries CSV
+  // balance-column anchors and OFX <LEDGERBAL> from the upload step
+  // through to the approve step (where they're INSERTed into
+  // bank_daily_balances + validated against the running total). Null
+  // means no anchors were parsed; the upload form's statement_balance
+  // is a SEPARATE upload_form source carried via the existing
+  // statement_balance / statement_balance_date / statement_currency
+  // columns above.
+  parsedAnchors: jsonb("parsed_anchors"),
 });
 
 export const stagedTransactions = pgTable("staged_transactions", {
@@ -1110,3 +1120,61 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
     .notNull()
     .defaultNow(),
 });
+
+// ─── bank_daily_balances — per-day bank-reported anchor balances (2026-05-24)
+//
+// Independent of `bank_transactions`. An anchor is "the bank told us X
+// on date D" — it survives row deletion and may exist on days that have
+// no row at all (e.g., user-typed statement balance for a statement-end
+// date with no transactions on it).
+//
+// Re-import semantics: ON CONFLICT (user_id, account_id, date) DO UPDATE
+// — newer balance wins. A re-downloaded statement with a corrected value
+// should overwrite. Load-bearing per CLAUDE.md "Bank balance anchors".
+//
+// CASCADE on user_id + account_id so wipe-account and account delete
+// clean up automatically. PK enforces "at most one anchor per day".
+export const bankDailyBalances = pgTable("bank_daily_balances", {
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  accountId: integer("account_id")
+    .notNull()
+    .references(() => accounts.id, { onDelete: "cascade" }),
+  // YYYY-MM-DD, matches bank_transactions.date format.
+  date: text("date").notNull(),
+  balance: doublePrecision("balance").notNull(),
+  // ISO 4217. Captured at insert from accounts.currency or the
+  // statement's CURDEF. Drives /reconcile header's FX hop decision.
+  currency: text("currency").notNull(),
+  // 'csv_column' | 'ofx_ledgerbal' | 'upload_form' today.
+  // 'email' | 'connector' | 'backup_restore' reserved for future
+  // surfaces. CHECK enforced in SQL; keep this enum in sync with the
+  // SOURCES tuple in src/lib/bank-ledger-balance.ts.
+  source: text("source").notNull(),
+  // Append-only history of filenames that produced or re-confirmed
+  // this anchor. Mirrors bank_transactions.source_filenames pattern.
+  sourceFilenames: text("source_filenames")
+    .array()
+    .notNull()
+    .default(sql`ARRAY[]::TEXT[]`),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.userId, table.accountId, table.date] }),
+  // Hot path: "give me the most recent anchor for this account" — drives
+  // the /reconcile header's "bank says (as of <date>): $X" display, and
+  // the validation helper's "find prior anchor" lookup. The DESC
+  // ordering on `date` lives in the SQL migration; PG scans the index
+  // either direction so the Drizzle reflection can omit it without
+  // changing the runtime plan.
+  index("bank_daily_balances_account_date_desc_idx").on(
+    table.userId,
+    table.accountId,
+    table.date,
+  ),
+]);
