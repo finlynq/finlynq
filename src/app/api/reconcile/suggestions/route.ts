@@ -54,6 +54,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Invalid accountId" }, { status: 400 });
   }
 
+  // Optional date window. `lookbackDays` is a positive integer count of
+  // days from today (e.g. 60 = "last 60 days"). Omitted / 0 / negative
+  // means "all time". UI sends one of 30 / 60 / 90 / 180 / null per the
+  // preset chips on the page; the engine clamps + handles null.
+  const lookbackRaw = request.nextUrl.searchParams.get("lookbackDays");
+  const lookbackDays = lookbackRaw ? parseInt(lookbackRaw, 10) : null;
+  const dateMin =
+    lookbackDays != null && Number.isFinite(lookbackDays) && lookbackDays > 0
+      ? shiftDaysFromToday(-lookbackDays)
+      : null;
+
   // Cross-tenant attack returns 404 without leaking that the account
   // exists for another user. Same pattern as /api/import/bank-ledger.
   const acct = await db
@@ -77,6 +88,7 @@ export async function GET(request: NextRequest) {
     dek,
     accountId,
     thresholds,
+    dateMin,
   });
 
   return NextResponse.json({
@@ -84,8 +96,15 @@ export async function GET(request: NextRequest) {
     data: {
       ...result,
       thresholds,
+      lookbackDays: lookbackDays && lookbackDays > 0 ? lookbackDays : null,
     },
   });
+}
+
+/** Return the YYYY-MM-DD that is `deltaDays` from today (UTC). */
+function shiftDaysFromToday(deltaDays: number): string {
+  const ms = Date.now() + deltaDays * 86_400_000;
+  return new Date(ms).toISOString().slice(0, 10);
 }
 
 /**

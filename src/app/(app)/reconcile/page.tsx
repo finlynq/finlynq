@@ -44,12 +44,49 @@ import {
 } from "@/components/reconcile/transactions-pane";
 import type { SuggestionDisplay } from "@/components/reconcile/suggestion-card";
 import type { ReconcileBadgeVariant } from "@/components/reconcile/match-pill";
+import {
+  MaterializeDialog,
+  type MaterializeBankPreview,
+  type CategoryOption,
+} from "@/components/reconcile/materialize-dialog";
 
 interface Account {
   id: number;
+  /** Decrypted formal name (post `decryptNamedRows`). */
   name: string;
+  /** Decrypted alias — friendly display name. Preferred over `name`
+   *  when set, matching the convention on other pages. */
+  alias?: string | null;
   currency: string;
   archived?: boolean;
+}
+
+/** Date-window preset for the lookback chip group. `null` = all time. */
+const LOOKBACK_OPTIONS: Array<{ label: string; value: number | null }> = [
+  { label: "30d", value: 30 },
+  { label: "60d", value: 60 },
+  { label: "90d", value: 90 },
+  { label: "6mo", value: 180 },
+  { label: "All", value: null },
+];
+const DEFAULT_LOOKBACK_DAYS = 60;
+
+function parseLookbackFromUrl(): number | null {
+  if (typeof window === "undefined") return DEFAULT_LOOKBACK_DAYS;
+  const raw = new URLSearchParams(window.location.search).get("range");
+  if (raw === "all") return null;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  if (Number.isFinite(n) && LOOKBACK_OPTIONS.some((o) => o.value === n)) {
+    return n;
+  }
+  return DEFAULT_LOOKBACK_DAYS;
+}
+
+/** Friendly display name for an account — alias when set, formal name otherwise. */
+function accountDisplayName(a: Account): string {
+  const alias = a.alias?.trim();
+  if (alias) return alias;
+  return a.name;
 }
 
 interface ReconcileLink {
@@ -93,6 +130,8 @@ interface BankSnapshot {
   seenCount: number;
   firstSeenAt: string | null;
   lastSeenAt: string | null;
+  /** Rule-engine suggestion for the materialize dialog. */
+  suggestedCategoryId: number | null;
 }
 
 interface ReconcileData {
@@ -108,6 +147,8 @@ interface ReconcileData {
     amountToleranceFloor: number;
     scoreThreshold: number;
   };
+  /** Echoed back by the server so the UI can confirm what window it used. */
+  lookbackDays: number | null;
 }
 
 export default function ReconcilePage() {
@@ -126,6 +167,18 @@ export default function ReconcilePage() {
   const [busyBankId, setBusyBankId] = useState<string | null>(null);
   /** Reject is local-only — page-scoped Set. Matches /import/pending pattern. */
   const [rejected, setRejected] = useState<Set<string>>(new Set());
+  /** Date-window lookback. null = all time. Defaults to 60d on first visit. */
+  const [lookbackDays, setLookbackDays] = useState<number | null>(
+    parseLookbackFromUrl(),
+  );
+  /** Loaded once on mount. The materialize dialog renders these in its
+   *  category picker; the bank-pool rule engine already used the same
+   *  ids server-side to compute `suggestedCategoryId` per bank row. */
+  const [categories, setCategories] = useState<CategoryOption[]>([]);
+  /** Active materialize target — bank-only row whose Create button was
+   *  clicked. null when the dialog is closed. */
+  const [materializeBank, setMaterializeBank] =
+    useState<MaterializeBankPreview | null>(null);
 
   // ─── Load accounts ──────────────────────────────────────────────────
   useEffect(() => {
@@ -166,13 +219,42 @@ export default function ReconcilePage() {
     };
   }, []);
 
-  // ─── Persist account selection in URL ──────────────────────────────
+  // ─── Persist account selection + lookback in URL ───────────────────
   useEffect(() => {
     if (selectedAccountId == null) return;
     const url = new URL(window.location.href);
     url.searchParams.set("account", String(selectedAccountId));
+    url.searchParams.set(
+      "range",
+      lookbackDays == null ? "all" : String(lookbackDays),
+    );
     window.history.replaceState({}, "", url.toString());
-  }, [selectedAccountId]);
+  }, [selectedAccountId, lookbackDays]);
+
+  // ─── Load categories (once) ────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/categories");
+        if (!res.ok) return;
+        const rows = (await res.json()) as Array<{
+          id: number;
+          name: string;
+          type: string;
+        }>;
+        if (cancelled) return;
+        setCategories(
+          rows.map((r) => ({ id: r.id, name: r.name, type: r.type })),
+        );
+      } catch {
+        // Non-fatal — the dialog will just show an empty category list.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ─── Load reconcile snapshot ───────────────────────────────────────
   const refresh = useCallback(async () => {
@@ -180,9 +262,9 @@ export default function ReconcilePage() {
     setDataLoading(true);
     setError(null);
     try {
-      const res = await fetch(
-        `/api/reconcile/suggestions?accountId=${selectedAccountId}`,
-      );
+      const qs = new URLSearchParams({ accountId: String(selectedAccountId) });
+      if (lookbackDays != null) qs.set("lookbackDays", String(lookbackDays));
+      const res = await fetch(`/api/reconcile/suggestions?${qs.toString()}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `HTTP ${res.status}`);
@@ -198,7 +280,7 @@ export default function ReconcilePage() {
     } finally {
       setDataLoading(false);
     }
-  }, [selectedAccountId]);
+  }, [selectedAccountId, lookbackDays]);
 
   useEffect(() => {
     void refresh();
@@ -271,6 +353,8 @@ export default function ReconcilePage() {
         linkedTransactionId: link?.transactionId ?? null,
         suggestedTransactionId: sug?.transactionId ?? null,
         seenCount: b.seenCount,
+        suggestedCategoryId: b.suggestedCategoryId,
+        accountId: b.accountId,
       };
     });
 
@@ -404,27 +488,26 @@ export default function ReconcilePage() {
     [refresh],
   );
 
+  // Open the MaterializeDialog with a per-row preview. The dialog owns
+  // the POST so the user picks category/account before the transaction
+  // is minted — fixes the V1 issue where Create produced uncategorized
+  // transactions silently.
   const onMaterialize = useCallback(
-    async (bankId: string) => {
-      setBusyBankId(bankId);
-      try {
-        const res = await fetch("/api/reconcile/materialize", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ bankTransactionId: bankId }),
-        });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error ?? `HTTP ${res.status}`);
-        }
-        await refresh();
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setBusyBankId(null);
-      }
+    (bankId: string) => {
+      if (!data) return;
+      const snap = data.bankTransactions[bankId];
+      if (!snap) return;
+      setMaterializeBank({
+        bankTransactionId: snap.id,
+        date: snap.date,
+        amount: snap.amount,
+        currency: snap.currency,
+        payee: snap.payee,
+        accountId: snap.accountId,
+        suggestedCategoryId: snap.suggestedCategoryId,
+      });
     },
-    [refresh],
+    [data],
   );
 
   // ─── Render ────────────────────────────────────────────────────────
@@ -446,45 +529,77 @@ export default function ReconcilePage() {
         </Link>
       </div>
 
-      <div className="flex items-center gap-2 text-sm">
-        <label
-          htmlFor="reconcile-account-selector"
-          className="text-muted-foreground"
-        >
-          Account:
-        </label>
-        {accountsLoading ? (
-          <span className="text-xs text-muted-foreground italic">Loading…</span>
-        ) : accounts.length === 0 ? (
-          <span className="text-xs text-muted-foreground italic">
-            No accounts found. Create an account first.
-          </span>
-        ) : (
-          <Select
-            value={selectedAccountId != null ? String(selectedAccountId) : ""}
-            onValueChange={(v) => {
-              const n = parseInt(v ?? "", 10);
-              if (Number.isFinite(n)) {
-                setSelectedAccountId(n);
-                setRejected(new Set());
-              }
-            }}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 text-sm">
+          <label
+            htmlFor="reconcile-account-selector"
+            className="text-muted-foreground"
           >
-            <SelectTrigger
-              id="reconcile-account-selector"
-              className="w-[280px]"
+            Account:
+          </label>
+          {accountsLoading ? (
+            <span className="text-xs text-muted-foreground italic">
+              Loading…
+            </span>
+          ) : accounts.length === 0 ? (
+            <span className="text-xs text-muted-foreground italic">
+              No accounts found. Create an account first.
+            </span>
+          ) : (
+            <Select
+              value={
+                selectedAccountId != null ? String(selectedAccountId) : ""
+              }
+              onValueChange={(v) => {
+                const n = parseInt(v ?? "", 10);
+                if (Number.isFinite(n)) {
+                  setSelectedAccountId(n);
+                  setRejected(new Set());
+                }
+              }}
             >
-              <SelectValue placeholder="Select an account" />
-            </SelectTrigger>
-            <SelectContent>
-              {accounts.map((a) => (
-                <SelectItem key={a.id} value={String(a.id)}>
-                  {a.name} · {a.currency}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
+              <SelectTrigger
+                id="reconcile-account-selector"
+                className="w-[280px]"
+              >
+                <SelectValue placeholder="Select an account" />
+              </SelectTrigger>
+              <SelectContent>
+                {accounts.map((a) => (
+                  <SelectItem key={a.id} value={String(a.id)}>
+                    {accountDisplayName(a)} · {a.currency}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+
+        {/* Date-window preset chips. Default 60d; "All" passes null. */}
+        <div
+          className="flex items-center gap-1 text-xs"
+          role="group"
+          aria-label="Date window"
+        >
+          <span className="text-muted-foreground mr-1">Last</span>
+          {LOOKBACK_OPTIONS.map((opt) => {
+            const active = lookbackDays === opt.value;
+            return (
+              <Button
+                key={opt.label}
+                size="sm"
+                variant={active ? "default" : "outline"}
+                onClick={() => {
+                  setLookbackDays(opt.value);
+                  setRejected(new Set());
+                }}
+                className="h-7 px-2 text-xs"
+              >
+                {opt.label}
+              </Button>
+            );
+          })}
+        </div>
       </div>
 
       {error && (
@@ -529,10 +644,30 @@ export default function ReconcilePage() {
         {data && (
           <span className="ml-auto">
             threshold {data.thresholds.scoreThreshold.toFixed(2)} · ±
-            {data.thresholds.dateToleranceDays}d
+            {data.thresholds.dateToleranceDays}d ·{" "}
+            {data.lookbackDays != null
+              ? `last ${data.lookbackDays}d`
+              : "all time"}
           </span>
         )}
       </div>
+
+      <MaterializeDialog
+        open={materializeBank != null}
+        onOpenChange={(o) => {
+          if (!o) setMaterializeBank(null);
+        }}
+        bank={materializeBank}
+        categories={categories}
+        accounts={accounts.map((a) => ({
+          id: a.id,
+          name: accountDisplayName(a),
+          currency: a.currency,
+        }))}
+        onCreated={() => {
+          void refresh();
+        }}
+      />
     </div>
   );
 }

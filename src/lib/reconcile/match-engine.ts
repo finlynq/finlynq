@@ -38,9 +38,11 @@
  * No writes; no MCP cache invalidations.
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, gte } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { tryDecryptField } from "@/lib/crypto/envelope";
+import { applyRules, type TransactionRule } from "@/lib/auto-categorize";
+import type { Action, ConditionGroup } from "@/lib/rules/schema";
 import {
   buildBankLedgerCandidatePool,
   type BankCandidateRow,
@@ -114,6 +116,11 @@ export interface ReconcileBankSnapshot {
   seenCount: number;
   firstSeenAt: string | null;
   lastSeenAt: string | null;
+  /** Rule-engine suggestion for the materialize-from-bank-row flow.
+   *  `null` when no rule matches the bank row's payee/amount/etc.
+   *  Populated for ALL bank rows so the UI can preview the default
+   *  category before clicking Create. */
+  suggestedCategoryId: number | null;
 }
 
 export interface ReconcileResult {
@@ -133,6 +140,12 @@ export interface ReconcileInput {
   dek: Buffer | null;
   accountId: number;
   thresholds?: Partial<ReconcileThresholds>;
+  /** Optional ISO YYYY-MM-DD floor on both `transactions.date` and
+   *  `bank_transactions.date`. Null = no window (full history). The UI
+   *  defaults to last 60 days; "All time" passes null. The match engine
+   *  also auto-pads the bank-pool window by `dateToleranceDays` so an
+   *  edge-of-window tx can still match a bank row just outside it. */
+  dateMin?: string | null;
 }
 
 /**
@@ -146,19 +159,31 @@ export async function computeReconcileForAccount(
     ...RECONCILE_DEFAULT_THRESHOLDS,
     ...(input.thresholds ?? {}),
   };
+  const dateMin = input.dateMin ?? null;
 
-  const [bankPool, txRows, joinRows] = await Promise.all([
+  const [bankPool, txRows, joinRows, activeRules] = await Promise.all([
     buildBankLedgerCandidatePool({
       userId: input.userId,
       dek: input.dek,
       accountIds: [input.accountId],
     }),
-    loadTxRows(input.userId, input.accountId, input.dek),
+    loadTxRows(input.userId, input.accountId, input.dek, dateMin),
     loadJoinRows(input.userId, input.accountId),
+    loadActiveRulesForReconcile(input.userId),
   ]);
 
-  const bankRows: BankCandidateRow[] =
+  // Pre-filter the bank pool to the same window. Pad by the fuzzy date
+  // tolerance so an edge-of-window tx can still match a bank row just
+  // outside it via the fuzzy layer; the exact-hash + linked layers only
+  // care about hash/FK so the pad has no effect there.
+  const allBankRows: BankCandidateRow[] =
     bankPool.byAccount.get(input.accountId) ?? [];
+  const bankDateFloor = dateMin
+    ? shiftDateString(dateMin, -thresholds.dateToleranceDays)
+    : null;
+  const bankRows: BankCandidateRow[] = bankDateFloor
+    ? allBankRows.filter((b) => b.date >= bankDateFloor)
+    : allBankRows;
 
   // ─── Layer 1: existing links ───────────────────────────────────────
   // Track consumption so layers 2 + 3 skip pairs (and individual rows
@@ -313,6 +338,22 @@ export async function computeReconcileForAccount(
   }
   const bankTransactions: Record<string, ReconcileBankSnapshot> = {};
   for (const b of bankRows) {
+    // Compute the rule-engine suggested category for this bank row's
+    // payee. `null` when no rule matches OR the matched rule has no
+    // `set_category` action. The materialize dialog uses this as the
+    // default value of its category select.
+    const ruleMatch = applyRules(
+      {
+        payee: b.payeePlain,
+        amount: b.amount,
+        accountId: b.accountId,
+        date: b.date,
+      },
+      activeRules,
+    );
+    const suggestedCategoryId = ruleMatch
+      ? pickCategoryFromActions(ruleMatch.actions)
+      : null;
     bankTransactions[b.id] = {
       id: b.id,
       date: b.date,
@@ -326,6 +367,7 @@ export async function computeReconcileForAccount(
       seenCount: 0,
       firstSeenAt: null,
       lastSeenAt: null,
+      suggestedCategoryId,
     };
   }
   // Pull the per-row freshness metadata in a single follow-up query.
@@ -380,11 +422,82 @@ interface TxLoaded {
   importHash: string | null;
 }
 
+/**
+ * Shift a YYYY-MM-DD string by N days. Used to pad the bank-pool window
+ * by the fuzzy date tolerance.
+ */
+function shiftDateString(iso: string, deltaDays: number): string {
+  const ms = Date.parse(iso + "T00:00:00Z");
+  if (Number.isNaN(ms)) return iso;
+  const d = new Date(ms + deltaDays * 86_400_000);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Pick the first `set_category` action's categoryId from a rule's
+ * action list, if any. Returns null when none of the actions is a
+ * `set_category`. Rules-v2 allows multiple actions per rule but only
+ * one category-setting action is meaningful (later ones overwrite); we
+ * mirror the patcher's first-wins semantics.
+ */
+function pickCategoryFromActions(actions: Action[]): number | null {
+  for (const a of actions) {
+    if (a.kind === "set_category" && typeof a.categoryId === "number") {
+      return a.categoryId;
+    }
+  }
+  return null;
+}
+
+/**
+ * Load the user's active transaction rules in priority-descending order,
+ * shaped for `applyRules()`. Read-only — no DEK needed because
+ * `transaction_rules.conditions` + `actions` are JSONB (not encrypted).
+ */
+async function loadActiveRulesForReconcile(
+  userId: string,
+): Promise<TransactionRule[]> {
+  const rows = await db
+    .select({
+      id: schema.transactionRules.id,
+      name: schema.transactionRules.name,
+      conditions: schema.transactionRules.conditions,
+      actions: schema.transactionRules.actions,
+      isActive: schema.transactionRules.isActive,
+      priority: schema.transactionRules.priority,
+    })
+    .from(schema.transactionRules)
+    .where(
+      and(
+        eq(schema.transactionRules.userId, userId),
+        eq(schema.transactionRules.isActive, true),
+      ),
+    )
+    .orderBy(desc(schema.transactionRules.priority), schema.transactionRules.id)
+    .all();
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
+    actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
+    isActive: r.isActive,
+    priority: r.priority ?? 0,
+  }));
+}
+
 async function loadTxRows(
   userId: string,
   accountId: number,
   dek: Buffer | null,
+  dateMin: string | null,
 ): Promise<TxLoaded[]> {
+  const whereClauses = [
+    eq(schema.transactions.userId, userId),
+    eq(schema.transactions.accountId, accountId),
+  ];
+  if (dateMin) {
+    whereClauses.push(gte(schema.transactions.date, dateMin));
+  }
   const rows = await db
     .select({
       id: schema.transactions.id,
@@ -402,12 +515,7 @@ async function loadTxRows(
       schema.categories,
       eq(schema.transactions.categoryId, schema.categories.id),
     )
-    .where(
-      and(
-        eq(schema.transactions.userId, userId),
-        eq(schema.transactions.accountId, accountId),
-      ),
-    )
+    .where(and(...whereClauses))
     .all();
 
   return rows.flatMap((r) => {

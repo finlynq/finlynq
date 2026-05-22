@@ -44,6 +44,12 @@ export interface BankRow {
   suggestedTransactionId: number | null;
   /** How many statements have included this row. */
   seenCount: number;
+  /** Pre-resolved category id from the rule engine; piped through to
+   *  the MaterializeDialog as the default category pick. null when no
+   *  rule matched the bank row's payee. */
+  suggestedCategoryId: number | null;
+  /** Bank row's account id — used by the dialog as the default account. */
+  accountId: number;
 }
 
 export function BankPane({
