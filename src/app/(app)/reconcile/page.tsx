@@ -49,10 +49,10 @@ import {
   type MaterializeBankPreview,
   type CategoryOption,
 } from "@/components/reconcile/materialize-dialog";
-import {
-  BalanceSummaryCard,
-  type BalanceSummary,
-} from "@/components/reconcile/balance-summary-card";
+// 2026-05-24 — BalanceSummaryCard moved to /import/pending per user
+// decision: surface the bank-vs-system compare at import time when the
+// user can still reject the batch, not when doing post-import row-by-row
+// reconciliation here.
 
 interface Account {
   id: number;
@@ -183,13 +183,6 @@ export default function ReconcilePage() {
    *  clicked. null when the dialog is closed. */
   const [materializeBank, setMaterializeBank] =
     useState<MaterializeBankPreview | null>(null);
-  /** 2026-05-24 — bank-side vs. system-side balance summary for the
-   *  header card. Independent fetch from the suggestions endpoint so a
-   *  slow match-engine run doesn't block the balance display. */
-  const [balanceSummary, setBalanceSummary] = useState<BalanceSummary | null>(
-    null,
-  );
-  const [balanceLoading, setBalanceLoading] = useState(false);
 
   // ─── Load accounts ──────────────────────────────────────────────────
   useEffect(() => {
@@ -296,42 +289,6 @@ export default function ReconcilePage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  // ─── Load balance summary for header card ──────────────────────────
-  const refreshBalanceSummary = useCallback(async () => {
-    if (selectedAccountId == null) {
-      setBalanceSummary(null);
-      return;
-    }
-    setBalanceLoading(true);
-    try {
-      const qs = new URLSearchParams({
-        accountId: String(selectedAccountId),
-      });
-      const res = await fetch(`/api/reconcile/balance-summary?${qs.toString()}`);
-      if (!res.ok) {
-        setBalanceSummary(null);
-        return;
-      }
-      const body = await res.json();
-      if (body.success) {
-        setBalanceSummary(body.data as BalanceSummary);
-      } else {
-        setBalanceSummary(null);
-      }
-    } catch {
-      setBalanceSummary(null);
-    } finally {
-      setBalanceLoading(false);
-    }
-  }, [selectedAccountId]);
-
-  useEffect(() => {
-    void refreshBalanceSummary();
-    // The summary depends on data the mutation endpoints can change (a
-    // user accepting a suggestion materializes a new tx that shifts the
-    // system-side balance), so we refetch in lockstep with `refresh()`.
-  }, [refreshBalanceSummary, data]);
 
   // ─── Derive BankRow[] + TxRow[] for the panes ──────────────────────
   const { bankRows, txRows, counts } = useMemo(() => {
@@ -653,13 +610,6 @@ export default function ReconcilePage() {
         <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
           {error}
         </div>
-      )}
-
-      {selectedAccountId != null && (
-        <BalanceSummaryCard
-          summary={balanceSummary}
-          loading={balanceLoading && !balanceSummary}
-        />
       )}
 
       {selectedAccountId != null && (

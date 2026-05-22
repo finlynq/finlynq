@@ -50,6 +50,14 @@ export interface FilePaneProps {
   /** Phase 3 — optional pinned content rendered above the table (the
    *  auto-match SuggestionsGroup). Composes cleanly with empty state. */
   header?: React.ReactNode;
+  /**
+   * 2026-05-24 — bank balance anchors parsed from the uploaded file's
+   * Balance column. Map of YYYY-MM-DD → balance value. When non-empty,
+   * the pane renders a Balance column showing the file's stated balance
+   * on the FIRST row of each day in display order. Empty map = no
+   * column rendered.
+   */
+  anchorsByDate?: Map<string, number>;
 }
 
 export function FilePane({
@@ -64,6 +72,7 @@ export function FilePane({
   onRowUpdated,
   rowActions,
   header,
+  anchorsByDate,
 }: FilePaneProps) {
   if (rows.length === 0) {
     return (
@@ -75,6 +84,17 @@ export function FilePane({
       </>
     );
   }
+
+  // 2026-05-24 — "one balance per day" rule. Track which dates have
+  // already had a balance cell rendered (rows are sorted newest-first
+  // by the server, so the FIRST row of each day in display order is
+  // the most recent transaction of that day).
+  const balanceShownForDate = new Set<string>();
+  const hasAnyAnchor = (anchorsByDate?.size ?? 0) > 0;
+  // colSpan for the expanded editor row must cover every header column.
+  // Columns: checkbox (1) + chevron (2) + Date (3) + Payee (4) + Type (5)
+  //          + Amount (6) [+ Balance (7)] [+ Actions (last)]
+  const editorColSpan = 6 + (hasAnyAnchor ? 1 : 0) + (rowActions ? 1 : 0);
 
   return (
     <div className="flex flex-col h-full">
@@ -106,6 +126,9 @@ export function FilePane({
               <TableHead>Payee</TableHead>
               <TableHead>Type</TableHead>
               <TableHead className="text-right">Amount</TableHead>
+              {hasAnyAnchor && (
+                <TableHead className="text-right">Balance</TableHead>
+              )}
               {rowActions && <TableHead className="w-32 text-right">Actions</TableHead>}
             </TableRow>
           </TableHeader>
@@ -118,6 +141,12 @@ export function FilePane({
                   : r.isDuplicate || r.reconcileState === "linked"
                     ? "opacity-60"
                     : "";
+              const dayBalance = hasAnyAnchor ? anchorsByDate?.get(r.date) : undefined;
+              const showBalance =
+                hasAnyAnchor &&
+                dayBalance !== undefined &&
+                !balanceShownForDate.has(r.date);
+              if (showBalance) balanceShownForDate.add(r.date);
               return (
                 <RowFragment key={r.id}>
                   <TableRow className={dimmed}>
@@ -184,6 +213,20 @@ export function FilePane({
                     <TableCell className="text-right font-mono text-xs">
                       {formatCurrency(r.amount, r.currency || "CAD")}
                     </TableCell>
+                    {hasAnyAnchor && (
+                      <TableCell
+                        className="text-right font-mono text-xs"
+                        title={
+                          showBalance
+                            ? `Bank-stated balance from file on ${r.date}`
+                            : undefined
+                        }
+                      >
+                        {showBalance && dayBalance !== undefined
+                          ? formatCurrency(dayBalance, r.currency || "CAD")
+                          : ""}
+                      </TableCell>
+                    )}
                     {rowActions && (
                       <TableCell className="text-right">
                         {rowActions(r)}
@@ -192,7 +235,7 @@ export function FilePane({
                   </TableRow>
                   {isExpanded && (
                     <TableRow>
-                      <TableCell colSpan={rowActions ? 7 : 6} className="p-0">
+                      <TableCell colSpan={editorColSpan} className="p-0">
                         <StagedRowEditor
                           stagedImportId={stagedImportId}
                           row={r}

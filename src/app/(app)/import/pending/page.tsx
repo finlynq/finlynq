@@ -51,6 +51,10 @@ import {
   BalanceWarningBanner,
   type BalanceWarning,
 } from "@/components/staging/balance-warning-banner";
+import {
+  BalanceSummaryCard,
+  type BalanceSummary,
+} from "@/components/reconcile/balance-summary-card";
 import { AccountSelector, type AccountOption } from "@/components/import/reconcile/account-selector";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
 import { FilePane } from "@/components/import/reconcile/file-pane";
@@ -74,6 +78,13 @@ interface StagedRow {
   fileFormat?: string | null;
 }
 
+interface ParsedAnchorRow {
+  date: string;
+  balance: number;
+  currency?: string;
+  source?: string;
+}
+
 interface StagedDetail {
   staged: StagedRow & {
     status: string;
@@ -85,6 +96,9 @@ interface StagedDetail {
     boundAccountId?: number | null;
     dateRangeStart?: string | null;
     dateRangeEnd?: string | null;
+    /** 2026-05-24 — anchors parsed from the file's Balance column.
+     *  Same shape persisted to staged_imports.parsed_anchors. */
+    parsedAnchors?: ParsedAnchorRow[] | null;
   };
   rows: StagedEditableRow[];
   reconciliation?: {
@@ -141,6 +155,12 @@ function PendingImportsPageInner() {
   const [accountId, setAccountId] = useState<number | null>(null);
   const [dbRows, setDbRows] = useState<DbTransactionRow[]>([]);
   const [dbRowsLoading, setDbRowsLoading] = useState(false);
+  // 2026-05-24 — bank-vs-system balance summary card (relocated from
+  // /reconcile to /import/pending per user decision: surface the compare
+  // at IMPORT TIME when the user can still reject the batch, not when
+  // doing post-import row-by-row reconciliation).
+  const [balanceSummary, setBalanceSummary] = useState<BalanceSummary | null>(null);
+  const [balanceSummaryLoading, setBalanceSummaryLoading] = useState(false);
   // Phase 3 — match-action state.
   // Local-only set of rejected suggestion pairs ("stagedRowId:transactionId").
   // Per sub-item FINLYNQ-71 the reject is intentionally NOT persisted —
@@ -395,6 +415,40 @@ function PendingImportsPageInner() {
     };
   }, [accountId]);
 
+  // 2026-05-24 — fetch the bank-vs-system balance summary for the selected
+  // account, displayed in the BalanceSummaryCard above the two-pane layout.
+  // Re-runs in lockstep with dbRows (anything that mutates bank-side or
+  // system-side data should refresh the rollup).
+  useEffect(() => {
+    if (!accountId) {
+      setBalanceSummary(null);
+      return;
+    }
+    let cancelled = false;
+    setBalanceSummaryLoading(true);
+    fetch(`/api/reconcile/balance-summary?accountId=${accountId}`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (cancelled) return;
+        if (body?.success) {
+          setBalanceSummary(body.data as BalanceSummary);
+        } else {
+          setBalanceSummary(null);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setBalanceSummary(null);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setBalanceSummaryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId, dbRows]);
+
   // Filter staged rows to the currently-selected account. Empty
   // accountName matches every account (legacy rows pre-FINLYNQ-58 where
   // boundAccountId was set but the row didn't carry an accountName).
@@ -407,6 +461,28 @@ function PendingImportsPageInner() {
       return !rn || rn === account.name;
     });
   }, [detail, accountId, accounts]);
+
+  // 2026-05-24 — parsed anchors → date map for the FilePane's per-day
+  // Balance column. Plus the upload-form statement_balance lifted as a
+  // synthetic anchor when present (mirrors the approve-time dedup pass:
+  // parser-extracted source wins over upload_form on date collision).
+  const stagedAnchorsByDate = useMemo(() => {
+    const map = new Map<string, number>();
+    const parsed = detail?.staged.parsedAnchors;
+    if (Array.isArray(parsed)) {
+      for (const a of parsed) {
+        if (typeof a?.date === "string" && typeof a?.balance === "number") {
+          map.set(a.date, a.balance);
+        }
+      }
+    }
+    const sb = detail?.staged.statementBalance;
+    const sd = detail?.staged.statementBalanceDate;
+    if (typeof sb === "number" && typeof sd === "string" && !map.has(sd)) {
+      map.set(sd, sb);
+    }
+    return map;
+  }, [detail]);
 
   const toggleSelect = useCallback((id: string) => {
     setSelected((s) => {
@@ -1035,6 +1111,13 @@ function PendingImportsPageInner() {
         </Card>
       )}
 
+      {detail && detail.staged.boundAccountId != null && (
+        <BalanceSummaryCard
+          summary={balanceSummary}
+          loading={balanceSummaryLoading && !balanceSummary}
+        />
+      )}
+
       {detail && detail.staged.statementBalance != null && (
         <ReconciliationCallout
           statementBalance={detail.staged.statementBalance ?? null}
@@ -1199,6 +1282,7 @@ function PendingImportsPageInner() {
                 onToggleSelect={toggleSelect}
                 onToggleExpand={toggleExpanded}
                 onRowUpdated={onRowUpdated}
+                anchorsByDate={stagedAnchorsByDate}
                 header={
                   displaySuggestions.length > 0 && (
                     <SuggestionsGroup

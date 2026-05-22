@@ -38,11 +38,12 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { and, asc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
+import { getLatestBankAnchor } from "@/lib/bank-ledger-balance";
 
 export const dynamic = "force-dynamic";
 
@@ -122,7 +123,10 @@ export async function GET(request: NextRequest) {
       eq(schema.bankTransactions.userId, userId),
       eq(schema.bankTransactions.accountId, accountId),
     ))
-    .orderBy(asc(schema.bankTransactions.date), asc(schema.bankTransactions.id))
+    // 2026-05-24 — newest-first sort. The /import/pending bank-ledger
+    // pane shows running balance per day, anchored from the most-recent
+    // anchor; reading top-down means walking history from now backwards.
+    .orderBy(desc(schema.bankTransactions.date), desc(schema.bankTransactions.id))
     .all();
 
   // Dedup by bank id — a single bank row may join to multiple staged_transactions
@@ -132,6 +136,49 @@ export async function GET(request: NextRequest) {
     if (!byBankId.has(r.bankId)) byBankId.set(r.bankId, r);
   }
   const deduped = Array.from(byBankId.values());
+
+  // ─── End-of-day running balance per date (2026-05-24) ─────────────────
+  //
+  // Anchor from `bank_daily_balances` acts as a checkpoint; end-of-day
+  // balance for any other date is offset from the anchor by the cumulative
+  // sum of intervening amounts. Algorithm:
+  //
+  //   1. Group amounts by date → dailySum
+  //   2. Compute forward cumulative sum cumByDate (sorted ASC)
+  //   3. offset = anchor.balance - cumByDate[anchor.date]
+  //      (or cum-as-of-the-latest-date-≤-anchor.date when anchor isn't in
+  //       the row set — e.g., anchor is for a day with no transactions)
+  //   4. endOfDay[date] = cumByDate[date] + offset
+  //
+  // Math: endOfDay[d] = anchor.balance + (cumByDate[d] - cumByDate[anchor.date])
+  // = anchor.balance + Σ(amounts in (anchor.date, d]) for d > anchor.date
+  // = anchor.balance - Σ(amounts in (d, anchor.date]) for d < anchor.date.
+  //
+  // Falls back to null on every row when no anchor exists.
+  const anchor = await getLatestBankAnchor(userId, accountId);
+  const endOfDayBalance = new Map<string, number>();
+  if (anchor) {
+    const dailySum = new Map<string, number>();
+    for (const r of deduped) {
+      dailySum.set(r.date, (dailySum.get(r.date) ?? 0) + Number(r.amount));
+    }
+    const datesAsc = Array.from(dailySum.keys()).sort();
+    let running = 0;
+    const cumByDate = new Map<string, number>();
+    for (const d of datesAsc) {
+      running += dailySum.get(d) ?? 0;
+      cumByDate.set(d, running);
+    }
+    let cumAtAnchor = 0;
+    for (const d of datesAsc) {
+      if (d <= anchor.date) cumAtAnchor = cumByDate.get(d)!;
+      else break;
+    }
+    const offset = anchor.balance - cumAtAnchor;
+    for (const [d, c] of cumByDate) {
+      endOfDayBalance.set(d, c + offset);
+    }
+  }
 
   // Per-row decrypt. Tier-aware: 'user' → DEK, 'service' → PF_STAGING_KEY.
   // Category name decrypts under the user DEK only (Stream D table).
@@ -166,11 +213,19 @@ export async function GET(request: NextRequest) {
       seenCount: r.seenCount,
       firstSeenAt: r.firstSeenAt?.toISOString() ?? null,
       lastSeenAt: r.lastSeenAt?.toISOString() ?? null,
+      // 2026-05-24 — end-of-day balance for this row's date. Same value
+      // appears on every row of that date; the UI shows it only on the
+      // first row of each day in display order to reduce noise. Null
+      // when the account has no anchor yet.
+      runningBalance: endOfDayBalance.get(r.date) ?? null,
     };
   });
 
   return NextResponse.json({
     success: true,
-    data: { transactions },
+    data: {
+      transactions,
+      latestAnchor: anchor,
+    },
   });
 }

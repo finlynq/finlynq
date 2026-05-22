@@ -60,6 +60,15 @@ export interface DbTransactionRow {
   reconciliationFlag: { kind: string; note: string | null } | null;
   /** How many statements have included this row. Bumped on every re-import. */
   seenCount?: number;
+  /**
+   * End-of-day balance for this row's date, computed from the latest
+   * bank_daily_balances anchor + cumulative sum of intervening amounts.
+   * Same value appears on every row of a given date (server-side); the
+   * pane renders it only on the FIRST row of each day in display order
+   * to reduce noise (the "one balance per day" rule the user picked).
+   * Null when the account has no anchor at all yet.
+   */
+  runningBalance?: number | null;
 }
 
 export function DbPane({
@@ -95,6 +104,12 @@ export function DbPane({
     );
   }
 
+  // 2026-05-24 — "one balance per day" rule: show runningBalance only on
+  // the FIRST row of each day in display order (rows are already sorted
+  // newest-first by the server). Track which dates we've already shown.
+  const balanceShownForDate = new Set<string>();
+  const hasAnyBalance = rows.some((r) => r.runningBalance != null);
+
   return (
     <div className="flex flex-col h-full">
       {header}
@@ -106,12 +121,18 @@ export function DbPane({
               <TableHead>Payee</TableHead>
               <TableHead>Type</TableHead>
               <TableHead className="text-right">Amount</TableHead>
+              {hasAnyBalance && (
+                <TableHead className="text-right">Balance</TableHead>
+              )}
               {rowActions && <TableHead className="w-32 text-right">Actions</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.map((r) => {
               const dimmed = r.linkedStagedRowId != null ? "opacity-70" : "";
+              const showBalance =
+                r.runningBalance != null && !balanceShownForDate.has(r.date);
+              if (showBalance) balanceShownForDate.add(r.date);
               return (
                 <TableRow key={r.id} className={dimmed}>
                   <TableCell className="font-mono text-xs">{r.date}</TableCell>
@@ -168,6 +189,20 @@ export function DbPane({
                   <TableCell className="text-right font-mono text-xs">
                     {formatCurrency(r.amount, r.currency || "CAD")}
                   </TableCell>
+                  {hasAnyBalance && (
+                    <TableCell
+                      className="text-right font-mono text-xs"
+                      title={
+                        showBalance
+                          ? `End-of-day running balance for ${r.date}`
+                          : undefined
+                      }
+                    >
+                      {showBalance && r.runningBalance != null
+                        ? formatCurrency(r.runningBalance, r.currency || "CAD")
+                        : ""}
+                    </TableCell>
+                  )}
                   {rowActions && (
                     <TableCell className="text-right">{rowActions(r)}</TableCell>
                   )}

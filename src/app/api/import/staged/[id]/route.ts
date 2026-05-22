@@ -11,7 +11,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { and, eq, asc, gte, lte, sql, isNotNull } from "drizzle-orm";
+import { and, eq, asc, desc, gte, lte, sql, isNotNull } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
@@ -94,7 +94,11 @@ export async function GET(
     })
     .from(schema.stagedTransactions)
     .where(eq(schema.stagedTransactions.stagedImportId, id))
-    .orderBy(asc(schema.stagedTransactions.rowIndex))
+    // 2026-05-24 — newest-first sort. The /import/pending right pane
+    // surfaces the parsed Balance column on the first row of each day,
+    // and the user reads top-down from most recent backwards. Secondary
+    // sort on rowIndex DESC preserves stable ordering within a day.
+    .orderBy(desc(schema.stagedTransactions.date), desc(schema.stagedTransactions.rowIndex))
     .all();
 
   // Branch on encryption_tier per row (2026-05-06): mixed tiers are expected
