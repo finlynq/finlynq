@@ -1,21 +1,25 @@
 "use client";
 
 /**
- * DbPane — left pane of the /import/pending two-pane UI (FINLYNQ-56).
- * Renders existing `transactions` rows for the currently-selected account
- * within the ±7-day window around the staged batch's date range. The
- * parent fetches via `GET /api/transactions/reconciliation` and passes
- * the rows in.
+ * DbPane — left pane of the /import/pending two-pane UI.
+ *
+ * Renders the user's continuous bank-side ledger (`bank_transactions`) for
+ * the currently-selected account. Powered by `GET /api/import/bank-ledger`
+ * (2026-05-22 two-ledger refactor) — previously this pane showed live
+ * `transactions` in a ±7-day window via /api/transactions/reconciliation;
+ * post-refactor we show the full bank-side history so the user sees
+ * "continuous statement from the bank side" alongside the new upload on
+ * the right.
  *
  * Each row surfaces:
- *   - a "linked to staged #X" indicator when some staged row's
- *     `linked_transaction_id` references it (back-reference),
+ *   - the linked system-side transaction's id when present (rendered as
+ *     "Matches #X"); bank-only rows whose transaction was deleted display
+ *     without it,
+ *   - a "linked to staged #X" indicator when the current upload's staged
+ *     row was manually linked to this bank row's system-side transaction,
  *   - a "flagged" badge when `transaction_reconciliation_flags` carries a
  *     `missing_from_statement` row,
- *   - amount + decoded payee + decoded category name.
- *
- * Phase 2 scope: read-only. Phase 3 adds the per-row action group (link
- * mode + flag-missing toggle).
+ *   - amount + decoded payee + decoded category name (when linked tx).
  */
 
 import {
@@ -30,7 +34,21 @@ import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 
 export interface DbTransactionRow {
-  id: number;
+  /**
+   * Unique row identifier. Post the two-ledger refactor (2026-05-22) this
+   * is the `bank_transactions.id` UUID — bank-side rows are the source of
+   * truth for the pane. Pre-refactor consumers that key on a numeric
+   * transactions.id should use `linkedTransactionId` instead.
+   */
+  id: string;
+  /** UUID of the bank-ledger row this entry came from. Always present. */
+  bankTransactionId: string;
+  /**
+   * `transactions.id` of the live system-side transaction linked to this
+   * bank row. NULL when the bank ledger has the row but no transaction
+   * currently references it (user deleted the transaction after approval).
+   */
+  linkedTransactionId: number | null;
   date: string;
   amount: number;
   currency: string;
@@ -40,6 +58,8 @@ export interface DbTransactionRow {
   txType: "E" | "I" | "R" | "T" | null;
   linkedStagedRowId: string | null;
   reconciliationFlag: { kind: string; note: string | null } | null;
+  /** How many statements have included this row. Bumped on every re-import. */
+  seenCount?: number;
 }
 
 export function DbPane({
@@ -69,7 +89,7 @@ export function DbPane({
       <>
         {header}
         <p className="p-6 text-sm text-muted-foreground text-center">
-          No transactions in the ±7-day window for this account.
+          No bank-ledger entries for this account yet.
         </p>
       </>
     );
