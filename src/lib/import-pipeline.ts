@@ -811,12 +811,24 @@ export async function executeImport(
         });
         row.bankTransactionId = id;
       } catch (err) {
-        importErrors.push(
-          `Row ${row.rowIndex + 1}: bank-ledger upsert failed (${err instanceof Error ? err.message : "Unknown error"})`,
+        // Two-ledger invariant — bank-ledger upserts MUST succeed or the
+        // import is rolled back. Silent-continue was the original
+        // behavior, but it produced exactly the symptom we saw on dev:
+        // transactions land with NULL bank_transaction_id, the left pane
+        // of /import/pending stays empty, and the user has no way to
+        // diagnose. Make it loud + fatal.
+        // eslint-disable-next-line no-console
+        console.error("[bank-ledger] upsert failed", {
+          userId,
+          accountId: row.accountId,
+          importHash: row.importHash,
+          occurrenceIndex: occurrenceIndices[j],
+          source: bankSource,
+          err: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err),
+        });
+        throw new Error(
+          `Bank-ledger upsert failed for row ${row.rowIndex + 1} (${row.date} / ${row.payeePlaintext.slice(0, 40)}): ${err instanceof Error ? err.message : String(err)}`,
         );
-        // Continue — the transaction row will land with NULL
-        // bank_transaction_id; lineage is lost but the import still
-        // succeeds. The audit-invariants check (Phase 5) surfaces this.
       }
     }
   }

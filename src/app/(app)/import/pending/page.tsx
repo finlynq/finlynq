@@ -754,6 +754,16 @@ function PendingImportsPageInner() {
         });
         return;
       }
+      if (!res.ok && data?.code === "bank_ledger_upsert_failed") {
+        // Two-ledger refactor — bank_transactions upsert is now fatal.
+        // Surface the exact error so the user can report it and we can
+        // fix the underlying schema/migration issue.
+        setToast({
+          type: "error",
+          msg: `Bank-ledger write failed: ${data.error ?? "Unknown error"}`,
+        });
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Approve failed");
       setToast({
         type: "success",

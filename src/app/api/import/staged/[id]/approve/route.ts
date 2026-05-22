@@ -452,27 +452,50 @@ export async function POST(
   }));
 
   if (rawForPipeline.length > 0) {
-    const result = await executeImport(
-      rawForPipeline,
-      forceImportIndices,
-      userId,
-      dek,
-      "import",
-      {
-        bankLedgerMode: "merge",
-        filename: staged.originalFilename ?? null,
+    try {
+      const result = await executeImport(
+        rawForPipeline,
+        forceImportIndices,
+        userId,
+        dek,
+        "import",
+        {
+          bankLedgerMode: "merge",
+          filename: staged.originalFilename ?? null,
+          stagedImportId: staged.id,
+        },
+      );
+      imported += result.imported;
+      if (result.errors) importErrors.push(...result.errors);
+      // Mark cash rows as materialized for the partial-approve cleanup. We
+      // don't have a fine-grained "this specific row was inserted" signal
+      // out of executeImport (it returns counts, not per-row outcomes), so
+      // we treat all cashRows as materialized when at least one inserted.
+      // Rows that got rejected as duplicates are still removed from staging
+      // (they were the bank's view of an existing transaction).
+      for (const r of cashRows) materializedRowIds.add(r.id);
+    } catch (err) {
+      // executeImport now throws on bank-ledger upsert failure (the
+      // two-ledger invariant — see import-pipeline.ts). Surface it cleanly
+      // instead of letting Next.js return an opaque 500.
+      // eslint-disable-next-line no-console
+      console.error("[approve] executeImport threw", {
+        userId,
         stagedImportId: staged.id,
-      },
-    );
-    imported += result.imported;
-    if (result.errors) importErrors.push(...result.errors);
-    // Mark cash rows as materialized for the partial-approve cleanup. We
-    // don't have a fine-grained "this specific row was inserted" signal
-    // out of executeImport (it returns counts, not per-row outcomes), so
-    // we treat all cashRows as materialized when at least one inserted.
-    // Rows that got rejected as duplicates are still removed from staging
-    // (they were the bank's view of an existing transaction).
-    for (const r of cashRows) materializedRowIds.add(r.id);
+        rowCount: rawForPipeline.length,
+        err: err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : String(err),
+      });
+      return NextResponse.json(
+        {
+          success: false,
+          code: "bank_ledger_upsert_failed",
+          error: err instanceof Error ? err.message : "Bank-ledger upsert failed",
+        },
+        { status: 500 },
+      );
+    }
   }
 
   // ─── Step 3: handle peer-paired transfer rows ──────────────────────────
