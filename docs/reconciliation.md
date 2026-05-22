@@ -6,6 +6,16 @@ captures the design + phasing; this doc tracks what's actually shipped,
 the surface contract, and the roadmap for follow-up work on the same
 page.
 
+> **Related surface (2026-05-23, FINLYNQ-98)**: a separate standalone
+> `/reconcile` page now exists for **bank_transactions ↔ transactions**
+> reconciliation, backed by a new `transaction_bank_links` M:N join
+> table. Use cases: link bank-ledger rows to transactions after the fact,
+> materialize a transaction from a bank-only row, accept rule-suggested
+> categories via a dedicated dialog. That surface is documented in
+> [architecture/bank-ledger.md](./architecture/bank-ledger.md)
+> "Standalone reconcile page + M:N join (2026-05-23)". This doc covers
+> only the staged-import-pending two-pane UI.
+
 Cross-references:
 
 - Schema: [database.md](./architecture/database.md) — `staged_transactions`
