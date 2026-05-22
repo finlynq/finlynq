@@ -98,9 +98,29 @@ Post-refactor, `checkDuplicates` / `checkFitIdDuplicates` / `findDuplicateMatche
 - **`createTransferPair` / `createTransferPairViaSql` gained `fromLegBankTransactionId` / `toLegBankTransactionId` opts.** Pre-resolved by the approve route's target-transfer bucket.
 - **`ExactDuplicateMatchInfo.id` is now `number | null`.** A bank-ledger row whose linked transaction was deleted returns `id: null`. The new field `bankTransactionId: string` is always present.
 
+## Post-launch fixes (2026-05-22 dev → main)
+
+Shipped same-day as the initial refactor, in response to dev verification:
+
+1. **Bank-ledger UI feed at `/import/pending`** (commit `315ca31`). The left pane was still reading `/api/transactions/reconciliation` (±7d window over `transactions`), so users uploading a new statement only saw the upload's own rows on the right and an empty / narrowly-windowed left pane — defeating the "continuous statement from the bank side" intent. New endpoint [GET /api/import/bank-ledger?accountId=X](../../src/app/api/import/bank-ledger/route.ts) returns the full continuous history for the account, decrypted tier-aware (`user` via DEK, `service` via `PF_STAGING_KEY`), with per-row enrichment for the linked system-side tx + manual-link back-reference. `DbTransactionRow.id` is now `string` (bank UUID); `linkedTransactionId: number | null` carries the live tx id. Link / flag actions key on `linkedTransactionId` — bank-only rows render as read-only "bank-only".
+
+2. **Bank-ledger upserts are FATAL** (commit `25bc931` + `33bbfbd`). The original Phase 3 wiring wrapped `upsertBankTransaction` in a try/catch that pushed errors onto `importErrors[]` and continued. Dev launch day exposed the symptom: transactions landed with NULL `bank_transaction_id`, the left pane stayed permanently empty, no log, no toast. Now: the catch re-throws after logging via `console.error` with `{userId, accountId, importHash, pgCode, pgMessage, pgDetail}`. The throw propagates BEFORE the batch `INSERT INTO transactions`, so a failed upsert leaves zero rows in either table. Approve route catches the throw and returns `{ success: false, code: "bank_ledger_upsert_failed", error }`; the page surfaces the unwrapped PG cause (code + detail) in the toast.
+
+3. **Array-literal serialization bug fixed** (commit `a2381ab`). `${jsArray}::TEXT[]` doesn't serialize a JS array to PG's `{elem1,elem2}` literal form through Drizzle's sql template — PG receives a bare string and returns `22P02 malformed array literal`. Fix: build the array inline with `ARRAY[…]` using a properly-bound element:
+   ```ts
+   const filenamesFragment = row.filename
+     ? sql`ARRAY[${row.filename}]::TEXT[]`
+     : sql`ARRAY[]::TEXT[]`;
+   ```
+   Also tightened the ON CONFLICT empty-array check from `EXCLUDED.source_filenames = ARRAY[]::TEXT[]` to `array_length(EXCLUDED.source_filenames, 1) IS NULL` (idiomatic — PG returns NULL for empty-array length, not 0).
+
+4. **File → bank-ledger dedup is exact-only** (commit `41c0918`). Per user feedback: file-to-bank-ledger should only compare exact `import_hash` / `fit_id` against `bank_transactions`. The previous probable-duplicate fuzzy pass (`buildDuplicateCandidatePool` + `detectProbableDuplicates`) queried `transactions` for FX-spread / date-drift heuristics — which conflated "what the bank reported" with "what's in my live view". File-side classification is now binary: `'new'` vs. `'existing'`. The `'probable_duplicate'` value is no longer produced (DB CHECK still permits legacy rows). 87 lines of fuzzy-match infrastructure left intact in [duplicate-detect.ts](../../src/lib/external-import/duplicate-detect.ts) + [duplicate-detect-pool.ts](../../src/lib/external-import/duplicate-detect-pool.ts) — reserved for the future bank-ledger → transactions reconciliation surface.
+
 ## Future work (deferred)
 
+- **Bank-ledger → transactions reconciliation page** (next-session priority). Multi-strategy matching: exact via `transactions.bank_transaction_id` lineage, fuzzy via the preserved `detectProbableDuplicates` infrastructure (FX-spread, date drift, payee similarity, transfer-pair sibling boost). UI surface: extend the left pane's per-row Actions, or a dedicated `/bank-ledger` view that pairs each bank row with its candidate transaction.
 - Read-only UI for the bank-side ledger (per-account "everything the bank reported" view).
 - MCP read tools (`list_bank_transactions`, `get_bank_history`).
-- Drop `staged_imports.date_range_start` / `date_range_end` columns (no readers post Phase 4 of the refactor).
+- Drop `staged_imports.date_range_start` / `date_range_end` columns (no readers post the F-53E removal).
 - Per-row "Matches existing transaction #X" surface on the staging-path (`/import/pending`) — today it lives only on the classic `/import` flow.
+- Bank-only row hover: surface `seen_count`, `first_seen_at`, `last_seen_at`, `source_filenames[]` as a tooltip / detail drawer.

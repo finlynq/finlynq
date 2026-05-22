@@ -73,7 +73,8 @@ account selector updates `?account=`.
 | `/api/import/staged/[id]/rows/[rowId]` | PATCH | Per-row edit; extended with `reconcileState` + `linkedTransactionId` |
 | `/api/import/staged/[id]/approve` | POST | Materialize; de-queues `linked` rows |
 | `/api/import/staged/[id]` | DELETE | Reject (cascade-delete staged rows) |
-| `/api/transactions/reconciliation` | GET | Left-pane rows for `?accountId=&from=&to=` |
+| `/api/import/bank-ledger` | GET | Left-pane rows for `?accountId=` — full continuous bank-side history (no date window). Two-ledger refactor 2026-05-22. |
+| ~~`/api/transactions/reconciliation`~~ | ~~GET~~ | ~~Pre-refactor left-pane source (±7d window over `transactions`).~~ No longer used by `/import/pending`. |
 | `/api/transactions/[id]/reconciliation-flag` | POST / DELETE | Add/remove flag; idempotent DELETE |
 
 All require an unlocked DEK (`requireEncryption()`) — no soft-fallback.
@@ -114,7 +115,7 @@ Under [src/components/import/reconcile/](../src/components/import/reconcile/):
 | `account-selector.tsx` | Single-account label OR multi-account `<Select>`; emits change upward |
 | `two-pane-layout.tsx` | lg+ side-by-side, narrow viewports stack with DB pane on top |
 | `file-pane.tsx` | Staged rows + RowBadge + existing `<StagedRowEditor>` expansion + optional `rowActions` / `header` slots |
-| `db-pane.tsx` | DB rows from `/api/transactions/reconciliation` + linked / flagged indicators + optional `rowActions` slot |
+| `db-pane.tsx` | Bank-ledger rows from `/api/import/bank-ledger` + linked / flagged indicators + optional `rowActions` slot. Row `id` is `bank_transactions.id` UUID (string); separate `linkedTransactionId: number \| null` carries the live tx id. Bank-only rows render "bank-only" instead of link / flag actions. |
 | `suggestions-group.tsx` | Pinned auto-match cards above FilePane; accept/reject per pair; multi-candidate friendly |
 | `row-badge.tsx` | Colored pill for `reconcile_state` (linked → emerald, suggested → sky, skipped → amber, unmatched → null) |
 
