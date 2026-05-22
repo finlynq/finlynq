@@ -179,6 +179,81 @@ Every site that sets `transactions.bank_transaction_id` on a fresh INSERT now al
 
 Backup export at [data/export/route.ts](../../src/app/api/data/export/route.ts) now serializes `transactionBankLinks[]`.
 
+## Daily balance anchors (2026-05-24)
+
+Anchors are the bank's reported balance for an account on a given date. They're a sibling to `bank_transactions` — independent table, independent lifecycle. An anchor is "the bank told us X on date D"; the row stays even if the bank-ledger row that introduced it is deleted later.
+
+### Schema
+
+```
+CREATE TABLE bank_daily_balances (
+  user_id          TEXT             NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+  account_id       INTEGER          NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  date             TEXT             NOT NULL,  -- YYYY-MM-DD
+  balance          DOUBLE PRECISION NOT NULL,
+  currency         TEXT             NOT NULL,
+  source           TEXT             NOT NULL CHECK (source IN (
+                     'csv_column','ofx_ledgerbal','upload_form',
+                     'email','connector','backup_restore'
+                   )),
+  source_filenames TEXT[]           NOT NULL DEFAULT ARRAY[]::TEXT[],
+  first_seen_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+  last_seen_at     TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, account_id, date)
+);
+```
+
+PK on `(user_id, account_id, date)` is the load-bearing uniqueness: **at most one anchor per day**. CASCADE on both FKs means wipe-account and account-delete clean anchors automatically without code changes.
+
+Also: `staged_imports.parsed_anchors JSONB` (nullable) carries CSV/OFX anchors from the upload step through to the approve step. Wiped on `staged_imports` delete; no separate cleanup.
+
+Migration: [scripts/migrations/20260524_bank-daily-balances.sql](../../scripts/migrations/20260524_bank-daily-balances.sql).
+
+### Anchor sources
+
+| `source` | Origin | Notes |
+|---|---|---|
+| `csv_column` | CSV with a mapped "Balance" column | Parser walks rows; OVERWRITES on every date hit, so the final map value is the **last-in-file-order's** balance for each date. Works for ASC and DESC file sort alike. |
+| `ofx_ledgerbal` | OFX/QFX `<LEDGERBAL><BALAMT>` + `<DTASOF>` | Single anchor per upload at the statement's "as of" date. |
+| `upload_form` | User-typed `statementBalance` field on /import/reconcile | Lifted into one anchor at approve time using `statement_balance_date` (or, if null, the latest row's date). |
+| `email` | (reserved) | Resend Inbound webhook ingest, post-DPA. |
+| `connector` | (reserved) | Plaid / SnapTrade balance sync. |
+| `backup_restore` | (reserved) | Pre-2026-05-24 backups that didn't serialize `source`. |
+
+When a parser-source anchor and an `upload_form` anchor share a date in the same batch, the **parser-source wins** (more specific). Implemented in the approve route + GET endpoint dedup pass.
+
+### Re-import semantics
+
+`ON CONFLICT (user_id, account_id, date) DO UPDATE` — newer balance wins, `last_seen_at` bumps, `source_filenames` appends the new filename. Rationale: a re-downloaded statement with a corrected value should overwrite (the user trusts the most recent number from the bank). Load-bearing per CLAUDE.md.
+
+### Validation algorithm
+
+[validateBankBalances](../../src/lib/bank-ledger-balance.ts) is called pre-approve. Algorithm:
+
+```
+For each newAnchor in batch (sorted ASC by date):
+  priorAnchor = most-recent existing anchor with date < newAnchor.date
+  if no priorAnchor: skip (first anchor anchors; nothing before it)
+  intervalSum = Σ(amount of bank_transactions + projected staged rows
+                  with priorAnchor.date < date ≤ newAnchor.date)
+  expected = priorAnchor.balance + intervalSum
+  if |expected - newAnchor.balance| > 0.005:
+    push BalanceMismatch { date, expected, actual, delta,
+                            priorAnchorDate, priorAnchorBalance, intervalSum }
+```
+
+Checkpoint-style. **Errors do NOT compound forward**: a mismatched anchor in period N-1 doesn't propagate into period N's expected value — period N still validates against period N-1's anchor as-is. User decision 2026-05-22: "if there was an issue in prior periods we will not keep dragging the issue forward; the user can always go back and check the issue for that specific period."
+
+### Surfaces
+
+- `/import/pending` — pre-approve banner via [BalanceWarningBanner](../../src/components/staging/balance-warning-banner.tsx) when the staged batch's anchors don't line up with the running total. Approve still works regardless (warn-but-allow).
+- `/reconcile` — header card via [BalanceSummaryCard](../../src/components/reconcile/balance-summary-card.tsx) showing bank-side latest balance (`latestAnchor.balance + Σ(bank_tx.amount where date > latestAnchor.date)`), system-side latest balance (canonical account-balance rule), delta, and status (`balanced | mismatch | no_anchor`).
+- Approve route also returns `balanceWarnings: BalanceMismatch[]` in its JSON response so the post-approve toast can echo any final mismatch.
+
+### Backup round-trip
+
+Export serializes `bankDailyBalances[]` array on [data/export/route.ts](../../src/app/api/data/export/route.ts). Restore at [data/import/route.ts](../../src/app/api/data/import/route.ts) remaps `accountId` via `accountIdMap` and inserts with `ON CONFLICT DO NOTHING` so re-running an import is harmless. Pre-2026-05-24 backups (no `bankDailyBalances` array) skip the section cleanly.
+
 ## Future work (deferred)
 
 - Read-only UI for the bank-side ledger (per-account "everything the bank reported" view).

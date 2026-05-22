@@ -47,6 +47,10 @@ import {
   type HoldingOption,
 } from "@/components/staging/staged-row-editor";
 import { UnresolvedCategoriesBanner } from "@/components/staging/unresolved-categories-banner";
+import {
+  BalanceWarningBanner,
+  type BalanceWarning,
+} from "@/components/staging/balance-warning-banner";
 import { AccountSelector, type AccountOption } from "@/components/import/reconcile/account-selector";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
 import { FilePane } from "@/components/import/reconcile/file-pane";
@@ -94,6 +98,9 @@ interface StagedDetail {
     transactionId: number;
     confidence: "exact" | "fuzzy";
   }>;
+  /** 2026-05-24 — bank balance pre-flight mismatches. Empty array =
+   *  every anchor in the batch lines up with the running total. */
+  balanceWarnings?: BalanceWarning[];
 }
 
 function daysUntil(iso: string): number {
@@ -1037,6 +1044,17 @@ function PendingImportsPageInner() {
           currentBalance={liveProjection?.current ?? null}
           projectedBalance={liveProjection?.projected ?? null}
           boundAccountCurrency={detail.reconciliation?.boundAccountCurrency ?? null}
+        />
+      )}
+
+      {detail && (detail.balanceWarnings?.length ?? 0) > 0 && (
+        <BalanceWarningBanner
+          warnings={detail.balanceWarnings ?? []}
+          currency={
+            detail.staged.statementCurrency ??
+            detail.reconciliation?.boundAccountCurrency ??
+            null
+          }
         />
       )}
 
