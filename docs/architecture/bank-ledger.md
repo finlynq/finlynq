@@ -226,6 +226,38 @@ When a parser-source anchor and an `upload_form` anchor share a date in the same
 
 `ON CONFLICT (user_id, account_id, date) DO UPDATE` — newer balance wins, `last_seen_at` bumps, `source_filenames` appends the new filename. Rationale: a re-downloaded statement with a corrected value should overwrite (the user trusts the most recent number from the bank). Load-bearing per CLAUDE.md.
 
+### Lifecycle
+
+```
+upload   → extracted at /api/import/staging/upload, stored on
+           staged_imports.parsed_anchors (JSONB) + the form-typed
+           statementBalance / statementBalanceDate columns
+
+approve  → /api/import/staged/[id]/approve dedups across sources
+           (parser-source wins over upload_form on date collision),
+           then upserts into bank_daily_balances via
+           upsertBankBalanceAnchors. Gate:
+             boundAccountId != null
+             && dedupedAnchors.length > 0
+             && importErrors.length === 0
+           Explicitly NOT gated on `imported > 0`:
+             - Anchors-only approve (every staged row is a duplicate,
+               nothing to materialize) IS a valid commit path. The
+               default-approve filter at the top of the route also no
+               longer 400s "No rows selected" in this case — it short-
+               circuits the materialization loops, computes zero new
+               bank_transactions rows, then falls through to the
+               anchor upsert.
+             - importErrors.length > 0 (per-row materialization
+               failures) DOES suppress the upsert — rollback semantics.
+
+reject   → DELETE /api/import/staged/[id] cascades, dropping the
+           staged_imports row + parsed_anchors JSONB. No anchors
+           commit; existing bank_daily_balances rows untouched.
+```
+
+The anchors-only approve path is the load-bearing fix for "re-uploading a statement to refresh the bank-side balance silently no-ops when every row is already in the bank ledger" (the bug fixed 2026-05-22). UI hint on `/import/pending`: when `dedupedAnchorsCount > 0 && eligibleRowCount === 0`, an info banner above the row table tells the user that clicking Approve will still commit the anchors.
+
 ### Validation algorithm
 
 [validateBankBalances](../../src/lib/bank-ledger-balance.ts) is called pre-approve. Algorithm:
@@ -247,7 +279,7 @@ Checkpoint-style. **Errors do NOT compound forward**: a mismatched anchor in per
 ### Surfaces
 
 - `/import/pending` — pre-approve banner via [BalanceWarningBanner](../../src/components/staging/balance-warning-banner.tsx) when the staged batch's anchors don't line up with the running total. Approve still works regardless (warn-but-allow).
-- `/reconcile` — header card via [BalanceSummaryCard](../../src/components/reconcile/balance-summary-card.tsx) showing bank-side latest balance (`latestAnchor.balance + Σ(bank_tx.amount where date > latestAnchor.date)`), system-side latest balance (canonical account-balance rule), delta, and status (`balanced | mismatch | no_anchor`).
+- `/import/pending` — header card via [BalanceSummaryCard](../../src/components/reconcile/balance-summary-card.tsx) showing bank-side latest balance (`latestAnchor.balance + Σ(bank_tx.amount where date > latestAnchor.date)` when an anchor exists, **null when no anchor** — UI renders "—"), system-side latest balance (canonical account-balance rule), delta (null when bankSide is null), and status (`balanced | mismatch | no_anchor`). Relocated from `/reconcile` per user decision 2026-05-22 — surface compare at import time when the batch can still be rejected.
 - Approve route also returns `balanceWarnings: BalanceMismatch[]` in its JSON response so the post-approve toast can echo any final mismatch.
 
 ### Backup round-trip

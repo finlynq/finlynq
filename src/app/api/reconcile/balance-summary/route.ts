@@ -6,14 +6,15 @@
  *   - latestAnchor: the most recent bank_daily_balances row for the
  *     account, or null when the account has no anchors yet
  *   - bankSideLatest: latestAnchor.balance + Σ(bank_tx.amount where
- *     date > latestAnchor.date). Falls back to Σ(bank_tx.amount) for
- *     all rows when no anchor exists.
+ *     date > latestAnchor.date). Null when no anchor exists — the naive
+ *     sum-from-zero is meaningless and misleads the user (CLAUDE.md "Bank
+ *     balance anchors": anchors are the truth source for the bank side).
  *   - systemSideLatest: canonical account-balance per CLAUDE.md
  *     "Account balance for accounts with holdings = holdings.value":
  *       investment accounts → getHoldingsValueByAccount[id].value
  *       cash accounts       → SUM(transactions.amount)
- *   - delta: systemSideLatest - bankSideLatest (positive = system has
- *     MORE than bank → possibly extra credits / missing debits)
+ *   - delta: systemSideLatest - bankSideLatest, or null when bankSide is
+ *     null (no anchor)
  *   - status: 'balanced' | 'mismatch' | 'no_anchor'
  *   - currency: the account currency (anchor display unit)
  *
@@ -30,7 +31,6 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import {
   getLatestBankAnchor,
   sumBankAmountsAfter,
-  sumAllBankAmounts,
 } from "@/lib/bank-ledger-balance";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 
@@ -82,8 +82,12 @@ export async function GET(request: NextRequest) {
 
   const latestAnchor = await getLatestBankAnchor(userId, accountId);
 
-  // Bank-side: anchor + sum-after, or sum-all when no anchor exists.
-  let bankSideLatest: number;
+  // Bank-side: anchor + sum-after, or null when no anchor exists.
+  // The previous fallback (Σ over all bank rows) silently rendered a
+  // misleading number that drifted further from reality with every
+  // import; nulling it out + showing "—" in the UI is the honest signal
+  // that no anchor has been loaded.
+  let bankSideLatest: number | null;
   if (latestAnchor) {
     const after = await sumBankAmountsAfter(
       userId,
@@ -92,7 +96,7 @@ export async function GET(request: NextRequest) {
     );
     bankSideLatest = latestAnchor.balance + after;
   } else {
-    bankSideLatest = await sumAllBankAmounts(userId, accountId);
+    bankSideLatest = null;
   }
 
   // System-side: canonical account balance per CLAUDE.md
@@ -115,9 +119,10 @@ export async function GET(request: NextRequest) {
     systemSideLatest = Number(sumRow?.balance ?? 0);
   }
 
-  const delta = systemSideLatest - bankSideLatest;
+  const delta: number | null =
+    bankSideLatest === null ? null : systemSideLatest - bankSideLatest;
   const status: "balanced" | "mismatch" | "no_anchor" = (() => {
-    if (!latestAnchor) return "no_anchor";
+    if (!latestAnchor || delta === null) return "no_anchor";
     if (Math.abs(delta) > EPSILON) return "mismatch";
     return "balanced";
   })();

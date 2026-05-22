@@ -39,6 +39,7 @@ import {
   Check,
   X,
   RefreshCw,
+  Info,
 } from "lucide-react";
 import { ReconciliationCallout } from "@/components/staging/reconciliation-callout";
 import {
@@ -483,6 +484,27 @@ function PendingImportsPageInner() {
     }
     return map;
   }, [detail]);
+
+  // Anchors-only approve detector. When every staged row is already in
+  // the bank ledger (skipped_duplicate) or already linked to a system-side
+  // transaction, the default-approve path materializes zero rows but
+  // STILL commits the file's balance anchors. Surface a hint so the user
+  // knows clicking Approve isn't a no-op.
+  const anchorsOnlyHint = useMemo(() => {
+    if (!detail || detail.staged.boundAccountId == null) return null;
+    const anchorCount = stagedAnchorsByDate.size;
+    if (anchorCount === 0) return null;
+    const eligibleRowCount = detail.rows.filter(
+      (r) =>
+        r.reconcileState !== "skipped_duplicate" &&
+        r.reconcileState !== "linked",
+    ).length;
+    if (eligibleRowCount > 0) return null;
+    return {
+      anchorCount,
+      totalRows: detail.rows.length,
+    };
+  }, [detail, stagedAnchorsByDate]);
 
   const toggleSelect = useCallback((id: string) => {
     setSelected((s) => {
@@ -1139,6 +1161,25 @@ function PendingImportsPageInner() {
             null
           }
         />
+      )}
+
+      {anchorsOnlyHint && (
+        <Card className="border-sky-300 bg-sky-50/50">
+          <CardContent className="py-2.5 px-3 text-sm flex items-start gap-3">
+            <Info className="h-4 w-4 text-sky-700 shrink-0 mt-0.5" />
+            <div className="text-sky-900">
+              All {anchorsOnlyHint.totalRows} transaction
+              {anchorsOnlyHint.totalRows === 1 ? "" : "s"} in this file are
+              already in the bank ledger. Clicking <strong>Approve</strong> will
+              still load{" "}
+              <strong>
+                {anchorsOnlyHint.anchorCount} balance anchor
+                {anchorsOnlyHint.anchorCount === 1 ? "" : "s"}
+              </strong>{" "}
+              from this file into the bank-side ledger.
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {detail && unresolved && unresolved.rowIds.length > 0 && (

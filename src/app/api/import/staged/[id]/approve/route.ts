@@ -183,7 +183,71 @@ export async function POST(
   }
   const selected = allSelected.filter((r) => r.reconcileState !== "linked");
 
-  if (selected.length === 0 && linkedRows.length === 0) {
+  // ─── Bank balance anchor dedup (moved up 2026-05-22) ───────────────────
+  //
+  // Computed BEFORE the "no rows selected" early-return so an anchors-only
+  // approve (every row is `skipped_duplicate`) can still commit the file's
+  // balance anchors. Anchors are a sibling fact to bank rows — re-uploading
+  // a fully-duplicate statement to refresh the bank-side balance is a
+  // valid commit path. Load-bearing per CLAUDE.md "Bank balance anchors".
+  //
+  // The validation pass (projectedBankRows + validateBankBalances) stays
+  // at its original location below — it depends on `selected`, which is
+  // legitimately empty in the anchors-only case (no projected rows means
+  // validateBankBalances compares anchors against the existing bank
+  // ledger only, which is the right behavior).
+  const balanceAnchors: BalanceAnchor[] = [];
+  if (staged.boundAccountId != null) {
+    const parsed = staged.parsedAnchors;
+    if (Array.isArray(parsed)) {
+      for (const raw of parsed as unknown[]) {
+        if (!raw || typeof raw !== "object") continue;
+        const a = raw as Record<string, unknown>;
+        if (typeof a.date !== "string") continue;
+        if (typeof a.balance !== "number") continue;
+        const ccy = typeof a.currency === "string" ? a.currency : "CAD";
+        const src = typeof a.source === "string" ? a.source : "csv_column";
+        if (!(ANCHOR_SOURCES as readonly string[]).includes(src)) continue;
+        balanceAnchors.push({
+          date: a.date,
+          balance: a.balance,
+          currency: ccy,
+          source: src as AnchorSource,
+        });
+      }
+    }
+    if (
+      typeof staged.statementBalance === "number" &&
+      typeof staged.statementBalanceDate === "string"
+    ) {
+      balanceAnchors.push({
+        date: staged.statementBalanceDate,
+        balance: staged.statementBalance,
+        currency: staged.statementCurrency ?? "CAD",
+        source: "upload_form",
+      });
+    }
+  }
+  const anchorByDate = new Map<string, BalanceAnchor>();
+  for (const a of balanceAnchors) {
+    const existing = anchorByDate.get(a.date);
+    if (!existing || existing.source === "upload_form") {
+      anchorByDate.set(a.date, a);
+    }
+  }
+  const dedupedAnchors = Array.from(anchorByDate.values());
+
+  // Anchors-only approve — when every row is a duplicate (selected empty)
+  // and the user has nothing linked, but the file carries balance anchors
+  // for a bound account, the approve still goes through to commit anchors.
+  const anchorsOnlyApprove =
+    staged.boundAccountId != null && dedupedAnchors.length > 0;
+
+  if (
+    selected.length === 0 &&
+    linkedRows.length === 0 &&
+    !anchorsOnlyApprove
+  ) {
     return NextResponse.json({ error: "No rows selected" }, { status: 400 });
   }
 
@@ -310,59 +374,15 @@ export async function POST(
 
   // ─── Bank balance pre-flight validation (2026-05-24) ───────────────────
   //
-  // Gather anchors carried from the upload step (parsed_anchors JSONB)
-  // plus the form-typed statement_balance (single anchor with source
-  // 'upload_form'). Compare them to the rolling sum of bank rows
-  // produced by the materialization preview — surfaced as
-  // `balanceWarnings` on the response. Approve still goes through;
-  // user decision is warn-but-allow per CLAUDE.md "Bank balance anchors".
+  // `dedupedAnchors` was computed earlier (above the "no rows selected"
+  // early-return) so an anchors-only approve can still commit anchors.
+  // This pass compares them to the rolling sum of bank rows produced by
+  // the materialization preview — surfaced as `balanceWarnings` on the
+  // response. Approve still goes through; user decision is warn-but-allow
+  // per CLAUDE.md "Bank balance anchors".
   //
   // Skipped when there's no bound account (multi-account CSVs don't
   // carry a single coherent anchor) or no anchors at all.
-  const balanceAnchors: BalanceAnchor[] = [];
-  if (staged.boundAccountId != null) {
-    // JSONB array — runtime cast since Drizzle types it as `unknown`.
-    const parsed = staged.parsedAnchors;
-    if (Array.isArray(parsed)) {
-      for (const raw of parsed as unknown[]) {
-        if (!raw || typeof raw !== "object") continue;
-        const a = raw as Record<string, unknown>;
-        if (typeof a.date !== "string") continue;
-        if (typeof a.balance !== "number") continue;
-        const ccy = typeof a.currency === "string" ? a.currency : "CAD";
-        const src = typeof a.source === "string" ? a.source : "csv_column";
-        if (!(ANCHOR_SOURCES as readonly string[]).includes(src)) continue;
-        balanceAnchors.push({
-          date: a.date,
-          balance: a.balance,
-          currency: ccy,
-          source: src as AnchorSource,
-        });
-      }
-    }
-    if (
-      typeof staged.statementBalance === "number" &&
-      typeof staged.statementBalanceDate === "string"
-    ) {
-      balanceAnchors.push({
-        date: staged.statementBalanceDate,
-        balance: staged.statementBalance,
-        currency: staged.statementCurrency ?? "CAD",
-        source: "upload_form",
-      });
-    }
-  }
-  // De-dup across sources — if parsed_anchors already has the
-  // statement-balance date, prefer the parser-extracted one (more
-  // specific source label) and drop the upload-form duplicate.
-  const anchorByDate = new Map<string, BalanceAnchor>();
-  for (const a of balanceAnchors) {
-    const existing = anchorByDate.get(a.date);
-    if (!existing || existing.source === "upload_form") {
-      anchorByDate.set(a.date, a);
-    }
-  }
-  const dedupedAnchors = Array.from(anchorByDate.values());
 
   // Projected rows = the bank rows the materialization step is about to
   // upsert into bank_transactions. Mirror what the row-by-row classifier
@@ -942,10 +962,19 @@ export async function POST(
   // the bank should overwrite). Load-bearing per CLAUDE.md "Bank balance
   // anchors". Skipped when the staged batch had no bound account or no
   // anchors; balanceWarnings still surfaces above for context.
+  // Gate: anchors land whenever the user explicitly approved a batch with
+  // a bound account + at least one anchor AND no per-row errors. The old
+  // `imported > 0 || linkedRows.length > 0` condition silently discarded
+  // anchors when every row was a `skipped_duplicate` — re-uploading a
+  // statement to refresh the bank-side balance silently no-oped. Anchors
+  // are a sibling fact to bank rows (CLAUDE.md "Bank balance anchors");
+  // row-materialization absence does not invalidate them, only
+  // row-materialization FAILURE does (importErrors gate preserves the
+  // rollback semantics).
   if (
     staged.boundAccountId != null &&
     dedupedAnchors.length > 0 &&
-    (imported > 0 || linkedRows.length > 0)
+    importErrors.length === 0
   ) {
     try {
       await upsertBankBalanceAnchors(

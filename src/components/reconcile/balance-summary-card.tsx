@@ -11,8 +11,9 @@
  * ledgers disagree.
  *
  * `no_anchor` state: the account has bank rows but no statement-balance
- * anchor yet. The bank-side number is just Σ(bank_tx.amount) starting
- * from zero, which is informative but unvalidated. The card surfaces a
+ * anchor yet. Bank-side renders as "—" (the route returns null in this
+ * state — the naive sum-from-zero we used to show was misleading and
+ * drifted further from reality with every import). The card surfaces a
  * hint encouraging the user to upload a statement balance.
  */
 
@@ -28,9 +29,9 @@ export interface BalanceSummary {
     source: string;
     currency: string;
   } | null;
-  bankSideLatest: number;
+  bankSideLatest: number | null;
   systemSideLatest: number;
-  delta: number;
+  delta: number | null;
   status: "balanced" | "mismatch" | "no_anchor";
 }
 
@@ -126,7 +127,7 @@ export function BalanceSummaryCard({
                 )}
               </div>
               <div className={`font-mono font-medium ${valueTone}`}>
-                {fmt(bankSideLatest, currency)}
+                {bankSideLatest === null ? "—" : fmt(bankSideLatest, currency)}
               </div>
             </div>
             <div>
@@ -142,7 +143,7 @@ export function BalanceSummaryCard({
               {status === "balanced" && (
                 <div className="font-medium text-emerald-700">✓ Balanced</div>
               )}
-              {status === "mismatch" && (
+              {status === "mismatch" && delta !== null && (
                 <div className="font-mono font-medium text-rose-700">
                   {delta >= 0 ? "+" : ""}
                   {fmt(delta, currency)}
