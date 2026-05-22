@@ -488,6 +488,89 @@ export async function POST(request: NextRequest) {
       d.transactions.forEach((old, i) => {
         if (inserted[i]) txnIdMap.set(old.id as number, inserted[i].id);
       });
+
+      // Dual-write retrofit (Phase 5, 2026-05-23) — every restored tx
+      // whose `bank_transaction_id` FK was just set gets a matching
+      // 'primary' row in `transaction_bank_links`. Covers pre-Phase-5
+      // backups (no explicit join section) and stays idempotent with
+      // the explicit `transactionBankLinks[]` section below for post-
+      // Phase-5 backups (ON CONFLICT dedupes the primary rows).
+      const primaryLinkRows = inserted
+        .map((row, i) => ({
+          row,
+          bankId: (remapped[i] as { bankTransactionId?: string | null })
+            .bankTransactionId,
+        }))
+        .filter((r): r is { row: { id: number }; bankId: string } =>
+          typeof r.bankId === "string" && r.bankId.length > 0,
+        )
+        .map(({ row, bankId }) => ({
+          userId,
+          transactionId: row.id,
+          bankTransactionId: bankId,
+          linkType: "primary" as const,
+          source: "backup_restore" as const,
+        }));
+      if (primaryLinkRows.length > 0) {
+        await db
+          .insert(schema.transactionBankLinks)
+          .values(primaryLinkRows)
+          .onConflictDoNothing({
+            target: [
+              schema.transactionBankLinks.transactionId,
+              schema.transactionBankLinks.bankTransactionId,
+            ],
+          });
+      }
+    }
+
+    // Insert explicit transaction_bank_links from the backup (Phase 5,
+    // 2026-05-23). Pre-Phase-5 backups don't have this section — the
+    // FK-derived primary rows above cover the primary links and there
+    // are no extras to restore. Post-Phase-5 backups serialize the full
+    // join table so M:N extras round-trip.
+    interface BackupLinkRow {
+      transactionId: number;
+      bankTransactionId: string;
+      linkType?: string;
+      source?: string;
+    }
+    const backupLinks = (d as { transactionBankLinks?: BackupLinkRow[] })
+      .transactionBankLinks;
+    if (backupLinks?.length) {
+      const remappedLinks = backupLinks
+        .map((l) => {
+          const newTxId = txnIdMap.get(l.transactionId);
+          const newBankId = bankTxIdMap.get(l.bankTransactionId);
+          if (newTxId == null || newBankId == null) return null;
+          return {
+            userId,
+            transactionId: newTxId,
+            bankTransactionId: newBankId,
+            linkType: l.linkType === "primary" ? "primary" : "extra",
+            source: "backup_restore" as const,
+          };
+        })
+        .filter(
+          (r): r is {
+            userId: string;
+            transactionId: number;
+            bankTransactionId: string;
+            linkType: "primary" | "extra";
+            source: "backup_restore";
+          } => r != null,
+        );
+      if (remappedLinks.length > 0) {
+        await db
+          .insert(schema.transactionBankLinks)
+          .values(remappedLinks)
+          .onConflictDoNothing({
+            target: [
+              schema.transactionBankLinks.transactionId,
+              schema.transactionBankLinks.bankTransactionId,
+            ],
+          });
+      }
     }
 
     // Insert transaction splits with remapped IDs (also encrypting text fields)

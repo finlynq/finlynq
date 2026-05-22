@@ -668,11 +668,64 @@ export async function POST(
         source: "import" as const,
       };
       // Single INSERT with both rows. Drizzle's PG driver runs this as
-      // one statement; either both legs land or neither does.
-      await db.insert(schema.transactions).values([aValues, bValues]);
-      imported += 2;
+      // one statement; either both legs land or neither does. RETURNING
+      // ids so the M:N join row insert below pairs them with the bank
+      // transaction ids (Phase 5 dual-write retrofit, 2026-05-23).
+      const inserted = await db
+        .insert(schema.transactions)
+        .values([aValues, bValues])
+        .returning({ id: schema.transactions.id });
+      imported += inserted.length;
       materializedRowIds.add(pair.a.id);
       materializedRowIds.add(pair.b.id);
+
+      // Dual-write retrofit — insert one 'primary' join row per leg whose
+      // bank_transaction_id was successfully minted above. ON CONFLICT
+      // DO NOTHING so a future re-run is harmless. Failures are tracked
+      // as importErrors (the FK is set; the migration's backfill will
+      // catch drift on next deploy).
+      const linkRows: Array<{
+        userId: string;
+        transactionId: number;
+        bankTransactionId: string;
+        linkType: "primary";
+        source: "import";
+      }> = [];
+      if (aBankTxId) {
+        linkRows.push({
+          userId,
+          transactionId: inserted[0].id,
+          bankTransactionId: aBankTxId,
+          linkType: "primary",
+          source: "import",
+        });
+      }
+      if (bBankTxId) {
+        linkRows.push({
+          userId,
+          transactionId: inserted[1].id,
+          bankTransactionId: bBankTxId,
+          linkType: "primary",
+          source: "import",
+        });
+      }
+      if (linkRows.length > 0) {
+        try {
+          await db
+            .insert(schema.transactionBankLinks)
+            .values(linkRows)
+            .onConflictDoNothing({
+              target: [
+                schema.transactionBankLinks.transactionId,
+                schema.transactionBankLinks.bankTransactionId,
+              ],
+            });
+        } catch (linkErr) {
+          importErrors.push(
+            `Transfer pair ${pair.a.rowIndex + 1}/${pair.b.rowIndex + 1}: bank-link insert failed (${linkErr instanceof Error ? linkErr.message : "Unknown error"})`,
+          );
+        }
+      }
     } catch (err) {
       importErrors.push(
         `Transfer pair ${pair.a.rowIndex + 1}/${pair.b.rowIndex + 1}: ${err instanceof Error ? err.message : "unknown error"}`,

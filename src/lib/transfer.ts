@@ -785,6 +785,48 @@ export async function createTransferPair(
 
       fromTransactionId = sourceInserted.id as number;
       toTransactionId = destInserted.id as number;
+
+      // Dual-write retrofit (Phase 5, 2026-05-23) — when either leg's
+      // bank_transaction_id was pre-resolved by the staging-approve route,
+      // insert the matching 'primary' join row. ON CONFLICT DO NOTHING
+      // so a future re-run is harmless. Failure throws and rolls back
+      // both legs (we're still inside `tx.transaction`).
+      const linkRows: Array<{
+        userId: string;
+        transactionId: number;
+        bankTransactionId: string;
+        linkType: "primary";
+        source: TransactionSource;
+      }> = [];
+      if (opts.fromLegBankTransactionId) {
+        linkRows.push({
+          userId,
+          transactionId: fromTransactionId,
+          bankTransactionId: opts.fromLegBankTransactionId,
+          linkType: "primary",
+          source: txSource,
+        });
+      }
+      if (opts.toLegBankTransactionId) {
+        linkRows.push({
+          userId,
+          transactionId: toTransactionId,
+          bankTransactionId: opts.toLegBankTransactionId,
+          linkType: "primary",
+          source: txSource,
+        });
+      }
+      if (linkRows.length > 0) {
+        await tx
+          .insert(schema.transactionBankLinks)
+          .values(linkRows)
+          .onConflictDoNothing({
+            target: [
+              schema.transactionBankLinks.transactionId,
+              schema.transactionBankLinks.bankTransactionId,
+            ],
+          });
+      }
     });
   } catch (err) {
     return {
@@ -2107,6 +2149,39 @@ export async function createTransferPairViaSql(
         ],
       );
       toTransactionId = destIns.rows[0].id;
+
+      // Dual-write retrofit (Phase 5, 2026-05-23) — raw-SQL variant.
+      // Same shape as createTransferPair's Drizzle path; runs inside
+      // the existing `withTx` client transaction so a failure rolls
+      // both legs back.
+      if (opts.fromLegBankTransactionId) {
+        await client.query(
+          `INSERT INTO transaction_bank_links
+             (user_id, transaction_id, bank_transaction_id, link_type, source)
+           VALUES ($1, $2, $3, 'primary', $4)
+           ON CONFLICT (transaction_id, bank_transaction_id) DO NOTHING`,
+          [
+            userId,
+            fromTransactionId,
+            opts.fromLegBankTransactionId,
+            txSource,
+          ],
+        );
+      }
+      if (opts.toLegBankTransactionId) {
+        await client.query(
+          `INSERT INTO transaction_bank_links
+             (user_id, transaction_id, bank_transaction_id, link_type, source)
+           VALUES ($1, $2, $3, 'primary', $4)
+           ON CONFLICT (transaction_id, bank_transaction_id) DO NOTHING`,
+          [
+            userId,
+            toTransactionId,
+            opts.toLegBankTransactionId,
+            txSource,
+          ],
+        );
+      }
     });
   } catch (err) {
     return {

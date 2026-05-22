@@ -15,6 +15,12 @@ export const SOURCES = [
   "connector",
   "sample_data",
   "backup_restore",
+  // Reconcile-page "Create transaction from bank row" materialization.
+  // Mints a fresh `transactions` row from an existing `bank_transactions`
+  // row with `bank_transaction_id` set + a `transaction_bank_links` row
+  // inserted as link_type='primary'. The bank row keeps its original
+  // ingest source (BANK_LEDGER_SOURCES); this label is system-side only.
+  "reconcile_link",
 ] as const;
 
 export type TransactionSource = (typeof SOURCES)[number];
@@ -53,6 +59,8 @@ export function labelForSource(s: TransactionSource): string {
       return "Sample data";
     case "backup_restore":
       return "Backup restore";
+    case "reconcile_link":
+      return "Reconcile";
   }
 }
 

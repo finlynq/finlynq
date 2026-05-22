@@ -18,6 +18,7 @@ import {
   timestamp,
   boolean,
   uniqueIndex,
+  index,
   uuid,
   jsonb,
 } from "drizzle-orm/pg-core";
@@ -839,6 +840,81 @@ export const bankTransactions = pgTable("bank_transactions", {
     { onDelete: "set null" },
   ),
 });
+
+// ─── transaction_bank_links — many-to-many between transactions and bank_transactions
+//
+// 2026-05-23. The 2026-05-22 two-ledger refactor added a 1:1 lineage FK
+// `transactions.bank_transaction_id`. This join table lifts that to many-to-many
+// in both directions so the standalone /reconcile page can express:
+//   - 1 bank row → N transactions  (a single bank charge split into multiple
+//     system-side transactions because the user tracks them separately)
+//   - N bank rows → 1 transaction  (a recurring fee spread across statements
+//     that the user wants to track as one annual line)
+//
+// The existing `transactions.bank_transaction_id` FK stays as the "primary
+// link" hint — every primary join row mirrors it. Aggregators / wipe-account /
+// backup-restore that already read the FK keep working unchanged; only the
+// new reconcile surface consults this table.
+//
+// CASCADE on both FKs:
+//   - Deleting a transaction removes its join rows (the bank row persists).
+//   - Deleting a bank row removes its join rows (transactions persist; their
+//     FK independently flips to NULL via the existing ON DELETE SET NULL rule).
+// Net: wipe-account's existing "delete transactions THEN bank_transactions"
+// ordering keeps working without modification.
+//
+// `link_type` is one of 'primary' | 'extra' — NOT enforced by SQL CHECK in v1
+// (rules-v2 precedent — drift between code enum + SQL CHECK is a CLAUDE.md
+// contract breach unless documented; the API layer's Zod schema is the
+// enforcement layer). `source` mirrors the SOURCES tuple in src/lib/tx-source.ts.
+export const transactionBankLinks = pgTable(
+  "transaction_bank_links",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    transactionId: integer("transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
+    bankTransactionId: uuid("bank_transaction_id")
+      .notNull()
+      .references(() => bankTransactions.id, { onDelete: "cascade" }),
+    // 'primary' | 'extra'. Exactly one 'primary' per transaction at a time
+    // (application-layer invariant — when a primary link is removed the
+    // transactions.bank_transaction_id FK is cleared in the same DB tx).
+    linkType: text("link_type").notNull().default("extra"),
+    // Writer-surface attribution. Mirrors the SOURCES tuple. Today's writers:
+    //   'manual'         — user clicked Accept on a reconcile suggestion
+    //   'import'         — backfilled from the FK by Phase 1 / dual-write
+    //                      retrofit on the 4 import chokepoints (Phase 5)
+    //   'reconcile_link' — created during materialize-from-bank-row flow
+    //   'backup_restore' — restored from an export
+    source: text("source").notNull().default("manual"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // The pair (transaction_id, bank_transaction_id) is globally unique —
+    // a given tx can link to a given bank row at most once, regardless of
+    // link_type. Re-linking with a different link_type goes through
+    // UPDATE rather than INSERT.
+    uniqueIndex("transaction_bank_links_pair_uq").on(
+      table.transactionId,
+      table.bankTransactionId,
+    ),
+    // Hot paths for the /api/reconcile/suggestions endpoint:
+    //   - "give me every join row for these tx ids"
+    //   - "give me every join row for these bank ids"
+    index("transaction_bank_links_user_tx_idx").on(
+      table.userId,
+      table.transactionId,
+    ),
+    index("transaction_bank_links_user_bank_idx").on(
+      table.userId,
+      table.bankTransactionId,
+    ),
+  ],
+);
 
 // ─── transaction_reconciliation_flags — DB-side reconciliation annotations
 //

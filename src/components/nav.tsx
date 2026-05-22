@@ -31,6 +31,7 @@ import {
   ShieldCheck,
   LogOut,
   Inbox,
+  Link2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { FinlynqLogo } from "@/components/FinlynqLogo";
@@ -86,6 +87,7 @@ const navGroups: { label: string; items: NavItem[] }[] = [
 
 const toolLinks: NavItem[] = [
   { href: "/import", label: "Import", icon: Upload, color: ACTIVE_ACCENT, mode: "prod" },
+  { href: "/reconcile", label: "Reconcile", icon: Link2, color: ACTIVE_ACCENT, mode: "dev" },
   { href: "/api-docs", label: "API Docs", icon: FileText, color: ACTIVE_ACCENT, mode: "dev" },
   { href: "/admin", label: "Admin", icon: ShieldCheck, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/inbox", label: "Admin Inbox", icon: Inbox, color: ACTIVE_ACCENT, mode: "prod" },

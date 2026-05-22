@@ -891,8 +891,51 @@ export async function executeImport(
     });
     if (values.length > 0) {
       try {
-        await db.insert(schema.transactions).values(values);
-        imported += values.length;
+        // RETURNING ids so we can dual-write into transaction_bank_links
+        // for any row whose bank_transaction_id FK was set above. PG's
+        // INSERT RETURNING preserves the input order, so we can pair
+        // `inserted[k]` with `values[k]` 1:1.
+        const inserted = await db
+          .insert(schema.transactions)
+          .values(values)
+          .returning({
+            id: schema.transactions.id,
+            bankTransactionId: schema.transactions.bankTransactionId,
+          });
+        imported += inserted.length;
+
+        // Dual-write retrofit for the two-ledger M:N model (Phase 5,
+        // 2026-05-23). Insert a 'primary' join row for every
+        // freshly-INSERTed tx whose FK is non-NULL. ON CONFLICT DO NOTHING
+        // so a future re-run is a no-op. Failures here append to
+        // importErrors but do not roll back — the FK is still set and
+        // the migration's backfill catches drift on the next deploy.
+        const linkValues = inserted
+          .filter((r) => r.bankTransactionId != null)
+          .map((r) => ({
+            userId,
+            transactionId: r.id,
+            bankTransactionId: r.bankTransactionId as string,
+            linkType: "primary" as const,
+            source: txSource,
+          }));
+        if (linkValues.length > 0) {
+          try {
+            await db
+              .insert(schema.transactionBankLinks)
+              .values(linkValues)
+              .onConflictDoNothing({
+                target: [
+                  schema.transactionBankLinks.transactionId,
+                  schema.transactionBankLinks.bankTransactionId,
+                ],
+              });
+          } catch (linkErr) {
+            importErrors.push(
+              `Bank-link insert failed at row ${i + 1}: ${linkErr instanceof Error ? linkErr.message : "Unknown error"}`,
+            );
+          }
+        }
       } catch (e) {
         importErrors.push(`Batch insert failed at row ${i + 1}: ${e instanceof Error ? e.message : "Unknown error"}`);
       }

@@ -116,11 +116,76 @@ Shipped same-day as the initial refactor, in response to dev verification:
 
 4. **File → bank-ledger dedup is exact-only** (commit `41c0918`). Per user feedback: file-to-bank-ledger should only compare exact `import_hash` / `fit_id` against `bank_transactions`. The previous probable-duplicate fuzzy pass (`buildDuplicateCandidatePool` + `detectProbableDuplicates`) queried `transactions` for FX-spread / date-drift heuristics — which conflated "what the bank reported" with "what's in my live view". File-side classification is now binary: `'new'` vs. `'existing'`. The `'probable_duplicate'` value is no longer produced (DB CHECK still permits legacy rows). 87 lines of fuzzy-match infrastructure left intact in [duplicate-detect.ts](../../src/lib/external-import/duplicate-detect.ts) + [duplicate-detect-pool.ts](../../src/lib/external-import/duplicate-detect-pool.ts) — reserved for the future bank-ledger → transactions reconciliation surface.
 
+## Standalone reconcile page + M:N join (2026-05-23)
+
+Shipped as the follow-up to the 2026-05-22 refactor. Lifts the 1:1 lineage FK to **many-to-many** in both directions so the user can express:
+- **1 bank → N transactions** — one bank charge split into multiple system-side transactions because the user tracks them separately (different categories, different splits).
+- **N bank → 1 transaction** — a recurring fee spread across statements that the user wants to track as a single annual line.
+
+The existing `transactions.bank_transaction_id` FK stays as the **"primary link" hint**. Every primary join row mirrors it; extra links (the M:N second-and-beyond) live only in the join table. Aggregators / wipe-account / backup-restore that already read the FK keep working unchanged.
+
+### Schema
+
+```sql
+CREATE TABLE transaction_bank_links (
+  id                  SERIAL PRIMARY KEY,
+  user_id             TEXT    NOT NULL,
+  transaction_id      INTEGER NOT NULL REFERENCES transactions(id)      ON DELETE CASCADE,
+  bank_transaction_id UUID    NOT NULL REFERENCES bank_transactions(id) ON DELETE CASCADE,
+  link_type           TEXT    NOT NULL DEFAULT 'extra',   -- 'primary' | 'extra'
+  source              TEXT    NOT NULL DEFAULT 'manual',  -- mirrors SOURCES tuple
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (transaction_id, bank_transaction_id)
+);
+```
+
+`link_type` is not enforced by SQL CHECK in v1 (rules-v2 precedent — drift between code enum + SQL CHECK is a CLAUDE.md contract breach unless documented; Zod at the API boundary is the enforcement layer). `transactions.source` CHECK gains `'reconcile_link'` for the materialize-from-bank-row path.
+
+CASCADE on both FKs is load-bearing — wipe-account's existing "delete transactions THEN bank_transactions" ordering keeps working untouched because deletes on either side automatically tidy the join. Backfill: the migration inserts a primary join row for every existing `transactions.bank_transaction_id IS NOT NULL` row, idempotent via `ON CONFLICT (transaction_id, bank_transaction_id) DO NOTHING`.
+
+Migration: [scripts/migrations/20260523_transaction-bank-links.sql](../../scripts/migrations/20260523_transaction-bank-links.sql).
+
+### Match engine
+
+Three layers, in order — each layer's pairs are excluded from the next:
+
+1. **`join_existing`** — pairs already in `transaction_bank_links` (surface as "linked" with their `link_type`). Never auto-mutated; user explicitly unlinks via the UI.
+2. **`exact_hash`** — pairs not in the join table where `transactions.import_hash = bank_transactions.import_hash` AND `account_id` matches. Score 1.0. Surfaced as a suggestion; manual accept required (we don't auto-link historical FK-null rows to avoid surprising the user with retroactive lineage they may have intentionally rejected during staging review).
+3. **`fuzzy`** — pairs not in (1) or (2), scored by a small purpose-built bank↔tx scorer in [match-engine.ts](../../src/lib/reconcile/match-engine.ts). Same amount/date/payee rubric as the cross-source detector ([duplicate-detect.ts](../../src/lib/external-import/duplicate-detect.ts)) so the unified threshold story holds. The detector's transfer-pair-sibling + holding-symbol hints are intentionally omitted — `bank_transactions` doesn't carry that info. Greedy assignment per layer (one tx ↔ one bank); user can build M:N explicitly via the UI after.
+
+Defaults: `dateToleranceDays: 7, amountTolerancePct: 0.07, amountToleranceFloor: 50, scoreThreshold: 0.6` — re-exported from `duplicate-detect.ts` `DEFAULT_OPTIONS` as `RECONCILE_DEFAULT_THRESHOLDS` so the single source of truth covers both surfaces.
+
+### Per-user thresholds
+
+Persist in the generic `settings(key='reconcile_thresholds')` row, JSON-serialized. GET/PUT at [/api/settings/reconcile-thresholds](../../src/app/api/settings/reconcile-thresholds/route.ts), edited at [/settings/reconciliation](../../src/app/(app)/settings/reconciliation/page.tsx).
+
+### Routes + page
+
+- `GET /api/reconcile/suggestions?accountId=X` — runs the match engine, returns linked + suggestions + bankOnly + txOnly with per-id decrypted enrichment.
+- `POST /api/reconcile/links` `{ transactionId, bankTransactionId, linkType }` — `requireEncryption`; delegates to [linkTransactionToBank](../../src/lib/reconcile/links.ts) (single DB transaction; sets FK if linkType='primary' AND FK was NULL).
+- `DELETE /api/reconcile/links` `{ transactionId, bankTransactionId }` — `requireEncryption`; delegates to [unlinkTransactionFromBank](../../src/lib/reconcile/links.ts) (clears FK if removed row was primary AND FK still pointed there).
+- `POST /api/reconcile/materialize` `{ bankTransactionId, categoryId?, accountId? }` — creates a fresh `transactions` row mirrored from the bank row with `source='reconcile_link'`, FK set, primary join row inserted. Refuses materialize into investment accounts (those need `portfolio_holding_id`). `import_hash` copied verbatim — NEVER recomputed.
+- Page: [/reconcile](../../src/app/(app)/reconcile/page.tsx) — per-account two-pane view (BankPane left forks the staging variant, TransactionsPane right with inline SuggestionCards).
+
+### Dual-write retrofit (Phase 5)
+
+Every site that sets `transactions.bank_transaction_id` on a fresh INSERT now also inserts a `link_type='primary'` row in the same DB scope with `ON CONFLICT (transaction_id, bank_transaction_id) DO NOTHING`:
+
+- [executeImport](../../src/lib/import-pipeline.ts) — batch INSERT uses `.returning({ id, bankTransactionId })`, then a single follow-up insert into `transaction_bank_links` for every row with a non-NULL FK. `source='import'` (or `'connector'` per `txSource`).
+- [createTransferPair](../../src/lib/transfer.ts) — inside the Drizzle transaction, after both leg INSERTs.
+- [createTransferPairViaSql](../../src/lib/transfer.ts) — raw-SQL variant, same shape via `client.query`.
+- Staged-approve peer-pair bucket in [approve/route.ts](../../src/app/api/import/staged/[id]/approve/route.ts) — batch `.returning({ id })`, then bulk join INSERT.
+- Backup-restore in [data/import/route.ts](../../src/app/api/data/import/route.ts) — primary rows derived from the FK as a safety net for pre-2026-05-23 backups; explicit `transactionBankLinks[]` (if present in the JSON) re-inserts after, ON CONFLICT dedupes against the primaries.
+
+Backup export at [data/export/route.ts](../../src/app/api/data/export/route.ts) now serializes `transactionBankLinks[]`.
+
 ## Future work (deferred)
 
-- **Bank-ledger → transactions reconciliation page** (next-session priority). Multi-strategy matching: exact via `transactions.bank_transaction_id` lineage, fuzzy via the preserved `detectProbableDuplicates` infrastructure (FX-spread, date drift, payee similarity, transfer-pair sibling boost). UI surface: extend the left pane's per-row Actions, or a dedicated `/bank-ledger` view that pairs each bank row with its candidate transaction.
 - Read-only UI for the bank-side ledger (per-account "everything the bank reported" view).
-- MCP read tools (`list_bank_transactions`, `get_bank_history`).
+- MCP read tools (`list_bank_transactions`, `get_bank_history`, `list_reconcile_suggestions`, `accept_link`, `materialize_from_bank`).
 - Drop `staged_imports.date_range_start` / `date_range_end` columns (no readers post the F-53E removal).
 - Per-row "Matches existing transaction #X" surface on the staging-path (`/import/pending`) — today it lives only on the classic `/import` flow.
 - Bank-only row hover: surface `seen_count`, `first_seen_at`, `last_seen_at`, `source_filenames[]` as a tooltip / detail drawer.
+- Persisting rejected reconcile suggestions so they don't reappear on next load. Today reject is page-scoped state. Future option: a `link_type='rejected'` row or sibling `reconcile_rejections` table.
+- Cross-account view on `/reconcile` (v1 is per-account).
+- New `audit:invariants` rule for "FK-set without join-insert" to catch dual-write drift before it ships.
