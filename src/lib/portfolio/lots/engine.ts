@@ -41,6 +41,39 @@ import type {
   TxRowForLots,
 } from "./types";
 
+// ─── InvalidLinkPairError ────────────────────────────────────────────────
+//
+// Raised when the engine encounters a link_id pair that doesn't match any
+// of the two valid shapes:
+//   (a) same portfolio_holding_id on both legs → in-kind transfer
+//   (b) both legs reference is_cash=TRUE sleeves → FX conversion
+// Anything else (stock paired with a different stock, stock paired with a
+// cash sleeve, etc.) gets this error. Callers should let it propagate so
+// the user sees a clear refusal rather than silent corruption (a
+// transfer_in lot on the wrong holding).
+
+export interface InvalidLinkPairErrorContext {
+  sourceTxId: number | string;
+  destTxId: number | string;
+  sourceHoldingId: number | null;
+  destHoldingId: number | null;
+  reason: string;
+}
+
+export class InvalidLinkPairError extends Error {
+  readonly code = "invalid_link_pair" as const;
+  readonly context: InvalidLinkPairErrorContext;
+  constructor(context: InvalidLinkPairErrorContext) {
+    super(
+      `InvalidLinkPairError: ${context.reason} ` +
+        `(source tx=${context.sourceTxId} holding=${context.sourceHoldingId}, ` +
+        `dest tx=${context.destTxId} holding=${context.destHoldingId})`,
+    );
+    this.name = "InvalidLinkPairError";
+    this.context = context;
+  }
+}
+
 // ─── openLotForBuy ────────────────────────────────────────────────────────
 
 export interface OpenLotPlan {
@@ -301,6 +334,30 @@ export function transferLot(input: TransferLotInput): TransferLotResult {
     throw new Error(
       `transferLot: destTx.id=${destTx.id} missing holdingId or accountId`,
     );
+  }
+
+  // 2026-05-25 portfolio ops Phase 1 — engine-level guard. In-kind
+  // transfers are only valid when both legs reference the SAME
+  // portfolio_holding_id (e.g., VTI in TFSA → VTI in RRSP, cost basis
+  // carries over). A pair with different holdings (AAPL → MSFT,
+  // AAPL → USD-cash sleeve, etc.) is not a transfer — it's a swap or a
+  // sell, which the write-hook layer should route through
+  // closeLotsForSell + openLotForBuy instead. Refusing here is
+  // defense-in-depth: the new form layer can't produce different-holding
+  // pairs, but legacy/API/MCP callers might, and we want loud refusal
+  // rather than silent transfer_in lots on the wrong holding.
+  if (sourceTx.portfolioHoldingId != null && destTx.portfolioHoldingId != null) {
+    if (sourceTx.portfolioHoldingId !== destTx.portfolioHoldingId) {
+      throw new InvalidLinkPairError({
+        sourceTxId: sourceTx.id,
+        destTxId: destTx.id,
+        sourceHoldingId: sourceTx.portfolioHoldingId,
+        destHoldingId: destTx.portfolioHoldingId,
+        reason:
+          "In-kind transfer requires the same portfolio_holding_id on both legs. " +
+          "For different holdings, use a swap (sell + buy) or stock→cash sell instead.",
+      });
+    }
   }
 
   const ordered = sourceLots

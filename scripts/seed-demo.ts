@@ -19,6 +19,9 @@ import {
 } from "../src/lib/crypto/envelope";
 import { encryptName } from "../src/lib/crypto/encrypted-columns";
 import { stageSampleOfxImport } from "./seed-demo-pending-import";
+import { PostgresAdapter } from "../src/db/adapters/postgres";
+import { setAdapter, setDialect } from "../src/db";
+import { buildLotsForUser } from "../src/lib/portfolio/lots/backfill";
 
 /** Mirror of src/lib/import-hash.ts generateImportHash(). Kept local so this
  *  CLI script doesn't reach into the Next.js bundle graph. Drift here breaks
@@ -334,6 +337,7 @@ export async function assertDemoDatabase(client: pg.PoolClient, url: string) {
 async function main() {
   const pool = new pg.Pool({ connectionString: databaseUrl });
   const client = await pool.connect();
+  let lotsAdapter: PostgresAdapter | null = null;
 
   try {
     await assertDemoDatabase(client, databaseUrl);
@@ -400,6 +404,13 @@ async function main() {
       "transactions",
       "budgets",
       "goals",
+      // loans must be wiped BEFORE accounts because loans.account_id has
+      // no ON DELETE CASCADE (intentional — losing a loan due to an
+      // account delete is a data-loss footgun in normal app flow). Missing
+      // this caused the demo wipe to half-complete: transactions/holdings
+      // would drop fine, then the accounts DELETE would 23503 on the
+      // loans FK and the rest of the wipe + the reseed never ran.
+      "loans",
       "portfolio_holdings",
       "recurring_transactions",
       "subscriptions",
@@ -493,25 +504,54 @@ async function main() {
     // /api/admin/portfolio-holding-fk-progress and blocks the Phase 5 cutover.
     const brokerageId = accountIds["Brokerage"];
     console.log(`[seed-demo] Inserting portfolio holdings…`);
-    const holdingsSeed = [
-      { name: "VTI",    symbol: "VTI",    currency: "USD", isCrypto: 0, note: "Vanguard Total Stock Market (US broad)" },
-      { name: "VOO",    symbol: "VOO",    currency: "USD", isCrypto: 0, note: "Vanguard S&P 500" },
-      { name: "VXUS",   symbol: "VXUS",   currency: "USD", isCrypto: 0, note: "Vanguard International ex-US" },
-      { name: "VCN.TO", symbol: "VCN.TO", currency: "CAD", isCrypto: 0, note: "Vanguard FTSE Canada" },
-      { name: "VAB.TO", symbol: "VAB.TO", currency: "CAD", isCrypto: 0, note: "Vanguard Canadian Aggregate Bond" },
-      { name: "AAPL",   symbol: "AAPL",   currency: "USD", isCrypto: 0, note: "Apple Inc. — single stock" },
-      { name: "BTC",    symbol: "BTC",    currency: "USD", isCrypto: 1, note: "Bitcoin" },
+    // Stock holdings + 1 Cash CAD sleeve. The Cash sleeve is the implicit
+    // cash side for every investment-account transaction in this seed —
+    // explicit creation (Phase 1 portfolio ops, 2026-05-25) replaces the
+    // legacy getOrCreateCashHolding auto-create. `is_cash: true` lets the
+    // lot engine + future operations.ts helpers identify the sleeve.
+    type HoldingSeed = {
+      name: string;
+      symbol: string | null;
+      currency: string;
+      isCrypto: number;
+      isCash: boolean;
+      note: string;
+    };
+    const holdingsSeed: HoldingSeed[] = [
+      { name: "VTI",    symbol: "VTI",    currency: "CAD", isCrypto: 0, isCash: false, note: "Vanguard Total Stock Market (US broad)" },
+      { name: "VOO",    symbol: "VOO",    currency: "CAD", isCrypto: 0, isCash: false, note: "Vanguard S&P 500" },
+      { name: "VXUS",   symbol: "VXUS",   currency: "CAD", isCrypto: 0, isCash: false, note: "Vanguard International ex-US" },
+      { name: "VCN.TO", symbol: "VCN.TO", currency: "CAD", isCrypto: 0, isCash: false, note: "Vanguard FTSE Canada" },
+      { name: "VAB.TO", symbol: "VAB.TO", currency: "CAD", isCrypto: 0, isCash: false, note: "Vanguard Canadian Aggregate Bond" },
+      { name: "AAPL",   symbol: "AAPL",   currency: "CAD", isCrypto: 0, isCash: false, note: "Apple Inc. — single stock" },
+      { name: "BTC",    symbol: "BTC",    currency: "CAD", isCrypto: 1, isCash: false, note: "Bitcoin" },
+      // Cash sleeve — explicit per portfolio ops Phase 1. symbol_ct stays
+      // NULL (the canonical cash detection rule); the UI renders this as
+      // "Cash CAD" by combining is_cash=TRUE + currency.
+      { name: "Cash",   symbol: null,     currency: "CAD", isCrypto: 0, isCash: true,  note: "" },
     ];
     const holdingIdsByName: Record<string, number> = {};
     for (const h of holdingsSeed) {
       // Stream D Phase 4 cutover (2026-05-03): plaintext `name` + `symbol`
-      // physically dropped. *_ct + *_lookup are the sole storage.
+      // physically dropped. *_ct + *_lookup are the sole storage. Cash
+      // sleeves have symbol=NULL (no symbol_ct, no symbol_lookup).
       const nameEnc = encryptName(demoDek, h.name);
-      const symbolEnc = encryptName(demoDek, h.symbol);
+      const symbolEnc = h.symbol != null ? encryptName(demoDek, h.symbol) : null;
       const { rows } = await client.query(
-        `INSERT INTO portfolio_holdings (user_id, account_id, name_ct, name_lookup, symbol_ct, symbol_lookup, currency, is_crypto, note)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-        [userId, brokerageId, nameEnc.ct, nameEnc.lookup, symbolEnc.ct, symbolEnc.lookup, h.currency, h.isCrypto, h.note]
+        `INSERT INTO portfolio_holdings (user_id, account_id, name_ct, name_lookup, symbol_ct, symbol_lookup, currency, is_crypto, is_cash, note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+        [
+          userId,
+          brokerageId,
+          nameEnc.ct,
+          nameEnc.lookup,
+          symbolEnc?.ct ?? null,
+          symbolEnc?.lookup ?? null,
+          h.currency,
+          h.isCrypto,
+          h.isCash,
+          h.note,
+        ]
       );
       const holdingId = rows[0].id;
       holdingIdsByName[h.name] = holdingId;
@@ -533,6 +573,13 @@ async function main() {
 
     // Investment buys — bind portfolio_holding_id (FK). Phase 5 (2026-04-29)
     // retired the legacy encrypted portfolio_holding text column.
+    //
+    // 2026-05-25 portfolio ops Phase 1 — each row now carries a `kind`
+    // discriminator. The qty-sign rule mirrors what the schema migration's
+    // backfill does for existing data; tagging at write time keeps the
+    // discriminator consistent across fresh re-seeds. Phase 2 will route
+    // these through src/lib/portfolio/operations.ts (recordBuy/recordSell)
+    // to also produce paired cash-leg rows on the Cash sleeve.
     const today0 = new Date(); today0.setHours(0, 0, 0, 0);
     const invStart = new Date(today0); invStart.setMonth(invStart.getMonth() - 6);
     const invTxs = investmentTransactions(invStart);
@@ -543,9 +590,10 @@ async function main() {
       if (!holdingId) {
         throw new Error(`[seed-demo] Investment tx references unknown holding '${i.holding}'`);
       }
+      const kind = i.quantity > 0 ? "buy" : "sell";
       await client.query(
-        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, quantity, portfolio_holding_id, payee, note, tags, is_business, source)
-         VALUES ($1, $2, $3, NULL, 'CAD', $4, $5, $6, $7, $8, $9, 0, 'sample_data')`,
+        `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, quantity, portfolio_holding_id, payee, note, tags, is_business, source, kind)
+         VALUES ($1, $2, $3, NULL, 'CAD', $4, $5, $6, $7, $8, $9, 0, 'sample_data', $10)`,
         [
           userId,
           isoDate(d),
@@ -556,6 +604,7 @@ async function main() {
           encryptField(demoDek, i.payee),
           encryptField(demoDek, ""),
           encryptField(demoDek, ""),
+          kind,
         ]
       );
     }
@@ -608,6 +657,42 @@ async function main() {
         `(${staged.skippedDuplicateCount} flagged as already-imported).`,
     );
 
+    // 9. Lot-tracking backfill for the demo user.
+    //
+    // The transaction INSERTs above are raw SQL and bypass the lot
+    // write-hooks in src/lib/portfolio/lots/write-hooks.ts, so without an
+    // explicit backfill the demo user would have 8 buys + 1 sell on the
+    // brokerage but ZERO holding_lots / holding_lot_closures rows — the
+    // /portfolio/realized-gains dashboard (and the get_realized_gains MCP
+    // HTTP tool, and the Phase 3 performance chart) would render the
+    // empty-state copy on every nightly reseed.
+    //
+    // The backfill walks the demo's investment transactions chronologically
+    // via the same engine that powers live writes (issue #25/#84/#96/#128
+    // /#129/#236 invariants honored), opens lots from the buys, and
+    // FIFO-depletes on the VOO sell to produce one holding_lot_closures
+    // row. The status row is upserted with backfill_done=true,
+    // enabled=false — demo isn't part of the per-user rollout, the page
+    // just reads the closures directly (the read path is not gated on
+    // `enabled`, only the aggregator branch in /portfolio is).
+    //
+    // Uses the Drizzle db proxy via PostgresAdapter — independent pool
+    // from the seed's pg.Pool. Released in `finally`.
+    console.log(`[seed-demo] Backfilling holding lots for demo user…`);
+    setDialect("postgres");
+    lotsAdapter = new PostgresAdapter();
+    await lotsAdapter.initialize({
+      dialect: "postgres",
+      postgres: { connectionString: databaseUrl, userId },
+    });
+    setAdapter(lotsAdapter);
+    const lotsResult = await buildLotsForUser(userId, demoDek);
+    console.log(
+      `[seed-demo] Lots: ${lotsResult.lotsWritten} written, ` +
+        `${lotsResult.closuresWritten} closures from ${lotsResult.txProcessed} txs` +
+        (lotsResult.errors.length ? ` (${lotsResult.errors.length} non-fatal errors)` : ""),
+    );
+
     // Note: login_count and last_login_at are intentionally NOT reset here
     // so they accumulate across nightly reseeds and give a true interaction metric.
 
@@ -625,6 +710,7 @@ async function main() {
   } finally {
     client.release();
     await pool.end();
+    if (lotsAdapter) await lotsAdapter.close();
   }
 }
 

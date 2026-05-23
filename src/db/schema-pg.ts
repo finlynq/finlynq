@@ -119,6 +119,23 @@ export const transactions = pgTable("transactions", {
   // from `link_id`, which the four-check transfer-pair rule reserves for
   // `record_transfer` siblings.
   tradeLinkId: text("trade_link_id"),
+  // 2026-05-25 — portfolio ops Phase 1. Explicit type discriminator for
+  // portfolio-related rows (NULL on non-portfolio rows). Valid values
+  // listed in the CHECK constraint on the column (see
+  // 20260525_portfolio_ops_phase1.sql). The 6 operation helpers in
+  // src/lib/portfolio/operations.ts are the canonical writers; existing
+  // tx-write sites that handle portfolio rows route through them.
+  kind: text("kind"),
+  // 2026-05-25 — portfolio ops Phase 1. For portfolio_income /
+  // portfolio_expense rows that land on a cash sleeve, this points back
+  // to the holding the income/expense pertains to. Example: an AAPL
+  // dividend lands on the USD-cash sleeve (portfolio_holding_id =
+  // USD_Cash) but related_holding_id = AAPL so reports can group
+  // dividends by source holding. ON DELETE SET NULL.
+  relatedHoldingId: integer("related_holding_id").references(
+    () => portfolioHoldings.id,
+    { onDelete: "set null" }
+  ),
   // Two-ledger import refactor (2026-05-22) — lineage FK back to the bank-
   // side record of this row. Set on import-sourced INSERTs (executeImport,
   // createTransferPair source leg, approve route's three buckets); NULL on
@@ -158,6 +175,13 @@ export const portfolioHoldings = pgTable("portfolio_holdings", {
   // queries via `name_lookup`/`symbol_lookup`.
   currency: text("currency").notNull().default("CAD"),
   isCrypto: integer("is_crypto").default(0),
+  // 2026-05-25 — portfolio ops Phase 1. Explicit flag for cash sleeves.
+  // See plan/portfolio-operations-refactor and the
+  // 20260525_portfolio_ops_phase1.sql migration. Partial unique index on
+  // (user_id, account_id, currency) WHERE is_cash=TRUE enforces "at most
+  // one cash sleeve per (account, currency)". UI renders cash sleeves as
+  // "Cash <currency>" by combining is_cash=TRUE + currency column.
+  isCash: boolean("is_cash").notNull().default(false),
   note: text("note").default(""),
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),

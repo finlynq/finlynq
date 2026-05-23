@@ -46,6 +46,19 @@
  *                                  `*LotHook` / `reverseLotsForDeleteHook`
  *                                  (plan/portfolio-lots-and-performance.md
  *                                  Phase 1).
+ *   8. portfolio-ops-kind-via-operations
+ *                                — any file that literally writes
+ *                                  `kind: "buy"` / `kind: "sell"` /
+ *                                  `kind: "buy_cash_leg"` /
+ *                                  `kind: "sell_cash_leg"` /
+ *                                  `kind: "fx_*"` /
+ *                                  `kind: "in_kind_transfer_*"` must
+ *                                  import the matching helper from
+ *                                  `@/lib/portfolio/operations` — the
+ *                                  only writer that knows how to pair
+ *                                  legs correctly + invoke the lot
+ *                                  engine + share the trade_link_id
+ *                                  (portfolio ops Phase 1, 2026-05-25).
  *
  * Output:
  *   ALL INVARIANTS PASS                  (exit 0)
@@ -139,6 +152,20 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // (record_transaction + delete_transaction are already wired as of 2026-05-25.)
   "mcp-server/register-tools-pg.ts:lots-write-hook":
     "Phase 1 follow-up — bulk_record_transactions / record_trade / update_transaction need lot wiring; record_transaction + delete_transaction already wired; backfill covers the gap until flag-flip",
+  // operations.ts is the canonical writer of the multi-leg portfolio op
+  // kinds; it can't very well "import from @/lib/portfolio/operations" of
+  // itself. Accepted as a baseline exception for invariant #8.
+  "src/lib/portfolio/operations.ts:portfolio-ops-kind-via-operations":
+    "operations.ts is the canonical writer; cannot self-import",
+  // seed-demo.ts uses raw-SQL INSERTs to populate the demo's investment
+  // history (legacy pattern — predates operations.ts). Each row's `kind`
+  // is set by the qty-sign rule that matches the schema-migration backfill,
+  // and the lots-backfill at the end of seed-demo (buildLotsForUser) wires
+  // the cost-basis side. Phase 2 follow-up: route through operations.ts
+  // so the seed itself produces paired cash-leg rows (today the demo's
+  // cash sleeve qty is derived from the backfill, not literal rows).
+  "scripts/seed-demo.ts:portfolio-ops-kind-via-operations":
+    "Phase 2 follow-up — seed uses legacy raw-SQL with `kind` tagged by qty sign; lots-backfill at end wires cost basis",
 };
 
 interface InvariantConfig {
@@ -273,6 +300,29 @@ const INVARIANTS: InvariantConfig[] = [
     requiredHelper:
       /\b(?:applyLotEffectsForTx|openLotForBuyHook|closeLotsForSellHook|transferLotHook|reverseLotsForDeleteHook|openLotForBuy|closeLotsForSell|transferLot)\b/,
     helperName: "applyLotEffectsForTx / *LotHook (Phase 1 lot tracking)",
+  },
+  {
+    id: "portfolio-ops-kind-via-operations",
+    description:
+      "any file that writes one of the portfolio-op kind discriminators (buy/sell/buy_cash_leg/sell_cash_leg/fx_*/in_kind_transfer_*) must import the matching helper from @/lib/portfolio/operations — otherwise the cash-leg pairing + lot wiring is incomplete (portfolio ops Phase 1, 2026-05-25)",
+    fileGlobs: [
+      "src/",
+      "mcp-server/",
+      "scripts/",
+    ],
+    // Trigger on a literal `kind: "<op>"` or `kind: '<op>'` for any
+    // operation kind that requires multi-row pairing. portfolio_income /
+    // portfolio_expense are intentionally NOT in this list — they're
+    // single-row writes and can be written directly without the helper.
+    writeSite:
+      /kind\s*:\s*['"](?:buy|sell|buy_cash_leg|sell_cash_leg|fx_from|fx_to|fx_fee|in_kind_transfer_in|in_kind_transfer_out)['"]/,
+    // Any import from the operations module satisfies the invariant.
+    // operations.ts itself is the canonical writer; its own writes don't
+    // need to import it (and won't match this import regex), so we add a
+    // baseline exception for operations.ts below.
+    requiredHelper:
+      /from\s+["']@\/lib\/portfolio\/operations["']|from\s+["']\.{1,2}\/(?:[^"']*\/)?operations["']/,
+    helperName: "import from @/lib/portfolio/operations",
   },
   {
     id: "buildNameFields-on-stream-d-tables",

@@ -35,13 +35,15 @@
  *      reach this hook because the caller filters on qty != 0.
  */
 
-import { and, eq, isNotNull, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import {
+  InvalidLinkPairError,
   closeLotsForSell,
   openLotForBuy,
   transferLot,
 } from "./engine";
+import { fxConversionHook, isFxConversionPair, type FxLegInfo } from "./fx-conversion";
 import { selectLotsToClose } from "./selection";
 import type {
   CashLegHint,
@@ -64,6 +66,16 @@ export function __setLotWriteHookStrictMode(value: boolean): void {
 }
 
 function softFail(err: unknown, label: string): void {
+  // 2026-05-25 portfolio ops Phase 1 — data-integrity errors propagate.
+  // Soft-fail is meant to absorb lot-side bugs that are recoverable via
+  // backfill (the lot row didn't land but the underlying tx did, so
+  // backfill can reconcile). An InvalidLinkPairError is NOT recoverable:
+  // it means the caller created a `link_id` pair that doesn't match any
+  // valid shape (in-kind transfer or FX). The user needs to see the
+  // refusal so they can fix the input — silent log + soft-fail would
+  // produce the exact bug we just patched on dev (AAPL paired with the
+  // Cash sleeve via link_id, no lot effects, user sees no realized gain).
+  if (err instanceof InvalidLinkPairError) throw err;
   // eslint-disable-next-line no-console
   console.error(`${HOOK_LABEL} ${label} failed:`, err);
   if (strictMode) throw err;
@@ -366,6 +378,135 @@ export async function transferLotHook(
     softFail(err, `transferLotHook source=${sourceTx.id} dest=${destTx.id}`);
     return null;
   }
+}
+
+// ─── applyLotEffectsForLinkPair — link_id pair dispatcher ─────────────────
+//
+// Centralized entry point for the lot-engine side of a link_id-paired
+// transaction (in-kind transfer or FX conversion). Replaces direct
+// `transferLotHook` calls from callers that don't know which valid shape
+// the pair is — the dispatcher reads the two holdings, classifies, and
+// routes:
+//
+//   1. Same `portfolio_holding_id` on both legs (and neither is a cash
+//      sleeve)               → transferLotHook (existing in-kind transfer)
+//   2. Both legs reference cash sleeves (is_cash=TRUE on both holdings)
+//                            → fxConversionHook (no lot writes)
+//   3. Anything else         → throws InvalidLinkPairError
+//
+// The error propagates to the caller (route / operations.ts / MCP tool)
+// so the user sees a clear "this is not a valid pairing" rather than a
+// silent transfer_in lot on the wrong holding (the bug observed on dev
+// 2026-05-23: AAPL paired with the Cash sleeve via link_id opened a
+// nonsense $260/sh cash lot).
+//
+// Note: this is INTENTIONALLY hard-fail (the throw is not caught in
+// softFail). Lot-side errors elsewhere are soft-failed because they're
+// recoverable via backfill; an invalid link pair is a data-integrity
+// issue that requires the caller's attention.
+
+export interface LinkPairResult {
+  shape: "in_kind_transfer" | "fx_conversion";
+  closuresWritten: number;
+  destLotsWritten: number;
+  warning?: string;
+}
+
+export async function applyLotEffectsForLinkPair(
+  sourceTx: TxRowForLots,
+  destTx: TxRowForLots,
+): Promise<LinkPairResult> {
+  if (
+    sourceTx.portfolioHoldingId == null ||
+    destTx.portfolioHoldingId == null
+  ) {
+    throw new InvalidLinkPairError({
+      sourceTxId: sourceTx.id,
+      destTxId: destTx.id,
+      sourceHoldingId: sourceTx.portfolioHoldingId,
+      destHoldingId: destTx.portfolioHoldingId,
+      reason: "Both legs of a link_id pair must reference a portfolio_holding_id.",
+    });
+  }
+
+  // Look up both holdings (is_cash + currency) — needed for the
+  // FX-vs-transfer classification.
+  const holdingIds = [
+    sourceTx.portfolioHoldingId,
+    destTx.portfolioHoldingId,
+  ];
+  const holdingRows = await db
+    .select({
+      id: schema.portfolioHoldings.id,
+      isCash: schema.portfolioHoldings.isCash,
+      currency: schema.portfolioHoldings.currency,
+    })
+    .from(schema.portfolioHoldings)
+    .where(inArray(schema.portfolioHoldings.id, holdingIds));
+
+  const byId = new Map(holdingRows.map((h) => [h.id, h]));
+  const sourceHolding = byId.get(sourceTx.portfolioHoldingId);
+  const destHolding = byId.get(destTx.portfolioHoldingId);
+  if (!sourceHolding || !destHolding) {
+    throw new InvalidLinkPairError({
+      sourceTxId: sourceTx.id,
+      destTxId: destTx.id,
+      sourceHoldingId: sourceTx.portfolioHoldingId,
+      destHoldingId: destTx.portfolioHoldingId,
+      reason: "Could not resolve one or both holdings for the link_id pair.",
+    });
+  }
+
+  const sourceLeg: FxLegInfo = {
+    isCash: Boolean(sourceHolding.isCash),
+    currency: sourceHolding.currency,
+  };
+  const destLeg: FxLegInfo = {
+    isCash: Boolean(destHolding.isCash),
+    currency: destHolding.currency,
+  };
+
+  // Shape 1: in-kind transfer — same holding on both legs, neither is cash.
+  if (
+    sourceTx.portfolioHoldingId === destTx.portfolioHoldingId &&
+    !sourceLeg.isCash &&
+    !destLeg.isCash
+  ) {
+    const r = await transferLotHook(sourceTx, destTx, {
+      holdingCurrency: sourceHolding.currency,
+    });
+    return {
+      shape: "in_kind_transfer",
+      closuresWritten: r?.closuresWritten ?? 0,
+      destLotsWritten: r?.destLotsWritten ?? 0,
+    };
+  }
+
+  // Shape 2: FX conversion — both legs are cash sleeves.
+  if (isFxConversionPair(sourceLeg, destLeg)) {
+    const r = fxConversionHook(sourceTx, destTx, sourceLeg, destLeg);
+    return {
+      shape: "fx_conversion",
+      closuresWritten: 0,
+      destLotsWritten: 0,
+      warning: r.warning,
+    };
+  }
+
+  // Shape 3: anything else — refuse.
+  throw new InvalidLinkPairError({
+    sourceTxId: sourceTx.id,
+    destTxId: destTx.id,
+    sourceHoldingId: sourceTx.portfolioHoldingId,
+    destHoldingId: destTx.portfolioHoldingId,
+    reason:
+      "link_id pair is neither an in-kind transfer (same holding, non-cash) " +
+      "nor an FX conversion (both cash sleeves). " +
+      `Source holding ${sourceTx.portfolioHoldingId} (is_cash=${sourceLeg.isCash}, ${sourceLeg.currency}); ` +
+      `dest holding ${destTx.portfolioHoldingId} (is_cash=${destLeg.isCash}, ${destLeg.currency}). ` +
+      "If this is a swap between different securities, record it as a Sell + Buy (no link_id). " +
+      "If this is converting a stock to cash, record it as a plain Sell.",
+  });
 }
 
 // ─── reverseLotsForDeleteHook ─────────────────────────────────────────────
