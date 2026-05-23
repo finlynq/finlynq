@@ -22,6 +22,7 @@ import {
   BookTemplate,
   Link as LinkIcon,
   ListChecks,
+  ArrowLeftRight,
 } from "lucide-react";
 import Link from "next/link";
 import { FileDropZone } from "./components/file-drop-zone";
@@ -522,6 +523,34 @@ export default function ImportPage() {
                   </div>
                   <Link
                     href="/import/reconcile"
+                    className="shrink-0 inline-flex h-8 items-center rounded-md border bg-background px-3 text-xs font-medium hover:bg-muted"
+                  >
+                    Open
+                  </Link>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Bank Reconciliation entry — FINLYNQ-98 (2026-05-22). The
+                standalone /reconcile surface matches imported transactions
+                to the bank-ledger tape, surfaces bank-only rows for
+                materialization, and lets the user link / unlink pairs. */}
+            <Card className="border-dashed border-sky-200 bg-sky-50/30 dark:bg-sky-950/10">
+              <CardContent className="py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ArrowLeftRight className="h-4 w-4 text-sky-600 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">Bank Reconciliation</p>
+                      <p className="text-xs text-muted-foreground">
+                        Match imported transactions against the bank's tape.
+                        Materialize bank-only rows, link or unlink pairs, and
+                        spot balance drift.
+                      </p>
+                    </div>
+                  </div>
+                  <Link
+                    href="/reconcile"
                     className="shrink-0 inline-flex h-8 items-center rounded-md border bg-background px-3 text-xs font-medium hover:bg-muted"
                   >
                     Open
