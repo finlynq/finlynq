@@ -861,10 +861,13 @@ export async function createTransferPair(
       enteredCurrency: fromCurrency,
       quantity: -Math.abs(holdingResolved.quantity),
       accountId: fromAcct.id,
-      categoryId,
+      // categoryId scoped to the closure above; null is safe here — lot
+      // effects on transfers don't read it (dividend-reinvest classification
+      // doesn't apply to transfer category).
+      categoryId: null,
       portfolioHoldingId: holdingResolved.fromHoldingId,
       tradeLinkId: null,
-      source: txSource,
+      source: opts.txSource ?? "manual",
     };
     const destTx: TxRowForLots = {
       id: toTransactionId,
@@ -876,10 +879,10 @@ export async function createTransferPair(
       enteredCurrency: fromCurrency,
       quantity: Math.abs(holdingResolved.destQuantity ?? holdingResolved.quantity),
       accountId: toAcct.id,
-      categoryId,
+      categoryId: null,
       portfolioHoldingId: holdingResolved.toHoldingId,
       tradeLinkId: null,
-      source: txSource,
+      source: opts.txSource ?? "manual",
     };
     await transferLotHook(sourceTx, destTx, { holdingCurrency: fromCurrency });
   }
@@ -2269,10 +2272,13 @@ export async function createTransferPairViaSql(
       enteredCurrency: fromCurrency,
       quantity: -Math.abs(holdingResolved.quantity),
       accountId: fromAcct.id,
-      categoryId,
+      // categoryId scoped to the closure above; null is safe here — lot
+      // effects on transfers don't read it (dividend-reinvest classification
+      // doesn't apply to transfer category).
+      categoryId: null,
       portfolioHoldingId: holdingResolved.fromHoldingId,
       tradeLinkId: null,
-      source: txSource,
+      source: opts.txSource ?? "manual",
     };
     const destTx: TxRowForLots = {
       id: toTransactionId,
@@ -2284,10 +2290,10 @@ export async function createTransferPairViaSql(
       enteredCurrency: fromCurrency,
       quantity: Math.abs(holdingResolved.destQuantity ?? holdingResolved.quantity),
       accountId: toAcct.id,
-      categoryId,
+      categoryId: null,
       portfolioHoldingId: holdingResolved.toHoldingId,
       tradeLinkId: null,
-      source: txSource,
+      source: opts.txSource ?? "manual",
     };
     await transferLotHook(sourceTx, destTx, { holdingCurrency: fromCurrency });
   }

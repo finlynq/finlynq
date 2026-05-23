@@ -499,8 +499,8 @@ export async function buildLotContext(
   const map = new Map<number, string>();
   for (const h of holdings) map.set(h.id, h.currency);
   const dividendsCategoryId = await resolveDividendsCategoryId(
-    // @ts-expect-error pg-shim execute typing
-    db,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db as any,
     userId,
     dek,
   );

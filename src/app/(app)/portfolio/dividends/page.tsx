@@ -21,7 +21,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Download } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
 
@@ -89,11 +89,12 @@ export default function DividendsPage() {
           <Link href="/portfolio" className="text-sm text-muted-foreground hover:underline self-center">
             ← Overview
           </Link>
-          <Button asChild variant="outline" size="sm">
-            <a href={csvHref}>
-              <Download className="mr-2 h-4 w-4" /> CSV
-            </a>
-          </Button>
+          <a
+            href={csvHref}
+            className={buttonVariants({ variant: "outline", size: "sm" })}
+          >
+            <Download className="mr-2 h-4 w-4" /> CSV
+          </a>
         </div>
       </div>
 

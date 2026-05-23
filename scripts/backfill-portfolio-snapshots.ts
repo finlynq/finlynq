@@ -38,6 +38,7 @@ async function main(): Promise<number> {
   setDialect("postgres");
   const adapter = new PostgresAdapter();
   await adapter.initialize({
+    dialect: "postgres",
     postgres: { connectionString: databaseUrl, userId },
   });
   setAdapter(adapter);

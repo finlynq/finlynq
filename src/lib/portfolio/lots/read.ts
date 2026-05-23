@@ -20,7 +20,7 @@
 
 import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
-import { getCrossRate, getLatestFxRate, getRate } from "@/lib/fx-service";
+import { getLatestFxRate, getRate } from "@/lib/fx-service";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import { computeHoldingMetricsFromLots } from "../metrics";
 import type {
@@ -244,9 +244,6 @@ export async function loadMetricsForUser(
     );
     return amount;
   };
-
-  // Unused but kept for parity with the legacy aggregator's async lookup.
-  void getCrossRate;
 
   return computeHoldingMetricsFromLots({
     lots,
