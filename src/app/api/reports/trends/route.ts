@@ -162,7 +162,7 @@ export async function GET(request: NextRequest) {
     const entry = target.get(name)!;
     const amt = row.categoryType === "E" ? Math.abs(row.total) : row.total;
     entry.total += amt;
-    entry.count += row.count;
+    entry.count += Number(row.count);
     entry.periods[row.period] = (entry.periods[row.period] ?? 0) + amt;
   }
 

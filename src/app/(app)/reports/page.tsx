@@ -1260,7 +1260,7 @@ function GroupRow({
         </TableCell>
         <TableCell className="text-sm font-semibold">{group.name}</TableCell>
         <TableCell className="text-right text-xs text-muted-foreground">
-          {group.items.reduce((s, i) => s + i.count, 0)}
+          {group.items.reduce((s, i) => s + Number(i.count), 0)}
         </TableCell>
         <TableCell className={`text-right font-mono text-sm font-semibold ${colorClass}`}>
           {formatCurrency(group.total, currency)}

@@ -62,14 +62,14 @@ export async function GET(request: NextRequest) {
       const existing = categoryTotals.get(key);
       if (existing) {
         existing.total += converted;
-        existing.count += row.count;
+        existing.count += Number(row.count);
       } else {
         categoryTotals.set(key, {
           categoryType: catType,
           categoryGroup: catGroup,
           categoryName: catName,
           total: converted,
-          count: row.count,
+          count: Number(row.count),
         });
       }
     }
