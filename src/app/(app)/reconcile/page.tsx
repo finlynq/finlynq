@@ -35,7 +35,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Settings as SettingsIcon } from "lucide-react";
+import { ArrowRight, Settings as SettingsIcon } from "lucide-react";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
 import { BankPane, type BankRow } from "@/components/reconcile/bank-pane";
 import {
@@ -49,10 +49,10 @@ import {
   type MaterializeBankPreview,
   type CategoryOption,
 } from "@/components/reconcile/materialize-dialog";
-// 2026-05-24 — BalanceSummaryCard moved to /import/pending per user
-// decision: surface the bank-vs-system compare at import time when the
-// user can still reject the batch, not when doing post-import row-by-row
-// reconciliation here.
+import {
+  BalanceSummaryCard,
+  type BalanceSummary,
+} from "@/components/reconcile/balance-summary-card";
 
 interface Account {
   id: number;
@@ -65,7 +65,7 @@ interface Account {
   archived?: boolean;
 }
 
-/** Date-window preset for the lookback chip group. `null` = all time. */
+/** Date-window preset for the quick-fill chip group. `null` = all time. */
 const LOOKBACK_OPTIONS: Array<{ label: string; value: number | null }> = [
   { label: "30d", value: 30 },
   { label: "60d", value: 60 },
@@ -75,15 +75,48 @@ const LOOKBACK_OPTIONS: Array<{ label: string; value: number | null }> = [
 ];
 const DEFAULT_LOOKBACK_DAYS = 60;
 
-function parseLookbackFromUrl(): number | null {
-  if (typeof window === "undefined") return DEFAULT_LOOKBACK_DAYS;
-  const raw = new URLSearchParams(window.location.search).get("range");
-  if (raw === "all") return null;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  if (Number.isFinite(n) && LOOKBACK_OPTIONS.some((o) => o.value === n)) {
-    return n;
+/** Return the YYYY-MM-DD that is `deltaDays` from today (UTC). */
+function shiftDaysFromToday(deltaDays: number): string {
+  const ms = Date.now() + deltaDays * 86_400_000;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Parse explicit `?from=YYYY-MM-DD` with legacy `?range=N` back-compat.
+ *  Legacy `?range=` is read once and converted on next persist. */
+function parseDateFromUrl(): string | null {
+  if (typeof window === "undefined") {
+    return shiftDaysFromToday(-DEFAULT_LOOKBACK_DAYS);
   }
-  return DEFAULT_LOOKBACK_DAYS;
+  const params = new URLSearchParams(window.location.search);
+  const explicit = params.get("from");
+  if (explicit && ISO_DATE_RE.test(explicit)) return explicit;
+  const range = params.get("range");
+  if (range === "all") return null;
+  const n = range ? parseInt(range, 10) : NaN;
+  if (Number.isFinite(n) && n > 0) return shiftDaysFromToday(-n);
+  return shiftDaysFromToday(-DEFAULT_LOOKBACK_DAYS);
+}
+
+/** Parse explicit `?to=YYYY-MM-DD`. No legacy equivalent. */
+function parseDateToUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  const explicit = params.get("to");
+  if (explicit && ISO_DATE_RE.test(explicit)) return explicit;
+  return null;
+}
+
+function describeRange(from: string | null, to: string | null): string {
+  if (from && to) return `${from} → ${to}`;
+  if (from) return `from ${from}`;
+  if (to) return `until ${to}`;
+  return "all time";
 }
 
 /** Friendly display name for an account — alias when set, formal name otherwise. */
@@ -151,8 +184,12 @@ interface ReconcileData {
     amountToleranceFloor: number;
     scoreThreshold: number;
   };
-  /** Echoed back by the server so the UI can confirm what window it used. */
+  /** Echoed back by the server so the UI can confirm what window it used.
+   *  `lookbackDays` is retained for legacy URL back-compat; new URLs use
+   *  explicit `dateMin` + `dateMax`. */
   lookbackDays: number | null;
+  dateMin: string | null;
+  dateMax: string | null;
 }
 
 export default function ReconcilePage() {
@@ -171,10 +208,11 @@ export default function ReconcilePage() {
   const [busyBankId, setBusyBankId] = useState<string | null>(null);
   /** Reject is local-only — page-scoped Set. Matches /import/pending pattern. */
   const [rejected, setRejected] = useState<Set<string>>(new Set());
-  /** Date-window lookback. null = all time. Defaults to 60d on first visit. */
-  const [lookbackDays, setLookbackDays] = useState<number | null>(
-    parseLookbackFromUrl(),
-  );
+  /** Explicit date window. Both null = all time. Both can be edited
+   *  independently in the UI (date inputs) or co-set via the chip presets
+   *  ("30d" → from = today-30d, to = today). Defaults to last 60d. */
+  const [dateFrom, setDateFrom] = useState<string | null>(parseDateFromUrl());
+  const [dateTo, setDateTo] = useState<string | null>(parseDateToUrl());
   /** Loaded once on mount. The materialize dialog renders these in its
    *  category picker; the bank-pool rule engine already used the same
    *  ids server-side to compute `suggestedCategoryId` per bank row. */
@@ -183,6 +221,12 @@ export default function ReconcilePage() {
    *  clicked. null when the dialog is closed. */
   const [materializeBank, setMaterializeBank] =
     useState<MaterializeBankPreview | null>(null);
+  /** Bank-vs-system balance summary for the selected account (Bank says /
+   *  Finlynq has / Delta). Surfaced above the two-pane layout. */
+  const [balanceSummary, setBalanceSummary] = useState<BalanceSummary | null>(
+    null,
+  );
+  const [balanceSummaryLoading, setBalanceSummaryLoading] = useState(false);
 
   // ─── Load accounts ──────────────────────────────────────────────────
   useEffect(() => {
@@ -223,17 +267,20 @@ export default function ReconcilePage() {
     };
   }, []);
 
-  // ─── Persist account selection + lookback in URL ───────────────────
+  // ─── Persist account selection + date window in URL ────────────────
+  // Legacy `?range=` is removed on the first persist after a navigation
+  // that included it (parseDateFromUrl already absorbed the value).
   useEffect(() => {
     if (selectedAccountId == null) return;
     const url = new URL(window.location.href);
     url.searchParams.set("account", String(selectedAccountId));
-    url.searchParams.set(
-      "range",
-      lookbackDays == null ? "all" : String(lookbackDays),
-    );
+    if (dateFrom) url.searchParams.set("from", dateFrom);
+    else url.searchParams.delete("from");
+    if (dateTo) url.searchParams.set("to", dateTo);
+    else url.searchParams.delete("to");
+    url.searchParams.delete("range");
     window.history.replaceState({}, "", url.toString());
-  }, [selectedAccountId, lookbackDays]);
+  }, [selectedAccountId, dateFrom, dateTo]);
 
   // ─── Load categories (once) ────────────────────────────────────────
   useEffect(() => {
@@ -267,7 +314,8 @@ export default function ReconcilePage() {
     setError(null);
     try {
       const qs = new URLSearchParams({ accountId: String(selectedAccountId) });
-      if (lookbackDays != null) qs.set("lookbackDays", String(lookbackDays));
+      if (dateFrom) qs.set("dateMin", dateFrom);
+      if (dateTo) qs.set("dateMax", dateTo);
       const res = await fetch(`/api/reconcile/suggestions?${qs.toString()}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -284,11 +332,44 @@ export default function ReconcilePage() {
     } finally {
       setDataLoading(false);
     }
-  }, [selectedAccountId, lookbackDays]);
+  }, [selectedAccountId, dateFrom, dateTo]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // ─── Load bank-vs-system balance summary ───────────────────────────
+  // Re-runs whenever the account changes OR the reconcile snapshot
+  // mutates (a fresh link/unlink/materialize can shift the system side).
+  useEffect(() => {
+    if (selectedAccountId == null) {
+      setBalanceSummary(null);
+      return;
+    }
+    let cancelled = false;
+    setBalanceSummaryLoading(true);
+    fetch(`/api/reconcile/balance-summary?accountId=${selectedAccountId}`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (cancelled) return;
+        if (body?.success) {
+          setBalanceSummary(body.data as BalanceSummary);
+        } else {
+          setBalanceSummary(null);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setBalanceSummary(null);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setBalanceSummaryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAccountId, data]);
 
   // ─── Derive BankRow[] + TxRow[] for the panes ──────────────────────
   const { bankRows, txRows, counts } = useMemo(() => {
@@ -524,13 +605,22 @@ export default function ReconcilePage() {
             Pair bank-ledger rows with system-side transactions.
           </p>
         </div>
-        <Link
-          href="/settings/reconciliation"
-          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <SettingsIcon className="h-4 w-4" />
-          Thresholds
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/import/pending"
+            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          >
+            Open pending imports
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+          <Link
+            href="/settings/reconciliation"
+            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <SettingsIcon className="h-4 w-4" />
+            Thresholds
+          </Link>
+        </div>
       </div>
 
       <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -579,30 +669,80 @@ export default function ReconcilePage() {
           )}
         </div>
 
-        {/* Date-window preset chips. Default 60d; "All" passes null. */}
+        {/* Date window: explicit from/to inputs + quick-fill chips. The
+         *  chips set both inputs at once (e.g. "30d" → from=today-30d,
+         *  to=today). Inputs may be edited independently for arbitrary
+         *  ranges. Both empty = "all time". */}
         <div
-          className="flex items-center gap-1 text-xs"
+          className="flex items-center gap-2 text-xs flex-wrap"
           role="group"
           aria-label="Date window"
         >
-          <span className="text-muted-foreground mr-1">Last</span>
-          {LOOKBACK_OPTIONS.map((opt) => {
-            const active = lookbackDays === opt.value;
-            return (
-              <Button
-                key={opt.label}
-                size="sm"
-                variant={active ? "default" : "outline"}
-                onClick={() => {
-                  setLookbackDays(opt.value);
-                  setRejected(new Set());
-                }}
-                className="h-7 px-2 text-xs"
-              >
-                {opt.label}
-              </Button>
-            );
-          })}
+          <label className="text-muted-foreground" htmlFor="reconcile-date-from">
+            From
+          </label>
+          <input
+            id="reconcile-date-from"
+            type="date"
+            value={dateFrom ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              setDateFrom(v ? v : null);
+              setRejected(new Set());
+            }}
+            className="h-7 px-2 text-xs border border-input rounded-md bg-background"
+          />
+          <span className="text-muted-foreground">→</span>
+          <label className="text-muted-foreground" htmlFor="reconcile-date-to">
+            To
+          </label>
+          <input
+            id="reconcile-date-to"
+            type="date"
+            value={dateTo ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              setDateTo(v ? v : null);
+              setRejected(new Set());
+            }}
+            className="h-7 px-2 text-xs border border-input rounded-md bg-background"
+          />
+          <div
+            className="flex items-center gap-1 ml-2"
+            role="group"
+            aria-label="Quick presets"
+          >
+            {LOOKBACK_OPTIONS.map((opt) => {
+              // A chip is "active" when the current inputs exactly match
+              // the preset window. "All" matches when both inputs are null.
+              let active = false;
+              if (opt.value === null) {
+                active = dateFrom === null && dateTo === null;
+              } else if (dateTo === todayIso()) {
+                active = dateFrom === shiftDaysFromToday(-opt.value);
+              }
+              return (
+                <Button
+                  key={opt.label}
+                  size="sm"
+                  variant={active ? "default" : "outline"}
+                  onClick={() => {
+                    if (opt.value === null) {
+                      setDateFrom(null);
+                      setDateTo(null);
+                    } else {
+                      setDateFrom(shiftDaysFromToday(-opt.value));
+                      setDateTo(todayIso());
+                    }
+                    setRejected(new Set());
+                  }}
+                  className="h-7 px-2 text-xs"
+                >
+                  {opt.label}
+                </Button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -613,25 +753,38 @@ export default function ReconcilePage() {
       )}
 
       {selectedAccountId != null && (
+        <BalanceSummaryCard
+          summary={balanceSummary}
+          loading={balanceSummaryLoading && !balanceSummary}
+        />
+      )}
+
+      {selectedAccountId != null && (
+        // Pane order on /reconcile is transactions-left, bank-ledger-right
+        // (intentionally inverted from /import/pending). /reconcile is
+        // system-first — the user's books are the source of truth and the
+        // bank-ledger pane is the audit trail to reconcile against. The
+        // inner SuggestionCard already renders tx-left / bank-right, so
+        // this outer order matches the card's column order.
         <TwoPaneLayout
-          leftLabel="Bank ledger"
+          leftLabel="Transactions"
           left={
-            <BankPane
-              rows={bankRows}
-              loading={dataLoading}
-              onMaterialize={onMaterialize}
-              onUnlink={onUnlink}
-              busyBankId={busyBankId}
-            />
-          }
-          rightLabel="Transactions"
-          right={
             <TransactionsPane
               rows={txRows}
               loading={dataLoading}
               onAccept={onAccept}
               onReject={onReject}
               busySuggestionKey={busySuggestionKey}
+            />
+          }
+          rightLabel="Bank ledger"
+          right={
+            <BankPane
+              rows={bankRows}
+              loading={dataLoading}
+              onMaterialize={onMaterialize}
+              onUnlink={onUnlink}
+              busyBankId={busyBankId}
             />
           }
         />
@@ -649,9 +802,7 @@ export default function ReconcilePage() {
           <span className="ml-auto">
             threshold {data.thresholds.scoreThreshold.toFixed(2)} · ±
             {data.thresholds.dateToleranceDays}d ·{" "}
-            {data.lookbackDays != null
-              ? `last ${data.lookbackDays}d`
-              : "all time"}
+            {describeRange(data.dateMin, data.dateMax)}
           </span>
         )}
       </div>

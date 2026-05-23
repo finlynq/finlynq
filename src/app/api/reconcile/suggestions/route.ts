@@ -54,16 +54,28 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Invalid accountId" }, { status: 400 });
   }
 
-  // Optional date window. `lookbackDays` is a positive integer count of
-  // days from today (e.g. 60 = "last 60 days"). Omitted / 0 / negative
-  // means "all time". UI sends one of 30 / 60 / 90 / 180 / null per the
-  // preset chips on the page; the engine clamps + handles null.
+  // Optional date window. Two equivalent input shapes:
+  //   - Legacy: `lookbackDays` (positive int = "last N days from today";
+  //     accepted for back-compat with older URLs and bookmarks).
+  //   - Explicit: `dateMin` + `dateMax` (ISO YYYY-MM-DD strings; either
+  //     can be omitted independently). Preferred — the UI's date-from /
+  //     date-to inputs send these directly so the user can pick an
+  //     arbitrary window, not just the lookback presets.
+  // Explicit params win when both shapes are present.
+  const dateMinParam = parseIsoDateParam(
+    request.nextUrl.searchParams.get("dateMin"),
+  );
+  const dateMaxParam = parseIsoDateParam(
+    request.nextUrl.searchParams.get("dateMax"),
+  );
   const lookbackRaw = request.nextUrl.searchParams.get("lookbackDays");
   const lookbackDays = lookbackRaw ? parseInt(lookbackRaw, 10) : null;
-  const dateMin =
+  const lookbackDateMin =
     lookbackDays != null && Number.isFinite(lookbackDays) && lookbackDays > 0
       ? shiftDaysFromToday(-lookbackDays)
       : null;
+  const dateMin = dateMinParam ?? lookbackDateMin;
+  const dateMax = dateMaxParam;
 
   // Cross-tenant attack returns 404 without leaking that the account
   // exists for another user. Same pattern as /api/import/bank-ledger.
@@ -89,6 +101,7 @@ export async function GET(request: NextRequest) {
     accountId,
     thresholds,
     dateMin,
+    dateMax,
   });
 
   return NextResponse.json({
@@ -97,8 +110,23 @@ export async function GET(request: NextRequest) {
       ...result,
       thresholds,
       lookbackDays: lookbackDays && lookbackDays > 0 ? lookbackDays : null,
+      dateMin,
+      dateMax,
     },
   });
+}
+
+/**
+ * Parse an ISO `YYYY-MM-DD` query param. Returns null for missing,
+ * malformed, or empty strings — match-engine treats null as "no bound".
+ */
+function parseIsoDateParam(raw: string | null): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
+  const ms = Date.parse(trimmed + "T00:00:00Z");
+  if (Number.isNaN(ms)) return null;
+  return trimmed;
 }
 
 /** Return the YYYY-MM-DD that is `deltaDays` from today (UTC). */

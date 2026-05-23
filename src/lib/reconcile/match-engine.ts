@@ -38,7 +38,7 @@
  * No writes; no MCP cache invalidations.
  */
 
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, lte } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { applyRules, type TransactionRule } from "@/lib/auto-categorize";
@@ -146,6 +146,10 @@ export interface ReconcileInput {
    *  also auto-pads the bank-pool window by `dateToleranceDays` so an
    *  edge-of-window tx can still match a bank row just outside it. */
   dateMin?: string | null;
+  /** Optional ISO YYYY-MM-DD ceiling. Null = no upper bound. The
+   *  bank-pool window is symmetrically padded outward by
+   *  `dateToleranceDays` so fuzzy matches near the edge still surface. */
+  dateMax?: string | null;
 }
 
 /**
@@ -160,6 +164,7 @@ export async function computeReconcileForAccount(
     ...(input.thresholds ?? {}),
   };
   const dateMin = input.dateMin ?? null;
+  const dateMax = input.dateMax ?? null;
 
   const [bankPool, txRows, joinRows, activeRules] = await Promise.all([
     buildBankLedgerCandidatePool({
@@ -167,23 +172,28 @@ export async function computeReconcileForAccount(
       dek: input.dek,
       accountIds: [input.accountId],
     }),
-    loadTxRows(input.userId, input.accountId, input.dek, dateMin),
+    loadTxRows(input.userId, input.accountId, input.dek, dateMin, dateMax),
     loadJoinRows(input.userId, input.accountId),
     loadActiveRulesForReconcile(input.userId),
   ]);
 
-  // Pre-filter the bank pool to the same window. Pad by the fuzzy date
-  // tolerance so an edge-of-window tx can still match a bank row just
-  // outside it via the fuzzy layer; the exact-hash + linked layers only
-  // care about hash/FK so the pad has no effect there.
+  // Pre-filter the bank pool to the same window. Pad symmetrically by the
+  // fuzzy date tolerance so an edge-of-window tx can still match a bank
+  // row just outside it via the fuzzy layer; the exact-hash + linked
+  // layers only care about hash/FK so the pad has no effect there.
   const allBankRows: BankCandidateRow[] =
     bankPool.byAccount.get(input.accountId) ?? [];
   const bankDateFloor = dateMin
     ? shiftDateString(dateMin, -thresholds.dateToleranceDays)
     : null;
-  const bankRows: BankCandidateRow[] = bankDateFloor
-    ? allBankRows.filter((b) => b.date >= bankDateFloor)
-    : allBankRows;
+  const bankDateCeil = dateMax
+    ? shiftDateString(dateMax, thresholds.dateToleranceDays)
+    : null;
+  const bankRows: BankCandidateRow[] = allBankRows.filter((b) => {
+    if (bankDateFloor && b.date < bankDateFloor) return false;
+    if (bankDateCeil && b.date > bankDateCeil) return false;
+    return true;
+  });
 
   // ─── Layer 1: existing links ───────────────────────────────────────
   // Track consumption so layers 2 + 3 skip pairs (and individual rows
@@ -490,6 +500,7 @@ async function loadTxRows(
   accountId: number,
   dek: Buffer | null,
   dateMin: string | null,
+  dateMax: string | null,
 ): Promise<TxLoaded[]> {
   const whereClauses = [
     eq(schema.transactions.userId, userId),
@@ -497,6 +508,9 @@ async function loadTxRows(
   ];
   if (dateMin) {
     whereClauses.push(gte(schema.transactions.date, dateMin));
+  }
+  if (dateMax) {
+    whereClauses.push(lte(schema.transactions.date, dateMax));
   }
   const rows = await db
     .select({

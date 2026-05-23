@@ -28,10 +28,11 @@ import {
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   ArrowLeft,
+  ArrowRight,
   Inbox,
   Mail,
   Upload,
@@ -52,10 +53,6 @@ import {
   BalanceWarningBanner,
   type BalanceWarning,
 } from "@/components/staging/balance-warning-banner";
-import {
-  BalanceSummaryCard,
-  type BalanceSummary,
-} from "@/components/reconcile/balance-summary-card";
 import { AccountSelector, type AccountOption } from "@/components/import/reconcile/account-selector";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
 import { FilePane } from "@/components/import/reconcile/file-pane";
@@ -156,12 +153,6 @@ function PendingImportsPageInner() {
   const [accountId, setAccountId] = useState<number | null>(null);
   const [dbRows, setDbRows] = useState<DbTransactionRow[]>([]);
   const [dbRowsLoading, setDbRowsLoading] = useState(false);
-  // 2026-05-24 — bank-vs-system balance summary card (relocated from
-  // /reconcile to /import/pending per user decision: surface the compare
-  // at IMPORT TIME when the user can still reject the batch, not when
-  // doing post-import row-by-row reconciliation).
-  const [balanceSummary, setBalanceSummary] = useState<BalanceSummary | null>(null);
-  const [balanceSummaryLoading, setBalanceSummaryLoading] = useState(false);
   // Phase 3 — match-action state.
   // Local-only set of rejected suggestion pairs ("stagedRowId:transactionId").
   // Per sub-item FINLYNQ-71 the reject is intentionally NOT persisted —
@@ -415,40 +406,6 @@ function PendingImportsPageInner() {
       cancelled = true;
     };
   }, [accountId]);
-
-  // 2026-05-24 — fetch the bank-vs-system balance summary for the selected
-  // account, displayed in the BalanceSummaryCard above the two-pane layout.
-  // Re-runs in lockstep with dbRows (anything that mutates bank-side or
-  // system-side data should refresh the rollup).
-  useEffect(() => {
-    if (!accountId) {
-      setBalanceSummary(null);
-      return;
-    }
-    let cancelled = false;
-    setBalanceSummaryLoading(true);
-    fetch(`/api/reconcile/balance-summary?accountId=${accountId}`)
-      .then((r) => r.json())
-      .then((body) => {
-        if (cancelled) return;
-        if (body?.success) {
-          setBalanceSummary(body.data as BalanceSummary);
-        } else {
-          setBalanceSummary(null);
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setBalanceSummary(null);
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setBalanceSummaryLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [accountId, dbRows]);
 
   // Filter staged rows to the currently-selected account. Empty
   // accountName matches every account (legacy rows pre-FINLYNQ-58 where
@@ -1105,6 +1062,17 @@ function PendingImportsPageInner() {
           )}
         </div>
         <div className="flex gap-2">
+          <Link
+            href={
+              accountId != null
+                ? `/reconcile?account=${accountId}`
+                : "/reconcile"
+            }
+            className={buttonVariants({ variant: "outline" })}
+          >
+            Open reconciliation
+            <ArrowRight className="h-4 w-4 ml-1.5" />
+          </Link>
           <Button
             variant="ghost"
             onClick={reject}
@@ -1131,13 +1099,6 @@ function PendingImportsPageInner() {
         >
           <CardContent className="py-3 text-sm">{toast.msg}</CardContent>
         </Card>
-      )}
-
-      {detail && detail.staged.boundAccountId != null && (
-        <BalanceSummaryCard
-          summary={balanceSummary}
-          loading={balanceSummaryLoading && !balanceSummary}
-        />
       )}
 
       {detail && detail.staged.statementBalance != null && (
