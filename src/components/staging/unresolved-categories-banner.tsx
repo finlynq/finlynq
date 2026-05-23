@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Unresolved-category banner for /import/pending (FINLYNQ-57).
+ * Unresolved-category banner for /import/pending (FINLYNQ-57, FINLYNQ-90).
  *
  * Rendered above the row table when the approve endpoint returned 400 with
  * `code: 'unresolved_categories'`. Lists the N affected rows by payee and
@@ -13,9 +13,12 @@
  *      The user just expands the row in the table below and uses the
  *      StagedRowEditor; this banner stays out of the way for that path.
  *   2. Create a rule + apply to current batch → POST
- *      /api/import/staged/[id]/create-rule. Inserts `transaction_rules`
- *      AND walks the staged batch to update matching rows. Historical
- *      `transactions` are untouched (scoped per the item spec).
+ *      /api/import/staged/[id]/create-rule. FINLYNQ-90 swapped the inline
+ *      legacy 3-field form for the shared `RuleEditorDialog`; the user
+ *      now gets the full v2 surface (multi-condition AND group, 7 action
+ *      kinds, priority + isActive, live preview) seeded from the row's
+ *      payee. Historical `transactions` are untouched (scoped per the
+ *      item spec).
  *   3. Cancel → dismiss the banner; user is free to manually assign or
  *      re-approve. The unresolved set will reappear on the next approve
  *      attempt if any row still lacks a category.
@@ -24,32 +27,35 @@
  * banner's row list shrinks via the parent's `setUnresolved` filter. The
  * `onRuleApplied` callback is the trigger.
  *
- * Design-system primitives only — no new shadcn components.
+ * Lazy-fetch — the 3 FK option lists (categories / accounts / holdings)
+ * are NOT fetched on banner mount. They're fetched on the FIRST per-row
+ * "Create rule" click and cached in component state; subsequent clicks
+ * reuse the cache. Dismissing the banner without ever clicking "Create
+ * rule" triggers ZERO fetches. Load-bearing for the banner-only-on-error
+ * traffic shape.
  */
 
 import { useState } from "react";
 import { AlertTriangle, X, PlusCircle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  RuleEditorDialog,
+  type Category,
+  type Account,
+  type Holding,
+} from "@/components/rules/rule-editor-dialog";
+import type { Condition } from "@/lib/rules/schema";
 
 export interface UnresolvedRow {
   id: string;
   payee: string;
 }
 
-interface CategoryOption {
-  id: number;
-  name: string;
-  type: string;
+interface FkCache {
+  categories?: Category[];
+  accounts?: Account[];
+  holdings?: Holding[];
 }
 
 interface Props {
@@ -69,90 +75,84 @@ export function UnresolvedCategoriesBanner({
   onRuleApplied,
   onDismiss,
 }: Props) {
-  // Open form per-row by id. Only one form open at a time keeps the layout
-  // tight — the user clicks "Create rule" on the row they want.
-  const [openFormForRowId, setOpenFormForRowId] = useState<string | null>(null);
-  const [matchValue, setMatchValue] = useState("");
-  const [matchType, setMatchType] = useState<"contains" | "exact" | "regex">("contains");
-  const [categoryId, setCategoryId] = useState<string>("");
-  const [categories, setCategories] = useState<CategoryOption[]>([]);
-  const [submitting, setSubmitting] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
+  // Which row's dialog is open (null = none). One dialog open at a time.
+  const [dialogRowId, setDialogRowId] = useState<string | null>(null);
+  // Per-banner-instance lazy cache for the 3 FK option lists.
+  const [cache, setCache] = useState<FkCache>({});
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Lazy-load categories on first form open. Avoids the fetch when the user
-  // dismisses the banner without engaging.
-  const ensureCategoriesLoaded = async () => {
-    if (categories.length > 0) return;
-    try {
-      const res = await fetch("/api/categories");
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        setCategories(
-          data
-            .filter((c: { id?: number; name?: string }) => c.id != null && c.name)
-            .map((c: { id: number; name: string; type: string }) => ({
-              id: c.id,
-              name: c.name,
-              type: c.type,
-            })),
-        );
-      }
-    } catch {
-      // Best-effort; the Select stays empty and the user can dismiss.
-    }
-  };
-
-  const openForm = (rowId: string, defaultPayee: string) => {
-    setOpenFormForRowId(rowId);
-    setMatchValue(defaultPayee);
-    setMatchType("contains");
-    setCategoryId("");
-    setFormError(null);
-    void ensureCategoriesLoaded();
-  };
-
-  const cancelForm = () => {
-    setOpenFormForRowId(null);
-    setMatchValue("");
-    setCategoryId("");
-    setFormError(null);
-  };
-
-  const submitRule = async () => {
-    if (!matchValue.trim() || !categoryId) {
-      setFormError("Match pattern and category are required.");
+  // Fetch categories / accounts / holdings on FIRST dialog open. Re-opening
+  // a second row reuses the cache. Dismissing the banner without clicking
+  // any "Create rule" triggers zero fetches.
+  const openDialogForRow = async (rowId: string) => {
+    setLoadError(null);
+    if (cache.categories && cache.accounts && cache.holdings) {
+      setDialogRowId(rowId);
       return;
     }
-    setSubmitting(true);
-    setFormError(null);
+    setLoading(true);
     try {
-      const res = await fetch(`/api/import/staged/${stagedImportId}/create-rule`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          matchField: "payee",
-          matchType,
-          matchValue: matchValue.trim(),
-          assignCategoryId: Number(categoryId),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setFormError(data?.error ?? "Rule creation failed");
+      const [catsRes, acctsRes, holdRes] = await Promise.all([
+        fetch("/api/categories"),
+        fetch("/api/accounts"),
+        fetch("/api/portfolio"),
+      ]);
+      if (!catsRes.ok || !acctsRes.ok || !holdRes.ok) {
+        setLoadError("Failed to load category / account / holding lists.");
         return;
       }
-      // Tell the parent to refresh staged detail and recompute the
-      // unresolved set. The banner row count will drop on next render.
-      cancelForm();
-      onRuleApplied();
+      const catsRaw = (await catsRes.json()) as Array<{
+        id?: number;
+        name?: string;
+        type?: string;
+        group?: string;
+      }>;
+      const acctsRaw = (await acctsRes.json()) as Array<{ id?: number; name?: string | null }>;
+      const holdRaw = (await holdRes.json()) as Array<{ id?: number; name?: string | null }>;
+      const categories: Category[] = catsRaw
+        .filter((c) => c.id != null && c.name)
+        .map((c) => ({
+          id: c.id as number,
+          name: c.name as string,
+          type: c.type ?? "",
+          group: c.group ?? "",
+        }));
+      const accounts: Account[] = acctsRaw
+        .filter((a) => a.id != null && a.name)
+        .map((a) => ({ id: a.id as number, name: a.name as string }));
+      const holdings: Holding[] = holdRaw
+        .filter((h) => h.id != null && h.name)
+        .map((h) => ({ id: h.id as number, name: h.name as string }));
+      setCache({ categories, accounts, holdings });
+      setDialogRowId(rowId);
     } catch (e) {
-      setFormError(e instanceof Error ? e.message : "Rule creation failed");
+      setLoadError(e instanceof Error ? e.message : "Failed to load");
     } finally {
-      setSubmitting(false);
+      setLoading(false);
     }
   };
 
   if (rowIds.length === 0) return null;
+
+  // Figure out the row payee to seed the dialog with.
+  const dialogRow = dialogRowId
+    ? (() => {
+        const idx = rowIds.indexOf(dialogRowId);
+        if (idx < 0) return null;
+        return { id: dialogRowId, payee: payees[idx] ?? "" };
+      })()
+    : null;
+
+  // Seed the rule name from the row's payee, truncated for the 120-char
+  // `transaction_rules.name` length cap. `Match "<payee>"` adds 9 chars of
+  // surround, so cap the payee slice at 100 to stay well inside.
+  const initialName = dialogRow
+    ? `Match "${(dialogRow.payee || "").trim().slice(0, 100)}"`
+    : "";
+  const initialConditions: Condition[] = dialogRow
+    ? [{ field: "payee", op: "contains", value: (dialogRow.payee || "").trim() }]
+    : [];
 
   return (
     <Card className="border-amber-300 bg-amber-50/40 dark:bg-amber-950/20">
@@ -180,108 +180,69 @@ export function UnresolvedCategoriesBanner({
           </button>
         </div>
 
+        {loadError && (
+          <p className="ml-6 text-[11px] text-rose-700">{loadError}</p>
+        )}
+
         <ul className="space-y-1.5 ml-6">
           {rowIds.map((rid, idx) => {
             const payee = payees[idx] ?? "(no payee)";
-            const isOpen = openFormForRowId === rid;
             return (
               <li key={rid} className="text-xs">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-mono text-amber-900 dark:text-amber-200 break-all">
                     {payee || <span className="italic text-muted-foreground">(empty payee)</span>}
                   </span>
-                  {!isOpen && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-6 px-2 text-[11px] border-amber-300 hover:bg-amber-100"
-                      onClick={() => openForm(rid, payee)}
-                    >
-                      <PlusCircle className="h-3 w-3 mr-1" />
-                      Create rule
-                    </Button>
-                  )}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-[11px] border-amber-300 hover:bg-amber-100"
+                    onClick={() => openDialogForRow(rid)}
+                    disabled={loading}
+                  >
+                    <PlusCircle className="h-3 w-3 mr-1" />
+                    {loading && dialogRowId === null ? "Loading…" : "Create rule"}
+                  </Button>
                 </div>
-                {isOpen && (
-                  <div className="mt-2 p-3 border border-amber-300 rounded-md bg-background space-y-2">
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="space-y-1">
-                        <Label htmlFor={`mt-${rid}`} className="text-[11px]">Match type</Label>
-                        <Select
-                          value={matchType}
-                          onValueChange={(v) => setMatchType((v ?? "contains") as "contains" | "exact" | "regex")}
-                        >
-                          <SelectTrigger id={`mt-${rid}`} className="h-8 text-xs">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="contains">contains</SelectItem>
-                            <SelectItem value="exact">exact</SelectItem>
-                            <SelectItem value="regex">regex</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-1">
-                        <Label htmlFor={`mv-${rid}`} className="text-[11px]">Match value (payee)</Label>
-                        <Input
-                          id={`mv-${rid}`}
-                          value={matchValue}
-                          onChange={(e) => setMatchValue(e.target.value)}
-                          className="h-8 text-xs"
-                          placeholder="e.g. STARBUCKS"
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-1">
-                      <Label htmlFor={`cat-${rid}`} className="text-[11px]">Assign category</Label>
-                      <Select
-                        value={categoryId}
-                        onValueChange={(v) => setCategoryId(v ?? "")}
-                      >
-                        <SelectTrigger id={`cat-${rid}`} className="h-8 text-xs">
-                          <SelectValue placeholder="Pick a category…" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {categories.map((c) => (
-                            <SelectItem key={c.id} value={String(c.id)}>
-                              {c.name} <span className="text-muted-foreground">({c.type})</span>
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    {formError && (
-                      <p className="text-[11px] text-rose-700">{formError}</p>
-                    )}
-                    <div className="flex gap-2 justify-end">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-[11px]"
-                        onClick={cancelForm}
-                        disabled={submitting}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-7 px-2 text-[11px]"
-                        onClick={submitRule}
-                        disabled={submitting || !matchValue.trim() || !categoryId}
-                      >
-                        {submitting ? "Saving…" : "Create rule + apply"}
-                      </Button>
-                    </div>
-                  </div>
-                )}
               </li>
             );
           })}
         </ul>
       </CardContent>
+
+      {dialogRow && cache.categories && cache.accounts && cache.holdings && (
+        <RuleEditorDialog
+          initialName={initialName}
+          initialConditions={initialConditions}
+          initialActions={[]}
+          categories={cache.categories}
+          accounts={cache.accounts}
+          holdings={cache.holdings}
+          submitLabel="Create rule + apply"
+          title="Create rule from row"
+          onClose={(saved) => {
+            setDialogRowId(null);
+            if (saved) onRuleApplied();
+          }}
+          onSubmit={async (payload) => {
+            try {
+              const res = await fetch(`/api/import/staged/${stagedImportId}/create-rule`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              });
+              if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                return { ok: false, error: data?.error ?? "Rule creation failed" };
+              }
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, error: e instanceof Error ? e.message : "Rule creation failed" };
+            }
+          }}
+        />
+      )}
     </Card>
   );
 }
