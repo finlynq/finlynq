@@ -38,6 +38,8 @@ import { Badge } from "@/components/ui/badge";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import {
   Zap, Plus, Trash2, AlertTriangle, ChevronUp, ChevronDown,
 } from "lucide-react";
@@ -565,12 +567,15 @@ function ConditionRow({
               <SelectItem value="is_not">is not</SelectItem>
             </SelectContent>
           </Select>
-          <Select value={String((cond as { accountId: number }).accountId)} onValueChange={(v) => onChange({ accountId: parseInt(v ?? "0") } as Partial<Condition>)}>
-            <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <Combobox
+            value={String((cond as { accountId: number }).accountId)}
+            onValueChange={(v) => onChange({ accountId: parseInt(v ?? "0") } as Partial<Condition>)}
+            items={accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name }))}
+            placeholder="Select account"
+            searchPlaceholder="Search accounts…"
+            emptyMessage="No matches"
+            className="flex-1"
+          />
         </>
       )}
 
@@ -655,6 +660,8 @@ function ActionRow({
   onMoveUp?: () => void;
   onMoveDown?: () => void;
 }) {
+  const sortCategory = useDropdownOrder("category");
+
   function setKind(kind: Action["kind"]) {
     if (kind === "set_category") onChange({ kind, categoryId: categories[0]?.id ?? 0 } as unknown as Partial<Action>);
     else if (kind === "set_tags") onChange({ kind, tags: "" } as unknown as Partial<Action>);
@@ -677,12 +684,19 @@ function ActionRow({
       </Select>
 
       {action.kind === "set_category" && (
-        <Select value={String(action.categoryId)} onValueChange={(v) => onChange({ categoryId: parseInt(v ?? "0") } as Partial<Action>)}>
-          <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {categories.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
-          </SelectContent>
-        </Select>
+        <Combobox
+          value={String(action.categoryId)}
+          onValueChange={(v) => onChange({ categoryId: parseInt(v ?? "0") } as Partial<Action>)}
+          items={sortCategory(
+            categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} — ${c.name}` })),
+            (c) => Number(c.value),
+            (a, z) => a.label.localeCompare(z.label),
+          )}
+          placeholder="Select category"
+          searchPlaceholder="Search categories…"
+          emptyMessage="No matches"
+          className="flex-1"
+        />
       )}
       {action.kind === "set_tags" && (
         <Input value={action.tags} onChange={(e) => onChange({ tags: e.target.value } as Partial<Action>)} placeholder="tag1, tag2" className="flex-1" />
@@ -691,31 +705,40 @@ function ActionRow({
         <Input value={action.to} onChange={(e) => onChange({ to: e.target.value } as Partial<Action>)} placeholder="Clean payee" className="flex-1" />
       )}
       {action.kind === "set_account" && (
-        <Select value={String(action.accountId)} onValueChange={(v) => onChange({ accountId: parseInt(v ?? "0") } as Partial<Action>)}>
-          <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
-          </SelectContent>
-        </Select>
+        <Combobox
+          value={String(action.accountId)}
+          onValueChange={(v) => onChange({ accountId: parseInt(v ?? "0") } as Partial<Action>)}
+          items={accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name }))}
+          placeholder="Select account"
+          searchPlaceholder="Search accounts…"
+          emptyMessage="No matches"
+          className="flex-1"
+        />
       )}
       {action.kind === "set_entered_currency" && (
         <Input value={action.currency} onChange={(e) => onChange({ currency: e.target.value.toUpperCase() } as Partial<Action>)} placeholder="USD" className="w-24" />
       )}
       {action.kind === "set_portfolio_holding" && (
-        <Select value={String(action.holdingId)} onValueChange={(v) => onChange({ holdingId: parseInt(v ?? "0") } as Partial<Action>)}>
-          <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {holdings.map((h) => <SelectItem key={h.id} value={String(h.id)}>{h.name}</SelectItem>)}
-          </SelectContent>
-        </Select>
+        <Combobox
+          value={String(action.holdingId)}
+          onValueChange={(v) => onChange({ holdingId: parseInt(v ?? "0") } as Partial<Action>)}
+          items={holdings.map((h): ComboboxItemShape => ({ value: String(h.id), label: h.name }))}
+          placeholder="Select holding"
+          searchPlaceholder="Search holdings…"
+          emptyMessage="No matches"
+          className="flex-1"
+        />
       )}
       {action.kind === "create_transfer" && (
-        <Select value={String(action.destAccountId)} onValueChange={(v) => onChange({ destAccountId: parseInt(v ?? "0") } as Partial<Action>)}>
-          <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {accounts.map((a) => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
-          </SelectContent>
-        </Select>
+        <Combobox
+          value={String(action.destAccountId)}
+          onValueChange={(v) => onChange({ destAccountId: parseInt(v ?? "0") } as Partial<Action>)}
+          items={accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name }))}
+          placeholder="Select destination account"
+          searchPlaceholder="Search accounts…"
+          emptyMessage="No matches"
+          className="flex-1"
+        />
       )}
 
       <div className="flex">
