@@ -33,6 +33,11 @@ interface Proposal {
   deltasJson: { balance: number; lots: Array<{ holdingId: number; qtyDelta: number }>; realizedGainBase: number | null };
   dependsOnProposalIds: number[];
   variantChoice: "separate_fee_row" | "absorb_into_cost" | null;
+  // Phase 2 backfill — dividend_reinvestment proposals require the user
+  // to pick the underlying stock holding before apply. `chosenHoldingId`
+  // mirrors `variantChoice` for the holding-picker flow.
+  chosenHoldingId: number | null;
+  candidateHoldingIds: number[];
   status: string;
 }
 
@@ -117,7 +122,10 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
       .catch(() => setCoverage(null));
   }, [runId, proposals]); // refetch after proposals change (post-apply)
 
-  async function updateProposal(proposalId: number, patch: { status?: string; variantChoice?: string | null }) {
+  async function updateProposal(
+    proposalId: number,
+    patch: { status?: string; variantChoice?: string | null; chosenHoldingId?: number | null },
+  ) {
     setError("");
     const res = await fetch(`/api/settings/backfill/${runId}`, {
       method: "PATCH",
@@ -227,6 +235,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
                 holdingMap={holdingMap}
                 accountMap={accountMap}
                 onVariantChange={(v) => updateProposal(selected.id, { variantChoice: v })}
+                onHoldingChange={(id) => updateProposal(selected.id, { chosenHoldingId: id })}
                 onApprove={() => updateProposal(selected.id, { status: "approved" })}
                 onReject={() => updateProposal(selected.id, { status: "rejected" })}
                 onUndo={() => undoProposal(selected.id)}
@@ -306,6 +315,7 @@ function ProposalDetail({
   holdingMap,
   accountMap,
   onVariantChange,
+  onHoldingChange,
   onApprove,
   onReject,
   onUndo,
@@ -315,6 +325,7 @@ function ProposalDetail({
   holdingMap: Record<number, HoldingMeta>;
   accountMap: Record<number, AccountMeta>;
   onVariantChange: (v: "separate_fee_row" | "absorb_into_cost" | null) => void;
+  onHoldingChange: (id: number | null) => void;
   onApprove: () => void;
   onReject: () => void;
   onUndo: () => void;
@@ -323,6 +334,7 @@ function ProposalDetail({
   const isRefused = proposal.confidence === "refused";
   const isOrphan = proposal.proposalKind === "orphan_stock_leg";
   const isOpeningBalance = proposal.proposalKind === "opening_balance";
+  const isDripReinvest = proposal.proposalKind === "dividend_reinvestment";
   const isApplied = proposal.status === "applied";
 
   return (
@@ -394,7 +406,23 @@ function ProposalDetail({
           </div>
         )}
 
-        {!isDrift && !isOrphan && (
+        {isDripReinvest && (
+          <div className="space-y-2">
+            <div className="font-medium">Pick the underlying stock</div>
+            <p className="text-xs text-muted-foreground">
+              This row looks like a dividend reinvestment (share count ≈ dollar
+              amount) but currently points to the wrong holding. Pick the stock
+              whose dividends bought these shares. Approve only after picking.
+            </p>
+            <HoldingPicker
+              proposal={proposal}
+              holdingMap={holdingMap}
+              onChange={onHoldingChange}
+            />
+          </div>
+        )}
+
+        {!isDrift && !isOrphan && !isDripReinvest && (
           <ReplacementPreviewTable
             proposal={proposal}
             holdingMap={holdingMap}
@@ -589,6 +617,54 @@ function DriftVariantPicker({
         onSelect={() => onChange("absorb_into_cost")}
       />
     </div>
+  );
+}
+
+function HoldingPicker({
+  proposal,
+  holdingMap,
+  onChange,
+}: {
+  proposal: Proposal;
+  holdingMap: Record<number, HoldingMeta>;
+  onChange: (id: number | null) => void;
+}) {
+  // Candidates from the planner (non-cash holdings in the displaced row's
+  // account). Filter out any that resolve to a cash sleeve defensively —
+  // user may have toggled the is_cash flag after the run was computed.
+  const candidates = proposal.candidateHoldingIds.filter((id) => {
+    const h = holdingMap[id];
+    return h && !h.isCash;
+  });
+  if (candidates.length === 0) {
+    return (
+      <div className="text-xs text-amber-700 dark:text-amber-300 border border-amber-500/40 bg-amber-500/10 rounded p-2">
+        No non-cash holdings in this account to choose from. Create the underlying stock holding from the account-detail page, then re-run the backfill.
+      </div>
+    );
+  }
+  return (
+    <select
+      value={proposal.chosenHoldingId ?? ""}
+      onChange={(e) => {
+        const v = e.target.value;
+        onChange(v === "" ? null : Number(v));
+      }}
+      className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
+    >
+      <option value="">— Pick a holding —</option>
+      {candidates.map((id) => {
+        const h = holdingMap[id];
+        const label = h?.name ?? `holding #${id}`;
+        const currency = h?.currency ? ` (${h.currency})` : "";
+        return (
+          <option key={id} value={id}>
+            {label}
+            {currency}
+          </option>
+        );
+      })}
+    </select>
   );
 }
 

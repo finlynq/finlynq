@@ -66,6 +66,11 @@ interface PersistedProposal {
   synthesizedRowsJson: unknown; // SynthesizedRow[] | null
   dependsOnProposalIds: number[];
   variantChoice: string | null;
+  /** Set for `dividend_reinvestment` proposals — the user-picked underlying
+   *  stock holding. Apply route refuses without this; on apply, the
+   *  existing row's portfolio_holding_id is UPDATEd to this id and
+   *  kind='dividend' is stamped. */
+  chosenHoldingId: number | null;
   status: string;
 }
 
@@ -103,6 +108,13 @@ export async function applyProposal(
   }
   if (proposal.proposalKind === "drift" && !proposal.variantChoice) {
     return { ok: false, code: "drift_variant_missing", message: `Drift proposal requires a variant_choice ('separate_fee_row' or 'absorb_into_cost')` };
+  }
+  if (proposal.proposalKind === "dividend_reinvestment" && proposal.chosenHoldingId == null) {
+    return {
+      ok: false,
+      code: "holding_choice_missing",
+      message: `Dividend reinvestment proposal requires chosen_holding_id (the underlying stock the user picks)`,
+    };
   }
 
   // Server-side dependency check — every parent must already be applied.
@@ -143,11 +155,31 @@ export async function applyProposal(
   const insertedTxIds: number[] = [];
 
   // Stale-proposal guard (load-bearing — surfaced as a duplicate-lot bug
-  // 2026-06-02). If any displaced row already has `kind` set, the proposal
-  // is stale: a prior backfill run already canonicalized this row, or the
-  // user edited it manually. Re-applying would mint a second lot. Refuse.
+  // 2026-06-02). If a displaced row is already in canonical shape (kind +
+  // PAIRLESS kind OR trade_link_id OR link_id), the proposal is stale: a
+  // prior backfill run already canonicalized this row. Re-applying would
+  // mint a second lot. Refuse.
+  //
+  // Mirrors `isAlreadyCanonical` from
+  // src/lib/portfolio/backfill/types.ts — same predicate the planner uses
+  // to skip candidates, and the coverage SQL uses to count canonical.
+  // A row with kind='buy' and no trade_link_id is NOT canonical and CAN
+  // be displaced (e.g., by a dividend_reinvestment proposal that
+  // re-tags it kind='dividend' on a user-picked stock holding).
+  const PAIRLESS_KINDS = new Set([
+    "dividend",
+    "interest",
+    "portfolio_income",
+    "portfolio_expense",
+    "opening_balance",
+  ]);
   const staleCheck = await db
-    .select({ id: schema.transactions.id, kind: schema.transactions.kind })
+    .select({
+      id: schema.transactions.id,
+      kind: schema.transactions.kind,
+      tradeLinkId: schema.transactions.tradeLinkId,
+      linkId: schema.transactions.linkId,
+    })
     .from(schema.transactions)
     .where(
       and(
@@ -155,12 +187,17 @@ export async function applyProposal(
         inArray(schema.transactions.id, proposal.existingRowIds),
       ),
     );
-  const alreadyTagged = staleCheck.filter((r) => r.kind != null && r.kind !== "");
-  if (alreadyTagged.length > 0) {
+  const alreadyCanonical = staleCheck.filter(
+    (r) =>
+      r.kind != null &&
+      r.kind !== "" &&
+      (PAIRLESS_KINDS.has(r.kind) || r.tradeLinkId != null || r.linkId != null),
+  );
+  if (alreadyCanonical.length > 0) {
     return {
       ok: false,
       code: "rows_already_canonical",
-      message: `Cannot apply — ${alreadyTagged.length} of the displaced rows already have kind set (probably canonicalized by a prior run). Refresh the page to re-plan.`,
+      message: `Cannot apply — ${alreadyCanonical.length} of the displaced rows are already in canonical shape (canonicalized by a prior run). Refresh the page to re-plan.`,
     };
   }
 
@@ -192,6 +229,17 @@ export async function applyProposal(
       if (r.kind !== undefined) patch.kind = r.kind;
       if (r.tradeLinkId !== undefined) patch.tradeLinkId = r.tradeLinkId;
       if (r.linkId !== undefined) patch.linkId = r.linkId;
+      // dividend_reinvestment fills its patch from the user's choice — the
+      // proposal's `replacement[0]` only carries the txId; the
+      // portfolio_holding_id and kind come from the apply path so the
+      // user cannot bypass the picker by manipulating the JSON.
+      if (
+        proposal.proposalKind === "dividend_reinvestment" &&
+        proposal.chosenHoldingId != null
+      ) {
+        patch.portfolioHoldingId = proposal.chosenHoldingId;
+        patch.kind = "dividend";
+      }
       await tx
         .update(schema.transactions)
         .set(patch)
@@ -614,6 +662,7 @@ async function loadProposal(
     synthesizedRowsJson: row.synthesizedRowsJson,
     dependsOnProposalIds: row.dependsOnProposalIds ?? [],
     variantChoice: row.variantChoice,
+    chosenHoldingId: row.chosenHoldingId,
     status: row.status,
   };
 }

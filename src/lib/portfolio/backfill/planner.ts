@@ -259,6 +259,61 @@ export function planBackfill(
     }
   }
 
+  // Pass 1.6: dividend reinvestments (DRIP)
+  //
+  // Pattern: category=Dividends, qty>0, amount>0, qty ≈ amount. The source
+  // data recorded the dividend dollars AS the share count — likely because
+  // the import lumped both numbers as the dollar value of the distribution.
+  // The `portfolio_holding_id` likely points to a CASH sleeve (or to the
+  // wrong stock), so the row needs a user-chosen holding before apply.
+  //
+  // We emit a `dividend_reinvestment` proposal with
+  // `requiresUserChoice='holding_picker'` and a candidate list of every
+  // non-cash holding in the same account. The right-pane UI surfaces the
+  // dropdown; apply route refuses without `chosen_holding_id`.
+  for (const t of candidates) {
+    if (consumed.has(t.id)) continue;
+    if (t.quantity == null || t.quantity <= 0) continue;
+    if (t.amount <= 0) continue;
+    if (snap.dividendsCategoryId == null || t.categoryId !== snap.dividendsCategoryId) continue;
+    // DRIP heuristic: |qty - amount| / max(qty, amount) < 0.05. Catches
+    // rows where qty=$amount exactly AND where the share count is close
+    // to (but not identical to) the dollar amount. A normal cash dividend
+    // (qty=0) is caught by Pass 1; a normal share purchase from a
+    // dividend distribution at $price per share (qty != amount) doesn't
+    // match the heuristic — that's a true Buy and falls through to
+    // Pass 2.
+    const qtyAbs = Math.abs(t.quantity);
+    const amtAbs = Math.abs(t.amount);
+    const rel = Math.abs(qtyAbs - amtAbs) / Math.max(qtyAbs, amtAbs);
+    if (rel >= 0.05) continue;
+
+    // Candidate holdings: every non-cash holding in the same account. The
+    // user picks the correct underlying stock; UI pre-selects the first
+    // (or the top fuzzy-matched one in a future iteration).
+    const candidateHoldingIds = snap.holdings
+      .filter((h) => h.accountId === t.accountId && !h.isCash)
+      .map((h) => h.id);
+
+    proposals.push({
+      kind: "dividend_reinvestment",
+      confidence: "medium",
+      summary: `Dividend reinvestment ${qtyAbs} shares (${amtAbs.toFixed(2)} ${t.currency}) on ${t.date} in ${accountLabel(t.accountId, idx)} — pick the underlying stock`,
+      existingRowIds: [t.id],
+      // No `kind` or `portfolioHoldingId` here — both are set by the
+      // apply path once the user has chosen a holding. Carrying them in
+      // `replacement` would let an apply succeed without the user's
+      // pick, which is exactly the divergence we're trying to avoid.
+      replacement: [{ txId: t.id }],
+      synthesized: [],
+      requiresUserChoice: "holding_picker",
+      candidateHoldingIds,
+      deltas: { balance: 0, lots: [], realizedGainBase: null },
+      dependsOn: [],
+    });
+    consumed.add(t.id);
+  }
+
   // Pass 2: buy / sell / drift pairs
   for (const t of candidates) {
     if (consumed.has(t.id)) continue;

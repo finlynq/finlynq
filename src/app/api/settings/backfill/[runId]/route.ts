@@ -20,6 +20,10 @@ const patchSchema = z.object({
   proposalId: z.number().int().positive(),
   status: z.enum(["pending", "approved", "rejected"]).optional(),
   variantChoice: z.enum(["separate_fee_row", "absorb_into_cost"]).nullable().optional(),
+  // Set by the holding-picker on `dividend_reinvestment` proposals. The
+  // apply route refuses with `holding_choice_missing` if it's still NULL
+  // at apply time.
+  chosenHoldingId: z.number().int().positive().nullable().optional(),
 });
 
 export async function GET(
@@ -129,7 +133,7 @@ export async function PATCH(
     const body = await request.json();
     const parsed = validateBody(body, patchSchema);
     if (parsed.error) return parsed.error;
-    const { proposalId, status, variantChoice } = parsed.data;
+    const { proposalId, status, variantChoice, chosenHoldingId } = parsed.data;
 
     // Verify the proposal belongs to this run+user.
     const existing = await db
@@ -160,6 +164,7 @@ export async function PATCH(
     const patch: Record<string, unknown> = {};
     if (status !== undefined) patch.status = status;
     if (variantChoice !== undefined) patch.variantChoice = variantChoice;
+    if (chosenHoldingId !== undefined) patch.chosenHoldingId = chosenHoldingId;
     if (Object.keys(patch).length === 0) {
       return NextResponse.json({ ok: true, noop: true });
     }

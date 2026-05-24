@@ -93,7 +93,21 @@ export type ProposalKind =
    * platform. Apply records the row as a lot at the entered cost basis;
    * no cash-side impact. User can reject if it's actually a normal orphan.
    */
-  | "opening_balance";
+  | "opening_balance"
+  /**
+   * Dividend reinvestment (DRIP): category=Dividends, qty>0, amount>0,
+   * qty≈amount (share count equals cash value because the dividend
+   * dollars buy shares at the prevailing price; not literally true but a
+   * decent heuristic when the source data records both numbers as the
+   * dollar value of the distribution). Likely the underlying
+   * `portfolio_holding_id` points to a cash sleeve OR to the wrong stock
+   * — the row needs the user to pick the correct stock holding before
+   * apply. Apply stamps `kind='dividend'`, switches
+   * `portfolio_holding_id` to `chosen_holding_id`, opens a lot via the
+   * standard `applyLotEffectsForTx` replay at
+   * `costPerShare = amount / qty`, `origin='reinvest_div'`.
+   */
+  | "dividend_reinvestment";
 
 export type Confidence = "high" | "medium" | "low" | "refused";
 
@@ -166,6 +180,21 @@ export interface Proposal {
   synthesized: SynthesizedRow[];
   /** Drift proposals only. Keys: 'separate_fee_row' | 'absorb_into_cost'. */
   variants?: { separate_fee_row: DriftVariant; absorb_into_cost: DriftVariant };
+  /**
+   * Set when the proposal cannot be applied without a user choice. For
+   * `dividend_reinvestment` proposals: `'holding_picker'` — the right pane
+   * surfaces a dropdown of stock holdings, the user picks one, and the
+   * apply route reads `chosen_holding_id` from the proposal row. Mirror
+   * pattern of the existing `variant_choice` field on drift proposals.
+   */
+  requiresUserChoice?: "holding_picker";
+  /**
+   * Pre-suggested holding ids for `requiresUserChoice='holding_picker'`
+   * proposals — fuzzy-matched on row note/tags against existing holding
+   * display names. UI pre-selects the top candidate. Empty array if no
+   * good matches; user picks freely from the full holdings list.
+   */
+  candidateHoldingIds?: number[];
   deltas: ProposalDeltas;
   /**
    * Proposal indices (within the same plan result) this one depends on.

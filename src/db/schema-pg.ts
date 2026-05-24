@@ -1469,6 +1469,17 @@ export const backfillProposals = pgTable("backfill_proposals", {
   // NULL until the user picks. Drift proposals refuse to apply with NULL.
   // 'separate_fee_row' | 'absorb_into_cost' — CHECK enforced in SQL.
   variantChoice: text("variant_choice"),
+  // NULL until the user picks. dividend_reinvestment proposals refuse to
+  // apply with NULL — mirror of variantChoice for the holding-picker
+  // flow. Apply route reads this when proposal_kind='dividend_reinvestment'.
+  chosenHoldingId: integer("chosen_holding_id"),
+  // Pre-suggested holding ids for the picker UI. Set by the planner
+  // (Pass 1.6) to every non-cash holding in the row's account. UI
+  // pre-selects the top one and offers the rest as alternatives.
+  candidateHoldingIds: integer("candidate_holding_ids")
+    .array()
+    .notNull()
+    .default(sql`ARRAY[]::INTEGER[]`),
   // 'pending' | 'approved' | 'rejected' | 'applied' | 'undone' | 'refused_with_reason'
   status: text("status").notNull().default("pending"),
   appliedAt: timestamp("applied_at", { withTimezone: true }),

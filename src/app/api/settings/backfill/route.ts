@@ -81,6 +81,9 @@ export async function POST(request: NextRequest) {
           // Will rewrite once all proposals have ids
           dependsOnProposalIds: [],
           variantChoice: null,
+          // Surface the planner's per-proposal candidate list to the
+          // picker UI. Empty for proposals that don't need a holding pick.
+          candidateHoldingIds: p.candidateHoldingIds ?? [],
           status: p.confidence === "refused" ? "refused_with_reason" : "pending",
         })
         .returning({ id: schema.backfillProposals.id });

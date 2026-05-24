@@ -571,3 +571,149 @@ describe("Pass 3 — fallback catches every unmatched candidate", () => {
     expect(proposals[0].refusalReason).toBeUndefined();
   });
 });
+
+// ─── Pass 1.6 — dividend reinvestments (DRIP) ─────────────────────────
+
+describe("Pass 1.6 — DRIP detection", () => {
+  it("emits dividend_reinvestment for category=Dividends with qty>0 + qty≈amount on a cash-sleeve holding", () => {
+    // The Mimi TFSA scenario: dividend was incorrectly recorded against
+    // a cash sleeve (holding 99) instead of the stock (holding 100).
+    // qty=9.90 and amount=$9.90 — the import lumped both numbers as the
+    // dollar value of the distribution. The planner emits a
+    // dividend_reinvestment proposal so the user can re-link it.
+    const ACCT = acct(42);
+    const STOCK = holding(100, 42, { currency: "USD", displayName: "Total US ETF" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [STOCK, USD_CASH],
+      dividendsCategoryId: 1,
+      txs: [
+        tx({
+          id: 12001,
+          date: "2025-03-28",
+          accountId: 42,
+          portfolioHoldingId: 99, // cash sleeve — wrong!
+          categoryId: 1,
+          quantity: 9.9,
+          amount: 9.9,
+        }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("dividend_reinvestment");
+    expect(proposals[0].confidence).toBe("medium");
+    expect(proposals[0].requiresUserChoice).toBe("holding_picker");
+    // The candidate list excludes the cash sleeve (holding 99) and offers
+    // the stock holding (100).
+    expect(proposals[0].candidateHoldingIds).toEqual([100]);
+    expect(proposals[0].replacement).toEqual([{ txId: 12001 }]);
+    // No kind in replacement — the apply path sets kind='dividend' once
+    // the user picks. Carrying kind here would let an apply bypass the
+    // picker.
+    expect(proposals[0].replacement[0].kind).toBeUndefined();
+  });
+
+  it("emits dividend_reinvestment for DRIP on a stock holding too (qty≈amount is the trigger, not holding type)", () => {
+    // Even when the row is recorded against the correct stock holding,
+    // the qty=$amount shape is a strong DRIP signal — the import still
+    // recorded the dividend dollars as the share count. The user
+    // picker confirms the holding (which may already be correct).
+    const ACCT = acct(42);
+    const STOCK = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [STOCK, USD_CASH],
+      dividendsCategoryId: 1,
+      txs: [
+        tx({
+          id: 12101,
+          date: "2025-03-28",
+          accountId: 42,
+          portfolioHoldingId: 100,
+          categoryId: 1,
+          quantity: 10.15,
+          amount: 10.15,
+        }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("dividend_reinvestment");
+  });
+
+  it("does NOT emit dividend_reinvestment for a regular dividend with qty=0", () => {
+    // Plain dividend — Pass 1 catches it as kind 'dividend', Pass 1.6
+    // does NOT also propose it.
+    const ACCT = acct(42);
+    const STOCK = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [STOCK, USD_CASH],
+      dividendsCategoryId: 1,
+      txs: [
+        tx({
+          id: 12201,
+          date: "2025-03-28",
+          accountId: 42,
+          portfolioHoldingId: 100,
+          categoryId: 1,
+          quantity: 0,
+          amount: 12,
+        }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("dividend");
+    expect(proposals.some((p) => p.kind === "dividend_reinvestment")).toBe(false);
+  });
+
+  it("does NOT emit dividend_reinvestment when qty and amount diverge sharply (it's a real share purchase)", () => {
+    // qty=10 shares @ $200 = $2000 amount → diverges from DRIP heuristic
+    // (|qty-amount|/max=199/200=0.995 >= 0.05). Treated as a normal Buy
+    // by Pass 2 — emits orphan_stock_leg (no cash leg in fixture).
+    const ACCT = acct(42);
+    const STOCK = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [STOCK, USD_CASH],
+      dividendsCategoryId: 1,
+      txs: [
+        // Prior canonical buy so this isn't the first tx for the holding
+        tx({ id: 12300, date: "2022-01-01", accountId: 42, portfolioHoldingId: 100, quantity: 1, amount: 100, kind: "buy", tradeLinkId: "prev" }),
+        tx({ id: 12301, date: "2022-01-01", accountId: 42, portfolioHoldingId: 99, quantity: -100, amount: -100, kind: "buy_cash_leg", tradeLinkId: "prev" }),
+        tx({
+          id: 12302,
+          date: "2025-03-28",
+          accountId: 42,
+          portfolioHoldingId: 100,
+          categoryId: 1,
+          quantity: 10,
+          amount: 2000,
+        }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals.some((p) => p.kind === "dividend_reinvestment")).toBe(false);
+    // The qty=10 + amount=$2000 row falls through to Pass 2; with no
+    // matching cash leg + not earliest → orphan_stock_leg.
+    expect(proposals.some((p) => p.kind === "orphan_stock_leg" && p.existingRowIds.includes(12302))).toBe(true);
+  });
+});
