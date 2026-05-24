@@ -119,6 +119,8 @@ export default function BackfillWizardPage() {
         </p>
       </div>
 
+      <CashSleeveSymbolFix />
+
       <Card>
         <CardHeader>
           <CardTitle>Step 1 — Mode</CardTitle>
@@ -245,5 +247,68 @@ function ScopeChip({ label, selected, onSelect }: { label: string; selected: boo
     >
       {label}
     </button>
+  );
+}
+
+/**
+ * Phase 4a — Cash-sleeve symbol fix.
+ *
+ * Cash sleeves (portfolio_holdings.is_cash=true) commonly ship with the
+ * Symbol field blank because users name them like "CL - CAD" or
+ * "Fidelity - CAD" without filling the separate symbol field. This card
+ * surfaces a one-click fix: POST to the server-side endpoint which sets
+ * symbol = currency for every cash sleeve missing one (using the user's
+ * DEK to encrypt the symbol value).
+ *
+ * Idempotent — clicking again after a successful fix returns 0.
+ */
+function CashSleeveSymbolFix() {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ fixed: number; total: number } | null>(null);
+  const [error, setError] = useState<string>("");
+
+  async function handleFix() {
+    setBusy(true);
+    setError("");
+    setResult(null);
+    try {
+      const res = await fetch("/api/settings/backfill/fix-cash-sleeve-symbols", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data?.error ?? `HTTP ${res.status}`);
+      } else {
+        setResult({ fixed: data.fixed ?? 0, total: data.total ?? 0 });
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Request failed");
+    }
+    setBusy(false);
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Step 0 — Cash-sleeve symbols</CardTitle>
+        <CardDescription>
+          Cash sleeves often ship without a Symbol set. Click to auto-fill
+          symbol = currency (e.g., CAD cash sleeve gets symbol=&quot;CAD&quot;).
+          Safe to run repeatedly — only touches sleeves with a missing symbol.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Button variant="outline" onClick={handleFix} disabled={busy}>
+          {busy ? <><Loader2 className="size-4 animate-spin mr-2" /> Fixing…</> : "Fix cash-sleeve symbols"}
+        </Button>
+        {result && (
+          <div className="text-xs text-muted-foreground mt-2">
+            Fixed {result.fixed} of {result.total} cash sleeves.
+            {result.fixed === 0 && result.total > 0 && " (all already have symbols set)"}
+          </div>
+        )}
+        {error && (
+          <div className="text-xs text-destructive mt-2">{error}</div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
