@@ -506,3 +506,68 @@ describe("S8 — Migration from competitor (no cash data, synthesize mode)", () 
     expect(sell?.deltas.balance).toBe(3900);
   });
 });
+
+// ─── Pass 3 safety net — no silent skips ──────────────────────────────
+
+describe("Pass 3 — fallback catches every unmatched candidate", () => {
+  it("emits a refused proposal for a candidate that no earlier pass handles", () => {
+    // Construct a row crafted to evade all three earlier passes:
+    //   - Pass 1 dividend detection requires categoryId === dividendsCategoryId
+    //     → use a different category (categoryId: 99)
+    //   - Pass 1.5 combined cash leg requires ≥2 same-date stock legs
+    //     → only one row
+    //   - Pass 2 buy/sell requires qty != 0 + isStockHolding
+    //     → qty=0 + stock holding (passes isStockHolding but fails qty filter)
+    //
+    // Without Pass 3 this row would be a candidate (kind null) that no
+    // proposal touches → coverage counts it pending, planner returns 0
+    // → divergence. With Pass 3, an `unmatched_candidate` proposal is
+    // emitted so the user sees what coverage is counting.
+    const ACCT = acct(42);
+    const AAPL = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [AAPL, USD_CASH],
+      dividendsCategoryId: 1,
+      txs: [
+        // qty=0, amount>0, NOT in Dividends category → falls through Pass 1
+        // and Pass 2 silently. Stock holding so it's not a cash-sleeve case.
+        tx({ id: 11001, date: "2025-03-01", accountId: 42, portfolioHoldingId: 100, categoryId: 99, quantity: 0, amount: 50 }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("orphan_stock_leg");
+    expect(proposals[0].confidence).toBe("refused");
+    expect(proposals[0].refusalReason).toBe("unmatched_candidate");
+    expect(proposals[0].existingRowIds).toEqual([11001]);
+  });
+
+  it("does NOT emit unmatched_candidate when an earlier pass already handled the row", () => {
+    // Sanity check the safety net doesn't double-emit for rows that hit
+    // Pass 1 (dividend) or Pass 2 (orphan_stock_leg).
+    const ACCT = acct(42);
+    const AAPL = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [AAPL, USD_CASH],
+      dividendsCategoryId: 1,
+      txs: [
+        // Plain dividend → Pass 1 catches it
+        tx({ id: 11101, date: "2025-03-01", accountId: 42, portfolioHoldingId: 100, categoryId: 1, quantity: 0, amount: 12 }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("dividend");
+    expect(proposals[0].refusalReason).toBeUndefined();
+  });
+});

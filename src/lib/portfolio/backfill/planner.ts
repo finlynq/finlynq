@@ -445,6 +445,44 @@ export function planBackfill(
     consumed.add(cash.id);
   }
 
+  // Pass 3: safety net — every candidate that fell through Passes 1/1.5/2
+  // becomes a `confidence='refused'` proposal so coverage-pending and
+  // planner-proposals can never diverge silently.
+  //
+  // Examples of rows that fall through:
+  //   - qty=0 row with categoryId !== dividendsCategoryId (Pass 1 misses
+  //     it on category mismatch, Pass 2 skips it on the qty=0 filter)
+  //   - cash-holding row with kind set but no pair (Pass 2 first check
+  //     `!isStockHolding(t, idx) continue` silently)
+  //   - a stock-leg row whose partner cash row was consumed by a
+  //     combined-cash-leg refusal but the stock leg has qty=0
+  //
+  // The user reviews these and chooses: leave them as-is, fix the
+  // underlying data manually, or wait for a future planner pass that
+  // handles their shape semantically. The fallback ensures the
+  // /settings/backfill dashboard never lies about what's covered.
+  for (const t of candidates) {
+    if (consumed.has(t.id)) continue;
+    const verb =
+      t.quantity != null && t.quantity > 0
+        ? "Buy"
+        : t.quantity != null && t.quantity < 0
+          ? "Sell"
+          : "Row";
+    proposals.push({
+      kind: "orphan_stock_leg",
+      confidence: "refused",
+      refusalReason: "unmatched_candidate",
+      summary: `${describeTx(verb, t, idx)} — planner couldn't classify; manual fix needed`,
+      existingRowIds: [t.id],
+      replacement: [],
+      synthesized: [],
+      deltas: emptyDeltas(),
+      dependsOn: [],
+    });
+    consumed.add(t.id);
+  }
+
   // Compute dependencies across emitted proposals.
   computeDependencies(proposals, (rowIds) => {
     for (const id of rowIds) {
