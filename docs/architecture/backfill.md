@@ -1,6 +1,6 @@
 # Transaction-canonicalization backfill pipeline
 
-**Status:** Shipped to dev 2026-06-02. Schema + planner + apply/undo + UI + CLI.
+**Status:** Shipped to dev 2026-06-02. Schema + planner + apply/undo + UI + CLI. **Three bugs surfaced from review — see "Known issues — pending fix" below before extending this code.**
 **Migration:** [scripts/migrations/20260602_backfill_pipeline.sql](../../scripts/migrations/20260602_backfill_pipeline.sql)
 **Key modules:**
 - Pure planner: [src/lib/portfolio/backfill/planner.ts](../../src/lib/portfolio/backfill/planner.ts)
@@ -102,6 +102,18 @@ When extending the backfill pipeline:
 - **NEVER skip `invalidateUser(userId)`** after a successful apply or undo — the MCP per-user tx cache will serve stale data.
 - **Adding a new proposal kind** requires: (1) the planner detector in planner.ts, (2) test fixtures in tests/backfill-planner.test.ts, (3) any new replacement-payload shape documented in this file.
 - **Adding a new refusal reason** requires: only updating the planner; the apply route reads `confidence='refused'` and refuses without case-by-case logic.
+
+## Known issues — pending fix
+
+Surfaced by a manual review session on the demo user (1,280 investment-account transactions) on 2026-06-02. Full hand-off: [HANDOVER_2026-06-02_BACKFILL_REVIEW_BUGS.md](../../../HANDOVER_2026-06-02_BACKFILL_REVIEW_BUGS.md).
+
+1. **Wizard "Specific accounts" picker reads the wrong field name.** `/api/accounts` returns rows with `id` (from `db.select().from(accounts)` in [queries.ts:22-26](../../src/lib/queries.ts)), but the wizard at [src/app/(app)/settings/backfill/page.tsx](../../src/app/(app)/settings/backfill/page.tsx) reads `a.accountId` which is undefined. Symptom: empty picker, or (pre-strict-filter) clicking one checkbox marks them all. **Fix:** read `a.id`, alias locally as `accountId`.
+2. **Coverage and planner predicates have diverged.** The planner's `isAlreadyCanonical` (commit `92ed3a6`) treats any non-null `kind` as canonical; the coverage endpoint at [coverage/route.ts](../../src/app/api/settings/backfill/coverage/route.ts) requires kind AND (pair-less kind OR pair link). Effect: dashboard reports N pending, planner returns 0 proposals. Root cause: `kind='buy'` without `trade_link_id` is ambiguous — could be an intentional opening balance OR a broken pair.
+3. **Kind column tags vs. coverage count mismatch** (same root cause as #2). User sees all 4 Gold Coins rows tagged `buy` in the `/transactions` Kind column but coverage says 3/4 canonical.
+
+**Recommended fix** (in the hand-off): introduce `kind='opening_balance'` as a distinct literal so the planner can stamp it on carry-in rows. Then both predicates count `'opening_balance'` as pair-less canonical; a row with `kind='buy'` + no pair is unambiguously a bug. Requires a small data migration on dev to re-tag existing `kind='buy'` + no-pair rows that came from the broken first-pass opening_balance flow.
+
+**Known damage on dev:** one VWRD.L lot (32 shares, opened 2022-12-31 on IBKR Joint) is duplicated because the pre-fix opening_balance path re-applied the same proposal twice. The fix prevents new duplicates; the existing duplicate must be cleaned up manually by deleting one of the two `2022-12-31` VWRD.L buy rows from `/transactions` (the `reverseLotsForDeleteHook` handles lot cleanup).
 
 ## V2 work surfaced by stress testing (not yet shipped)
 
