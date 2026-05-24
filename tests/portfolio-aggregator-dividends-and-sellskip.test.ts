@@ -477,4 +477,182 @@ describe("#128 paired cash-leg sell-branch skip — realized-gain side (tc-3, tc
     // plan + suite output. The live catch is tc-3's assertion above.
     expect(true).toBe(true);
   });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Phase 2 (2026-05-26): the same skip needs to fire on the new sign
+  // convention, where buy_cash_leg / sell_cash_leg rows carry non-zero
+  // amount + quantity. The legacy `amount=0` predicate no longer matches
+  // them; the new `kind IN ('buy_cash_leg', 'sell_cash_leg')` predicate
+  // does. Both buy- AND sell-side aggregations must skip these rows so
+  // the cash sleeve doesn't book phantom realized gains/losses.
+  // ───────────────────────────────────────────────────────────────────────
+  it("tc-5 (Phase 2 convention): buy_cash_leg with qty<0+amt<0 is skipped from the cash sleeve's sell branch", async () => {
+    const userId = await createTestUser();
+    const accountId = await createAccount({
+      userId,
+      name: "IBKR USD",
+      currency: "USD",
+      isInvestment: true,
+    });
+    // Cash sleeve (where the Phase 2 buy_cash_leg lands).
+    const cashSleeveId = await createHolding({
+      userId,
+      accountId,
+      name: "USD Cash",
+      symbol: "USD",
+      currency: "USD",
+    });
+    const tradeLinkId = "phase2-buy-link-" + Date.now();
+    // Stock leg of Buy (on a separate holding — not the cash sleeve).
+    const stockId = await createHolding({
+      userId,
+      accountId,
+      name: "MSFT",
+      symbol: "MSFT",
+      currency: "USD",
+    });
+    await recordTransaction({
+      userId,
+      accountId,
+      portfolioHoldingId: stockId,
+      currency: "USD",
+      amount: 2000,    // Phase 2: stock leg amount POSITIVE
+      quantity: 10,
+      enteredCurrency: "USD",
+      enteredAmount: 2000,
+      tradeLinkId,
+      kind: "buy",
+      source: "import",
+      date: TODAY,
+    });
+    // Paired cash leg on the cash sleeve. Phase 2: qty<0 + amount<0.
+    // Without the kind-based skip, this would phantom-count as a sell of
+    // 2000 units on the USD sleeve.
+    await recordTransaction({
+      userId,
+      accountId,
+      portfolioHoldingId: cashSleeveId,
+      currency: "USD",
+      amount: -2000,
+      quantity: -2000,
+      enteredCurrency: "USD",
+      enteredAmount: -2000,
+      tradeLinkId,
+      kind: "buy_cash_leg",
+      source: "import",
+      date: TODAY,
+    });
+
+    await seedFxRate({ currency: "USD", date: TODAY, rateToUsd: 1 });
+
+    const aggs = await aggregateHoldings(db, userId, TEST_DEK);
+    const cashSleeve = aggs.find(a => a.holding_id === cashSleeveId);
+    expect(cashSleeve).toBeDefined();
+    // The buy_cash_leg has qty<0 — without the skip it would count as a
+    // sell of 2000 units. With the skip, cash sleeve has 0 buys/sells.
+    expect(cashSleeve!.sell_qty).toBe(0);
+    expect(cashSleeve!.sell_amount).toBe(0);
+    expect(cashSleeve!.buy_qty).toBe(0);
+    expect(cashSleeve!.buy_amount).toBe(0);
+
+    // Stock holding sees only the stock leg's buy.
+    const stock = aggs.find(a => a.holding_id === stockId);
+    expect(stock).toBeDefined();
+    expect(stock!.buy_qty).toBeCloseTo(10, 2);
+    expect(stock!.buy_amount).toBeCloseTo(2000, 2);
+    expect(stock!.sell_qty).toBe(0);
+  });
+
+  it("tc-6 (Phase 2 convention): sell_cash_leg with qty>0+amt>0 is skipped from the cash sleeve's buy branch", async () => {
+    const userId = await createTestUser();
+    const accountId = await createAccount({
+      userId,
+      name: "IBKR USD",
+      currency: "USD",
+      isInvestment: true,
+    });
+    const cashSleeveId = await createHolding({
+      userId,
+      accountId,
+      name: "USD Cash",
+      symbol: "USD",
+      currency: "USD",
+    });
+    const stockId = await createHolding({
+      userId,
+      accountId,
+      name: "NVDA",
+      symbol: "NVDA",
+      currency: "USD",
+    });
+    // Prior buy so the stock has a position to sell.
+    await recordTransaction({
+      userId,
+      accountId,
+      portfolioHoldingId: stockId,
+      currency: "USD",
+      amount: 1000,
+      quantity: 10,
+      enteredCurrency: "USD",
+      enteredAmount: 1000,
+      kind: "buy",
+      source: "import",
+      date: TODAY,
+    });
+
+    const sellLinkId = "phase2-sell-link-" + Date.now();
+    // Stock leg of Sell. Phase 2: amount NEGATIVE on the stock leg.
+    await recordTransaction({
+      userId,
+      accountId,
+      portfolioHoldingId: stockId,
+      currency: "USD",
+      amount: -750,
+      quantity: -5,
+      enteredCurrency: "USD",
+      enteredAmount: -750,
+      tradeLinkId: sellLinkId,
+      kind: "sell",
+      source: "import",
+      date: TODAY,
+    });
+    // Paired cash leg on the cash sleeve. Phase 2: qty>0 + amount>0
+    // (cash arrives). Without the kind-based skip, this would phantom-
+    // count as a buy of 750 units on the USD sleeve.
+    await recordTransaction({
+      userId,
+      accountId,
+      portfolioHoldingId: cashSleeveId,
+      currency: "USD",
+      amount: 750,
+      quantity: 750,
+      enteredCurrency: "USD",
+      enteredAmount: 750,
+      tradeLinkId: sellLinkId,
+      kind: "sell_cash_leg",
+      source: "import",
+      date: TODAY,
+    });
+
+    await seedFxRate({ currency: "USD", date: TODAY, rateToUsd: 1 });
+
+    const aggs = await aggregateHoldings(db, userId, TEST_DEK);
+    const cashSleeve = aggs.find(a => a.holding_id === cashSleeveId);
+    expect(cashSleeve).toBeDefined();
+    // sell_cash_leg has qty>0 — would phantom-count as a buy of 750.
+    // With the skip, cash sleeve has 0 buys/sells.
+    expect(cashSleeve!.buy_qty).toBe(0);
+    expect(cashSleeve!.buy_amount).toBe(0);
+    expect(cashSleeve!.sell_qty).toBe(0);
+    expect(cashSleeve!.sell_amount).toBe(0);
+
+    // Stock holding sees buy=1000 (10 sh) + sell=750 (5 sh).
+    const stock = aggs.find(a => a.holding_id === stockId);
+    expect(stock).toBeDefined();
+    expect(stock!.buy_qty).toBeCloseTo(10, 2);
+    expect(stock!.sell_qty).toBeCloseTo(5, 2);
+    expect(stock!.sell_amount).toBeCloseTo(750, 2);
+    // realizedGain = 750 - 5*100 = 250.
+    expect(realizedGain(stock!)).toBeCloseTo(250, 2);
+  });
 });

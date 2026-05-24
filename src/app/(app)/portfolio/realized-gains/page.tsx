@@ -26,8 +26,39 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Download } from "lucide-react";
+import { Download, ArrowDownLeft, ArrowUpLeft, RefreshCw, Coins } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
+
+// Phase 3 follow-up (2026-05-26): short_close = a Buy that covered a short
+// position; gain inverts (cost − buy_price). short_open = the audit-marker
+// row written when a Sell overflows into a new short lot. The other
+// close_kind values are normal long-position closures + special cases.
+const CLOSE_KIND_META: Record<string, { icon: typeof ArrowDownLeft; label: string; className: string; tooltip: string }> = {
+  short_open: {
+    icon: ArrowDownLeft,
+    label: "Short open",
+    className: "border-rose-500 text-rose-600 dark:border-rose-400 dark:text-rose-400",
+    tooltip: "Short opened — a Sell exceeded the open longs and opened a new side='short' lot at the sell price.",
+  },
+  short_close: {
+    icon: ArrowUpLeft,
+    label: "Short close",
+    className: "border-amber-500 text-amber-600 dark:border-amber-400 dark:text-amber-400",
+    tooltip: "Short covered — a Buy on this holding/account closed an open short lot. Realized gain = (open cost − buy price) × qty.",
+  },
+  swap_out: {
+    icon: RefreshCw,
+    label: "Swap",
+    className: "border-sky-500 text-sky-600 dark:border-sky-400 dark:text-sky-400",
+    tooltip: "Closure originated from a Swap (sell-out leg of an in-place rebalance).",
+  },
+  fx_conversion: {
+    icon: Coins,
+    label: "Currency",
+    className: "border-violet-500 text-violet-600 dark:border-violet-400 dark:text-violet-400",
+    tooltip: "Currency-on-currency FX gain — a cash lot in this sleeve was closed by an FX conversion. The realized gain in the sleeve currency is 0 (cost=1, proceeds=1); the actual gain shows in the base-currency view (toggle above).",
+  },
+};
 
 interface ApiRow {
   closureId: number;
@@ -232,7 +263,10 @@ export default function RealizedGainsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.rows.map((r) => (
+                {data.rows.map((r) => {
+                  const kindMeta = CLOSE_KIND_META[r.closeKind] ?? null;
+                  const KindIcon = kindMeta?.icon ?? null;
+                  return (
                   <TableRow key={r.closureId}>
                     <TableCell className="font-mono text-xs">{r.closeDate}</TableCell>
                     <TableCell className="font-mono text-xs">{r.openDate}</TableCell>
@@ -242,7 +276,23 @@ export default function RealizedGainsPage() {
                         {r.term}
                       </Badge>
                     </TableCell>
-                    <TableCell>{r.holdingName ?? `#${r.holdingId}`}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        {KindIcon && (
+                          <KindIcon className={`h-3.5 w-3.5 ${kindMeta!.className.split(" ").filter(c => c.startsWith("text-")).join(" ")}`} />
+                        )}
+                        <span>{r.holdingName ?? `#${r.holdingId}`}</span>
+                        {kindMeta && (
+                          <Badge
+                            variant="outline"
+                            className={`text-[10px] h-4 px-1 ${kindMeta.className}`}
+                            title={kindMeta.tooltip}
+                          >
+                            {kindMeta.label}
+                          </Badge>
+                        )}
+                      </div>
+                    </TableCell>
                     <TableCell>{r.accountName ?? `#${r.accountId}`}</TableCell>
                     <TableCell className="text-right">{r.qtyClosed}</TableCell>
                     <TableCell className="text-right font-mono">
@@ -265,7 +315,8 @@ export default function RealizedGainsPage() {
                         : formatCurrency(r.realizedGain, r.currency)}
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           )}

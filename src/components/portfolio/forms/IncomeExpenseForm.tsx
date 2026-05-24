@@ -380,7 +380,7 @@ export default function IncomeExpenseForm() {
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Pick an investment account" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {investmentAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
                     {a.name ?? `#${a.id}`} ({a.currency})
@@ -403,7 +403,7 @@ export default function IncomeExpenseForm() {
                 <SelectTrigger className="w-full">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   <SelectItem value="income">Income (+)</SelectItem>
                   <SelectItem value="expense">Expense (−)</SelectItem>
                 </SelectContent>
@@ -425,7 +425,7 @@ export default function IncomeExpenseForm() {
                     }
                   />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {cashSleeves.map((s) => (
                     <SelectItem key={s.id} value={s.currency}>
                       {s.currency}
@@ -493,7 +493,7 @@ export default function IncomeExpenseForm() {
                   }
                 />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {accountHoldings.map((h) => (
                   <SelectItem key={h.id} value={String(h.id)}>
                     {h.symbol ? `${h.symbol} — ` : ""}
@@ -523,7 +523,7 @@ export default function IncomeExpenseForm() {
                   }
                 />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {categories.map((c) => (
                   <SelectItem key={c.id} value={String(c.id)}>
                     {c.name ?? `#${c.id}`}

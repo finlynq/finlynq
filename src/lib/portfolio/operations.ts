@@ -50,6 +50,7 @@ import {
   applyLotEffectsForLinkPair,
   resolveCashLegForTx,
 } from "@/lib/portfolio/lots/write-hooks";
+import { closeCashLotsHook, openCashLotHook } from "@/lib/portfolio/lots/cash-hooks";
 import { InvalidLinkPairError } from "@/lib/portfolio/lots/engine";
 import type { LotSelectionStrategy } from "@/lib/portfolio/lots/types";
 import type { TransactionSource } from "@/lib/tx-source";
@@ -291,6 +292,29 @@ export async function recordBuy(input: RecordBuyInput): Promise<RecordBuyResult>
     { holdingCurrency: holding.currency, origin: "buy" },
   );
 
+  // Phase 5c (2026-05-26): the cash leg (qty<0 on the cash sleeve) closes
+  // cash lots FIFO so the FX gain on holding the cash over time surfaces
+  // in /portfolio/realized-gains when the user later runs an FX conversion.
+  await closeCashLotsHook(
+    {
+      id: cashLegTxId,
+      userId: input.userId,
+      date: input.date,
+      amount: -input.totalCost,
+      currency: holding.currency,
+      enteredAmount: null,
+      enteredCurrency: null,
+      quantity: -input.totalCost,
+      accountId: input.accountId,
+      categoryId: null,
+      portfolioHoldingId: cashSleeve.id,
+      tradeLinkId,
+      kind: "buy_cash_leg",
+      source,
+    },
+    { sleeveCurrency: holding.currency, closeKind: "buy_sell" },
+  );
+
   return { stockLegTxId, cashLegTxId, tradeLinkId, lotId };
 }
 
@@ -425,6 +449,29 @@ export async function recordSell(input: RecordSellInput): Promise<RecordSellResu
       lotIds: input.lotSelection?.lotIds,
       perLotQty: input.lotSelection?.lots,
     },
+  );
+
+  // Phase 5c: the cash leg (qty>0 on the cash sleeve) opens a fresh cash
+  // lot at the sell date's FX rate. A future FX conversion that consumes
+  // this cash will compute its FX gain against this lot's open rate.
+  await openCashLotHook(
+    {
+      id: cashLegTxId,
+      userId: input.userId,
+      date: input.date,
+      amount: input.totalProceeds,
+      currency: holding.currency,
+      enteredAmount: null,
+      enteredCurrency: null,
+      quantity: input.totalProceeds,
+      accountId: input.accountId,
+      categoryId: null,
+      portfolioHoldingId: cashSleeve.id,
+      tradeLinkId,
+      kind: "sell_cash_leg",
+      source,
+    },
+    { sleeveCurrency: holding.currency },
   );
 
   return {
@@ -692,9 +739,38 @@ export async function recordPortfolioIncomeOrExpense(
       source,
     })
     .returning({ id: schema.transactions.id });
+  const txId = inserted[0]!.id;
+
+  // Phase 5c (2026-05-26): cash-sleeve lot effects.
+  //   - income (amount>0): opens a cash lot for the dividend / interest
+  //   - expense (amount<0): FIFO-closes cash lots
+  const lotTx = {
+    id: txId,
+    userId: input.userId,
+    date: input.date,
+    amount: input.amount,
+    currency: input.currency,
+    enteredAmount: null,
+    enteredCurrency: null,
+    quantity: input.amount,
+    accountId: input.accountId,
+    categoryId: input.categoryId ?? null,
+    portfolioHoldingId: cashSleeve.id,
+    tradeLinkId: null,
+    kind,
+    source,
+  };
+  if (input.amount > 0) {
+    await openCashLotHook(lotTx, { sleeveCurrency: input.currency });
+  } else {
+    await closeCashLotsHook(lotTx, {
+      sleeveCurrency: input.currency,
+      closeKind: "income_expense",
+    });
+  }
 
   return {
-    txId: inserted[0]!.id,
+    txId,
     cashSleeveHoldingId: cashSleeve.id,
     kind,
   };
@@ -843,6 +919,27 @@ export async function recordFxConversion(
       })
       .returning({ id: schema.transactions.id });
     feeTxId = feeIns[0]!.id;
+
+    // Phase 5c (2026-05-26): FX fee reduces the fee sleeve — close cash lots.
+    await closeCashLotsHook(
+      {
+        id: feeTxId,
+        userId: input.userId,
+        date: input.date,
+        amount: -input.feeAmount,
+        currency: feeCcy,
+        enteredAmount: null,
+        enteredCurrency: null,
+        quantity: -input.feeAmount,
+        accountId: input.accountId,
+        categoryId: null,
+        portfolioHoldingId: feeSleeve.id,
+        tradeLinkId: null,
+        kind: "fx_fee",
+        source,
+      },
+      { sleeveCurrency: feeCcy, closeKind: "income_expense" },
+    );
   }
 
   return { fromTxId, toTxId, feeTxId, linkId };
@@ -1014,6 +1111,29 @@ export async function recordBrokerageDeposit(
     .returning({ id: schema.transactions.id });
   const destTxId = destInsert[0]!.id;
 
+  // Phase 5c (2026-05-26): open a cash lot on the brokerage cash sleeve
+  // for the deposit. Future FX conversions on this sleeve will close it
+  // and surface FX gain in base currency.
+  await openCashLotHook(
+    {
+      id: destTxId,
+      userId: input.userId,
+      date: input.date,
+      amount: input.amount,
+      currency: cashSleeve.currency,
+      enteredAmount: null,
+      enteredCurrency: null,
+      quantity: input.amount,
+      accountId: input.destAccountId,
+      categoryId: null,
+      portfolioHoldingId: cashSleeve.id,
+      tradeLinkId: null,
+      kind: "brokerage_deposit_in",
+      source: txSource,
+    },
+    { sleeveCurrency: cashSleeve.currency },
+  );
+
   return { sourceTxId, destTxId, linkId };
 }
 
@@ -1109,6 +1229,29 @@ export async function recordBrokerageWithdrawal(
     })
     .returning({ id: schema.transactions.id });
   const sourceTxId = sourceInsert[0]!.id;
+
+  // Phase 5c (2026-05-26): FIFO-close cash lots on the brokerage sleeve.
+  // Realized gain in the sleeve currency is 0; FX gain in base surfaces
+  // via augmentWithBaseCurrency() downstream.
+  await closeCashLotsHook(
+    {
+      id: sourceTxId,
+      userId: input.userId,
+      date: input.date,
+      amount: -input.amount,
+      currency: cashSleeve.currency,
+      enteredAmount: null,
+      enteredCurrency: null,
+      quantity: -input.amount,
+      accountId: input.sourceAccountId,
+      categoryId: null,
+      portfolioHoldingId: cashSleeve.id,
+      tradeLinkId: null,
+      kind: "brokerage_withdrawal_out",
+      source: txSource,
+    },
+    { sleeveCurrency: cashSleeve.currency, closeKind: "buy_sell" },
+  );
 
   // Dest leg — non-investment account. qty=0 + amount>0.
   const destInsert = await db

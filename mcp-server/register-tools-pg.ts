@@ -948,12 +948,15 @@ export async function aggregateHoldings(
   // Phase 6 (2026-04-29) eliminated orphan rows; t.portfolio_holding_id is
   // never null here. Skip-and-warn any row that surprises us with a null FK.
   const out = new Map<number, Agg>();
-  // Issue #128: SELECT t.trade_link_id so accumulate() can skip paired
-  // cash-leg rows from the realized-gain sell branch.
+  // Issue #128: SELECT t.trade_link_id + t.kind so accumulate() can skip
+  // paired cash-leg rows from BOTH the buy- and sell-side branches. Under
+  // the Phase 2 sign convention (2026-05-25), `buy_cash_leg`/`sell_cash_leg`
+  // rows carry non-zero amount + qty so `trade_link_id IS NOT NULL AND
+  // amount = 0` no longer matches them — kind is the new discriminator.
   // Stream D Phase 4: ph.name dropped — read ph.name_ct only.
   const fkRows = await q(db, sql`
     SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
-           t.trade_link_id,
+           t.trade_link_id, t.kind,
            t.entered_amount, t.entered_currency, t.currency AS row_currency,
            a.currency AS account_currency,
            ph.name_ct AS holding_name_ct,
@@ -1098,7 +1101,24 @@ function accumulate(
   // reinvestments and withholding-tax / negative-correction rows. When the
   // user has no Dividends category (dividendsCategoryId == null), the
   // branch is skipped and `dividends` sums to 0.
-  if (qty > 0) {
+  // Issue #128 (Phase 2 update, 2026-05-26): paired cash-leg rows are
+  // skipped from BOTH the buy- and sell-side branches. Under Phase 2 sign
+  // convention, sell_cash_leg has qty>0 (would phantom-count as a buy on
+  // the cash sleeve) and buy_cash_leg has qty<0 (would phantom-count as a
+  // sell). The discriminator is `kind IN ('buy_cash_leg', 'sell_cash_leg')`;
+  // legacy pre-Phase-2 cash legs (kind NULL, amount=0) are caught by the
+  // fallback `trade_link_id IS NOT NULL AND amount = 0`.
+  const tradeLinkId = r.trade_link_id ?? null;
+  const kind = (r.kind ?? null) as string | null;
+  const isPairedCashLeg =
+    kind === "buy_cash_leg" || kind === "sell_cash_leg" ||
+    (tradeLinkId != null && amt === 0);
+  if (isPairedCashLeg) {
+    // Paired cash-leg sibling — contributes neither buy nor sell here.
+    // (Cash-sleeve qty is tracked separately via SUM(quantity) per
+    // CLAUDE.md "Portfolio aggregator"; this aggregation is for the
+    // realized-gain calc only.)
+  } else if (qty > 0) {
     row.buy_qty += qty;
     // Issue #96: when a paired cash-leg sibling is present (multi-currency
     // trade pair), use its entered_amount as cost basis instead of this
@@ -1125,25 +1145,13 @@ function accumulate(
     row.purchases += 1;
     if (!row.first_purchase || d < row.first_purchase) row.first_purchase = d;
   } else if (qty < 0) {
-    // Issue #128: skip paired cash-leg rows (`trade_link_id IS NOT NULL AND
-    // amount = 0`). These are the cash-side sibling of a tradeGroupKey-paired
-    // buy (issue #96); the stock leg captures the trade economics. Counting
-    // them as "sells" on the cash sleeve produced a phantom realized loss
-    // (sellAmt=0, sellQty=N, avgCost~=1 → realizedGain ~= -N) even though no
-    // cash position was sold. Conjunctive predicate leaves legitimate cash
-    // withdrawals (`trade_link_id NULL`, `amount<0`) untouched.
-    const tradeLinkId = r.trade_link_id ?? null;
-    if (tradeLinkId != null && amt === 0) {
-      // Paired cash-leg sibling — skip the sell branch.
-    } else {
-      row.sell_qty += Math.abs(qty);
-      // Issue #129: sell amount in entered_currency, FX-normalized to
-      // holding currency.
-      const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
-      const sellAmtInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
-      const fx = holdingCcy ? fxLookup(enteredCcy, holdingCcy) : 1;
-      row.sell_amount += sellAmtInEntered * fx;
-    }
+    row.sell_qty += Math.abs(qty);
+    // Issue #129: sell amount in entered_currency, FX-normalized to
+    // holding currency.
+    const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
+    const sellAmtInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+    const fx = holdingCcy ? fxLookup(enteredCcy, holdingCcy) : 1;
+    row.sell_amount += sellAmtInEntered * fx;
   }
   if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
     // Issue #129: dividends in entered_currency, FX-normalized to holding
@@ -6300,9 +6308,11 @@ export function registerPgTools(
       // currency and labeled them holding currency, producing inflated
       // numbers and a downstream double-FX bug in reporting.
       // Stream D Phase 4: ph.name, ph.symbol, a.name dropped — read *_ct only.
+      // Phase 2 (2026-05-26): SELECT t.kind so the per-row loop can skip
+      // `buy_cash_leg`/`sell_cash_leg` rows in the realized-gain calc.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.amount, t.quantity, t.payee, t.note, t.tags,
-               t.portfolio_holding_id, t.category_id, t.trade_link_id,
+               t.portfolio_holding_id, t.category_id, t.trade_link_id, t.kind,
                t.entered_amount, t.entered_currency, t.currency AS row_currency,
                ph.name_ct as ph_name_ct,
                ph.symbol_ct as ph_symbol_ct,
@@ -6480,7 +6490,17 @@ export function registerPgTools(
         const amt = Number(t.amount);
         const catId = t.category_id != null ? Number(t.category_id) : null;
         const enteredCcy = String(t.entered_currency ?? t.row_currency ?? t.currency ?? "").toUpperCase();
-        if (qty > 0) {
+        // Issue #128 (Phase 2 update, 2026-05-26): skip paired cash-leg
+        // rows from BOTH buy- and sell-side. See accumulate() above for
+        // rationale.
+        const tradeLinkId = t.trade_link_id ?? null;
+        const kind = (t.kind ?? null) as string | null;
+        const isPairedCashLeg =
+          kind === "buy_cash_leg" || kind === "sell_cash_leg" ||
+          (tradeLinkId != null && amt === 0);
+        if (isPairedCashLeg) {
+          // Skip — neither buy nor sell for realized-gain purposes.
+        } else if (qty > 0) {
           // Issue #96: paired cash-leg cost basis when present.
           // Issue #129: prefer cash.entered_amount in cash.entered_currency,
           // FX-converted into holding currency; falls back to cash.amount in
@@ -6499,22 +6519,11 @@ export function registerPgTools(
           }
           buyQty += qty; buyAmt += buyCostInHolding; purchases.push(t);
         } else if (qty < 0) {
-          // Issue #128: skip paired cash-leg rows (`trade_link_id IS NOT NULL
-          // AND amount = 0`) from the realized-gain sell branch. These are
-          // the cash-side sibling of a tradeGroupKey-paired buy (issue #96);
-          // counting them as sells produced a phantom realized loss on the
-          // cash sleeve. Conjunctive predicate leaves legitimate cash
-          // withdrawals untouched.
-          const tradeLinkId = t.trade_link_id ?? null;
-          if (tradeLinkId != null && amt === 0) {
-            // Paired cash-leg sibling — skip sell-branch contribution.
-          } else {
-            // Issue #129: sell amount in entered_currency, FX-converted.
-            const enteredAmt = t.entered_amount != null ? Number(t.entered_amount) : NaN;
-            const sellAmtInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
-            const sellAmtInHolding = sellAmtInEntered * fxLookup(enteredCcy, holdingCurrency);
-            sellQty += Math.abs(qty); sellAmt += sellAmtInHolding; sales.push(t);
-          }
+          // Issue #129: sell amount in entered_currency, FX-converted.
+          const enteredAmt = t.entered_amount != null ? Number(t.entered_amount) : NaN;
+          const sellAmtInEntered = Number.isFinite(enteredAmt) ? Math.abs(enteredAmt) : Math.abs(amt);
+          const sellAmtInHolding = sellAmtInEntered * fxLookup(enteredCcy, holdingCurrency);
+          sellQty += Math.abs(qty); sellAmt += sellAmtInHolding; sales.push(t);
         }
         if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
           // Issue #129: dividend amount in entered_currency, FX-converted.

@@ -68,6 +68,7 @@ export async function buildDailySnapshot(
       linkId: schema.transactions.linkId,
       tradeLinkId: schema.transactions.tradeLinkId,
       quantity: schema.transactions.quantity,
+      kind: schema.transactions.kind,
     })
     .from(schema.transactions)
     .where(
@@ -78,6 +79,11 @@ export async function buildDailySnapshot(
     );
   for (const leg of sameDayLegs) {
     if (!leg.linkId || leg.accountId == null) continue;
+    // Issue #128 (Phase 2 update, 2026-05-26): buy/sell paired cash legs
+    // aren't contributions — they're internal swaps within the account.
+    // Use `kind` discriminator for Phase 2+ rows; legacy `(amount=0 OR
+    // quantity=0)` predicate covers pre-migration rows.
+    if (leg.kind === "buy_cash_leg" || leg.kind === "sell_cash_leg") continue;
     if (leg.tradeLinkId != null && (leg.amount === 0 || leg.quantity === 0)) continue;
     const value = Number(leg.enteredAmount ?? leg.amount ?? 0);
     if (value === 0) continue;

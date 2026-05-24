@@ -307,7 +307,7 @@ export default function WithdrawalForm() {
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Pick an investment account" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {investmentAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
                     {a.name ?? `#${a.id}`} ({a.currency})
@@ -329,7 +329,7 @@ export default function WithdrawalForm() {
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Pick a destination account" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {nonInvestmentAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
                     {a.name ?? `#${a.id}`} ({a.currency})
@@ -370,7 +370,7 @@ export default function WithdrawalForm() {
                 <SelectTrigger className="w-full">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {eligibleSleeves.map((s) => (
                     <SelectItem key={s.id} value={String(s.id)}>
                       {s.name ?? `Cash ${s.currency}`}

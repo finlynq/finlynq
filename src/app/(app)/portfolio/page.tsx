@@ -932,11 +932,20 @@ export default function PortfolioPage() {
                                 >
                                   {typeConf?.label ?? r.assetType}
                                 </Badge>
+                                {r.totalQty < 0 && (
+                                  <Badge
+                                    variant="outline"
+                                    className="text-[10px] h-4 px-1 border-rose-500 text-rose-600 dark:border-rose-400 dark:text-rose-400"
+                                    title="Net-short position — sales exceeded buys. Lots are tracked via holding_lots.side='short'; close by buying to cover."
+                                  >
+                                    Short
+                                  </Badge>
+                                )}
                               </div>
                             </div>
                           </div>
                         </TableCell>
-                        <TableCell className="text-right font-mono text-sm">
+                        <TableCell className={`text-right font-mono text-sm ${r.totalQty < 0 ? "text-rose-600 dark:text-rose-400" : ""}`}>
                           {r.totalQty !== 0
                             ? r.totalQty.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: r.totalQty % 1 === 0 ? 0 : 4 })
                             : <span className="text-muted-foreground text-xs">--</span>}
@@ -1048,10 +1057,13 @@ export default function PortfolioPage() {
                                               {h.accountName}
                                             </button>
                                           </TableCell>
-                                          <TableCell className="text-right font-mono text-xs">
+                                          <TableCell className={`text-right font-mono text-xs ${hasMetrics && h.quantity != null && h.quantity < 0 ? "text-rose-600 dark:text-rose-400" : ""}`}>
                                             {hasMetrics && h.quantity != null
                                               ? h.quantity.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: h.quantity % 1 === 0 ? 0 : 4 })
                                               : <span className="text-muted-foreground">--</span>}
+                                            {hasMetrics && h.quantity != null && h.quantity < 0 && (
+                                              <span className="ml-1 text-[9px] uppercase tracking-wider text-rose-500" title="Short position">short</span>
+                                            )}
                                           </TableCell>
                                           <TableCell className="text-right font-mono text-xs">
                                             {hasMetrics && h.avgCostPerShare != null
@@ -1807,10 +1819,13 @@ export default function PortfolioPage() {
                                       <div>
                                         <span className="font-medium text-sm">{h.name}</span>
                                         {h.symbol && <Badge variant="secondary" className="ml-1 font-mono text-[10px] h-4 px-1">{h.symbol}</Badge>}
+                                        {hasMetrics && h.quantity != null && h.quantity < 0 && (
+                                          <Badge variant="outline" className="ml-1 text-[10px] h-4 px-1 border-rose-500 text-rose-600 dark:border-rose-400 dark:text-rose-400" title="Net-short position">Short</Badge>
+                                        )}
                                       </div>
                                     </div>
                                   </TableCell>
-                                  <TableCell className="text-right font-mono text-sm">
+                                  <TableCell className={`text-right font-mono text-sm ${hasMetrics && h.quantity != null && h.quantity < 0 ? "text-rose-600 dark:text-rose-400" : ""}`}>
                                     {hasMetrics && h.quantity != null
                                       ? h.quantity.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: h.quantity % 1 === 0 ? 0 : 4 })
                                       : <span className="text-muted-foreground text-xs">--</span>}

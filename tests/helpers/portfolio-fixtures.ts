@@ -224,6 +224,7 @@ export async function recordTransaction(args: {
   enteredCurrency?: string | null;
   enteredAmount?: number | null;
   tradeLinkId?: string | null;
+  kind?: string | null;
   source?: string;
   payee?: string;
 }): Promise<number> {
@@ -242,6 +243,7 @@ export async function recordTransaction(args: {
       enteredCurrency: args.enteredCurrency ?? null,
       enteredAmount: args.enteredAmount ?? null,
       tradeLinkId: args.tradeLinkId ?? null,
+      kind: args.kind ?? null,
       source: args.source ?? "manual",
       payee: args.payee ?? "",
     })

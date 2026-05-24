@@ -359,7 +359,7 @@ export default function BuyForm() {
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Pick an investment account" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {investmentAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
                     {a.name ?? `#${a.id}`} ({a.currency})
@@ -390,7 +390,7 @@ export default function BuyForm() {
                   }
                 />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {accountHoldings.map((h) => (
                   <SelectItem key={h.id} value={String(h.id)}>
                     {h.symbol ? `${h.symbol} — ` : ""}

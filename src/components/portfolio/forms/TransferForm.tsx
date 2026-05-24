@@ -340,7 +340,7 @@ export default function TransferForm() {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Pick source" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {investmentAccounts.map((a) => (
                     <SelectItem key={a.id} value={String(a.id)}>
                       {a.name ?? `#${a.id}`} ({a.currency})
@@ -364,7 +364,7 @@ export default function TransferForm() {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Pick destination" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {destAccountOptions.map((a) => (
                     <SelectItem key={a.id} value={String(a.id)}>
                       {a.name ?? `#${a.id}`} ({a.currency})
@@ -402,7 +402,7 @@ export default function TransferForm() {
                   }
                 />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {sourceHoldings.map((h) => (
                   <SelectItem key={h.id} value={String(h.id)}>
                     {h.symbol ? `${h.symbol} — ` : ""}

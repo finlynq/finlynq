@@ -378,7 +378,7 @@ export default function FxConversionForm() {
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Pick an investment account" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {investmentAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
                     {a.name ?? `#${a.id}`} ({a.currency})
@@ -419,7 +419,7 @@ export default function FxConversionForm() {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Pick" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {sleeveCurrencies.map((c) => (
                     <SelectItem key={c} value={c}>
                       {c}
@@ -465,7 +465,7 @@ export default function FxConversionForm() {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Pick" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {toCurrencyOptions.map((c) => (
                     <SelectItem key={c} value={c}>
                       {c}
@@ -545,7 +545,7 @@ export default function FxConversionForm() {
                     }
                   />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {sleeveCurrencies.map((c) => (
                     <SelectItem key={c} value={c}>
                       {c}

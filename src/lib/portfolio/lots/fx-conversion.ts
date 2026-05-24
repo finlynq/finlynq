@@ -7,18 +7,24 @@
  * sleeves (`portfolio_holdings.is_cash = TRUE`), with an optional third
  * row for an FX fee on a user-selected sleeve.
  *
- * The lot engine recognizes this shape and DOES NOT write any holding_lots
- * or holding_lot_closures rows — cash sleeves don't carry tax-lot cost
- * basis. The cash sleeve quantities move via the rows themselves (each
- * leg's `amount` debits or credits its respective sleeve).
+ * Phase 5c (2026-05-26) — cash sleeves now carry per-inflow lots so the
+ * realized-gain aggregator can compute currency-on-currency FX gains over
+ * time. An FX conversion now:
+ *   - source leg (qty<0): FIFO-closes cash lots on the source sleeve with
+ *     `closeKind='fx_conversion'`. Each closure's per-share cost = 1 and
+ *     proceeds = 1 in the source currency, so the in-currency realized
+ *     gain is 0; the USD / base-currency gain comes from the difference
+ *     between the lot's FX rate at open and the closure's FX rate at close
+ *     (filled in by `augmentWithBaseCurrency()`).
+ *   - dest leg (qty>0): opens a fresh cash lot on the dest sleeve at qty
+ *     units, cost-per-share = 1 in the dest currency.
  *
- * This module is intentionally tiny — it exists so the write-hook
- * classifier can branch cleanly:
- *   - `isFxConversionPair(...)`  — classifier predicate
- *   - `fxConversionHook(...)`    — explicit no-op acknowledger; we run it
- *                                  for symmetry and to log a structured
- *                                  diagnostic if something looks off
- *                                  (e.g., currencies match on both legs).
+ * Classifier:
+ *   - `isFxConversionPair(...)`  — classifier predicate (unchanged)
+ *   - `fxConversionHook(...)`    — replaced by `applyLotEffectsForLinkPair`
+ *                                  invoking cashHooks directly; kept here
+ *                                  as a deprecated shim with a structured
+ *                                  warning if same-currency.
  *
  * See plan/portfolio-operations-refactor for the full operation set.
  */
@@ -46,25 +52,26 @@ export function isFxConversionPair(
 }
 
 /**
- * Hook for an FX-conversion link_id pair. No lot row writes — both legs
- * are cash sleeves which don't carry cost basis. We perform a sanity
- * check and log if the two legs share a currency (typically a user
- * mistake; the form should have routed this through a different operation).
+ * Sanity check for an FX-conversion link_id pair. Logs a structured
+ * warning if both legs share a currency (typically a user mistake; the
+ * form should have routed this through a different operation).
  *
- * Returns a structured result so the write-hook dispatcher can record
- * "FX pair recognized, no lot effects" for audit.
+ * Phase 5c (2026-05-26): cash-lot writes now happen in
+ * `applyLotEffectsForLinkPair` via `openCashLotHook` / `closeCashLotsHook`.
+ * This function is a no-op classifier shim retained for the dispatcher
+ * to record "FX pair recognized" alongside the new lot writes.
  */
 export function fxConversionHook(
   sourceTx: TxRowForLots,
   destTx: TxRowForLots,
   source: FxLegInfo,
   dest: FxLegInfo,
-): { noLotEffects: true; warning?: string } {
+): { noLotEffects: false; warning?: string } {
   let warning: string | undefined;
   if (source.currency === dest.currency) {
     warning =
       `FX conversion pair with matching currencies (${source.currency}) — ` +
       `source tx=${sourceTx.id}, dest tx=${destTx.id}. Likely a recording mistake.`;
   }
-  return { noLotEffects: true, warning };
+  return { noLotEffects: false, warning };
 }

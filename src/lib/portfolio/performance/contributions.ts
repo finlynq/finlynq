@@ -63,13 +63,17 @@ export async function computeNetContributions(
       tradeLinkId: schema.transactions.tradeLinkId,
       linkId: schema.transactions.linkId,
       accountId: schema.transactions.accountId,
+      kind: schema.transactions.kind,
     })
     .from(schema.transactions)
     .where(and(...preds));
 
   const out: CashFlow[] = [];
   for (const r of rows) {
-    // Skip the issue #96 paired cash-leg companions of trades.
+    // Issue #128 (Phase 2 update, 2026-05-26): buy/sell paired cash legs
+    // are internal account swaps, not contributions. Use `kind` for
+    // Phase 2+; the legacy predicate covers pre-migration rows.
+    if (r.kind === "buy_cash_leg" || r.kind === "sell_cash_leg") continue;
     if (r.tradeLinkId != null && (r.amount === 0 || r.quantity === 0)) continue;
     // The leg ON the investment account: amount > 0 = transfer-in
     // (contribution); amount < 0 = transfer-out (withdrawal). Negate

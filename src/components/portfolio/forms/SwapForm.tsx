@@ -353,7 +353,7 @@ function SwapCreateForm() {
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Pick an investment account" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
                 {investmentAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
                     {a.name ?? `#${a.id}`} ({a.currency})
@@ -380,7 +380,7 @@ function SwapCreateForm() {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Pick a holding" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {accountHoldings.map((h) => (
                     <SelectItem key={h.id} value={String(h.id)}>
                       {h.symbol ? `${h.symbol} — ` : ""}
@@ -405,7 +405,7 @@ function SwapCreateForm() {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Pick a holding" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
                   {destHoldings.map((h) => (
                     <SelectItem key={h.id} value={String(h.id)}>
                       {h.symbol ? `${h.symbol} — ` : ""}

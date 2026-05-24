@@ -46,6 +46,11 @@ import {
 } from "./engine";
 import { fxConversionHook, isFxConversionPair, type FxLegInfo } from "./fx-conversion";
 import { selectLotsToClose } from "./selection";
+import {
+  closeCashLotsHook,
+  inferCashCloseKind,
+  openCashLotHook,
+} from "./cash-hooks";
 import type {
   CashLegHint,
   HoldingLot,
@@ -693,10 +698,23 @@ export async function applyLotEffectsForLinkPair(
   // Shape 2: FX conversion — both legs are cash sleeves.
   if (isFxConversionPair(sourceLeg, destLeg)) {
     const r = fxConversionHook(sourceTx, destTx, sourceLeg, destLeg);
+    // Phase 5c (2026-05-26): write cash-lot effects.
+    //   - source leg FIFO-closes cash lots with closeKind='fx_conversion'
+    //   - dest leg opens a fresh cash lot on the dest sleeve
+    // The per-row realized gain in the source currency is 0; FX gain in
+    // base currency surfaces via augmentWithBaseCurrency() downstream.
+    const closuresWritten =
+      (await closeCashLotsHook(sourceTx, {
+        sleeveCurrency: sourceLeg.currency,
+        closeKind: "fx_conversion",
+      })) ?? 0;
+    const destLotId = await openCashLotHook(destTx, {
+      sleeveCurrency: destLeg.currency,
+    });
     return {
       shape: "fx_conversion",
-      closuresWritten: 0,
-      destLotsWritten: 0,
+      closuresWritten,
+      destLotsWritten: destLotId != null ? 1 : 0,
       warning: r.warning,
     };
   }
@@ -821,6 +839,9 @@ export async function reverseLotsForDeleteHook(
 export interface LotContext {
   /** Holding-id → currency map, for the holdingCurrency arg on each hook. */
   holdingCurrencyById: Map<number, string>;
+  /** Phase 5c (2026-05-26): holding-id → is_cash flag. Cash sleeves take
+   *  the cash-lot path; non-cash holdings take the stock-lot path. */
+  isCashHoldingById: Map<number, boolean>;
   /** User's Dividends category id, null if not configured. */
   dividendsCategoryId: number | null;
 }
@@ -842,18 +863,27 @@ export async function buildLotContext(
     .select({
       id: schema.portfolioHoldings.id,
       currency: schema.portfolioHoldings.currency,
+      isCash: schema.portfolioHoldings.isCash,
     })
     .from(schema.portfolioHoldings)
     .where(eq(schema.portfolioHoldings.userId, userId));
   const map = new Map<number, string>();
-  for (const h of holdings) map.set(h.id, h.currency);
+  const isCashMap = new Map<number, boolean>();
+  for (const h of holdings) {
+    map.set(h.id, h.currency);
+    isCashMap.set(h.id, Boolean(h.isCash));
+  }
   const dividendsCategoryId = await resolveDividendsCategoryId(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db as any,
     userId,
     dek,
   );
-  return { holdingCurrencyById: map, dividendsCategoryId };
+  return {
+    holdingCurrencyById: map,
+    isCashHoldingById: isCashMap,
+    dividendsCategoryId,
+  };
 }
 
 /**
@@ -885,19 +915,43 @@ export async function applyLotEffectsForTx(
 ): Promise<void> {
   if (tx.portfolioHoldingId == null || tx.accountId == null) return;
   if (tx.quantity == null || tx.quantity === 0) return;
-  // Phase 2 portfolio-ops refactor (2026-05-25): cash-leg siblings of
-  // buy/sell pairs land here too when the caller iterates over every
-  // tx row. They're paired with their stock leg which already drove the
-  // lot write, so skip them. Without this guard, a buy_cash_leg
-  // (qty=-totalCost, amount=-totalCost) would be misclassified as a sell
-  // by the qty<0 dispatch below and spam shortfall warnings (cash sleeves
-  // never have lots opened against them).
-  if (tx.kind && /_cash_leg$/.test(tx.kind)) return;
 
   const holdingCurrency =
     ctx.holdingCurrencyById.get(tx.portfolioHoldingId) ??
     tx.currency ??
     "USD";
+  const isCashSleeve = ctx.isCashHoldingById.get(tx.portfolioHoldingId) ?? false;
+
+  // Phase 5c (2026-05-26): cash sleeves get their own lot tracking. Every
+  // inflow opens a cash lot at fxToUsdAtOpen=null (aggregator fills via
+  // historical lookup); every outflow FIFO-closes them with closeKind
+  // inferred from the tx's `kind`. The realized-gain in the sleeve
+  // currency is always 0 (cost=1, proceeds=1); the augmentWithBaseCurrency
+  // path uses the open/close FX rates to surface the currency-on-currency
+  // FX gain in the user's base currency.
+  if (isCashSleeve) {
+    if (tx.quantity > 0) {
+      await openCashLotHook(tx, { sleeveCurrency: holdingCurrency });
+    } else {
+      await closeCashLotsHook(tx, {
+        sleeveCurrency: holdingCurrency,
+        closeKind: inferCashCloseKind(tx.kind),
+      });
+    }
+    return;
+  }
+
+  // Non-cash holdings: existing stock-lot dispatch. The `_cash_leg` kinds
+  // should never reach this branch (cash legs land on cash sleeves, which
+  // were routed above) — but a defensive skip stays for legacy / data-bug
+  // rows where a cash_leg kind landed on a non-cash holding.
+  if (tx.kind && /_cash_leg$/.test(tx.kind)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `${HOOK_LABEL} applyLotEffectsForTx tx=${tx.id} kind='${tx.kind}' landed on a non-cash holding (${tx.portfolioHoldingId}); skipping lot effects. Likely a data-integrity issue — investigate.`,
+    );
+    return;
+  }
 
   if (tx.quantity > 0) {
     const categoryIsDividend =
