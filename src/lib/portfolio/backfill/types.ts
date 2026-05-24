@@ -86,7 +86,14 @@ export type ProposalKind =
   | "brokerage_withdrawal_pair"
   | "classify_only"
   | "drift"
-  | "orphan_stock_leg";
+  | "orphan_stock_leg"
+  /**
+   * First transaction for a (holding, account) with qty > 0 and no matching
+   * cash leg — almost certainly an opening balance carried in from another
+   * platform. Apply records the row as a lot at the entered cost basis;
+   * no cash-side impact. User can reject if it's actually a normal orphan.
+   */
+  | "opening_balance";
 
 export type Confidence = "high" | "medium" | "low" | "refused";
 

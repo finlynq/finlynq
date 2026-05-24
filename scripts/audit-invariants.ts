@@ -176,6 +176,16 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // rows. Accepted as a one-off-script exception (file is delete-after-use).
   "scripts/backfill-buy-sell-cash-legs.ts:portfolio-ops-kind-via-operations":
     "One-off raw-SQL backfill script; regex false-positive on a TypeScript union type annotation. Writes only `*_cash_leg` literals.",
+  // The transaction-canonicalization backfill planner is a PURE module that
+  // emits Proposal payloads — it doesn't write to the DB itself. The actual
+  // INSERT/UPDATE of `kind` happens in src/lib/portfolio/backfill/apply.ts
+  // which calls applyLotEffectsForTx from @/lib/portfolio/lots/write-hooks
+  // (the canonical lot module). Putting an unused `import` of operations.ts
+  // in the planner would be cargo-culted; the planner's correctness contract
+  // is exercised by tests/backfill-planner.test.ts. Accepted as a pure-module
+  // exception for invariant #8. → pf-app/docs/architecture/backfill.md.
+  "src/lib/portfolio/backfill/planner.ts:portfolio-ops-kind-via-operations":
+    "Pure planner module — emits Proposal payloads; the apply path materializes them via applyLotEffectsForTx from the canonical lot module.",
 };
 
 interface InvariantConfig {

@@ -110,6 +110,27 @@ function accountLabel(accountId: number | null, idx: SnapshotIndex): string {
  * summaries so the user can identify the row without opening the right
  * pane. `verb` is the human verb ("Buy", "Sell", "Dividend", etc.).
  */
+/**
+ * True if `tx` is the earliest transaction for its (portfolioHoldingId,
+ * accountId) tuple across the WHOLE ledger (not just the scoped pool —
+ * we use snap.txs so that scope filtering doesn't accidentally mark a
+ * normal mid-history orphan as an opening balance).
+ *
+ * "Earliest" = lowest date; tie-broken by lowest id so the result is
+ * deterministic. Returns false if either id is null.
+ */
+function isFirstTxForHolding(tx: SnapshotTx, allTxs: SnapshotTx[]): boolean {
+  if (tx.portfolioHoldingId == null || tx.accountId == null) return false;
+  for (const other of allTxs) {
+    if (other.id === tx.id) continue;
+    if (other.portfolioHoldingId !== tx.portfolioHoldingId) continue;
+    if (other.accountId !== tx.accountId) continue;
+    if (other.date < tx.date) return false;
+    if (other.date === tx.date && other.id < tx.id) return false;
+  }
+  return true;
+}
+
 function describeTx(verb: string, tx: SnapshotTx, idx: SnapshotIndex, qtyOverride?: number): string {
   const qty = qtyOverride ?? (tx.quantity == null ? 0 : Math.abs(tx.quantity));
   const ticker = holdingLabel(tx.portfolioHoldingId, idx);
@@ -308,7 +329,26 @@ export function planBackfill(
         continue;
       }
 
-      // True orphan — no related cash row anywhere. Mode (S3, S8) decides.
+      // True orphan — no related cash row anywhere. Two-step decision:
+      //   1. Is this the EARLIEST transaction for (holding, account)?
+      //      → almost certainly an opening balance carried in from another
+      //        platform. Emit opening_balance regardless of run mode.
+      //   2. Otherwise, mode (S3, S8) decides: refuse or synthesize.
+      const earliestForHolding = isFirstTxForHolding(t, snap.txs);
+      if (earliestForHolding && t.quantity > 0) {
+        proposals.push({
+          kind: "opening_balance",
+          confidence: "medium",
+          summary: `${describeTx("Opening balance", t, idx)} — record as a lot with no cash impact`,
+          existingRowIds: [t.id],
+          replacement: [{ txId: t.id, kind: "buy" }],
+          synthesized: [],
+          deltas: { balance: 0, lots: [{ holdingId: t.portfolioHoldingId!, qtyDelta: t.quantity }], realizedGainBase: null },
+          dependsOn: [],
+        });
+        consumed.add(t.id);
+        continue;
+      }
       if (config.mode === "refuse_orphans") {
         const verb = t.quantity > 0 ? "Buy" : "Sell";
         proposals.push({

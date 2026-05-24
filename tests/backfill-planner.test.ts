@@ -199,11 +199,19 @@ describe("S3 — Orphan stock leg (no cash pair candidate)", () => {
   const AAPL = holding(100, 42, { currency: "USD" });
   const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
 
+  // Each fixture seeds a PRIOR canonical buy so the test orphan isn't the
+  // first transaction for AAPL on the account (otherwise opening_balance fires).
+  const priorCanonicalBuy: SnapshotTx[] = [
+    tx({ id: 4900, date: "2024-01-01", accountId: 42, portfolioHoldingId: 100, quantity: 1, amount: 100, kind: "buy", tradeLinkId: "prev" }),
+    tx({ id: 4901, date: "2024-01-01", accountId: 42, portfolioHoldingId: 99, quantity: -100, amount: -100, kind: "buy_cash_leg", tradeLinkId: "prev" }),
+  ];
+
   it("refuse_orphans mode: emits orphan_stock_leg proposal, no synthesized rows", () => {
     const snap = snapshot({
       accounts: [ACCT],
       holdings: [AAPL, USD_CASH],
       txs: [
+        ...priorCanonicalBuy,
         tx({ id: 5001, date: "2025-04-10", accountId: 42, portfolioHoldingId: 100, quantity: 20, amount: -4000 }),
       ],
     });
@@ -220,6 +228,7 @@ describe("S3 — Orphan stock leg (no cash pair candidate)", () => {
       accounts: [ACCT],
       holdings: [AAPL, USD_CASH],
       txs: [
+        ...priorCanonicalBuy,
         tx({ id: 5001, date: "2025-04-10", accountId: 42, portfolioHoldingId: 100, quantity: 20, amount: -4000 }),
       ],
     });
@@ -350,10 +359,10 @@ describe("S7 — Dependency graph", () => {
   });
 });
 
-// ─── S8 — Migration with no cash data (synthesize mode) ───────────────
+// ─── Opening balance — first-tx orphan in either mode ────────────────
 
-describe("S8 — Migration from competitor (no cash data, synthesize mode)", () => {
-  it("3 stock-only rows in synthesize mode → 3 proposals, all with synthesized cash legs except dividend", () => {
+describe("Opening balance — first transaction for a holding", () => {
+  it("emits opening_balance proposal in refuse_orphans mode (first tx, qty>0, no cash pair)", () => {
     const ACCT = acct(42);
     const AAPL = holding(100, 42, { currency: "USD" });
     const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
@@ -362,8 +371,62 @@ describe("S8 — Migration from competitor (no cash data, synthesize mode)", () 
       accounts: [ACCT],
       holdings: [AAPL, USD_CASH],
       txs: [
+        // This is the ONLY tx for AAPL on acct 42 — no prior, no cash pair.
+        tx({ id: 9001, date: "2023-06-01", accountId: 42, portfolioHoldingId: 100, quantity: 50, amount: -10000 }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("opening_balance");
+    expect(proposals[0].confidence).toBe("medium");
+    expect(proposals[0].replacement).toEqual([{ txId: 9001, kind: "buy" }]);
+    expect(proposals[0].synthesized).toHaveLength(0);
+  });
+
+  it("does NOT emit opening_balance when a prior tx for same holding exists", () => {
+    const ACCT = acct(42);
+    const AAPL = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [AAPL, USD_CASH],
+      txs: [
+        // Prior tx — already canonical (kind set + trade_link_id).
+        tx({ id: 8000, date: "2022-01-01", accountId: 42, portfolioHoldingId: 100, quantity: 20, amount: 4000, kind: "buy", tradeLinkId: "old" }),
+        tx({ id: 8001, date: "2022-01-01", accountId: 42, portfolioHoldingId: 99, quantity: -4000, amount: -4000, kind: "buy_cash_leg", tradeLinkId: "old" }),
+        // New orphan — NOT the first tx for AAPL anymore.
+        tx({ id: 9001, date: "2023-06-01", accountId: 42, portfolioHoldingId: 100, quantity: 50, amount: -10000 }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    // The orphan should be flagged orphan_stock_leg, not opening_balance.
+    expect(proposals.some((p) => p.kind === "opening_balance")).toBe(false);
+    expect(proposals.some((p) => p.kind === "orphan_stock_leg")).toBe(true);
+  });
+});
+
+// ─── S8 — Migration with no cash data (synthesize mode) ───────────────
+
+describe("S8 — Migration from competitor (no cash data, synthesize mode)", () => {
+  it("first buy → opening_balance, dividend → dividend, sell → synthesized cash leg", () => {
+    const ACCT = acct(42);
+    const AAPL = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [AAPL, USD_CASH],
+      txs: [
+        // First tx for AAPL — carried in from Wealthfolio, opening balance.
         tx({ id: 7001, date: "2024-01-15", accountId: 42, portfolioHoldingId: 100, quantity: 50, amount: -9000 }),
+        // Dividend, single-row, classified directly.
         tx({ id: 7002, date: "2024-02-10", accountId: 42, portfolioHoldingId: 100, categoryId: 1, quantity: 0, amount: 25 }),
+        // Real sell after the user started tracking — should get synthesized cash leg.
         tx({ id: 7003, date: "2024-06-01", accountId: 42, portfolioHoldingId: 100, quantity: -20, amount: 3900 }),
       ],
     });
@@ -371,15 +434,18 @@ describe("S8 — Migration from competitor (no cash data, synthesize mode)", () 
     const proposals = planBackfill(snap, CONFIG_SYNTH);
     expect(proposals.length).toBeGreaterThanOrEqual(3);
 
-    const buy = proposals.find((p) => p.kind === "buy_pair");
+    const openingBalance = proposals.find((p) => p.kind === "opening_balance");
     const div = proposals.find((p) => p.kind === "dividend");
     const sell = proposals.find((p) => p.kind === "sell_pair");
 
-    expect(buy?.synthesized).toHaveLength(1);
-    expect(buy?.synthesized[0].kind).toBe("buy_cash_leg");
-    expect(buy?.deltas.balance).toBe(-9000);
+    // Opening balance: just classify as 'buy', no synth, no cash impact.
+    expect(openingBalance).toBeDefined();
+    expect(openingBalance?.replacement[0]?.kind).toBe("buy");
+    expect(openingBalance?.synthesized).toHaveLength(0);
+    expect(openingBalance?.deltas.balance).toBe(0);
 
-    expect(div?.synthesized ?? []).toHaveLength(0); // dividends don't get cash pairs by default
+    expect(div?.replacement[0]?.kind).toBe("dividend");
+    expect(div?.synthesized ?? []).toHaveLength(0);
 
     expect(sell?.synthesized).toHaveLength(1);
     expect(sell?.synthesized[0].kind).toBe("sell_cash_leg");

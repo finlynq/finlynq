@@ -36,6 +36,15 @@ interface Proposal {
   status: string;
 }
 
+interface Coverage {
+  accountCount: number;
+  totalTxs: number;
+  canonicalTxs: number;
+  nonCanonicalTxs: number;
+  canonicalPct: number;
+  perAccount: Array<{ accountId: number; name: string; total: number; canonical: number; pending: number; pendingPct: number }>;
+}
+
 interface DisplacedRow {
   id: number;
   date: string;
@@ -72,6 +81,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
   const [displacedRows, setDisplacedRows] = useState<Record<number, DisplacedRow>>({});
   const [holdingMap, setHoldingMap] = useState<Record<number, HoldingMeta>>({});
   const [accountMap, setAccountMap] = useState<Record<number, AccountMeta>>({});
+  const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [applying, setApplying] = useState(false);
@@ -99,6 +109,13 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
   }
 
   useEffect(() => { loadProposals(); }, [runId]);
+
+  useEffect(() => {
+    fetch(`/api/settings/backfill/coverage`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data: Coverage | null) => { if (data) setCoverage(data); })
+      .catch(() => setCoverage(null));
+  }, [runId, proposals]); // refetch after proposals change (post-apply)
 
   async function updateProposal(proposalId: number, patch: { status?: string; variantChoice?: string | null }) {
     setError("");
@@ -173,6 +190,8 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
 
       {error && <div className="border border-destructive bg-destructive/10 text-destructive rounded p-3 text-sm">{error}</div>}
       {info && <div className="border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 rounded p-3 text-sm flex items-center gap-2"><CheckCircle2 className="size-4" /> {info}</div>}
+
+      {coverage && <CoverageDashboard coverage={coverage} proposals={proposals} />}
 
       {loading && <div className="flex items-center gap-2 text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading…</div>}
 
@@ -303,6 +322,7 @@ function ProposalDetail({
   const isDrift = proposal.proposalKind === "drift";
   const isRefused = proposal.confidence === "refused";
   const isOrphan = proposal.proposalKind === "orphan_stock_leg";
+  const isOpeningBalance = proposal.proposalKind === "opening_balance";
   const isApplied = proposal.status === "applied";
 
   return (
@@ -337,6 +357,18 @@ function ProposalDetail({
                     ? "This proposal can&apos;t be auto-applied because the planner couldn&apos;t propose a canonical reshape."
                     : "Resolve the underlying issue in /transactions, then re-run the backfill."
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isOpeningBalance && (
+          <div className="border border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300 rounded p-3 flex items-start gap-2">
+            <AlertTriangle className="size-4 mt-0.5 shrink-0" />
+            <div>
+              <div className="font-medium">Opening balance</div>
+              <div className="text-xs mt-1 opacity-90">
+                This is the earliest transaction for this holding in this account — almost certainly an opening balance carried in from another platform. Approving records it as a lot at the entered cost basis with NO cash-side impact (no synthesized cash leg, no trade_link_id). Reject if it&apos;s actually a normal buy with a forgotten cash row.
               </div>
             </div>
           </div>
@@ -577,6 +609,120 @@ function VariantOption({ label, explanation, selected, onSelect }: { label: stri
         </div>
       </div>
     </button>
+  );
+}
+
+function CoverageDashboard({ coverage, proposals }: { coverage: Coverage; proposals: Proposal[] }) {
+  const approvedCount = proposals.filter((p) => p.status === "approved").length;
+  const appliedCount = proposals.filter((p) => p.status === "applied").length;
+  const willCanonicalize = proposals.filter((p) => p.status === "approved" || p.status === "applied")
+    .filter((p) => p.proposalKind !== "orphan_stock_leg")
+    .reduce((acc, p) => acc + p.existingRowIds.length, 0);
+
+  const projectedCanonical = Math.min(coverage.canonicalTxs + willCanonicalize, coverage.totalTxs);
+  const projectedPct = coverage.totalTxs === 0 ? 0 : Math.round((projectedCanonical / coverage.totalTxs) * 100);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Canonicalization coverage</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-4 gap-4 text-sm">
+          <Metric label="Investment accounts" value={String(coverage.accountCount)} />
+          <Metric label="Total transactions" value={String(coverage.totalTxs)} />
+          <Metric
+            label="Canonical (kind set + paired)"
+            value={`${coverage.canonicalTxs} / ${coverage.totalTxs}`}
+            sub={`${coverage.canonicalPct}%`}
+            tone="good"
+          />
+          <Metric
+            label="Pending (needs backfill)"
+            value={String(coverage.nonCanonicalTxs)}
+            sub={coverage.totalTxs > 0 ? `${100 - coverage.canonicalPct}%` : undefined}
+            tone={coverage.nonCanonicalTxs > 0 ? "warn" : "good"}
+          />
+        </div>
+
+        {/* Progress bar — current vs projected after applying approved */}
+        <div className="mt-4 space-y-1">
+          <div className="h-2 w-full rounded-full bg-muted/40 overflow-hidden relative">
+            <div
+              className="h-full bg-emerald-500/70 absolute left-0 top-0"
+              style={{ width: `${coverage.canonicalPct}%` }}
+              title={`${coverage.canonicalPct}% already canonical`}
+            />
+            {willCanonicalize > 0 && (
+              <div
+                className="h-full bg-amber-500/60 absolute top-0"
+                style={{ left: `${coverage.canonicalPct}%`, width: `${projectedPct - coverage.canonicalPct}%` }}
+                title={`+${willCanonicalize} after applying ${approvedCount + appliedCount} approved/applied proposals → ${projectedPct}%`}
+              />
+            )}
+          </div>
+          <div className="text-xs text-muted-foreground flex justify-between">
+            <span>Now: {coverage.canonicalPct}% canonical</span>
+            {willCanonicalize > 0 && <span>After this run: {projectedPct}% (+{willCanonicalize} rows)</span>}
+          </div>
+        </div>
+
+        {/* Per-account breakdown */}
+        {coverage.perAccount.length > 0 && (
+          <div className="mt-4">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Per-account breakdown</div>
+            <div className="rounded border overflow-hidden">
+              <table className="w-full text-xs">
+                <thead className="bg-muted/40">
+                  <tr>
+                    <th className="text-left px-2 py-1.5">Account</th>
+                    <th className="text-right px-2 py-1.5">Total</th>
+                    <th className="text-right px-2 py-1.5">Canonical</th>
+                    <th className="text-right px-2 py-1.5">Pending</th>
+                    <th className="text-left px-2 py-1.5 w-40">Coverage</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {coverage.perAccount.map((a) => (
+                    <tr key={a.accountId} className="border-t">
+                      <td className="px-2 py-1.5">{a.name}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{a.total}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{a.canonical}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">
+                        {a.pending > 0 ? (
+                          <span className="text-amber-600 dark:text-amber-400">{a.pending}</span>
+                        ) : (
+                          <span className="text-emerald-600 dark:text-emerald-400">0</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <div className="h-1.5 w-full rounded-full bg-muted/40 overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-500/70"
+                            style={{ width: `${100 - a.pendingPct}%` }}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Metric({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "good" | "warn" }) {
+  const toneClass = tone === "good" ? "text-emerald-600 dark:text-emerald-400" : tone === "warn" ? "text-amber-600 dark:text-amber-400" : "";
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className={`text-lg font-semibold ${toneClass}`}>{value}</div>
+      {sub && <div className={`text-xs ${toneClass}`}>{sub}</div>}
+    </div>
   );
 }
 

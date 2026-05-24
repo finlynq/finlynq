@@ -21,7 +21,7 @@ type Mode = "refuse_orphans" | "synthesize_orphans";
 type ScopeChoice = "all" | "accounts" | "date_range";
 
 interface AccountOption {
-  id: number;
+  accountId: number;
   name: string;
   isInvestment: boolean;
 }
@@ -38,11 +38,19 @@ export default function BackfillWizardPage() {
   const [error, setError] = useState<string>("");
 
   useEffect(() => {
-    // Load investment accounts for the picker.
+    // /api/accounts returns an array directly (not wrapped). Each row carries
+    // `accountId` (not `id`) and `isInvestment` (camel) per src/lib/queries.ts:701.
     fetch("/api/accounts")
       .then((r) => r.json())
-      .then((data) => {
-        const list = (data?.accounts ?? []).filter((a: { isInvestment?: boolean }) => a.isInvestment);
+      .then((data: unknown) => {
+        const arr = Array.isArray(data) ? data : [];
+        const list = arr
+          .filter((a: { isInvestment?: boolean }) => a.isInvestment === true)
+          .map((a: { accountId: number; name?: string }) => ({
+            accountId: a.accountId,
+            name: a.name ?? `account #${a.accountId}`,
+            isInvestment: true,
+          }));
         setAccounts(list);
       })
       .catch(() => setAccounts([]));
@@ -131,13 +139,13 @@ export default function BackfillWizardPage() {
             <div className="space-y-1">
               {accounts.length === 0 && <p className="text-sm text-muted-foreground">No investment accounts found.</p>}
               {accounts.map((a) => (
-                <label key={a.id} className="flex items-center gap-2 text-sm">
+                <label key={a.accountId} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
-                    checked={accountIds.includes(a.id)}
+                    checked={accountIds.includes(a.accountId)}
                     onChange={(e) => {
                       setAccountIds((prev) =>
-                        e.target.checked ? [...prev, a.id] : prev.filter((id) => id !== a.id),
+                        e.target.checked ? [...prev, a.accountId] : prev.filter((id) => id !== a.accountId),
                       );
                     }}
                   />
