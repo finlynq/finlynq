@@ -3568,6 +3568,59 @@ function TransactionsPageInner() {
                             </TableCell>
                           );
                         }
+                        case "canonical": {
+                          // 2026-06-09 — companion to the `kind` column.
+                          // Mirrors the predicate the /settings/backfill
+                          // coverage dashboard uses to count canonical vs
+                          // pending vs not-yet-classified rows. Keep this
+                          // PAIRLESS set in sync with PAIRLESS_CANONICAL_KINDS
+                          // in src/lib/portfolio/backfill/types.ts and with
+                          // the duplicate set above in the `kind` case —
+                          // ideally hoist to module scope on next touch.
+                          const PAIRLESS_KINDS = new Set([
+                            "dividend",
+                            "interest",
+                            "portfolio_income",
+                            "portfolio_expense",
+                            "opening_balance",
+                          ]);
+                          const status: "canonical" | "pending" | "none" =
+                            t.kind == null
+                              ? "none"
+                              : PAIRLESS_KINDS.has(t.kind) ||
+                                  t.tradeLinkId != null ||
+                                  t.linkId != null
+                                ? "canonical"
+                                : "pending";
+                          return (
+                            <TableCell key={c.id} className="text-sm">
+                              {status === "canonical" ? (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                                  title="Row has a canonical Phase-2 shape — kind set AND (pair-less kind OR trade_link_id OR link_id)."
+                                >
+                                  canonical
+                                </Badge>
+                              ) : status === "pending" ? (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 border-dashed"
+                                  title={`Kind is '${t.kind}' but row lacks the canonical pair shape — visit /settings/backfill to canonicalize.`}
+                                >
+                                  pending
+                                </Badge>
+                              ) : (
+                                <span
+                                  className="text-muted-foreground/50"
+                                  title="No kind set — row predates Phase-2 portfolio ops or has no portfolio-op classification."
+                                >
+                                  —
+                                </span>
+                              )}
+                            </TableCell>
+                          );
+                        }
                         case "actions":
                           return (
                             <TableCell key={c.id}>

@@ -39,6 +39,14 @@ export const COLUMN_IDS = [
   // 'dividend', '*_cash_leg', etc. = canonicalized. Mirrors what the
   // /settings/backfill coverage dashboard reads from.
   "kind",
+  // 2026-06-09 — companion to `kind`. The /settings/backfill coverage
+  // dashboard surfaces a per-row predicate ("canonical" if kind is set
+  // AND (PAIRLESS kind OR trade_link_id OR link_id); "pending" if kind
+  // is set but not canonical; "—" if kind is NULL). Adding it as a
+  // standalone column lets users see backfill readiness at a glance on
+  // the main transactions page without parsing the dashed-vs-solid
+  // border on the `kind` pill. Off by default.
+  "canonical",
   "actions",
 ] as const;
 
@@ -65,6 +73,7 @@ export const DEFAULT_COLUMNS: Array<{ id: ColumnId; visible: boolean }> = [
   { id: "updatedAt", visible: false },
   { id: "source", visible: false },
   { id: "kind", visible: false },
+  { id: "canonical", visible: false },
   { id: "actions", visible: true },
 ];
 
@@ -87,6 +96,7 @@ export const COLUMN_LABELS: Record<ColumnId, string> = {
   updatedAt: "Updated",
   source: "Source",
   kind: "Kind",
+  canonical: "Canonical?",
   actions: "Actions",
 };
 
@@ -153,6 +163,7 @@ export const FILTER_COLUMN_TYPES: Partial<Record<ColumnId, FilterType>> = {
   amount: "numeric",
   source: "enum",
   kind: "text",
+  canonical: "enum",
 };
 
 export const FILTERABLE_COLUMN_IDS = Object.keys(

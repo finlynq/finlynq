@@ -19,6 +19,35 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, Undo2 } from "lucide-react";
 
+// MUST stay in sync with the CHECK constraint on
+// backfill_proposals.chosen_kind (migration 20260609), with OverrideKind
+// in src/lib/portfolio/backfill/apply.ts, and with the overrideKindSchema
+// Zod in /api/settings/backfill/[runId]/route.ts.
+type OverrideKind =
+  | "opening_balance"
+  | "dividend"
+  | "interest"
+  | "portfolio_income"
+  | "portfolio_expense"
+  | "buy"
+  | "sell"
+  | "in_kind_transfer_in"
+  | "in_kind_transfer_out"
+  | "fx_from"
+  | "fx_to"
+  | "brokerage_deposit_in"
+  | "brokerage_deposit_out"
+  | "brokerage_withdrawal_in"
+  | "brokerage_withdrawal_out";
+
+const OVERRIDE_PAIRLESS_KINDS: ReadonlySet<OverrideKind> = new Set<OverrideKind>([
+  "opening_balance",
+  "dividend",
+  "interest",
+  "portfolio_income",
+  "portfolio_expense",
+]);
+
 interface Proposal {
   id: number;
   runId: string;
@@ -41,6 +70,12 @@ interface Proposal {
   // Phase 4b — dividend_reinvestment variant: cash_dividend (zero qty,
   // no lot) or drip (qty as shares, lot opens).
   dividendVariant: "cash_dividend" | "drip" | null;
+  // 2026-06-09 — kind override on refused orphan_stock_leg proposals
+  // (migration 20260609). NULL on every other proposal kind.
+  chosenKind: OverrideKind | null;
+  chosenCounterpartTxId: number | null;
+  chosenCounterpartMode: "link_existing" | "synth_new" | null;
+  chosenRelatedHoldingId: number | null;
   status: string;
 }
 
@@ -58,16 +93,24 @@ interface DisplacedRow {
   date: string;
   accountId: number | null;
   portfolioHoldingId: number | null;
+  // 2026-06-09 — added so RowDetails can render the secondary line.
+  relatedHoldingId: number | null;
+  categoryId: number | null;
   amount: number;
   currency: string;
   quantity: number | null;
   kind: string | null;
   tradeLinkId: string | null;
   linkId: string | null;
+  note: string | null;
+  tags: string | null;
+  payee: string | null;
+  source: string | null;
 }
 
 interface HoldingMeta { name: string | null; isCash: boolean; currency: string }
 interface AccountMeta { name: string | null; currency: string }
+interface CategoryMeta { name: string | null; type: string | null }
 
 const REFUSAL_EXPLANATIONS: Record<string, string> = {
   no_cash_pair_found:
@@ -89,6 +132,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
   const [displacedRows, setDisplacedRows] = useState<Record<number, DisplacedRow>>({});
   const [holdingMap, setHoldingMap] = useState<Record<number, HoldingMeta>>({});
   const [accountMap, setAccountMap] = useState<Record<number, AccountMeta>>({});
+  const [categoryMap, setCategoryMap] = useState<Record<number, CategoryMeta>>({});
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -107,6 +151,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
       setDisplacedRows(rowsById);
       setHoldingMap(data.holdingMap ?? {});
       setAccountMap(data.accountMap ?? {});
+      setCategoryMap(data.categoryMap ?? {});
       if ((data.proposals ?? []).length > 0 && selectedId == null) {
         setSelectedId(data.proposals[0].id);
       }
@@ -132,6 +177,10 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
       variantChoice?: string | null;
       chosenHoldingId?: number | null;
       dividendVariant?: "cash_dividend" | "drip" | null;
+      chosenKind?: OverrideKind | null;
+      chosenCounterpartTxId?: number | null;
+      chosenCounterpartMode?: "link_existing" | "synth_new" | null;
+      chosenRelatedHoldingId?: number | null;
     },
   ) {
     setError("");
@@ -242,12 +291,20 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
                 displacedRows={displacedRows}
                 holdingMap={holdingMap}
                 accountMap={accountMap}
+                categoryMap={categoryMap}
                 onVariantChange={(v) => updateProposal(selected.id, { variantChoice: v })}
                 onHoldingChange={(id) => updateProposal(selected.id, { chosenHoldingId: id })}
                 onDividendVariantChange={(v) => updateProposal(selected.id, { dividendVariant: v })}
                 onApprove={() => updateProposal(selected.id, { status: "approved" })}
                 onReject={() => updateProposal(selected.id, { status: "rejected" })}
                 onUndo={() => undoProposal(selected.id)}
+                onApproveOverride={(payload) =>
+                  updateProposal(selected.id, {
+                    status: "approved",
+                    chosenKind: payload.chosenKind,
+                    chosenRelatedHoldingId: payload.chosenRelatedHoldingId ?? null,
+                  })
+                }
               />
             ) : (
               <Card><CardContent className="py-8 text-center text-muted-foreground">Select a proposal to view detail.</CardContent></Card>
@@ -323,23 +380,30 @@ function ProposalDetail({
   displacedRows,
   holdingMap,
   accountMap,
+  categoryMap,
   onVariantChange,
   onHoldingChange,
   onDividendVariantChange,
   onApprove,
   onReject,
   onUndo,
+  onApproveOverride,
 }: {
   proposal: Proposal;
   displacedRows: Record<number, DisplacedRow>;
   holdingMap: Record<number, HoldingMeta>;
   accountMap: Record<number, AccountMeta>;
+  categoryMap: Record<number, CategoryMeta>;
   onVariantChange: (v: "separate_fee_row" | "absorb_into_cost" | null) => void;
   onHoldingChange: (id: number | null) => void;
   onDividendVariantChange: (v: "cash_dividend" | "drip" | null) => void;
   onApprove: () => void;
   onReject: () => void;
   onUndo: () => void;
+  onApproveOverride: (payload: {
+    chosenKind: OverrideKind;
+    chosenRelatedHoldingId?: number | null;
+  }) => Promise<boolean> | void;
 }) {
   const isDrift = proposal.proposalKind === "drift";
   const isRefused = proposal.confidence === "refused";
@@ -408,7 +472,20 @@ function ProposalDetail({
           displacedRows={displacedRows}
           holdingMap={holdingMap}
           accountMap={accountMap}
+          categoryMap={categoryMap}
         />
+
+        {isOrphan && !isApplied && (
+          <KindOverridePicker
+            proposal={proposal}
+            displacedRows={displacedRows}
+            holdingMap={holdingMap}
+            accountMap={accountMap}
+            categoryMap={categoryMap}
+            onApproveOverride={onApproveOverride}
+            onReject={onReject}
+          />
+        )}
 
         {isDrift && (
           <div className="space-y-2">
@@ -436,6 +513,13 @@ function ProposalDetail({
               proposal={proposal}
               holdingMap={holdingMap}
               onChange={onHoldingChange}
+            />
+            <DividendReinvestmentPreview
+              proposal={proposal}
+              displacedRows={displacedRows}
+              holdingMap={holdingMap}
+              accountMap={accountMap}
+              categoryMap={categoryMap}
             />
           </div>
         )}
@@ -474,11 +558,13 @@ function DisplacedRowsTable({
   displacedRows,
   holdingMap,
   accountMap,
+  categoryMap,
 }: {
   ids: number[];
   displacedRows: Record<number, DisplacedRow>;
   holdingMap: Record<number, HoldingMeta>;
   accountMap: Record<number, AccountMeta>;
+  categoryMap: Record<number, CategoryMeta>;
 }) {
   return (
     <div>
@@ -506,15 +592,18 @@ function DisplacedRowsTable({
                 <tr key={id} className="border-t"><td colSpan={7} className="px-2 py-1.5 text-muted-foreground">Tx #{id} (row not found)</td></tr>
               );
               return (
-                <tr key={id} className="border-t">
-                  <td className="px-2 py-1.5 font-mono">#{r.id}</td>
-                  <td className="px-2 py-1.5">{r.date}</td>
-                  <td className="px-2 py-1.5">{accountLabelFor(r.accountId, accountMap)}</td>
-                  <td className="px-2 py-1.5">{holdingLabelFor(r.portfolioHoldingId, holdingMap)}</td>
-                  <td className="px-2 py-1.5 text-right font-mono">{r.quantity ?? "—"}</td>
-                  <td className="px-2 py-1.5 text-right font-mono">{r.amount.toFixed(2)} {r.currency}</td>
-                  <td className="px-2 py-1.5 font-mono">{r.kind ?? "—"}</td>
-                </tr>
+                <>
+                  <tr key={`${id}-primary`} className="border-t">
+                    <td className="px-2 py-1.5 font-mono">#{r.id}</td>
+                    <td className="px-2 py-1.5">{r.date}</td>
+                    <td className="px-2 py-1.5">{accountLabelFor(r.accountId, accountMap)}</td>
+                    <td className="px-2 py-1.5">{holdingLabelFor(r.portfolioHoldingId, holdingMap)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{r.quantity ?? "—"}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{r.amount.toFixed(2)} {r.currency}</td>
+                    <td className="px-2 py-1.5 font-mono">{r.kind ?? "—"}</td>
+                  </tr>
+                  <RowDetailsLine row={r} holdingMap={holdingMap} categoryMap={categoryMap} colSpan={7} />
+                </>
               );
             })}
           </tbody>
@@ -523,6 +612,73 @@ function DisplacedRowsTable({
     </div>
   );
 }
+
+/**
+ * Secondary line under each existing row showing the user-entered context
+ * that the primary table omits. Skips fields that are empty/null so the
+ * line stays compact. Reused by DisplacedRowsTable + WillBecomeTable.
+ */
+function RowDetailsLine({
+  row,
+  holdingMap,
+  categoryMap,
+  colSpan,
+  highlight,
+}: {
+  row: {
+    note: string | null;
+    tags: string | null;
+    payee: string | null;
+    source: string | null;
+    categoryId: number | null;
+    relatedHoldingId: number | null;
+  };
+  holdingMap: Record<number, HoldingMeta>;
+  categoryMap: Record<number, CategoryMeta>;
+  colSpan: number;
+  highlight?: ReadonlySet<keyof typeof FIELD_LABELS>;
+}) {
+  const category = row.categoryId != null ? categoryMap[row.categoryId] : null;
+  const related = row.relatedHoldingId != null ? holdingMap[row.relatedHoldingId] : null;
+  const items: Array<{ key: keyof typeof FIELD_LABELS; value: string }> = [];
+  if (category?.name) items.push({ key: "category", value: category.name });
+  if (row.source) items.push({ key: "source", value: row.source });
+  if (row.note) items.push({ key: "note", value: row.note });
+  if (row.tags) items.push({ key: "tags", value: row.tags });
+  if (related) {
+    const label = related.isCash
+      ? `${related.currency} cash sleeve`
+      : related.name ?? `holding #${row.relatedHoldingId}`;
+    items.push({ key: "related", value: label });
+  }
+  if (row.payee) items.push({ key: "payee", value: row.payee });
+  if (items.length === 0) return null;
+  return (
+    <tr key={`details`} className="bg-muted/20">
+      <td colSpan={colSpan} className="px-2 py-1 text-[11px] text-muted-foreground">
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {items.map((it) => {
+            const isHi = highlight?.has(it.key);
+            return (
+              <span key={it.key} className={isHi ? "font-semibold text-foreground" : ""}>
+                <span className="opacity-70">{FIELD_LABELS[it.key]}:</span> {it.value}
+              </span>
+            );
+          })}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+const FIELD_LABELS = {
+  category: "Category",
+  source: "Source",
+  note: "Note",
+  tags: "Tags",
+  related: "Related",
+  payee: "Payee",
+} as const;
 
 function ReplacementPreviewTable({
   proposal,
@@ -711,6 +867,494 @@ function HoldingPicker({
     </select>
   );
 }
+
+// ─── Kind override on refused orphan_stock_leg ────────────────────────
+//
+// Override picker for refused orphan_stock_leg proposals. Pair-less
+// kinds (opening_balance, dividend, interest, portfolio_income,
+// portfolio_expense) apply directly via applyOrphanOverride in
+// apply.ts. Paired kinds (buy/sell/transfer/fx/brokerage) are rendered
+// disabled with a tooltip pointing at the follow-up — those need the
+// convertExisting*Pair helpers in operations.ts + a counterpart picker.
+function KindOverridePicker({
+  proposal,
+  displacedRows,
+  holdingMap,
+  accountMap,
+  categoryMap,
+  onApproveOverride,
+  onReject,
+}: {
+  proposal: Proposal;
+  displacedRows: Record<number, DisplacedRow>;
+  holdingMap: Record<number, HoldingMeta>;
+  accountMap: Record<number, AccountMeta>;
+  categoryMap: Record<number, CategoryMeta>;
+  onApproveOverride: (payload: { chosenKind: OverrideKind; chosenRelatedHoldingId?: number | null }) => Promise<boolean> | void;
+  onReject: () => void;
+}) {
+  const [open, setOpen] = useState<boolean>(proposal.chosenKind != null);
+  const [chosenKind, setChosenKind] = useState<OverrideKind | null>(proposal.chosenKind);
+  const [chosenRelatedHoldingId, setChosenRelatedHoldingId] = useState<number | null>(
+    proposal.chosenRelatedHoldingId,
+  );
+
+  const orphanRow = proposal.existingRowIds[0] != null ? displacedRows[proposal.existingRowIds[0]] : null;
+  const accountHoldings = useMemo(() => {
+    if (orphanRow?.accountId == null) return [] as Array<[number, HoldingMeta]>;
+    return Object.entries(holdingMap)
+      .map(([k, h]) => [Number(k), h] as [number, HoldingMeta])
+      .filter(([, h]) => !h.isCash);
+  }, [holdingMap, orphanRow?.accountId]);
+
+  const needsRelatedHolding = chosenKind === "portfolio_income" || chosenKind === "portfolio_expense";
+  const canApprove =
+    chosenKind != null &&
+    OVERRIDE_PAIRLESS_KINDS.has(chosenKind) &&
+    (!needsRelatedHolding || chosenRelatedHoldingId != null);
+
+  // Build the client-side WILL-BECOME preview from the current orphan
+  // row + the chosen override. Mirrors what applyOrphanOverride writes
+  // server-side. If the server logic diverges from this preview, the
+  // user will see a discrepancy after apply — keep them in sync.
+  const preview = useMemo(() => {
+    if (!orphanRow || !chosenKind) return null;
+    return computePairlessWillBecome({
+      orphanRow,
+      chosenKind,
+      chosenRelatedHoldingId,
+      holdingMap,
+    });
+  }, [orphanRow, chosenKind, chosenRelatedHoldingId, holdingMap]);
+
+  if (!open) {
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="text-xs text-primary hover:underline"
+        >
+          Convert to a different kind…
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3 border-t pt-3">
+      <div className="flex items-center justify-between">
+        <div className="font-medium text-sm">Or apply with a hand-picked kind</div>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="text-xs text-muted-foreground hover:text-foreground"
+        >
+          Hide
+        </button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Pair-less kinds apply directly to this row. Paired kinds (Buy / Sell / Transfer / FX / Brokerage)
+        need a counterpart row — coming in a follow-up; pick a pair-less option for now.
+      </p>
+
+      <div className="grid grid-cols-1 gap-1.5">
+        {OVERRIDE_KIND_OPTIONS.map((opt) => {
+          const isPairLess = OVERRIDE_PAIRLESS_KINDS.has(opt.kind);
+          const isSelected = chosenKind === opt.kind;
+          return (
+            <button
+              key={opt.kind}
+              type="button"
+              disabled={!isPairLess}
+              onClick={() => {
+                setChosenKind(opt.kind);
+                if (!OVERRIDE_PAIRLESS_KINDS.has(opt.kind)) return;
+                if (opt.kind !== "portfolio_income" && opt.kind !== "portfolio_expense") {
+                  setChosenRelatedHoldingId(null);
+                }
+              }}
+              title={
+                isPairLess
+                  ? opt.explanation
+                  : "Paired kinds require the convertExisting*Pair helpers (follow-up commit) + a counterpart picker. Use a pair-less kind for now."
+              }
+              className={`text-left rounded border p-2 text-xs ${
+                isSelected
+                  ? "border-primary bg-primary/5"
+                  : "border-border hover:border-primary/50"
+              } ${!isPairLess ? "opacity-40 cursor-not-allowed" : ""}`}
+            >
+              <div className="flex items-start gap-2">
+                <div
+                  className={`mt-0.5 size-3 rounded-full shrink-0 ${
+                    isSelected ? "bg-primary" : "border border-border"
+                  }`}
+                />
+                <div className="min-w-0">
+                  <div className="font-medium">
+                    {opt.label}
+                    {!isPairLess && <span className="ml-1 opacity-60">(soon)</span>}
+                  </div>
+                  <div className="text-muted-foreground mt-0.5">{opt.explanation}</div>
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {needsRelatedHolding && (
+        <div className="space-y-1">
+          <div className="text-xs font-medium">Related stock holding (for reporting)</div>
+          <select
+            className="w-full rounded border border-border bg-background px-2 py-1 text-xs"
+            value={chosenRelatedHoldingId ?? ""}
+            onChange={(e) => setChosenRelatedHoldingId(e.target.value ? Number(e.target.value) : null)}
+          >
+            <option value="">— pick a holding —</option>
+            {accountHoldings.map(([id, h]) => (
+              <option key={id} value={id}>
+                {h.name ?? `holding #${id}`} ({h.currency})
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {preview && orphanRow && (
+        <WillBecomeTable
+          existing={orphanRow}
+          willBecome={preview.willBecome}
+          changedKeys={preview.changedKeys}
+          holdingMap={holdingMap}
+          accountMap={accountMap}
+          categoryMap={categoryMap}
+        />
+      )}
+
+      <div className="flex justify-end gap-2 pt-1">
+        <Button size="sm" variant="outline" onClick={onReject}>Reject</Button>
+        <Button
+          size="sm"
+          disabled={!canApprove}
+          onClick={() => {
+            if (!canApprove || !chosenKind) return;
+            onApproveOverride({
+              chosenKind,
+              chosenRelatedHoldingId: needsRelatedHolding ? chosenRelatedHoldingId : null,
+            });
+          }}
+        >
+          Approve override
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Pure helper that mirrors applyOrphanOverride's pair-less branch in
+ * src/lib/portfolio/backfill/apply.ts. If apply.ts changes, update this.
+ */
+function computePairlessWillBecome({
+  orphanRow,
+  chosenKind,
+  chosenRelatedHoldingId,
+  holdingMap,
+}: {
+  orphanRow: DisplacedRow;
+  chosenKind: OverrideKind;
+  chosenRelatedHoldingId: number | null;
+  holdingMap: Record<number, HoldingMeta>;
+}): {
+  willBecome: DisplacedRow;
+  changedKeys: ReadonlySet<keyof typeof FIELD_LABELS | "kind" | "holding">;
+} {
+  const willBecome: DisplacedRow = { ...orphanRow };
+  const changedKeys = new Set<keyof typeof FIELD_LABELS | "kind" | "holding">();
+  if (orphanRow.kind !== chosenKind) {
+    willBecome.kind = chosenKind;
+    changedKeys.add("kind");
+  }
+  if (chosenKind === "portfolio_income" || chosenKind === "portfolio_expense") {
+    // Find matching cash sleeve in the same (account, currency).
+    const sleeveEntry = Object.entries(holdingMap).find(
+      ([, h]) => h.isCash && h.currency === orphanRow.currency,
+    );
+    if (sleeveEntry) {
+      const sleeveId = Number(sleeveEntry[0]);
+      if (orphanRow.portfolioHoldingId !== sleeveId) {
+        willBecome.portfolioHoldingId = sleeveId;
+        changedKeys.add("holding");
+      }
+    }
+    if (orphanRow.relatedHoldingId !== chosenRelatedHoldingId) {
+      willBecome.relatedHoldingId = chosenRelatedHoldingId;
+      changedKeys.add("related");
+    }
+  }
+  return { willBecome, changedKeys };
+}
+
+/**
+ * WILL-BECOME preview for `dividend_reinvestment` proposals. Mirrors the
+ * apply.ts dispatch in applyProposal at the `dividend_reinvestment`
+ * branch — keep in sync if apply.ts changes.
+ *
+ * - variant='drip': UPDATE portfolioHoldingId = chosenHoldingId, kind='dividend'.
+ *   Qty preserved (treated as a share count, lot opens at amount/qty).
+ * - variant='cash_dividend': UPDATE portfolioHoldingId = matching cash
+ *   sleeve in (account, currency), relatedHoldingId = chosenHoldingId,
+ *   kind='portfolio_income'. Qty preserved (cash units).
+ *
+ * Renders nothing until BOTH dividendVariant + chosenHoldingId are set
+ * — the planner pre-suggests defaults but the user owns the final pick.
+ */
+function DividendReinvestmentPreview({
+  proposal,
+  displacedRows,
+  holdingMap,
+  accountMap,
+  categoryMap,
+}: {
+  proposal: Proposal;
+  displacedRows: Record<number, DisplacedRow>;
+  holdingMap: Record<number, HoldingMeta>;
+  accountMap: Record<number, AccountMeta>;
+  categoryMap: Record<number, CategoryMeta>;
+}) {
+  const existingId = proposal.existingRowIds[0];
+  const existing = existingId != null ? displacedRows[existingId] : null;
+  const preview = useMemo(() => {
+    if (!existing) return null;
+    if (!proposal.dividendVariant) return null;
+    if (proposal.chosenHoldingId == null) return null;
+    return computeDividendReinvestmentWillBecome({
+      existing,
+      variant: proposal.dividendVariant,
+      chosenHoldingId: proposal.chosenHoldingId,
+      holdingMap,
+    });
+  }, [existing, proposal.dividendVariant, proposal.chosenHoldingId, holdingMap]);
+
+  if (!existing) return null;
+  if (!preview) {
+    return (
+      <p className="text-xs text-muted-foreground italic">
+        Pick a variant + the underlying stock to see what this row will look like after apply.
+      </p>
+    );
+  }
+  return (
+    <WillBecomeTable
+      existing={existing}
+      willBecome={preview.willBecome}
+      changedKeys={preview.changedKeys}
+      holdingMap={holdingMap}
+      accountMap={accountMap}
+      categoryMap={categoryMap}
+    />
+  );
+}
+
+function computeDividendReinvestmentWillBecome({
+  existing,
+  variant,
+  chosenHoldingId,
+  holdingMap,
+}: {
+  existing: DisplacedRow;
+  variant: "cash_dividend" | "drip";
+  chosenHoldingId: number;
+  holdingMap: Record<number, HoldingMeta>;
+}): {
+  willBecome: DisplacedRow;
+  changedKeys: ReadonlySet<keyof typeof FIELD_LABELS | "kind" | "holding">;
+} {
+  const willBecome: DisplacedRow = { ...existing };
+  const changedKeys = new Set<keyof typeof FIELD_LABELS | "kind" | "holding">();
+  if (variant === "drip") {
+    if (existing.kind !== "dividend") {
+      willBecome.kind = "dividend";
+      changedKeys.add("kind");
+    }
+    if (existing.portfolioHoldingId !== chosenHoldingId) {
+      willBecome.portfolioHoldingId = chosenHoldingId;
+      changedKeys.add("holding");
+    }
+  } else {
+    // cash_dividend — row moves to the matching cash sleeve in
+    // (account, currency); related_holding_id = chosen stock.
+    if (existing.kind !== "portfolio_income") {
+      willBecome.kind = "portfolio_income";
+      changedKeys.add("kind");
+    }
+    const sleeveEntry = Object.entries(holdingMap).find(
+      ([, h]) => h.isCash && h.currency === existing.currency,
+    );
+    if (sleeveEntry) {
+      const sleeveId = Number(sleeveEntry[0]);
+      if (existing.portfolioHoldingId !== sleeveId) {
+        willBecome.portfolioHoldingId = sleeveId;
+        changedKeys.add("holding");
+      }
+    }
+    if (existing.relatedHoldingId !== chosenHoldingId) {
+      willBecome.relatedHoldingId = chosenHoldingId;
+      changedKeys.add("related");
+    }
+  }
+  return { willBecome, changedKeys };
+}
+
+/**
+ * Render-only diff table. Bolds the changed cells in the WILL-BECOME row.
+ * Pair-less only — paired previews require server-side computation
+ * (preview-override endpoint, follow-up).
+ */
+function WillBecomeTable({
+  existing,
+  willBecome,
+  changedKeys,
+  holdingMap,
+  accountMap,
+  categoryMap,
+}: {
+  existing: DisplacedRow;
+  willBecome: DisplacedRow;
+  changedKeys: ReadonlySet<keyof typeof FIELD_LABELS | "kind" | "holding">;
+  holdingMap: Record<number, HoldingMeta>;
+  accountMap: Record<number, AccountMeta>;
+  categoryMap: Record<number, CategoryMeta>;
+}) {
+  const hi = (k: keyof typeof FIELD_LABELS | "kind" | "holding") =>
+    changedKeys.has(k) ? "font-semibold text-foreground" : "";
+  // The secondary line's highlight set is a subset of changedKeys
+  // restricted to FIELD_LABELS keys (the secondary row only renders
+  // those fields).
+  const secondaryHi = new Set<keyof typeof FIELD_LABELS>();
+  if (changedKeys.has("related")) secondaryHi.add("related");
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Will become</div>
+      <div className="rounded border border-emerald-500/40 bg-emerald-500/5 overflow-hidden">
+        <table className="w-full text-xs">
+          <thead className="bg-emerald-500/10">
+            <tr>
+              <th className="text-left px-2 py-1.5">Tx</th>
+              <th className="text-left px-2 py-1.5">Date</th>
+              <th className="text-left px-2 py-1.5">Account</th>
+              <th className="text-left px-2 py-1.5">Holding</th>
+              <th className="text-right px-2 py-1.5">Qty</th>
+              <th className="text-right px-2 py-1.5">Amount</th>
+              <th className="text-left px-2 py-1.5">Kind</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td className="px-2 py-1.5 font-mono">#{willBecome.id}</td>
+              <td className="px-2 py-1.5">{willBecome.date}</td>
+              <td className="px-2 py-1.5">{accountLabelFor(willBecome.accountId, accountMap)}</td>
+              <td className={`px-2 py-1.5 ${hi("holding")}`}>
+                {holdingLabelFor(willBecome.portfolioHoldingId, holdingMap)}
+              </td>
+              <td className="px-2 py-1.5 text-right font-mono">{willBecome.quantity ?? "—"}</td>
+              <td className="px-2 py-1.5 text-right font-mono">{willBecome.amount.toFixed(2)} {willBecome.currency}</td>
+              <td className={`px-2 py-1.5 font-mono ${hi("kind")}`}>{willBecome.kind ?? "—"}</td>
+            </tr>
+            <RowDetailsLine
+              row={willBecome}
+              holdingMap={holdingMap}
+              categoryMap={categoryMap}
+              colSpan={7}
+              highlight={secondaryHi}
+            />
+          </tbody>
+        </table>
+      </div>
+      {existing.kind !== willBecome.kind && (
+        <p className="text-[11px] text-muted-foreground mt-1">
+          Existing kind: <span className="font-mono">{existing.kind ?? "—"}</span> → new: <span className="font-mono font-semibold">{willBecome.kind}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+interface OverrideKindOption {
+  kind: OverrideKind;
+  label: string;
+  explanation: string;
+}
+
+const OVERRIDE_KIND_OPTIONS: readonly OverrideKindOption[] = [
+  // Pair-less first (these are enabled now)
+  {
+    kind: "opening_balance",
+    label: "Opening balance",
+    explanation:
+      "Carried-in position from another platform. Preserves qty + amount, opens a lot at the entered cost basis. No cash leg.",
+  },
+  {
+    kind: "dividend",
+    label: "Dividend (share reinvestment / DRIP)",
+    explanation:
+      "Treats qty as a share count. Opens a lot at costPerShare = amount/qty. Pick this for crypto staking rewards or true DRIP rows.",
+  },
+  {
+    kind: "interest",
+    label: "Interest",
+    explanation: "Interest received (or paid, if amount < 0). Pair-less — applies to this row alone.",
+  },
+  {
+    kind: "portfolio_income",
+    label: "Portfolio income (cash dividend, etc.)",
+    explanation:
+      "Moves the row to the matching cash sleeve, stamps related_holding_id to the picked stock for reporting. Pick this for ordinary stock cash dividends.",
+  },
+  {
+    kind: "portfolio_expense",
+    label: "Portfolio expense (fee, etc.)",
+    explanation:
+      "Moves the row to the matching cash sleeve, stamps related_holding_id to the picked stock. Amount should be negative.",
+  },
+  // Paired (disabled — follow-up commit)
+  { kind: "buy", label: "Buy", explanation: "Needs a paired cash leg." },
+  { kind: "sell", label: "Sell", explanation: "Needs a paired cash leg." },
+  {
+    kind: "in_kind_transfer_out",
+    label: "In-kind transfer (this is the source leg)",
+    explanation: "Needs a partner stock row in another account.",
+  },
+  {
+    kind: "in_kind_transfer_in",
+    label: "In-kind transfer (this is the destination leg)",
+    explanation: "Needs a partner stock row in another account.",
+  },
+  { kind: "fx_from", label: "FX from-leg", explanation: "Needs a partner cash row in a different currency." },
+  { kind: "fx_to", label: "FX to-leg", explanation: "Needs a partner cash row in a different currency." },
+  {
+    kind: "brokerage_deposit_in",
+    label: "Brokerage deposit (cash sleeve leg)",
+    explanation: "Needs a partner cash row on a non-investment account.",
+  },
+  {
+    kind: "brokerage_deposit_out",
+    label: "Brokerage deposit (external leg)",
+    explanation: "Needs a partner row on the brokerage cash sleeve.",
+  },
+  {
+    kind: "brokerage_withdrawal_in",
+    label: "Brokerage withdrawal (external leg)",
+    explanation: "Needs a partner row on the brokerage cash sleeve.",
+  },
+  {
+    kind: "brokerage_withdrawal_out",
+    label: "Brokerage withdrawal (cash sleeve leg)",
+    explanation: "Needs a partner cash row on a non-investment account.",
+  },
+];
 
 function VariantOption({ label, explanation, selected, onSelect }: { label: string; explanation: string; selected: boolean; onSelect: () => void }) {
   return (

@@ -186,6 +186,16 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // exception for invariant #8. → pf-app/docs/architecture/backfill.md.
   "src/lib/portfolio/backfill/planner.ts:portfolio-ops-kind-via-operations":
     "Pure planner module — emits Proposal payloads; the apply path materializes them via applyLotEffectsForTx from the canonical lot module.",
+  // The two-pane review page renders a static `OVERRIDE_KIND_OPTIONS` array
+  // listing every override-eligible kind as radio-button metadata —
+  // `{ kind: 'buy', label: 'Buy', explanation: '…' }`. The regex matches
+  // the literal but there is no DB write here; this is a static UI config
+  // array. The actual writes route through applyOrphanOverride in
+  // src/lib/portfolio/backfill/apply.ts which is restricted to pair-less
+  // kinds today (paired kinds disabled in the UI until follow-up commit
+  // ships convertExisting*Pair helpers in operations.ts).
+  "src/app/(app)/settings/backfill/[runId]/page.tsx:portfolio-ops-kind-via-operations":
+    "Static UI config (OVERRIDE_KIND_OPTIONS) listing override-eligible kinds as radio metadata — no DB writes from this file; paired kinds disabled until follow-up commit wires convertExisting*Pair helpers in operations.ts.",
 };
 
 interface InvariantConfig {

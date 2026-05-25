@@ -15,6 +15,28 @@ import { db, schema } from "@/db";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
+import { tryDecryptField } from "@/lib/crypto/envelope";
+
+// MUST stay in sync with the CHECK constraint on
+// backfill_proposals.chosen_kind (migration 20260609) and with
+// OverrideKind in src/lib/portfolio/backfill/apply.ts.
+const overrideKindSchema = z.enum([
+  "opening_balance",
+  "dividend",
+  "interest",
+  "portfolio_income",
+  "portfolio_expense",
+  "buy",
+  "sell",
+  "in_kind_transfer_in",
+  "in_kind_transfer_out",
+  "fx_from",
+  "fx_to",
+  "brokerage_deposit_in",
+  "brokerage_deposit_out",
+  "brokerage_withdrawal_in",
+  "brokerage_withdrawal_out",
+]);
 
 const patchSchema = z.object({
   proposalId: z.number().int().positive(),
@@ -29,6 +51,12 @@ const patchSchema = z.object({
   // before approving. Apply refuses with `dividend_variant_missing` if
   // NULL at apply time.
   dividendVariant: z.enum(["cash_dividend", "drip"]).nullable().optional(),
+  // Kind override (migration 20260609) — set ONLY by the override picker
+  // on refused `orphan_stock_leg` proposals.
+  chosenKind: overrideKindSchema.nullable().optional(),
+  chosenCounterpartTxId: z.number().int().positive().nullable().optional(),
+  chosenCounterpartMode: z.enum(["link_existing", "synth_new"]).nullable().optional(),
+  chosenRelatedHoldingId: z.number().int().positive().nullable().optional(),
 });
 
 export async function GET(
@@ -56,18 +84,30 @@ export async function GET(
     for (const p of proposals) {
       for (const id of (p.existingRowIds ?? [])) allTxIds.add(id);
     }
-    const displacedRows = allTxIds.size === 0 ? [] : await db
+    const displacedRowsRaw = allTxIds.size === 0 ? [] : await db
       .select({
         id: schema.transactions.id,
         date: schema.transactions.date,
         accountId: schema.transactions.accountId,
         portfolioHoldingId: schema.transactions.portfolioHoldingId,
+        relatedHoldingId: schema.transactions.relatedHoldingId,
+        categoryId: schema.transactions.categoryId,
         amount: schema.transactions.amount,
         currency: schema.transactions.currency,
         quantity: schema.transactions.quantity,
         kind: schema.transactions.kind,
         tradeLinkId: schema.transactions.tradeLinkId,
         linkId: schema.transactions.linkId,
+        // Encrypted-at-rest free-text fields — decrypt below so the
+        // RowDetails secondary line can render them without a second
+        // round-trip. Columns are `note`/`tags`/`payee` (not `_ct`-suffixed);
+        // the encrypted ciphertext is stored in-place. tryDecryptField
+        // returns null on tag mismatch — legacy plaintext rows fall back
+        // to the raw value via the ?? coalesce.
+        note: schema.transactions.note,
+        tags: schema.transactions.tags,
+        payee: schema.transactions.payee,
+        source: schema.transactions.source,
       })
       .from(schema.transactions)
       .where(
@@ -76,6 +116,37 @@ export async function GET(
           inArray(schema.transactions.id, Array.from(allTxIds)),
         ),
       );
+
+    // Decrypt the free-text fields once per row server-side. The UI
+    // never sees ciphertext — same pattern as the holdingMap / accountMap
+    // labels below.
+    const displacedRows = displacedRowsRaw.map((r) => ({
+      id: r.id,
+      date: r.date,
+      accountId: r.accountId,
+      portfolioHoldingId: r.portfolioHoldingId,
+      relatedHoldingId: r.relatedHoldingId,
+      categoryId: r.categoryId,
+      amount: r.amount,
+      currency: r.currency,
+      quantity: r.quantity,
+      kind: r.kind,
+      tradeLinkId: r.tradeLinkId,
+      linkId: r.linkId,
+      note:
+        auth.dek && r.note
+          ? tryDecryptField(auth.dek, r.note, "transactions.note") ?? r.note
+          : r.note ?? null,
+      tags:
+        auth.dek && r.tags
+          ? tryDecryptField(auth.dek, r.tags, "transactions.tags") ?? r.tags
+          : r.tags ?? null,
+      payee:
+        auth.dek && r.payee
+          ? tryDecryptField(auth.dek, r.payee, "transactions.payee") ?? r.payee
+          : r.payee ?? null,
+      source: r.source ?? null,
+    }));
 
     // Holding + account labels (decrypted display names)
     const holdingsRaw = await db
@@ -112,11 +183,31 @@ export async function GET(
       };
     }
 
+    // Category labels (decrypted) — needed by the RowDetails secondary
+    // line that the override-picker UI surfaces. Categories are encrypted
+    // via the same envelope helpers; schema column is `name_ct`.
+    const categoriesRaw = await db
+      .select({
+        id: schema.categories.id,
+        nameCt: schema.categories.nameCt,
+        type: schema.categories.type,
+      })
+      .from(schema.categories)
+      .where(eq(schema.categories.userId, auth.userId));
+    const categoryMap: Record<number, { name: string | null; type: string | null }> = {};
+    for (const c of categoriesRaw) {
+      categoryMap[c.id] = {
+        name: decryptName(c.nameCt, auth.dek, null) ?? null,
+        type: c.type ?? null,
+      };
+    }
+
     return NextResponse.json({
       proposals,
       displacedRows,
       holdingMap,
       accountMap,
+      categoryMap,
     });
   } catch (err: unknown) {
     await logApiError("GET", `/api/settings/backfill/${runId}`, err, auth.userId);
@@ -138,7 +229,17 @@ export async function PATCH(
     const body = await request.json();
     const parsed = validateBody(body, patchSchema);
     if (parsed.error) return parsed.error;
-    const { proposalId, status, variantChoice, chosenHoldingId, dividendVariant } = parsed.data;
+    const {
+      proposalId,
+      status,
+      variantChoice,
+      chosenHoldingId,
+      dividendVariant,
+      chosenKind,
+      chosenCounterpartTxId,
+      chosenCounterpartMode,
+      chosenRelatedHoldingId,
+    } = parsed.data;
 
     // Verify the proposal belongs to this run+user.
     const existing = await db
@@ -166,11 +267,34 @@ export async function PATCH(
       );
     }
 
+    // Status transition: `refused_with_reason → approved` is only valid
+    // when the caller also stamps a chosen_kind on an orphan_stock_leg
+    // proposal. Without an override the proposal stays refused and the
+    // apply route short-circuits with `refused_proposal`.
+    if (row.status === "refused_with_reason" && status === "approved") {
+      if (row.proposalKind !== "orphan_stock_leg") {
+        return NextResponse.json(
+          { error: `Cannot promote a refused ${row.proposalKind} proposal — only orphan_stock_leg supports kind override.` },
+          { status: 409 },
+        );
+      }
+      if (chosenKind == null) {
+        return NextResponse.json(
+          { error: `Promoting a refused orphan_stock_leg requires chosenKind to be set in the same request.` },
+          { status: 409 },
+        );
+      }
+    }
+
     const patch: Record<string, unknown> = {};
     if (status !== undefined) patch.status = status;
     if (variantChoice !== undefined) patch.variantChoice = variantChoice;
     if (chosenHoldingId !== undefined) patch.chosenHoldingId = chosenHoldingId;
     if (dividendVariant !== undefined) patch.dividendVariant = dividendVariant;
+    if (chosenKind !== undefined) patch.chosenKind = chosenKind;
+    if (chosenCounterpartTxId !== undefined) patch.chosenCounterpartTxId = chosenCounterpartTxId;
+    if (chosenCounterpartMode !== undefined) patch.chosenCounterpartMode = chosenCounterpartMode;
+    if (chosenRelatedHoldingId !== undefined) patch.chosenRelatedHoldingId = chosenRelatedHoldingId;
     if (Object.keys(patch).length === 0) {
       return NextResponse.json({ ok: true, noop: true });
     }

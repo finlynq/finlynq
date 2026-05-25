@@ -75,8 +75,57 @@ interface PersistedProposal {
    *  the qty and opens no lot; 'drip' keeps qty (as shares) and lets the
    *  lot replay open a lot at costPerShare=amount/qty. Refuse on NULL. */
   dividendVariant: "cash_dividend" | "drip" | null;
+  /** Kind override (migration 20260609) — set ONLY for `orphan_stock_leg`
+   *  proposals the user wants to apply with a hand-picked kind. NULL
+   *  otherwise. When non-null the apply route dispatches to
+   *  applyOrphanOverride() BEFORE the refused short-circuit. */
+  chosenKind: OverrideKind | null;
+  /** Paired-kind partner row when the user picks an existing unmatched
+   *  candidate. NULL when chosenKind is pair-less or counterpartMode is
+   *  'synth_new'. */
+  chosenCounterpartTxId: number | null;
+  chosenCounterpartMode: "link_existing" | "synth_new" | null;
+  /** Underlying stock when chosenKind is portfolio_income/expense — apply
+   *  swaps the row onto the matching cash sleeve and stamps
+   *  related_holding_id. Mirror of cash_dividend branch of
+   *  dividend_reinvestment. NULL otherwise. */
+  chosenRelatedHoldingId: number | null;
   status: string;
 }
+
+/**
+ * The 15 override-eligible kinds for refused `orphan_stock_leg` proposals.
+ * 5 pair-less (apply does UPDATE-in-place on the orphan row alone) + 10
+ * paired (the row + a counterpart that is either picked from existing
+ * unmatched rows or synthesized as `source='backfill_synth'`).
+ *
+ * MUST stay in sync with the CHECK constraint on
+ * backfill_proposals.chosen_kind (migration 20260609).
+ */
+export type OverrideKind =
+  | "opening_balance"
+  | "dividend"
+  | "interest"
+  | "portfolio_income"
+  | "portfolio_expense"
+  | "buy"
+  | "sell"
+  | "in_kind_transfer_in"
+  | "in_kind_transfer_out"
+  | "fx_from"
+  | "fx_to"
+  | "brokerage_deposit_in"
+  | "brokerage_deposit_out"
+  | "brokerage_withdrawal_in"
+  | "brokerage_withdrawal_out";
+
+export const OVERRIDE_PAIRLESS_KINDS = new Set<OverrideKind>([
+  "opening_balance",
+  "dividend",
+  "interest",
+  "portfolio_income",
+  "portfolio_expense",
+]);
 
 export interface ApplyResult {
   ok: true;
@@ -106,6 +155,17 @@ export async function applyProposal(
   }
   if (proposal.status !== "pending" && proposal.status !== "approved") {
     return { ok: false, code: "wrong_status", message: `Proposal ${proposalId} is in status '${proposal.status}', cannot apply` };
+  }
+  // Kind override branch (migration 20260609) — when the user has picked a
+  // chosenKind on a refused `orphan_stock_leg` proposal, dispatch to the
+  // override path BEFORE the refused short-circuit. The override path runs
+  // its own snapshot + UPDATE + lot-replay + invalidateUser flow because
+  // the displaced shape is different from the planner-emitted replacement.
+  if (
+    proposal.proposalKind === "orphan_stock_leg" &&
+    proposal.chosenKind != null
+  ) {
+    return applyOrphanOverride(proposal, userId, dek);
   }
   if (proposal.confidence === "refused") {
     return { ok: false, code: "refused_proposal", message: `Proposal ${proposalId} is refused (${proposal.refusalReason ?? "no reason"}); cannot apply` };
@@ -442,6 +502,252 @@ export async function applyProposal(
   invalidateUser(userId);
 
   return { ok: true, proposalId, updatedTxIds, insertedTxIds };
+}
+
+// ─── Kind override on refused orphan_stock_leg ───────────────────────
+//
+// User picks a chosenKind on the review page; PATCH stamps it on the
+// proposal; applyProposal dispatches here. The pair-less branch
+// (opening_balance / dividend / interest / portfolio_income /
+// portfolio_expense) does UPDATE-in-place on the orphan row alone, then
+// replays applyLotEffectsForTx so the lot engine picks up the new kind.
+// The paired branch (buy / sell / in_kind_transfer / fx / brokerage)
+// is NOT YET IMPLEMENTED — refuses with `paired_override_not_yet_implemented`
+// and surfaces in the UI; tracked as a follow-up commit.
+
+async function applyOrphanOverride(
+  proposal: PersistedProposal,
+  userId: string,
+  dek: Buffer | null,
+): Promise<ApplyResult | ApplyRefusal> {
+  const chosenKind = proposal.chosenKind;
+  if (chosenKind == null) {
+    return {
+      ok: false,
+      code: "kind_override_missing",
+      message: `Orphan-override apply requires chosen_kind to be set on the proposal.`,
+    };
+  }
+
+  const isPairLess = OVERRIDE_PAIRLESS_KINDS.has(chosenKind);
+  if (!isPairLess) {
+    // Paired kinds (buy / sell / in_kind_transfer_* / fx_* / brokerage_*)
+    // require the convertExisting*Pair helpers in operations.ts plus the
+    // counterpart picker UI — not yet shipped (follow-up commit).
+    return {
+      ok: false,
+      code: "paired_override_not_yet_implemented",
+      message: `Paired override kinds (buy/sell/transfer/fx/brokerage) require the convertExisting*Pair helpers — not yet shipped. Use a pair-less kind (opening_balance / dividend / interest / portfolio_income / portfolio_expense) or fix manually in /transactions.`,
+    };
+  }
+
+  // Refuse for portfolio_income/_expense without a chosen related holding
+  // — mirror of the cash_dividend branch of dividend_reinvestment. Without
+  // a related holding we'd lose the reporting attribution.
+  if (
+    (chosenKind === "portfolio_income" || chosenKind === "portfolio_expense") &&
+    proposal.chosenRelatedHoldingId == null
+  ) {
+    return {
+      ok: false,
+      code: "related_holding_missing",
+      message: `${chosenKind} override requires chosen_related_holding_id (the stock the income/expense relates to).`,
+    };
+  }
+
+  // Stale-row guard — refuse if the orphan row has been canonicalized
+  // since the proposal was emitted. Same predicate as the main apply
+  // path's stale guard, but localised here because the override path
+  // runs before the main guard.
+  const PAIRLESS_DB_KINDS = new Set([
+    "dividend",
+    "interest",
+    "portfolio_income",
+    "portfolio_expense",
+    "opening_balance",
+  ]);
+  const staleCheck = await db
+    .select({
+      id: schema.transactions.id,
+      kind: schema.transactions.kind,
+      tradeLinkId: schema.transactions.tradeLinkId,
+      linkId: schema.transactions.linkId,
+      amount: schema.transactions.amount,
+      currency: schema.transactions.currency,
+      accountId: schema.transactions.accountId,
+      portfolioHoldingId: schema.transactions.portfolioHoldingId,
+      quantity: schema.transactions.quantity,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        inArray(schema.transactions.id, proposal.existingRowIds),
+      ),
+    );
+  const alreadyCanonical = staleCheck.filter(
+    (r) =>
+      r.kind != null &&
+      r.kind !== "" &&
+      (PAIRLESS_DB_KINDS.has(r.kind) ||
+        r.tradeLinkId != null ||
+        r.linkId != null),
+  );
+  if (alreadyCanonical.length > 0) {
+    return {
+      ok: false,
+      code: "rows_already_canonical",
+      message: `Cannot apply — ${alreadyCanonical.length} of the displaced rows are already in canonical shape (canonicalized by a prior run). Refresh the page to re-plan.`,
+    };
+  }
+
+  const updatedTxIds: number[] = [];
+
+  await db.transaction(async (tx) => {
+    // 1. Snapshot to backfill_audit for Undo
+    const before = await tx
+      .select()
+      .from(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          inArray(schema.transactions.id, proposal.existingRowIds),
+        ),
+      );
+    if (before.length > 0) {
+      await tx.insert(schema.backfillAudit).values(
+        before.map((row) => ({
+          proposalId: proposal.id,
+          txId: row.id,
+          beforeJson: row,
+        })),
+      );
+    }
+
+    // 2. UPDATE-in-place per row — pair-less branch
+    for (const row of before) {
+      const patch: Record<string, unknown> = {
+        kind: chosenKind,
+        updatedAt: sql`NOW()`,
+      };
+
+      // portfolio_income / portfolio_expense — swap onto the matching
+      // cash sleeve and stamp the related holding. Mirror of the
+      // cash_dividend branch of dividend_reinvestment.
+      if (
+        chosenKind === "portfolio_income" ||
+        chosenKind === "portfolio_expense"
+      ) {
+        if (row.accountId == null) {
+          throw new Error(
+            `applyOrphanOverride: cannot locate orphan row ${row.id} account (NULL accountId)`,
+          );
+        }
+        const sleeve = await tx
+          .select({ id: schema.portfolioHoldings.id })
+          .from(schema.portfolioHoldings)
+          .where(
+            and(
+              eq(schema.portfolioHoldings.userId, userId),
+              eq(schema.portfolioHoldings.accountId, row.accountId),
+              eq(schema.portfolioHoldings.currency, row.currency),
+              eq(schema.portfolioHoldings.isCash, true),
+            ),
+          )
+          .limit(1);
+        const sleeveId = sleeve[0]?.id;
+        if (sleeveId == null) {
+          throw new Error(
+            `applyOrphanOverride: no cash sleeve in account ${row.accountId} for currency ${row.currency}. Create one in the account-detail page first.`,
+          );
+        }
+        patch.portfolioHoldingId = sleeveId;
+        patch.relatedHoldingId = proposal.chosenRelatedHoldingId;
+      }
+      // dividend / interest / opening_balance keep the row's existing
+      // portfolio_holding_id (the orphan stock holding) — that's the
+      // whole point of these overrides for DRIP / carry-in / direct
+      // interest cases.
+
+      await tx
+        .update(schema.transactions)
+        .set(patch)
+        .where(
+          and(
+            eq(schema.transactions.id, row.id),
+            eq(schema.transactions.userId, userId),
+          ),
+        );
+      updatedTxIds.push(row.id);
+    }
+
+    // 3. Flip proposal status (consistent inside the tx)
+    await tx
+      .update(schema.backfillProposals)
+      .set({ status: "applied", appliedAt: sql`NOW()` })
+      .where(eq(schema.backfillProposals.id, proposal.id));
+  });
+
+  // 4. Replay lot effects on each updated row (outside the tx — hooks
+  //    are designed for post-INSERT invocation, see apply.ts:377-440).
+  const ctx: LotContext = await buildLotContext(userId, dek);
+  if (updatedTxIds.length > 0) {
+    const rows = await db
+      .select({
+        id: schema.transactions.id,
+        userId: schema.transactions.userId,
+        date: schema.transactions.date,
+        amount: schema.transactions.amount,
+        currency: schema.transactions.currency,
+        enteredAmount: schema.transactions.enteredAmount,
+        enteredCurrency: schema.transactions.enteredCurrency,
+        quantity: schema.transactions.quantity,
+        accountId: schema.transactions.accountId,
+        categoryId: schema.transactions.categoryId,
+        portfolioHoldingId: schema.transactions.portfolioHoldingId,
+        tradeLinkId: schema.transactions.tradeLinkId,
+        source: schema.transactions.source,
+        kind: schema.transactions.kind,
+      })
+      .from(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          inArray(schema.transactions.id, updatedTxIds),
+        ),
+      );
+    for (const r of rows) {
+      await applyLotEffectsForTx(
+        {
+          id: r.id,
+          userId: r.userId,
+          date: r.date,
+          amount: r.amount ?? 0,
+          currency: r.currency,
+          enteredAmount: r.enteredAmount,
+          enteredCurrency: r.enteredCurrency,
+          quantity: r.quantity,
+          accountId: r.accountId,
+          categoryId: r.categoryId,
+          portfolioHoldingId: r.portfolioHoldingId,
+          tradeLinkId: r.tradeLinkId,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          source: (r.source ?? "manual") as any,
+          kind: r.kind,
+        },
+        ctx,
+      );
+    }
+  }
+
+  invalidateUser(userId);
+
+  return {
+    ok: true,
+    proposalId: proposal.id,
+    updatedTxIds,
+    insertedTxIds: [],
+  };
 }
 
 // ─── Undo ─────────────────────────────────────────────────────────────
@@ -810,6 +1116,14 @@ async function loadProposal(
     variantChoice: row.variantChoice,
     chosenHoldingId: row.chosenHoldingId,
     dividendVariant: row.dividendVariant as "cash_dividend" | "drip" | null,
+    chosenKind: (row.chosenKind ?? null) as OverrideKind | null,
+    chosenCounterpartTxId: row.chosenCounterpartTxId ?? null,
+    chosenCounterpartMode:
+      (row.chosenCounterpartMode ?? null) as
+        | "link_existing"
+        | "synth_new"
+        | null,
+    chosenRelatedHoldingId: row.chosenRelatedHoldingId ?? null,
     status: row.status,
   };
 }

@@ -1488,6 +1488,26 @@ export const backfillProposals = pgTable("backfill_proposals", {
   // no lot opens) or a share reinvestment (qty interpreted as shares,
   // lot opens). CHECK in SQL: NULL OR 'cash_dividend' | 'drip'.
   dividendVariant: text("dividend_variant"),
+  // Kind override (migration 20260609) — set ONLY for refused
+  // `orphan_stock_leg` proposals that the user wants to apply with a
+  // hand-picked kind. NULL for every other proposal. Apply route
+  // dispatches to applyOrphanOverride() before the refused short-circuit
+  // when chosenKind != null. CHECK in SQL constrains to the 15 override-
+  // eligible kinds (pair-less + paired). See migration file for the full
+  // list and rationale.
+  chosenKind: text("chosen_kind"),
+  // Paired-kind partner row when the user picks an existing unmatched
+  // candidate via the CounterpartPicker. NULL when chosenKind is
+  // pair-less OR when counterpartMode='synth_new'.
+  chosenCounterpartTxId: integer("chosen_counterpart_tx_id"),
+  // 'link_existing' | 'synth_new'. Captures the partner-vs-synth toggle.
+  // NULL for pair-less chosenKind.
+  chosenCounterpartMode: text("chosen_counterpart_mode"),
+  // The underlying stock when chosenKind is `portfolio_income` /
+  // `portfolio_expense` — apply swaps the row onto the matching cash
+  // sleeve and stamps `related_holding_id` to this id. Mirror of the
+  // `cash_dividend` branch of `dividend_reinvestment`. NULL otherwise.
+  chosenRelatedHoldingId: integer("chosen_related_holding_id"),
   // 'pending' | 'approved' | 'rejected' | 'applied' | 'undone' | 'refused_with_reason'
   status: text("status").notNull().default("pending"),
   appliedAt: timestamp("applied_at", { withTimezone: true }),
