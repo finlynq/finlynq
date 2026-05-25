@@ -58,6 +58,11 @@ export interface FilePaneProps {
    * column rendered.
    */
   anchorsByDate?: Map<string, number>;
+  /** Plan #5 Phase 3 — click on a row body (excluding the checkbox /
+   *  chevron / action buttons) drives the cross-pane highlight UX. */
+  onRowClick?: (stagedId: string) => void;
+  /** Staged row ids currently highlighted by a click-through. */
+  highlightedStagedIds?: ReadonlySet<string>;
 }
 
 export function FilePane({
@@ -73,6 +78,8 @@ export function FilePane({
   rowActions,
   header,
   anchorsByDate,
+  onRowClick,
+  highlightedStagedIds,
 }: FilePaneProps) {
   if (rows.length === 0) {
     return (
@@ -147,9 +154,31 @@ export function FilePane({
                 dayBalance !== undefined &&
                 !balanceShownForDate.has(r.date);
               if (showBalance) balanceShownForDate.add(r.date);
+              const highlighted = highlightedStagedIds?.has(r.id) ?? false;
+              const highlightClass = highlighted
+                ? "bg-sky-500/10 outline outline-2 outline-sky-500/40"
+                : "";
+              const clickable = onRowClick != null;
               return (
                 <RowFragment key={r.id}>
-                  <TableRow className={dimmed}>
+                  <TableRow
+                    className={`${dimmed} ${highlightClass} ${clickable ? "cursor-pointer" : ""}`}
+                    onClick={
+                      clickable
+                        ? (e) => {
+                            // The row carries an interactive checkbox + the
+                            // chevron expand button + optional action buttons
+                            // (Link / Skip / Unlink). Suppress the row-click
+                            // when the target is inside any of them so those
+                            // actions retain their original semantics.
+                            const target = e.target as HTMLElement;
+                            if (target.closest("button")) return;
+                            if (target.closest("input")) return;
+                            onRowClick?.(r.id);
+                          }
+                        : undefined
+                    }
+                  >
                     <TableCell>
                       <input
                         type="checkbox"

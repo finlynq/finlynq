@@ -177,6 +177,20 @@ function PendingImportsPageInner() {
   // FINLYNQ-88 — Re-apply rules confirmation modal.
   const [reapplyModalOpen, setReapplyModalOpen] = useState(false);
   const [reapplying, setReapplying] = useState(false);
+  // Plan #5 Phase 3 — click-to-highlight on both panes. Mirrors the
+  // /reconcile implementation: clicking a row tints its neighborhood
+  // (linked counterpart + transfer-pair peer when present); clicking
+  // the same row toggles the highlight off; clicking a different row
+  // swaps in the new neighborhood. Transient — page state, not URL.
+  const [highlightedStagedIds, setHighlightedStagedIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const [highlightedBankIds, setHighlightedBankIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  /** Anchor encoded as `staged:<id>` or `bank:<uuid>`. Null = no
+   *  active highlight; second click on the same row clears it. */
+  const [highlightAnchor, setHighlightAnchor] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -687,6 +701,144 @@ function PendingImportsPageInner() {
     },
     [linkMode, patchStagedRow, updateDbRowLink],
   );
+
+  // ─── Plan #5 Phase 3 — click-to-highlight neighborhoods ──────────────
+  // Source of truth for staged↔bank join: each side carries the system
+  // transaction id (staged.linkedTransactionId / dbRow.linkedTransactionId)
+  // once a link exists. Two staged rows can also be transfer-pair peers
+  // WITHIN the same batch via staged.peerStagedId (fans out the highlight
+  // to the peer + any bank rows linked to its tx).
+  //
+  // Pair lineage via system-side linkId/tradeLinkId/swapLinkId is NOT
+  // surfaced here — DbTransactionRow doesn't carry those fields and the
+  // staged side never does. Matches /reconcile's out-of-scope note about
+  // cross-account highlights: keep the wiring honest to the data we have.
+  const computeNeighborhoodFromStaged = useCallback(
+    (stagedId: string) => {
+      const stagedIds = new Set<string>([stagedId]);
+      const bankIds = new Set<string>();
+      const rows = detail?.rows ?? [];
+      const stagedById = new Map(rows.map((r) => [r.id, r]));
+      const seed = stagedById.get(stagedId);
+      if (!seed) return { stagedIds, bankIds };
+      const txIds = new Set<number>();
+      if (seed.linkedTransactionId != null) txIds.add(seed.linkedTransactionId);
+      // Transfer-pair peer within the same batch.
+      if (seed.peerStagedId) {
+        const peer = stagedById.get(seed.peerStagedId);
+        if (peer) {
+          stagedIds.add(peer.id);
+          if (peer.linkedTransactionId != null) {
+            txIds.add(peer.linkedTransactionId);
+          }
+        }
+      }
+      for (const dr of dbRows) {
+        if (dr.linkedTransactionId != null && txIds.has(dr.linkedTransactionId)) {
+          bankIds.add(dr.id);
+        }
+      }
+      return { stagedIds, bankIds };
+    },
+    [detail, dbRows],
+  );
+
+  const computeNeighborhoodFromBank = useCallback(
+    (bankId: string) => {
+      const stagedIds = new Set<string>();
+      const bankIds = new Set<string>([bankId]);
+      const rows = detail?.rows ?? [];
+      const stagedById = new Map(rows.map((r) => [r.id, r]));
+      const seed = dbRows.find((r) => r.id === bankId);
+      if (!seed) return { stagedIds, bankIds };
+      const txIds = new Set<number>();
+      if (seed.linkedTransactionId != null) txIds.add(seed.linkedTransactionId);
+      // Pick up the explicit back-reference set by acceptSuggestion /
+      // completeLink — covers the in-flight case where the local row
+      // already mirrors the link but the underlying ledger fetch hasn't
+      // re-run yet.
+      if (seed.linkedStagedRowId) {
+        const linked = stagedById.get(seed.linkedStagedRowId);
+        if (linked) {
+          stagedIds.add(linked.id);
+          if (linked.linkedTransactionId != null) {
+            txIds.add(linked.linkedTransactionId);
+          }
+          if (linked.peerStagedId) {
+            const peer = stagedById.get(linked.peerStagedId);
+            if (peer) {
+              stagedIds.add(peer.id);
+              if (peer.linkedTransactionId != null) {
+                txIds.add(peer.linkedTransactionId);
+              }
+            }
+          }
+        }
+      }
+      for (const sr of rows) {
+        if (sr.linkedTransactionId != null && txIds.has(sr.linkedTransactionId)) {
+          stagedIds.add(sr.id);
+          if (sr.peerStagedId) {
+            const peer = stagedById.get(sr.peerStagedId);
+            if (peer) stagedIds.add(peer.id);
+          }
+        }
+      }
+      // Re-fan to additional bank rows that share any tx we picked up
+      // through the staged side (e.g. multiple bank rows linked to the
+      // same system tx via primary + extra link types).
+      for (const dr of dbRows) {
+        if (dr.linkedTransactionId != null && txIds.has(dr.linkedTransactionId)) {
+          bankIds.add(dr.id);
+        }
+      }
+      return { stagedIds, bankIds };
+    },
+    [detail, dbRows],
+  );
+
+  const clearHighlight = useCallback(() => {
+    setHighlightAnchor(null);
+    setHighlightedStagedIds(new Set());
+    setHighlightedBankIds(new Set());
+  }, []);
+
+  const onStagedRowClick = useCallback(
+    (stagedId: string) => {
+      const anchorKey = `staged:${stagedId}`;
+      if (highlightAnchor === anchorKey) {
+        clearHighlight();
+        return;
+      }
+      const { stagedIds, bankIds } = computeNeighborhoodFromStaged(stagedId);
+      setHighlightAnchor(anchorKey);
+      setHighlightedStagedIds(stagedIds);
+      setHighlightedBankIds(bankIds);
+    },
+    [highlightAnchor, computeNeighborhoodFromStaged, clearHighlight],
+  );
+
+  const onDbRowClick = useCallback(
+    (bankId: string) => {
+      const anchorKey = `bank:${bankId}`;
+      if (highlightAnchor === anchorKey) {
+        clearHighlight();
+        return;
+      }
+      const { stagedIds, bankIds } = computeNeighborhoodFromBank(bankId);
+      setHighlightAnchor(anchorKey);
+      setHighlightedStagedIds(stagedIds);
+      setHighlightedBankIds(bankIds);
+    },
+    [highlightAnchor, computeNeighborhoodFromBank, clearHighlight],
+  );
+
+  // Drop the highlight whenever the user switches accounts or closes the
+  // batch — otherwise stale ids tint rows that aren't even in the current
+  // view's row set.
+  useEffect(() => {
+    clearHighlight();
+  }, [accountId, openId, clearHighlight]);
 
   const flagDbRow = useCallback(
     async (transactionId: number) => {
@@ -1292,6 +1444,8 @@ function PendingImportsPageInner() {
               <DbPane
                 rows={dbRows}
                 loading={dbRowsLoading}
+                onRowClick={onDbRowClick}
+                highlightedBankIds={highlightedBankIds}
                 rowActions={(r) => {
                   // In link-mode: show a Pick button on rows that aren't
                   // already linked to a DIFFERENT staged row. The staged
@@ -1383,6 +1537,8 @@ function PendingImportsPageInner() {
                 onToggleSelect={toggleSelect}
                 onToggleExpand={toggleExpanded}
                 onRowUpdated={onRowUpdated}
+                onRowClick={onStagedRowClick}
+                highlightedStagedIds={highlightedStagedIds}
                 anchorsByDate={stagedAnchorsByDate}
                 header={
                   displaySuggestions.length > 0 && (

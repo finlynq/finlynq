@@ -84,11 +84,18 @@ export function DbPane({
   loading,
   rowActions,
   header,
+  onRowClick,
+  highlightedBankIds,
 }: {
   rows: DbTransactionRow[];
   loading: boolean;
   rowActions?: (row: DbTransactionRow) => React.ReactNode;
   header?: React.ReactNode;
+  /** Click anywhere on a row body (not the action button / checkbox) —
+   *  drives the cross-pane highlight UX (plan #5 Phase 3). */
+  onRowClick?: (bankId: string) => void;
+  /** Bank ids currently highlighted by a click-through. */
+  highlightedBankIds?: ReadonlySet<string>;
 }) {
   if (loading) {
     return (
@@ -173,8 +180,29 @@ export function DbPane({
               const isFirstOfDayLoadedEmpty =
                 r.anchorBalance == null && !dayFirstSeenForLoaded.has(r.date);
               if (isFirstOfDayLoadedEmpty) dayFirstSeenForLoaded.add(r.date);
+              const highlighted = highlightedBankIds?.has(r.id) ?? false;
+              const highlightClass = highlighted
+                ? "bg-sky-500/10 outline outline-2 outline-sky-500/40"
+                : "";
+              const clickable = onRowClick != null;
               return (
-                <TableRow key={r.id} className={dimmed}>
+                <TableRow
+                  key={r.id}
+                  className={`${dimmed} ${highlightClass} ${clickable ? "cursor-pointer" : ""}`}
+                  onClick={
+                    clickable
+                      ? (e) => {
+                          // Defensive: rowActions render buttons (Pick / Flag /
+                          // unflag) inside this row. Suppress the row-click
+                          // when the target is inside any interactive child.
+                          const target = e.target as HTMLElement;
+                          if (target.closest("button")) return;
+                          if (target.closest("input")) return;
+                          onRowClick?.(r.id);
+                        }
+                      : undefined
+                  }
+                >
                   <TableCell className="font-mono text-xs">{r.date}</TableCell>
                   <TableCell className="text-xs truncate max-w-[220px]">
                     {r.payee || (
