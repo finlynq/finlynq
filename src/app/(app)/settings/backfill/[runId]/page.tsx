@@ -140,8 +140,8 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
   const [error, setError] = useState<string>("");
   const [info, setInfo] = useState<string>("");
 
-  async function loadProposals() {
-    setLoading(true);
+  async function loadProposals(opts: { silent?: boolean } = {}) {
+    if (!opts.silent) setLoading(true);
     try {
       const res = await fetch(`/api/settings/backfill/${runId}`);
       const data = await res.json();
@@ -158,7 +158,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load proposals");
     }
-    setLoading(false);
+    if (!opts.silent) setLoading(false);
   }
 
   useEffect(() => { loadProposals(); }, [runId]);
@@ -194,7 +194,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
       setError(err?.error ?? `HTTP ${res.status}`);
       return false;
     }
-    await loadProposals();
+    await loadProposals({ silent: true });
     return true;
   }
 
