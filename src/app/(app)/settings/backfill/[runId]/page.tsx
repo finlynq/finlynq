@@ -514,6 +514,13 @@ function ProposalDetail({
               holdingMap={holdingMap}
               onChange={onHoldingChange}
             />
+            <DividendReinvestmentPreview
+              proposal={proposal}
+              displacedRows={displacedRows}
+              holdingMap={holdingMap}
+              accountMap={accountMap}
+              categoryMap={categoryMap}
+            />
           </div>
         )}
 
@@ -1084,6 +1091,117 @@ function computePairlessWillBecome({
     }
     if (orphanRow.relatedHoldingId !== chosenRelatedHoldingId) {
       willBecome.relatedHoldingId = chosenRelatedHoldingId;
+      changedKeys.add("related");
+    }
+  }
+  return { willBecome, changedKeys };
+}
+
+/**
+ * WILL-BECOME preview for `dividend_reinvestment` proposals. Mirrors the
+ * apply.ts dispatch in applyProposal at the `dividend_reinvestment`
+ * branch — keep in sync if apply.ts changes.
+ *
+ * - variant='drip': UPDATE portfolioHoldingId = chosenHoldingId, kind='dividend'.
+ *   Qty preserved (treated as a share count, lot opens at amount/qty).
+ * - variant='cash_dividend': UPDATE portfolioHoldingId = matching cash
+ *   sleeve in (account, currency), relatedHoldingId = chosenHoldingId,
+ *   kind='portfolio_income'. Qty preserved (cash units).
+ *
+ * Renders nothing until BOTH dividendVariant + chosenHoldingId are set
+ * — the planner pre-suggests defaults but the user owns the final pick.
+ */
+function DividendReinvestmentPreview({
+  proposal,
+  displacedRows,
+  holdingMap,
+  accountMap,
+  categoryMap,
+}: {
+  proposal: Proposal;
+  displacedRows: Record<number, DisplacedRow>;
+  holdingMap: Record<number, HoldingMeta>;
+  accountMap: Record<number, AccountMeta>;
+  categoryMap: Record<number, CategoryMeta>;
+}) {
+  const existingId = proposal.existingRowIds[0];
+  const existing = existingId != null ? displacedRows[existingId] : null;
+  const preview = useMemo(() => {
+    if (!existing) return null;
+    if (!proposal.dividendVariant) return null;
+    if (proposal.chosenHoldingId == null) return null;
+    return computeDividendReinvestmentWillBecome({
+      existing,
+      variant: proposal.dividendVariant,
+      chosenHoldingId: proposal.chosenHoldingId,
+      holdingMap,
+    });
+  }, [existing, proposal.dividendVariant, proposal.chosenHoldingId, holdingMap]);
+
+  if (!existing) return null;
+  if (!preview) {
+    return (
+      <p className="text-xs text-muted-foreground italic">
+        Pick a variant + the underlying stock to see what this row will look like after apply.
+      </p>
+    );
+  }
+  return (
+    <WillBecomeTable
+      existing={existing}
+      willBecome={preview.willBecome}
+      changedKeys={preview.changedKeys}
+      holdingMap={holdingMap}
+      accountMap={accountMap}
+      categoryMap={categoryMap}
+    />
+  );
+}
+
+function computeDividendReinvestmentWillBecome({
+  existing,
+  variant,
+  chosenHoldingId,
+  holdingMap,
+}: {
+  existing: DisplacedRow;
+  variant: "cash_dividend" | "drip";
+  chosenHoldingId: number;
+  holdingMap: Record<number, HoldingMeta>;
+}): {
+  willBecome: DisplacedRow;
+  changedKeys: ReadonlySet<keyof typeof FIELD_LABELS | "kind" | "holding">;
+} {
+  const willBecome: DisplacedRow = { ...existing };
+  const changedKeys = new Set<keyof typeof FIELD_LABELS | "kind" | "holding">();
+  if (variant === "drip") {
+    if (existing.kind !== "dividend") {
+      willBecome.kind = "dividend";
+      changedKeys.add("kind");
+    }
+    if (existing.portfolioHoldingId !== chosenHoldingId) {
+      willBecome.portfolioHoldingId = chosenHoldingId;
+      changedKeys.add("holding");
+    }
+  } else {
+    // cash_dividend — row moves to the matching cash sleeve in
+    // (account, currency); related_holding_id = chosen stock.
+    if (existing.kind !== "portfolio_income") {
+      willBecome.kind = "portfolio_income";
+      changedKeys.add("kind");
+    }
+    const sleeveEntry = Object.entries(holdingMap).find(
+      ([, h]) => h.isCash && h.currency === existing.currency,
+    );
+    if (sleeveEntry) {
+      const sleeveId = Number(sleeveEntry[0]);
+      if (existing.portfolioHoldingId !== sleeveId) {
+        willBecome.portfolioHoldingId = sleeveId;
+        changedKeys.add("holding");
+      }
+    }
+    if (existing.relatedHoldingId !== chosenHoldingId) {
+      willBecome.relatedHoldingId = chosenHoldingId;
       changedKeys.add("related");
     }
   }
