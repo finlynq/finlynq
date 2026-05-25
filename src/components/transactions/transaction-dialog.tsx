@@ -228,6 +228,16 @@ interface TransferEditState {
 
 const emptySplitRow = (): SplitRow => ({ categoryId: "", amount: "", note: "" });
 
+/** Friendly-fallback label for an entity whose decrypted name comes back
+ *  null (DEK missing post-restart, pathfinder mismatch). Mirrors the
+ *  pattern used by accountDisplayName on /reconcile and keeps every
+ *  Combobox label as a non-null string so sort comparators don't crash. */
+function safeName(name: string | null | undefined, kind: string, id: number): string {
+  const trimmed = name?.trim();
+  if (trimmed) return trimmed;
+  return `${kind} #${id}`;
+}
+
 const FORM_DEFAULTS: TransactionFormValues = {
   date: new Date().toISOString().split("T")[0],
   accountId: "",
@@ -1024,7 +1034,7 @@ export function TransactionDialog({
                       .filter((a) => !!editId || a.isInvestment !== true)
                       .map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                     (a) => Number(a.value),
-                    (a, z) => a.label.localeCompare(z.label),
+                    (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   )}
                   placeholder="Select account"
                   searchPlaceholder="Search accounts…"
@@ -1043,7 +1053,7 @@ export function TransactionDialog({
                       label: `${c.group} - ${c.name}`,
                     })),
                     (c) => Number(c.value),
-                    (a, z) => a.label.localeCompare(z.label),
+                    (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   )}
                   placeholder="Select category"
                   searchPlaceholder="Search categories…"
@@ -1099,7 +1109,7 @@ export function TransactionDialog({
                       label: h.symbol ? `${h.name} (${h.symbol})` : h.name,
                     })),
                   (h) => accountHoldings.find((x) => x.name === h.value)?.id ?? h.value,
-                  (a, z) => a.label.localeCompare(z.label),
+                  (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                 ),
               ];
               return (
@@ -1187,7 +1197,7 @@ export function TransactionDialog({
                           label: c.name,
                         })),
                         (c) => Number(c.value),
-                        (a, z) => a.label.localeCompare(z.label),
+                        (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                       )}
                       placeholder="Category"
                       searchPlaceholder="Search categories…"
@@ -1298,7 +1308,7 @@ export function TransactionDialog({
                                 label: `${h.symbol ? `${h.name} (${h.symbol})` : h.name}${h.accountName ? ` — ${h.accountName}` : ""}`,
                               })),
                               (h) => accountHoldings.find((x) => x.name === h.value)?.id ?? h.value,
-                              (a, z) => a.label.localeCompare(z.label),
+                              (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                             ),
                             ...(form.portfolioHoldingId &&
                             !holdings.some((h) => h.name === form.portfolioHoldingId)
@@ -1437,7 +1447,7 @@ export function TransactionDialog({
                             label: `${a.name} · ${a.currency}`,
                           })),
                         (a) => Number(a.value),
-                        (a, z) => a.label.localeCompare(z.label),
+                        (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                       )}
                       placeholder="Source account"
                       searchPlaceholder="Search accounts…"
@@ -1459,7 +1469,7 @@ export function TransactionDialog({
                             label: `${a.name} · ${a.currency}`,
                           })),
                         (a) => Number(a.value),
-                        (a, z) => a.label.localeCompare(z.label),
+                        (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                       )}
                       placeholder="Destination account"
                       searchPlaceholder="Search accounts…"
@@ -1491,7 +1501,7 @@ export function TransactionDialog({
                   })),
                   (h) =>
                     acctHoldings.find((x) => (bothInv ? x.name === h.value : String(x.id) === h.value))?.id ?? h.value,
-                  (a, z) => a.label.localeCompare(z.label),
+                  (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                 );
 
               if (bothInv) {
