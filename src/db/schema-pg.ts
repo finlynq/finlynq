@@ -551,6 +551,14 @@ export const importTemplates = pgTable("import_templates", {
   skipFooterRows: integer("skip_footer_rows").notNull().default(0),
   dateFormatOverride: text("date_format_override"),
   defaultCurrency: text("default_currency"),
+  // Per-template upload mode (plan/import-modes-simplified-detailed.md).
+  //   'simplified' — rows land directly in bank_transactions, skip staged review.
+  //   'detailed'   — rows land in staged_imports + staged_transactions; user
+  //                  reviews the parse on /import/pending before approve
+  //                  materializes them into bank_transactions.
+  // CHECK enforced in SQL (import_templates_mode_check). Defaults to
+  // 'detailed' so every existing template keeps the legacy flow.
+  importMode: text("import_mode").notNull().default("detailed"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -835,6 +843,53 @@ export const stagedTransactions = pgTable("staged_transactions", {
 //
 // See pf-app/docs/architecture/bank-ledger.md for the full design and the
 // load-bearing invariants in CLAUDE.md "Two-ledger import model".
+// ─── bank_upload_batches — lineage for upload batches
+//
+// 2026-05-25. One row per upload batch (simplified-direct OR detailed-via-
+// approve). Anchors the Recent Uploads panel on /reconcile and gives batch
+// undo a clean handle without array-membership joins on
+// bank_transactions.source_filenames.
+//
+// CASCADE rules:
+//   - user_id, account_id → CASCADE: deleting a user/account purges the
+//     batch history (matches wipe-account semantics).
+//   - template_id → SET NULL: a template can be deleted without nuking
+//     batch history that referenced it.
+//   - staged_import_id → SET NULL: staged_imports rows are TTL'd; the
+//     batch row outlives them.
+// Inbound FKs (bank_transactions.upload_batch_id, bank_daily_balances.
+// upload_batch_id) are SET NULL — deleting a batch row does NOT cascade-
+// delete the rows it created. Phase 4's batch-undo endpoint handles the
+// cascade explicitly so it can prompt the user about linked transactions
+// before pulling the trigger.
+export const bankUploadBatches = pgTable("bank_upload_batches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  accountId: integer("account_id")
+    .notNull()
+    .references(() => accounts.id, { onDelete: "cascade" }),
+  templateId: integer("template_id").references(() => importTemplates.id, {
+    onDelete: "set null",
+  }),
+  // 'upload' | 'email' | 'connector' — CHECK enforced in SQL.
+  source: text("source").notNull(),
+  // 'simplified' | 'detailed' — CHECK enforced in SQL.
+  mode: text("mode").notNull(),
+  filename: text("filename"),
+  uploadedAt: timestamp("uploaded_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  rowCount: integer("row_count").notNull().default(0),
+  anchorCount: integer("anchor_count").notNull().default(0),
+  // Detailed-mode batches reference the staged_imports row they came from.
+  // NULL for simplified-mode batches.
+  stagedImportId: text("staged_import_id").references(() => stagedImports.id, {
+    onDelete: "set null",
+  }),
+});
+
 export const bankTransactions = pgTable("bank_transactions", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: text("user_id")
@@ -887,6 +942,15 @@ export const bankTransactions = pgTable("bank_transactions", {
     () => stagedImports.id,
     { onDelete: "set null" },
   ),
+  // Phase 1 of import-modes refactor (2026-05-25). NULL for pre-refactor
+  // rows. Populated for every batch written by the new simplified-upload
+  // helper AND for every batch promoted via the post-refactor approve
+  // route. ON DELETE SET NULL so a batch row going away doesn't cascade-
+  // delete the bank ledger row — Phase 4's undo endpoint walks the
+  // cascade explicitly.
+  uploadBatchId: uuid("upload_batch_id").references(() => bankUploadBatches.id, {
+    onDelete: "set null",
+  }),
 });
 
 // ─── transaction_bank_links — many-to-many between transactions and bank_transactions
@@ -1202,6 +1266,13 @@ export const bankDailyBalances = pgTable("bank_daily_balances", {
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
+  // Phase 1 of import-modes refactor (2026-05-25). NULL for pre-refactor
+  // anchors. Populated for every anchor that arrived with a tracked upload
+  // batch. ON DELETE SET NULL so Phase 4's batch-undo endpoint walks the
+  // anchor deletion explicitly.
+  uploadBatchId: uuid("upload_batch_id").references(() => bankUploadBatches.id, {
+    onDelete: "set null",
+  }),
 }, (table) => [
   primaryKey({ columns: [table.userId, table.accountId, table.date] }),
   // Hot path: "give me the most recent anchor for this account" — drives
