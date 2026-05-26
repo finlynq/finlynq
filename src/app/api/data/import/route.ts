@@ -40,6 +40,10 @@ interface BackupData {
     portfolioHoldings?: Row[];
     /** Two-ledger refactor (2026-05-22) — bank-side persistent ledger. */
     bankTransactions?: Row[];
+    /** Phase 4 of import-modes refactor (2026-05-25) — upload batch lineage.
+     *  Restored BEFORE bank_transactions so the upload_batch_id FK target
+     *  exists during the per-row insert + remap. */
+    bankUploadBatches?: Row[];
     budgets?: Row[];
     budgetTemplates?: Row[];
     loans?: Row[];
@@ -301,6 +305,10 @@ export async function POST(request: NextRequest) {
     // SET NULL; deleting transactions first leaves the bank-ledger rows
     // unreferenced, then the user_id-scoped delete drops them cleanly.
     await db.delete(schema.bankTransactions).where(eq(schema.bankTransactions.userId, userId));
+    // Phase 4 of import-modes refactor (2026-05-25) — drop the lineage
+    // table after bank_transactions to keep FK ordering trivial (the FK
+    // is ON DELETE SET NULL so either order works, but this is clearer).
+    await db.delete(schema.bankUploadBatches).where(eq(schema.bankUploadBatches.userId, userId));
     await db.delete(schema.portfolioHoldings).where(eq(schema.portfolioHoldings.userId, userId));
     await db.delete(schema.categories).where(eq(schema.categories.userId, userId));
     await db.delete(schema.accounts).where(eq(schema.accounts.userId, userId));
@@ -361,6 +369,55 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Phase 4 of import-modes refactor (2026-05-25) — restore
+    // bank_upload_batches BEFORE bank_transactions so the upload_batch_id
+    // FK target exists when bank_transactions inserts get remapped.
+    const bankUploadBatchIdMap = new Map<string, string>();
+    if (d.bankUploadBatches?.length) {
+      const BATCH_SOURCES = new Set(["upload", "email", "connector"]);
+      const BATCH_MODES = new Set(["simplified", "detailed"]);
+      const remappedBatches = d.bankUploadBatches
+        .map((row) => {
+          const { id: _id, userId: _uid, accountId, source: rawSrc, mode: rawMode, templateId: _tpl, stagedImportId: _si, ...rest } = row;
+          if (accountId == null) return null;
+          const newAccountId = accountIdMap.get(accountId as number);
+          if (newAccountId == null) {
+            throw new Error(
+              `Backup bank_upload_batches references unknown accountId=${String(accountId)} — accounts section missing or inconsistent`,
+            );
+          }
+          const src = typeof rawSrc === "string" && BATCH_SOURCES.has(rawSrc) ? rawSrc : "upload";
+          const mode = typeof rawMode === "string" && BATCH_MODES.has(rawMode) ? rawMode : "detailed";
+          return {
+            ...rest,
+            userId,
+            accountId: newAccountId,
+            source: src,
+            mode,
+            // template_id + staged_import_id are SET NULL on delete; we
+            // drop them entirely on restore since template ids drift and
+            // staged_imports rows aren't part of the backup payload today.
+            templateId: null,
+            stagedImportId: null,
+          };
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+      if (remappedBatches.length > 0) {
+        const inserted = await db
+          .insert(schema.bankUploadBatches)
+          .values(remappedBatches as (typeof schema.bankUploadBatches.$inferInsert)[])
+          .returning({ id: schema.bankUploadBatches.id });
+        let outIdx = 0;
+        for (const old of d.bankUploadBatches) {
+          if (old.accountId == null) continue;
+          if (inserted[outIdx]) {
+            bankUploadBatchIdMap.set(String(old.id), inserted[outIdx].id as string);
+          }
+          outIdx++;
+        }
+      }
+    }
+
     // Two-ledger refactor (2026-05-22) — restore bank_transactions BEFORE
     // transactions so the FK target exists when transactions.bank_transaction_id
     // is remapped through the bankTxIdMap below. Per-row remap mirrors the
@@ -375,7 +432,7 @@ export async function POST(request: NextRequest) {
       const BANK_TX_ENC_FIELDS = ["payee", "note", "tags", "accountName"] as const;
       const remapped = d.bankTransactions
         .map((row) => {
-          const { id: _id, userId: _uid, accountId, source: rawSource, ...rest } = row;
+          const { id: _id, userId: _uid, accountId, source: rawSource, uploadBatchId: rawBatchId, ...rest } = row;
           if (accountId == null) return null;
           const newAccountId = accountIdMap.get(accountId as number);
           if (newAccountId == null) {
@@ -387,6 +444,14 @@ export async function POST(request: NextRequest) {
             typeof rawSource === "string" && BANK_LEDGER_SOURCES_RESTORE.has(rawSource)
               ? rawSource
               : "backup_restore";
+          // Phase 4 (2026-05-25) — remap upload_batch_id through the
+          // batch-id map built above. Missing map entry → NULL (the FK
+          // is ON DELETE SET NULL so this is the same end state as if
+          // the batch was deleted).
+          const newBatchId =
+            typeof rawBatchId === "string" && bankUploadBatchIdMap.has(rawBatchId)
+              ? bankUploadBatchIdMap.get(rawBatchId)!
+              : null;
           const withFks = {
             ...rest,
             userId,
@@ -397,6 +462,7 @@ export async function POST(request: NextRequest) {
             // and the original-tier may have been mid-upgrade in the
             // source DB. Re-encrypt under the local user DEK below.
             encryptionTier: "user",
+            uploadBatchId: newBatchId,
           };
           return encryptRowFields(dek, withFks, BANK_TX_ENC_FIELDS);
         })
@@ -587,6 +653,7 @@ export async function POST(request: NextRequest) {
       currency?: string;
       source?: string;
       sourceFilenames?: string[];
+      uploadBatchId?: string | null;
     }
     const backupAnchors = (d as { bankDailyBalances?: BackupAnchorRow[] })
       .bankDailyBalances;
@@ -595,6 +662,12 @@ export async function POST(request: NextRequest) {
         .map((a) => {
           const newAccountId = accountIdMap.get(a.accountId);
           if (newAccountId == null) return null;
+          // Phase 4 (2026-05-25) — remap upload_batch_id through the
+          // batch-id map. Pre-Phase-4 backups don't carry the column.
+          const newBatchId =
+            typeof a.uploadBatchId === "string" && bankUploadBatchIdMap.has(a.uploadBatchId)
+              ? bankUploadBatchIdMap.get(a.uploadBatchId)!
+              : null;
           return {
             userId,
             accountId: newAccountId,
@@ -609,6 +682,7 @@ export async function POST(request: NextRequest) {
             sourceFilenames: Array.isArray(a.sourceFilenames)
               ? a.sourceFilenames
               : [],
+            uploadBatchId: newBatchId,
           };
         })
         .filter((r): r is NonNullable<typeof r> => r != null);

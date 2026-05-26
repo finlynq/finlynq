@@ -55,6 +55,7 @@ import {
   BalanceSummaryCard,
   type BalanceSummary,
 } from "@/components/reconcile/balance-summary-card";
+import { RecentUploadsPanel } from "@/components/reconcile/recent-uploads-panel";
 import { safeAccountName } from "@/lib/safe-name";
 
 interface Account {
@@ -968,6 +969,18 @@ export default function ReconcilePage() {
               busyBankId={busyBankId}
             />
           }
+        />
+      )}
+
+      {/* Phase 4 of import-modes refactor (2026-05-25) — Recent Uploads
+          panel lists the last 20 bank_upload_batches for this account and
+          provides a one-click batch-undo affordance for mistaken imports. */}
+      {selectedAccountId != null && (
+        <RecentUploadsPanel
+          accountId={selectedAccountId}
+          onChange={() => {
+            void refresh();
+          }}
         />
       )}
 

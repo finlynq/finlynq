@@ -152,6 +152,7 @@ async function handleExport(request: NextRequest) {
       bankTransactions,
       transactionBankLinks,
       bankDailyBalances,
+      bankUploadBatches,
       budgets,
       budgetTemplates,
       loans,
@@ -176,6 +177,11 @@ async function handleExport(request: NextRequest) {
       db.select().from(schema.transactionBankLinks).where(eq(schema.transactionBankLinks.userId, userId)),
       // Bank balance anchors (2026-05-24). No encrypted fields — straight pass-through.
       db.select().from(schema.bankDailyBalances).where(eq(schema.bankDailyBalances.userId, userId)),
+      // Bank upload batches (Phase 4 of import-modes refactor, 2026-05-25).
+      // No encrypted fields — straight pass-through. FKs from
+      // bank_transactions.upload_batch_id + bank_daily_balances.upload_batch_id
+      // are remapped by the import path's standard FK-remap helper.
+      db.select().from(schema.bankUploadBatches).where(eq(schema.bankUploadBatches.userId, userId)),
       db.select().from(schema.budgets).where(eq(schema.budgets.userId, userId)),
       db.select().from(schema.budgetTemplates).where(eq(schema.budgetTemplates.userId, userId)),
       db.select().from(schema.loans).where(eq(schema.loans.userId, userId)),
@@ -228,6 +234,7 @@ async function handleExport(request: NextRequest) {
         bankTransactions: decryptedBankTransactions,
         transactionBankLinks,
         bankDailyBalances,
+        bankUploadBatches,
         budgets,
         budgetTemplates,
         loans,
