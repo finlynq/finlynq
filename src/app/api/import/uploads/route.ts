@@ -23,7 +23,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { and, desc, eq, sql, count } from "drizzle-orm";
+import { and, desc, eq, inArray, count } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 
 export const dynamic = "force-dynamic";
@@ -82,7 +82,7 @@ export async function GET(request: NextRequest) {
     .from(schema.bankTransactions)
     .where(and(
       eq(schema.bankTransactions.userId, userId),
-      sql`${schema.bankTransactions.uploadBatchId} = ANY(${ids}::UUID[])`,
+      inArray(schema.bankTransactions.uploadBatchId, ids),
     ))
     .groupBy(schema.bankTransactions.uploadBatchId)
     .all();
@@ -103,7 +103,7 @@ export async function GET(request: NextRequest) {
     .where(and(
       eq(schema.transactionBankLinks.userId, userId),
       eq(schema.transactionBankLinks.linkType, "primary"),
-      sql`${schema.bankTransactions.uploadBatchId} = ANY(${ids}::UUID[])`,
+      inArray(schema.bankTransactions.uploadBatchId, ids),
     ))
     .all();
   const linkedSet = new Set<string>();
