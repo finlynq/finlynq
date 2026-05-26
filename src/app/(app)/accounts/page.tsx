@@ -370,7 +370,7 @@ export default function AccountsPage() {
                     <div
                       className={`h-7 w-7 shrink-0 rounded-lg flex items-center justify-center text-xs font-bold ${avatarClasses}`}
                     >
-                      {a.accountName.charAt(0).toUpperCase()}
+                      {(a.accountName ?? "?").charAt(0).toUpperCase()}
                     </div>
                     <div className="flex items-center gap-2 min-w-0">
                       <p className="font-medium text-sm truncate">

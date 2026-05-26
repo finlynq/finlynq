@@ -262,7 +262,7 @@ export default function AccountDetailPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className={`h-10 w-10 rounded-xl flex items-center justify-center text-sm font-bold ${account.type === "A" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
-            {account.name.charAt(0)}
+            {(account.name ?? "?").charAt(0)}
           </div>
           <div>
             <h1 className="text-2xl font-bold tracking-tight">{account.name}</h1>
