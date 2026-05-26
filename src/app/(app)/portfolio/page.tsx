@@ -424,7 +424,7 @@ export default function PortfolioPage() {
     list = [...list].sort((a, b) => {
       let cmp = 0;
       switch (sortField) {
-        case "name": cmp = a.name.localeCompare(b.name); break;
+        case "name": cmp = (a.name ?? "").localeCompare(b.name ?? ""); break;
         case "marketValueDisplay": cmp = (a.marketValueDisplay ?? 0) - (b.marketValueDisplay ?? 0); break;
         case "unrealizedGainPct": cmp = (a.unrealizedGainPct ?? 0) - (b.unrealizedGainPct ?? 0); break;
       }
@@ -446,7 +446,7 @@ export default function PortfolioPage() {
     }
     // Sort each bucket by accountName for stable rendering.
     for (const [k, arr] of map) {
-      map.set(k, arr.slice().sort((a, b) => a.accountName.localeCompare(b.accountName)));
+      map.set(k, arr.slice().sort((a, b) => (a.accountName ?? "").localeCompare(b.accountName ?? "")));
     }
     return map;
   }, [data]);
@@ -459,7 +459,7 @@ export default function PortfolioPage() {
       const acc = h.accountName;
       groups.set(acc, [...(groups.get(acc) ?? []), h]);
     }
-    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+    return Array.from(groups.entries()).sort(([a], [b]) => (a ?? "").localeCompare(b ?? ""));
   }, [data]);
 
   const toggleAccount = (name: string) => {

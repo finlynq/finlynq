@@ -55,6 +55,7 @@ import {
   BalanceSummaryCard,
   type BalanceSummary,
 } from "@/components/reconcile/balance-summary-card";
+import { safeAccountName } from "@/lib/safe-name";
 
 interface Account {
   id: number;
@@ -127,17 +128,6 @@ function describeRange(from: string | null, to: string | null): string {
   if (from) return `from ${from}`;
   if (to) return `until ${to}`;
   return "all time";
-}
-
-/** Friendly display name for an account — alias when set, formal name
- *  otherwise. Falls back to `Account #<id>` if both are missing (DEK
- *  not in cache → decryptNamedRows returns null on both fields). */
-function accountDisplayName(a: Account): string {
-  const alias = a.alias?.trim();
-  if (alias) return alias;
-  const name = a.name?.trim();
-  if (name) return name;
-  return `Account #${a.id}`;
 }
 
 interface ReconcileLink {
@@ -848,7 +838,7 @@ export default function ReconcilePage() {
               <SelectContent>
                 {visibleAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
-                    {accountDisplayName(a)} · {a.currency}
+                    {safeAccountName(a)} · {a.currency}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -1009,7 +999,7 @@ export default function ReconcilePage() {
         }}
         accounts={accounts.map((a) => ({
           id: a.id,
-          name: accountDisplayName(a),
+          name: safeAccountName(a),
           currency: a.currency,
           isInvestment: a.isInvestment,
         }))}

@@ -259,7 +259,7 @@ function GoalEditForm({
           items={sortAccount(
             availableAccounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
             (a) => Number(a.value),
-            (a, z) => a.label.localeCompare(z.label),
+            (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
           )}
           placeholder={form.accountIds.length === 0 ? "Add an account…" : "Add another…"}
           searchPlaceholder="Search accounts…"

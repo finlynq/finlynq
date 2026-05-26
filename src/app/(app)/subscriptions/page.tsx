@@ -311,7 +311,7 @@ function SubscriptionsPageContent() {
         case "nextDate":
           return (a.nextDate ?? "").localeCompare(b.nextDate ?? "");
         default:
-          return a.name.localeCompare(b.name);
+          return (a.name ?? "").localeCompare(b.name ?? "");
       }
     });
   }
@@ -592,7 +592,7 @@ function SubscriptionsPageContent() {
                       items={sortCategory(
                         categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: c.name })),
                         (c) => Number(c.value),
-                        (a, z) => a.label.localeCompare(z.label),
+                        (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                       )}
                       placeholder="None"
                       searchPlaceholder="Search categories…"
@@ -608,7 +608,7 @@ function SubscriptionsPageContent() {
                       items={sortAccount(
                         accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                         (a) => Number(a.value),
-                        (a, z) => a.label.localeCompare(z.label),
+                        (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                       )}
                       placeholder="None"
                       searchPlaceholder="Search accounts…"

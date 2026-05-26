@@ -61,6 +61,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { labelForSource, type TransactionSource } from "@/lib/tx-source";
+import { safeName } from "@/lib/safe-name";
 
 // ─── Public types ──────────────────────────────────────────────────────
 
@@ -227,16 +228,6 @@ interface TransferEditState {
 }
 
 const emptySplitRow = (): SplitRow => ({ categoryId: "", amount: "", note: "" });
-
-/** Friendly-fallback label for an entity whose decrypted name comes back
- *  null (DEK missing post-restart, pathfinder mismatch). Mirrors the
- *  pattern used by accountDisplayName on /reconcile and keeps every
- *  Combobox label as a non-null string so sort comparators don't crash. */
-function safeName(name: string | null | undefined, kind: string, id: number): string {
-  const trimmed = name?.trim();
-  if (trimmed) return trimmed;
-  return `${kind} #${id}`;
-}
 
 const FORM_DEFAULTS: TransactionFormValues = {
   date: new Date().toISOString().split("T")[0],

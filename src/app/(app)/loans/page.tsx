@@ -245,7 +245,7 @@ function LoansPageContent() {
                   items={sortAccount(
                     accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                     (a) => Number(a.value),
-                    (a, z) => a.label.localeCompare(z.label),
+                    (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   )}
                   placeholder="None"
                   searchPlaceholder="Search accounts…"

@@ -201,7 +201,7 @@ export function SplitDialog({
                       label: `${c.group} — ${c.name}`,
                     })),
                     (c) => Number(c.value),
-                    (a, z) => a.label.localeCompare(z.label),
+                    (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   )}
                   placeholder="Category"
                   searchPlaceholder="Search categories…"
@@ -215,7 +215,7 @@ export function SplitDialog({
                   items={sortAccount(
                     accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                     (a) => Number(a.value),
-                    (a, z) => a.label.localeCompare(z.label),
+                    (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   )}
                   placeholder="Account"
                   searchPlaceholder="Search accounts…"

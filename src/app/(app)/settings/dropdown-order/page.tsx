@@ -151,7 +151,7 @@ export default function DropdownOrderPage() {
     const pinnedSet = new Set(pinned.map(String));
     return items
       .filter((i) => !pinnedSet.has(String(i.key)))
-      .sort((a, z) => a.label.localeCompare(z.label));
+      .sort((a, z) => (a.label ?? "").localeCompare(z.label ?? ""));
   }, [items, pinned]);
 
   function showToast(type: "success" | "error", msg: string) {

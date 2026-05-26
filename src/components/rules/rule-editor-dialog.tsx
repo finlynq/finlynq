@@ -516,7 +516,7 @@ function ActionRow({
           items={sortCategory(
             categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} — ${c.name}` })),
             (c) => Number(c.value),
-            (a, z) => a.label.localeCompare(z.label),
+            (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
           )}
           placeholder="Select category"
           searchPlaceholder="Search categories…"

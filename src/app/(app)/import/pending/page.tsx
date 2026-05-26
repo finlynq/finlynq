@@ -64,6 +64,7 @@ import {
 } from "@/components/staging/balance-warning-banner";
 import { AccountSelector, type AccountOption } from "@/components/import/reconcile/account-selector";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
+import { safeName } from "@/lib/safe-name";
 import { FilePane } from "@/components/import/reconcile/file-pane";
 import { DbPane, type DbTransactionRow } from "@/components/import/reconcile/db-pane";
 import {
@@ -322,17 +323,13 @@ function PendingImportsPageInner() {
     // Fall back to `Account #<id>` when the loaded account's name decrypted
     // to null/empty (DEK not in cache → decryptNamedRows returns null). The
     // raw integer would otherwise surface in the AccountSelector trigger.
-    const friendlyName = (a: EditorAccountOption): string => {
-      const trimmed = a.name?.trim();
-      return trimmed ? trimmed : `Account #${a.id}`;
-    };
     const opts: AccountOption[] = [];
     for (const [name, count] of byName) {
       const match = accounts.find((a) => a.name === name);
       if (match) {
         opts.push({
           id: match.id,
-          name: friendlyName(match),
+          name: safeName(match.name, "Account", match.id),
           currency: match.currency,
           rowCount: count,
         });
@@ -343,7 +340,7 @@ function PendingImportsPageInner() {
       if (bound) {
         opts.push({
           id: bound.id,
-          name: friendlyName(bound),
+          name: safeName(bound.name, "Account", bound.id),
           currency: bound.currency,
           rowCount: detail.rows.length,
         });

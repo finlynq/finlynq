@@ -1309,7 +1309,7 @@ function TransactionsPageInner() {
                 ...sortAccount(
                   accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: formatAccountLabel(a) })),
                   (a) => Number(a.value),
-                  (a, z) => a.label.localeCompare(z.label),
+                  (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                 ),
               ]}
               placeholder="All accounts"
@@ -1326,7 +1326,7 @@ function TransactionsPageInner() {
                 ...sortCategory(
                   categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: c.name })),
                   (c) => Number(c.value),
-                  (a, z) => a.label.localeCompare(z.label),
+                  (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                 ),
               ]}
               placeholder="All categories"
@@ -1492,7 +1492,7 @@ function TransactionsPageInner() {
                 items={sortCategory(
                   categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} — ${c.name}` })),
                   (c) => Number(c.value),
-                  (a, z) => a.label.localeCompare(z.label),
+                  (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                 )}
                 placeholder="Select category"
                 searchPlaceholder="Search categories…"
@@ -1508,7 +1508,7 @@ function TransactionsPageInner() {
                 items={sortAccount(
                   accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                   (a) => Number(a.value),
-                  (a, z) => a.label.localeCompare(z.label),
+                  (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                 )}
                 placeholder="Select account"
                 searchPlaceholder="Search accounts…"

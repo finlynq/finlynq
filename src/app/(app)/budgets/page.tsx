@@ -420,7 +420,7 @@ export default function BudgetsPage() {
                           label: `${b.categoryName} (${formatCurrency(b.amount - (spendingMap.get(b.categoryId) ?? 0), displayCurrency)} available)`,
                         })),
                         (b) => Number(b.value),
-                        (a, z) => a.label.localeCompare(z.label),
+                        (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                       )}
                       placeholder="Select category"
                       searchPlaceholder="Search categories…"
@@ -438,7 +438,7 @@ export default function BudgetsPage() {
                           .filter((b) => String(b.categoryId) !== moveFrom)
                           .map((b): ComboboxItemShape => ({ value: String(b.categoryId), label: b.categoryName })),
                         (b) => Number(b.value),
-                        (a, z) => a.label.localeCompare(z.label),
+                        (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                       )}
                       placeholder="Select category"
                       searchPlaceholder="Search categories…"
@@ -485,7 +485,7 @@ export default function BudgetsPage() {
                     items={sortCategory(
                       categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: `${c.group} - ${c.name}` })),
                       (c) => Number(c.value),
-                      (a, z) => a.label.localeCompare(z.label),
+                      (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                     )}
                     placeholder="Select category"
                     searchPlaceholder="Search categories…"
