@@ -316,9 +316,19 @@ export async function POST(request: NextRequest) {
     // Insert accounts, build old→new ID map
     const accountIdMap = new Map<number, number>();
     if (d.accounts?.length) {
+      // Reconcile v4 Phase 1 (2026-05-27) — coerce unknown/missing `mode` values
+      // back to 'manual' so a pre-Phase-1 backup (column absent) or a corrupt
+      // value doesn't hit the CHECK constraint on insert.
+      const ACCOUNT_MODES = new Set(["auto", "approve", "manual"]);
+      const stripped = strip(d.accounts, userId).map((row) => {
+        const raw = (row as { mode?: unknown }).mode;
+        (row as { mode: string }).mode =
+          typeof raw === "string" && ACCOUNT_MODES.has(raw) ? raw : "manual";
+        return row;
+      });
       const inserted = await db
         .insert(schema.accounts)
-        .values(strip(d.accounts, userId) as (typeof schema.accounts.$inferInsert)[])
+        .values(stripped as (typeof schema.accounts.$inferInsert)[])
         .returning({ id: schema.accounts.id });
       d.accounts.forEach((old, i) => {
         if (inserted[i]) accountIdMap.set(old.id as number, inserted[i].id);

@@ -43,6 +43,13 @@ export const accounts = pgTable("accounts", {
   // scripts/migrate-accounts-is-investment.sql backfills the flag from any
   // account that already has at least one portfolio_holdings row.
   isInvestment: boolean("is_investment").notNull().default(false),
+  // Reconcile v4 Phase 1 (2026-05-27) — per-account pipeline policy.
+  // 'auto' = rules fire at upload, rows land directly in ledger.
+  // 'approve' = bank-write automatic, ledger commit needs one click.
+  // 'manual' = legacy two-pane staging + reconcile flow.
+  // CHECK enforced in SQL (accounts_mode_check). Defaults to 'manual'
+  // so every existing account keeps the legacy flow.
+  mode: text("mode").notNull().default("manual").$type<"auto" | "approve" | "manual">(),
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
   aliasCt: text("alias_ct"),
