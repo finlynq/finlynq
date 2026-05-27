@@ -882,6 +882,38 @@ export default function ReconcilePage() {
     setSelectedBankIds(new Set());
   }, []);
 
+  // Sum of selected amounts on each pane + delta — surfaced by the bulk
+  // action bar so the user can sanity-check that the selection actually
+  // reconciles before firing the cartesian product.
+  const bulkSelectionSums = useMemo(() => {
+    let txSum = 0;
+    let bankSum = 0;
+    let currency = "CAD";
+    if (data) {
+      for (const id of selectedTxIds) {
+        const t = data.transactions[id];
+        if (t) {
+          txSum += t.amount;
+          currency = t.currency || currency;
+        }
+      }
+      for (const id of selectedBankIds) {
+        const b = data.bankTransactions[id];
+        if (b) {
+          bankSum += b.amount;
+          currency = b.currency || currency;
+        }
+      }
+    }
+    // Fall back to the selected account's currency when no rows are
+    // selected yet (covers the half-selected state — one side empty).
+    if (selectedAccountId != null) {
+      const acct = accounts.find((a) => a.id === selectedAccountId);
+      if (acct?.currency) currency = acct.currency;
+    }
+    return { txSum, bankSum, currency };
+  }, [data, selectedTxIds, selectedBankIds, selectedAccountId, accounts]);
+
   const onBulkReconcile = useCallback(async () => {
     if (selectedTxIds.size === 0 || selectedBankIds.size === 0) return;
     setBulkLinking(true);
@@ -1198,6 +1230,9 @@ export default function ReconcilePage() {
       <BulkLinkActionBar
         txCount={selectedTxIds.size}
         bankCount={selectedBankIds.size}
+        txSum={bulkSelectionSums.txSum}
+        bankSum={bulkSelectionSums.bankSum}
+        currency={bulkSelectionSums.currency}
         busy={bulkLinking}
         onReconcile={() => void onBulkReconcile()}
         onClear={clearSelection}
