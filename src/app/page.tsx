@@ -9,7 +9,7 @@ const FEATURES = [
   {
     idx: "F.01 · AI NATIVE",
     title: "Talk to your money in plain English.",
-    desc: "Connect Claude, Cursor, or any MCP client. Ask questions, get charts and structured answers — no custom exports, no BI tool needed.",
+    desc: "Connect Claude, Cursor, or any MCP client — or use the in-app AI chat with zero setup. 91 HTTP / 87 stdio tools. Ask questions, get charts and structured answers — no custom exports, no BI tool needed.",
     viz: "bars",
   },
   {
@@ -27,7 +27,7 @@ const FEATURES = [
   {
     idx: "F.04 · PORTFOLIO",
     title: "Holdings, returns, benchmarks.",
-    desc: "Live prices, XIRR, and benchmarks against SPX, QQQ, VTI. Built for people who actually track their money — not just watch it.",
+    desc: "Live prices, XIRR, benchmarks vs SPX/QQQ/VTI, lot-tracked cost basis with FX-aware realized gains, RRSP/TFSA/RESP contribution-room tracking. Built for people who actually track their money — not just watch it.",
     viz: "portfolio",
   },
   {
@@ -74,16 +74,17 @@ const MCP_TOOLS = [
 ];
 
 const PLAN_FEATS = [
-  "90 MCP tools (HTTP) · 86 (stdio) — read & write",
-  "AES-256-GCM envelope encryption · scrypt-derived KEK",
-  "CSV, Excel, OFX/QFX, PDF import",
-  "Budgets, portfolio, goals, loans",
-  "Natural-language AI chat",
-  "FIRE calculator & Monte Carlo sim",
-  "Rules & auto-categorize",
-  "Self-host or managed cloud",
+  "91 MCP tools (HTTP) · 87 (stdio) — read & write",
+  "Per-user AES-256-GCM envelope encryption · operator can't decrypt",
+  "In-app AI chat — no MCP client setup required",
+  "Native mobile app (React Native, iOS + Android)",
+  "RRSP, TFSA, RESP contribution-room tracking (CRA limits)",
+  "Lot-tracked portfolio cost basis · dividends · FX-aware",
+  "Cash-flow forecasting · spending anomaly detection",
+  "CSV, Excel, OFX/QFX, PDF, email import",
+  "Rules engine · budgets · goals · loans · subscriptions",
+  "Self-host or managed cloud · same features either way",
   "REST API + MCP (HTTP & stdio · OAuth 2.1 + DCR)",
-  "Dark mode, mobile-friendly UI",
 ];
 
 function LogoMark() {
@@ -274,7 +275,7 @@ export default function LandingPage() {
           <div className="hero-copy reveal">
             <div className="hero-bar">
               <span className="tag">MCP</span>
-              <span>90 tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
+              <span>91 tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
             </div>
 
             <h1 className="display-xl">
@@ -296,6 +297,9 @@ export default function LandingPage() {
               <Link href="/cloud?tab=register" className="btn btn-primary">
                 Try the hosted cloud <span aria-hidden="true">→</span>
               </Link>
+              <Link href="/try-demo?next=/dashboard" className="btn btn-ghost">
+                Try the demo (1 click)
+              </Link>
               <Link href="/self-hosted" className="btn btn-ghost">
                 Self-host with Docker
               </Link>
@@ -303,7 +307,7 @@ export default function LandingPage() {
 
             <div className="hero-meta">
               <div className="cell">
-                <div className="v num">90</div>
+                <div className="v num">91</div>
                 <div className="k">MCP tools</div>
               </div>
               <div className="cell">
@@ -820,6 +824,7 @@ export default function LandingPage() {
             <div>
               <h5>Product</h5>
               <ul>
+                <li><Link href="/about">What is Finlynq?</Link></li>
                 <li><a href="#features">Features</a></li>
                 <li><a href="#flow">How it works</a></li>
                 <li><Link href="/mcp-guide">MCP guide</Link></li>
@@ -847,6 +852,7 @@ export default function LandingPage() {
             <div>
               <h5>Compare</h5>
               <ul>
+                <li><Link href="/vs/monarch">Finlynq vs Monarch Money</Link></li>
                 <li><Link href="/vs/era">Finlynq vs Era</Link></li>
                 <li><Link href="/vs/firefly-iii">Finlynq vs Firefly III</Link></li>
                 <li><Link href="/vs/alderfi">Finlynq vs Alderfi</Link></li>

@@ -13,7 +13,7 @@ import type { MetadataRoute } from "next";
 
 const BASE_URL = "https://finlynq.com";
 
-const VS_SLUGS = ["era", "firefly-iii", "alderfi"] as const;
+const VS_SLUGS = ["era", "firefly-iii", "alderfi", "monarch"] as const;
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const now = new Date();
@@ -42,6 +42,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       lastModified: now,
       changeFrequency: "monthly",
       priority: 0.8,
+    },
+    {
+      url: `${BASE_URL}/about`,
+      lastModified: now,
+      changeFrequency: "monthly",
+      priority: 0.9,
     },
     {
       url: `${BASE_URL}/privacy`,
