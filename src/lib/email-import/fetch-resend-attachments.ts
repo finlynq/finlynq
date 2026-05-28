@@ -3,10 +3,18 @@
  *
  * Resend's `email.received` webhook payload does NOT inline attachment bytes —
  * only the email metadata. To get the file contents we have to:
- *   1. Hit GET /received-emails/{id}/attachments  → list of {id, filename, downloadUrl}
- *   2. Fetch each `downloadUrl` (signed, time-limited)
+ *   1. Hit GET https://api.resend.com/emails/receiving/{id}/attachments
+ *      → {object:"list", data:[{id, filename, content_type, download_url}]}
+ *   2. Fetch each `download_url` (signed, time-limited — Cloudfront)
  *   3. Base64-encode the bytes back into the `ResendAttachment` shape so the
  *      existing `parseResendAttachments` consumer doesn't change.
+ *
+ * Endpoint URL gotcha: the path is `/emails/receiving/{id}/attachments`, NOT
+ * `/received-emails/{id}/attachments` — Resend's URL hierarchy nests inbound
+ * under `/emails/receiving/`. Got this wrong on the first ship of this file
+ * (every probe returned 405 method_not_allowed even though the API key was
+ * valid; the catch-all 405 masked what was effectively a 404). See docs:
+ * https://resend.com/docs/api-reference/emails/list-received-email-attachments.
  *
  * Returns [] (with a warn log) when RESEND_API_KEY is missing or any HTTP
  * step fails, so the webhook handler degrades gracefully to its "no
@@ -54,7 +62,7 @@ export async function fetchResendAttachments(
   let listResp: Response;
   try {
     listResp = await fetch(
-      `${RESEND_API_BASE}/received-emails/${encodeURIComponent(resendEmailId)}/attachments`,
+      `${RESEND_API_BASE}/emails/receiving/${encodeURIComponent(resendEmailId)}/attachments`,
       { headers: { Authorization: `Bearer ${apiKey}` } },
     );
   } catch (e) {
