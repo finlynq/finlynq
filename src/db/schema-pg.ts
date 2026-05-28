@@ -728,6 +728,17 @@ export const stagedImports = pgTable("staged_imports", {
   // statement_balance / statement_balance_date / statement_currency
   // columns above.
   parsedAnchors: jsonb("parsed_anchors"),
+  // ─── Manual template-pick fallback (2026-05-28) ──────────────────────
+  // When a CSV email-import attachment doesn't match any saved template
+  // we capture the column header row + first ~3 data rows here so the
+  // user can pick a template (or just bind to an account) post-hoc from
+  // /import/pending. `headers` is the raw header string array;
+  // `sampleRows` is an array of { [header]: cellValue } maps. Both
+  // remain NULL for upload-path imports (those already had a template
+  // picker before parse) and for emails whose CSV matched a template at
+  // parse time. Hides the picker UI when null.
+  headers: jsonb("headers"),
+  sampleRows: jsonb("sample_rows"),
 });
 
 export const stagedTransactions = pgTable("staged_transactions", {

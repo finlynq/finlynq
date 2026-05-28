@@ -30,13 +30,38 @@ export interface ResendAttachment {
 }
 
 /**
+ * Result of parsing email-import attachments.
+ *
+ * `rows` is the flat per-transaction list (input for stageEmailImport).
+ *
+ * `unmatchedCsvMeta` is populated when at least one CSV attachment didn't
+ * template-match — it carries the headers + first ~3 data rows from the
+ * FIRST such attachment so the /import/pending detail page can render a
+ * "Pick template / Bind to account" picker post-hoc. We capture only the
+ * first because the typical email-import case is one CSV per email; the
+ * second+ unmatched CSV would overwrite the first in the staged_imports
+ * row anyway, and showing a second metadata snapshot in the UI would be
+ * confusing. Null when every attachment template-matched, or when none of
+ * the attachments were CSVs.
+ */
+export interface ParseResendAttachmentsResult {
+  rows: RawTransaction[];
+  unmatchedCsvMeta: {
+    headers: string[];
+    sampleRows: Array<Record<string, string>>;
+  } | null;
+}
+
+const SAMPLE_ROW_COUNT = 3;
+
+/**
  * Parse Resend attachments into flat RawTransaction rows for the given user.
  * Unrecognized file types are skipped silently.
  */
 export async function parseResendAttachments(
   attachments: ResendAttachment[],
   userId: string,
-): Promise<RawTransaction[]> {
+): Promise<ParseResendAttachmentsResult> {
   // Load the user's templates once for CSV header matching.
   const templateRows = await db
     .select()
@@ -46,6 +71,7 @@ export async function parseResendAttachments(
   const templates = templateRows.map(deserializeTemplate);
 
   const allRows: RawTransaction[] = [];
+  let unmatchedCsvMeta: ParseResendAttachmentsResult["unmatchedCsvMeta"] = null;
 
   for (const att of attachments) {
     const ext = att.filename.split(".").pop()?.toLowerCase();
@@ -71,6 +97,23 @@ export async function parseResendAttachments(
         }
       } else {
         rows = csvToRawTransactions(text).rows;
+        // Capture only the FIRST unmatched CSV's metadata — see interface
+        // doc above. Snapshot headers + a few sample rows for the manual
+        // template picker on /import/pending.
+        if (unmatchedCsvMeta === null && headers.length > 0) {
+          const sampleRows: Array<Record<string, string>> = [];
+          const dataLines = text.split(/\r?\n/).slice(1, 1 + SAMPLE_ROW_COUNT);
+          for (const line of dataLines) {
+            if (!line.trim()) continue;
+            const cells = parseCsvLine(line);
+            const row: Record<string, string> = {};
+            headers.forEach((h, i) => {
+              row[h] = cells[i] ?? "";
+            });
+            sampleRows.push(row);
+          }
+          unmatchedCsvMeta = { headers, sampleRows };
+        }
       }
     } else if (ext === "pdf" || att.contentType === "application/pdf") {
       // Dynamic import — PDF parser is heavy (~5 MB), lazy-load.
@@ -92,5 +135,43 @@ export async function parseResendAttachments(
     allRows.push(...rows);
   }
 
-  return allRows;
+  return { rows: allRows, unmatchedCsvMeta };
+}
+
+/**
+ * Minimal RFC4180-ish CSV line splitter for sample-row capture. Handles
+ * double-quoted fields with embedded commas + escaped quotes. Not used for
+ * actual import parsing (`csv-parser.ts` owns that) — only for snapshotting
+ * preview rows surfaced in the manual-pick UI.
+ */
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else {
+      if (ch === ",") {
+        out.push(cur);
+        cur = "";
+      } else if (ch === '"' && cur === "") {
+        inQuotes = true;
+      } else {
+        cur += ch;
+      }
+    }
+  }
+  out.push(cur);
+  return out;
 }

@@ -31,6 +31,15 @@ export interface StageEmailImportInput {
   fromAddress?: string | null;
   subject?: string | null;
   svixId?: string | null;
+  /**
+   * Raw CSV header row + first ~3 data rows from the FIRST email-import
+   * attachment that didn't template-match at parse time. Persisted on the
+   * staged_imports row so the /import/pending detail page can surface a
+   * "Pick template / Bind to account" picker post-hoc. Both nullable —
+   * leave undefined for template-matched parses or non-CSV attachments.
+   */
+  headers?: string[] | null;
+  sampleRows?: Array<Record<string, string>> | null;
 }
 
 export interface StageEmailImportResult {
@@ -50,7 +59,7 @@ const STAGE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 export async function stageEmailImport(
   input: StageEmailImportInput,
 ): Promise<StageEmailImportResult> {
-  const { userId, rows, source, fromAddress, subject, svixId } = input;
+  const { userId, rows, source, fromAddress, subject, svixId, headers, sampleRows } = input;
 
   // Idempotency — Resend retries on 5xx. If we've seen this svix_id already,
   // surface the existing row instead of duplicating.
@@ -165,6 +174,8 @@ export async function stageEmailImport(
     totalRowCount: prepared.length,
     duplicateCount,
     expiresAt,
+    headers: headers ?? null,
+    sampleRows: sampleRows ?? null,
   });
 
   if (prepared.length > 0) {

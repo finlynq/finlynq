@@ -150,7 +150,7 @@ async function handleResendInbound(request: NextRequest): Promise<NextResponse> 
           attachments = await fetchResendAttachments(parsed.resendEmailId);
         }
 
-        const rows = await parseResendAttachments(attachments, route.userId);
+        const { rows, unmatchedCsvMeta } = await parseResendAttachments(attachments, route.userId);
         if (rows.length === 0) {
           // No usable attachments — treat as trash so admin can see the
           // body (some banks send HTML bodies with no CSV).
@@ -176,6 +176,8 @@ async function handleResendInbound(request: NextRequest): Promise<NextResponse> 
           fromAddress: parsed.from,
           subject: parsed.subject,
           svixId,
+          headers: unmatchedCsvMeta?.headers ?? null,
+          sampleRows: unmatchedCsvMeta?.sampleRows ?? null,
         });
 
         // User-facing notification — they'll see this next time they log in.

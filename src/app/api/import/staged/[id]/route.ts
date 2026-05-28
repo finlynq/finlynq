@@ -387,6 +387,72 @@ export async function GET(
     }
   }
 
+  // ─── 2026-05-28 — manual template/account picker payload ──────────────
+  // For email-import batches that didn't template-match at parse time, the
+  // detail page renders a "Pick template or bind to account" panel BEFORE
+  // the per-account split view. Surface the user's accounts (decrypted
+  // names) + import templates so the UI can render dropdowns without
+  // separate round-trips. Only attached when the staged_imports row
+  // carries fallback metadata (headers != null) — small payload, but no
+  // reason to send for already-bound batches.
+  let pickerCandidates: {
+    accounts: Array<{ id: number; name: string; currency: string; isInvestment: boolean }>;
+    templates: Array<{
+      id: number;
+      name: string;
+      defaultAccount: string | null;
+      columnMapping: unknown;
+      matchesHeaders: boolean;
+    }>;
+  } | null = null;
+  if (staged.headers != null && staged.boundAccountId == null) {
+    const headersForMatch = Array.isArray(staged.headers)
+      ? (staged.headers as unknown[]).filter((h): h is string => typeof h === "string")
+      : [];
+    const acctRows = await db
+      .select({
+        id: schema.accounts.id,
+        nameCt: schema.accounts.nameCt,
+        currency: schema.accounts.currency,
+        isInvestment: schema.accounts.isInvestment,
+        archived: schema.accounts.archived,
+      })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.userId, userId))
+      .all();
+    const accounts = acctRows
+      .filter((a) => !a.archived)
+      .map((a) => ({
+        id: a.id,
+        name: a.nameCt ? tryDecryptField(dek, a.nameCt, "accounts.name_ct") ?? "(encrypted)" : "(unnamed)",
+        currency: a.currency,
+        isInvestment: a.isInvestment,
+      }));
+
+    const tmplRows = await db
+      .select()
+      .from(schema.importTemplates)
+      .where(eq(schema.importTemplates.userId, userId))
+      .all();
+    // findBestTemplate expects parsed templates — defer the import to
+    // avoid pulling the template parser into hot paths.
+    const { deserializeTemplate, findBestTemplate } = await import("@/lib/import-templates");
+    const parsedTemplates = tmplRows.map(deserializeTemplate);
+    const bestMatch = headersForMatch.length > 0
+      ? findBestTemplate(headersForMatch, parsedTemplates)
+      : null;
+    const templates = parsedTemplates.map((t) => ({
+      id: t.id as number,
+      name: t.name as string,
+      defaultAccount: (t.defaultAccount as string | null) ?? null,
+      columnMapping: t.columnMapping,
+      // True only for the SINGLE best-match (findBestTemplate's contract);
+      // other templates render in the dropdown but without the badge.
+      matchesHeaders: bestMatch?.template.id === t.id,
+    }));
+    pickerCandidates = { accounts, templates };
+  }
+
   return NextResponse.json({
     staged,
     rows: decryptedRows,
@@ -398,6 +464,7 @@ export async function GET(
     },
     suggestedMatches,
     balanceWarnings,
+    pickerCandidates,
   });
 }
 

@@ -68,6 +68,11 @@ import { safeName } from "@/lib/safe-name";
 import { FilePane } from "@/components/import/reconcile/file-pane";
 import { DbPane, type DbTransactionRow } from "@/components/import/reconcile/db-pane";
 import {
+  UnboundImportPicker,
+  type PickerAccount,
+  type PickerTemplate,
+} from "@/components/staging/unbound-import-picker";
+import {
   SuggestionsGroup,
   type SuggestionDisplay,
 } from "@/components/import/reconcile/suggestions-group";
@@ -108,6 +113,12 @@ interface StagedDetail {
     /** 2026-05-24 — anchors parsed from the file's Balance column.
      *  Same shape persisted to staged_imports.parsed_anchors. */
     parsedAnchors?: ParsedAnchorRow[] | null;
+    /** 2026-05-28 — fallback metadata captured when an email-import CSV
+     *  attachment didn't template-match at parse time. Backs the
+     *  UnboundImportPicker. Both null for upload-path imports and for
+     *  email imports whose CSV did match a template. */
+    headers?: string[] | null;
+    sampleRows?: Array<Record<string, string>> | null;
   };
   rows: StagedEditableRow[];
   reconciliation?: {
@@ -124,6 +135,13 @@ interface StagedDetail {
   /** 2026-05-24 — bank balance pre-flight mismatches. Empty array =
    *  every anchor in the batch lines up with the running total. */
   balanceWarnings?: BalanceWarning[];
+  /** 2026-05-28 — populated by the GET when bound_account_id IS NULL AND
+   *  headers IS NOT NULL. Lets the UnboundImportPicker render template
+   *  + account dropdowns without extra round-trips. */
+  pickerCandidates?: {
+    accounts: PickerAccount[];
+    templates: PickerTemplate[];
+  } | null;
 }
 
 function daysUntil(iso: string): number {
@@ -1507,6 +1525,38 @@ function PendingImportsPageInner() {
               Loading rows…
             </CardContent>
           </Card>
+        ) : detail && detail.pickerCandidates && detail.staged.headers ? (
+          // 2026-05-28 — Unbound email-import path: CSV didn't template-match
+          // at parse time so per-account split would be empty. Render the
+          // template/account picker INSTEAD of the panes; on bind, reload
+          // detail and the panes render normally with populated account_name.
+          <UnboundImportPicker
+            stagedImportId={detail.staged.id}
+            headers={detail.staged.headers}
+            sampleRows={detail.staged.sampleRows ?? []}
+            accounts={detail.pickerCandidates.accounts}
+            templates={detail.pickerCandidates.templates}
+            fromAddress={detail.staged.fromAddress ?? null}
+            subject={detail.staged.subject ?? null}
+            totalRowCount={detail.staged.totalRowCount ?? detail.rows.length}
+            onBound={async () => {
+              // Reload detail so the picker disappears (server stops
+              // sending pickerCandidates after boundAccountId is set)
+              // and the panes render with the now-bound rows.
+              if (openId) {
+                setDetailLoading(true);
+                try {
+                  const resp = await fetch(`/api/import/staged/${openId}`);
+                  if (resp.ok) {
+                    const data = await resp.json();
+                    setDetail(data);
+                  }
+                } finally {
+                  setDetailLoading(false);
+                }
+              }
+            }}
+          />
         ) : detail ? (
           <TwoPaneLayout
             leftLabel="Bank ledger (continuous)"
