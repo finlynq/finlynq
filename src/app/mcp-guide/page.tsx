@@ -288,7 +288,6 @@ export default function McpGuidePage() {
           env: {
             DATABASE_URL: "postgresql://user:pass@localhost:5432/pf",
             PF_USER_ID: "your-user-uuid-from-users-table",
-            PF_PASSPHRASE: "your-passphrase",
           },
         },
       },

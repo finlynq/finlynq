@@ -131,11 +131,30 @@ export interface Notification {
 }
 
 // --- Auth ---
-export interface UnlockStatus {
-  unlocked: boolean;
-  needsSetup: boolean;
-  mode: string;
-  hasExistingData: boolean;
+/** Shape returned by GET /api/auth/session — the backend identity source. */
+export interface SessionInfo {
+  authenticated: boolean;
+  method: string | null;
+  authMethod?: string | null;
+  userId: string | null;
+  mfaVerified?: boolean;
+  onboardingComplete?: boolean;
+  isAdmin?: boolean;
+  username?: string | null;
+  email?: string | null;
+  displayName?: string | null;
+  displayCurrency?: string;
+}
+
+/** Payload for POST /api/auth/register. Username is the required identifier;
+ *  email is an optional recovery channel. When email is omitted the user must
+ *  set acknowledgeNoRecovery=true (no password-recovery path). */
+export interface RegisterPayload {
+  username: string;
+  email?: string;
+  password: string;
+  displayName?: string;
+  acknowledgeNoRecovery?: boolean;
 }
 
 // --- Dashboard ---

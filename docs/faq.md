@@ -23,7 +23,7 @@ No. Finlynq is open source under **AGPL v3** and donation-funded ([GitHub Sponso
 
 Sensitive text columns (payees, transaction notes, tags, account names, category names, goal names, loan names, subscription names, portfolio holding names + symbols) are encrypted at rest with **AES-256-GCM** using a per-user **DEK** (data encryption key). Your password is run through **scrypt** to derive a KEK that wraps the DEK on disk; the DEK itself lives only in memory while you're signed in (cleared on logout and on every deploy restart).
 
-Amounts, dates, and foreign keys stay plaintext so aggregations (budgets, portfolio rollups, MCP queries) can run server-side without an unwrap step. Full design in [architecture/encryption.md](./architecture/encryption.md).
+Amounts, dates, and account references stay plaintext so aggregations (budgets, portfolio rollups, MCP queries) can run on the server without unwrapping your key. The key itself is derived from your password and never leaves your session.
 
 ### What happens if I forget my password?
 
@@ -56,7 +56,7 @@ See the [Getting Started guide](./getting-started.md#connecting-an-ai-assistant-
 
 ### What can the AI assistant do?
 
-The MCP server registers **91 tools on HTTP / 87 tools on stdio** (as of server v3.1.0). They cover reads + writes across accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, recurring transactions, rules, imports, and the staging-review queue. Typical operations: record a transaction, log a transfer between accounts, create a budget or auto-categorize rule, run portfolio analysis, build a debt-payoff plan, review a pending CSV/email import.
+The MCP server registers **94 tools on HTTP / 87 tools on stdio** (as of server v3.1.0). They cover reads + writes across accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, recurring transactions, rules, imports, and the staging-review queue. Typical operations: record a transaction, log a transfer between accounts, create a budget or auto-categorize rule, run portfolio analysis, build a debt-payoff plan, review a pending CSV/email import.
 
 Destructive operations (delete account, delete category, bulk-categorize) use a **confirmation-token preview/execute pattern** so the AI has to show you the impact before it can act.
 
@@ -72,17 +72,17 @@ Finlynq supports five import methods:
 | **Excel** (.xlsx/.xls) | Spreadsheets with visual column mapper |
 | **PDF** | Bank statements with automatic table extraction |
 | **OFX/QFX** | Standard bank statement format |
-| **Email** | Forward bank statements to your per-user `import-<hex>@finlynq.com` address. See [resend-inbound-setup.md](./resend-inbound-setup.md) for the ops side. |
+| **Email** | Forward bank statements to your per-user `import-<code>@finlynq.com` address; attachments are parsed automatically. |
 
 Every import path lands in a **unified staging queue at `/import/pending`** — you review, edit (payee / category / note / tags / holding / amount + currency), flag transfer pairs, and approve before any row is materialized into your transactions table. Nothing is auto-committed.
 
 ### Will importing the same file create duplicates?
 
-No. Finlynq fingerprints each incoming row with a **SHA-256 hash over the plaintext payee + bank fitId** (computed at ingest, stable across edits and across the staging-encryption upgrade). Re-imports of the same file are detected and skipped.
+No. Finlynq fingerprints each incoming row with a **SHA-256 hash over the payee and the bank's transaction ID**, computed when the row first arrives and stable even if you later edit it. Re-imports of the same file are detected and skipped.
 
 ### Can I connect directly to my bank?
 
-Not today. Bank-feed aggregator integration (Plaid / SnapTrade / SimpleFIN / Enable Banking / Inverite — research is open) is on the roadmap, but no shipping date yet. For now, use file-based import: download statements from your bank's website (CSV / OFX / PDF), or forward email statements to your per-user import address.
+Not today. Bank-feed aggregator integration (services like Plaid, SnapTrade, and SimpleFIN) is on the roadmap, but there's no shipping date yet. For now, use file-based import: download statements from your bank's website (CSV / OFX / PDF), or forward email statements to your per-user import address.
 
 ## Multi-Device & Mobile
 
@@ -107,15 +107,15 @@ Create a budget by picking a category and setting a monthly limit. Finlynq track
 
 ### Can I use multiple currencies?
 
-Yes. Finlynq supports multi-currency accounts with automatic FX-rate fetching (Yahoo Finance for fiat, CoinGecko for crypto, Stooq for precious metals). Each account has its own currency; reports convert to your base currency on the fly. Triangulated rates (e.g. EUR → USD → CAD) are computed via the USD hop and surface the worst-case per-leg source so you can see when a rate is stale or overridden.
+Yes. Finlynq supports multi-currency accounts with automatic FX-rate fetching (Yahoo Finance for fiat, CoinGecko for crypto, Stooq for precious metals). Each account has its own currency; reports convert to your base currency on the fly. Pairs without a direct rate (e.g. EUR → CAD) are converted via USD, and Finlynq shows you the source of each rate so you can tell when one is stale or manually overridden.
 
 ## Troubleshooting
 
 ### Encrypted fields show as "—" or `v1:...`
 
-This means the server has a row but no DEK to decrypt it. Most common cause: the in-memory DEK cache was cleared by a deploy restart (hosted) or a process restart (self-hosted). Sign out and back in — that re-unwraps your DEK and the names + payees come back.
+This means the server has the row but doesn't currently hold the key to decrypt it. Most common cause: your encryption key is loaded only while you're signed in, and it gets cleared by a server restart (a deploy on hosted, or a process restart self-hosted). Sign out and back in — that reloads your key and the names + payees come back.
 
-If they're still missing after a clean re-login, your DEK may have been wrapped with a different password than the one you're using (the "Pathfinder DEK mismatch" footgun in `architecture/encryption.md`). File an issue with a screenshot if so.
+If they're still missing after a clean re-login, the data may have been encrypted under a different password than the one you're using now. File a GitHub issue with a screenshot if so.
 
 ### Import failed with an error
 

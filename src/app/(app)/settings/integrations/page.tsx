@@ -53,7 +53,8 @@ export default function IntegrationsSettingsPage() {
       "command": "npx",
       "args": ["tsx", "${typeof process !== "undefined" && process.cwd?.() ? process.cwd() : "/path/to/pf-app"}/mcp-server/index.ts"],
       "env": {
-        "PF_PASSPHRASE": "<your passphrase>"
+        "DATABASE_URL": "postgresql://user:pass@localhost:5432/pf",
+        "PF_USER_ID": "your-user-uuid-from-users-table"
       }
     }
   }
