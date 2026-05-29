@@ -89,13 +89,36 @@ perplexity.ai / claude.ai.
   would publish misinformation. They need a rewrite-for-current-architecture pass
   first (spawned as a separate task); then a `/docs/*` route can render them.
 
-## Deferred (follow-up)
+## Phase 3 — /vs expansion (shipped 2026-05-29)
 
-- **OG/Twitter images** — `opengraph-image.tsx` via `next/og` (no image files
-  shipped yet; cards currently carry title + description only).
-- **Phase 4 external** — awesome-list PRs, Google Search Console / Bing
-  submission, IndexNow ping (need account access; GitHub repo topics + the
-  IndexNow key file are done in-repo).
-- **`/docs/*` route** — pending the doc rewrite above.
+The comparison cluster grew from 4 to 8 pages: added `/vs/ynab`, `/vs/actual`,
+`/vs/ghostfolio`, `/vs/maybe`. All use the shared `VsPage` template, carry
+BreadcrumbList JSON-LD (via the component), and are registered in `site.ts`
+(`VS_SLUGS` + `VS_META`) so they flow into the sitemap, the `/vs` index, the
+footer, and llms-full.txt. Content is sourced + dated; re-fact-check competitor
+claims before any prod promotion.
+
+## Phase 4 — OG images, IndexNow, repo SEO (shipped 2026-05-29)
+
+- **OG / Twitter images** — sitewide [opengraph-image.tsx](../src/app/opengraph-image.tsx)
+  (+ twitter-image re-export) via `next/og` ImageResponse. Next attaches it to
+  every route's OG/Twitter metadata automatically. Per-page dynamic images
+  (e.g. "Finlynq vs X") remain a future enhancement.
+- **IndexNow** — ownership key at `public/7e2c9a4f1b6d83e05a9c2f47b1d6e803.txt`.
+  After a deploy, ping Bing to index new/changed URLs:
+  `curl "https://api.indexnow.org/indexnow?url=https://finlynq.com/&key=7e2c9a4f1b6d83e05a9c2f47b1d6e803"`
+- **GitHub repo SEO** — repo description + topics set via `gh repo edit`
+  (personal-finance, mcp, model-context-protocol, self-hosted, budgeting,
+  nextjs, postgresql, agpl, …). The social-preview IMAGE must still be uploaded
+  manually in repo Settings (GitHub has no API for it) — use the OG image.
+
+## Deferred / needs user action
+
+- **Awesome-list PRs** (awesome-selfhosted, awesome-mcp-servers ×N,
+  awesome-personal-finance) and **Google Search Console / Bing Webmaster**
+  verification + sitemap submission — external accounts / third-party repos,
+  out of scope for an automated push. Submit `${SITE_URL}/sitemap.xml`.
+- **GitHub social-preview image upload** (manual, see above).
+- **`/docs/*` route** — pending the stale-doc rewrite (see Phase 2 note).
 - **FAQPage JSON-LD on `/vs/*`** — blocked on the `faq` answers being JSX
   (`ReactNode`); needs a plain-text `aText` field on `FaqItem` to serialize.
