@@ -106,7 +106,8 @@ const content: VsPageContent = {
     {
       label: "Funding / revenue model",
       finlynq: "Bootstrapped, donations",
-      competitor: "Original raised ~$1.45M, archived 2025; Sure is volunteer / donation",
+      competitor:
+        "Original raised ~$1.45M, shut down 2023, open-sourced, then archived July 2025 on a B2B pivot; Sure is volunteer / donation",
     },
   ],
   migrationSteps: [

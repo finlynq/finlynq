@@ -31,7 +31,7 @@ const content: VsPageContent = {
     "You want best-in-class envelope / zero-based budgeting UX — a keyboard-driven register, payee autocomplete, splits, and schedules. Actual nails budgeting in a way Finlynq does not aim to.",
     "You want true local-first with opt-in end-to-end encryption — your data lives on-device and the sync server stores opaque encrypted blobs. Architecturally very private for a single user's data.",
     "You want a permissive MIT license (proprietary forks allowed) rather than Finlynq's copyleft AGPL v3.",
-    "You want built-in bank sync via GoCardless (EU/UK) or SimpleFIN Bridge (US/Canada). Finlynq has no first-party bank sync today.",
+    "You want built-in bank sync via GoCardless (EU/UK), SimpleFIN Bridge (US/Canada), or Pluggy.ai (Brazil). Finlynq has no first-party bank sync today.",
     "You want a desktop app and offline-first multi-device via Actual's sync engine.",
   ],
   whenFinlynq: [
@@ -69,7 +69,8 @@ const content: VsPageContent = {
       label: "Bank sync",
       finlynq:
         "File / email import + connector framework. No first-party Plaid today.",
-      competitor: "GoCardless (EU/UK) + SimpleFIN Bridge (US/Canada); CSV/QIF/OFX import",
+      competitor:
+        "GoCardless (EU/UK, no new accounts since 2025) + SimpleFIN (US/Canada) + Pluggy.ai (Brazil); CSV/QIF/OFX import",
     },
     {
       label: "Encryption at rest",
@@ -96,7 +97,7 @@ const content: VsPageContent = {
     {
       label: "Multi-user / household",
       finlynq: "No (single-user)",
-      competitor: "Per-instance; multi-user is a roadmap item, not shipped",
+      competitor: "Multi-user shipped (requires an OpenID provider for login)",
     },
     {
       label: "Pricing",

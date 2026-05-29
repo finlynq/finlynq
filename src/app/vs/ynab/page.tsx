@@ -29,7 +29,7 @@ const content: VsPageContent = {
     "YNAB (You Need A Budget) is the gold-standard closed-source budgeting SaaS built on a strict zero-based, give-every-dollar-a-job method. Finlynq is the open-source, self-hostable alternative for people who also want investment tracking, multi-currency, encryption that excludes the operator, and a first-party MCP server — with no subscription.",
   whenCompetitor: [
     "You want a proven, opinionated budgeting method with 20 years of content, books, and a strong community. YNAB owns zero-based / envelope budgeting as a category; Finlynq is methodology-agnostic.",
-    "You want first-party bank sync that works out of the box — Plaid (US/Canada) and TrueLayer (select UK/EU banks). Finlynq has no first-party bank sync today (file / email import only).",
+    "You want first-party bank sync that works out of the box — Plaid (US/Canada, and now UK/EU Direct Import). Finlynq has no first-party bank sync today (file / email import only).",
     "You want a polished native iOS / Android app with best-in-class quick-entry at the register. YNAB's mobile is more mature than Finlynq's React Native app.",
     "You want shared household budgeting baked in — multiple people on one subscription. Finlynq is single-user.",
     "You want a long-stable, well-documented public REST API that a community of tools already builds on.",
@@ -69,7 +69,7 @@ const content: VsPageContent = {
       label: "Bank sync",
       finlynq:
         "File / email import + connector framework. No first-party Plaid today.",
-      competitor: "Plaid (US/Canada) + TrueLayer (select UK/EU); CSV/OFX/QFX elsewhere",
+      competitor: "Plaid (US/Canada, and UK/EU Direct Import); CSV/OFX/QFX elsewhere",
     },
     {
       label: "Encryption at rest",
@@ -121,7 +121,7 @@ const content: VsPageContent = {
     },
     {
       q: "Can Finlynq sync my bank like YNAB does?",
-      a: "Not with first-party bank sync today. Finlynq imports via CSV/OFX/QFX/PDF/email and a connector framework; SnapTrade is on the roadmap. YNAB's Plaid/TrueLayer sync is more automatic.",
+      a: "Not with first-party bank sync today. Finlynq imports via CSV/OFX/QFX/PDF/email and a connector framework; SnapTrade is on the roadmap. YNAB's Plaid-based sync is more automatic.",
     },
     {
       q: "Why compare a free app to a paid one?",
