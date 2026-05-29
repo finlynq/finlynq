@@ -333,9 +333,21 @@ export const endpoints = {
     return { success: true, data: res.data?.balances ?? [] };
   },
 
-  // Transactions
-  getTransactions: (params?: string) =>
-    api.get<Transaction[]>(`/api/transactions${params ? `?${params}` : ""}`),
+  // Transactions. The REST route returns a paginated envelope
+  // `{ data: Transaction[], total }` (issue #59), NOT a bare array — so unwrap
+  // to Transaction[] here so every caller (list, account detail, dashboard
+  // recents) gets an array. Defensive: also accept a bare array.
+  getTransactions: async (params?: string): Promise<ApiResponse<Transaction[]>> => {
+    const res = await api.get<unknown>(`/api/transactions${params ? `?${params}` : ""}`);
+    if (!res.success) return res;
+    const body = res.data as Transaction[] | { data?: Transaction[] } | null;
+    const rows: Transaction[] = Array.isArray(body)
+      ? body
+      : Array.isArray(body?.data)
+        ? (body!.data as Transaction[])
+        : [];
+    return { success: true, data: rows };
+  },
   createTransaction: (data: TransactionFormData) =>
     api.post<Transaction>("/api/transactions", data),
   updateTransaction: (data: Partial<TransactionFormData> & { id: number }) =>

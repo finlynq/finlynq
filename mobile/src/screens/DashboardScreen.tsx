@@ -11,7 +11,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
-import type { DashboardData, HealthScoreData, BudgetWithSpending } from "../../../shared/types";
+import type { DashboardData, HealthScoreData, BudgetWithSpending, Category } from "../../../shared/types";
 
 function formatCurrency(amount: number, currency = "CAD"): string {
   return new Intl.NumberFormat("en-CA", {
@@ -126,6 +126,7 @@ export default function DashboardScreen() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [health, setHealth] = useState<HealthScoreData | null>(null);
   const [budgets, setBudgets] = useState<BudgetWithSpending[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -134,10 +135,11 @@ export default function DashboardScreen() {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     try {
-      const [dashRes, healthRes, budgetRes] = await Promise.all([
+      const [dashRes, healthRes, budgetRes, catRes] = await Promise.all([
         endpoints.getDashboard(),
         endpoints.getHealthScore(),
         endpoints.getBudgets(getCurrentMonth()),
+        endpoints.getCategories(),
       ]);
 
       if (dashRes.success) {
@@ -152,6 +154,11 @@ export default function DashboardScreen() {
       else logger.warn("dashboard", "health-score fetch failed", { error: healthRes.error });
       if (budgetRes.success) setBudgets(budgetRes.data);
       else logger.warn("dashboard", "budgets fetch failed", { error: budgetRes.error });
+      // /api/budgets returns categoryNameCt (ciphertext) undecrypted, so resolve
+      // the display name from the decrypted categories list by id (mirrors
+      // BudgetsScreen). Without this the budget progress shows "Category #1014".
+      if (catRes.success) setCategories(catRes.data);
+      else logger.warn("dashboard", "categories fetch failed", { error: catRes.error });
     } catch (e) {
       const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       logger.error("dashboard", "fetchAll threw", { detail });
@@ -167,6 +174,8 @@ export default function DashboardScreen() {
   }, []);
 
   const colors = theme.colors;
+  const categoryLabel = (catId: number) =>
+    categories.find((c) => c.id === catId)?.name || `Category #${catId}`;
 
   if (loading) {
     return (
@@ -291,7 +300,7 @@ export default function DashboardScreen() {
             {budgets.slice(0, 5).map((b) => (
               <BudgetProgressBar
                 key={b.id}
-                label={b.categoryName || `Category ${b.categoryId}`}
+                label={categoryLabel(b.categoryId)}
                 spent={b.convertedSpent ?? 0}
                 budget={b.convertedAmount ?? b.amount}
                 colors={colors}

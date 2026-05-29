@@ -47,9 +47,9 @@ export default function TransactionsScreen({ navigation }: Props) {
         if (res.success) {
           setTransactions(res.data);
           setError(null);
-          // Explicit count: distinguishes "global query empty" from a render bug
-          // (the request shape log truncates the data object in Diagnostics).
-          logger.info("transactions", "loaded", { count: res.data.length });
+          // Count in the message string (the Diagnostics panel truncates the
+          // data object) so an empty result is unambiguous on device.
+          logger.info("transactions", `loaded ${res.data.length} rows`);
         } else {
           logger.warn("transactions", "fetch failed", { error: res.error });
           setError(res.error);
@@ -243,9 +243,7 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, fontSize: 15, paddingVertical: 0 },
   clearBtn: { fontSize: 14, padding: 4 },
   hint: { fontSize: 11, textAlign: "center", marginBottom: 4 },
-  // Bottom tab bar is a fixed 60px (see TabNavigator) and screens only inset
-  // the top, so the bar overlaps list content — pad past it (60 + ~28 gap).
-  list: { paddingHorizontal: 16, paddingBottom: 88 },
+  list: { paddingHorizontal: 16, paddingBottom: 32 },
   row: {
     flexDirection: "row",
     alignItems: "center",

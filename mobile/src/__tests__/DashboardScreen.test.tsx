@@ -12,6 +12,7 @@ jest.mock("../api/client", () => ({
     getDashboard: jest.fn(),
     getHealthScore: jest.fn(),
     getBudgets: jest.fn(),
+    getCategories: jest.fn(),
   },
 }));
 
@@ -100,6 +101,12 @@ function renderWithTheme(component: React.ReactElement) {
 describe("DashboardScreen", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // The dashboard resolves budget category names from the decrypted
+    // categories list (id 1 -> "Groceries" for the budget-progress assertion).
+    (endpoints.getCategories as jest.Mock).mockResolvedValue({
+      success: true,
+      data: [{ id: 1, type: "E", group: "Needs", name: "Groceries", note: "" }],
+    });
   });
 
   it("shows loading indicator initially", () => {

@@ -1,6 +1,7 @@
 import React from "react";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { StyleSheet } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "../theme";
 import { Icon, type IconName } from "../components/icon";
 import DashboardScreen from "../screens/DashboardScreen";
@@ -30,6 +31,11 @@ const Tab = createBottomTabNavigator<TabParamList>();
 
 export default function TabNavigator() {
   const { colors } = useTheme();
+  // Add the bottom safe-area inset to the bar so the labels sit ABOVE the OS
+  // gesture/home indicator instead of overlapping it. With edge-to-edge enabled
+  // and an explicit height, RN would otherwise ignore the inset and the bar
+  // draws under the system navigation area.
+  const insets = useSafeAreaInsets();
 
   return (
     <Tab.Navigator
@@ -41,8 +47,8 @@ export default function TabNavigator() {
           backgroundColor: colors.sidebar,
           borderTopColor: colors.sidebarBorder,
           borderTopWidth: StyleSheet.hairlineWidth,
-          height: 60,
-          paddingBottom: 6,
+          height: 60 + insets.bottom,
+          paddingBottom: insets.bottom + 6,
           paddingTop: 6,
         },
         tabBarActiveTintColor: colors.sidebarPrimary,
