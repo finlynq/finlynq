@@ -5,6 +5,21 @@ export const metadata: Metadata = {
   title: "Blog — Finlynq",
   description:
     "Long-form writing about the Finlynq personal-finance app: encryption architecture, MCP design, AI in personal finance, open-source operations.",
+  alternates: { canonical: "/blog" },
+  openGraph: {
+    title: "Finlynq blog",
+    description:
+      "Long-form writing on encryption, MCP design, and running an open-source personal-finance app.",
+    url: "/blog",
+    type: "website",
+    siteName: "Finlynq",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Finlynq blog",
+    description:
+      "Encryption architecture, MCP design, and open-source personal-finance operations.",
+  },
 };
 
 type Post = {

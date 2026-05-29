@@ -1,0 +1,26 @@
+# Finlynq
+
+> Open-source (AGPL v3) personal finance app with a first-party Model Context Protocol (MCP) server. Track income, expenses, budgets, investments, loans, and goals — then query your data in natural language from Claude, Cursor, Windsurf, or any MCP client. Self-host with Docker, or use the free managed cloud at finlynq.com/cloud.
+
+Finlynq is the only open-source, self-hostable personal finance manager (PFM) with a shipped first-party MCP server (91 HTTP / 87 stdio tools). Per-user envelope encryption (AES-256-GCM with a scrypt-derived key) means even the operator cannot read your transaction payees, notes, tags, account names, or category names. It is bootstrapped and donation-funded — no paid tiers, no advertising, no sale of user data. Not affiliated with Finq.com (a forex/CFD broker) or Finlync (a B2B treasury platform).
+
+## Core pages
+- [What is Finlynq?](https://finlynq.com/about): Overview, what makes it different, brand disambiguation, and FAQ.
+- [MCP guide](https://finlynq.com/mcp-guide): Connect Claude, Cursor, Windsurf, and other MCP clients (OAuth 2.1 + DCR, Bearer API key, or stdio).
+- [MCP tool catalog](https://finlynq.com/mcp-guide/tools): The full list of HTTP + stdio MCP tools, grouped by category.
+- [Self-hosting](https://finlynq.com/self-hosted): Run Finlynq on your own infrastructure with Docker Compose.
+- [Managed cloud](https://finlynq.com/cloud): Free hosted edition, same features as self-host.
+
+## Comparisons
+- [Finlynq vs Monarch Money](https://finlynq.com/vs/monarch): Open-source self-host vs polished closed SaaS with mature US bank sync.
+- [Finlynq vs Era](https://finlynq.com/vs/era): Two MCP-first PFMs — open-source + self-hostable vs closed hosted SaaS.
+- [Finlynq vs Firefly III](https://finlynq.com/vs/firefly-iii): Two open-source self-hostable PFMs — first-party MCP + name encryption vs mature double-entry.
+- [Finlynq vs Alderfi](https://finlynq.com/vs/alderfi): Shipped, encrypted, MCP-first Finlynq compared with Alderfi.
+
+## Writing
+- [How Finlynq encrypts your money](https://finlynq.com/blog/how-finlynq-encrypts-your-money): Envelope encryption explained in plain English — AES-256-GCM, a scrypt-derived key from your password, a per-user DEK, and the honest tradeoffs.
+
+## Project
+- [Source code (GitHub, AGPL v3)](https://github.com/finlynq/finlynq)
+- [Privacy policy](https://finlynq.com/privacy)
+- [Terms of service](https://finlynq.com/terms)

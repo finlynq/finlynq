@@ -6,13 +6,13 @@ export const metadata: Metadata = {
   description:
     "Finlynq vs Monarch Money: open-source AGPL v3 with self-host + 91 MCP tools + per-user envelope encryption + Canadian tax accounts, compared against Monarch's closed-source hosted SaaS with full Plaid bank sync and household budgeting. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
-    canonical: "https://finlynq.com/vs/monarch",
+    canonical: "/vs/monarch",
   },
   openGraph: {
     title: "Finlynq vs Monarch Money — open-source AI-native alternative",
     description:
       "Two AI-native PFMs, compared. Monarch: closed-source SaaS, $99/yr, Plaid bank sync, household plan. Finlynq: AGPL v3, self-hostable, 91 MCP tools, per-user envelope encryption, RRSP/TFSA tracking.",
-    url: "https://finlynq.com/vs/monarch",
+    url: "/vs/monarch",
     siteName: "Finlynq",
     type: "article",
   },

@@ -312,9 +312,16 @@ export function middleware(request: NextRequest) {
     pathname === "/" ||
     pathname === "/cloud" ||
     pathname === "/self-hosted" ||
+    pathname === "/about" ||
+    pathname === "/blog" ||
+    pathname === "/vs" ||
+    pathname === "/mcp-guide" ||
     pathname.startsWith("/cloud/") ||
     pathname.startsWith("/self-hosted/") ||
-    pathname.startsWith("/vs/");
+    pathname.startsWith("/vs/") ||
+    pathname.startsWith("/blog/") ||
+    pathname.startsWith("/mcp-guide/") ||
+    pathname.startsWith("/docs");
 
   // CSP `script-src` policy — per-request nonce + 'strict-dynamic'
   // (B10 / finding C-8).

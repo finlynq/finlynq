@@ -5,6 +5,15 @@ export const metadata: Metadata = {
   title: "Terms of Service — Finlynq",
   description:
     "Terms governing the Finlynq managed cloud service at finlynq.com. Self-hosted use of the source code is governed by AGPL v3.",
+  alternates: { canonical: "/terms" },
+  openGraph: {
+    title: "Terms of Service — Finlynq",
+    description:
+      "Terms governing the Finlynq managed cloud service. Self-hosted use is governed by AGPL v3.",
+    url: "/terms",
+    type: "website",
+    siteName: "Finlynq",
+  },
 };
 
 export default function TermsPage() {

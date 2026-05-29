@@ -6,13 +6,13 @@ export const metadata: Metadata = {
   description:
     "Finlynq vs Era: open-source AGPL v3 with self-host + 91 MCP tools + per-user envelope encryption, compared against Era's closed-source hosted SaaS with 27 MCP tools and operator-held keys. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
-    canonical: "https://finlynq.com/vs/era",
+    canonical: "/vs/era",
   },
   openGraph: {
     title: "Finlynq vs Era — open-source vs closed AI personal finance",
     description:
       "Two MCP-first personal finance apps, compared. Finlynq: AGPL v3, self-hostable, 91 MCP tools, per-user envelope encryption. Era: closed SaaS, hosted-only, 27 MCP tools, operator-held keys.",
-    url: "https://finlynq.com/vs/era",
+    url: "/vs/era",
     siteName: "Finlynq",
     type: "article",
   },

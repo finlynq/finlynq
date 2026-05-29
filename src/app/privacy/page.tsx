@@ -6,6 +6,15 @@ export const metadata: Metadata = {
   title: "Privacy Policy — Finlynq",
   description:
     "What Finlynq collects, how it's encrypted, what we never share, and how to export or delete your data.",
+  alternates: { canonical: "/privacy" },
+  openGraph: {
+    title: "Privacy Policy — Finlynq",
+    description:
+      "What Finlynq collects, how it's encrypted, what we never share, and how to export or delete your data.",
+    url: "/privacy",
+    type: "website",
+    siteName: "Finlynq",
+  },
 };
 
 export default function PrivacyPage() {

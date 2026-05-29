@@ -7,14 +7,14 @@ export const metadata: Metadata = {
   description:
     "Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (91 HTTP / 87 stdio tools) with per-user envelope encryption. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
-    canonical: "https://finlynq.com/vs/firefly-iii",
+    canonical: "/vs/firefly-iii",
   },
   openGraph: {
     title:
       "Finlynq vs Firefly III — open-source personal finance with first-party MCP",
     description:
       "Two AGPL v3 self-hostable PFMs, compared. Firefly III: 11-year-old double-entry, PSD2 bank sync, no first-party MCP. Finlynq: first-party MCP server with 91 HTTP / 87 stdio tools, per-user envelope encryption, native investment tracking.",
-    url: "https://finlynq.com/vs/firefly-iii",
+    url: "/vs/firefly-iii",
     siteName: "Finlynq",
     type: "article",
   },

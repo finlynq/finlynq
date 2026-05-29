@@ -1,23 +1,55 @@
 import Link from "next/link";
 import type { Metadata } from "next";
+import {
+  JsonLd,
+  articleSchema,
+  breadcrumbSchema,
+} from "@/components/seo/json-ld";
+
+const SLUG = "how-finlynq-encrypts-your-money";
+const PUBLISHED = "2026-05-13";
 
 export const metadata: Metadata = {
   title:
     "How Finlynq encrypts your money — envelope encryption, in plain English",
   description:
     "A walkthrough of Finlynq's encryption architecture: AES-256-GCM at rest, a per-user Data Encryption Key wrapped by a scrypt-derived key from your password, and the honest tradeoffs (operator can see anonymized amounts; lose your password, lose your data).",
+  alternates: { canonical: `/blog/${SLUG}` },
   openGraph: {
     title: "How Finlynq encrypts your money",
     description:
       "AES-256-GCM, a scrypt-derived key from your password, a per-user DEK, and the honest tradeoffs.",
     type: "article",
-    url: "https://finlynq.com/blog/how-finlynq-encrypts-your-money",
+    url: `/blog/${SLUG}`,
+    siteName: "Finlynq",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "How Finlynq encrypts your money",
+    description:
+      "Envelope encryption in plain English: AES-256-GCM, a scrypt-derived key, a per-user DEK, and the honest tradeoffs.",
   },
 };
 
 export default function HowFinlynqEncryptsYourMoneyPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <JsonLd
+        data={articleSchema({
+          title: "How Finlynq encrypts your money",
+          description:
+            "A walkthrough of Finlynq's encryption architecture: AES-256-GCM at rest, a per-user DEK wrapped by a scrypt-derived key, and the honest tradeoffs.",
+          path: `/blog/${SLUG}`,
+          datePublished: PUBLISHED,
+        })}
+      />
+      <JsonLd
+        data={breadcrumbSchema([
+          { name: "Home", path: "/" },
+          { name: "Blog", path: "/blog" },
+          { name: "How Finlynq encrypts your money", path: `/blog/${SLUG}` },
+        ])}
+      />
       <div className="mx-auto max-w-3xl px-6 py-16">
         <header className="mb-12 border-b border-border pb-8">
           <Link

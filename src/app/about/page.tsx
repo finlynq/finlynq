@@ -1,18 +1,24 @@
 import Link from "next/link";
 import type { Metadata } from "next";
+import {
+  JsonLd,
+  softwareApplicationSchema,
+  faqSchema,
+  breadcrumbSchema,
+} from "@/components/seo/json-ld";
 
 export const metadata: Metadata = {
   title: "What is Finlynq? — open-source personal finance app with first-party MCP",
   description:
     "Finlynq is an open-source (AGPL v3) personal finance web app with a first-party Model Context Protocol (MCP) server. Track income, expenses, budgets, investments, loans, and goals — then query your financial data from Claude, Cursor, Windsurf, or any MCP-compatible AI assistant. Not affiliated with Finq.com (forex broker) or Finlync (B2B treasury software).",
   alternates: {
-    canonical: "https://finlynq.com/about",
+    canonical: "/about",
   },
   openGraph: {
     title: "What is Finlynq? — open-source personal finance with first-party MCP",
     description:
       "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 91 MCP tools. Not affiliated with Finq.com or Finlync.",
-    url: "https://finlynq.com/about",
+    url: "/about",
     siteName: "Finlynq",
     type: "article",
   },
@@ -79,52 +85,19 @@ const faqItems: { q: string; a: string }[] = [
   },
 ];
 
-// JSON-LD structured data for Google's Knowledge Graph and AI search
-// disambiguation. Helps separate Finlynq from Finq.com and Finlync entities.
-const jsonLd = {
-  "@context": "https://schema.org",
-  "@graph": [
-    {
-      "@type": "SoftwareApplication",
-      "@id": "https://finlynq.com/#software",
-      name: "Finlynq",
-      applicationCategory: "FinanceApplication",
-      operatingSystem: "Web, Docker, iOS (React Native), Android (React Native)",
-      description:
-        "Open-source (AGPL v3) personal finance web app with a first-party Model Context Protocol (MCP) server. Track income, expenses, budgets, investments, loans, and goals; query in natural language from Claude, Cursor, Windsurf, or any MCP-compatible AI assistant.",
-      license: "https://www.gnu.org/licenses/agpl-3.0.html",
-      url: "https://finlynq.com/",
-      sameAs: [
-        "https://github.com/finlynq/finlynq",
-      ],
-      offers: {
-        "@type": "Offer",
-        price: "0",
-        priceCurrency: "USD",
-        description: "Free and open source. Donation-supported.",
-      },
-    },
-    {
-      "@type": "FAQPage",
-      mainEntity: faqItems.map(({ q, a }) => ({
-        "@type": "Question",
-        name: q,
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: a,
-        },
-      })),
-    },
-  ],
-};
-
 export default function AboutPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <script
-        type="application/ld+json"
-        // Structured data for search engines; safe — content is literal.
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      {/* JSON-LD for Google's Knowledge Graph + AI search disambiguation
+          (separates Finlynq from Finq.com / Finlync). Routed through the
+          nonce-aware <JsonLd> helper to satisfy the strict script-src CSP. */}
+      <JsonLd data={softwareApplicationSchema()} />
+      <JsonLd data={faqSchema(faqItems)} />
+      <JsonLd
+        data={breadcrumbSchema([
+          { name: "Home", path: "/" },
+          { name: "About", path: "/about" },
+        ])}
       />
       <div className="mx-auto max-w-3xl px-6 py-16">
         <header className="mb-12 border-b border-border pb-8">

@@ -3,8 +3,24 @@ import Link from "next/link";
 import { AnalyticsConsent } from "@/components/analytics-consent";
 
 export const metadata: Metadata = {
+  title: "Self-host Finlynq — Docker Compose personal finance with MCP",
   description:
-    "Self-hosted Finlynq on your own infrastructure with Docker Compose. Same code as the managed cloud at finlynq.com/cloud. No license fees.",
+    "Self-host Finlynq on your own infrastructure with Docker Compose. Same code as the managed cloud — first-party MCP server, per-user envelope encryption, PostgreSQL. AGPL v3, no license fees.",
+  alternates: { canonical: "/self-hosted" },
+  openGraph: {
+    title: "Self-host Finlynq with Docker",
+    description:
+      "Run the open-source, MCP-first personal finance app on your own hardware. Docker Compose + PostgreSQL. No license fees.",
+    url: "/self-hosted",
+    type: "website",
+    siteName: "Finlynq",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Self-host Finlynq with Docker",
+    description:
+      "Open-source, MCP-first personal finance on your own hardware. Docker Compose + PostgreSQL.",
+  },
 };
 
 export default function SelfHostedPage() {

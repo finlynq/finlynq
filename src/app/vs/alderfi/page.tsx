@@ -7,14 +7,14 @@ export const metadata: Metadata = {
   description:
     "Finlynq vs Alderfi: production-ready AGPL v3 PFM with 91 MCP tools, hosted demo, per-user envelope encryption, and multi-currency support — compared with Alderfi's pre-alpha Apache-2.0 project that ships local LLM (Llama 3 via llama.cpp). Side-by-side feature table, when to choose each, dated 2026-05-13.",
   alternates: {
-    canonical: "https://finlynq.com/vs/alderfi",
+    canonical: "/vs/alderfi",
   },
   openGraph: {
     title:
       "Finlynq vs Alderfi — two open-source MCP-first personal finance apps",
     description:
       "Two open-source MCP-first PFMs, honestly compared. Finlynq: AGPL v3, production, 91 MCP tools, hosted + self-host, per-user encryption. Alderfi: Apache-2.0, pre-alpha, local LLM via llama.cpp.",
-    url: "https://finlynq.com/vs/alderfi",
+    url: "/vs/alderfi",
     siteName: "Finlynq",
     type: "article",
   },

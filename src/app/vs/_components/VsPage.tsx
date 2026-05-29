@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
+import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
 
 /**
  * Shared layout for `/vs/<competitor>` comparison pages.
@@ -60,6 +61,7 @@ export type VsPageContent = {
 export function VsPage({ content }: { content: VsPageContent }) {
   const {
     competitorName,
+    slug,
     tagline,
     whenCompetitor,
     whenFinlynq,
@@ -73,6 +75,13 @@ export function VsPage({ content }: { content: VsPageContent }) {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <AnalyticsConsent />
+      <JsonLd
+        data={breadcrumbSchema([
+          { name: "Home", path: "/" },
+          { name: "Comparisons", path: "/vs" },
+          { name: `Finlynq vs ${competitorName}`, path: `/vs/${slug}` },
+        ])}
+      />
       <div className="mx-auto max-w-3xl px-6 py-16">
         <header className="mb-12 border-b border-border pb-8">
           <Link
