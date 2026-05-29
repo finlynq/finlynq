@@ -1,4 +1,10 @@
-import { api, getServerUrl, setServerUrl, endpoints } from "../api/client";
+import {
+  api,
+  getServerUrl,
+  setServerUrl,
+  endpoints,
+  getSession,
+} from "../api/client";
 
 // Mock global fetch
 const mockFetch = jest.fn();
@@ -56,12 +62,12 @@ describe("API Client", () => {
         json: () => Promise.resolve({ success: true, data: {} }),
       });
 
-      await api.post("/api/auth/unlock", { action: "unlock", passphrase: "test" });
+      await api.post("/api/transactions", { amount: 100 });
 
-      expect(mockFetch).toHaveBeenCalledWith("http://localhost:3000/api/auth/unlock", {
+      expect(mockFetch).toHaveBeenCalledWith("http://localhost:3000/api/transactions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "unlock", passphrase: "test" }),
+        body: JSON.stringify({ amount: 100 }),
       });
     });
 
@@ -134,34 +140,60 @@ describe("API Client", () => {
       });
     });
 
-    it("getUnlockStatus calls correct path", async () => {
-      await endpoints.getUnlockStatus();
+    it("login sends {identifier, password} to /api/auth/login", async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true }),
+        headers: { get: () => null },
+      });
+      await endpoints.login("alice", "hunter2hunter2");
       expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:3000/api/auth/unlock",
+        "http://localhost:3000/api/auth/login",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            identifier: "alice",
+            password: "hunter2hunter2",
+          }),
+        })
+      );
+    });
+
+    it("register forwards the full payload to /api/auth/register", async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ success: true }),
+        headers: { get: () => null },
+      });
+      const payload = {
+        username: "alice",
+        email: undefined,
+        password: "correct horse battery",
+        displayName: "Alice",
+        acknowledgeNoRecovery: true,
+      };
+      await endpoints.register(payload);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/auth/register",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify(payload),
+        })
+      );
+    });
+
+    it("getSession calls /api/auth/session", async () => {
+      mockFetch.mockResolvedValue({
+        json: () => Promise.resolve({ authenticated: true, userId: "u1" }),
+      });
+      const session = await getSession();
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/auth/session",
         expect.any(Object)
       );
-    });
-
-    it("unlock sends correct payload", async () => {
-      await endpoints.unlock("mypass");
-      expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:3000/api/auth/unlock",
-        expect.objectContaining({
-          method: "POST",
-          body: JSON.stringify({ action: "unlock", passphrase: "mypass" }),
-        })
-      );
-    });
-
-    it("lock sends correct payload", async () => {
-      await endpoints.lock();
-      expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:3000/api/auth/unlock",
-        expect.objectContaining({
-          method: "POST",
-          body: JSON.stringify({ action: "lock" }),
-        })
-      );
+      expect(session).toEqual({ authenticated: true, userId: "u1" });
     });
 
     it("getDashboard calls correct path", async () => {

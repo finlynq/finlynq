@@ -4,20 +4,21 @@ import SettingsScreen from "../screens/SettingsScreen";
 import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
 import { lightColors } from "../theme/colors";
-import { getServerUrl, setServerUrl } from "../api/client";
+import { getServerUrl } from "../api/client";
 
 jest.mock("../api/client", () => ({
   getServerUrl: jest.fn(() => "http://localhost:3000"),
-  setServerUrl: jest.fn(),
 }));
 
-const mockLock = jest.fn();
+const mockSignOut = jest.fn();
+const mockSaveServerUrl = jest.fn();
 const mockSetBiometricEnabled = jest.fn();
 const mockSetAutoLockMinutes = jest.fn();
 
 jest.mock("../hooks/useAuth", () => ({
   useAuth: () => ({
-    lock: mockLock,
+    signOut: mockSignOut,
+    saveServerUrl: mockSaveServerUrl,
     biometricAvailable: true,
     biometricEnabled: false,
     setBiometricEnabled: mockSetBiometricEnabled,
@@ -67,7 +68,7 @@ describe("SettingsScreen", () => {
   it("shows ABOUT section", () => {
     const { getByText } = renderWithTheme(<SettingsScreen />);
     expect(getByText("ABOUT")).toBeTruthy();
-    expect(getByText("PF Mobile")).toBeTruthy();
+    expect(getByText("Finlynq")).toBeTruthy();
     expect(getByText("1.0.0")).toBeTruthy();
     expect(getByText("React Native + Expo")).toBeTruthy();
   });
@@ -81,19 +82,19 @@ describe("SettingsScreen", () => {
     expect(getByText("30 min")).toBeTruthy();
   });
 
-  it("shows Lock App Now button", () => {
+  it("shows Sign Out button", () => {
     const { getByText } = renderWithTheme(<SettingsScreen />);
-    expect(getByText("Lock App Now")).toBeTruthy();
+    expect(getByText("Sign Out")).toBeTruthy();
   });
 
-  it("calls setServerUrl on save", () => {
+  it("calls saveServerUrl on save", () => {
     const { getByText, getByDisplayValue } = renderWithTheme(<SettingsScreen />);
 
     const input = getByDisplayValue("http://localhost:3000");
     fireEvent.changeText(input, "http://myserver:3000");
     fireEvent.press(getByText("Save"));
 
-    expect(setServerUrl).toHaveBeenCalledWith("http://myserver:3000");
+    expect(mockSaveServerUrl).toHaveBeenCalledWith("http://myserver:3000");
   });
 
   it("shows footer text", () => {

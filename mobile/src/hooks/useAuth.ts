@@ -1,136 +1,114 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useContext,
+  createContext,
+  createElement,
+  type ReactNode,
+} from "react";
 import { AppState, AppStateStatus } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SecureStore from "expo-secure-store";
-import { endpoints, setAuthToken, getAuthToken } from "../api/client";
+import type { RegisterPayload } from "../../../shared/types";
+import {
+  endpoints,
+  getSession,
+  setAuthToken,
+  setServerUrl,
+} from "../api/client";
 
 const BIOMETRIC_KEY = "pf_biometric_enabled";
 const AUTO_LOCK_KEY = "pf_auto_lock_minutes";
-const PASSPHRASE_KEY = "pf_passphrase";
-const SERVER_MODE_KEY = "pf_server_mode";
 const SESSION_TOKEN_KEY = "pf_session_token";
-
-export type ServerMode = "self-hosted" | "cloud" | null;
+const SERVER_URL_KEY = "pf_server_url";
 
 interface AuthState {
+  /** UI gate the navigator reads — true means show the main app. */
   isUnlocked: boolean;
+  /** We hold a session token that validated against /api/auth/session. May be
+   *  locked behind biometrics (hasSession true + isUnlocked false). */
+  hasSession: boolean;
   isLoading: boolean;
-  needsSetup: boolean;
   error: string | null;
   biometricAvailable: boolean;
   biometricEnabled: boolean;
   autoLockMinutes: number; // 0 = disabled
-  serverMode: ServerMode;
 }
 
-export function useAuth() {
+export type { RegisterPayload };
+
+function useAuthEngine() {
   const [state, setState] = useState<AuthState>({
     isUnlocked: false,
+    hasSession: false,
     isLoading: true,
-    needsSetup: false,
     error: null,
     biometricAvailable: false,
     biometricEnabled: false,
     autoLockMinutes: 5,
-    serverMode: null,
   });
 
   const backgroundedAt = useRef<number | null>(null);
 
-  // Load persisted server mode and session token on mount
+  // Bootstrap: restore the server URL + biometric prefs, then validate any
+  // stored session token against the backend's single identity source.
   useEffect(() => {
     (async () => {
-      const [mode, token] = await Promise.all([
-        AsyncStorage.getItem(SERVER_MODE_KEY),
-        SecureStore.getItemAsync(SESSION_TOKEN_KEY),
-      ]);
-      const serverMode = (mode === "self-hosted" || mode === "cloud") ? mode : null;
+      const [storedUrl, biometricHw, bioEnabled, autoLockStr, token] =
+        await Promise.all([
+          AsyncStorage.getItem(SERVER_URL_KEY),
+          LocalAuthentication.hasHardwareAsync(),
+          AsyncStorage.getItem(BIOMETRIC_KEY),
+          AsyncStorage.getItem(AUTO_LOCK_KEY),
+          SecureStore.getItemAsync(SESSION_TOKEN_KEY),
+        ]);
 
-      // Restore token for cloud mode
-      if (serverMode === "cloud" && token) {
+      if (storedUrl) setServerUrl(storedUrl);
+      const autoLock = autoLockStr ? parseInt(autoLockStr, 10) : 5;
+      const biometricEnabled = bioEnabled === "true";
+
+      let isUnlocked = false;
+      let hasSession = false;
+
+      if (token) {
         setAuthToken(token);
+        try {
+          const session = await getSession();
+          if (session.authenticated) {
+            hasSession = true;
+            // Gate behind biometrics when enabled; otherwise unlock straight away.
+            isUnlocked = !(biometricHw && biometricEnabled);
+          } else {
+            // Token rejected (expired / deploy-rotated) — drop it.
+            setAuthToken(null);
+            await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
+          }
+        } catch {
+          // Couldn't reach the server. Keep the stored token (it may still be
+          // valid once the URL/network is fixed) but fall through to the login
+          // screen so the user can retry or correct the server URL.
+        }
       }
 
-      setState((s) => ({ ...s, serverMode }));
+      setState((s) => ({
+        ...s,
+        isUnlocked,
+        hasSession,
+        isLoading: false,
+        biometricAvailable: biometricHw,
+        biometricEnabled,
+        autoLockMinutes: isNaN(autoLock) ? 5 : autoLock,
+      }));
     })();
   }, []);
 
-  const checkStatus = useCallback(async () => {
-    try {
-      const [res, biometricHw, bioEnabled, autoLockStr] = await Promise.all([
-        endpoints.getUnlockStatus(),
-        LocalAuthentication.hasHardwareAsync(),
-        AsyncStorage.getItem(BIOMETRIC_KEY),
-        AsyncStorage.getItem(AUTO_LOCK_KEY),
-      ]);
-
-      const autoLock = autoLockStr ? parseInt(autoLockStr, 10) : 5;
-
-      if (res.success) {
-        setState((s) => ({
-          ...s,
-          isUnlocked: res.data.unlocked,
-          isLoading: false,
-          needsSetup: res.data.needsSetup,
-          error: null,
-          biometricAvailable: biometricHw,
-          biometricEnabled: bioEnabled === "true",
-          autoLockMinutes: isNaN(autoLock) ? 5 : autoLock,
-        }));
-      } else {
-        setState((s) => ({
-          ...s,
-          isLoading: false,
-          error: res.error,
-          biometricAvailable: biometricHw,
-          biometricEnabled: bioEnabled === "true",
-          autoLockMinutes: isNaN(autoLock) ? 5 : autoLock,
-        }));
-      }
-    } catch {
-      setState((s) => ({
-        ...s,
-        isLoading: false,
-        error: "Cannot connect to server",
-      }));
-    }
-  }, []);
-
-  // Check status once mode is set for self-hosted, or validate token for cloud
+  // Auto-lock on background. Only re-locks when biometrics are available AND
+  // enabled — without a biometric unlock path, locking would strand the user
+  // with no way back in short of a full re-login.
   useEffect(() => {
-    if (state.serverMode === "self-hosted") {
-      checkStatus();
-    } else if (state.serverMode === "cloud") {
-      // For cloud mode, check if we have a valid token
-      const token = getAuthToken();
-      if (token) {
-        // Validate token by making an API call
-        endpoints.getDashboard().then((res) => {
-          if (res.success) {
-            setState((s) => ({ ...s, isUnlocked: true, isLoading: false }));
-          } else {
-            // Token expired — clear it
-            setAuthToken(null);
-            SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
-            setState((s) => ({ ...s, isUnlocked: false, isLoading: false }));
-          }
-        }).catch(() => {
-          setState((s) => ({ ...s, isLoading: false, error: "Cannot connect to server" }));
-        });
-      } else {
-        setState((s) => ({ ...s, isLoading: false }));
-      }
-    } else if (state.serverMode === null) {
-      // Mode not selected yet — stop loading
-      setState((s) => ({ ...s, isLoading: false }));
-    }
-  }, [state.serverMode, checkStatus]);
-
-  // Auto-lock on background (self-hosted only)
-  useEffect(() => {
-    if (state.serverMode !== "self-hosted") return;
-
     const handleAppState = (nextState: AppStateStatus) => {
       if (nextState === "background" || nextState === "inactive") {
         backgroundedAt.current = Date.now();
@@ -140,156 +118,144 @@ export function useAuth() {
         if (
           state.autoLockMinutes > 0 &&
           elapsed >= state.autoLockMinutes &&
-          state.isUnlocked
+          state.isUnlocked &&
+          state.biometricAvailable &&
+          state.biometricEnabled
         ) {
-          endpoints.lock().then(() => {
-            setState((s) => ({ ...s, isUnlocked: false }));
-          });
+          // Lock the UI but keep the session token; biometric re-unlocks.
+          setState((s) => ({ ...s, isUnlocked: false }));
         }
       }
     };
 
     const sub = AppState.addEventListener("change", handleAppState);
     return () => sub.remove();
-  }, [state.serverMode, state.autoLockMinutes, state.isUnlocked]);
+  }, [
+    state.autoLockMinutes,
+    state.isUnlocked,
+    state.biometricAvailable,
+    state.biometricEnabled,
+  ]);
 
-  /** Set the server mode (first launch) */
-  const selectMode = useCallback(async (mode: "self-hosted" | "cloud") => {
-    await AsyncStorage.setItem(SERVER_MODE_KEY, mode);
-    setState((s) => ({ ...s, serverMode: mode, isLoading: true }));
+  /** Persist + apply the backend server URL (used by the login + settings screens). */
+  const saveServerUrl = useCallback(async (url: string) => {
+    const cleaned = url.trim().replace(/\/$/, "");
+    setServerUrl(cleaned);
+    await AsyncStorage.setItem(SERVER_URL_KEY, cleaned);
   }, []);
 
-  /** Reset mode selection (back to mode selector) */
-  const resetMode = useCallback(async () => {
-    await AsyncStorage.removeItem(SERVER_MODE_KEY);
-    await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
-    setAuthToken(null);
-    setState((s) => ({
-      ...s,
-      serverMode: null,
-      isUnlocked: false,
-      isLoading: false,
-      error: null,
-    }));
-  }, []);
-
-  // --- Self-hosted auth ---
-  const unlock = useCallback(async (passphrase: string) => {
+  /** Account login — `identifier` is a username OR email. */
+  const signIn = useCallback(async (identifier: string, password: string) => {
     setState((s) => ({ ...s, isLoading: true, error: null }));
     try {
-      const res = await endpoints.unlock(passphrase);
-      if (res.success && res.data.unlocked) {
-        setState((s) => ({ ...s, isUnlocked: true, isLoading: false }));
-        try {
-          await SecureStore.setItemAsync(PASSPHRASE_KEY, passphrase);
-        } catch {
-          // Non-critical
+      const res = await endpoints.login(identifier.trim(), password);
+      if (res.ok) {
+        // RN's fetch can't read the httpOnly session cookie, but its native
+        // cookie jar auto-resends it on subsequent requests (cookie-based
+        // account auth + DEK keyed on the JWT jti). Store the token only if the
+        // platform happened to expose it (best-effort Bearer fallback).
+        if (res.token) {
+          setAuthToken(res.token);
+          await SecureStore.setItemAsync(SESSION_TOKEN_KEY, res.token);
         }
-        return true;
-      }
-      setState((s) => ({
-        ...s,
-        isLoading: false,
-        error: res.success ? "Unlock failed" : (res as { error: string }).error,
-      }));
-      return false;
-    } catch {
-      setState((s) => ({
-        ...s,
-        isLoading: false,
-        error: "Cannot connect to server",
-      }));
-      return false;
-    }
-  }, []);
-
-  const biometricUnlock = useCallback(async () => {
-    if (!state.biometricEnabled || !state.biometricAvailable) return false;
-
-    try {
-      const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: "Unlock PF",
-        fallbackLabel: "Use Passphrase",
-        disableDeviceFallback: false,
-      });
-
-      if (!result.success) return false;
-
-      const savedPass = await SecureStore.getItemAsync(PASSPHRASE_KEY);
-      if (!savedPass) return false;
-
-      return unlock(savedPass);
-    } catch {
-      return false;
-    }
-  }, [state.biometricEnabled, state.biometricAvailable, unlock]);
-
-  const lock = useCallback(async () => {
-    if (state.serverMode === "cloud") {
-      // Cloud mode: clear token
-      setAuthToken(null);
-      await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
-      setState((s) => ({ ...s, isUnlocked: false }));
-    } else {
-      await endpoints.lock();
-      setState((s) => ({ ...s, isUnlocked: false }));
-    }
-  }, [state.serverMode]);
-
-  // --- Cloud auth ---
-  const login = useCallback(async (email: string, password: string) => {
-    setState((s) => ({ ...s, isLoading: true, error: null }));
-    try {
-      const res = await endpoints.login(email, password);
-      if (res.ok && res.token) {
-        setAuthToken(res.token);
-        await SecureStore.setItemAsync(SESSION_TOKEN_KEY, res.token);
-        setState((s) => ({ ...s, isUnlocked: true, isLoading: false }));
+        setState((s) => ({
+          ...s,
+          isUnlocked: true,
+          hasSession: true,
+          isLoading: false,
+        }));
         return true;
       }
       if (res.data?.mfaRequired) {
         setState((s) => ({
           ...s,
           isLoading: false,
-          error: "MFA is not yet supported in the mobile app.",
+          error:
+            "Two-factor authentication isn't supported in the mobile app yet. Sign in on the web.",
         }));
         return false;
       }
-      const errorMsg = (res.data?.error as string) || "Login failed";
+      const errorMsg = (res.data?.error as string) || "Sign in failed";
       setState((s) => ({ ...s, isLoading: false, error: errorMsg }));
       return false;
-    } catch {
+    } catch (e) {
+      // Surface the real error so we can diagnose device-only failures.
+      const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       setState((s) => ({
         ...s,
         isLoading: false,
-        error: "Cannot connect to server",
+        error: `Cannot connect — ${detail}`,
       }));
       return false;
     }
   }, []);
 
-  const register = useCallback(async (email: string, password: string, displayName?: string) => {
+  /** Create a new account. Username is required; email is optional recovery. */
+  const register = useCallback(async (payload: RegisterPayload) => {
     setState((s) => ({ ...s, isLoading: true, error: null }));
     try {
-      const res = await endpoints.register(email, password, displayName);
-      if (res.ok && res.token) {
-        setAuthToken(res.token);
-        await SecureStore.setItemAsync(SESSION_TOKEN_KEY, res.token);
-        setState((s) => ({ ...s, isUnlocked: true, isLoading: false }));
+      const res = await endpoints.register(payload);
+      if (res.ok) {
+        // RN's fetch can't read the httpOnly session cookie, but its native
+        // cookie jar auto-resends it on subsequent requests (cookie-based
+        // account auth + DEK keyed on the JWT jti). Store the token only if the
+        // platform happened to expose it (best-effort Bearer fallback).
+        if (res.token) {
+          setAuthToken(res.token);
+          await SecureStore.setItemAsync(SESSION_TOKEN_KEY, res.token);
+        }
+        setState((s) => ({
+          ...s,
+          isUnlocked: true,
+          hasSession: true,
+          isLoading: false,
+        }));
         return true;
       }
       const errorMsg = (res.data?.error as string) || "Registration failed";
       setState((s) => ({ ...s, isLoading: false, error: errorMsg }));
       return false;
-    } catch {
+    } catch (e) {
+      // Surface the real error so we can diagnose device-only failures.
+      const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       setState((s) => ({
         ...s,
         isLoading: false,
-        error: "Cannot connect to server",
+        error: `Cannot connect — ${detail}`,
       }));
       return false;
     }
   }, []);
+
+  /** Clear the session token and return to the login screen. */
+  const signOut = useCallback(async () => {
+    setAuthToken(null);
+    await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
+    setState((s) => ({
+      ...s,
+      isUnlocked: false,
+      hasSession: false,
+      error: null,
+    }));
+  }, []);
+
+  /** Unlock the UI with biometrics. The session token already lives in
+   *  SecureStore — biometrics only gate the local UI, they don't re-auth. */
+  const biometricUnlock = useCallback(async () => {
+    if (!state.biometricEnabled || !state.biometricAvailable) return false;
+    try {
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: "Unlock Finlynq",
+        fallbackLabel: "Use Password",
+        disableDeviceFallback: false,
+      });
+      if (!result.success) return false;
+      setState((s) => ({ ...s, isUnlocked: true }));
+      return true;
+    } catch {
+      return false;
+    }
+  }, [state.biometricEnabled, state.biometricAvailable]);
 
   const setBiometricEnabled = useCallback(async (enabled: boolean) => {
     if (enabled) {
@@ -314,16 +280,33 @@ export function useAuth() {
 
   return {
     ...state,
-    selectMode,
-    resetMode,
-    unlock,
-    biometricUnlock,
-    lock,
-    login,
+    signIn,
     register,
-    checkStatus,
+    signOut,
+    biometricUnlock,
+    saveServerUrl,
     setBiometricEnabled,
     setAutoLockMinutes,
     clearError,
   };
+}
+
+export type AuthValue = ReturnType<typeof useAuthEngine>;
+
+// Auth state is shared via context so the navigator and the settings screen
+// read/write the SAME instance. Without this, signing out from Settings would
+// only mutate that screen's local state and never return the app to login.
+const AuthContext = createContext<AuthValue | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const value = useAuthEngine();
+  return createElement(AuthContext.Provider, { value }, children);
+}
+
+export function useAuth(): AuthValue {
+  const ctx = useContext(AuthContext);
+  if (!ctx) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return ctx;
 }

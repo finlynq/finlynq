@@ -1,8 +1,12 @@
 {
   "expo": {
-    "name": "PF Mobile",
-    "slug": "pf-mobile",
+    "name": "Finlynq",
+    "slug": "finlynq-mobile",
     "version": "1.0.0",
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -27,6 +31,20 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "scheme": "pf-mobile"
+    "scheme": "pf-mobile",
+    "extra": {
+      "eas": {
+        "projectId": "1e34e1d4-ff26-4772-a261-91ec54d9892c"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/1e34e1d4-ff26-4772-a261-91ec54d9892c"
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
   }
 }

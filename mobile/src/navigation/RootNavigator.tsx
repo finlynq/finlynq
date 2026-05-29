@@ -1,9 +1,9 @@
 import React from "react";
+import { View, ActivityIndicator } from "react-native";
 import { NavigationContainer, DefaultTheme, DarkTheme } from "@react-navigation/native";
 import { useTheme } from "../theme";
 import TabNavigator from "./TabNavigator";
-import UnlockScreen from "../screens/UnlockScreen";
-import ModeSelectScreen from "../screens/ModeSelectScreen";
+import LockScreen from "../screens/LockScreen";
 import LoginScreen from "../screens/LoginScreen";
 import { useAuth } from "../hooks/useAuth";
 
@@ -36,30 +36,45 @@ export default function RootNavigator() {
       };
 
   const renderContent = () => {
-    // Step 1: Mode not selected yet — show mode selector
-    if (auth.serverMode === null) {
-      return <ModeSelectScreen onSelect={auth.selectMode} />;
+    // Bootstrapping — restoring the stored session + validating it.
+    if (auth.isLoading) {
+      return (
+        <View
+          style={{
+            flex: 1,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: theme.colors.background,
+          }}
+        >
+          <ActivityIndicator color={theme.colors.primary} />
+        </View>
+      );
     }
 
-    // Step 2: Cloud mode — need login
-    if (auth.serverMode === "cloud" && !auth.isUnlocked) {
+    if (!auth.isUnlocked) {
+      // We hold a validated token but it's locked behind biometrics.
+      if (auth.hasSession && auth.biometricAvailable && auth.biometricEnabled) {
+        return (
+          <LockScreen
+            onBiometricUnlock={auth.biometricUnlock}
+            onSignOut={auth.signOut}
+          />
+        );
+      }
+      // No session (or no biometric gate) — sign in with an account.
       return (
         <LoginScreen
-          onLogin={auth.login}
+          onLogin={auth.signIn}
           onRegister={auth.register}
-          onBack={auth.resetMode}
+          onServerUrlChange={auth.saveServerUrl}
           error={auth.error}
           isLoading={auth.isLoading}
         />
       );
     }
 
-    // Step 3: Self-hosted mode — need passphrase unlock
-    if (auth.serverMode === "self-hosted" && !auth.isUnlocked) {
-      return <UnlockScreen isLoading={auth.isLoading} onBack={auth.resetMode} />;
-    }
-
-    // Step 4: Authenticated — show main app
+    // Authenticated + unlocked — show the main app.
     return <TabNavigator />;
   };
 

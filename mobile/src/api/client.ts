@@ -1,7 +1,7 @@
-// Typed API client for connecting to the PF Next.js backend
-import type { ApiResponse } from "../../../shared/types";
+// Typed API client for connecting to the Finlynq Next.js backend
+import type { ApiResponse, SessionInfo } from "../../../shared/types";
 
-let _serverUrl = "http://localhost:3000";
+let _serverUrl = "https://dev.finlynq.com";
 let _authToken: string | null = null;
 
 export function setServerUrl(url: string) {
@@ -65,6 +65,24 @@ export async function authRequest(
   return { ok: res.ok, status: res.status, data, token };
 }
 
+/**
+ * GET /api/auth/session — the single identity source of truth on the backend.
+ * Returns a bare `{ authenticated, userId, ... }` shape (NOT the `{ success,
+ * data }` envelope), so it bypasses the typed `api.get` helper. The stored
+ * session JWT rides along as a Bearer token.
+ */
+export async function getSession(): Promise<SessionInfo> {
+  const url = `${_serverUrl}/api/auth/session`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (_authToken) {
+    headers["Authorization"] = `Bearer ${_authToken}`;
+  }
+  const res = await fetch(url, { headers });
+  return res.json() as Promise<SessionInfo>;
+}
+
 export const api = {
   get<T>(path: string): Promise<ApiResponse<T>> {
     return request<T>(path);
@@ -106,25 +124,18 @@ import type {
   Category,
   DashboardData,
   HealthScoreData,
-  UnlockStatus,
+  RegisterPayload,
 } from "../../../shared/types";
 
 export const endpoints = {
-  // Auth — self-hosted (passphrase)
-  getUnlockStatus: () => api.get<UnlockStatus>("/api/auth/unlock"),
-  unlock: (passphrase: string) =>
-    api.post<{ unlocked: boolean }>("/api/auth/unlock", {
-      action: "unlock",
-      passphrase,
-    }),
-  lock: () =>
-    api.post<{ unlocked: boolean }>("/api/auth/unlock", { action: "lock" }),
-
-  // Auth — managed (cloud)
-  login: (email: string, password: string) =>
-    authRequest("/api/auth/login", { email, password }),
-  register: (email: string, password: string, displayName?: string) =>
-    authRequest("/api/auth/register", { email, password, displayName }),
+  // Auth — account login. `identifier` accepts username OR email; the backend
+  // login route resolves either via getUserByIdentifier. There is no longer a
+  // self-hosted passphrase/unlock path (the /api/auth/unlock endpoint was
+  // removed — GET /api/auth/session is the single identity source).
+  login: (identifier: string, password: string) =>
+    authRequest("/api/auth/login", { identifier, password }),
+  register: (payload: RegisterPayload) =>
+    authRequest("/api/auth/register", payload),
 
   // Dashboard
   getDashboard: () => api.get<DashboardData>("/api/dashboard"),
