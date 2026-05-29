@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.get_login_creds"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.pf.mobile",
+      "sha256_cert_fingerprints": [
+        "7D:F6:14:97:9F:1C:27:6E:EE:F3:F8:AD:FF:99:9C:30:D5:0C:9C:77:98:EF:9A:9F:E0:00:2A:D4:43:92:B1:04"
+      ]
+    }
+  }
+]
