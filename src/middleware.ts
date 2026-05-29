@@ -315,11 +315,13 @@ export function middleware(request: NextRequest) {
     pathname === "/about" ||
     pathname === "/blog" ||
     pathname === "/vs" ||
+    pathname === "/glossary" ||
     pathname === "/mcp-guide" ||
     pathname.startsWith("/cloud/") ||
     pathname.startsWith("/self-hosted/") ||
     pathname.startsWith("/vs/") ||
     pathname.startsWith("/blog/") ||
+    pathname.startsWith("/glossary/") ||
     pathname.startsWith("/mcp-guide/") ||
     pathname.startsWith("/docs");
 

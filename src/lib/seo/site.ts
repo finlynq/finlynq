@@ -62,6 +62,7 @@ export const STATIC_ROUTES: StaticRoute[] = [
   { path: "/mcp-guide", changeFrequency: "monthly", priority: 0.8 },
   { path: "/mcp-guide/tools", changeFrequency: "monthly", priority: 0.6 },
   { path: "/vs", changeFrequency: "monthly", priority: 0.6 },
+  { path: "/glossary", changeFrequency: "monthly", priority: 0.5 },
   { path: "/blog", changeFrequency: "weekly", priority: 0.6 },
   { path: "/privacy", changeFrequency: "yearly", priority: 0.4 },
   { path: "/terms", changeFrequency: "yearly", priority: 0.4 },

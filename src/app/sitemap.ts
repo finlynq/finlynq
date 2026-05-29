@@ -1,5 +1,6 @@
 import type { MetadataRoute } from "next";
 import { SITE_URL, STATIC_ROUTES, VS_SLUGS, BLOG_SLUGS } from "@/lib/seo/site";
+import { GLOSSARY_SLUGS } from "@/lib/seo/glossary";
 
 /**
  * Public sitemap for finlynq.com.
@@ -36,5 +37,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
     priority: 0.5,
   }));
 
-  return [...staticRoutes, ...vsRoutes, ...blogRoutes];
+  const glossaryRoutes: MetadataRoute.Sitemap = GLOSSARY_SLUGS.map((slug) => ({
+    url: `${SITE_URL}/glossary/${slug}`,
+    lastModified: now,
+    changeFrequency: "monthly" as const,
+    priority: 0.5,
+  }));
+
+  return [...staticRoutes, ...vsRoutes, ...blogRoutes, ...glossaryRoutes];
 }

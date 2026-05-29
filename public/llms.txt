@@ -20,6 +20,16 @@ Finlynq is the only open-source, self-hostable personal finance manager (PFM) wi
 ## Writing
 - [How Finlynq encrypts your money](https://finlynq.com/blog/how-finlynq-encrypts-your-money): Envelope encryption explained in plain English — AES-256-GCM, a scrypt-derived key from your password, a per-user DEK, and the honest tradeoffs.
 
+## Concepts (glossary)
+- [What is an MCP server?](https://finlynq.com/glossary/mcp-server)
+- [What is envelope encryption?](https://finlynq.com/glossary/envelope-encryption)
+- [What is self-hosted personal finance?](https://finlynq.com/glossary/self-hosted-personal-finance)
+- [What is a zero-knowledge personal finance app?](https://finlynq.com/glossary/zero-knowledge-personal-finance)
+- [What is lot-tracked cost basis?](https://finlynq.com/glossary/lot-tracked-cost-basis)
+
+## Optional
+- [Full text for LLMs](https://finlynq.com/llms-full.txt): The whole public glossary + page pointers in one file.
+
 ## Project
 - [Source code (GitHub, AGPL v3)](https://github.com/finlynq/finlynq)
 - [Privacy policy](https://finlynq.com/privacy)

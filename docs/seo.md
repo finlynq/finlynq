@@ -74,13 +74,28 @@ Capture a baseline before measuring lift: GSC impressions/clicks/position,
 `site:finlynq.com` indexed count, and GA referrals from chatgpt.com /
 perplexity.ai / claude.ai.
 
-## Deferred (follow-up phases)
+## Phase 2 — glossary + llms-full.txt (shipped 2026-05-29)
+
+- **`/glossary` + `/glossary/<slug>`** — hand-authored, accurate definition pages
+  ([src/lib/seo/glossary.ts](../src/lib/seo/glossary.ts) data → server-rendered,
+  no markdown dependency). Each has Article + BreadcrumbList JSON-LD. Targets
+  informational-intent queries + AI citation.
+- **`/llms-full.txt`** ([route](../src/app/llms-full.txt/route.ts)) — long-form
+  companion to llms.txt, built from the glossary + page pointers.
+- **The public `/docs/*` markdown route is DEFERRED on purpose.** The tracked
+  user docs (getting-started.md, faq.md, mobile-setup.md) are STALE — they still
+  describe the obsolete SQLite/SQLCipher passphrase-wizard architecture, not the
+  current PostgreSQL + username/password + per-user-DEK model. Exposing them raw
+  would publish misinformation. They need a rewrite-for-current-architecture pass
+  first (spawned as a separate task); then a `/docs/*` route can render them.
+
+## Deferred (follow-up)
 
 - **OG/Twitter images** — `opengraph-image.tsx` via `next/og` (no image files
   shipped yet; cards currently carry title + description only).
-- **Phase 2** — public `/docs/*` route + glossary + `llms-full.txt`.
-- **Phase 3** — new `/vs/*` competitor pages (YNAB, Actual, Ghostfolio, …).
-- **Phase 4** — off-page: GitHub repo topics + social preview, awesome-list PRs,
-  GSC / Bing submission, IndexNow.
+- **Phase 4 external** — awesome-list PRs, Google Search Console / Bing
+  submission, IndexNow ping (need account access; GitHub repo topics + the
+  IndexNow key file are done in-repo).
+- **`/docs/*` route** — pending the doc rewrite above.
 - **FAQPage JSON-LD on `/vs/*`** — blocked on the `faq` answers being JSX
   (`ReactNode`); needs a plain-text `aText` field on `FaqItem` to serialize.
