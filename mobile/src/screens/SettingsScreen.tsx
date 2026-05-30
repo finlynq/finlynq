@@ -10,7 +10,7 @@ import {
   Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useTheme } from "../theme";
+import { useTheme, type ThemePreference } from "../theme";
 import { useAuth } from "../hooks/useAuth";
 import { getServerUrl } from "../api/client";
 import { getLogs, clearLogs, type LogEntry, type LogLevel } from "../lib/logger";
@@ -23,6 +23,12 @@ const AUTO_LOCK_OPTIONS = [
   { label: "30 min", value: 30 },
 ];
 
+const THEME_OPTIONS: Array<{ label: string; value: ThemePreference }> = [
+  { label: "System", value: "system" },
+  { label: "Light", value: "light" },
+  { label: "Dark", value: "dark" },
+];
+
 export default function SettingsScreen() {
   const theme = useTheme();
   const {
@@ -33,6 +39,7 @@ export default function SettingsScreen() {
     setBiometricEnabled,
     autoLockMinutes,
     setAutoLockMinutes,
+    isAdmin,
   } = useAuth();
   const [url, setUrl] = useState(getServerUrl());
   const [saved, setSaved] = useState(false);
@@ -113,6 +120,45 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* Appearance — Light / Dark / System theme selector. */}
+        <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>APPEARANCE</Text>
+        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <Text style={[styles.settingLabel, { color: colors.foreground }]}>Theme</Text>
+          <Text style={[styles.settingDesc, { color: colors.mutedForeground }]}>
+            "System" follows your device's light/dark setting.
+          </Text>
+          <View style={styles.chipRow}>
+            {THEME_OPTIONS.map((opt) => (
+              <TouchableOpacity
+                key={opt.value}
+                onPress={() => theme.setPreference(opt.value)}
+                style={[
+                  styles.chip,
+                  {
+                    backgroundColor:
+                      theme.preference === opt.value ? colors.primary : colors.secondary,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.chipText,
+                    {
+                      color:
+                        theme.preference === opt.value
+                          ? colors.primaryForeground
+                          : colors.foreground,
+                    },
+                  ]}
+                >
+                  {opt.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
         {/* Security */}
         <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>SECURITY</Text>
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -189,7 +235,10 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Diagnostics — on-device view of the app log (no adb needed). */}
+        {/* Diagnostics — on-device view of the app log (no adb needed).
+            Admin-only: hidden for regular accounts (incl. the public demo). */}
+        {isAdmin && (
+          <>
         <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>DIAGNOSTICS</Text>
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[styles.settingDesc, { color: colors.mutedForeground, marginBottom: 10 }]}>
@@ -239,6 +288,8 @@ export default function SettingsScreen() {
             </View>
           )}
         </View>
+          </>
+        )}
 
         {/* About */}
         <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>ABOUT</Text>

@@ -94,7 +94,9 @@ const theme: Theme = {
 
 function renderWithTheme(component: React.ReactElement) {
   return render(
-    <ThemeContext.Provider value={theme}>{component}</ThemeContext.Provider>
+    <ThemeContext.Provider value={{ ...theme, preference: "system", setPreference: () => {} }}>
+      {component}
+    </ThemeContext.Provider>
   );
 }
 

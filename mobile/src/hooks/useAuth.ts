@@ -38,6 +38,8 @@ interface AuthState {
   biometricAvailable: boolean;
   biometricEnabled: boolean;
   autoLockMinutes: number; // 0 = disabled
+  /** Admin flag from GET /api/auth/session — gates the Diagnostics panel. */
+  isAdmin: boolean;
 }
 
 export type { RegisterPayload };
@@ -51,6 +53,7 @@ function useAuthEngine() {
     biometricAvailable: false,
     biometricEnabled: false,
     autoLockMinutes: 5,
+    isAdmin: false,
   });
 
   const backgroundedAt = useRef<number | null>(null);
@@ -82,6 +85,7 @@ function useAuthEngine() {
 
       let isUnlocked = false;
       let hasSession = false;
+      let isAdmin = false;
 
       if (token) {
         setAuthToken(token);
@@ -89,6 +93,7 @@ function useAuthEngine() {
           const session = await getSession();
           if (session.authenticated) {
             hasSession = true;
+            isAdmin = !!session.isAdmin;
             // Gate behind biometrics when enabled; otherwise unlock straight away.
             isUnlocked = !(biometricHw && biometricEnabled);
           } else {
@@ -110,6 +115,7 @@ function useAuthEngine() {
         ...s,
         isUnlocked,
         hasSession,
+        isAdmin,
         isLoading: false,
         biometricAvailable: biometricHw,
         biometricEnabled,
@@ -178,6 +184,13 @@ function useAuthEngine() {
           hasSession: true,
           isLoading: false,
         }));
+        // The login response doesn't carry admin status; refresh it from the
+        // session (rides the cookie jar). Non-blocking so login stays instant.
+        getSession()
+          .then((sess) =>
+            setState((s) => ({ ...s, isAdmin: sess.authenticated ? !!sess.isAdmin : false }))
+          )
+          .catch(() => {});
         return true;
       }
       if (res.data?.mfaRequired) {
@@ -231,6 +244,12 @@ function useAuthEngine() {
           hasSession: true,
           isLoading: false,
         }));
+        // Pull admin status from the session (non-blocking; cookie-jar backed).
+        getSession()
+          .then((sess) =>
+            setState((s) => ({ ...s, isAdmin: sess.authenticated ? !!sess.isAdmin : false }))
+          )
+          .catch(() => {});
         return true;
       }
       const errorMsg = (res.data?.error as string) || "Registration failed";
@@ -262,6 +281,7 @@ function useAuthEngine() {
       ...s,
       isUnlocked: false,
       hasSession: false,
+      isAdmin: false,
       error: null,
     }));
   }, []);

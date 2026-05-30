@@ -11,7 +11,7 @@
 import type { ApiResponse, SessionInfo } from "../../../shared/types";
 import { logger, describeShape } from "../lib/logger";
 
-let _serverUrl = "https://dev.finlynq.com";
+let _serverUrl = "https://finlynq.com";
 let _authToken: string | null = null;
 
 export function setServerUrl(url: string) {
@@ -249,7 +249,10 @@ async function composeDashboard(): Promise<ApiResponse<DashboardData>> {
   // Recent transactions are a separate endpoint; a failure here must not blank
   // the whole dashboard — degrade to an empty list and log it.
   let recentTransactions: Transaction[] = [];
-  const txRes = await api.get<Transaction[]>("/api/transactions?limit=5&sort=date&sortDir=desc");
+  // Use the unwrapping helper, NOT a raw api.get — the REST route returns the
+  // paginated `{ data, total }` envelope (issue #59), so a bare api.get would
+  // see a non-array and log a spurious "fetch failed" WARN on every 200.
+  const txRes = await endpoints.getTransactions("limit=5&sort=date&sortDir=desc");
   if (txRes.success && Array.isArray(txRes.data)) {
     recentTransactions = txRes.data;
   } else {

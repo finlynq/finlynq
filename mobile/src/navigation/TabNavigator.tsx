@@ -1,5 +1,6 @@
 import React from "react";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
+import type { NavigatorScreenParams } from "@react-navigation/native";
 import { StyleSheet } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "../theme";
@@ -8,7 +9,7 @@ import DashboardScreen from "../screens/DashboardScreen";
 import AccountsStack from "./AccountsStack";
 import PortfolioScreen from "../screens/PortfolioScreen";
 import TransactionsStack from "./TransactionsStack";
-import MoreStack from "./MoreStack";
+import MoreStack, { type MoreStackParamList } from "./MoreStack";
 
 // Option B — "Wealth-led" IA: Home · Accounts · Portfolio · Transactions · More.
 export type TabParamList = {
@@ -16,7 +17,8 @@ export type TabParamList = {
   Accounts: undefined;
   Portfolio: undefined;
   Transactions: undefined;
-  More: undefined;
+  // Nested-stack params so we can navigate the More tab back to its menu root.
+  More: NavigatorScreenParams<MoreStackParamList> | undefined;
 };
 
 const ICON_BY_ROUTE: Record<keyof TabParamList, IconName> = {
@@ -63,7 +65,21 @@ export default function TabNavigator() {
       <Tab.Screen name="Accounts" component={AccountsStack} />
       <Tab.Screen name="Portfolio" component={PortfolioScreen} />
       <Tab.Screen name="Transactions" component={TransactionsStack} />
-      <Tab.Screen name="More" component={MoreStack} />
+      <Tab.Screen
+        name="More"
+        component={MoreStack}
+        // Always return the More tab to its menu root. `popToTopOnBlur` covers
+        // the "drill in → switch tab → come back" case; the `tabPress` guard
+        // covers re-tapping More while already inside a deep More screen.
+        options={{ popToTopOnBlur: true }}
+        listeners={({ navigation }) => ({
+          tabPress: () => {
+            if (navigation.isFocused()) {
+              navigation.navigate("More", { screen: "MoreHome" });
+            }
+          },
+        })}
+      />
     </Tab.Navigator>
   );
 }
