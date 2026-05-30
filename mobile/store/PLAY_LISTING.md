@@ -4,6 +4,12 @@ All copy + every "App content" / Data Safety / content-rating answer for the Pla
 Console, plus the graphics checklist. Package `com.finlynq.mobile`. Target
 audience already set to **18 and over**.
 
+> **Status (2026-05-30):** Data Safety form (§5) + target-audience (18+) + the
+> deletion URL are **filled & verified against the app** (matched a Play CSV
+> export — Name/Email/User IDs/Other financial info/Files-and-docs, deletion
+> URLs both set). Content rating (§4), store-listing assets (§2 screenshots),
+> and the route-to-production decision (§7) are the remaining user-side steps.
+
 ---
 
 ## 1. Store listing
@@ -118,19 +124,21 @@ This is a shared demo account preloaded with sample data (it resets nightly). Af
 **Does your app collect or share any required user data types?** → **Yes**
 **Is all user data encrypted in transit?** → **Yes** (HTTPS/TLS to the backend)
 **Account creation methods:** → **Username and password** (email counts as a username; no OAuth; biometric is local-unlock only)
-**Do you provide a way to request data deletion?** → **Yes** (in-app account wipe + deletion URL — see note below)
+**Do you provide a way to request data deletion?** → **Yes**
+**Delete account URL** → `https://finlynq.com/account-deletion`
+**Delete data URL** → `https://finlynq.com/account-deletion` (same page covers both)
 
-**Data collected — Shared = No for every item:**
+**Data collected — Shared = No for every item. ✅ This is the FINAL submitted state (matches the Play CSV export, verified 2026-05-30):**
 
 | Category → Data type | Collected | Required/Optional | Processed ephemerally | Purpose |
 |---|---|---|---|---|
-| Personal info → Name | Yes | Optional | No | App functionality, Account management |
-| Personal info → Email address | Yes | Optional | No | App functionality, Account management |
-| Personal info → User IDs (username) | Yes | Required | No | App functionality, Account management |
-| Financial info → Other financial info (balances, transactions, budgets, investments) | Yes | Required | No | App functionality |
+| Personal info → Name | Yes | Optional | **No** | App functionality, Account management |
+| Personal info → Email address | Yes | Optional | **No** | App functionality, Account management |
+| Personal info → User IDs (username) | Yes | Required | **No** | App functionality, Account management |
+| Financial info → Other financial info (balances, transactions, budgets, investments) | Yes | Required | **No** | App functionality |
 | **Files and docs** (uploaded CSV/Excel/OFX/PDF statements for import) | Yes | Optional | **Yes** (parsed server-side; raw file not retained as a file) | App functionality |
 
-> **Files and docs is YES** because the in-app Import screen lets users upload a bank/statement file (`expo-document-picker` → `/api/import/preview` + `/api/import/execute`). The file is parsed into transactions server-side and isn't kept as a file, so mark **Processed ephemerally = Yes**. The transactions extracted from it are covered by "Other financial info."
+> **Name + Email** come from the in-app register form ([LoginScreen.tsx](../src/screens/LoginScreen.tsx) "Create Account" mode: optional display name + optional email). **Other financial info** = the user's transactions/balances/budgets the app reads + writes ([AddTransactionScreen.tsx](../src/screens/AddTransactionScreen.tsx) `createTransaction`/`recordTransfer`) — a finance app MUST declare this or review flags it. **User IDs ephemeral = No** (the username is stored on the account, not discarded). **Files and docs ephemeral = Yes** because the Import screen uploads a statement file (`expo-document-picker` → `/api/import/preview` + `/api/import/execute`) that's parsed into transactions server-side and not kept as a file.
 
 **Everything else → NOT collected**, specifically:
 - Location, Phone number, Physical address, Contacts, Calendar — No
@@ -151,13 +159,14 @@ This is a shared demo account preloaded with sample data (it resets nightly). Af
 
 ---
 
-## 6. ⚠️ One gap to close before production: data-deletion URL
-Google requires a **reachable URL** where users can request account/data deletion
-(in addition to the in-app wipe). Confirm finlynq.com exposes one (a Settings
-deletion flow page, or a documented path). If it doesn't yet, add a short
-"Delete your account" section to `/privacy` (or a `/account-deletion` page) and
-use that URL. Until that URL exists, the Data Safety "deletion" entry can't be
-fully completed.
+## 6. ✅ Data-deletion URL — DONE (was the one gap; now closed)
+Google requires a reachable URL where users can request account/data deletion.
+**Shipped + live on prod:** [`https://finlynq.com/account-deletion`](https://finlynq.com/account-deletion)
+(source: [src/app/account-deletion/page.tsx](../../src/app/account-deletion/page.tsx)) — names
+the app, lists the in-app deletion steps (`finlynq.com → Settings → Data →
+Delete account`), gives an email fallback (`privacy@finlynq.com`), and states
+retention (logs 30d, encrypted backups 7d). Used for BOTH Data Safety deletion
+fields. Returns HTTP 200; registered in `seo/site.ts` STATIC_ROUTES.
 
 ---
 
