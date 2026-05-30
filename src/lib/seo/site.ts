@@ -95,6 +95,7 @@ export const STATIC_ROUTES: StaticRoute[] = [
   { path: "/blog", changeFrequency: "weekly", priority: 0.6 },
   { path: "/privacy", changeFrequency: "yearly", priority: 0.4 },
   { path: "/terms", changeFrequency: "yearly", priority: 0.4 },
+  { path: "/account-deletion", changeFrequency: "yearly", priority: 0.3 },
 ];
 
 /** Resolve a path (relative or absolute) to an absolute URL on SITE_URL. */
