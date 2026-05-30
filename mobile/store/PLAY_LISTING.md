@@ -29,6 +29,7 @@ WHAT YOU CAN DO
 • Goals — Set savings and debt-payoff goals and watch your progress.
 • Loans — Track mortgages, student loans, and other debt with amortization detail.
 • Multi-currency — Accurate conversion with historical exchange rates so your totals are always right.
+• Import — Bring in transactions from CSV, Excel, OFX, or PDF statements.
 
 BUILT FOR AI
 Finlynq ships a first-party MCP server, so you can connect AI assistants and ask natural questions about your money — "How much did I spend on groceries last month?", "What's my savings rate?", "Show my portfolio's realized gains this year." Your assistant works with your real data, securely.
@@ -119,18 +120,21 @@ This is a shared demo account preloaded with sample data (it resets nightly). Af
 **Account creation methods:** → **Username and password** (email counts as a username; no OAuth; biometric is local-unlock only)
 **Do you provide a way to request data deletion?** → **Yes** (in-app account wipe + deletion URL — see note below)
 
-**Data collected — every item: Collected = Yes, Shared = No, Processed ephemerally = No:**
+**Data collected — Shared = No for every item:**
 
-| Category → Data type | Required/Optional | Purpose |
-|---|---|---|
-| Personal info → Name | Optional | App functionality, Account management |
-| Personal info → Email address | Optional | App functionality, Account management |
-| Personal info → User IDs (username) | Required | App functionality, Account management |
-| Financial info → Other financial info (balances, transactions, budgets, investments) | Required | App functionality |
+| Category → Data type | Collected | Required/Optional | Processed ephemerally | Purpose |
+|---|---|---|---|---|
+| Personal info → Name | Yes | Optional | No | App functionality, Account management |
+| Personal info → Email address | Yes | Optional | No | App functionality, Account management |
+| Personal info → User IDs (username) | Yes | Required | No | App functionality, Account management |
+| Financial info → Other financial info (balances, transactions, budgets, investments) | Yes | Required | No | App functionality |
+| **Files and docs** (uploaded CSV/Excel/OFX/PDF statements for import) | Yes | Optional | **Yes** (parsed server-side; raw file not retained as a file) | App functionality |
+
+> **Files and docs is YES** because the in-app Import screen lets users upload a bank/statement file (`expo-document-picker` → `/api/import/preview` + `/api/import/execute`). The file is parsed into transactions server-side and isn't kept as a file, so mark **Processed ephemerally = Yes**. The transactions extracted from it are covered by "Other financial info."
 
 **Everything else → NOT collected**, specifically:
 - Location, Phone number, Physical address, Contacts, Calendar — No
-- Messages, Photos/Videos, Audio, **Files and docs** (mobile import is web-only) — No
+- Messages, Photos/Videos, Audio — No
 - Health & fitness — No
 - **Device or other IDs** — No (no analytics/ad SDKs)
 - **App activity / Web history** — No
