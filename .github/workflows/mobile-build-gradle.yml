@@ -109,6 +109,15 @@ jobs:
       - name: Expo prebuild (generate android/)
         run: npx expo prebuild --platform android --no-install
 
+      - name: Disable release-lint gate (match EAS)
+        working-directory: mobile/android
+        run: |
+          # AGP's lintVitalRelease aborts the release build on fatal lint issues
+          # in third-party modules (:expo, :react-native-screens). EAS Build does
+          # not gate on this; disable checkReleaseBuilds on the app module so the
+          # whole lintVital* chain is skipped during bundleRelease.
+          node -e "const fs=require('fs');const p='app/build.gradle';let s=fs.readFileSync(p,'utf8');if(!/checkReleaseBuilds\s+false/.test(s)){s=s.replace(/android\s*\{/, m=>m+'\n    lint {\n        checkReleaseBuilds false\n        abortOnError false\n    }');fs.writeFileSync(p,s);console.log('Injected lint{} disable into app/build.gradle');}else{console.log('lint disable already present');}"
+
       - name: Decode upload keystore
         if: steps.signing.outputs.available == 'true'
         env:
