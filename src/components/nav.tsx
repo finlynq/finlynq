@@ -32,9 +32,12 @@ import {
   LogOut,
   Inbox,
   Link2,
+  Megaphone,
+  MessageCircle,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { FinlynqLogo } from "@/components/FinlynqLogo";
+import { FeedbackDialog } from "@/components/feedback-dialog";
 
 type NavItem = { href: string; label: string; icon: LucideIcon; color: string; mode?: "prod" | "dev" };
 
@@ -47,6 +50,7 @@ const navGroups: { label: string; items: NavItem[] }[] = [
     label: "",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/whats-new", label: "What's New", icon: Megaphone, color: ACTIVE_ACCENT, mode: "prod" },
       { href: "/mcp-guide", label: "MCP Guide", icon: Bot, color: ACTIVE_ACCENT, mode: "prod" },
       { href: "/chat", label: "AI Chat", icon: MessageSquare, color: ACTIVE_ACCENT, mode: "dev" },
     ],
@@ -91,6 +95,8 @@ const toolLinks: NavItem[] = [
   { href: "/api-docs", label: "API Docs", icon: FileText, color: ACTIVE_ACCENT, mode: "dev" },
   { href: "/admin", label: "Admin", icon: ShieldCheck, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/inbox", label: "Admin Inbox", icon: Inbox, color: ACTIVE_ACCENT, mode: "prod" },
+  { href: "/admin/announcements", label: "Announcements", icon: Megaphone, color: ACTIVE_ACCENT, mode: "prod" },
+  { href: "/admin/feedback", label: "Feedback", icon: MessageCircle, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/settings", label: "Settings", icon: Settings, color: ACTIVE_ACCENT, mode: "prod" },
 ];
 
@@ -111,6 +117,8 @@ export function Nav() {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [devMode, setDevMode] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [unread, setUnread] = useState(0);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
 
   const handleSignOut = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -135,6 +143,20 @@ export function Nav() {
       .then((data) => { if (data.devMode) setDevMode(true); })
       .catch(() => {});
   }, []);
+
+  // Unread announcement count for the "What's New" badge. Refetched on every
+  // navigation so the badge clears after the user visits /whats-new (which
+  // marks items read server-side).
+  useEffect(() => {
+    fetch("/api/announcements")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => {
+        if (Array.isArray(list)) {
+          setUnread(list.filter((a: { read?: boolean }) => !a.read).length);
+        }
+      })
+      .catch(() => {});
+  }, [pathname]);
 
   const toggleCollapsed = () => {
     const next = !collapsed;
@@ -170,8 +192,18 @@ export function Nav() {
           "h-[18px] w-[18px] shrink-0 transition-all duration-200",
           isActive ? item.color : "text-sidebar-foreground/40 group-hover/link:text-sidebar-foreground/70 group-hover/link:scale-110"
         )} />
+        {/* Collapsed-sidebar unread dot for What's New */}
+        {!showLabel && item.href === "/whats-new" && unread > 0 && (
+          <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-primary" />
+        )}
         {showLabel && <span className="truncate">{item.label}</span>}
-        {showLabel && isActive && <div className="ml-auto h-1.5 w-1.5 rounded-full bg-sidebar-primary animate-pulse" />}
+        {showLabel && item.href === "/whats-new" && unread > 0 ? (
+          <span className="ml-auto rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-primary-foreground">
+            {unread}
+          </span>
+        ) : (
+          showLabel && isActive && <div className="ml-auto h-1.5 w-1.5 rounded-full bg-sidebar-primary animate-pulse" />
+        )}
       </Link>
     );
   };
@@ -231,6 +263,18 @@ export function Nav() {
       {/* Bottom section */}
       <div className="px-2 pb-3 pt-2 border-t border-sidebar-border/50 space-y-0.5">
         {toolLinks.filter((item) => (devMode || item.mode !== "dev") && (!item.href.startsWith("/admin") || isAdmin)).map((item) => renderLink(item, !collapsed))}
+        <button
+          onClick={() => setFeedbackOpen(true)}
+          title={collapsed ? "Send feedback" : undefined}
+          className={cn(
+            "group/link relative flex items-center gap-3 rounded-lg text-[13px] font-medium transition-all duration-200 w-full",
+            collapsed ? "px-0 py-2 justify-center" : "px-3 py-2",
+            "text-sidebar-foreground/50 hover:bg-white/[0.05] hover:text-sidebar-foreground"
+          )}
+        >
+          <MessageCircle className="h-[18px] w-[18px] shrink-0 text-sidebar-foreground/40 group-hover/link:text-sidebar-foreground/70 group-hover/link:scale-110 transition-all duration-200" />
+          {!collapsed && <span className="truncate">Send feedback</span>}
+        </button>
         <button
           onClick={handleSignOut}
           title={collapsed ? "Sign out" : undefined}
@@ -309,6 +353,13 @@ export function Nav() {
           .filter((item) => !item.href.startsWith("/admin") || isAdmin)
           .map((item) => renderLink(item, true))}
         <button
+          onClick={() => { setMobileOpen(false); setFeedbackOpen(true); }}
+          className="group/link relative flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-sidebar-foreground/50 hover:bg-white/[0.05] hover:text-sidebar-foreground transition-all duration-200 w-full"
+        >
+          <MessageCircle className="h-[18px] w-[18px] shrink-0 text-sidebar-foreground/40 group-hover/link:text-sidebar-foreground/70 transition-all duration-200" />
+          <span className="truncate">Send feedback</span>
+        </button>
+        <button
           onClick={() => { setMobileOpen(false); handleSignOut(); }}
           className="group/link relative flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-sidebar-foreground/50 hover:bg-white/[0.05] hover:text-sidebar-foreground transition-all duration-200 w-full"
         >
@@ -324,6 +375,7 @@ export function Nav() {
       {sidebar}
       {mobileBar}
       {mobilePanel}
+      <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
     </>
   );
 }

@@ -20,7 +20,11 @@ export type AdminAuditAction =
   | "inbox_triaged"
   | "inbox_promoted"
   | "inbox_deleted"
-  | "user_deleted";
+  | "user_deleted"
+  | "announcement_created"
+  | "announcement_updated"
+  | "announcement_deleted"
+  | "feedback_status_change";
 
 export async function logAdminAction(opts: {
   adminUserId: string;

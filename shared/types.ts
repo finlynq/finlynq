@@ -145,6 +145,32 @@ export interface Notification {
   metadata: string;
 }
 
+// --- Announcements (admin broadcast) ---
+/** GET /api/announcements row — admin-authored broadcast item + per-user read flag. */
+export interface Announcement {
+  id: number;
+  title: string;
+  body: string;
+  category: string; // 'news' | 'update' | 'maintenance'
+  severity: "info" | "warning";
+  pinned: boolean;
+  publishedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  /** Whether the requesting user has read/dismissed this item. */
+  read: boolean;
+}
+
+// --- Feedback ---
+export type FeedbackType = "bug" | "idea" | "question" | "other";
+/** POST /api/feedback body. */
+export interface FeedbackFormData {
+  type: FeedbackType;
+  message: string;
+  pageUrl?: string;
+  appVersion?: string;
+}
+
 // --- Auth ---
 /** Shape returned by GET /api/auth/session — the backend identity source. */
 export interface SessionInfo {

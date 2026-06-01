@@ -398,6 +398,71 @@ export const notifications = pgTable("notifications", {
   metadata: text("metadata").default(""),
 });
 
+// ─── Announcements (admin broadcast) ────────────────────────────────────────
+// Admin-authored news/update items broadcast to ALL users. Plaintext by
+// design: this is operator content, not per-user data, so it is NOT
+// DEK-encrypted. Per-user read/dismiss state lives in `announcement_reads`.
+export const announcements = pgTable(
+  "announcements",
+  {
+    id: serial("id").primaryKey(),
+    title: text("title").notNull(),
+    body: text("body").notNull(), // markdown / plain
+    category: text("category").notNull().default("news"), // 'news' | 'update' | 'maintenance'
+    severity: text("severity").notNull().default("info"), // 'info' | 'warning'
+    pinned: boolean("pinned").notNull().default(false), // drives the banner
+    published: boolean("published").notNull().default(false),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdBy: text("created_by").notNull(), // admin user id
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("announcements_published_idx").on(t.published, t.expiresAt)],
+);
+
+// Per-user read/dismiss state. One row per (user, announcement) the user has
+// seen. Absence of a row = unread.
+export const announcementReads = pgTable(
+  "announcement_reads",
+  {
+    userId: text("user_id").notNull(),
+    announcementId: integer("announcement_id")
+      .notNull()
+      .references(() => announcements.id, { onDelete: "cascade" }),
+    readAt: timestamp("read_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.announcementId] }),
+    index("announcement_reads_user_idx").on(t.userId),
+  ],
+);
+
+// ─── User feedback (bug reports / ideas) ─────────────────────────────────────
+// Plaintext by design: feedback must be readable by the maintainer (admin
+// review page + email to feedback@finlynq.com), and the submitting user's
+// per-user DEK is unreadable by an admin. The submit form warns users not to
+// include sensitive financial details.
+export const feedback = pgTable(
+  "feedback",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    type: text("type").notNull().default("other"), // 'bug' | 'idea' | 'question' | 'other'
+    message: text("message").notNull(),
+    pageUrl: text("page_url"), // route the user was on when submitting
+    appVersion: text("app_version"), // 'web' | mobile version string
+    status: text("status").notNull().default("new"), // 'new' | 'triaged' | 'resolved'
+    adminNote: text("admin_note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("feedback_status_idx").on(t.status, t.createdAt),
+    index("feedback_user_idx").on(t.userId),
+  ],
+);
+
 export const subscriptions = pgTable("subscriptions", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),

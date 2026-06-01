@@ -251,3 +251,43 @@ export function budgetAlertEmail(
     text: `${title}: ${currency} ${spentAmount.toFixed(2)} of ${currency} ${budgetAmount.toFixed(2)} (${Math.round(percentUsed)}%)`,
   };
 }
+
+/**
+ * Maintainer notification for in-app user feedback. Sent TO the operator
+ * inbox (FEEDBACK_EMAIL, default feedback@finlynq.com), NOT the user. Every
+ * user-derived field is escaped (the body is rendered as HTML). Best-effort:
+ * callers fire-and-forget this so a missing SMTP config never blocks the
+ * feedback submit — the DB row is the source of truth.
+ */
+export function feedbackNotificationEmail(opts: {
+  feedbackType: string;
+  message: string;
+  userId: string;
+  userLabel?: string | null; // username or email, for the maintainer's context
+  pageUrl?: string | null;
+  appVersion?: string | null;
+}): EmailMessage {
+  const to = process.env.FEEDBACK_EMAIL || "feedback@finlynq.com";
+  const safeType = escapeHtml(opts.feedbackType);
+  const safeMessage = escapeHtml(opts.message).replace(/\n/g, "<br>");
+  const safeUser = escapeHtml(opts.userLabel || opts.userId);
+  const safePage = opts.pageUrl ? escapeHtml(opts.pageUrl) : "—";
+  const safeVersion = opts.appVersion ? escapeHtml(opts.appVersion) : "web";
+  const html = baseLayout(
+    `New ${safeType} feedback`,
+    `<table style="width:100%;border-collapse:collapse;color:#3f3f46;font-size:14px;margin-bottom:16px">
+       <tr><td style="padding:4px 0;color:#71717a;width:90px">Type</td><td style="padding:4px 0"><strong>${safeType}</strong></td></tr>
+       <tr><td style="padding:4px 0;color:#71717a">From</td><td style="padding:4px 0">${safeUser}</td></tr>
+       <tr><td style="padding:4px 0;color:#71717a">Page</td><td style="padding:4px 0">${safePage}</td></tr>
+       <tr><td style="padding:4px 0;color:#71717a">Source</td><td style="padding:4px 0">${safeVersion}</td></tr>
+     </table>
+     <div style="background:#fafafa;border-radius:6px;padding:16px;line-height:1.6;white-space:pre-wrap">${safeMessage}</div>
+     <p style="color:#71717a;font-size:13px;margin-top:16px">Review at ${escapeHtml(APP_URL())}/admin/feedback</p>`,
+  );
+  return {
+    to,
+    subject: `[Finlynq feedback] ${opts.feedbackType}`,
+    html,
+    text: `New ${opts.feedbackType} feedback from ${opts.userLabel || opts.userId} (page: ${opts.pageUrl || "—"}):\n\n${opts.message}`,
+  };
+}
