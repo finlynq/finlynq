@@ -1,0 +1,164 @@
+name: Mobile Build (Gradle, no EAS)
+
+# Builds the Android release .aab entirely on the GitHub runner with gradle —
+# NO EAS / eas.dev cloud build. The compile (prebuild + gradle + NDK + Hermes)
+# happens here; the artifact is downloadable from the run.
+#
+# HOW IT RUNS
+#   * tag push:  push a tag like `mobile-gradle-v4`  → builds versionCode 4.
+#                The trailing integer in the tag IS the versionCode.
+#   * manual:    Actions tab → this workflow → Run workflow → set `versionCode`.
+#                (workflow_dispatch is only available once this file is on the
+#                 default branch; the tag path works from any branch.)
+#
+# Tag prefix `mobile-gradle-v*` deliberately does NOT match docker.yml's `v*`
+# filter (that matches tags STARTING with `v`), so the Docker pipeline stays put.
+#
+# SIGNING (optional but required for a Play-uploadable build)
+#   With the 4 secrets below the release bundle is signed with the EXISTING EAS
+#   upload key (so Play accepts the upload and the password-autofill assetlinks
+#   fingerprint stays valid). WITHOUT them, the workflow still runs and produces
+#   a DEBUG-SIGNED .aab for pipeline validation only — NOT uploadable to Play.
+#   Export the keystore from EAS:  cd mobile && eas credentials -p android →
+#   production → Keystore → Download (prints alias + passwords), then add:
+#     ANDROID_UPLOAD_KEYSTORE_BASE64  base64 of the .jks  (`base64 -w0 file.jks`)
+#     ANDROID_KEYSTORE_PASSWORD       keystore (store) password
+#     ANDROID_KEY_ALIAS               key alias
+#     ANDROID_KEY_PASSWORD            key password
+#   under Settings → Secrets and variables → Actions.
+
+on:
+  workflow_dispatch:
+    inputs:
+      versionCode:
+        description: Android versionCode (must be greater than the last uploaded build)
+        type: string
+        required: true
+  push:
+    tags: ['mobile-gradle-v*']
+
+concurrency:
+  group: mobile-build-gradle-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Gradle bundleRelease
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Resolve versionCode
+        id: ver
+        env:
+          INPUT_VC: ${{ github.event.inputs.versionCode }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VC="$INPUT_VC"
+          # Tag pushes carry no inputs — take the trailing integer of the tag
+          # (mobile-gradle-v4 → 4).
+          if [ -z "$VC" ]; then VC="$(printf '%s' "$REF_NAME" | grep -oE '[0-9]+$' || true)"; fi
+          if [ -z "$VC" ]; then
+            echo "::error::Could not determine versionCode. Tag like 'mobile-gradle-v4' or pass the versionCode input."
+            exit 1
+          fi
+          echo "Building versionCode $VC"
+          echo "versionCode=$VC" >> "$GITHUB_OUTPUT"
+
+      - name: Detect signing secrets
+        id: signing
+        env:
+          KS: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Upload keystore present — release bundle will be signed for Play."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No ANDROID_UPLOAD_KEYSTORE_BASE64 secret — building a DEBUG-SIGNED .aab for validation only (NOT uploadable to Play)."
+          fi
+
+      - name: Setup Java (Temurin 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set versionCode in app.json
+        env:
+          VC: ${{ steps.ver.outputs.versionCode }}
+        run: |
+          node -e "const fs=require('fs');const p='app.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.expo.android=j.expo.android||{};j.expo.android.versionCode=Number(process.env.VC);fs.writeFileSync(p,JSON.stringify(j,null,2));console.log('versionCode set to',j.expo.android.versionCode);"
+
+      - name: Expo prebuild (generate android/)
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Disable release-lint gate (match EAS)
+        working-directory: mobile/android
+        run: |
+          # AGP's lintVitalRelease aborts the release build on fatal lint issues
+          # in third-party modules (:expo, :react-native-screens). EAS Build does
+          # not gate on this; disable checkReleaseBuilds on the app module so the
+          # whole lintVital* chain is skipped during bundleRelease.
+          node -e "const fs=require('fs');const p='app/build.gradle';let s=fs.readFileSync(p,'utf8');if(!/checkReleaseBuilds\s+false/.test(s)){s=s.replace(/android\s*\{/, m=>m+'\n    lint {\n        checkReleaseBuilds false\n        abortOnError false\n    }');fs.writeFileSync(p,s);console.log('Injected lint{} disable into app/build.gradle');}else{console.log('lint disable already present');}"
+
+      - name: Decode upload keystore
+        if: steps.signing.outputs.available == 'true'
+        env:
+          ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$ANDROID_UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.keystore"
+          echo "Keystore decoded ($(wc -c < "$RUNNER_TEMP/upload.keystore") bytes)"
+
+      - name: Gradle bundleRelease + assembleRelease
+        working-directory: mobile/android
+        env:
+          SIGNED: ${{ steps.signing.outputs.available }}
+          KSPW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEYPW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x ./gradlew
+          # bundleRelease → .aab (Play upload); assembleRelease → .apk (sideload).
+          if [ "$SIGNED" = "true" ]; then
+            ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon --stacktrace \
+              -Pandroid.injected.signing.store.file="$RUNNER_TEMP/upload.keystore" \
+              -Pandroid.injected.signing.store.password="$KSPW" \
+              -Pandroid.injected.signing.key.alias="$ALIAS" \
+              -Pandroid.injected.signing.key.password="$KEYPW"
+          else
+            echo "::warning::Building DEBUG-SIGNED artifacts (no upload keystore) — validation only, NOT uploadable to Play."
+            ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon --stacktrace
+          fi
+
+      - name: Upload .aab artifact (Play upload)
+        uses: actions/upload-artifact@v4
+        with:
+          name: finlynq-vc${{ steps.ver.outputs.versionCode }}-${{ steps.signing.outputs.available == 'true' && 'release' || 'DEBUGSIGNED' }}-aab
+          path: mobile/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload .apk artifact (sideload)
+        uses: actions/upload-artifact@v4
+        with:
+          name: finlynq-vc${{ steps.ver.outputs.versionCode }}-${{ steps.signing.outputs.available == 'true' && 'release' || 'DEBUGSIGNED' }}-apk
+          path: mobile/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30

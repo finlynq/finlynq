@@ -189,6 +189,46 @@ export default function AddTransactionScreen() {
     );
   }
 
+  // A brand-new user has no accounts/categories yet, so there's nothing to pick.
+  // Don't strand them on an unusable form — point at the create flows + the
+  // one-tap sample-data shortcut. The list screens (Accounts → + Add, More →
+  // Categories → + Add) are the primary path.
+  if (accounts.length === 0 || categories.length === 0) {
+    return (
+      <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
+        <View style={[styles.topBar, { borderBottomColor: colors.border }]}>
+          <TouchableOpacity onPress={() => navigation.goBack()}>
+            <Text style={[styles.backBtn, { color: colors.primary }]}>Cancel</Text>
+          </TouchableOpacity>
+          <Text style={[styles.title, { color: colors.foreground }]}>Add Transaction</Text>
+          <View style={{ width: 48 }} />
+        </View>
+        <View style={styles.emptyState}>
+          <Text style={[styles.emptyTitle, { color: colors.foreground }]}>Set up first</Text>
+          {accounts.length === 0 && (
+            <Text style={[styles.emptyLine, { color: colors.mutedForeground }]}>
+              • Add an account: Accounts tab → + Add
+            </Text>
+          )}
+          {categories.length === 0 && (
+            <Text style={[styles.emptyLine, { color: colors.mutedForeground }]}>
+              • Add a category: More → Categories → + Add
+            </Text>
+          )}
+          <Text style={[styles.emptyLine, { color: colors.mutedForeground, marginTop: 8 }]}>
+            Or tap “Load sample data” on the More tab to get started instantly.
+          </Text>
+          <TouchableOpacity
+            style={[styles.goBackBtn, { backgroundColor: colors.primary }]}
+            onPress={() => navigation.goBack()}
+          >
+            <Text style={[styles.goBackBtnText, { color: colors.primaryForeground }]}>Go back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   const segments: { key: Mode; label: string; activeBg: string; activeFg: string }[] = [
     { key: "expense", label: "Expense", activeBg: colors.neg, activeFg: "#ffffff" },
     { key: "income", label: "Income", activeBg: colors.pos, activeFg: "#ffffff" },
@@ -454,6 +494,11 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   warning: { fontSize: 13, marginTop: 4, marginBottom: 8 },
+  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
+  emptyTitle: { fontSize: 18, fontWeight: "700", marginBottom: 16 },
+  emptyLine: { fontSize: 14, textAlign: "center", lineHeight: 20, marginBottom: 4 },
+  goBackBtn: { marginTop: 24, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 10 },
+  goBackBtnText: { fontSize: 15, fontWeight: "700" },
 });
 
 const fieldStyles = StyleSheet.create({

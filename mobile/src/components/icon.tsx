@@ -31,6 +31,10 @@ import {
   Check,
   RefreshCw,
   Building2,
+  Tag,
+  Sparkles,
+  Megaphone,
+  MessageCircle,
   type LucideIcon,
 } from "lucide-react-native";
 
@@ -63,6 +67,10 @@ export const Icons = {
   close: X,
   check: Check,
   refresh: RefreshCw,
+  categories: Tag,
+  sampleData: Sparkles,
+  whatsNew: Megaphone,
+  feedback: MessageCircle,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof Icons;

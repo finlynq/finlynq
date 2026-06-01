@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   View,
   Text,
@@ -12,6 +12,8 @@ import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { useAuth } from "../hooks/useAuth";
+import { endpoints } from "../api/client";
+import { logger } from "../lib/logger";
 import { Icon, type IconName } from "../components/icon";
 import type { MoreStackParamList } from "../navigation/MoreStack";
 
@@ -33,6 +35,7 @@ export default function MoreScreen() {
   const { colors } = useTheme();
   const navigation = useNavigation<Nav>();
   const { signOut } = useAuth();
+  const [seedingSample, setSeedingSample] = useState(false);
 
   const confirmSignOut = () => {
     Alert.alert("Sign Out", "Are you sure you want to sign out?", [
@@ -41,7 +44,58 @@ export default function MoreScreen() {
     ]);
   };
 
+  const runLoadSampleData = async () => {
+    setSeedingSample(true);
+    try {
+      const res = await endpoints.loadSampleData();
+      if (res.success) {
+        // The sample-data route returns `{ success, transactionsCreated }`
+        // (no `.data` wrapper) — read the count off the top level.
+        const created =
+          (res as unknown as { transactionsCreated?: number }).transactionsCreated ?? 0;
+        logger.info("more", "sample data loaded", { created });
+        Alert.alert(
+          "Sample data added",
+          "Added starter accounts, categories" +
+            (created > 0 ? ` and ${created} sample transactions` : "") +
+            ". Pull to refresh your accounts and transactions."
+        );
+      } else {
+        logger.warn("more", "sample data rejected", { error: res.error });
+        Alert.alert("Error", "error" in res ? res.error : "Failed to load sample data");
+      }
+    } catch (e) {
+      const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      logger.error("more", "sample data threw", { detail });
+      Alert.alert("Error", "Cannot connect to server");
+    } finally {
+      setSeedingSample(false);
+    }
+  };
+
+  const confirmLoadSampleData = () => {
+    if (seedingSample) return;
+    Alert.alert(
+      "Load sample data",
+      "Add a few starter accounts, categories and example transactions so you can explore the app? You can delete them anytime.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Load", onPress: runLoadSampleData },
+      ]
+    );
+  };
+
   const sections: Section[] = [
+    {
+      title: "Get started",
+      rows: [
+        {
+          icon: "sampleData",
+          label: seedingSample ? "Loading sample data…" : "Load sample data",
+          onPress: confirmLoadSampleData,
+        },
+      ],
+    },
     {
       title: "Add",
       rows: [
@@ -62,13 +116,16 @@ export default function MoreScreen() {
       rows: [
         { icon: "budgets", label: "Budgets", onPress: () => navigation.navigate("Budgets") },
         { icon: "goals", label: "Goals", onPress: () => navigation.navigate("Goals") },
+        { icon: "categories", label: "Categories", onPress: () => navigation.navigate("Categories") },
         { icon: "import", label: "Import", onPress: () => navigation.navigate("Import") },
       ],
     },
     {
       title: "Tools",
       rows: [
+        { icon: "whatsNew", label: "What's new", onPress: () => navigation.navigate("WhatsNew") },
         { icon: "settings", label: "Settings", onPress: () => navigation.navigate("Settings") },
+        { icon: "feedback", label: "Send feedback", onPress: () => navigation.navigate("Feedback") },
         { icon: "logout", label: "Sign out", onPress: confirmSignOut, danger: true },
       ],
     },

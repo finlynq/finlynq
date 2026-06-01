@@ -305,6 +305,40 @@ export interface TransferPayload {
   tags?: string;
 }
 
+// --- Create-flow form payloads (mobile) ---
+/** POST /api/accounts body. Names are sent plaintext; the server encrypts via
+ *  buildNameFields. Opening balance is deferred (set it via a transaction). */
+export interface AccountFormData {
+  name: string;
+  type: "A" | "L";
+  group: string;
+  currency: string;
+  alias?: string;
+  note?: string;
+  isInvestment?: boolean;
+}
+
+/** POST /api/categories body. */
+export interface CategoryFormData {
+  name: string;
+  type: "E" | "I" | "R";
+  group: string;
+  note?: string;
+}
+
+/** POST /api/goals body. `accountIds: []` creates a standalone goal. */
+export interface GoalFormData {
+  name: string;
+  type: string;
+  targetAmount: number;
+  currency?: string;
+  deadline?: string;
+  accountIds?: number[];
+  priority?: number;
+  status?: string;
+  note?: string;
+}
+
 // --- Transaction form ---
 export interface TransactionFormData {
   date: string;

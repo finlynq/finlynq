@@ -215,6 +215,11 @@ import type {
   PortfolioOverview,
   TransferPayload,
   RegisterPayload,
+  AccountFormData,
+  CategoryFormData,
+  GoalFormData,
+  Announcement,
+  FeedbackFormData,
 } from "../../../shared/types";
 
 // --- Raw shape of GET /api/dashboard (server-computed, pre-aggregation) ---
@@ -328,6 +333,7 @@ export const endpoints = {
 
   // Accounts (no balances — name/type/group/currency only)
   getAccounts: () => api.get<Account[]>("/api/accounts"),
+  createAccount: (d: AccountFormData) => api.post<Account>("/api/accounts", d),
 
   // Per-account balances live in the dashboard payload (computed + FX-converted).
   getAccountBalances: async (): Promise<ApiResponse<AccountBalance[]>> => {
@@ -360,9 +366,19 @@ export const endpoints = {
 
   // Categories
   getCategories: () => api.get<Category[]>("/api/categories"),
+  createCategory: (d: CategoryFormData) => api.post<Category>("/api/categories", d),
 
   // Goals — bare array of Goal + server-computed progress fields.
   getGoals: () => api.get<GoalWithProgress[]>("/api/goals"),
+  createGoal: (d: GoalFormData) => api.post<GoalWithProgress>("/api/goals", d),
+
+  // One-tap onboarding: seeds 12 categories + Checking/Credit Card accounts +
+  // ~8 sample transactions (idempotent). Returns the enveloped
+  // `{ success, transactionsCreated }` shape directly (request() passes it
+  // through unchanged), so `transactionsCreated` rides at the top level, NOT
+  // under `.data`.
+  loadSampleData: () =>
+    api.post<{ transactionsCreated: number }>("/api/onboarding/sample-data"),
 
   // Portfolio (read-only on mobile) — consolidated holdings + summary.
   getPortfolioOverview: () => api.get<PortfolioOverview>("/api/portfolio/overview"),
@@ -377,4 +393,18 @@ export const endpoints = {
     api.get<BudgetWithSpending[]>(
       `/api/budgets?spending=1${month ? `&month=${month}` : ""}`
     ),
+
+  // Announcements — active broadcast items + per-user read flag (bare array).
+  getAnnouncements: () => api.get<Announcement[]>("/api/announcements"),
+  // Mark an announcement read/dismissed (idempotent server-side).
+  markAnnouncementRead: (id: number) =>
+    api.post<{ ok: boolean }>(`/api/announcements/${id}/read`),
+
+  // Feedback — submit a bug report / idea. Server stores it + emails the
+  // maintainer. `appVersion: "mobile"` distinguishes mobile submissions.
+  submitFeedback: (payload: FeedbackFormData) =>
+    api.post<{ ok: boolean; id: number }>("/api/feedback", {
+      ...payload,
+      appVersion: payload.appVersion ?? "mobile",
+    }),
 };

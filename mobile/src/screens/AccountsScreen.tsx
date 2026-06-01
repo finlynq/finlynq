@@ -94,6 +94,12 @@ export default function AccountsScreen({ navigation }: Props) {
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
       <View style={styles.headerRow}>
         <Text style={[styles.header, { color: colors.foreground }]}>Accounts</Text>
+        <TouchableOpacity
+          style={[styles.addSmallBtn, { backgroundColor: colors.primary }]}
+          onPress={() => navigation.navigate("AddAccount")}
+        >
+          <Text style={[styles.addSmallBtnText, { color: colors.primaryForeground }]}>+ Add</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Net worth hero */}
@@ -171,8 +177,17 @@ export default function AccountsScreen({ navigation }: Props) {
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  headerRow: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 8,
+  },
   header: { fontSize: 28, fontWeight: "800" },
+  addSmallBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
+  addSmallBtnText: { fontSize: 14, fontWeight: "700" },
   hero: {
     marginHorizontal: 16,
     marginBottom: 12,

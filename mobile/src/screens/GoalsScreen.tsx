@@ -6,15 +6,20 @@ import {
   StyleSheet,
   RefreshControl,
   ActivityIndicator,
+  TouchableOpacity,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency, safeName } from "../lib/format";
 import { Icon } from "../components/icon";
 import type { GoalWithProgress } from "../../../shared/types";
+import type { MoreStackParamList } from "../navigation/MoreStack";
+
+type Nav = NativeStackNavigationProp<MoreStackParamList, "Goals">;
 
 const TYPE_LABEL: Record<string, string> = {
   savings: "Savings",
@@ -25,6 +30,7 @@ const TYPE_LABEL: Record<string, string> = {
 
 export default function GoalsScreen() {
   const { colors } = useTheme();
+  const navigation = useNavigation<Nav>();
   const isFocused = useIsFocused();
   const [goals, setGoals] = useState<GoalWithProgress[]>([]);
   const [loading, setLoading] = useState(true);
@@ -124,6 +130,12 @@ export default function GoalsScreen() {
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
       <View style={styles.headerRow}>
         <Text style={[styles.header, { color: colors.foreground }]}>Goals</Text>
+        <TouchableOpacity
+          style={[styles.addSmallBtn, { backgroundColor: colors.primary }]}
+          onPress={() => navigation.navigate("AddGoal")}
+        >
+          <Text style={[styles.addSmallBtnText, { color: colors.primaryForeground }]}>+ Add</Text>
+        </TouchableOpacity>
       </View>
 
       <FlatList
@@ -138,9 +150,19 @@ export default function GoalsScreen() {
           error ? (
             <Text style={[styles.empty, { color: colors.destructive }]}>{error}</Text>
           ) : (
-            <Text style={[styles.empty, { color: colors.mutedForeground }]}>
-              No goals yet — add one on the web app.
-            </Text>
+            <View style={styles.emptyWrap}>
+              <Text style={[styles.empty, { color: colors.mutedForeground }]}>
+                No goals yet.
+              </Text>
+              <TouchableOpacity
+                style={[styles.ctaBtn, { backgroundColor: colors.primary }]}
+                onPress={() => navigation.navigate("AddGoal")}
+              >
+                <Text style={[styles.ctaBtnText, { color: colors.primaryForeground }]}>
+                  + Add your first goal
+                </Text>
+              </TouchableOpacity>
+            </View>
           )
         }
       />
@@ -151,8 +173,17 @@ export default function GoalsScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  headerRow: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 8,
+  },
   header: { fontSize: 28, fontWeight: "800" },
+  addSmallBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
+  addSmallBtnText: { fontSize: 14, fontWeight: "700" },
   list: { paddingHorizontal: 16, paddingBottom: 32 },
   card: {
     borderRadius: 12,
@@ -179,4 +210,7 @@ const styles = StyleSheet.create({
   current: { fontSize: 14, fontWeight: "700", fontVariant: ["tabular-nums"] },
   remaining: { fontSize: 12, marginTop: 4 },
   empty: { textAlign: "center", paddingVertical: 32, fontSize: 14 },
+  emptyWrap: { alignItems: "center", paddingVertical: 24 },
+  ctaBtn: { paddingHorizontal: 20, paddingVertical: 12, borderRadius: 10 },
+  ctaBtnText: { fontSize: 15, fontWeight: "700" },
 });
