@@ -375,6 +375,13 @@ On the per-user tx cache after the commit. Missing it = Claude reading stale pay
 
 Strict isolation. Cross-tenant FK violations roll back the whole wipe. `mcp_uploads` file unlink runs BEFORE the DB transaction.
 
+**Shared deletion body (2026-05-31).** The per-table delete sequence is the single helper `deleteAllUserDataTx(tx, userId)` in [queries.ts](../src/lib/auth/queries.ts) — keeping ONE body is load-bearing so the two paths never drift on table coverage. Add a new per-user table there and both paths pick it up:
+
+- **`wipeUserDataAndRewrap(userId, passwordHash, wrap)`** → runs `deleteAllUserDataTx`, then KEEPS the `users` row: rewraps the DEK with the new password, bumps `encryptionV`, clears MFA (M-6). Used by `POST /api/auth/wipe-account` + the password-reset/confirm recovery path. The "Clear All Data" button in Settings → Data still calls the lighter `DELETE /api/data` (no password, ~15 tables, no rewrap).
+- **`deleteUserAccount(userId)`** → runs `deleteAllUserDataTx`, then DROPS the identity entirely: explicitly deletes `mcp_idempotency_keys` (it has a `user_id` column but NO FK to `users`, so it would orphan), then `DELETE FROM users WHERE id` — which cascades the `ON DELETE CASCADE` children (`webhooks`, `webhook_deliveries`, `transaction_flags`, backfill audit/runs). No DEK rewrap (the user is gone). Backs **`POST /api/auth/delete-account`** + the Settings → Data **"Delete Account"** button + the public `/account-deletion` page. After commit the route `evictAllForUser` + `invalidateUserTxCache` + clears the `pf_session` cookie; client redirects to `/`.
+
+**Both delete routes are password + fresh-MFA gated, account-session only (no `pf_*` API keys), rate-limited 3/hr** (H-7). **`admin_audit` edge case:** `admin_user_id` is `NOT NULL` with no cascade, so a `role='admin'` user who recorded audit rows can't self-delete via `deleteUserAccount` — the FK (23503) rolls the whole transaction back atomically and the route returns 500. A normal `role='user'` account has zero `admin_audit` rows, so it deletes cleanly. We do NOT delete `admin_audit` rows (append-only by policy) — admin self-deletion is an operator job, consistent with the cross-tenant philosophy above.
+
 ## Deploy & infra
 
 ### `PF_PEPPER` + `PF_STAGING_KEY` ≥32 chars in prod

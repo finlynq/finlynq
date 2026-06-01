@@ -7,6 +7,7 @@
  */
 
 import { db } from "@/db";
+import type { DrizzleDb } from "@/db";
 import * as pgSchema from "@/db/schema-pg";
 import { eq, count, sql, inArray, and } from "drizzle-orm";
 import crypto from "crypto";
@@ -15,6 +16,13 @@ import crypto from "crypto";
 function getSchema(): typeof pgSchema {
   return pgSchema;
 }
+
+/**
+ * The transaction handle passed to a `db.transaction(async (tx) => …)`
+ * callback — derived from the Drizzle client so extracted transaction-scoped
+ * helpers (e.g. `deleteAllUserDataTx`) can be typed without re-declaring it.
+ */
+type TxClient = Parameters<Parameters<DrizzleDb["transaction"]>[0]>[0];
 
 // ─── User queries ────────────────────────────────────────────────────────────
 
@@ -370,28 +378,14 @@ export async function updateUserPlan(userId: string, plan: string, planExpiresAt
 }
 
 /**
- * Permanently wipe all user-owned data (transactions, splits, accounts,
- * categories, etc.) and swap in a fresh DEK wrapped by the new password.
- *
- * Called from:
- *  - POST /api/auth/wipe-account (user-initiated, password confirmed)
- *  - POST /api/auth/password-reset/confirm (token-confirmed recovery)
- *
- * The user row is preserved (id, email, MFA, etc.) but `encryptionV` bumps
- * because the DEK changed — any in-flight session cache entries holding the
- * old DEK become invalid.
+ * Unlink a user's mcp_uploads files from disk. Runs BEFORE the wipe/delete
+ * transaction — unlink is not transactional, and we'd rather leak a DB row than
+ * orphan a plaintext file on disk if the transaction later fails. Swallows
+ * per-file errors (file may already be gone) and a missing-table error on
+ * older deploys.
  */
-export async function wipeUserDataAndRewrap(
-  userId: string,
-  passwordHash: string,
-  wrap: { kekSalt: string; dekWrapped: string; dekWrappedIv: string; dekWrappedTag: string }
-) {
+async function unlinkUserUploadFiles(userId: string) {
   const s = getSchema();
-  const BATCH = 900;
-
-  // Unlink mcp_uploads files from disk BEFORE the DB transaction starts —
-  // unlink is not transactional, and we'd rather leak a DB row than orphan a
-  // plaintext file on disk if the wipe later fails.
   try {
     const uploadRows = await db
       .select({ storagePath: s.mcpUploads.storagePath })
@@ -403,99 +397,135 @@ export async function wipeUserDataAndRewrap(
       try {
         await unlink(row.storagePath);
       } catch {
-        // File may already be gone — swallow. The DB row delete below cleans it up.
+        // File may already be gone — swallow. The DB row delete cleans it up.
       }
     }
   } catch {
     // If the mcp_uploads table is missing on this environment (older deploys),
-    // the SELECT above throws — don't let that block the wipe.
+    // the SELECT above throws — don't let that block the wipe/delete.
   }
+}
+
+/**
+ * Delete every per-user data row inside an open transaction, in FK-safe order
+ * with strict user_id-only filters.
+ *
+ * Shared by `wipeUserDataAndRewrap` (which then rewraps the DEK and KEEPS the
+ * user row) and `deleteUserAccount` (which then DROPS the user row). Keeping a
+ * single deletion body is load-bearing: the two paths must never drift on which
+ * tables they cover. Add a new per-user table here and BOTH paths pick it up.
+ *
+ * Each delete filters strictly by user_id — never by FK reach — so it can ONLY
+ * remove rows owned by this user. If any other user's row holds an FK into one
+ * of our accounts/categories, the final accounts/categories delete fails with
+ * FK 23503 and the whole transaction rolls back. That's intended: cross-tenant
+ * data must be cleaned up by an admin out-of-band, never silently destroyed by
+ * a user-initiated wipe/delete.
+ */
+async function deleteAllUserDataTx(tx: TxClient, userId: string) {
+  const s = getSchema();
+  const BATCH = 900;
+
+  // Delete user-scoped rows in FK-safe order. transaction_splits has no
+  // user_id column — filter via the user's transaction IDs first.
+  const userTxns = await tx
+    .select({ id: s.transactions.id })
+    .from(s.transactions)
+    .where(eq(s.transactions.userId, userId));
+  const txIds = userTxns.map((t) => t.id);
+  if (txIds.length > 0) {
+    for (let i = 0; i < txIds.length; i += BATCH) {
+      const batch = txIds.slice(i, i + BATCH);
+      await tx.delete(s.transactionSplits).where(inArray(s.transactionSplits.transactionId, batch));
+    }
+  }
+
+  // Get this user's import-email address so we can purge matching
+  // `incoming_emails` rows (the table has no user_id column).
+  const emailRow = await tx
+    .select({ value: s.settings.value })
+    .from(s.settings)
+    .where(and(eq(s.settings.key, "import_email"), eq(s.settings.userId, userId)))
+    .limit(1);
+  const userImportEmail: string | null = emailRow[0]?.value ?? null;
+
+  await tx.delete(s.notifications).where(eq(s.notifications.userId, userId));
+  await tx.delete(s.subscriptions).where(eq(s.subscriptions.userId, userId));
+  await tx.delete(s.recurringTransactions).where(eq(s.recurringTransactions.userId, userId));
+  await tx.delete(s.contributionRoom).where(eq(s.contributionRoom.userId, userId));
+  // priceCache and fxRates are global shared caches — not per-user, nothing
+  // to wipe here. User-specific FX overrides live in fxOverrides.
+  await tx.delete(s.fxOverrides).where(eq(s.fxOverrides.userId, userId));
+  await tx.delete(s.targetAllocations).where(eq(s.targetAllocations.userId, userId));
+  await tx.delete(s.snapshots).where(eq(s.snapshots.userId, userId));
+  // Issue #130 — goal_accounts FK references goals; wipe before parent.
+  await tx.delete(s.goalAccounts).where(eq(s.goalAccounts.userId, userId));
+  await tx.delete(s.goals).where(eq(s.goals.userId, userId));
+  await tx.delete(s.loans).where(eq(s.loans.userId, userId));
+  await tx.delete(s.budgets).where(eq(s.budgets.userId, userId));
+  await tx.delete(s.budgetTemplates).where(eq(s.budgetTemplates.userId, userId));
+  await tx.delete(s.transactionRules).where(eq(s.transactionRules.userId, userId));
+  await tx.delete(s.importTemplates).where(eq(s.importTemplates.userId, userId));
+  await tx.delete(s.transactions).where(eq(s.transactions.userId, userId));
+  // Two-ledger refactor (2026-05-22) — delete the bank-side ledger AFTER
+  // transactions because `transactions.bank_transaction_id` has ON DELETE SET
+  // NULL; deleting transactions first means the bank-ledger rows are no longer
+  // referenced and can be safely dropped via the user_id filter alone.
+  await tx.delete(s.bankTransactions).where(eq(s.bankTransactions.userId, userId));
+  await tx.delete(s.portfolioHoldings).where(eq(s.portfolioHoldings.userId, userId));
+  await tx.delete(s.categories).where(eq(s.categories.userId, userId));
+  await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));
+
+  // Tables missed by the original implementation — Finding #5. Covers the
+  // tokens that would survive a "wipe my account" click and still decrypt the
+  // user's session DEK after wipe, plus the staged-import plaintext buffer and
+  // mcp_uploads metadata rows whose on-disk files were unlinked above.
+  await tx.delete(s.mcpUploads).where(eq(s.mcpUploads.userId, userId));
+  await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
+  await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
+  await tx.delete(s.passwordResetTokens).where(eq(s.passwordResetTokens.userId, userId));
+  await tx.delete(s.oauthAccessTokens).where(eq(s.oauthAccessTokens.userId, userId));
+  await tx.delete(s.oauthAuthorizationCodes).where(eq(s.oauthAuthorizationCodes.userId, userId));
+  if (userImportEmail) {
+    // incoming_emails has no user_id; match on the user's own import-* address.
+    // Typo'd emails routed to trash by display_name match are left in place
+    // (best-effort; don't cascade-delete unrelated admin-inbox content).
+    await tx.delete(s.incomingEmails).where(eq(s.incomingEmails.toAddress, userImportEmail));
+  }
+
+  // settings last — it holds the api_key/api_key_dek/email_webhook_* rows and
+  // we also just read the import_email from here above.
+  await tx.delete(s.settings).where(eq(s.settings.userId, userId));
+}
+
+/**
+ * Permanently wipe all user-owned data (transactions, splits, accounts,
+ * categories, etc.) and swap in a fresh DEK wrapped by the new password.
+ *
+ * Called from:
+ *  - POST /api/auth/wipe-account (user-initiated, password confirmed)
+ *  - POST /api/auth/password-reset/confirm (token-confirmed recovery)
+ *
+ * The user row is preserved (id, email, MFA, etc.) but `encryptionV` bumps
+ * because the DEK changed — any in-flight session cache entries holding the
+ * old DEK become invalid. To DELETE the account entirely (drop the user row),
+ * use `deleteUserAccount` instead.
+ */
+export async function wipeUserDataAndRewrap(
+  userId: string,
+  passwordHash: string,
+  wrap: { kekSalt: string; dekWrapped: string; dekWrappedIv: string; dekWrappedTag: string }
+) {
+  const s = getSchema();
+
+  await unlinkUserUploadFiles(userId);
 
   // Atomic: every delete + the DEK rewrap commits together, or nothing does.
   // Pre-fix this function ran each delete as its own auto-commit, so a late
   // FK failure (e.g. cross-tenant transaction_splits) left the user signed
   // in to a half-wiped account whose DEK was never rotated.
   await db.transaction(async (tx) => {
-    // Delete user-scoped rows in FK-safe order. transaction_splits has no
-    // user_id column — filter via the user's transaction IDs first.
-    const userTxns = await tx
-      .select({ id: s.transactions.id })
-      .from(s.transactions)
-      .where(eq(s.transactions.userId, userId));
-    const txIds = userTxns.map((t) => t.id);
-    if (txIds.length > 0) {
-      for (let i = 0; i < txIds.length; i += BATCH) {
-        const batch = txIds.slice(i, i + BATCH);
-        await tx.delete(s.transactionSplits).where(inArray(s.transactionSplits.transactionId, batch));
-      }
-    }
-
-    // Get this user's import-email address so we can purge matching
-    // `incoming_emails` rows (the table has no user_id column).
-    let userImportEmail: string | null = null;
-    const emailRow = await tx
-      .select({ value: s.settings.value })
-      .from(s.settings)
-      .where(and(eq(s.settings.key, "import_email"), eq(s.settings.userId, userId)))
-      .limit(1);
-    userImportEmail = emailRow[0]?.value ?? null;
-
-    // Per-user tables with a user_id column. Each delete filters strictly by
-    // user_id — never by FK reach — so the wipe can ONLY remove rows owned
-    // by this user. If any other user's row has an FK pointing at one of
-    // our accounts/categories, the final accounts/categories delete will
-    // fail with FK 23503 and the whole transaction rolls back. That's the
-    // intended behavior: cross-tenant data must be cleaned up by an admin
-    // out-of-band, never silently destroyed by a user-initiated wipe.
-    await tx.delete(s.notifications).where(eq(s.notifications.userId, userId));
-    await tx.delete(s.subscriptions).where(eq(s.subscriptions.userId, userId));
-    await tx.delete(s.recurringTransactions).where(eq(s.recurringTransactions.userId, userId));
-    await tx.delete(s.contributionRoom).where(eq(s.contributionRoom.userId, userId));
-    // priceCache and fxRates are global shared caches — not per-user, nothing
-    // to wipe here. User-specific FX overrides live in fxOverrides.
-    await tx.delete(s.fxOverrides).where(eq(s.fxOverrides.userId, userId));
-    await tx.delete(s.targetAllocations).where(eq(s.targetAllocations.userId, userId));
-    await tx.delete(s.snapshots).where(eq(s.snapshots.userId, userId));
-    // Issue #130 — goal_accounts FK references goals; wipe before parent.
-    await tx.delete(s.goalAccounts).where(eq(s.goalAccounts.userId, userId));
-    await tx.delete(s.goals).where(eq(s.goals.userId, userId));
-    await tx.delete(s.loans).where(eq(s.loans.userId, userId));
-    await tx.delete(s.budgets).where(eq(s.budgets.userId, userId));
-    await tx.delete(s.budgetTemplates).where(eq(s.budgetTemplates.userId, userId));
-    await tx.delete(s.transactionRules).where(eq(s.transactionRules.userId, userId));
-    await tx.delete(s.importTemplates).where(eq(s.importTemplates.userId, userId));
-    await tx.delete(s.transactions).where(eq(s.transactions.userId, userId));
-    // Two-ledger refactor (2026-05-22) — delete the bank-side ledger
-    // AFTER transactions because `transactions.bank_transaction_id` has
-    // ON DELETE SET NULL; deleting transactions first means the bank-
-    // ledger rows are no longer referenced and can be safely dropped via
-    // the user_id filter alone (no cross-tenant cascade risk).
-    await tx.delete(s.bankTransactions).where(eq(s.bankTransactions.userId, userId));
-    await tx.delete(s.portfolioHoldings).where(eq(s.portfolioHoldings.userId, userId));
-    await tx.delete(s.categories).where(eq(s.categories.userId, userId));
-    await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));
-
-    // Tables missed by the original implementation — Finding #5. Covers the
-    // tokens that would survive a "wipe my account" click and still decrypt the
-    // user's session DEK after wipe, plus the staged-import plaintext buffer
-    // and mcp_uploads metadata rows whose on-disk files were unlinked above.
-    await tx.delete(s.mcpUploads).where(eq(s.mcpUploads.userId, userId));
-    await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
-    await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
-    await tx.delete(s.passwordResetTokens).where(eq(s.passwordResetTokens.userId, userId));
-    await tx.delete(s.oauthAccessTokens).where(eq(s.oauthAccessTokens.userId, userId));
-    await tx.delete(s.oauthAuthorizationCodes).where(eq(s.oauthAuthorizationCodes.userId, userId));
-    if (userImportEmail) {
-      // incoming_emails has no user_id; match on the user's own import-* address.
-      // Typo'd emails that were routed to trash by display_name match are left
-      // in place (the match is best-effort and we don't want to cascade-delete
-      // unrelated admin-inbox content).
-      await tx.delete(s.incomingEmails).where(eq(s.incomingEmails.toAddress, userImportEmail));
-    }
-
-    // settings last — it holds the api_key/api_key_dek/email_webhook_* rows and
-    // we also just read the import_email from here above.
-    await tx.delete(s.settings).where(eq(s.settings.userId, userId));
+    await deleteAllUserDataTx(tx, userId);
 
     // Rewrap the DEK with the new password + bump encryption version so any
     // cached session DEK gets invalidated on next auth check.
@@ -518,6 +548,38 @@ export async function wipeUserDataAndRewrap(
         updatedAt: now,
       })
       .where(eq(s.users.id, userId));
+  });
+}
+
+/**
+ * Permanently DELETE a user account: every per-user data row PLUS the `users`
+ * row itself. Used by POST /api/auth/delete-account.
+ *
+ * Unlike `wipeUserDataAndRewrap`, there is no DEK to rewrap afterward — the
+ * identity is gone. The final `DELETE FROM users` cascades the ON DELETE
+ * CASCADE children (webhooks, webhook_deliveries, transaction_flags, backfill
+ * audit/runs). `mcp_idempotency_keys` has no FK to users, so it's deleted
+ * explicitly here to avoid orphaning.
+ *
+ * Edge case — `admin_audit.admin_user_id` is NOT NULL with no cascade. A normal
+ * `role='user'` account has zero rows there, so the delete is safe. If an admin
+ * who recorded audit rows ever self-deletes, the FK (23503) rolls the whole
+ * transaction back atomically and the caller surfaces an error — an operator
+ * job, by design (same philosophy as the cross-tenant note in
+ * `deleteAllUserDataTx`). We do NOT delete `admin_audit` rows — it's
+ * append-only by policy.
+ */
+export async function deleteUserAccount(userId: string) {
+  const s = getSchema();
+
+  await unlinkUserUploadFiles(userId);
+
+  await db.transaction(async (tx) => {
+    await deleteAllUserDataTx(tx, userId);
+    // No FK to users — would orphan if we relied on the user-row cascade.
+    await tx.delete(s.mcpIdempotencyKeys).where(eq(s.mcpIdempotencyKeys.userId, userId));
+    // Final — drops the identity row and cascades its ON DELETE CASCADE children.
+    await tx.delete(s.users).where(eq(s.users.id, userId));
   });
 }
 

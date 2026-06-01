@@ -40,6 +40,74 @@ export default function DataSettingsPage() {
   const [clearStep, setClearStep] = useState(0); // 0=idle, 1=first confirm, 2=type DELETE
   const [clearStatus, setClearStatus] = useState("");
 
+  // Delete account (danger zone) — irreversible: drops the user row + all data.
+  const [delStep, setDelStep] = useState(0); // 0=idle, 1=warn, 2=password+confirm form
+  const [delPassword, setDelPassword] = useState("");
+  const [delConfirm, setDelConfirm] = useState("");
+  const [delMfaCode, setDelMfaCode] = useState("");
+  const [delMfaRequired, setDelMfaRequired] = useState(false);
+  const [delStatus, setDelStatus] = useState("");
+  const [delLoading, setDelLoading] = useState(false);
+
+  function resetDeleteAccount() {
+    setDelStep(0);
+    setDelPassword("");
+    setDelConfirm("");
+    setDelMfaCode("");
+    setDelMfaRequired(false);
+    setDelStatus("");
+    setDelLoading(false);
+  }
+
+  async function handleDeleteAccount() {
+    if (delStep === 0) {
+      setDelStep(1);
+      return;
+    }
+    if (delStep === 1) {
+      setDelStep(2);
+      return;
+    }
+    // delStep === 2 — submit.
+    if (delConfirm !== "DELETE") {
+      setDelStatus("Type DELETE to confirm");
+      return;
+    }
+    if (!delPassword) {
+      setDelStatus("Enter your password");
+      return;
+    }
+    setDelLoading(true);
+    setDelStatus("");
+    try {
+      const res = await fetch("/api/auth/delete-account", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          password: delPassword,
+          confirmation: delConfirm,
+          mfaCode: delMfaCode || undefined,
+        }),
+      });
+      if (res.ok) {
+        // Account + session are gone — leave the app for the public home.
+        window.location.href = "/";
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 && data?.code === "mfa-required") {
+        setDelMfaRequired(true);
+        setDelStatus("Enter your 6-digit authenticator code.");
+      } else {
+        setDelStatus(data?.error || "Failed to delete account");
+      }
+    } catch {
+      setDelStatus("Failed to delete account");
+    } finally {
+      setDelLoading(false);
+    }
+  }
+
   const parseCSV = useCallback((text: string): { headers: string[]; rows: ImportRow[] } => {
     const lines = text.split(/\r?\n/).filter((l) => l.trim());
     if (lines.length < 2) return { headers: [], rows: [] };
@@ -455,6 +523,71 @@ export default function DataSettingsPage() {
               {clearStatus}
             </p>
           )}
+
+          {/* Delete account — irreversible: removes your login + all data */}
+          <div className="pt-3 mt-1 border-t border-border/60 space-y-3">
+            {delStep === 0 && (
+              <div className="space-y-1.5">
+                <Button variant="outline" className="border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground" onClick={handleDeleteAccount}>
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete Account
+                </Button>
+                <p className="text-xs text-muted-foreground">Permanently deletes your account, login, and all data.</p>
+              </div>
+            )}
+
+            {delStep === 1 && (
+              <div className="space-y-3 p-3 rounded-lg border border-destructive/30 bg-destructive/5">
+                <p className="text-sm font-medium text-destructive">This permanently deletes your account and all of your data, including your login. This cannot be undone.</p>
+                <div className="flex gap-2">
+                  <Button variant="destructive" size="sm" onClick={handleDeleteAccount}>Continue</Button>
+                  <Button variant="ghost" size="sm" onClick={resetDeleteAccount}>Cancel</Button>
+                </div>
+              </div>
+            )}
+
+            {delStep === 2 && (
+              <div className="space-y-3 p-3 rounded-lg border border-destructive/30 bg-destructive/5">
+                <p className="text-sm font-medium text-destructive">Confirm permanent account deletion:</p>
+                <div className="space-y-2">
+                  <Input
+                    type="password"
+                    value={delPassword}
+                    onChange={(e) => setDelPassword(e.target.value)}
+                    placeholder="Your password"
+                    autoComplete="current-password"
+                    className="max-w-xs"
+                  />
+                  <Input
+                    value={delConfirm}
+                    onChange={(e) => setDelConfirm(e.target.value)}
+                    placeholder="Type DELETE"
+                    className="max-w-40"
+                  />
+                  {delMfaRequired && (
+                    <Input
+                      value={delMfaCode}
+                      onChange={(e) => setDelMfaCode(e.target.value)}
+                      placeholder="6-digit code"
+                      inputMode="numeric"
+                      maxLength={6}
+                      className="max-w-40"
+                    />
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="destructive" size="sm" onClick={handleDeleteAccount} disabled={delLoading || delConfirm !== "DELETE" || !delPassword}>
+                    {delLoading ? "Deleting…" : "Delete my account"}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={resetDeleteAccount} disabled={delLoading}>Cancel</Button>
+                </div>
+              </div>
+            )}
+
+            {delStatus && (
+              <p className="text-xs text-destructive">{delStatus}</p>
+            )}
+          </div>
         </CardContent>
       </Card>
     </div>
