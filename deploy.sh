@@ -256,8 +256,25 @@ if [ "$SKIP_BUILD" = false ]; then
   if [ -d .next ] && [ -n "$REPO_OWNER" ]; then
     sudo chown -R "$REPO_OWNER:$REPO_OWNER" .next 2>/dev/null || true
   fi
+  # Atomic detach instead of in-place rm. The running service writes runtime
+  # cache files into .next/standalone/.next/cache/fetch-cache/ on every
+  # outbound HTTP fetch (FX rates, Yahoo prices, etc.). When `rm -rf .next`
+  # ran against the live tree, new fetch-cache entries appeared mid-traversal
+  # and `rm` failed with "Directory not empty" on the parent — partial-deleting
+  # the build (server.js gone, dev returning 500 on every page) until the next
+  # successful deploy. The fix: `mv` is atomic and the running service keeps
+  # its open inodes through the rename, so the rm operates on a detached tree
+  # that nobody is writing to. PID-suffixed name avoids collision if a second
+  # deploy fires before the previous .next.old.* finished cleaning up.
   echo "==> Removing stale build output..."
-  run_as "rm -rf .next"
+  if [ -d .next ]; then
+    OLD_NEXT=".next.old.$$"
+    run_as "mv .next $OLD_NEXT"
+    run_as "rm -rf $OLD_NEXT"
+  fi
+  # Belt-and-suspenders: clean any orphaned .next.old.* trees from a previous
+  # deploy that died after the mv but before the rm (e.g. SSH dropout).
+  run_as "rm -rf .next.old.* 2>/dev/null" || true
   echo "==> Building Next.js..."
   run_as "npm run build"
 else
