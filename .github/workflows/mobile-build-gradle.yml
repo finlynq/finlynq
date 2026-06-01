@@ -126,7 +126,7 @@ jobs:
           printf '%s' "$ANDROID_UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.keystore"
           echo "Keystore decoded ($(wc -c < "$RUNNER_TEMP/upload.keystore") bytes)"
 
-      - name: Gradle bundleRelease
+      - name: Gradle bundleRelease + assembleRelease
         working-directory: mobile/android
         env:
           SIGNED: ${{ steps.signing.outputs.available }}
@@ -135,21 +135,30 @@ jobs:
           KEYPW: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           chmod +x ./gradlew
+          # bundleRelease → .aab (Play upload); assembleRelease → .apk (sideload).
           if [ "$SIGNED" = "true" ]; then
-            ./gradlew :app:bundleRelease --no-daemon --stacktrace \
+            ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon --stacktrace \
               -Pandroid.injected.signing.store.file="$RUNNER_TEMP/upload.keystore" \
               -Pandroid.injected.signing.store.password="$KSPW" \
               -Pandroid.injected.signing.key.alias="$ALIAS" \
               -Pandroid.injected.signing.key.password="$KEYPW"
           else
-            echo "::warning::Building DEBUG-SIGNED bundle (no upload keystore) — validation only, NOT uploadable to Play."
-            ./gradlew :app:bundleRelease --no-daemon --stacktrace
+            echo "::warning::Building DEBUG-SIGNED artifacts (no upload keystore) — validation only, NOT uploadable to Play."
+            ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon --stacktrace
           fi
 
-      - name: Upload .aab artifact
+      - name: Upload .aab artifact (Play upload)
         uses: actions/upload-artifact@v4
         with:
           name: finlynq-vc${{ steps.ver.outputs.versionCode }}-${{ steps.signing.outputs.available == 'true' && 'release' || 'DEBUGSIGNED' }}-aab
           path: mobile/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload .apk artifact (sideload)
+        uses: actions/upload-artifact@v4
+        with:
+          name: finlynq-vc${{ steps.ver.outputs.versionCode }}-${{ steps.signing.outputs.available == 'true' && 'release' || 'DEBUGSIGNED' }}-apk
+          path: mobile/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 30
