@@ -123,7 +123,13 @@ export default function ReportsScreen() {
       sub: "Assets, liabilities & net worth",
       onPress: () => navigation.navigate("BalanceSheet", { endDate: range.endDate, displayCurrency }),
     },
-    // Trends / Cash flow / Year over year links are added in later phases.
+    {
+      icon: "performance",
+      label: "Trends",
+      sub: "Income vs expenses over time",
+      onPress: () => navigation.navigate("Trends", rangeParams),
+    },
+    // Cash flow / Year over year links are added in later phases.
   ];
 
   return (
