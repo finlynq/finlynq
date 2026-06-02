@@ -85,6 +85,7 @@ type EnrichedHolding = {
   price: number | null;
   change: number | null;
   changePct: number | null;
+  dayChangeDisplay: number | null;
   quoteCurrency: string | null;
   marketCap: number | null;
   image: string | null;
@@ -247,6 +248,27 @@ function ChangeBadge({ value, className = "" }: { value: number | null; classNam
       {isPositive ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
       {Math.abs(value).toFixed(2)}%
     </span>
+  );
+}
+
+// Day-change as a percentage badge with the dollar amount (display currency)
+// stacked beneath it. `amount` is this holding's contribution to the portfolio
+// day change (change-per-unit × qty, FX-converted server-side).
+function DayChange({
+  pct,
+  amount,
+  currency,
+}: { pct: number | null; amount: number | null; currency: string }) {
+  if (pct === null || pct === undefined) return <span className="text-muted-foreground">--</span>;
+  return (
+    <div className="inline-flex flex-col items-end leading-tight">
+      <ChangeBadge value={pct} />
+      {amount !== null && amount !== undefined && (
+        <span className={`text-[10px] font-mono ${amount >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+          {amount >= 0 ? "+" : ""}{formatCurrency(amount, currency)}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -781,7 +803,7 @@ export default function PortfolioPage() {
                         <span className="text-sm font-medium">{h.symbol ?? h.name}</span>
                         <span className="text-xs text-muted-foreground hidden sm:inline">{h.name}</span>
                       </div>
-                      <ChangeBadge value={h.changePct} />
+                      <DayChange pct={h.changePct} amount={h.dayChangeDisplay} currency={displayCurrency} />
                     </div>
                   ))}
                 </div>
@@ -805,7 +827,7 @@ export default function PortfolioPage() {
                         <span className="text-sm font-medium">{h.symbol ?? h.name}</span>
                         <span className="text-xs text-muted-foreground hidden sm:inline">{h.name}</span>
                       </div>
-                      <ChangeBadge value={h.changePct} />
+                      <DayChange pct={h.changePct} amount={h.dayChangeDisplay} currency={displayCurrency} />
                     </div>
                   ))}
                 </div>
@@ -1858,7 +1880,7 @@ export default function PortfolioPage() {
                                     ) : <span className="text-muted-foreground text-xs">--</span>}
                                   </TableCell>
                                   <TableCell className="text-right">
-                                    <ChangeBadge value={h.changePct} />
+                                    <DayChange pct={h.changePct} amount={h.dayChangeDisplay} currency={displayCurrency} />
                                   </TableCell>
                                   <TableCell className="text-right">
                                     <Link

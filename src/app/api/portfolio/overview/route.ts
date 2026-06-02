@@ -550,6 +550,14 @@ export async function GET(request: NextRequest) {
       ? (totalReturn / lifetimeCostBasis) * 100
       : null;
 
+    // Per-holding day-change in display currency = this holding's contribution
+    // to summary.dayChangeDisplay (change-per-unit × qty, FX-converted). Null
+    // when there's no live change to show (mirrors the holdingsWithChange
+    // filter used for the portfolio total below).
+    const dayChangeDisplay = changePct !== null && marketValueDisplay !== null
+      ? Math.round(convertCurrency((change ?? 0) * (quantity ?? 1), fxRate) * 100) / 100
+      : null;
+
     return {
       id: h.id,
       accountId: h.accountId,
@@ -561,6 +569,7 @@ export async function GET(request: NextRequest) {
       price,
       change,
       changePct,
+      dayChangeDisplay,
       quoteCurrency,
       marketCap,
       image,
