@@ -40,6 +40,20 @@ export async function buildDailySnapshot(
   input: BuildDailySnapshotInput,
 ): Promise<BuildDailySnapshotResult> {
   const { userId, date, dek } = input;
+
+  // Post Stream D Phase 4 holding symbols are ENCRYPTED. Without a DEK,
+  // getHoldingsValueByAccount can't decrypt a symbol to price it and falls back
+  // to $1/unit — so a DEK-less build would write garbage market values for
+  // stock holdings AND clobber good DEK-built snapshots via the UPSERT. Writing
+  // nothing is strictly better. Snapshots are therefore built only from
+  // DEK-bearing paths: the manual "Rebuild investment history" button and the
+  // chart-load self-heal (GET /api/net-worth-history), both of which pass the
+  // session DEK. A DEK-less caller (the nightly cron, the backfill script post
+  // Stream D) is a no-op. plan/net-worth-over-time.md Part B.
+  if (!dek) {
+    return { userId, date, perAccountRows: 0, aggregateRow: false, gapsFilled: false };
+  }
+
   const reportingCurrency = await resolveReportingCurrency(db, userId, undefined);
 
   // Per-account market value + cost basis (in account currency).
@@ -127,33 +141,30 @@ export async function buildDailySnapshot(
     const mv = v.value * fxRate;
     const cb = v.costBasis * fxRate;
     const contribution = (perAccountContribution.get(accountId) ?? 0) * fxRate;
-    await db
-      .insert(schema.portfolioSnapshots)
-      .values({
-        userId,
-        snapDate: date,
-        accountId,
-        marketValue: mv,
-        costBasis: cb,
-        netContribution: contribution,
-        currency: reportingCurrency,
-        gapsFilled,
-        source: "cron",
-      })
-      .onConflictDoUpdate({
-        target: [
-          schema.portfolioSnapshots.userId,
-          schema.portfolioSnapshots.snapDate,
-          schema.portfolioSnapshots.accountId,
-        ],
-        set: {
-          marketValue: mv,
-          costBasis: cb,
-          netContribution: contribution,
-          currency: reportingCurrency,
-          gapsFilled,
-        },
-      });
+    // The unique index is on (user_id, snap_date, COALESCE(account_id, -1)) —
+    // an EXPRESSION index — so a Drizzle onConflictDoUpdate targeting the bare
+    // columns (user_id, snap_date, account_id) finds no matching constraint and
+    // Postgres rejects it ("no unique or exclusion constraint matching the ON
+    // CONFLICT specification"). That threw on the first per-account row and
+    // aborted the whole snapshot build (so NO snapshots were ever written).
+    // Use raw SQL with the COALESCE conflict target, exactly like the aggregate
+    // insert below.
+    await db.execute(sql`
+      INSERT INTO portfolio_snapshots (
+        user_id, snap_date, account_id, market_value, cost_basis,
+        net_contribution, currency, gaps_filled, source
+      ) VALUES (
+        ${userId}, ${date}, ${accountId}, ${mv}, ${cb},
+        ${contribution}, ${reportingCurrency}, ${gapsFilled}, ${'cron'}
+      )
+      ON CONFLICT (user_id, snap_date, COALESCE(account_id, -1))
+      DO UPDATE SET
+        market_value = EXCLUDED.market_value,
+        cost_basis = EXCLUDED.cost_basis,
+        net_contribution = EXCLUDED.net_contribution,
+        currency = EXCLUDED.currency,
+        gaps_filled = EXCLUDED.gaps_filled
+    `);
     perAccountRows++;
     totalMv += mv;
     totalCb += cb;

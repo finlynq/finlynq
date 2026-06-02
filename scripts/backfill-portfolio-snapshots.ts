@@ -43,8 +43,16 @@ async function main(): Promise<number> {
   setAdapter(adapter);
 
   try {
+    // ⚠️ Post Stream D Phase 4, holding symbols are encrypted — buildDailySnapshot
+    // is a NO-OP without a session DEK (which this admin script can't obtain).
+    // Use the in-app "Rebuild investment history" button (Settings → Investments)
+    // or the chart-load self-heal instead; both pass the logged-in user's DEK.
+    // This script remains for the rare case where a DEK is wired in.
+    console.warn(
+      "WARNING: snapshots are only built with a session DEK; this DEK-less script will report days processed but write nothing. Use the in-app Rebuild button instead.",
+    );
     // Shared walk loop (also used by the manual rebuild endpoint + the
-    // auto-rebuild drain cron) — discovers fromDate = MIN(tx.date) when null.
+    // chart-load self-heal) — discovers fromDate = MIN(tx.date) when null.
     console.log(`Backfilling daily snapshots for user ${userId}`);
     const summary = await rebuildPortfolioSnapshots(userId, fromArg, null, null);
     console.log(`  Range: ${summary.fromDate} → ${summary.toDate}`);
