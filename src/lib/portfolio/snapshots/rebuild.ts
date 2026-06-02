@@ -21,6 +21,18 @@ export interface RebuildResult {
   gapsFilledDays: number;
 }
 
+/**
+ * Hard floor on how far back a rebuild will ever walk. A single garbage-dated
+ * row — e.g. an opening-balance transaction left at the Unix epoch (1970-01-01)
+ * because no date was entered — otherwise makes `MIN(transactions.date)` point
+ * to 1970 and sends the day-by-day walk on a ~20,000-day march: it pegs CPU,
+ * writes thousands of meaningless pre-history snapshots, and hits MAX_DAYS
+ * before it ever reaches the real holdings. No supported account predates this
+ * floor, so the start date is clamped up to it regardless of where `from` came
+ * from (caller param, dirty marker, or the MIN(date) probe).
+ */
+export const EARLIEST_REBUILD_DATE = "2020-01-01";
+
 // HMR-safe per-user in-flight guard. Shared by the manual rebuild endpoint and
 // the chart-load self-heal so a double-click / concurrent chart loads don't
 // spawn overlapping walks for the same user.
@@ -69,6 +81,10 @@ export async function rebuildPortfolioSnapshots(
       .where(eq(schema.transactions.userId, userId));
     from = row[0]?.minDate ?? to;
   }
+  // Hard floor: never walk before EARLIEST_REBUILD_DATE, no matter where `from`
+  // came from. Guards against epoch/garbage-dated rows producing a runaway
+  // multi-decade walk (see the constant's doc comment).
+  if (from && from < EARLIEST_REBUILD_DATE) from = EARLIEST_REBUILD_DATE;
   // Clamp a from-date past today to today (single-day rebuild).
   if (from > to) from = to;
 
