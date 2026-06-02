@@ -1,6 +1,6 @@
 # Mobile Setup Guide
 
-Finlynq has a companion mobile app — a React Native (Expo) client for iOS and Android that connects to your Finlynq backend (hosted or self-hosted). It covers the Dashboard, Transactions, Import, Budgets, and Settings screens. It's a client only: it talks to your Finlynq server over HTTP(S) and signs in with the same account you use on the web.
+Finlynq has a companion mobile app — a React Native (Expo) client for iOS and Android that connects to your Finlynq backend (hosted or self-hosted). It covers the Dashboard, Accounts, Portfolio, Transactions, Budgets, Goals, Import, and Settings screens. It's a client only: it talks to your Finlynq server over HTTP(S) and signs in with the same account you use on the web.
 
 > The mobile app is optional and evolving. The web app at [finlynq.com/cloud](https://finlynq.com/cloud) is the primary, fully-featured way to use Finlynq.
 
@@ -63,10 +63,14 @@ The app signs you in with your **Finlynq account** — the same username (or ema
 | Screen | Description |
 |--------|-------------|
 | **Dashboard** | Net worth, spending summaries, and financial-health overview |
+| **Accounts** | Per-account balances (native + display currency), account detail with recent activity, and creating accounts |
+| **Portfolio** | Holdings overview with the investment-returns grid, allocation donuts (by type / by account), and top movers; performance over time (TWRR / MWRR + value-vs-cost chart), realized gains (tax-year / term / base-currency), and dividend income (by year / quarter / holding); tap a holding for per-account rows, open lots, and its transactions. Record all 8 investment operations — buy, sell (with lot picker), swap, in-kind transfer, income/expense, FX conversion, brokerage deposit, and withdrawal |
 | **Transactions** | Browse, filter, add, and edit transactions |
-| **Import** | Upload and review transactions from files |
 | **Budgets** | Budget progress and spending by category |
-| **Settings** | Server URL, sign-out, biometric unlock, and auto-lock |
+| **Goals** | Savings and debt-payoff goals with progress, and creating goals |
+| **Categories** | Browse and create categories |
+| **Import** | Upload and review transactions from files |
+| **Settings** | Server URL, light/dark/system theme, sign-out, biometric unlock, auto-lock, and data controls (delete data / delete account) |
 
 ## Troubleshooting
 
