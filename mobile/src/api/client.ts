@@ -435,11 +435,14 @@ export const endpoints = {
   getGoals: () => api.get<GoalWithProgress[]>("/api/goals"),
   createGoal: (d: GoalFormData) => api.post<GoalWithProgress>("/api/goals", d),
 
-  // One-tap onboarding: seeds 12 categories + Checking/Credit Card accounts +
-  // ~8 sample transactions (idempotent). Returns the enveloped
-  // `{ success, transactionsCreated }` shape directly (request() passes it
-  // through unchanged), so `transactionsCreated` rides at the top level, NOT
-  // under `.data`.
+  // One-tap onboarding: seeds a full demo-grade dataset (idempotent) —
+  // categories incl. Dividends, 5 accounts (Chequing/Savings/Visa + Brokerage
+  // & TFSA investment accounts), ~6 months of transactions, a funded portfolio
+  // with holdings/cash-sleeves/buys/sells, cash dividends, goals, loans,
+  // subscriptions, and current-month budgets. Returns the enveloped
+  // `{ success, transactionsCreated, summary }` shape directly (request()
+  // passes it through unchanged), so `transactionsCreated` rides at the top
+  // level, NOT under `.data`.
   loadSampleData: () =>
     api.post<{ transactionsCreated: number }>("/api/onboarding/sample-data"),
 
