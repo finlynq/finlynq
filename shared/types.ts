@@ -899,3 +899,110 @@ export interface YoYReport {
   categories: YoYCategoryRow[];
   monthly: YoYMonthlyRow[];
 }
+
+// --- Reconcile inbox (account-anchored card flows; mirrors web /inbox) ---
+// The mobile app ports ONLY the phone-native card lenses — Approve-each
+// (mode='approve') + Auto-pilot categorize (mode='auto'). The two-pane N×M
+// grid + Manual-mode staging review stay web-only. Decrypted name/payee fields
+// can be null/"" under a cold DEK — route every label through safeName/
+// safeAccountName.
+
+/** Per-account reconciliation policy, persisted on `accounts.mode`. */
+export type AccountMode = "auto" | "approve" | "manual";
+
+/**
+ * Account row as returned by GET /api/accounts (bare array). Richer than the
+ * base `Account` type — it carries the decrypted name/alias, the archived flag,
+ * the investment flag, and the reconciliation `mode` the inbox is keyed on.
+ */
+export interface InboxAccount {
+  id: number;
+  name: string | null;
+  alias?: string | null;
+  currency: string;
+  archived?: boolean;
+  isInvestment?: boolean;
+  mode: AccountMode;
+}
+
+/** One already-committed (bank ↔ tx) link from /api/reconcile/suggestions. */
+export interface ReconcileLink {
+  transactionId: number;
+  bankTransactionId: string;
+  linkType: "primary" | "extra";
+  source: string;
+  createdAt: string;
+}
+
+/** A not-yet-linked match candidate (exact-hash or fuzzy). */
+export interface ReconcileSuggestion {
+  transactionId: number;
+  bankTransactionId: string;
+  strategy: string;
+  score: number;
+  reason: string;
+  daysOff: number;
+  amountDeltaAbs: number;
+}
+
+/** Per-id transaction enrichment (decrypted) so the UI doesn't re-decrypt. */
+export interface ReconcileTxSnapshot {
+  id: number;
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string | null;
+  categoryName: string | null;
+  categoryType: string | null;
+}
+
+/** Per-id bank-row enrichment incl. the rule-engine suggested category. */
+export interface ReconcileBankSnapshot {
+  id: string;
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string | null;
+  accountId: number;
+  suggestedCategoryId: number | null;
+}
+
+/**
+ * GET /api/reconcile/suggestions `data` payload (ENVELOPED — read res.data).
+ * `linked` drives the Reconciled tab; bank rows NOT in `linked` are the
+ * To-approve / To-categorize cards.
+ */
+export interface ReconcileSuggestions {
+  linked: ReconcileLink[];
+  suggestions: ReconcileSuggestion[];
+  bankOnly: string[];
+  txOnly: number[];
+  transactions: Record<number, ReconcileTxSnapshot>;
+  bankTransactions: Record<string, ReconcileBankSnapshot>;
+}
+
+/** One recent auto-rule-fired tx (the Auto-pilot Reconciled banner). */
+export interface AutoRuleItem {
+  id: number;
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string | null;
+  categoryName: string | null;
+  bankTransactionId: string | null;
+  createdAt: string;
+}
+
+/** GET /api/reconcile/auto-rule-recent `data` payload (ENVELOPED — res.data). */
+export interface AutoRuleRecent {
+  count: number;
+  windowDays: number;
+  items: AutoRuleItem[];
+}
+
+/** Body for POST /api/bank-transactions/[bankId]/approve|categorize. */
+export interface BankRowCommitBody {
+  categoryId: number;
+  payee?: string;
+  accountId?: number;
+}

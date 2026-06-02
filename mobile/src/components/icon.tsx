@@ -44,6 +44,11 @@ import {
   LineChart,
   Coins,
   Scissors,
+  Zap,
+  ShieldCheck,
+  Eye,
+  Inbox,
+  Link2,
   type LucideIcon,
 } from "lucide-react-native";
 
@@ -90,6 +95,12 @@ export const Icons = {
   withdrawUp: ArrowUpFromLine,
   performance: LineChart,
   coins: Coins,
+  // Reconcile inbox
+  inbox: Inbox,
+  zap: Zap,
+  shield: ShieldCheck,
+  eye: Eye,
+  link: Link2,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof Icons;

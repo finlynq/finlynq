@@ -37,6 +37,23 @@ export function initial(name: string | null | undefined): string {
   return (name ?? "?").charAt(0).toUpperCase();
 }
 
+/**
+ * Friendly display name for an account, preferring `alias` over `name` and
+ * falling back to `Account #id` when both are null/"" (cold DEK). Mirrors the
+ * web `safeAccountName` in src/lib/safe-name.ts.
+ */
+export function safeAccountName(a: {
+  id?: number | string;
+  name?: string | null;
+  alias?: string | null;
+}): string {
+  const alias = a.alias?.trim();
+  if (alias) return alias;
+  const name = a.name?.trim();
+  if (name) return name;
+  return a.id != null ? `Account #${a.id}` : "Account";
+}
+
 /** Short month/day label from an ISO date string (null-safe). */
 export function formatShortDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "—";

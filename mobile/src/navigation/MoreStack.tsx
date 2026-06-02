@@ -17,6 +17,7 @@ import BalanceSheetScreen from "../screens/BalanceSheetScreen";
 import TrendsScreen from "../screens/TrendsScreen";
 import CashFlowSankeyScreen from "../screens/CashFlowSankeyScreen";
 import YearOverYearScreen from "../screens/YearOverYearScreen";
+import InboxScreen from "../screens/InboxScreen";
 
 /** Date range + display currency threaded from the Reports hub to a detail
  *  screen (trends/sankey/income-statement responses don't all carry currency). */
@@ -34,6 +35,7 @@ export type MoreStackParamList = {
   Goals: undefined;
   Categories: undefined;
   Import: undefined;
+  Inbox: { accountId?: number } | undefined;
   Settings: undefined;
   AddTransaction:
     | { mode?: "expense" | "income" | "transfer"; preselectedAccountId?: number }
@@ -60,6 +62,7 @@ export default function MoreStack() {
       <Stack.Screen name="Goals" component={GoalsScreen} />
       <Stack.Screen name="Categories" component={CategoriesScreen} />
       <Stack.Screen name="Import" component={ImportScreen} />
+      <Stack.Screen name="Inbox" component={InboxScreen} />
       <Stack.Screen name="Settings" component={SettingsScreen} />
       <Stack.Screen
         name="AddTransaction"

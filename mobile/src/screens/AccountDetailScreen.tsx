@@ -53,6 +53,22 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
   const value = account.convertedBalance ?? account.balance;
   const currency = account.displayCurrency ?? account.currency;
 
+  // Cross-tab deep-link to the reconcile inbox (lives in the More stack). The
+  // parent tab navigator owns the More route; a minimal typed cast keeps this
+  // off `any` without importing the whole nested param map.
+  const goToReconcile = () => {
+    type RootTabNav = {
+      navigate: (
+        tab: "More",
+        params: { screen: "Inbox"; params: { accountId: number } },
+      ) => void;
+    };
+    (navigation.getParent() as unknown as RootTabNav | undefined)?.navigate("More", {
+      screen: "Inbox",
+      params: { accountId: account.accountId },
+    });
+  };
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
       <View style={[styles.topBar, { borderBottomColor: colors.border }]}>
@@ -99,6 +115,19 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
                 Market value (holdings) ·{" "}
                 <Text style={{ color: colors.mutedForeground }}>manage on web</Text>
               </Text>
+            )}
+            {/* Reconcile inbox — non-investment accounts only (the card lenses
+                refuse investment accounts server-side). */}
+            {!account.isInvestment && (
+              <TouchableOpacity
+                style={[styles.reconcileBtn, { borderColor: colors.border }]}
+                onPress={goToReconcile}
+              >
+                <Icon name="inbox" size={15} color={colors.primary} />
+                <Text style={[styles.reconcileText, { color: colors.primary }]}>
+                  Reconcile this account
+                </Text>
+              </TouchableOpacity>
             )}
             <Text style={[styles.activityLabel, { color: colors.mutedForeground }]}>
               Recent activity
@@ -170,6 +199,18 @@ const styles = StyleSheet.create({
   accountMeta: { fontSize: 13, marginTop: 4 },
   heroValue: { fontSize: 32, fontWeight: "800", marginTop: 12, fontVariant: ["tabular-nums"] },
   holdingsHint: { fontSize: 12, marginTop: 4 },
+  reconcileBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginTop: 14,
+  },
+  reconcileText: { fontSize: 13, fontWeight: "600" },
   activityLabel: { fontSize: 12, fontWeight: "700", textTransform: "uppercase", marginTop: 16 },
   txRow: {
     flexDirection: "row",

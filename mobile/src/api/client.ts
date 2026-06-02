@@ -291,6 +291,11 @@ import type {
   YoYReport,
   ReportPeriod,
   ReportGroupBy,
+  InboxAccount,
+  AccountMode,
+  ReconcileSuggestions,
+  AutoRuleRecent,
+  BankRowCommitBody,
 } from "../../../shared/types";
 
 // Shared report query params. The date range + business + display currency are
@@ -594,6 +599,69 @@ export const endpoints = {
       ...payload,
       appVersion: payload.appVersion ?? "mobile",
     }),
+
+  // ─── Reconcile inbox (account-anchored Approve-each / Auto-pilot cards) ───
+  // Account list WITH the per-account reconciliation `mode` + investment flag +
+  // decrypted name/alias. GET /api/accounts already returns these fields (the
+  // base `getAccounts` types them away); the inbox needs them, hence a
+  // dedicated helper with the richer InboxAccount shape.
+  getInboxAccounts: () => api.get<InboxAccount[]>("/api/accounts"),
+
+  // Three-layer reconcile snapshot for one account. ENVELOPED ({success,data})
+  // — request() passes it through, so res.data is the inner payload. Needs the
+  // DEK for fuzzy matching (423 without; mobile sessions carry it).
+  getReconcileSuggestions: (
+    accountId: number,
+    dateMin?: string,
+    dateMax?: string,
+  ) => {
+    const parts = [`accountId=${accountId}`];
+    if (dateMin) parts.push(`dateMin=${encodeURIComponent(dateMin)}`);
+    if (dateMax) parts.push(`dateMax=${encodeURIComponent(dateMax)}`);
+    return api.get<ReconcileSuggestions>(
+      `/api/reconcile/suggestions?${parts.join("&")}`,
+    );
+  },
+
+  // Commit one bank row → ledger with a chosen category (Approve-each lens).
+  // Bare structured error `{ error, code? }` on 4xx (sign-vs-category /
+  // investment-account guards) — use the structured-error-aware helper so the
+  // message survives instead of being collapsed to a string by request().
+  approveBankRow: (bankId: string, body: BankRowCommitBody) =>
+    postPortfolioOperationRaw<{ success: boolean; data: { transactionId: number } }>(
+      `/api/bank-transactions/${encodeURIComponent(bankId)}/approve`,
+      body,
+    ),
+
+  // Auto-pilot companion — commit an unmatched bank row with a chosen category.
+  categorizeBankRow: (bankId: string, body: BankRowCommitBody) =>
+    postPortfolioOperationRaw<{ success: boolean; data: { transactionId: number } }>(
+      `/api/bank-transactions/${encodeURIComponent(bankId)}/categorize`,
+      body,
+    ),
+
+  // Recent rule-fired rows for the Auto-pilot "Reconciled" banner. Enveloped.
+  getAutoRuleRecent: (accountId: number, days?: number) =>
+    api.get<AutoRuleRecent>(
+      `/api/reconcile/auto-rule-recent?accountId=${accountId}${
+        days ? `&days=${days}` : ""
+      }`,
+    ),
+
+  // Persist the per-account reconciliation policy. Enveloped; request() passes
+  // the { success, data } through, so res.data is { id, mode }.
+  setAccountMode: (accountId: number, mode: AccountMode) =>
+    api.patch<{ id: number; mode: AccountMode }>(
+      `/api/accounts/${accountId}/mode`,
+      { mode },
+    ),
+
+  // Per-row bank-ledger delete. The inbox cards only ever surface UNLINKED bank
+  // rows, which delete cleanly; a linked row would 409 (surfaced as an error).
+  deleteBankRow: (bankId: string) =>
+    api.delete<{ success?: boolean }>(
+      `/api/bank-transactions/${encodeURIComponent(bankId)}`,
+    ),
 
   // Destructive account actions. Both are account-session only (the backend
   // rejects API-key auth) and require the same confirmation phrase the web UI

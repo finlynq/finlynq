@@ -117,6 +117,7 @@ export default function MoreScreen() {
         { icon: "budgets", label: "Budgets", onPress: () => navigation.navigate("Budgets") },
         { icon: "goals", label: "Goals", onPress: () => navigation.navigate("Goals") },
         { icon: "reports", label: "Reports", onPress: () => navigation.navigate("Reports") },
+        { icon: "inbox", label: "Reconcile", onPress: () => navigation.navigate("Inbox") },
         { icon: "categories", label: "Categories", onPress: () => navigation.navigate("Categories") },
         { icon: "import", label: "Import", onPress: () => navigation.navigate("Import") },
       ],
