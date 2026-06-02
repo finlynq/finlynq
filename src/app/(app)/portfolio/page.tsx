@@ -252,8 +252,8 @@ function ChangeBadge({ value, className = "" }: { value: number | null; classNam
 }
 
 // Day-change as a percentage badge with the dollar amount (display currency)
-// stacked beneath it. `amount` is this holding's contribution to the portfolio
-// day change (change-per-unit × qty, FX-converted server-side).
+// shown inline beside it. `amount` is this holding's contribution to the
+// portfolio day change (change-per-unit × qty, FX-converted server-side).
 function DayChange({
   pct,
   amount,
@@ -261,14 +261,14 @@ function DayChange({
 }: { pct: number | null; amount: number | null; currency: string }) {
   if (pct === null || pct === undefined) return <span className="text-muted-foreground">--</span>;
   return (
-    <div className="inline-flex flex-col items-end leading-tight">
+    <span className="inline-flex items-center justify-end gap-1.5 whitespace-nowrap">
       <ChangeBadge value={pct} />
       {amount !== null && amount !== undefined && (
-        <span className={`text-[10px] font-mono ${amount >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+        <span className={`text-xs font-mono ${amount >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
           {amount >= 0 ? "+" : ""}{formatCurrency(amount, currency)}
         </span>
       )}
-    </div>
+    </span>
   );
 }
 
