@@ -15,6 +15,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
+import { formatCurrency as formatCurrencyBase } from "../lib/format";
 import { Icon } from "../components/icon";
 import type { Transaction, Account, Category } from "../../../shared/types";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -22,12 +23,8 @@ import type { TransactionsStackParamList } from "../navigation/TransactionsStack
 
 type Props = NativeStackScreenProps<TransactionsStackParamList, "TransactionDetail">;
 
-function formatCurrency(amount: number, currency = "CAD"): string {
-  return new Intl.NumberFormat("en-CA", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-  }).format(amount);
+function formatCurrency(amount: number, currency = "USD"): string {
+  return formatCurrencyBase(amount, currency);
 }
 
 export default function TransactionDetailScreen({ route, navigation }: Props) {

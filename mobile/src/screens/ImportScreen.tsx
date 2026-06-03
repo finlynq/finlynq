@@ -13,6 +13,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { useTheme } from "../theme";
 import { getServerUrl } from "../api/client";
 import { logger } from "../lib/logger";
+import { formatCurrency as formatCurrencyBase } from "../lib/format";
 
 interface PreviewRow {
   date: string;
@@ -42,12 +43,8 @@ interface ImportResult {
   errors?: string[];
 }
 
-function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat("en-CA", {
-    style: "currency",
-    currency: "CAD",
-    minimumFractionDigits: 2,
-  }).format(amount);
+function formatCurrency(amount: number, currency = "USD"): string {
+  return formatCurrencyBase(amount, currency);
 }
 
 export default function ImportScreen() {

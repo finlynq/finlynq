@@ -15,6 +15,7 @@ import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { api } from "../api/client";
 import { logger } from "../lib/logger";
+import { formatCurrency as formatCurrencyBase } from "../lib/format";
 import type { BudgetWithSpending, Category } from "../../../shared/types";
 
 function getMonth(offset: number): string {
@@ -29,13 +30,8 @@ function formatMonthLabel(monthStr: string): string {
   return d.toLocaleDateString("en-CA", { month: "long", year: "numeric" });
 }
 
-function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat("en-CA", {
-    style: "currency",
-    currency: "CAD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(amount);
+function formatCurrency(amount: number, currency = "USD"): string {
+  return formatCurrencyBase(amount, currency, { decimals: 0 });
 }
 
 export default function BudgetsScreen() {

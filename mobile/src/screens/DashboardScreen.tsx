@@ -11,15 +11,11 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
+import { formatCurrency as formatCurrencyBase } from "../lib/format";
 import type { DashboardData, HealthScoreData, BudgetWithSpending, Category } from "../../../shared/types";
 
-function formatCurrency(amount: number, currency = "CAD"): string {
-  return new Intl.NumberFormat("en-CA", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(amount);
+function formatCurrency(amount: number, currency = "USD"): string {
+  return formatCurrencyBase(amount, currency, { decimals: 0 });
 }
 
 function getCurrentMonth(): string {
