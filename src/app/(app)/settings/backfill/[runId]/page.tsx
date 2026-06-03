@@ -48,6 +48,44 @@ const OVERRIDE_PAIRLESS_KINDS: ReadonlySet<OverrideKind> = new Set<OverrideKind>
   "portfolio_expense",
 ]);
 
+// Paired kinds wired in the UI. Buy/Sell (same-account) support synth_new +
+// link_existing; the cross-account kinds (brokerage cash-sleeve leg / fx /
+// transfer) support link_existing only. The external-leg brokerage kinds stay
+// disabled — they can't be an investment-account orphan. Keep in sync with
+// apply.ts (OVERRIDE_BUYSELL_KINDS / CROSS_ACCOUNT_OVERRIDE_KINDS).
+const OVERRIDE_PAIRED_ENABLED_KINDS: ReadonlySet<OverrideKind> = new Set<OverrideKind>([
+  "buy",
+  "sell",
+  "brokerage_deposit_in",
+  "brokerage_withdrawal_out",
+  "fx_from",
+  "fx_to",
+  "in_kind_transfer_in",
+  "in_kind_transfer_out",
+]);
+
+// Paired kinds that can synthesize their counterpart (same-account only).
+const OVERRIDE_SYNTH_KINDS: ReadonlySet<OverrideKind> = new Set<OverrideKind>(["buy", "sell"]);
+
+function isOverrideKindEnabled(kind: OverrideKind): boolean {
+  return OVERRIDE_PAIRLESS_KINDS.has(kind) || OVERRIDE_PAIRED_ENABLED_KINDS.has(kind);
+}
+
+// A candidate counterpart row from /counterpart-candidates (link_existing mode).
+interface CounterpartCandidate {
+  id: number;
+  date: string;
+  accountId: number | null;
+  currency: string;
+  amount: number;
+  quantity: number | null;
+  kind: string | null;
+  portfolioHoldingId: number | null;
+  isCashSleeve: boolean;
+  holdingName: string | null;
+  reason: string;
+}
+
 interface Proposal {
   id: number;
   runId: string;
@@ -85,7 +123,10 @@ interface Coverage {
   canonicalTxs: number;
   nonCanonicalTxs: number;
   canonicalPct: number;
-  perAccount: Array<{ accountId: number; name: string; total: number; canonical: number; pending: number; pendingPct: number }>;
+  // Rows on investment accounts with no portfolio_holding_id — not investment
+  // transactions at all (invariant: is_investment ⇒ references a holding).
+  nonInvestmentRows?: number;
+  perAccount: Array<{ accountId: number; name: string; total: number; canonical: number; pending: number; pendingPct: number; missingLots?: number; nonInvestmentRows?: number }>;
 }
 
 interface DisplacedRow {
@@ -123,6 +164,8 @@ const REFUSAL_EXPLANATIONS: Record<string, string> = {
     "More than one cash-sleeve row matches the stock leg by date+amount. Disambiguate in /transactions (delete or edit the wrong candidate), then re-run.",
   no_cash_sleeve_to_synthesize_into:
     "Synthesize mode needs a cash sleeve in the matching currency on this account, but none exists. Create one from the account detail page first.",
+  non_investment_in_investment_account:
+    "This row has no holding, so it isn't an investment transaction — yet it lives in an investment account (the invariant is: every row in an investment account references a holding). It's most likely a mis-filed expense, income, or transfer. Move it to a cash account or delete it in /transactions. If it really was an investment fee or income, use the kind-override picker to reclassify it (e.g. Portfolio expense / Portfolio income).",
 };
 
 export default function BackfillReviewPage({ params }: { params: Promise<{ runId: string }> }) {
@@ -287,6 +330,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
           <div className="col-span-7">
             {selected ? (
               <ProposalDetail
+                runId={runId}
                 proposal={selected}
                 displacedRows={displacedRows}
                 holdingMap={holdingMap}
@@ -303,6 +347,8 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
                     status: "approved",
                     chosenKind: payload.chosenKind,
                     chosenRelatedHoldingId: payload.chosenRelatedHoldingId ?? null,
+                    chosenCounterpartMode: payload.chosenCounterpartMode ?? null,
+                    chosenCounterpartTxId: payload.chosenCounterpartTxId ?? null,
                   })
                 }
               />
@@ -376,6 +422,7 @@ function ConfidenceBadge({ confidence }: { confidence: Proposal["confidence"] })
 }
 
 function ProposalDetail({
+  runId,
   proposal,
   displacedRows,
   holdingMap,
@@ -389,6 +436,7 @@ function ProposalDetail({
   onUndo,
   onApproveOverride,
 }: {
+  runId: string;
   proposal: Proposal;
   displacedRows: Record<number, DisplacedRow>;
   holdingMap: Record<number, HoldingMeta>;
@@ -403,6 +451,8 @@ function ProposalDetail({
   onApproveOverride: (payload: {
     chosenKind: OverrideKind;
     chosenRelatedHoldingId?: number | null;
+    chosenCounterpartMode?: "link_existing" | "synth_new" | null;
+    chosenCounterpartTxId?: number | null;
   }) => Promise<boolean> | void;
 }) {
   const isDrift = proposal.proposalKind === "drift";
@@ -436,7 +486,11 @@ function ProposalDetail({
             <AlertTriangle className="size-4 mt-0.5 shrink-0" />
             <div>
               <div className="font-medium">
-                {isOrphan ? "Manual fix needed" : `Refused: ${proposal.refusalReason ?? "no reason"}`}
+                {proposal.refusalReason === "non_investment_in_investment_account"
+                  ? "Not an investment transaction"
+                  : isOrphan
+                    ? "Manual fix needed"
+                    : `Refused: ${proposal.refusalReason ?? "no reason"}`}
               </div>
               <div className="text-xs mt-1 opacity-90">
                 {(proposal.refusalReason && REFUSAL_EXPLANATIONS[proposal.refusalReason]) ?? (
@@ -477,6 +531,7 @@ function ProposalDetail({
 
         {isOrphan && !isApplied && (
           <KindOverridePicker
+            runId={runId}
             proposal={proposal}
             displacedRows={displacedRows}
             holdingMap={holdingMap}
@@ -877,6 +932,7 @@ function HoldingPicker({
 // disabled with a tooltip pointing at the follow-up — those need the
 // convertExisting*Pair helpers in operations.ts + a counterpart picker.
 function KindOverridePicker({
+  runId,
   proposal,
   displacedRows,
   holdingMap,
@@ -885,18 +941,34 @@ function KindOverridePicker({
   onApproveOverride,
   onReject,
 }: {
+  runId: string;
   proposal: Proposal;
   displacedRows: Record<number, DisplacedRow>;
   holdingMap: Record<number, HoldingMeta>;
   accountMap: Record<number, AccountMeta>;
   categoryMap: Record<number, CategoryMeta>;
-  onApproveOverride: (payload: { chosenKind: OverrideKind; chosenRelatedHoldingId?: number | null }) => Promise<boolean> | void;
+  onApproveOverride: (payload: {
+    chosenKind: OverrideKind;
+    chosenRelatedHoldingId?: number | null;
+    chosenCounterpartMode?: "link_existing" | "synth_new" | null;
+    chosenCounterpartTxId?: number | null;
+  }) => Promise<boolean> | void;
   onReject: () => void;
 }) {
   const [open, setOpen] = useState<boolean>(proposal.chosenKind != null);
   const [chosenKind, setChosenKind] = useState<OverrideKind | null>(proposal.chosenKind);
   const [chosenRelatedHoldingId, setChosenRelatedHoldingId] = useState<number | null>(
     proposal.chosenRelatedHoldingId,
+  );
+  const [counterpartTxId, setCounterpartTxId] = useState<number | null>(
+    proposal.chosenCounterpartTxId,
+  );
+  const [candidates, setCandidates] = useState<CounterpartCandidate[] | null>(null);
+  const [loadingCandidates, setLoadingCandidates] = useState(false);
+  // Paired kinds (Buy/Sell) need a counterpart. Phase 1 supports synth_new
+  // only; link_existing arrives with the candidate picker in Phase 2.
+  const [chosenCounterpartMode, setChosenCounterpartMode] = useState<"synth_new" | "link_existing">(
+    proposal.chosenCounterpartMode ?? "synth_new",
   );
 
   const orphanRow = proposal.existingRowIds[0] != null ? displacedRows[proposal.existingRowIds[0]] : null;
@@ -908,17 +980,44 @@ function KindOverridePicker({
   }, [holdingMap, orphanRow?.accountId]);
 
   const needsRelatedHolding = chosenKind === "portfolio_income" || chosenKind === "portfolio_expense";
+  const isPaired = chosenKind != null && OVERRIDE_PAIRED_ENABLED_KINDS.has(chosenKind);
+  const supportsSynth = chosenKind != null && OVERRIDE_SYNTH_KINDS.has(chosenKind);
   const canApprove =
     chosenKind != null &&
-    OVERRIDE_PAIRLESS_KINDS.has(chosenKind) &&
-    (!needsRelatedHolding || chosenRelatedHoldingId != null);
+    (OVERRIDE_PAIRLESS_KINDS.has(chosenKind)
+      ? !needsRelatedHolding || chosenRelatedHoldingId != null
+      : // Paired: synth_new (Buy/Sell only) is always ready; link_existing needs a pick.
+        isPaired &&
+        ((chosenCounterpartMode === "synth_new" && supportsSynth) ||
+          (chosenCounterpartMode === "link_existing" && counterpartTxId != null)));
 
-  // Build the client-side WILL-BECOME preview from the current orphan
-  // row + the chosen override. Mirrors what applyOrphanOverride writes
-  // server-side. If the server logic diverges from this preview, the
-  // user will see a discrepancy after apply — keep them in sync.
+  // Fetch counterpart candidates when the user switches to link_existing.
+  useEffect(() => {
+    if (!isPaired || chosenCounterpartMode !== "link_existing" || !chosenKind) {
+      setCandidates(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadingCandidates(true);
+    fetch(`/api/settings/backfill/${runId}/counterpart-candidates?proposalId=${proposal.id}&kind=${chosenKind}`)
+      .then((r) => (r.ok ? r.json() : { candidates: [] }))
+      .then((d) => { if (!cancelled) setCandidates((d.candidates ?? []) as CounterpartCandidate[]); })
+      .catch(() => { if (!cancelled) setCandidates([]); })
+      .finally(() => { if (!cancelled) setLoadingCandidates(false); });
+    return () => { cancelled = true; };
+  }, [isPaired, chosenCounterpartMode, chosenKind, runId, proposal.id]);
+
+  const selectedCandidate = useMemo(
+    () => candidates?.find((c) => c.id === counterpartTxId) ?? null,
+    [candidates, counterpartTxId],
+  );
+
+  // Build the client-side WILL-BECOME preview from the current orphan row +
+  // the chosen override. Mirrors what the apply path writes server-side —
+  // if apply.ts diverges from these helpers the user sees a discrepancy
+  // after apply, so keep them in sync.
   const preview = useMemo(() => {
-    if (!orphanRow || !chosenKind) return null;
+    if (!orphanRow || !chosenKind || !OVERRIDE_PAIRLESS_KINDS.has(chosenKind)) return null;
     return computePairlessWillBecome({
       orphanRow,
       chosenKind,
@@ -926,6 +1025,18 @@ function KindOverridePicker({
       holdingMap,
     });
   }, [orphanRow, chosenKind, chosenRelatedHoldingId, holdingMap]);
+
+  // Paired preview: the orphan stock leg + the cash leg (synthesized, or the
+  // picked existing row re-tagged in link_existing mode).
+  const pairedPreview = useMemo(() => {
+    if (!orphanRow || (chosenKind !== "buy" && chosenKind !== "sell")) return null;
+    return computeBuySellWillBecome({
+      orphanRow,
+      direction: chosenKind,
+      holdingMap,
+      counterpart: chosenCounterpartMode === "link_existing" ? selectedCandidate : null,
+    });
+  }, [orphanRow, chosenKind, holdingMap, chosenCounterpartMode, selectedCandidate]);
 
   if (!open) {
     return (
@@ -954,36 +1065,43 @@ function KindOverridePicker({
         </button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Pair-less kinds apply directly to this row. Paired kinds (Buy / Sell / Transfer / FX / Brokerage)
-        need a counterpart row — coming in a follow-up; pick a pair-less option for now.
+        Pair-less kinds apply directly to this row. Buy / Sell can synthesize the matching cash leg or link an
+        existing one. Brokerage / FX / Transfer pair the orphan with an existing row in the other account or
+        currency.
       </p>
 
       <div className="grid grid-cols-1 gap-1.5">
         {OVERRIDE_KIND_OPTIONS.map((opt) => {
-          const isPairLess = OVERRIDE_PAIRLESS_KINDS.has(opt.kind);
+          const enabled = isOverrideKindEnabled(opt.kind);
           const isSelected = chosenKind === opt.kind;
           return (
             <button
               key={opt.kind}
               type="button"
-              disabled={!isPairLess}
+              disabled={!enabled}
               onClick={() => {
+                if (!enabled) return;
                 setChosenKind(opt.kind);
-                if (!OVERRIDE_PAIRLESS_KINDS.has(opt.kind)) return;
+                setCounterpartTxId(null);
+                // Default the cash-leg mode: synth for Buy/Sell, link for the
+                // cross-account kinds (which can't synthesize).
+                if (OVERRIDE_PAIRED_ENABLED_KINDS.has(opt.kind)) {
+                  setChosenCounterpartMode(OVERRIDE_SYNTH_KINDS.has(opt.kind) ? "synth_new" : "link_existing");
+                }
                 if (opt.kind !== "portfolio_income" && opt.kind !== "portfolio_expense") {
                   setChosenRelatedHoldingId(null);
                 }
               }}
               title={
-                isPairLess
+                enabled
                   ? opt.explanation
-                  : "Paired kinds require the convertExisting*Pair helpers (follow-up commit) + a counterpart picker. Use a pair-less kind for now."
+                  : "This paired kind isn't wired yet — its converter + counterpart picker ship in a later phase. Use Buy / Sell or a pair-less kind for now."
               }
               className={`text-left rounded border p-2 text-xs ${
                 isSelected
                   ? "border-primary bg-primary/5"
                   : "border-border hover:border-primary/50"
-              } ${!isPairLess ? "opacity-40 cursor-not-allowed" : ""}`}
+              } ${!enabled ? "opacity-40 cursor-not-allowed" : ""}`}
             >
               <div className="flex items-start gap-2">
                 <div
@@ -994,7 +1112,7 @@ function KindOverridePicker({
                 <div className="min-w-0">
                   <div className="font-medium">
                     {opt.label}
-                    {!isPairLess && <span className="ml-1 opacity-60">(soon)</span>}
+                    {!enabled && <span className="ml-1 opacity-60">(soon)</span>}
                   </div>
                   <div className="text-muted-foreground mt-0.5">{opt.explanation}</div>
                 </div>
@@ -1003,6 +1121,81 @@ function KindOverridePicker({
           );
         })}
       </div>
+
+      {isPaired && (
+        <div className="space-y-1.5 rounded border border-border p-2">
+          <div className="text-xs font-medium">Counterpart leg</div>
+          <label className={`flex items-start gap-2 text-xs ${supportsSynth ? "cursor-pointer" : "opacity-40 cursor-not-allowed"}`}>
+            <input
+              type="radio"
+              name={`counterpart-mode-${proposal.id}`}
+              className="mt-0.5"
+              disabled={!supportsSynth}
+              checked={chosenCounterpartMode === "synth_new"}
+              onChange={() => { if (supportsSynth) { setChosenCounterpartMode("synth_new"); setCounterpartTxId(null); } }}
+            />
+            <span>
+              <span className="font-medium">Synthesize a new cash leg</span>
+              <span className="text-muted-foreground">
+                {supportsSynth
+                  ? ` — creates the matching ${chosenKind === "sell" ? "credit" : "debit"} on the account's cash sleeve.`
+                  : " — not available for cross-account kinds; link an existing row instead."}
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-xs cursor-pointer">
+            <input
+              type="radio"
+              name={`counterpart-mode-${proposal.id}`}
+              className="mt-0.5"
+              checked={chosenCounterpartMode === "link_existing"}
+              onChange={() => setChosenCounterpartMode("link_existing")}
+            />
+            <span>
+              <span className="font-medium">Link an existing row</span>
+              <span className="text-muted-foreground"> — pair the orphan with an unmatched row {supportsSynth ? "already in this account" : "in the other account / currency"}.</span>
+            </span>
+          </label>
+
+          {chosenCounterpartMode === "link_existing" && (
+            <div className="mt-1 space-y-1">
+              {loadingCandidates && (
+                <div className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Loader2 className="size-3 animate-spin" /> Finding candidates…
+                </div>
+              )}
+              {!loadingCandidates && candidates?.length === 0 && (
+                <div className="text-xs text-muted-foreground">
+                  No matching unmatched rows found{supportsSynth ? " — synthesize a new cash leg instead" : ". Fix manually in /transactions"}.
+                </div>
+              )}
+              {!loadingCandidates && candidates && candidates.length > 0 && (
+                <div className="max-h-48 overflow-y-auto rounded border border-border divide-y">
+                  {candidates.map((c) => {
+                    const sel = counterpartTxId === c.id;
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => setCounterpartTxId(c.id)}
+                        className={`w-full text-left px-2 py-1.5 text-xs flex items-center gap-2 ${sel ? "bg-primary/5" : "hover:bg-muted/40"}`}
+                      >
+                        <span className={`size-3 rounded-full shrink-0 ${sel ? "bg-primary" : "border border-border"}`} />
+                        <span className="font-mono">#{c.id}</span>
+                        <span>{c.date}</span>
+                        <span className="font-mono ml-auto">{c.amount.toFixed(2)} {c.currency}</span>
+                        <span className="text-muted-foreground truncate max-w-[45%]">
+                          {c.isCashSleeve ? (c.holdingName ?? "cash sleeve") : "no holding"} · {c.reason}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {needsRelatedHolding && (
         <div className="space-y-1">
@@ -1033,6 +1226,46 @@ function KindOverridePicker({
         />
       )}
 
+      {pairedPreview && orphanRow && (
+        <div className="space-y-2">
+          <div className="text-xs font-medium">Stock leg (this row, updated in place)</div>
+          <WillBecomeTable
+            existing={orphanRow}
+            willBecome={pairedPreview.stock.willBecome}
+            changedKeys={pairedPreview.stock.changedKeys}
+            holdingMap={holdingMap}
+            accountMap={accountMap}
+            categoryMap={categoryMap}
+          />
+          <div className="text-xs font-medium">
+            {pairedPreview.cashIsSynth ? "Cash leg (new, synthesized)" : `Cash leg (existing row #${pairedPreview.cash.willBecome.id}, re-tagged)`}
+          </div>
+          <WillBecomeTable
+            existing={pairedPreview.cash.willBecome}
+            willBecome={pairedPreview.cash.willBecome}
+            changedKeys={pairedPreview.cash.changedKeys}
+            holdingMap={holdingMap}
+            accountMap={accountMap}
+            categoryMap={categoryMap}
+          />
+        </div>
+      )}
+
+      {isPaired && !supportsSynth && (
+        <div className="text-xs text-muted-foreground rounded border border-border p-2">
+          This row becomes the <span className="font-mono">{chosenKind}</span> leg, paired via link_id with{" "}
+          {selectedCandidate ? (
+            <>
+              row <span className="font-mono">#{selectedCandidate.id}</span> ({selectedCandidate.date},{" "}
+              {selectedCandidate.amount.toFixed(2)} {selectedCandidate.currency})
+            </>
+          ) : (
+            "the counterpart you pick above"
+          )}
+          .
+        </div>
+      )}
+
       <div className="flex justify-end gap-2 pt-1">
         <Button size="sm" variant="outline" onClick={onReject}>Reject</Button>
         <Button
@@ -1043,6 +1276,9 @@ function KindOverridePicker({
             onApproveOverride({
               chosenKind,
               chosenRelatedHoldingId: needsRelatedHolding ? chosenRelatedHoldingId : null,
+              chosenCounterpartMode: isPaired ? chosenCounterpartMode : null,
+              chosenCounterpartTxId:
+                isPaired && chosenCounterpartMode === "link_existing" ? counterpartTxId : null,
             });
           }}
         >
@@ -1095,6 +1331,81 @@ function computePairlessWillBecome({
     }
   }
   return { willBecome, changedKeys };
+}
+
+/**
+ * WILL-BECOME preview for a Buy/Sell paired override. Mirrors
+ * convertExistingToBuySellPair + normalizeBuySellLegs (operations.ts) and
+ * applyPairedOverride (apply.ts): the orphan becomes the stock leg (kind +
+ * normalized signs), and a cash leg is synthesized on the matching cash
+ * sleeve. KEEP IN SYNC with those — a divergence shows the user a different
+ * post-apply state than the server produces.
+ */
+function computeBuySellWillBecome({
+  orphanRow,
+  direction,
+  holdingMap,
+  counterpart,
+}: {
+  orphanRow: DisplacedRow;
+  direction: "buy" | "sell";
+  holdingMap: Record<number, HoldingMeta>;
+  /** link_existing: the picked candidate that becomes the cash leg. When null,
+   *  the cash leg is synthesized. */
+  counterpart?: CounterpartCandidate | null;
+}): {
+  stock: { willBecome: DisplacedRow; changedKeys: ReadonlySet<keyof typeof FIELD_LABELS | "kind" | "holding"> };
+  cash: { willBecome: DisplacedRow; changedKeys: ReadonlySet<keyof typeof FIELD_LABELS | "kind" | "holding"> };
+  cashIsSynth: boolean;
+} {
+  // Mirror of normalizeBuySellLegs (operations.ts).
+  const isBuy = direction === "buy";
+  const magAmount = Math.abs(orphanRow.amount);
+  const magQty = Math.abs(orphanRow.quantity ?? 0);
+  const stockAmount = isBuy ? magAmount : -magAmount;
+  const stockQty = isBuy ? magQty : -magQty;
+  const cashAmount = -stockAmount;
+
+  // Stock leg — the orphan, updated in place.
+  const stockWillBecome: DisplacedRow = {
+    ...orphanRow,
+    kind: isBuy ? "buy" : "sell",
+    amount: stockAmount,
+    quantity: stockQty,
+    tradeLinkId: "(new)",
+  };
+  const stockChanged = new Set<keyof typeof FIELD_LABELS | "kind" | "holding">(["kind"]);
+
+  // Cash leg lands on the matching cash sleeve (preview resolves it by currency
+  // only; the server resolves by account + currency).
+  const sleeveEntry = Object.entries(holdingMap).find(
+    ([, h]) => h.isCash && h.currency === orphanRow.currency,
+  );
+  const sleeveId = sleeveEntry ? Number(sleeveEntry[0]) : null;
+  const cashWillBecome: DisplacedRow = {
+    // link_existing keeps the picked row's id/date; synth gets a placeholder.
+    id: counterpart ? counterpart.id : 0,
+    date: counterpart ? counterpart.date : orphanRow.date,
+    accountId: orphanRow.accountId,
+    portfolioHoldingId: sleeveId,
+    relatedHoldingId: null,
+    categoryId: orphanRow.categoryId,
+    amount: cashAmount,
+    currency: orphanRow.currency,
+    quantity: cashAmount,
+    kind: isBuy ? "buy_cash_leg" : "sell_cash_leg",
+    tradeLinkId: "(new)",
+    linkId: null,
+    note: orphanRow.note,
+    tags: orphanRow.tags,
+    payee: orphanRow.payee,
+    source: counterpart ? "backfill" : "backfill_synth",
+  };
+  return {
+    stock: { willBecome: stockWillBecome, changedKeys: stockChanged },
+    cash: { willBecome: cashWillBecome, changedKeys: new Set() },
+    cashIsSynth: !counterpart,
+  };
 }
 
 /**
@@ -1319,40 +1630,59 @@ const OVERRIDE_KIND_OPTIONS: readonly OverrideKindOption[] = [
     explanation:
       "Moves the row to the matching cash sleeve, stamps related_holding_id to the picked stock. Amount should be negative.",
   },
-  // Paired (disabled — follow-up commit)
-  { kind: "buy", label: "Buy", explanation: "Needs a paired cash leg." },
-  { kind: "sell", label: "Sell", explanation: "Needs a paired cash leg." },
+  // Paired — Buy/Sell wired (Phase 1, synth_new); the rest disabled until
+  // their converters + counterpart picker ship.
+  {
+    kind: "buy",
+    label: "Buy",
+    explanation:
+      "This row is the stock leg of a purchase. Synthesizes the matching cash debit on the account's cash sleeve and opens a lot at cost = |amount| / qty.",
+  },
+  {
+    kind: "sell",
+    label: "Sell",
+    explanation:
+      "This row is the stock leg of a sale. Synthesizes the matching cash credit on the account's cash sleeve and FIFO-closes lots for the realized gain.",
+  },
   {
     kind: "in_kind_transfer_out",
     label: "In-kind transfer (this is the source leg)",
-    explanation: "Needs a partner stock row in another account.",
+    explanation: "Moves this holding out to another account. Link the matching row in the destination account (same holding).",
   },
   {
     kind: "in_kind_transfer_in",
     label: "In-kind transfer (this is the destination leg)",
-    explanation: "Needs a partner stock row in another account.",
+    explanation: "Receives this holding from another account. Link the matching row in the source account (same holding).",
   },
-  { kind: "fx_from", label: "FX from-leg", explanation: "Needs a partner cash row in a different currency." },
-  { kind: "fx_to", label: "FX to-leg", explanation: "Needs a partner cash row in a different currency." },
+  {
+    kind: "fx_from",
+    label: "FX from-leg",
+    explanation: "The currency you sold. Link the matching to-leg: a cash row in a different currency, same account.",
+  },
+  {
+    kind: "fx_to",
+    label: "FX to-leg",
+    explanation: "The currency you bought. Link the matching from-leg: a cash row in a different currency, same account.",
+  },
   {
     kind: "brokerage_deposit_in",
     label: "Brokerage deposit (cash sleeve leg)",
-    explanation: "Needs a partner cash row on a non-investment account.",
+    explanation: "Cash arriving on the brokerage cash sleeve. Link the matching debit on the funding (non-investment) account.",
   },
   {
     kind: "brokerage_deposit_out",
     label: "Brokerage deposit (external leg)",
-    explanation: "Needs a partner row on the brokerage cash sleeve.",
+    explanation: "The funding-account side — can't be an investment-account row, so it never appears here.",
   },
   {
     kind: "brokerage_withdrawal_in",
     label: "Brokerage withdrawal (external leg)",
-    explanation: "Needs a partner row on the brokerage cash sleeve.",
+    explanation: "The receiving-account side — can't be an investment-account row, so it never appears here.",
   },
   {
     kind: "brokerage_withdrawal_out",
     label: "Brokerage withdrawal (cash sleeve leg)",
-    explanation: "Needs a partner cash row on a non-investment account.",
+    explanation: "Cash leaving the brokerage cash sleeve. Link the matching credit on the receiving (non-investment) account.",
   },
 ];
 
@@ -1392,7 +1722,7 @@ function CoverageDashboard({ coverage, proposals }: { coverage: Coverage; propos
         <CardTitle className="text-base">Canonicalization coverage</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-4 gap-4 text-sm">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 text-sm">
           <Metric label="Investment accounts" value={String(coverage.accountCount)} />
           <Metric label="Total transactions" value={String(coverage.totalTxs)} />
           <Metric
@@ -1406,6 +1736,12 @@ function CoverageDashboard({ coverage, proposals }: { coverage: Coverage; propos
             value={String(coverage.nonCanonicalTxs)}
             sub={coverage.totalTxs > 0 ? `${100 - coverage.canonicalPct}%` : undefined}
             tone={coverage.nonCanonicalTxs > 0 ? "warn" : "good"}
+          />
+          <Metric
+            label="Not investment txs (no holding)"
+            value={String(coverage.nonInvestmentRows ?? 0)}
+            sub={(coverage.nonInvestmentRows ?? 0) > 0 ? "review & move/delete" : undefined}
+            tone={(coverage.nonInvestmentRows ?? 0) > 0 ? "warn" : "good"}
           />
         </div>
 
@@ -1443,6 +1779,7 @@ function CoverageDashboard({ coverage, proposals }: { coverage: Coverage; propos
                     <th className="text-right px-2 py-1.5">Total</th>
                     <th className="text-right px-2 py-1.5">Canonical</th>
                     <th className="text-right px-2 py-1.5">Pending</th>
+                    <th className="text-right px-2 py-1.5">Not inv.</th>
                     <th className="text-left px-2 py-1.5 w-40">Coverage</th>
                   </tr>
                 </thead>
@@ -1457,6 +1794,13 @@ function CoverageDashboard({ coverage, proposals }: { coverage: Coverage; propos
                           <span className="text-amber-600 dark:text-amber-400">{a.pending}</span>
                         ) : (
                           <span className="text-emerald-600 dark:text-emerald-400">0</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono">
+                        {(a.nonInvestmentRows ?? 0) > 0 ? (
+                          <span className="text-amber-600 dark:text-amber-400">{a.nonInvestmentRows}</span>
+                        ) : (
+                          <span className="text-muted-foreground">0</span>
                         )}
                       </td>
                       <td className="px-2 py-1.5">

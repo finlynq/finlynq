@@ -580,6 +580,61 @@ describe("Pass 3 — fallback catches every unmatched candidate", () => {
   });
 });
 
+// ─── Pass 2.9 — non-investment rows in an investment account ──────────
+
+describe("Pass 2.9 — non-investment rows in an investment account", () => {
+  it("flags a null-holding row with the distinct non_investment reason (not unmatched_candidate)", () => {
+    // A plain expense mis-filed on a brokerage account: no
+    // portfolio_holding_id. The snapshot loader only loads investment-account
+    // txs, so this row violates `is_investment ⇒ references a holding`. It must
+    // surface as the EXPLICIT non_investment flag, not get swept into the
+    // generic Pass-3 unmatched_candidate.
+    const ACCT = acct(42);
+    const AAPL = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [AAPL, USD_CASH],
+      dividendsCategoryId: 1,
+      txs: [
+        tx({ id: 13001, date: "2025-04-01", accountId: 42, portfolioHoldingId: null, categoryId: 7, quantity: 0, amount: -42.5 }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("orphan_stock_leg");
+    expect(proposals[0].confidence).toBe("refused");
+    expect(proposals[0].refusalReason).toBe("non_investment_in_investment_account");
+    expect(proposals[0].existingRowIds).toEqual([13001]);
+  });
+
+  it("does NOT flag a normal un-canonicalized trade that references a holding", () => {
+    // A legacy buy with no kind/trade_link but WITH a holding is a normal
+    // backfill candidate (opening_balance or orphan_stock_leg), never a
+    // non-investment row. The discriminator is the holding reference.
+    const ACCT = acct(42);
+    const AAPL = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [AAPL, USD_CASH],
+      dividendsCategoryId: 1,
+      txs: [
+        tx({ id: 13101, date: "2025-04-02", accountId: 42, portfolioHoldingId: 100, quantity: 5, amount: -1000 }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals.some((p) => p.refusalReason === "non_investment_in_investment_account")).toBe(false);
+    expect(proposals.some((p) => p.existingRowIds.includes(13101))).toBe(true);
+  });
+});
+
 // ─── Pass 1.6 — dividend reinvestments (DRIP) ─────────────────────────
 
 describe("Pass 1.6 — DRIP detection", () => {

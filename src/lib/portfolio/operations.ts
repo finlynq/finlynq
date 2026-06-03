@@ -1277,6 +1277,499 @@ export async function recordBrokerageWithdrawal(
   return { sourceTxId, destTxId, linkId };
 }
 
+// ─── Backfill paired-override converters ─────────────────────────────────
+//
+// Convert an EXISTING orphan transaction row into a proper two-leg portfolio
+// operation. Used ONLY by the backfill kind-override apply path
+// (apply.ts applyOrphanOverride paired branch) — they let the user reclassify
+// a refused `orphan_stock_leg` into a Buy/Sell/Transfer/FX/Brokerage op.
+//
+// Unlike the record* helpers above (which INSERT both legs fresh), these
+// UPDATE the orphan row IN-PLACE — preserving id / created_at / import_hash /
+// bank_transaction_id lineage, a load-bearing backfill invariant — then either
+// synthesize the counterpart leg (mode='synth_new', tagged
+// source='backfill_synth') or re-tag a user-picked existing row
+// (mode='link_existing').
+//
+// They take a caller-supplied transaction handle so the apply path can wrap
+// the audit snapshot + leg conversion + proposal status flip in ONE atomic
+// transaction. Lot replay is the CALLER's job AFTER commit (mirrors
+// applyOrphanOverride's pair-less branch); the returned `linkPair` /
+// touched-id info tells the caller which rows to replay.
+//
+// Invariant #8: the paired kind literals (buy / sell / *_cash_leg / ...) live
+// here in operations.ts, never in apply.ts.
+
+/** Drizzle transaction handle, inferred from db.transaction's callback. */
+type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export type BackfillCounterpartMode = "synth_new" | "link_existing";
+
+export class BackfillConvertError extends Error {
+  constructor(
+    public code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BackfillConvertError";
+  }
+}
+
+/** The orphan row fields a converter needs. The apply path snapshots the full
+ *  row anyway, so it passes the relevant columns straight through. */
+export interface OrphanRowForConvert {
+  id: number;
+  date: string;
+  accountId: number | null;
+  portfolioHoldingId: number | null;
+  currency: string;
+  amount: number;
+  quantity: number | null;
+  categoryId: number | null;
+  payee: string | null;
+  note: string | null;
+  tags: string | null;
+}
+
+export interface ConvertPairResult {
+  /** Rows UPDATEd in place (orphan + optionally a linked counterpart). */
+  updatedTxIds: number[];
+  /** Synthesized rows INSERTed (source='backfill_synth'). */
+  insertedTxIds: number[];
+  /** The shared pairing token. */
+  pairToken: { tradeLinkId?: string; linkId?: string };
+  /** For link_id pairs (transfer / fx): the (source, dest) ids the caller
+   *  feeds to applyLotEffectsForLinkPair. null for buy/sell + brokerage. */
+  linkPair: { sourceTxId: number; destTxId: number } | null;
+}
+
+export interface ConvertBuySellPairInput {
+  tx: DbTx;
+  userId: string;
+  orphan: OrphanRowForConvert;
+  /** Which leg the orphan (stock leg) becomes. */
+  direction: "buy" | "sell";
+  mode: BackfillCounterpartMode;
+  /** link_existing only: the user-picked cash row id. */
+  counterpartTxId?: number | null;
+}
+
+/**
+ * Pure sign-normalization for the Buy/Sell converter (exported for tests).
+ * Phase-2 convention:
+ *   Buy  → stock qty>0, amount>0;  cash qty<0, amount<0
+ *   Sell → stock qty<0, amount<0;  cash qty>0, amount>0
+ * The stock + cash `amount` always sum to 0 (internal swap).
+ */
+export function normalizeBuySellLegs(
+  direction: "buy" | "sell",
+  amount: number,
+  quantity: number,
+): { stockAmount: number; stockQty: number; cashAmount: number; cashQty: number } {
+  const magAmount = Math.abs(amount);
+  const magQty = Math.abs(quantity);
+  const isBuy = direction === "buy";
+  const stockAmount = isBuy ? magAmount : -magAmount;
+  const stockQty = isBuy ? magQty : -magQty;
+  const cashAmount = -stockAmount;
+  return { stockAmount, stockQty, cashAmount, cashQty: cashAmount };
+}
+
+/**
+ * Convert an orphan stock-leg row into a canonical Buy or Sell pair.
+ *
+ * The orphan becomes the stock leg (kind='buy'|'sell', normalized signs);
+ * the cash leg is either synthesized on the matching cash sleeve
+ * (source='backfill_synth') or an existing user-picked row re-tagged in place.
+ * Both share a fresh trade_link_id. Cost basis flows from the stock leg's own
+ * (normalized) amount, so lot replay needs no cash-leg lookup.
+ */
+export async function convertExistingToBuySellPair(
+  input: ConvertBuySellPairInput,
+): Promise<ConvertPairResult> {
+  const { tx, userId, orphan, direction, mode } = input;
+  const isBuy = direction === "buy";
+
+  // The orphan must be a real stock leg: a non-cash holding + non-zero qty.
+  if (orphan.accountId == null) {
+    throw new BackfillConvertError("orphan_no_account", `Orphan row ${orphan.id} has no account.`);
+  }
+  if (orphan.portfolioHoldingId == null) {
+    throw new BackfillConvertError(
+      "orphan_not_stock_leg",
+      `Buy/Sell override needs a stock holding on the orphan row; row ${orphan.id} has none.`,
+    );
+  }
+  if (orphan.quantity == null || orphan.quantity === 0) {
+    throw new BackfillConvertError(
+      "orphan_zero_qty",
+      `Buy/Sell override needs a non-zero quantity; row ${orphan.id} has qty=${orphan.quantity}.`,
+    );
+  }
+  const holding = await fetchHolding(userId, orphan.portfolioHoldingId);
+  if (holding.isCash) {
+    throw new BackfillConvertError(
+      "orphan_is_cash_sleeve",
+      `Buy/Sell override can't apply to a cash-sleeve row; use FX Conversion instead.`,
+    );
+  }
+
+  const sleeve = await findCashSleeve(userId, orphan.accountId, holding.currency);
+  if (!sleeve) {
+    throw new BackfillConvertError(
+      "cash_sleeve_missing",
+      `No ${holding.currency} cash sleeve on account ${orphan.accountId}. Create one in the account page first.`,
+    );
+  }
+
+  // Normalize to the Phase-2 convention for the chosen direction.
+  const { stockAmount, stockQty, cashAmount } = normalizeBuySellLegs(
+    direction,
+    orphan.amount,
+    orphan.quantity,
+  );
+
+  const tradeLinkId = randomUUID();
+
+  // 1. UPDATE the orphan in-place into the stock leg.
+  await tx
+    .update(schema.transactions)
+    .set({
+      kind: isBuy ? "buy" : "sell",
+      amount: stockAmount,
+      quantity: stockQty,
+      tradeLinkId,
+      updatedAt: sql`NOW()`,
+    })
+    .where(and(eq(schema.transactions.id, orphan.id), eq(schema.transactions.userId, userId)));
+  const updatedTxIds = [orphan.id];
+  const insertedTxIds: number[] = [];
+
+  if (mode === "synth_new") {
+    // 2a. Synthesize the paired cash leg on the sleeve (source='backfill_synth').
+    const inserted = await tx
+      .insert(schema.transactions)
+      .values({
+        userId,
+        date: orphan.date,
+        accountId: orphan.accountId,
+        portfolioHoldingId: sleeve.id,
+        quantity: cashAmount,
+        amount: cashAmount,
+        currency: holding.currency,
+        payee: orphan.payee,
+        note: orphan.note,
+        tags: orphan.tags,
+        categoryId: orphan.categoryId,
+        kind: isBuy ? "buy_cash_leg" : "sell_cash_leg",
+        tradeLinkId,
+        source: "backfill_synth",
+      })
+      .returning({ id: schema.transactions.id });
+    insertedTxIds.push(inserted[0]!.id);
+  } else {
+    // 2b. link_existing — re-tag the user-picked cash row into the cash leg.
+    //     The apply path validated (exists / owned / same account+currency /
+    //     not already linked) and snapshotted it before calling us.
+    const counterpartTxId = input.counterpartTxId;
+    if (counterpartTxId == null) {
+      throw new BackfillConvertError(
+        "counterpart_missing",
+        `link_existing mode requires a counterpart tx id.`,
+      );
+    }
+    await tx
+      .update(schema.transactions)
+      .set({
+        kind: isBuy ? "buy_cash_leg" : "sell_cash_leg",
+        amount: cashAmount,
+        quantity: cashAmount,
+        portfolioHoldingId: sleeve.id,
+        tradeLinkId,
+        updatedAt: sql`NOW()`,
+      })
+      .where(and(eq(schema.transactions.id, counterpartTxId), eq(schema.transactions.userId, userId)));
+    updatedTxIds.push(counterpartTxId);
+  }
+
+  return {
+    updatedTxIds,
+    insertedTxIds,
+    pairToken: { tradeLinkId },
+    linkPair: null,
+  };
+}
+
+// ─── Cross-account converters (link_existing only) ───────────────────────
+//
+// Brokerage / FX / In-kind transfer overrides pair the orphan with an EXISTING
+// row the user picked (link_existing) — synth_new isn't supported for these
+// because the current schema can't record which other account/currency to
+// fabricate the counterpart on. Each UPDATEs BOTH the orphan and the picked
+// counterpart in place, pairs them via link_id, and self-validates the
+// counterpart's shape (throwing BackfillConvertError on a bad pick).
+
+/** The user-picked counterpart row a cross-account converter re-tags. */
+export interface CounterpartRowForConvert {
+  id: number;
+  accountId: number | null;
+  currency: string;
+  amount: number;
+  quantity: number | null;
+  portfolioHoldingId: number | null;
+  kind: string | null;
+  tradeLinkId: string | null;
+  linkId: string | null;
+}
+
+const PAIRLESS_CANONICAL_KINDS_FOR_CONVERT = new Set([
+  "dividend",
+  "interest",
+  "portfolio_income",
+  "portfolio_expense",
+  "opening_balance",
+]);
+
+function assertCounterpartUnlinked(cp: CounterpartRowForConvert): void {
+  // Already part of a pair if it carries a link id, OR its kind is a canonical
+  // pair-less kind. (A kind like 'buy' with no link is a BROKEN pair — eligible.)
+  const alreadyPaired =
+    cp.tradeLinkId != null ||
+    cp.linkId != null ||
+    (cp.kind != null && cp.kind !== "" && PAIRLESS_CANONICAL_KINDS_FOR_CONVERT.has(cp.kind));
+  if (alreadyPaired) {
+    throw new BackfillConvertError(
+      "counterpart_already_linked",
+      `Counterpart row ${cp.id} is already canonical / paired; pick an unmatched row.`,
+    );
+  }
+}
+
+export interface ConvertBrokeragePairInput {
+  tx: DbTx;
+  userId: string;
+  orphan: OrphanRowForConvert;
+  counterpart: CounterpartRowForConvert;
+  /** The cash-sleeve leg the orphan becomes (deposit dest / withdrawal source). */
+  orphanLeg: "brokerage_deposit_in" | "brokerage_withdrawal_out";
+}
+
+/**
+ * Convert a cash-sleeve orphan into a Brokerage deposit/withdrawal pair. The
+ * orphan is the investment-side cash-sleeve leg; the picked counterpart (in a
+ * different account, same currency) becomes the external leg. Paired via link_id.
+ */
+export async function convertExistingToBrokeragePair(
+  input: ConvertBrokeragePairInput,
+): Promise<ConvertPairResult> {
+  const { tx, userId, orphan, counterpart, orphanLeg } = input;
+  if (orphan.accountId == null || orphan.portfolioHoldingId == null) {
+    throw new BackfillConvertError("orphan_not_cash_sleeve_leg", `Brokerage override needs a cash-sleeve orphan row.`);
+  }
+  const holding = await fetchHolding(userId, orphan.portfolioHoldingId);
+  if (!holding.isCash) {
+    throw new BackfillConvertError("orphan_not_cash_sleeve_leg", `Brokerage override's orphan must be on a cash sleeve (the brokerage cash side).`);
+  }
+  assertCounterpartUnlinked(counterpart);
+  if (counterpart.accountId === orphan.accountId) {
+    throw new BackfillConvertError("counterpart_same_account", `The external leg must be in a DIFFERENT account than the brokerage cash sleeve.`);
+  }
+  if (counterpart.currency !== orphan.currency) {
+    throw new BackfillConvertError("counterpart_currency_mismatch", `Brokerage legs must share a currency (${orphan.currency} vs ${counterpart.currency}); FX-convert first.`);
+  }
+
+  const isDeposit = orphanLeg === "brokerage_deposit_in";
+  const mag = Math.abs(orphan.amount);
+  const linkId = randomUUID();
+
+  // Orphan = cash-sleeve leg. Deposit grows the sleeve (+), withdrawal shrinks it (−).
+  const sleeveAmount = isDeposit ? mag : -mag;
+  await tx
+    .update(schema.transactions)
+    .set({
+      kind: orphanLeg,
+      amount: sleeveAmount,
+      quantity: sleeveAmount,
+      linkId,
+      updatedAt: sql`NOW()`,
+    })
+    .where(and(eq(schema.transactions.id, orphan.id), eq(schema.transactions.userId, userId)));
+
+  // Counterpart = external leg on the non-investment account: qty=0, no holding.
+  const externalKind = isDeposit ? "brokerage_deposit_out" : "brokerage_withdrawal_in";
+  const externalAmount = isDeposit ? -mag : mag;
+  await tx
+    .update(schema.transactions)
+    .set({
+      kind: externalKind,
+      amount: externalAmount,
+      quantity: 0,
+      portfolioHoldingId: null,
+      linkId,
+      updatedAt: sql`NOW()`,
+    })
+    .where(and(eq(schema.transactions.id, counterpart.id), eq(schema.transactions.userId, userId)));
+
+  return {
+    updatedTxIds: [orphan.id, counterpart.id],
+    insertedTxIds: [],
+    pairToken: { linkId },
+    // Brokerage uses per-row cash-lot replay (one leg has a null holding, so
+    // applyLotEffectsForLinkPair would reject the pair).
+    linkPair: null,
+  };
+}
+
+export interface ConvertFxPairInput {
+  tx: DbTx;
+  userId: string;
+  orphan: OrphanRowForConvert;
+  counterpart: CounterpartRowForConvert;
+  /** Which FX leg the orphan becomes. */
+  orphanLeg: "fx_from" | "fx_to";
+}
+
+/**
+ * Convert a cash orphan into an FX conversion pair. Both legs sit on cash
+ * sleeves in the SAME account but DIFFERENT currencies; amounts differ by the
+ * FX rate (no sum-to-zero). Paired via link_id; lots via the FX hook.
+ */
+export async function convertExistingToFxPair(
+  input: ConvertFxPairInput,
+): Promise<ConvertPairResult> {
+  const { tx, userId, orphan, counterpart, orphanLeg } = input;
+  if (orphan.accountId == null) {
+    throw new BackfillConvertError("orphan_no_account", `FX override's orphan has no account.`);
+  }
+  assertCounterpartUnlinked(counterpart);
+  if (counterpart.accountId !== orphan.accountId) {
+    throw new BackfillConvertError("counterpart_account_mismatch", `Both FX legs must be in the same account.`);
+  }
+  if (counterpart.currency === orphan.currency) {
+    throw new BackfillConvertError("counterpart_currency_mismatch", `FX legs must be in DIFFERENT currencies (got ${orphan.currency} for both).`);
+  }
+
+  // Resolve each leg's cash sleeve (by account + its own currency).
+  const orphanSleeve = await findCashSleeve(userId, orphan.accountId, orphan.currency);
+  if (!orphanSleeve) {
+    throw new BackfillConvertError("cash_sleeve_missing", `No ${orphan.currency} cash sleeve on account ${orphan.accountId}.`);
+  }
+  const cpSleeve = await findCashSleeve(userId, orphan.accountId, counterpart.currency);
+  if (!cpSleeve) {
+    throw new BackfillConvertError("cash_sleeve_missing", `No ${counterpart.currency} cash sleeve on account ${orphan.accountId}.`);
+  }
+
+  const linkId = randomUUID();
+  const orphanIsFrom = orphanLeg === "fx_from";
+  const orphanAmount = (orphanIsFrom ? -1 : 1) * Math.abs(orphan.amount);
+  const cpKind = orphanIsFrom ? "fx_to" : "fx_from";
+  const cpAmount = (orphanIsFrom ? 1 : -1) * Math.abs(counterpart.amount);
+
+  await tx
+    .update(schema.transactions)
+    .set({
+      kind: orphanLeg,
+      amount: orphanAmount,
+      quantity: orphanAmount,
+      portfolioHoldingId: orphanSleeve.id,
+      linkId,
+      updatedAt: sql`NOW()`,
+    })
+    .where(and(eq(schema.transactions.id, orphan.id), eq(schema.transactions.userId, userId)));
+
+  await tx
+    .update(schema.transactions)
+    .set({
+      kind: cpKind,
+      amount: cpAmount,
+      quantity: cpAmount,
+      portfolioHoldingId: cpSleeve.id,
+      linkId,
+      updatedAt: sql`NOW()`,
+    })
+    .where(and(eq(schema.transactions.id, counterpart.id), eq(schema.transactions.userId, userId)));
+
+  const fromTxId = orphanIsFrom ? orphan.id : counterpart.id;
+  const toTxId = orphanIsFrom ? counterpart.id : orphan.id;
+  return {
+    updatedTxIds: [orphan.id, counterpart.id],
+    insertedTxIds: [],
+    pairToken: { linkId },
+    linkPair: { sourceTxId: fromTxId, destTxId: toTxId },
+  };
+}
+
+export interface ConvertInKindTransferPairInput {
+  tx: DbTx;
+  userId: string;
+  orphan: OrphanRowForConvert;
+  counterpart: CounterpartRowForConvert;
+  /** Which transfer leg the orphan becomes. */
+  orphanLeg: "in_kind_transfer_out" | "in_kind_transfer_in";
+}
+
+/**
+ * Convert a stock orphan into an in-kind transfer pair. Both legs reference the
+ * SAME holding in DIFFERENT accounts, amount=0, opposite qty. Paired via link_id;
+ * lots via the transfer hook.
+ */
+export async function convertExistingToInKindTransferPair(
+  input: ConvertInKindTransferPairInput,
+): Promise<ConvertPairResult> {
+  const { tx, userId, orphan, counterpart, orphanLeg } = input;
+  // Structural checks first (no DB) so bad input fails fast.
+  if (orphan.accountId == null || orphan.portfolioHoldingId == null) {
+    throw new BackfillConvertError("orphan_not_stock_leg", `In-kind transfer override needs a stock-holding orphan row.`);
+  }
+  if (orphan.quantity == null || orphan.quantity === 0) {
+    throw new BackfillConvertError("orphan_zero_qty", `In-kind transfer needs a non-zero quantity.`);
+  }
+  assertCounterpartUnlinked(counterpart);
+  if (counterpart.accountId === orphan.accountId) {
+    throw new BackfillConvertError("counterpart_same_account", `A transfer moves a holding BETWEEN accounts; pick a row in a different account.`);
+  }
+  if (counterpart.portfolioHoldingId !== orphan.portfolioHoldingId) {
+    throw new BackfillConvertError("counterpart_holding_mismatch", `Both transfer legs must reference the SAME holding.`);
+  }
+  const holding = await fetchHolding(userId, orphan.portfolioHoldingId);
+  if (holding.isCash) {
+    throw new BackfillConvertError("orphan_is_cash_sleeve", `In-kind transfer can't move a cash sleeve; use FX or Brokerage.`);
+  }
+
+  const mag = Math.abs(orphan.quantity);
+  const linkId = randomUUID();
+  const orphanIsOut = orphanLeg === "in_kind_transfer_out";
+  const orphanQty = orphanIsOut ? -mag : mag;
+  const cpKind = orphanIsOut ? "in_kind_transfer_in" : "in_kind_transfer_out";
+  const cpQty = orphanIsOut ? mag : -mag;
+
+  await tx
+    .update(schema.transactions)
+    .set({ kind: orphanLeg, amount: 0, quantity: orphanQty, linkId, updatedAt: sql`NOW()` })
+    .where(and(eq(schema.transactions.id, orphan.id), eq(schema.transactions.userId, userId)));
+
+  await tx
+    .update(schema.transactions)
+    .set({
+      kind: cpKind,
+      amount: 0,
+      quantity: cpQty,
+      portfolioHoldingId: orphan.portfolioHoldingId,
+      linkId,
+      updatedAt: sql`NOW()`,
+    })
+    .where(and(eq(schema.transactions.id, counterpart.id), eq(schema.transactions.userId, userId)));
+
+  const sourceTxId = orphanIsOut ? orphan.id : counterpart.id;
+  const destTxId = orphanIsOut ? counterpart.id : orphan.id;
+  return {
+    updatedTxIds: [orphan.id, counterpart.id],
+    insertedTxIds: [],
+    pairToken: { linkId },
+    linkPair: { sourceTxId, destTxId },
+  };
+}
+
 // ─── canEditPortfolioRow — edit/delete guard ─────────────────────────────
 //
 // Returns { allowed: true } when the tx has no downstream lot closures

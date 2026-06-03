@@ -573,6 +573,35 @@ export function planBackfill(
     consumed.add(cash.id);
   }
 
+  // Pass 2.9: non-investment rows in an investment account. The snapshot loader
+  // only loads investment-account txs (apply.ts:loadLedgerSnapshot), so any
+  // candidate with NO portfolio_holding_id violates the load-bearing invariant
+  // `accounts.is_investment=true ⇒ every tx references a portfolio_holdings
+  // row` — it's a mis-filed expense/income/transfer that doesn't belong in an
+  // investment account. Flag it EXPLICITLY here (distinct from the generic
+  // `unmatched_candidate` Pass 3 below) so it stands out in review and in the
+  // coverage dashboard's `nonInvestmentRows` metric. Reuses the
+  // `orphan_stock_leg` kind so the kind-override picker can reclassify it
+  // in-place (e.g. a stray fee → portfolio_expense); the distinct
+  // `refusalReason` carries the real meaning. Runs BEFORE Pass 3 so these rows
+  // never get swept into the catch-all.
+  for (const t of candidates) {
+    if (consumed.has(t.id)) continue;
+    if (t.portfolioHoldingId != null) continue;
+    proposals.push({
+      kind: "orphan_stock_leg",
+      confidence: "refused",
+      refusalReason: "non_investment_in_investment_account",
+      summary: `Non-investment row ${Math.abs(t.amount).toFixed(2)} ${t.currency} on ${t.date} in ${accountLabel(t.accountId, idx)} — no holding; doesn't belong in an investment account`,
+      existingRowIds: [t.id],
+      replacement: [],
+      synthesized: [],
+      deltas: emptyDeltas(),
+      dependsOn: [],
+    });
+    consumed.add(t.id);
+  }
+
   // Pass 3: safety net — every candidate that fell through Passes 1/1.5/2
   // becomes a `confidence='refused'` proposal so coverage-pending and
   // planner-proposals can never diverge silently.

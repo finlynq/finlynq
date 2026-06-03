@@ -29,11 +29,23 @@ import { db, schema } from "@/db";
 import { invalidateUser } from "@/lib/mcp/user-tx-cache";
 import {
   applyLotEffectsForTx,
+  applyLotEffectsForLinkPair,
   buildLotContext,
   reverseLotsForDeleteHook,
   type LotContext,
 } from "@/lib/portfolio/lots/write-hooks";
-import { canEditPortfolioRow } from "@/lib/portfolio/operations";
+import {
+  canEditPortfolioRow,
+  convertExistingToBuySellPair,
+  convertExistingToBrokeragePair,
+  convertExistingToFxPair,
+  convertExistingToInKindTransferPair,
+  BackfillConvertError,
+  type BackfillCounterpartMode,
+  type ConvertPairResult,
+  type OrphanRowForConvert,
+  type CounterpartRowForConvert,
+} from "@/lib/portfolio/operations";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import type {
@@ -531,14 +543,11 @@ async function applyOrphanOverride(
 
   const isPairLess = OVERRIDE_PAIRLESS_KINDS.has(chosenKind);
   if (!isPairLess) {
-    // Paired kinds (buy / sell / in_kind_transfer_* / fx_* / brokerage_*)
-    // require the convertExisting*Pair helpers in operations.ts plus the
-    // counterpart picker UI — not yet shipped (follow-up commit).
-    return {
-      ok: false,
-      code: "paired_override_not_yet_implemented",
-      message: `Paired override kinds (buy/sell/transfer/fx/brokerage) require the convertExisting*Pair helpers — not yet shipped. Use a pair-less kind (opening_balance / dividend / interest / portfolio_income / portfolio_expense) or fix manually in /transactions.`,
-    };
+    // Paired override — dispatch to the dedicated handler. Buy/Sell are wired
+    // (Phase 1, convertExistingToBuySellPair in operations.ts); the remaining
+    // paired kinds (transfer / fx / brokerage) still refuse cleanly until their
+    // converters ship in later phases.
+    return applyPairedOverride(proposal, chosenKind, userId, dek);
   }
 
   // Refuse for portfolio_income/_expense without a chosen related holding
@@ -750,6 +759,473 @@ async function applyOrphanOverride(
   };
 }
 
+// ─── Paired kind-override apply ───────────────────────────────────────
+
+/** Kinds that count as "already canonical" without a pair link — for the
+ *  override stale-guard. Mirror of PAIRLESS_CANONICAL_KINDS. */
+const PAIRLESS_DB_KINDS_FOR_OVERRIDE = new Set([
+  "dividend",
+  "interest",
+  "portfolio_income",
+  "portfolio_expense",
+  "opening_balance",
+]);
+
+/** Replay applyLotEffectsForTx on a set of tx ids (post-commit). Mirrors the
+ *  pair-less override branch's replay loop. */
+async function replayLotEffectsForTxIds(
+  userId: string,
+  txIds: number[],
+  dek: Buffer | null,
+): Promise<void> {
+  if (txIds.length === 0) return;
+  const ctx: LotContext = await buildLotContext(userId, dek);
+  const rows = await db
+    .select({
+      id: schema.transactions.id,
+      userId: schema.transactions.userId,
+      date: schema.transactions.date,
+      amount: schema.transactions.amount,
+      currency: schema.transactions.currency,
+      enteredAmount: schema.transactions.enteredAmount,
+      enteredCurrency: schema.transactions.enteredCurrency,
+      quantity: schema.transactions.quantity,
+      accountId: schema.transactions.accountId,
+      categoryId: schema.transactions.categoryId,
+      portfolioHoldingId: schema.transactions.portfolioHoldingId,
+      tradeLinkId: schema.transactions.tradeLinkId,
+      source: schema.transactions.source,
+      kind: schema.transactions.kind,
+    })
+    .from(schema.transactions)
+    .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, txIds)));
+  for (const r of rows) {
+    await applyLotEffectsForTx(
+      {
+        id: r.id,
+        userId: r.userId,
+        date: r.date,
+        amount: r.amount ?? 0,
+        currency: r.currency,
+        enteredAmount: r.enteredAmount,
+        enteredCurrency: r.enteredCurrency,
+        quantity: r.quantity,
+        accountId: r.accountId,
+        categoryId: r.categoryId,
+        portfolioHoldingId: r.portfolioHoldingId,
+        tradeLinkId: r.tradeLinkId,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        source: (r.source ?? "manual") as any,
+        kind: r.kind,
+      },
+      ctx,
+    );
+  }
+}
+
+const OVERRIDE_BUYSELL_KINDS = new Set(["buy", "sell"]);
+
+// Cross-account override kinds (brokerage / fx / transfer) — link_existing only.
+// Only the INVESTMENT-side legs are listed: the orphan always lives on an
+// investment account (the snapshot loads investment accounts only), so the
+// external/other-account counterpart is the user-picked existing row. The
+// external-leg brokerage kinds (deposit_out / withdrawal_in) are intentionally
+// absent — they'd require an orphan on a non-investment account.
+const CROSS_ACCOUNT_OVERRIDE_KINDS = new Set([
+  "brokerage_deposit_in",
+  "brokerage_withdrawal_out",
+  "fx_from",
+  "fx_to",
+  "in_kind_transfer_in",
+  "in_kind_transfer_out",
+]);
+
+/**
+ * Paired kind-override apply. Buy/Sell support both synth_new + link_existing
+ * (same-account cash leg). Brokerage / FX / Transfer support link_existing only
+ * (cross-account / cross-currency counterpart). The remaining external-leg
+ * brokerage kinds refuse cleanly.
+ */
+async function applyPairedOverride(
+  proposal: PersistedProposal,
+  chosenKind: string,
+  userId: string,
+  dek: Buffer | null,
+): Promise<ApplyResult | ApplyRefusal> {
+  if (CROSS_ACCOUNT_OVERRIDE_KINDS.has(chosenKind)) {
+    return applyCrossAccountOverride(proposal, chosenKind, userId, dek);
+  }
+  if (!OVERRIDE_BUYSELL_KINDS.has(chosenKind)) {
+    return {
+      ok: false,
+      code: "paired_override_not_yet_implemented",
+      message: `Paired override kind '${chosenKind}' isn't wired yet. Use Buy/Sell, a cross-account kind (brokerage/fx/transfer, link-an-existing-row), a pair-less kind, or fix manually in /transactions.`,
+    };
+  }
+  const direction = chosenKind as "buy" | "sell";
+  const mode: BackfillCounterpartMode = proposal.chosenCounterpartMode ?? "synth_new";
+
+  // Phase 1 handles single-orphan refusals (no_cash_pair_found,
+  // unmatched_candidate). Multi-row refusals (combined_cash_leg,
+  // ambiguous_cash_candidates) need the counterpart picker (Phase 2).
+  if (proposal.existingRowIds.length !== 1) {
+    return {
+      ok: false,
+      code: "ambiguous_orphan_for_override",
+      message: `Buy/Sell override expects a single orphan row; this proposal displaces ${proposal.existingRowIds.length}. Resolve in /transactions or wait for the counterpart picker.`,
+    };
+  }
+  const orphanId = proposal.existingRowIds[0];
+
+  const orphanRows = await db
+    .select({
+      id: schema.transactions.id,
+      date: schema.transactions.date,
+      accountId: schema.transactions.accountId,
+      portfolioHoldingId: schema.transactions.portfolioHoldingId,
+      currency: schema.transactions.currency,
+      amount: schema.transactions.amount,
+      quantity: schema.transactions.quantity,
+      categoryId: schema.transactions.categoryId,
+      payee: schema.transactions.payee,
+      note: schema.transactions.note,
+      tags: schema.transactions.tags,
+      kind: schema.transactions.kind,
+      tradeLinkId: schema.transactions.tradeLinkId,
+      linkId: schema.transactions.linkId,
+    })
+    .from(schema.transactions)
+    .where(and(eq(schema.transactions.id, orphanId), eq(schema.transactions.userId, userId)));
+  const orphan = orphanRows[0];
+  if (!orphan) {
+    return { ok: false, code: "orphan_not_found", message: `Orphan row ${orphanId} not found.` };
+  }
+
+  // Stale guard — refuse if the row is already canonical.
+  if (
+    orphan.kind != null &&
+    orphan.kind !== "" &&
+    (PAIRLESS_DB_KINDS_FOR_OVERRIDE.has(orphan.kind) || orphan.tradeLinkId != null || orphan.linkId != null)
+  ) {
+    return {
+      ok: false,
+      code: "rows_already_canonical",
+      message: `Cannot apply — row ${orphanId} is already in canonical shape (canonicalized by a prior run). Refresh the page to re-plan.`,
+    };
+  }
+
+  // link_existing — validate the user-picked counterpart up front so we can
+  // snapshot it for undo and refuse cleanly before mutating anything.
+  let counterpartId: number | null = null;
+  if (mode === "link_existing") {
+    counterpartId = proposal.chosenCounterpartTxId ?? null;
+    if (counterpartId == null) {
+      return { ok: false, code: "counterpart_missing", message: `link_existing override requires a counterpart row, but none was picked.` };
+    }
+    const cpRows = await db
+      .select({
+        id: schema.transactions.id,
+        accountId: schema.transactions.accountId,
+        currency: schema.transactions.currency,
+        kind: schema.transactions.kind,
+        tradeLinkId: schema.transactions.tradeLinkId,
+        linkId: schema.transactions.linkId,
+      })
+      .from(schema.transactions)
+      .where(and(eq(schema.transactions.id, counterpartId), eq(schema.transactions.userId, userId)));
+    const cp = cpRows[0];
+    if (!cp) {
+      return { ok: false, code: "counterpart_not_found", message: `Counterpart row ${counterpartId} not found.` };
+    }
+    if (cp.id === orphanId) {
+      return { ok: false, code: "counterpart_is_orphan", message: `The counterpart row cannot be the orphan itself.` };
+    }
+    if (cp.accountId !== orphan.accountId) {
+      return { ok: false, code: "counterpart_account_mismatch", message: `Counterpart must be in the same account as the orphan.` };
+    }
+    if (cp.currency !== orphan.currency) {
+      return { ok: false, code: "counterpart_currency_mismatch", message: `Counterpart currency (${cp.currency}) must match the orphan (${orphan.currency}).` };
+    }
+    if (
+      cp.kind != null &&
+      cp.kind !== "" &&
+      (PAIRLESS_DB_KINDS_FOR_OVERRIDE.has(cp.kind) || cp.tradeLinkId != null || cp.linkId != null)
+    ) {
+      return { ok: false, code: "counterpart_already_linked", message: `Counterpart row ${counterpartId} is already canonical / paired; pick an unmatched row.` };
+    }
+  }
+
+  const orphanForConvert: OrphanRowForConvert = {
+    id: orphan.id,
+    date: orphan.date,
+    accountId: orphan.accountId,
+    portfolioHoldingId: orphan.portfolioHoldingId,
+    currency: orphan.currency,
+    amount: orphan.amount ?? 0,
+    quantity: orphan.quantity,
+    categoryId: orphan.categoryId,
+    payee: orphan.payee,
+    note: orphan.note,
+    tags: orphan.tags,
+  };
+
+  let result: ConvertPairResult;
+  try {
+    result = await db.transaction(async (tx) => {
+      // 1. Snapshot the orphan (+ the link_existing counterpart) to
+      //    backfill_audit so undo can restore every UPDATEd row.
+      const snapshotIds = counterpartId != null ? [orphanId, counterpartId] : [orphanId];
+      const before = await tx
+        .select()
+        .from(schema.transactions)
+        .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, snapshotIds)));
+      if (before.length > 0) {
+        await tx.insert(schema.backfillAudit).values(
+          before.map((row) => ({ proposalId: proposal.id, txId: row.id, beforeJson: row })),
+        );
+      }
+
+      // 2. Convert the orphan into a canonical Buy/Sell pair.
+      const r = await convertExistingToBuySellPair({
+        tx,
+        userId,
+        orphan: orphanForConvert,
+        direction,
+        mode,
+        counterpartTxId: proposal.chosenCounterpartTxId,
+      });
+
+      // 3. Flip proposal status.
+      await tx
+        .update(schema.backfillProposals)
+        .set({ status: "applied", appliedAt: sql`NOW()` })
+        .where(eq(schema.backfillProposals.id, proposal.id));
+
+      return r;
+    });
+  } catch (err) {
+    if (err instanceof BackfillConvertError) {
+      return { ok: false, code: err.code, message: err.message };
+    }
+    throw err;
+  }
+
+  // 4. Replay lot effects on both legs (post-commit).
+  await replayLotEffectsForTxIds(userId, [...result.updatedTxIds, ...result.insertedTxIds], dek);
+
+  invalidateUser(userId);
+
+  return {
+    ok: true,
+    proposalId: proposal.id,
+    updatedTxIds: result.updatedTxIds,
+    insertedTxIds: result.insertedTxIds,
+  };
+}
+
+/**
+ * Cross-account paired override (brokerage / fx / transfer) — link_existing
+ * only. UPDATEs the orphan + the user-picked counterpart in place, pairs them
+ * via link_id, and replays lots (per-row for brokerage; the FX/transfer link
+ * pair for the rest).
+ */
+async function applyCrossAccountOverride(
+  proposal: PersistedProposal,
+  chosenKind: string,
+  userId: string,
+  dek: Buffer | null,
+): Promise<ApplyResult | ApplyRefusal> {
+  const mode: BackfillCounterpartMode = proposal.chosenCounterpartMode ?? "link_existing";
+  if (mode !== "link_existing") {
+    return {
+      ok: false,
+      code: "synth_not_supported_cross_account",
+      message: `Brokerage / FX / Transfer overrides support link-an-existing-row only (the other leg lives in a different account/currency). Pick an existing counterpart row.`,
+    };
+  }
+  if (proposal.existingRowIds.length !== 1) {
+    return {
+      ok: false,
+      code: "ambiguous_orphan_for_override",
+      message: `This override expects a single orphan row; this proposal displaces ${proposal.existingRowIds.length}. Resolve in /transactions.`,
+    };
+  }
+  const orphanId = proposal.existingRowIds[0];
+  const counterpartId = proposal.chosenCounterpartTxId ?? null;
+  if (counterpartId == null) {
+    return { ok: false, code: "counterpart_missing", message: `This override requires a counterpart row, but none was picked.` };
+  }
+
+  const pickFields = {
+    id: schema.transactions.id,
+    date: schema.transactions.date,
+    accountId: schema.transactions.accountId,
+    portfolioHoldingId: schema.transactions.portfolioHoldingId,
+    currency: schema.transactions.currency,
+    amount: schema.transactions.amount,
+    quantity: schema.transactions.quantity,
+    categoryId: schema.transactions.categoryId,
+    payee: schema.transactions.payee,
+    note: schema.transactions.note,
+    tags: schema.transactions.tags,
+    kind: schema.transactions.kind,
+    tradeLinkId: schema.transactions.tradeLinkId,
+    linkId: schema.transactions.linkId,
+  } as const;
+
+  const both = await db
+    .select(pickFields)
+    .from(schema.transactions)
+    .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, [orphanId, counterpartId])));
+  const orphan = both.find((r) => r.id === orphanId);
+  const cp = both.find((r) => r.id === counterpartId);
+  if (!orphan) return { ok: false, code: "orphan_not_found", message: `Orphan row ${orphanId} not found.` };
+  if (!cp) return { ok: false, code: "counterpart_not_found", message: `Counterpart row ${counterpartId} not found.` };
+  if (cp.id === orphanId) return { ok: false, code: "counterpart_is_orphan", message: `The counterpart row cannot be the orphan itself.` };
+
+  // Stale guard on the orphan (the converters guard the counterpart's shape).
+  if (
+    orphan.kind != null &&
+    orphan.kind !== "" &&
+    (PAIRLESS_DB_KINDS_FOR_OVERRIDE.has(orphan.kind) || orphan.tradeLinkId != null || orphan.linkId != null)
+  ) {
+    return { ok: false, code: "rows_already_canonical", message: `Cannot apply — orphan row ${orphanId} is already canonical. Re-plan.` };
+  }
+
+  const orphanForConvert: OrphanRowForConvert = {
+    id: orphan.id,
+    date: orphan.date,
+    accountId: orphan.accountId,
+    portfolioHoldingId: orphan.portfolioHoldingId,
+    currency: orphan.currency,
+    amount: orphan.amount ?? 0,
+    quantity: orphan.quantity,
+    categoryId: orphan.categoryId,
+    payee: orphan.payee,
+    note: orphan.note,
+    tags: orphan.tags,
+  };
+  const counterpartForConvert: CounterpartRowForConvert = {
+    id: cp.id,
+    accountId: cp.accountId,
+    currency: cp.currency,
+    amount: cp.amount ?? 0,
+    quantity: cp.quantity,
+    portfolioHoldingId: cp.portfolioHoldingId,
+    kind: cp.kind,
+    tradeLinkId: cp.tradeLinkId,
+    linkId: cp.linkId,
+  };
+
+  let result: ConvertPairResult;
+  try {
+    result = await db.transaction(async (tx) => {
+      // Snapshot both rows for undo.
+      const before = await tx
+        .select()
+        .from(schema.transactions)
+        .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, [orphanId, counterpartId])));
+      if (before.length > 0) {
+        await tx.insert(schema.backfillAudit).values(
+          before.map((row) => ({ proposalId: proposal.id, txId: row.id, beforeJson: row })),
+        );
+      }
+
+      let r: ConvertPairResult;
+      if (chosenKind === "brokerage_deposit_in" || chosenKind === "brokerage_withdrawal_out") {
+        r = await convertExistingToBrokeragePair({ tx, userId, orphan: orphanForConvert, counterpart: counterpartForConvert, orphanLeg: chosenKind });
+      } else if (chosenKind === "fx_from" || chosenKind === "fx_to") {
+        r = await convertExistingToFxPair({ tx, userId, orphan: orphanForConvert, counterpart: counterpartForConvert, orphanLeg: chosenKind });
+      } else {
+        r = await convertExistingToInKindTransferPair({
+          tx,
+          userId,
+          orphan: orphanForConvert,
+          counterpart: counterpartForConvert,
+          orphanLeg: chosenKind as "in_kind_transfer_in" | "in_kind_transfer_out",
+        });
+      }
+
+      await tx
+        .update(schema.backfillProposals)
+        .set({ status: "applied", appliedAt: sql`NOW()` })
+        .where(eq(schema.backfillProposals.id, proposal.id));
+      return r;
+    });
+  } catch (err) {
+    if (err instanceof BackfillConvertError) {
+      return { ok: false, code: err.code, message: err.message };
+    }
+    throw err;
+  }
+
+  // Replay lots: FX/transfer use the link-pair dispatcher; brokerage is per-row.
+  if (result.linkPair) {
+    const rows = await db
+      .select({
+        id: schema.transactions.id,
+        userId: schema.transactions.userId,
+        date: schema.transactions.date,
+        amount: schema.transactions.amount,
+        currency: schema.transactions.currency,
+        enteredAmount: schema.transactions.enteredAmount,
+        enteredCurrency: schema.transactions.enteredCurrency,
+        quantity: schema.transactions.quantity,
+        accountId: schema.transactions.accountId,
+        categoryId: schema.transactions.categoryId,
+        portfolioHoldingId: schema.transactions.portfolioHoldingId,
+        tradeLinkId: schema.transactions.tradeLinkId,
+        source: schema.transactions.source,
+        kind: schema.transactions.kind,
+      })
+      .from(schema.transactions)
+      .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, [result.linkPair.sourceTxId, result.linkPair.destTxId])));
+    const toLot = (id: number) => {
+      const r = rows.find((x) => x.id === id);
+      if (!r) return null;
+      return {
+        id: r.id,
+        userId: r.userId,
+        date: r.date,
+        amount: r.amount ?? 0,
+        currency: r.currency,
+        enteredAmount: r.enteredAmount,
+        enteredCurrency: r.enteredCurrency,
+        quantity: r.quantity,
+        accountId: r.accountId,
+        categoryId: r.categoryId,
+        portfolioHoldingId: r.portfolioHoldingId,
+        tradeLinkId: r.tradeLinkId,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        source: (r.source ?? "manual") as any,
+        kind: r.kind,
+      };
+    };
+    const src = toLot(result.linkPair.sourceTxId);
+    const dst = toLot(result.linkPair.destTxId);
+    if (src && dst) {
+      try {
+        await applyLotEffectsForLinkPair(src, dst);
+      } catch (e) {
+        // InvalidLinkPairError etc. — the rows are written + paired; lots just
+        // didn't materialize. Surface in logs; the user can rebuild snapshots.
+        // eslint-disable-next-line no-console
+        console.warn(`applyCrossAccountOverride: link-pair lot replay failed for proposal ${proposal.id}:`, e);
+      }
+    }
+  } else {
+    await replayLotEffectsForTxIds(userId, [...result.updatedTxIds, ...result.insertedTxIds], dek);
+  }
+
+  invalidateUser(userId);
+  return {
+    ok: true,
+    proposalId: proposal.id,
+    updatedTxIds: result.updatedTxIds,
+    insertedTxIds: result.insertedTxIds,
+  };
+}
+
 // ─── Undo ─────────────────────────────────────────────────────────────
 
 export interface UndoResult {
@@ -823,6 +1299,21 @@ export async function undoProposal(
         );
       for (const r of sib) affectedIds.add(r.id);
     }
+    // Same walk for link_id siblings — transfer / fx / brokerage converters
+    // pair via link_id (not trade_link_id). Without this branch a synthesized
+    // link_id counterpart is never reverse-lotted or deleted on undo.
+    if (s.linkId) {
+      const sibL = await db
+        .select({ id: schema.transactions.id })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.userId, userId),
+            eq(schema.transactions.linkId, s.linkId),
+          ),
+        );
+      for (const r of sibL) affectedIds.add(r.id);
+    }
   }
 
   // Live-engine guard: any of these tx ids open lots that have downstream closures?
@@ -870,6 +1361,15 @@ export async function undoProposal(
       if ("trade_link_id" in before) restorePatch.tradeLinkId = before.trade_link_id ?? null;
       if ("linkId" in before) restorePatch.linkId = before.linkId ?? null;
       if ("link_id" in before) restorePatch.linkId = before.link_id ?? null;
+      // The paired converters (and the income/expense pair-less branch) also
+      // change quantity / portfolio_holding_id / related_holding_id — restore
+      // them too or undo leaves the row half-reverted. before_json is the full
+      // row, so the camelCase keys are present; snake_case kept defensively.
+      if ("quantity" in before) restorePatch.quantity = before.quantity ?? null;
+      if ("portfolioHoldingId" in before) restorePatch.portfolioHoldingId = before.portfolioHoldingId ?? null;
+      if ("portfolio_holding_id" in before) restorePatch.portfolioHoldingId = before.portfolio_holding_id ?? null;
+      if ("relatedHoldingId" in before) restorePatch.relatedHoldingId = before.relatedHoldingId ?? null;
+      if ("related_holding_id" in before) restorePatch.relatedHoldingId = before.related_holding_id ?? null;
       await tx
         .update(schema.transactions)
         .set(restorePatch)

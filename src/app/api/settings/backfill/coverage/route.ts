@@ -147,9 +147,41 @@ export async function GET(request: NextRequest) {
       totalMissingLots += n;
     }
 
+    // Non-investment rows: txs on investment accounts with NO
+    // portfolio_holding_id. The invariant `is_investment=true ⇒ every tx
+    // references a portfolio_holdings row` means a null-holding row is not an
+    // investment transaction at all (a mis-filed expense/income/transfer).
+    // Surfaced distinctly so the dashboard can explain WHY a chunk of `pending`
+    // isn't real investment work. Mirrors the planner's Pass 2.9
+    // (`non_investment_in_investment_account`).
+    const nonInvestmentRows = await db.execute<{
+      account_id: number;
+      non_investment: number;
+    }>(
+      sql`
+        SELECT
+          ${schema.transactions.accountId} AS account_id,
+          COUNT(*)::int AS non_investment
+        FROM ${schema.transactions}
+        WHERE ${schema.transactions.userId} = ${auth.userId}
+          AND ${schema.transactions.accountId} IN (${sql.join(accountIds.map((id) => sql`${id}`), sql`, `)})
+          AND ${schema.transactions.portfolioHoldingId} IS NULL
+        GROUP BY ${schema.transactions.accountId}
+      `,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nonInvRaw: Array<{ account_id: number; non_investment: number }> = Array.isArray(nonInvestmentRows) ? nonInvestmentRows : ((nonInvestmentRows as any).rows ?? []);
+    const nonInvestmentByAccount: Record<number, number> = {};
+    let totalNonInvestmentRows = 0;
+    for (const r of nonInvRaw) {
+      const n = Number(r.non_investment) || 0;
+      nonInvestmentByAccount[r.account_id] = n;
+      totalNonInvestmentRows += n;
+    }
+
     let totalTxs = 0;
     let canonicalTxs = 0;
-    const perAccount: Array<{ accountId: number; name: string; total: number; canonical: number; pending: number; pendingPct: number; missingLots: number }> = [];
+    const perAccount: Array<{ accountId: number; name: string; total: number; canonical: number; pending: number; pendingPct: number; missingLots: number; nonInvestmentRows: number }> = [];
     for (const r of raw) {
       const tot = Number(r.total_txs) || 0;
       const can = Number(r.canonical_txs) || 0;
@@ -164,6 +196,7 @@ export async function GET(request: NextRequest) {
         pending,
         pendingPct: tot === 0 ? 0 : Math.round((pending / tot) * 100),
         missingLots: missingLotsByAccount[r.account_id] ?? 0,
+        nonInvestmentRows: nonInvestmentByAccount[r.account_id] ?? 0,
       });
     }
     // Investment accounts with zero transactions: pad with empty entries.
@@ -177,6 +210,7 @@ export async function GET(request: NextRequest) {
           pending: 0,
           pendingPct: 0,
           missingLots: 0,
+          nonInvestmentRows: nonInvestmentByAccount[a.id] ?? 0,
         });
       }
     }
@@ -189,6 +223,7 @@ export async function GET(request: NextRequest) {
       nonCanonicalTxs: totalTxs - canonicalTxs,
       canonicalPct: totalTxs === 0 ? 0 : Math.round((canonicalTxs / totalTxs) * 100),
       missingLots: totalMissingLots,
+      nonInvestmentRows: totalNonInvestmentRows,
       perAccount,
     });
   } catch (err: unknown) {
