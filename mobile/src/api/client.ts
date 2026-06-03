@@ -296,6 +296,12 @@ import type {
   ReconcileSuggestions,
   AutoRuleRecent,
   BankRowCommitBody,
+  Goal,
+  GoalEditData,
+  CategoryEditData,
+  AccountEditData,
+  AccountDetailRow,
+  ReconcileThresholds,
 } from "../../../shared/types";
 
 // Shared report query params. The date range + business + display currency are
@@ -431,6 +437,18 @@ export const endpoints = {
   // Accounts (no balances — name/type/group/currency only)
   getAccounts: () => api.get<Account[]>("/api/accounts"),
   createAccount: (d: AccountFormData) => api.post<Account>("/api/accounts", d),
+  // Full decrypted account rows (incl. type/group/note/alias/archived/mode) for
+  // the account-detail edit prefill + reconciliation-mode picker. Same route as
+  // getAccounts; the richer AccountDetailRow type just stops narrowing fields.
+  getAccountsDetailed: () => api.get<AccountDetailRow[]>("/api/accounts"),
+  // Edit goes through the COLLECTION route with `id` in the body (PUT). Names
+  // are sent plaintext; the server re-encrypts via buildNameFields.
+  updateAccount: (d: AccountEditData) => api.put<Account>("/api/accounts", d),
+  // Per-financial-account delete (NOT the destructive whole-account deletion —
+  // that's `deleteAccount(password)` below). 409 with an "archive it instead"
+  // message when the account still has linked transactions/records.
+  deleteAccountById: (id: number) =>
+    api.delete<{ ok?: boolean }>(`/api/accounts?id=${id}`),
 
   // Per-account balances live in the dashboard payload (computed + FX-converted).
   getAccountBalances: async (): Promise<ApiResponse<AccountBalance[]>> => {
@@ -479,10 +497,19 @@ export const endpoints = {
   // Categories
   getCategories: () => api.get<Category[]>("/api/categories"),
   createCategory: (d: CategoryFormData) => api.post<Category>("/api/categories", d),
+  // PUT with `id` in body; DELETE refuses with 409 + a message when the
+  // category is still referenced by transactions (mobile surfaces the message).
+  updateCategory: (d: CategoryEditData) => api.put<Category>("/api/categories", d),
+  deleteCategory: (id: number) =>
+    api.delete<{ success?: boolean }>(`/api/categories?id=${id}`),
 
   // Goals — bare array of Goal + server-computed progress fields.
   getGoals: () => api.get<GoalWithProgress[]>("/api/goals"),
   createGoal: (d: GoalFormData) => api.post<GoalWithProgress>("/api/goals", d),
+  // PUT with `id` in body (collection route); DELETE by `?id=`.
+  updateGoal: (d: GoalEditData) => api.put<Goal>("/api/goals", d),
+  deleteGoal: (id: number) =>
+    api.delete<{ success?: boolean }>(`/api/goals?id=${id}`),
 
   // One-tap onboarding: seeds a full demo-grade dataset (idempotent) —
   // categories incl. Dividends, 5 accounts (Chequing/Savings/Visa + Brokerage
@@ -661,6 +688,29 @@ export const endpoints = {
   deleteBankRow: (bankId: string) =>
     api.delete<{ success?: boolean }>(
       `/api/bank-transactions/${encodeURIComponent(bankId)}`,
+    ),
+
+  // ─── Settings (P4 expansion) ───────────────────────────────────────────
+  // Display currency — bare `{ displayCurrency }` (request() wraps → res.data).
+  // PUT returns the same bare shape on 2xx, or 400 `{ error, code }` for an
+  // unsupported code (collapsed to res.error by request()).
+  getDisplayCurrency: () =>
+    api.get<{ displayCurrency: string }>("/api/settings/display-currency"),
+  setDisplayCurrency: (displayCurrency: string) =>
+    api.put<{ displayCurrency: string }>("/api/settings/display-currency", {
+      displayCurrency,
+    }),
+
+  // Reconcile thresholds — ENVELOPED `{ success, data: { thresholds, isDefault } }`.
+  // request() passes the envelope through, so res.data is the inner object.
+  getReconcileThresholds: () =>
+    api.get<{ thresholds: ReconcileThresholds; isDefault: boolean }>(
+      "/api/settings/reconcile-thresholds",
+    ),
+  setReconcileThresholds: (t: ReconcileThresholds) =>
+    api.put<{ thresholds: ReconcileThresholds; isDefault: boolean }>(
+      "/api/settings/reconcile-thresholds",
+      t,
     ),
 
   // Destructive account actions. Both are account-session only (the backend

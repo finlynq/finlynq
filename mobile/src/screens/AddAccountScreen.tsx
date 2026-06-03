@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -12,29 +12,31 @@ import {
   Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, useRoute, type RouteProp } from "@react-navigation/native";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
-import {
-  ACCOUNT_TYPES,
-  ACCOUNT_GROUPS,
-  COMMON_CURRENCIES,
-  DEFAULT_CURRENCY,
-} from "../lib/constants";
+import { ACCOUNT_TYPES, ACCOUNT_GROUPS, COMMON_CURRENCIES } from "../lib/constants";
+import { accountFormFromRow } from "../lib/edit-prefill";
+import type { AccountsStackParamList } from "../navigation/AccountsStack";
 
 type AccountType = "A" | "L";
 
 export default function AddAccountScreen() {
   const { colors } = useTheme();
   const navigation = useNavigation<{ goBack: () => void }>();
+  const route = useRoute<RouteProp<AccountsStackParamList, "AddAccount">>();
+  const editAccount = route.params?.account ?? null;
+  const isEdit = !!editAccount;
+  // Map the row (if editing) into the input string state once.
+  const init = useMemo(() => accountFormFromRow(editAccount), [editAccount]);
 
-  const [name, setName] = useState("");
-  const [type, setType] = useState<AccountType>("A");
-  const [group, setGroup] = useState(ACCOUNT_GROUPS.A[0]);
-  const [currency, setCurrency] = useState(DEFAULT_CURRENCY);
-  const [alias, setAlias] = useState("");
-  const [note, setNote] = useState("");
+  const [name, setName] = useState(init.name);
+  const [type, setType] = useState<AccountType>(init.type);
+  const [group, setGroup] = useState(init.group);
+  const [currency, setCurrency] = useState(init.currency);
+  const [alias, setAlias] = useState(init.alias);
+  const [note, setNote] = useState(init.note);
   const [saving, setSaving] = useState(false);
 
   // Flipping type swaps the valid group list — reset group to the first option
@@ -51,24 +53,28 @@ export default function AddAccountScreen() {
     }
     setSaving(true);
     try {
-      const res = await endpoints.createAccount({
+      const fields = {
         name: name.trim(),
         type,
         group,
         currency,
         alias: alias.trim() || undefined,
         note: note.trim() || undefined,
-      });
+      };
+      const res =
+        isEdit && editAccount
+          ? await endpoints.updateAccount({ id: editAccount.id, ...fields })
+          : await endpoints.createAccount(fields);
       if (res.success) {
-        logger.info("add-account", "account created", { type, group });
+        logger.info("add-account", isEdit ? "account updated" : "account created", { type, group });
         navigation.goBack();
       } else {
-        logger.warn("add-account", "create rejected", { error: res.error });
-        Alert.alert("Error", "error" in res ? res.error : "Failed to create account");
+        logger.warn("add-account", "save rejected", { error: res.error });
+        Alert.alert("Error", "error" in res ? res.error : "Failed to save account");
       }
     } catch (e) {
       const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-      logger.error("add-account", "create threw", { detail });
+      logger.error("add-account", "save threw", { detail });
       Alert.alert("Error", "Cannot connect to server");
     } finally {
       setSaving(false);
@@ -122,7 +128,9 @@ export default function AddAccountScreen() {
           <TouchableOpacity onPress={() => navigation.goBack()}>
             <Text style={[styles.backBtn, { color: colors.primary }]}>Cancel</Text>
           </TouchableOpacity>
-          <Text style={[styles.title, { color: colors.foreground }]}>Add Account</Text>
+          <Text style={[styles.title, { color: colors.foreground }]}>
+            {isEdit ? "Edit Account" : "Add Account"}
+          </Text>
           <TouchableOpacity onPress={handleSave} disabled={saving}>
             {saving ? (
               <ActivityIndicator size="small" color={colors.primary} />
@@ -143,7 +151,7 @@ export default function AddAccountScreen() {
                 onChangeText={setName}
                 placeholder="e.g. Everyday Checking"
                 placeholderTextColor={colors.mutedForeground}
-                autoFocus
+                autoFocus={!isEdit}
               />
             </View>
 
@@ -195,9 +203,11 @@ export default function AddAccountScreen() {
             </View>
           </View>
 
-          <Text style={[styles.hint, { color: colors.mutedForeground }]}>
-            Set the starting balance by adding a transaction once the account exists.
-          </Text>
+          {!isEdit && (
+            <Text style={[styles.hint, { color: colors.mutedForeground }]}>
+              Set the starting balance by adding a transaction once the account exists.
+            </Text>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>

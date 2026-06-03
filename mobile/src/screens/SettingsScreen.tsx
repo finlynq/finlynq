@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -13,12 +13,26 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useNavigation } from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import Constants from "expo-constants";
 import { useTheme, type ThemePreference } from "../theme";
 import { useAuth } from "../hooks/useAuth";
 import { getServerUrl, endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { getLogs, clearLogs, type LogEntry, type LogLevel } from "../lib/logger";
+import { PickerSheet, type PickerOption } from "../components/picker-sheet";
+import { DISPLAY_CURRENCIES } from "../lib/constants";
+import type { MoreStackParamList } from "../navigation/MoreStack";
+
+type Nav = NativeStackNavigationProp<MoreStackParamList, "Settings">;
+
+// The PickerSheet keys on a numeric `id`, so each currency's id is its index in
+// DISPLAY_CURRENCIES; onSelect maps the index back to the 3-letter code.
+const CURRENCY_OPTIONS: PickerOption[] = DISPLAY_CURRENCIES.map((c, i) => ({
+  id: i,
+  label: `${c.code} — ${c.label}`,
+}));
 
 const AUTO_LOCK_OPTIONS = [
   { label: "Disabled", value: 0 },
@@ -36,6 +50,7 @@ const THEME_OPTIONS: Array<{ label: string; value: ThemePreference }> = [
 
 export default function SettingsScreen() {
   const theme = useTheme();
+  const navigation = useNavigation<Nav>();
   const {
     signOut,
     saveServerUrl,
@@ -50,6 +65,39 @@ export default function SettingsScreen() {
   const [saved, setSaved] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [showLogs, setShowLogs] = useState(false);
+
+  // 4a — display currency. `null` while loading; the row shows a dash until the
+  // GET resolves. Picking a code PUTs it and flips `currencySaved` briefly.
+  const [displayCurrency, setDisplayCurrency] = useState<string | null>(null);
+  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
+  const [currencySaved, setCurrencySaved] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const res = await endpoints.getDisplayCurrency();
+      if (res.success) setDisplayCurrency(res.data?.displayCurrency ?? "CAD");
+      else logger.warn("settings", "display-currency fetch failed", { error: res.error });
+    })();
+  }, []);
+
+  const onPickCurrency = async (id: number) => {
+    const code = DISPLAY_CURRENCIES[id]?.code;
+    if (!code || code === displayCurrency) return;
+    const prev = displayCurrency;
+    setDisplayCurrency(code); // optimistic
+    setCurrencySaved(false);
+    const res = await endpoints.setDisplayCurrency(code);
+    if (res.success) {
+      setDisplayCurrency(res.data?.displayCurrency ?? code);
+      setCurrencySaved(true);
+      setTimeout(() => setCurrencySaved(false), 2000);
+      logger.info("settings", "display currency changed", { code });
+    } else {
+      setDisplayCurrency(prev); // revert
+      logger.warn("settings", "display-currency save failed", { error: res.error });
+      Alert.alert("Couldn't change currency", res.error || "Please try again.");
+    }
+  };
 
   // Destructive-data flow: which confirm is open ("wipe" = keep login, "delete"
   // = remove account), the typed password, and an in-flight guard.
@@ -172,6 +220,32 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* General — display currency. Converted screens (Dashboard / Accounts /
+            Portfolio / Reports) refetch on focus, so the change is reflected on
+            return without an explicit broadcast. */}
+        <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>GENERAL</Text>
+        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <TouchableOpacity
+            style={styles.navRow}
+            onPress={() => setCurrencyPickerOpen(true)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.settingLeft}>
+              <Text style={[styles.settingLabel, { color: colors.foreground }]}>
+                Display currency
+              </Text>
+              <Text style={[styles.settingDesc, { color: colors.mutedForeground }]}>
+                {currencySaved
+                  ? "✓ Saved"
+                  : "Totals are converted into this currency for display."}
+              </Text>
+            </View>
+            <Text style={[styles.navValue, { color: colors.mutedForeground }]}>
+              {displayCurrency ?? "—"} ›
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Appearance — Light / Dark / System theme selector. */}
         <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>APPEARANCE</Text>
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -209,6 +283,26 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             ))}
           </View>
+        </View>
+
+        {/* Reconciliation — link to the fuzzy-match threshold editor. */}
+        <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>RECONCILIATION</Text>
+        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <TouchableOpacity
+            style={styles.navRow}
+            onPress={() => navigation.navigate("ReconcileThresholds")}
+            activeOpacity={0.7}
+          >
+            <View style={styles.settingLeft}>
+              <Text style={[styles.settingLabel, { color: colors.foreground }]}>
+                Match thresholds
+              </Text>
+              <Text style={[styles.settingDesc, { color: colors.mutedForeground }]}>
+                Tune how the reconcile screen suggests matches.
+              </Text>
+            </View>
+            <Text style={[styles.navValue, { color: colors.mutedForeground }]}>›</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Security */}
@@ -490,6 +584,20 @@ export default function SettingsScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Display-currency picker (4a). */}
+      <PickerSheet
+        visible={currencyPickerOpen}
+        title="Display currency"
+        options={CURRENCY_OPTIONS}
+        selectedId={
+          displayCurrency
+            ? DISPLAY_CURRENCIES.findIndex((c) => c.code === displayCurrency)
+            : null
+        }
+        onSelect={onPickCurrency}
+        onClose={() => setCurrencyPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -570,6 +678,12 @@ const styles = StyleSheet.create({
   settingLeft: { flex: 1, marginRight: 12 },
   settingLabel: { fontSize: 15, fontWeight: "500" },
   settingDesc: { fontSize: 12, marginTop: 2 },
+  navRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  navValue: { fontSize: 15, fontWeight: "600" },
   settingSection: { paddingVertical: 12 },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
   chip: {

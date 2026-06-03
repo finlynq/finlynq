@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -12,35 +12,37 @@ import {
   Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, useRoute, type RouteProp } from "@react-navigation/native";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { safeName } from "../lib/format";
-import {
-  GOAL_TYPES,
-  GOAL_PRIORITIES,
-  COMMON_CURRENCIES,
-  DEFAULT_CURRENCY,
-} from "../lib/constants";
+import { goalFormFromGoal } from "../lib/edit-prefill";
+import { GOAL_TYPES, GOAL_PRIORITIES, COMMON_CURRENCIES } from "../lib/constants";
 import type { Account } from "../../../shared/types";
+import type { MoreStackParamList } from "../navigation/MoreStack";
 
 export default function AddGoalScreen() {
   const { colors } = useTheme();
   const navigation = useNavigation<{ goBack: () => void }>();
+  const route = useRoute<RouteProp<MoreStackParamList, "AddGoal">>();
+  const editGoal = route.params?.goal ?? null;
+  const isEdit = !!editGoal;
+  const init = useMemo(() => goalFormFromGoal(editGoal), [editGoal]);
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
-  const [name, setName] = useState("");
-  const [targetAmount, setTargetAmount] = useState("");
-  const [type, setType] = useState(GOAL_TYPES[0].value);
-  const [currency, setCurrency] = useState(DEFAULT_CURRENCY);
-  const [deadline, setDeadline] = useState("");
-  const [priority, setPriority] = useState(GOAL_PRIORITIES[0].value);
-  const [linkedAccountIds, setLinkedAccountIds] = useState<number[]>([]);
-  const [note, setNote] = useState("");
+  const [name, setName] = useState(init.name);
+  const [targetAmount, setTargetAmount] = useState(init.targetAmount);
+  const [type, setType] = useState(init.type);
+  const [currency, setCurrency] = useState(init.currency);
+  const [deadline, setDeadline] = useState(init.deadline);
+  const [priority, setPriority] = useState(init.priority);
+  const [linkedAccountIds, setLinkedAccountIds] = useState<number[]>(init.linkedAccountIds);
+  const [note, setNote] = useState(init.note);
 
   useEffect(() => {
     endpoints
@@ -75,7 +77,7 @@ export default function AddGoalScreen() {
     }
     setSaving(true);
     try {
-      const res = await endpoints.createGoal({
+      const fields = {
         name: name.trim(),
         type,
         targetAmount: parsedTarget,
@@ -84,21 +86,58 @@ export default function AddGoalScreen() {
         accountIds: linkedAccountIds,
         priority,
         note: note.trim() || undefined,
-      });
+      };
+      const res =
+        isEdit && editGoal
+          ? await endpoints.updateGoal({ id: editGoal.id, ...fields })
+          : await endpoints.createGoal(fields);
       if (res.success) {
-        logger.info("add-goal", "goal created", { type, linked: linkedAccountIds.length });
+        logger.info("add-goal", isEdit ? "goal updated" : "goal created", {
+          type,
+          linked: linkedAccountIds.length,
+        });
         navigation.goBack();
       } else {
-        logger.warn("add-goal", "create rejected", { error: res.error });
-        Alert.alert("Error", "error" in res ? res.error : "Failed to create goal");
+        logger.warn("add-goal", "save rejected", { error: res.error });
+        Alert.alert("Error", "error" in res ? res.error : "Failed to save goal");
       }
     } catch (e) {
       const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-      logger.error("add-goal", "create threw", { detail });
+      logger.error("add-goal", "save threw", { detail });
       Alert.alert("Error", "Cannot connect to server");
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleDelete = () => {
+    if (!editGoal) return;
+    Alert.alert("Delete goal?", `Delete "${safeName(editGoal.name, "this goal")}"? This can't be undone.`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          setDeleting(true);
+          try {
+            const res = await endpoints.deleteGoal(editGoal.id);
+            if (res.success) {
+              logger.info("add-goal", "goal deleted", { id: editGoal.id });
+              navigation.goBack();
+            } else {
+              logger.warn("add-goal", "delete rejected", { error: res.error });
+              Alert.alert("Couldn't delete", res.error || "Please try again.");
+            }
+          } catch (e) {
+            const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+            logger.error("add-goal", "delete threw", { detail });
+            Alert.alert("Error", "Cannot connect to server");
+          } finally {
+            setDeleting(false);
+          }
+        },
+      },
+    ]);
   };
 
   const renderChips = <T extends string | number>(
@@ -156,7 +195,9 @@ export default function AddGoalScreen() {
           <TouchableOpacity onPress={() => navigation.goBack()}>
             <Text style={[styles.backBtn, { color: colors.primary }]}>Cancel</Text>
           </TouchableOpacity>
-          <Text style={[styles.title, { color: colors.foreground }]}>Add Goal</Text>
+          <Text style={[styles.title, { color: colors.foreground }]}>
+            {isEdit ? "Edit Goal" : "Add Goal"}
+          </Text>
           <TouchableOpacity onPress={handleSave} disabled={saving}>
             {saving ? (
               <ActivityIndicator size="small" color={colors.primary} />
@@ -177,7 +218,7 @@ export default function AddGoalScreen() {
                 onChangeText={setName}
                 placeholder="e.g. Emergency Fund"
                 placeholderTextColor={colors.mutedForeground}
-                autoFocus
+                autoFocus={!isEdit}
               />
             </View>
 
@@ -281,6 +322,20 @@ export default function AddGoalScreen() {
               />
             </View>
           </View>
+
+          {isEdit && (
+            <TouchableOpacity
+              style={[styles.deleteBtn, { borderColor: colors.destructive }]}
+              onPress={handleDelete}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <ActivityIndicator size="small" color={colors.destructive} />
+              ) : (
+                <Text style={[styles.deleteText, { color: colors.destructive }]}>Delete goal</Text>
+              )}
+            </TouchableOpacity>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -310,6 +365,15 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   noAccounts: { fontSize: 13, paddingVertical: 4 },
+  deleteBtn: {
+    height: 46,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+  },
+  deleteText: { fontSize: 15, fontWeight: "700" },
 });
 
 const fieldStyles = StyleSheet.create({

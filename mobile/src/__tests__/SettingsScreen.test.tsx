@@ -8,6 +8,15 @@ import { getServerUrl } from "../api/client";
 
 jest.mock("../api/client", () => ({
   getServerUrl: jest.fn(() => "http://localhost:3000"),
+  endpoints: {
+    // SettingsScreen now loads the display currency on mount.
+    getDisplayCurrency: jest.fn(() =>
+      Promise.resolve({ success: true, data: { displayCurrency: "CAD" } })
+    ),
+    setDisplayCurrency: jest.fn(() =>
+      Promise.resolve({ success: true, data: { displayCurrency: "CAD" } })
+    ),
+  },
 }));
 
 const mockSignOut = jest.fn();

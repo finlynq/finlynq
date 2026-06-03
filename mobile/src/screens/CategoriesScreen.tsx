@@ -126,7 +126,11 @@ export default function CategoriesScreen() {
             </Text>
           )}
           renderItem={({ item }) => (
-            <View style={[styles.row, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={() => navigation.navigate("AddCategory", { category: item })}
+              style={[styles.row, { backgroundColor: colors.card, borderColor: colors.border }]}
+            >
               <View style={[styles.iconWrap, { backgroundColor: colors.secondary }]}>
                 <Icon name="categories" size={18} color={colors.mutedForeground} />
               </View>
@@ -138,7 +142,8 @@ export default function CategoriesScreen() {
                   {TYPE_LABEL[item.type] ?? item.type}
                 </Text>
               </View>
-            </View>
+              <Icon name="chevronRight" size={16} color={colors.mutedForeground} />
+            </TouchableOpacity>
           )}
           ListEmptyComponent={
             <Text style={[styles.empty, { color: colors.mutedForeground }]}>

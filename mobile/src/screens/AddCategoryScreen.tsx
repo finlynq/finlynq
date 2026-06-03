@@ -12,24 +12,31 @@ import {
   Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, useRoute, type RouteProp } from "@react-navigation/native";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { CATEGORY_TYPES } from "../lib/constants";
+import { categoryFormFromCategory } from "../lib/edit-prefill";
 import type { Category } from "../../../shared/types";
+import type { MoreStackParamList } from "../navigation/MoreStack";
 
 type CategoryType = "E" | "I" | "R";
 
 export default function AddCategoryScreen() {
   const { colors } = useTheme();
   const navigation = useNavigation<{ goBack: () => void }>();
+  const route = useRoute<RouteProp<MoreStackParamList, "AddCategory">>();
+  const editCategory = route.params?.category ?? null;
+  const isEdit = !!editCategory;
+  const init = useMemo(() => categoryFormFromCategory(editCategory), [editCategory]);
 
-  const [name, setName] = useState("");
-  const [type, setType] = useState<CategoryType>("E");
-  const [group, setGroup] = useState("");
-  const [note, setNote] = useState("");
+  const [name, setName] = useState(init.name);
+  const [type, setType] = useState<CategoryType>(init.type);
+  const [group, setGroup] = useState(init.group);
+  const [note, setNote] = useState(init.note);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Existing categories drive the group suggestions. `group` is a plaintext
   // column (not encrypted), so values are usable directly. `customGroup` toggles
@@ -77,26 +84,62 @@ export default function AddCategoryScreen() {
     }
     setSaving(true);
     try {
-      const res = await endpoints.createCategory({
+      const fields = {
         name: name.trim(),
         type,
         group: group.trim(),
         note: note.trim() || undefined,
-      });
+      };
+      const res =
+        isEdit && editCategory
+          ? await endpoints.updateCategory({ id: editCategory.id, ...fields })
+          : await endpoints.createCategory(fields);
       if (res.success) {
-        logger.info("add-category", "category created", { type });
+        logger.info("add-category", isEdit ? "category updated" : "category created", { type });
         navigation.goBack();
       } else {
-        logger.warn("add-category", "create rejected", { error: res.error });
-        Alert.alert("Error", "error" in res ? res.error : "Failed to create category");
+        logger.warn("add-category", "save rejected", { error: res.error });
+        Alert.alert("Error", "error" in res ? res.error : "Failed to save category");
       }
     } catch (e) {
       const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-      logger.error("add-category", "create threw", { detail });
+      logger.error("add-category", "save threw", { detail });
       Alert.alert("Error", "Cannot connect to server");
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleDelete = () => {
+    if (!editCategory) return;
+    Alert.alert("Delete category?", "This can't be undone.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          setDeleting(true);
+          try {
+            const res = await endpoints.deleteCategory(editCategory.id);
+            if (res.success) {
+              logger.info("add-category", "category deleted", { id: editCategory.id });
+              navigation.goBack();
+            } else {
+              // 409 when transactions still reference it — surface the message
+              // ("Cannot delete: N transactions reference this category").
+              logger.warn("add-category", "delete rejected", { error: res.error });
+              Alert.alert("Can't delete category", res.error || "Reassign its transactions first (on the web app).");
+            }
+          } catch (e) {
+            const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+            logger.error("add-category", "delete threw", { detail });
+            Alert.alert("Error", "Cannot connect to server");
+          } finally {
+            setDeleting(false);
+          }
+        },
+      },
+    ]);
   };
 
   return (
@@ -109,7 +152,9 @@ export default function AddCategoryScreen() {
           <TouchableOpacity onPress={() => navigation.goBack()}>
             <Text style={[styles.backBtn, { color: colors.primary }]}>Cancel</Text>
           </TouchableOpacity>
-          <Text style={[styles.title, { color: colors.foreground }]}>Add Category</Text>
+          <Text style={[styles.title, { color: colors.foreground }]}>
+            {isEdit ? "Edit Category" : "Add Category"}
+          </Text>
           <TouchableOpacity onPress={handleSave} disabled={saving}>
             {saving ? (
               <ActivityIndicator size="small" color={colors.primary} />
@@ -130,7 +175,7 @@ export default function AddCategoryScreen() {
                 onChangeText={setName}
                 placeholder="e.g. Groceries"
                 placeholderTextColor={colors.mutedForeground}
-                autoFocus
+                autoFocus={!isEdit}
               />
             </View>
 
@@ -251,6 +296,22 @@ export default function AddCategoryScreen() {
               />
             </View>
           </View>
+
+          {isEdit && (
+            <TouchableOpacity
+              style={[styles.deleteBtn, { borderColor: colors.destructive }]}
+              onPress={handleDelete}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <ActivityIndicator size="small" color={colors.destructive} />
+              ) : (
+                <Text style={[styles.deleteText, { color: colors.destructive }]}>
+                  Delete category
+                </Text>
+              )}
+            </TouchableOpacity>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -278,6 +339,15 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 12,
   },
+  deleteBtn: {
+    height: 46,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+  },
+  deleteText: { fontSize: 15, fontWeight: "700" },
 });
 
 const fieldStyles = StyleSheet.create({

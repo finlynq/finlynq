@@ -77,7 +77,11 @@ export default function GoalsScreen() {
     const isDebt = item.type === "debt_payoff";
     const reached = pct >= 100;
     return (
-      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+      <TouchableOpacity
+        activeOpacity={0.7}
+        onPress={() => navigation.navigate("AddGoal", { goal: item })}
+        style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
+      >
         <View style={styles.cardTop}>
           <View style={[styles.iconWrap, { backgroundColor: colors.secondary }]}>
             <Icon name="goals" size={18} color={colors.primary} />
@@ -122,7 +126,7 @@ export default function GoalsScreen() {
             {isDebt ? "remaining to pay off" : "to go"}
           </Text>
         )}
-      </View>
+      </TouchableOpacity>
     );
   };
 

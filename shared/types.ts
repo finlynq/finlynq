@@ -116,6 +116,10 @@ export interface GoalWithProgress extends Goal {
   percentComplete: number;
   remaining: number;
   monthlyNeeded: number;
+  /** Issue #130 — every linked account id (the edit-prefill reads this back
+   *  into the multi-select). `accounts` is the parallel decrypted-name list. */
+  accountIds?: number[];
+  accounts?: string[];
 }
 
 export interface Loan {
@@ -750,6 +754,16 @@ export interface GoalFormData {
   note?: string;
 }
 
+// --- Edit-flow payloads (mobile, P4 settings expansion) ---
+// All three entity edits go through the COLLECTION route, NOT a `/[id]`
+// sub-route: PUT /api/goals|accounts|categories with `id` in the body. The
+// account edit additionally accepts `archived` for the archive affordance.
+export type GoalEditData = { id: number } & Partial<GoalFormData>;
+export type CategoryEditData = { id: number } & Partial<CategoryFormData>;
+export type AccountEditData = { id: number } & Partial<AccountFormData> & {
+  archived?: boolean;
+};
+
 // --- Transaction form ---
 export interface TransactionFormData {
   date: string;
@@ -909,6 +923,37 @@ export interface YoYReport {
 
 /** Per-account reconciliation policy, persisted on `accounts.mode`. */
 export type AccountMode = "auto" | "approve" | "manual";
+
+/**
+ * Full decrypted account row from GET /api/accounts — a superset of the base
+ * `Account` (which the typed `getAccounts` narrows to) and `InboxAccount`. The
+ * mobile account-detail surface needs all of these to drive the edit prefill
+ * (type/group/note/alias), the archive flag, and the reconciliation-mode
+ * picker. Name/alias can be null under a cold DEK — route through safeName.
+ */
+export interface AccountDetailRow {
+  id: number;
+  type: "A" | "L";
+  group: string;
+  name: string | null;
+  alias?: string | null;
+  currency: string;
+  note?: string | null;
+  archived?: boolean;
+  isInvestment?: boolean;
+  mode: AccountMode;
+}
+
+/**
+ * The four fuzzy-match thresholds the /reconcile match-engine uses. Persisted
+ * via GET/PUT /api/settings/reconcile-thresholds (enveloped {success,data}).
+ */
+export interface ReconcileThresholds {
+  dateToleranceDays: number;
+  amountTolerancePct: number;
+  amountToleranceFloor: number;
+  scoreThreshold: number;
+}
 
 /**
  * Account row as returned by GET /api/accounts (bare array). Richer than the

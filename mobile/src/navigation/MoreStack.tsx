@@ -18,6 +18,8 @@ import TrendsScreen from "../screens/TrendsScreen";
 import CashFlowSankeyScreen from "../screens/CashFlowSankeyScreen";
 import YearOverYearScreen from "../screens/YearOverYearScreen";
 import InboxScreen from "../screens/InboxScreen";
+import ReconcileThresholdsScreen from "../screens/ReconcileThresholdsScreen";
+import type { Category, GoalWithProgress } from "../../../shared/types";
 
 /** Date range + display currency threaded from the Reports hub to a detail
  *  screen (trends/sankey/income-statement responses don't all carry currency). */
@@ -37,11 +39,13 @@ export type MoreStackParamList = {
   Import: undefined;
   Inbox: { accountId?: number } | undefined;
   Settings: undefined;
+  ReconcileThresholds: undefined;
   AddTransaction:
     | { mode?: "expense" | "income" | "transfer"; preselectedAccountId?: number }
     | undefined;
-  AddCategory: undefined;
-  AddGoal: undefined;
+  // `category`/`goal` present → edit mode (prefill + PUT); absent → create.
+  AddCategory: { category?: Category } | undefined;
+  AddGoal: { goal?: GoalWithProgress } | undefined;
   WhatsNew: undefined;
   Feedback: undefined;
   Reports: undefined;
@@ -64,6 +68,7 @@ export default function MoreStack() {
       <Stack.Screen name="Import" component={ImportScreen} />
       <Stack.Screen name="Inbox" component={InboxScreen} />
       <Stack.Screen name="Settings" component={SettingsScreen} />
+      <Stack.Screen name="ReconcileThresholds" component={ReconcileThresholdsScreen} />
       <Stack.Screen
         name="AddTransaction"
         component={AddTransactionScreen}
