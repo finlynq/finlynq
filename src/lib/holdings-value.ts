@@ -68,6 +68,14 @@ export async function getHoldingsValueByAccount(
 ): Promise<Map<number, AccountHoldingsValue>> {
   const asOfDate = opts?.asOfDate ?? todayISO();
   const isToday = asOfDate >= todayISO();
+  // TEMP perf instrumentation (remove after diagnosing the ~11s dashboard).
+  let __h = Date.now();
+  const __hmark = (label: string) => {
+    const now = Date.now();
+    // eslint-disable-next-line no-console
+    console.log(`[holdings-timing] ${label} ${now - __h}ms`);
+    __h = now;
+  };
   // Stream D Phase 4 — plaintext name/symbol dropped; ciphertext only.
   const rawHoldings = await db
     .select({
@@ -83,6 +91,7 @@ export async function getHoldingsValueByAccount(
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
     .where(eq(schema.portfolioHoldings.userId, userId));
 
+  __hmark(`rawHoldings(${rawHoldings.length})`);
   if (rawHoldings.length === 0) return new Map();
 
   // Stream D Phase 4 — plaintext columns dropped, decrypt the ciphertext.
@@ -174,6 +183,7 @@ export async function getHoldingsValueByAccount(
       lte(schema.transactions.date, asOfDate),
     ))
     .groupBy(schema.transactions.portfolioHoldingId, effectiveEnteredCurrency);
+  __hmark(`fkAggRows(${fkAggRows.length})`);
 
   const qtyByHoldingId = new Map<number, number>();
   // Per-currency cost buckets per holding. Each entry is the SUM of buy/sell
@@ -210,6 +220,7 @@ export async function getHoldingsValueByAccount(
         ? await fetchMultipleQuotes(stockSymbols)
         : await fetchMultipleQuotesAtDate(stockSymbols, asOfDate))
     : new Map();
+  __hmark(`stockQuotes(${stockSymbols.length} syms)`);
 
   // Cache-first crypto prices (price-only). Pass both the CoinGecko coin id AND
   // the holding's base symbol so the returned price re-keys to the symbol
@@ -236,6 +247,7 @@ export async function getHoldingsValueByAccount(
       ? await getCryptoSpotPrices(cgPairs)
       : await getCryptoPricesAtDate(cgPairs, asOfDate);
   const cryptoByUpperSymbol = new Map(cryptoPrices.map(p => [p.symbol.toUpperCase(), p]));
+  __hmark(`cryptoPrices(${cgPairs.length} coins)`);
 
   // Accumulate market value per accountId, converting holding currency -> account currency via FX
   // Historical FX uses getRate(from, to, asOfDate) which triangulates via
@@ -358,5 +370,6 @@ export async function getHoldingsValueByAccount(
     }
   }
 
+  __hmark(`valuationLoop(${holdings.length} holdings, fx pairs cached)`);
   return out;
 }

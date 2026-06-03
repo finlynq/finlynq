@@ -33,9 +33,21 @@ export async function GET(request: NextRequest) {
       params.get("endDate") ??
       `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-31`;
 
+    // TEMP perf instrumentation (remove after diagnosing the ~11s dashboard).
+    const __t0 = Date.now();
+    let __t = __t0;
+    const __mark = (label: string) => {
+      const now = Date.now();
+      // eslint-disable-next-line no-console
+      console.log(`[dash-timing] ${label} ${now - __t}ms`);
+      __t = now;
+    };
+
     const rateMap = await getRateMap(displayCurrency, userId);
+    __mark("getRateMap");
 
     const rawBalances = await getAccountBalances(userId, { includeArchived });
+    __mark("getAccountBalances");
     // Stream D: decrypt accountName + alias before display / currency conversion.
     const balances = decryptNamedRows(rawBalances, dek, {
       accountNameCt: "accountName",
@@ -62,6 +74,7 @@ export async function GET(request: NextRequest) {
     // cashFlowBasis is the transaction sum exposed separately so the account
     // detail page can display "Cash flow" alongside Market value.
     const holdingsByAccount = await getHoldingsValueByAccount(userId, dek);
+    __mark("getHoldingsValueByAccount");
     const convertedBalances = balances.map((b: any) => {
       const holdings = holdingsByAccount.get(b.accountId);
       const cashFlowBasis = b.balance;
@@ -81,8 +94,13 @@ export async function GET(request: NextRequest) {
     });
 
     const incomeVsExpenses = await getIncomeVsExpenses(userId, startDate, endDate);
+    __mark("getIncomeVsExpenses");
     const spendingByCategory = await getSpendingByCategory(userId, startDate, endDate);
+    __mark("getSpendingByCategory");
     const netWorthRaw = await getNetWorthOverTime(userId);
+    __mark("getNetWorthOverTime");
+    // eslint-disable-next-line no-console
+    console.log(`[dash-timing] TOTAL ${Date.now() - __t0}ms user=${userId.slice(0, 8)} ccy=${displayCurrency}`);
 
     // Consolidate net worth across currencies into display currency
     const netWorthByMonth = new Map<string, number>();
