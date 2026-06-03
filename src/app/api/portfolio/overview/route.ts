@@ -10,6 +10,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
+import { cashLegSkipSql } from "@/lib/portfolio/aggregation-predicates";
 
 const CRYPTO_SYMBOLS = new Set([
   "BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AAVE", "ATOM", "AVAX",
@@ -231,24 +232,30 @@ export async function GET(request: NextRequest) {
       ELSE ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}))
     END
   `;
+  // Issue #128 (Phase 2 update, 2026-05-26): exclude paired cash-leg rows from
+  // BOTH the buy- and sell-side aggregations. Under the Phase 2 sign convention
+  // (2026-05-25), `buy_cash_leg` / `sell_cash_leg` rows on the cash sleeve carry
+  // non-zero amount + non-zero quantity, so the original predicate
+  // `tradeLinkId IS NOT NULL AND amount = 0` no longer matches them. Without
+  // this fix, the cash sleeve's realized-gain calc picks up phantom buys
+  // (sell_cash_leg qty>0) and phantom sells (buy_cash_leg qty<0). The predicate
+  // is a union of the explicit `kind` discriminator (Phase 2+) and the legacy
+  // `amount=0` fallback for un-tagged pre-migration rows. FINLYNQ-106: this is
+  // now the SHARED helper, identical to the one holdings-value.ts imports — so
+  // the two SQL aggregators can no longer drift.
+  const skipCashLeg = cashLegSkipSql({
+    kind: schema.transactions.kind,
+    tradeLinkId: schema.transactions.tradeLinkId,
+    amount: schema.transactions.amount,
+  });
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
       enteredCurrency: effectiveEnteredCurrency,
-      // Issue #128 (Phase 2 update, 2026-05-26): exclude paired cash-leg
-      // rows from BOTH the buy- and sell-side aggregations. Under the
-      // Phase 2 sign convention (2026-05-25), `buy_cash_leg` / `sell_cash_leg`
-      // rows on the cash sleeve carry non-zero amount + non-zero quantity,
-      // so the original predicate `tradeLinkId IS NOT NULL AND amount = 0`
-      // no longer matches them. Without this fix, the cash sleeve's
-      // realized-gain calc picks up phantom buys (sell_cash_leg qty>0) and
-      // phantom sells (buy_cash_leg qty<0). Predicate is a union of the
-      // explicit `kind` discriminator (Phase 2+) and the legacy `amount=0`
-      // fallback for un-tagged pre-migration rows.
-      totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT (${schema.transactions.kind} IN ('buy_cash_leg', 'sell_cash_leg') OR (${schema.transactions.tradeLinkId} IS NOT NULL AND ${schema.transactions.amount} = 0)) THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
-      totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT (${schema.transactions.kind} IN ('buy_cash_leg', 'sell_cash_leg') OR (${schema.transactions.tradeLinkId} IS NOT NULL AND ${schema.transactions.amount} = 0)) THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
-      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT (${schema.transactions.kind} IN ('buy_cash_leg', 'sell_cash_leg') OR (${schema.transactions.tradeLinkId} IS NOT NULL AND ${schema.transactions.amount} = 0)) THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
-      totalSellAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT (${schema.transactions.kind} IN ('buy_cash_leg', 'sell_cash_leg') OR (${schema.transactions.tradeLinkId} IS NOT NULL AND ${schema.transactions.amount} = 0)) THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
+      totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT ${skipCashLeg} THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
+      totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT ${skipCashLeg} THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
+      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT ${skipCashLeg} THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
+      totalSellAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT ${skipCashLeg} THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
       dividendsInEntered: dividendsCategoryId !== null
         ? sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.categoryId} = ${dividendsCategoryId} THEN COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}) ELSE 0 END), 0)::float8`
         : sql<number>`0::float8`,

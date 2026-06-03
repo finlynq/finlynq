@@ -18,6 +18,7 @@ import { getCryptoSpotPrices, getCryptoPricesAtDate, symbolToCoinGeckoId } from 
 import { getLatestFxRate, getRate } from "@/lib/fx-service";
 import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { cashLegSkipSql } from "@/lib/portfolio/aggregation-predicates";
 
 function todayISO(): string {
   return new Date().toISOString().split("T")[0];
@@ -133,6 +134,22 @@ export async function getHoldingsValueByAccount(
       ELSE ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}))
     END
   `;
+  // Issue #128 (FINLYNQ-106, 2026-06-03): exclude paired cash-leg rows from the
+  // buy- and sell-side COST-BASIS tallies. The shared predicate (single source
+  // in aggregation-predicates.ts) is the same one /api/portfolio/overview bakes
+  // into its SUM(CASE…) — before this both aggregators silently disagreed (the
+  // overview route carried the skip, this one didn't). NOTE: applied to the
+  // cost-basis CASE expressions only, NOT to `delta` (net qty). A cash-leg row
+  // lands on the cash-SLEEVE holding (kind=buy_cash_leg/sell_cash_leg →
+  // portfolio_holding_id = the sleeve), never on a stock holding, so for stock
+  // holdings the skip is a no-op; for cash sleeves (priced at 1) the cost basis
+  // falls back to market value either way, so this is behavior-preserving while
+  // pinning parity with overview + MCP accumulate().
+  const skipCashLeg = cashLegSkipSql({
+    kind: schema.transactions.kind,
+    tradeLinkId: schema.transactions.tradeLinkId,
+    amount: schema.transactions.amount,
+  });
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
@@ -144,9 +161,9 @@ export async function getHoldingsValueByAccount(
           ELSE 0
         END
       ), 0)::float8`,
-      totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
-      totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
-      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
+      totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT ${skipCashLeg} THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
+      totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT ${skipCashLeg} THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
+      totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT ${skipCashLeg} THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
     })
     .from(schema.transactions)
     .innerJoin(

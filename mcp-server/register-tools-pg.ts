@@ -101,6 +101,7 @@ import {
 import { decryptStaged, encryptStaged } from "../src/lib/crypto/staging-envelope";
 import { calculateFinancialHealth } from "../src/lib/financial-health";
 import { getHoldingsValueByAccount } from "../src/lib/holdings-value";
+import { isCashLegRow } from "../src/lib/portfolio/aggregation-predicates";
 import { computeGoalProgress } from "../src/lib/goals-progress";
 import { sourceTagFor, isFormatTag, type FormatTag } from "../src/lib/tx-source";
 import { validateSignVsCategory } from "../src/lib/transactions/sign-category-invariant";
@@ -1110,11 +1111,12 @@ function accumulate(
   // sell). The discriminator is `kind IN ('buy_cash_leg', 'sell_cash_leg')`;
   // legacy pre-Phase-2 cash legs (kind NULL, amount=0) are caught by the
   // fallback `trade_link_id IS NOT NULL AND amount = 0`.
-  const tradeLinkId = r.trade_link_id ?? null;
-  const kind = (r.kind ?? null) as string | null;
-  const isPairedCashLeg =
-    kind === "buy_cash_leg" || kind === "sell_cash_leg" ||
-    (tradeLinkId != null && amt === 0);
+  // FINLYNQ-106: the #128 paired cash-leg skip now lives in ONE place
+  // (src/lib/portfolio/aggregation-predicates.ts) shared with the two SQL
+  // aggregators (holdings-value.ts + /api/portfolio/overview). `amt` is the
+  // already-coerced Number(r.amount); pass it through so the legacy
+  // `amount = 0` fallback matches identically to the SQL form.
+  const isPairedCashLeg = isCashLegRow({ kind: r.kind ?? null, tradeLinkId: r.trade_link_id ?? null, amount: amt });
   if (isPairedCashLeg) {
     // Paired cash-leg sibling — contributes neither buy nor sell here.
     // (Cash-sleeve qty is tracked separately via SUM(quantity) per
