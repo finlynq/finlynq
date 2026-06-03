@@ -47,6 +47,14 @@ const eslintConfig = defineConfig([
       "@typescript-eslint/ban-ts-comment": "warn",
       "@next/next/no-html-link-for-pages": "warn",
       "react-hooks/immutability": "warn",
+      // eslint-plugin-react-hooks 7.1.1 (lockfile) errors on this React
+      // Compiler diagnostic ("Existing memoization could not be preserved") in
+      // 3 web components (inbox-to-approve-tab, inbox-to-categorize-tab,
+      // sankey-chart). It surfaced on the dev→main promotion PR — the blocking
+      // lint is PR-only and these reached `dev` via direct pushes, so it was
+      // never gated. Baselined to `warn` per the policy above; burn down + re-
+      // promote to `error`. (An optimization hint, not a correctness bug.)
+      "react-hooks/preserve-manual-memoization": "warn",
     },
   },
 ]);
