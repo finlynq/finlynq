@@ -243,8 +243,8 @@ export function OfxConfirmDialog({
                 <span>
                   <span className="font-medium">Apply automatically</span>
                   <span className="block text-[11px] text-muted-foreground">
-                    Import silently using this Payee source — don&apos;t ask again
-                    (re-enable in Settings → Import).
+                    Import silently using this Payee source — don&apos;t ask again.
+                    Reset anytime on the account&apos;s page → Import preferences.
                   </span>
                 </span>
               </label>

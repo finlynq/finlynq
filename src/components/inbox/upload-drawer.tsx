@@ -152,10 +152,11 @@ export function UploadDrawer({
   accountCurrency,
   policy,
   ofxPayeeSource = "name",
-  // csvMappingMode is enforced server-side (the upload route reads the
-  // account column + per-user default to decide confirm-vs-silent), so the
-  // drawer doesn't need to read it — but it's accepted in props so the page
-  // can pass it without a type error and so the contract is explicit.
+  // csvMappingMode is enforced server-side (the upload route reads the account
+  // column + per-user default to decide confirm-vs-silent). The drawer reads it
+  // so it can surface a reset affordance when the account is set to 'auto' —
+  // otherwise the preview never reappears and there's no way back from here.
+  csvMappingMode = "confirm",
   onUploaded,
 }: {
   open: boolean;
@@ -213,6 +214,15 @@ export function UploadDrawer({
   useEffect(() => {
     setSavedOfxPayeeSource(ofxPayeeSource);
   }, [ofxPayeeSource]);
+
+  // Local mirror of the account's confirm/auto import mode so the in-drawer
+  // reset (visible when 'auto') updates immediately without a page refetch.
+  const [acctCsvMode, setAcctCsvMode] = useState<"confirm" | "auto">(
+    csvMappingMode,
+  );
+  useEffect(() => {
+    setAcctCsvMode(csvMappingMode);
+  }, [csvMappingMode]);
 
   // §B (2026-06-04) — distinguishes the confirm-mapping dialog (the new
   // csv-confirm-mapping 422) from the needs-mapping dialog so the dialog can
@@ -728,6 +738,28 @@ export function UploadDrawer({
             </div>
           ) : (
             <>
+              {acctCsvMode === "auto" && (
+                <div className="rounded-md border border-amber-200 bg-amber-50/60 dark:bg-amber-950/10 px-3 py-2.5 text-xs">
+                  <p className="font-medium text-amber-800 dark:text-amber-300">
+                    This account imports automatically
+                  </p>
+                  <p className="mt-0.5 text-muted-foreground">
+                    No field-mapping preview is shown — rows are staged silently
+                    using the detected mapping.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2 h-7"
+                    onClick={() => {
+                      setAcctCsvMode("confirm");
+                      void patchImportPrefs({ csvMappingMode: "confirm" });
+                    }}
+                  >
+                    Switch to confirm-first
+                  </Button>
+                </div>
+              )}
               <ReconcileUploadCard
                 accounts={[lockedAccount]}
                 templates={templateOptions}

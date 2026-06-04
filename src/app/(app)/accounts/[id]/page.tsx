@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { ArrowLeft, Wallet, Layers, Hash, Pencil, Coins, Plus, Trash2, Inbox } from "lucide-react";
+import { ArrowLeft, Wallet, Layers, Hash, Pencil, Coins, Plus, Trash2, Inbox, FileCog } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import { ModePicker } from "@/components/inbox/mode-picker";
+import { ImportPrefsPicker } from "@/components/inbox/import-prefs-picker";
 import { isMode, type Mode } from "@/components/inbox/modes";
 import { NetWorthHistoryChart } from "@/components/net-worth-history-chart";
 
@@ -38,6 +39,9 @@ type Account = {
   currency: string;
   isInvestment?: boolean;
   mode?: Mode;
+  /** Statement-upload field-mapping prefs (2026-06-04). */
+  csvMappingMode?: "confirm" | "auto";
+  ofxPayeeSource?: "name" | "memo";
 };
 
 type CashSleeve = {
@@ -361,6 +365,39 @@ export default function AccountDetailPage() {
             accountId={account.id}
             initialMode={isMode(account.mode) ? account.mode : "manual"}
             onSaved={(m) => setAccount({ ...account, mode: m })}
+          />
+        </CardContent>
+      </Card>
+
+      {/* Import field-mapping preferences (2026-06-04). The canonical home for
+          resetting an account that was set to "apply automatically" back to
+          "ask me first" — once 'auto', the upload preview never reappears. */}
+      <Card id="import-prefs">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <FileCog className="h-4 w-4 text-violet-600" /> Import preferences
+          </CardTitle>
+          <p className="text-xs text-muted-foreground mt-1">
+            Whether CSV / OFX / QFX uploads to this account show a field-mapping
+            preview before staging, and which OFX field becomes the payee.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <ImportPrefsPicker
+            accountId={account.id}
+            initialCsvMappingMode={
+              account.csvMappingMode === "auto" ? "auto" : "confirm"
+            }
+            initialOfxPayeeSource={
+              account.ofxPayeeSource === "memo" ? "memo" : "name"
+            }
+            onSaved={(prefs) =>
+              setAccount({
+                ...account,
+                csvMappingMode: prefs.csvMappingMode,
+                ofxPayeeSource: prefs.ofxPayeeSource,
+              })
+            }
           />
         </CardContent>
       </Card>
