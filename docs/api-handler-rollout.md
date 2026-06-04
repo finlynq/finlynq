@@ -37,9 +37,19 @@ Tests:
 - `tests/api-handler.test.ts` — 15 wrapper unit tests (envelope, raw mode, validation, 401/423, AppError.status, mapError short-circuit).
 - `tests/api/portfolio-operations-buy.test.ts` — 4 route tests pinning the bare contract (201 bare `{id}`, bare 400, bare structured domain error, 423 no-DEK).
 
+## Migrated (FINLYNQ-116, increment 1, 2026-06-04) — `notifications` + `holding-accounts`
+
+Lowest-contract-risk group per the item body (internal/admin, no-mobile-consumer first). Both migrated in **raw/compat mode (`raw: true`)** — byte-identical wire shape, so zero blank-screen risk:
+
+- [x] `notifications/route.ts` (GET + POST) — **Category B → raw/compat.** Consumer grep: **ZERO callsites** in `pf-app/src` or `pf-app/mobile/src`. Returns bare `{ notifications, unreadCount }` (GET) / `{ success }` / `{ generated }` / bare 201 row (POST action-dispatch). No `body` schema passed (POST self-dispatches on `body.action` across multiple shapes, keeps its own validation). Auth + bare `{ error }` catch centralized.
+- [x] `holding-accounts/route.ts` (GET + POST + PUT + DELETE) — **Category B → raw/compat.** Consumer grep: ONLY the web `src/app/(app)/settings/holding-accounts/page.tsx`; **no mobile consumer**. The page reads a BARE array (GET, iterates `pairings` directly), checks only `res.ok` on success bodies (POST 201 row / PUT row / DELETE `{success:true}`), and reads bare `{ error }` on failure — so the shape was preserved exactly. POST/PUT pass their existing single Zod schema to `apiHandler`'s `body` option (bad JSON / invalid body → bare 400); the in-handler ownership / duplicate-409 / not-found-404 / last-pairing-409 guards return their own NextResponse, passed through verbatim. DELETE reads `holdingId`/`accountId` query params (no body schema).
+
+Tests:
+- `tests/api/holding-accounts.test.ts` — 8 route tests pinning the bare contract (GET bare array; POST 201 bare row, bare 400 invalid body, bare 409 duplicate; DELETE bare 409 last-pairing + bare 400 missing params; notifications GET bare `{ notifications, unreadCount }`; 401 unauth).
+
 ## Remaining routes (FINLYNQ-116)
 
-~113 `route.ts` files still hand-roll try/catch. Migrate incrementally. For each, classify FIRST:
+~111 `route.ts` files still hand-roll try/catch (was ~113; `notifications` + `holding-accounts` migrated 2026-06-04). Migrate incrementally. For each, classify FIRST:
 
 - **A. enveloped-safe** — internal-only or already-`{success}` consumers → migrate to default mode.
 - **B. bare-compat** — web/mobile reads a bare array/object/error → migrate in `raw: true` mode (centralize auth+validation+error, keep the shape).
@@ -59,7 +69,7 @@ These are confirmed via consumer greps; do NOT envelope without a coordinated cl
 
 - `mcp/route.ts`, `mcp/upload/route.ts`, `oauth/{authorize,token,register}/route.ts`, `import/email-webhook/route.ts`, `csp-report/route.ts`, `healthz/route.ts`.
 
-### Full remaining list (grep `} catch` under `src/app/api`, 2026-06-03)
+### Full remaining list (grep `} catch` under `src/app/api`, 2026-06-03; `notifications` + `holding-accounts` struck 2026-06-04)
 
 ```
 accounts/[id]/mode, accounts, admin/announcements/[id], admin/announcements,
@@ -70,14 +80,14 @@ auth/wipe-account, bank-transactions/[bankId]/approve,
 bank-transactions/[bankId]/categorize, bank-transactions/[bankId],
 budget-templates, budgets, budgets/seed, categories, chat, csp-report, dashboard,
 data/export, data/import, data, feedback/[id]/reply, feedback, fire/monte-carlo,
-fire, fx/overrides, goals, healthz, holding-accounts, import/backfill,
+fire, fx/overrides, goals, healthz, import/backfill,
 import/connectors/wealthposition/{credentials,execute,preview,probe,reconcile,
 zip-execute,zip-preview,zip-probe}, import/csv-map, import/email-config,
 import/email-webhook, import/excel-map, import/execute, import/preview, import,
 import/staged/[id]/apply-rules, import/staged/[id]/approve, import/staged/[id]/bind,
 import/staged/[id]/create-rule, import/staged/[id], import/staged/[id]/rows/[rowId],
 import/staging/upload, import/templates/[id], import/templates,
-import/uploads/[batchId], loans, mcp, mcp/upload, net-worth-history, notifications,
+import/uploads/[batchId], loans, mcp, mcp/upload, net-worth-history,
 oauth/authorize, oauth/register, oauth/token, onboarding/sample-data,
 portfolio/benchmarks, portfolio/crypto, portfolio/holdings/cash-sleeve,
 portfolio/lots, portfolio/operations/load, portfolio/overview, portfolio,

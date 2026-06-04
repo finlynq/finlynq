@@ -1,36 +1,42 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, desc, sql } from "drizzle-orm";
-import { requireAuth } from "@/lib/auth/require-auth";
-import { safeErrorMessage } from "@/lib/validate";
+import { apiHandler } from "@/lib/api-handler";
 
-export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
-  const notifications = await db
-    .select()
-    .from(schema.notifications)
-    .where(eq(schema.notifications.userId, userId))
-    .orderBy(desc(schema.notifications.createdAt))
-    .limit(50)
-    .all();
+// raw/compat mode (FINLYNQ-116): both handlers return bare bodies and the catch
+// branch stays bare `{ error }`. No web/mobile consumer reads this route today
+// (grep: zero callsites in pf-app/src or mobile/src), so apiHandler centralizes
+// auth + error handling WITHOUT changing the wire shape. The GET self-dispatch
+// on `body.action` keeps its own validation (multiple shapes), so no `body`
+// schema is passed. → FINLYNQ-107 / CLAUDE.md "API route wrapper".
 
-  const unreadCount = await db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(schema.notifications)
-    .where(and(eq(schema.notifications.userId, userId), eq(schema.notifications.read, 0)))
-    .get();
+export const GET = apiHandler(
+  { auth: "auth", raw: true, fallbackMessage: "Failed to load notifications" },
+  async ({ userId }) => {
+    const notifications = await db
+      .select()
+      .from(schema.notifications)
+      .where(eq(schema.notifications.userId, userId))
+      .orderBy(desc(schema.notifications.createdAt))
+      .limit(50)
+      .all();
 
-  return NextResponse.json({
-    notifications,
-    unreadCount: unreadCount?.count ?? 0,
-  });
-}
+    const unreadCount = await db
+      .select({ count: sql<number>`COUNT(*)` })
+      .from(schema.notifications)
+      .where(and(eq(schema.notifications.userId, userId), eq(schema.notifications.read, 0)))
+      .get();
 
-export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
-  try {
+    return NextResponse.json({
+      notifications,
+      unreadCount: unreadCount?.count ?? 0,
+    });
+  },
+);
+
+export const POST = apiHandler(
+  { auth: "auth", raw: true, fallbackMessage: "Notification operation failed" },
+  async ({ request, userId, dek }) => {
     const body = await request.json();
 
     if (body.action === "mark-read") {
@@ -55,9 +61,9 @@ export async function POST(request: NextRequest) {
       const endDate = `${month}-${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()}`;
 
       // Stream D Phase 4 — plaintext categories.name dropped. Read ct +
-      // decrypt with session DEK (auth.context.dek) before formatting the
-      // notification copy. Without a DEK the category renders as "your
-      // budget" — defense-in-depth fallback so we don't leak ciphertext.
+      // decrypt with session DEK (dek) before formatting the notification
+      // copy. Without a DEK the category renders as "your category" —
+      // defense-in-depth fallback so we don't leak ciphertext.
       const rawBudgets = await db
         .select({
           categoryNameCt: schema.categories.nameCt,
@@ -75,7 +81,7 @@ export async function POST(request: NextRequest) {
       for (const b of rawBudgets) {
         if (b.budgetAmount > 0) {
           const pct = (b.spent / b.budgetAmount) * 100;
-          const categoryName = decryptName(b.categoryNameCt, auth.context.dek, null) ?? "your category";
+          const categoryName = decryptName(b.categoryNameCt, dek, null) ?? "your category";
           if (pct >= 100) {
             generated.push({
               userId,
@@ -116,8 +122,5 @@ export async function POST(request: NextRequest) {
     }).returning().get();
 
     return NextResponse.json(notif, { status: 201 });
-  } catch (error: unknown) {
-    const message = safeErrorMessage(error, "Notification operation failed");
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
-}
+  },
+);

@@ -19,29 +19,34 @@
  * decryptNamedRows so the UI can render them; that is the only place
  * the DEK is touched, and a missing DEK degrades to ciphertext-or-null
  * exactly like every other read path.
+ *
+ * FINLYNQ-116: migrated onto `apiHandler` in raw/compat mode. The only
+ * consumer is the web Settings → Holding accounts page (no mobile
+ * consumer — grep `mobile/src/api/client.ts`), which reads BARE success
+ * bodies (it only checks `res.ok` on success) and bare `{ error }` on
+ * failure. apiHandler centralizes auth + body validation + error handling
+ * here WITHOUT changing the wire shape (`raw: true`). The ownership /
+ * duplicate / not-found / 409 guards return their own NextResponse, which
+ * the wrapper passes through verbatim. → FINLYNQ-107 / CLAUDE.md.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 
 import { db, schema } from "@/db";
-import { requireAuth } from "@/lib/auth/require-auth";
-import { logApiError, safeErrorMessage, validateBody } from "@/lib/validate";
+import { apiHandler } from "@/lib/api-handler";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 
 /**
  * GET /api/holding-accounts — list every (holding, account) pairing for
  * the authenticated user. Joins to portfolio_holdings + accounts so the
  * UI gets display names without a second round-trip; ciphertext columns
- * are decrypted in-memory.
+ * are decrypted in-memory. Returns a BARE array.
  */
-export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
-  const { userId, dek } = auth.context;
-
-  try {
+export const GET = apiHandler(
+  { auth: "auth", raw: true, fallbackMessage: "Failed to load holding-account pairings" },
+  async ({ userId, dek }) => {
     const rawRows = await db
       .select({
         holdingId: schema.holdingAccounts.holdingId,
@@ -76,14 +81,8 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json(rows);
-  } catch (error: unknown) {
-    await logApiError("GET", "/api/holding-accounts", error, userId);
-    return NextResponse.json(
-      { error: safeErrorMessage(error, "Failed to load holding-account pairings") },
-      { status: 500 },
-    );
-  }
-}
+  },
+);
 
 const numericId = z.number().int().positive();
 const nonNegativeNumber = z.number().finite().nonnegative();
@@ -104,22 +103,11 @@ const postSchema = z.object({
  * `portfolio_holdings.account_id` to mirror the new primary so the
  * legacy aggregator callsites stay in sync.
  */
-export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+export const POST = apiHandler(
+  { auth: "auth", body: postSchema, raw: true, fallbackMessage: "Failed to create pairing" },
+  async ({ userId, body }) => {
+    const { holdingId, accountId, qty, costBasis, isPrimary } = body;
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  const parsed = validateBody(body, postSchema);
-  if (parsed.error) return parsed.error;
-  const { holdingId, accountId, qty, costBasis, isPrimary } = parsed.data;
-
-  try {
     const ownership = await assertOwnership(userId, holdingId, accountId);
     if (ownership) return ownership;
 
@@ -179,14 +167,8 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json(inserted[0] ?? null, { status: 201 });
-  } catch (error: unknown) {
-    await logApiError("POST", "/api/holding-accounts", error, userId);
-    return NextResponse.json(
-      { error: safeErrorMessage(error, "Failed to create pairing") },
-      { status: 500 },
-    );
-  }
-}
+  },
+);
 
 const putSchema = z.object({
   holdingId: numericId,
@@ -200,22 +182,11 @@ const putSchema = z.object({
  * PUT /api/holding-accounts — update qty / cost_basis / is_primary on
  * an existing pairing (composite key in body).
  */
-export async function PUT(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+export const PUT = apiHandler(
+  { auth: "auth", body: putSchema, raw: true, fallbackMessage: "Failed to update pairing" },
+  async ({ userId, body }) => {
+    const { holdingId, accountId, qty, costBasis, isPrimary } = body;
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  const parsed = validateBody(body, putSchema);
-  if (parsed.error) return parsed.error;
-  const { holdingId, accountId, qty, costBasis, isPrimary } = parsed.data;
-
-  try {
     const ownership = await assertOwnership(userId, holdingId, accountId);
     if (ownership) return ownership;
 
@@ -276,14 +247,8 @@ export async function PUT(request: NextRequest) {
     }
 
     return NextResponse.json(updated[0] ?? null);
-  } catch (error: unknown) {
-    await logApiError("PUT", "/api/holding-accounts", error, userId);
-    return NextResponse.json(
-      { error: safeErrorMessage(error, "Failed to update pairing") },
-      { status: 500 },
-    );
-  }
-}
+  },
+);
 
 /**
  * DELETE /api/holding-accounts?holdingId=N&accountId=M — remove a
@@ -293,23 +258,20 @@ export async function PUT(request: NextRequest) {
  * to set another pairing as primary first) so the legacy
  * `portfolio_holdings.account_id` mirror always points at a live row.
  */
-export async function DELETE(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+export const DELETE = apiHandler(
+  { auth: "auth", raw: true, fallbackMessage: "Failed to delete pairing" },
+  async ({ request, userId }) => {
+    const holdingIdRaw = request.nextUrl.searchParams.get("holdingId");
+    const accountIdRaw = request.nextUrl.searchParams.get("accountId");
+    const holdingId = holdingIdRaw ? parseInt(holdingIdRaw, 10) : NaN;
+    const accountId = accountIdRaw ? parseInt(accountIdRaw, 10) : NaN;
+    if (!Number.isFinite(holdingId) || !Number.isFinite(accountId) || holdingId <= 0 || accountId <= 0) {
+      return NextResponse.json(
+        { error: "Missing or invalid holdingId / accountId query params" },
+        { status: 400 },
+      );
+    }
 
-  const holdingIdRaw = request.nextUrl.searchParams.get("holdingId");
-  const accountIdRaw = request.nextUrl.searchParams.get("accountId");
-  const holdingId = holdingIdRaw ? parseInt(holdingIdRaw, 10) : NaN;
-  const accountId = accountIdRaw ? parseInt(accountIdRaw, 10) : NaN;
-  if (!Number.isFinite(holdingId) || !Number.isFinite(accountId) || holdingId <= 0 || accountId <= 0) {
-    return NextResponse.json(
-      { error: "Missing or invalid holdingId / accountId query params" },
-      { status: 400 },
-    );
-  }
-
-  try {
     const pairings = await db
       .select({
         accountId: schema.holdingAccounts.accountId,
@@ -351,14 +313,8 @@ export async function DELETE(request: NextRequest) {
       );
 
     return NextResponse.json({ success: true });
-  } catch (error: unknown) {
-    await logApiError("DELETE", "/api/holding-accounts", error, userId);
-    return NextResponse.json(
-      { error: safeErrorMessage(error, "Failed to delete pairing") },
-      { status: 500 },
-    );
-  }
-}
+  },
+);
 
 /**
  * Verify both ids belong to the caller. Returns a 404 NextResponse on
