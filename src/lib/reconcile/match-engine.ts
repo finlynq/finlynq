@@ -131,6 +131,12 @@ export interface ReconcileBankSnapshot {
    *  Populated for ALL bank rows so the UI can preview the default
    *  category before clicking Create. */
   suggestedCategoryId: number | null;
+  /** Rule-engine transfer suggestion: the destination account id from a
+   *  matched rule's `create_transfer` action, when one applies and it's not
+   *  a self-transfer. `null` otherwise. Drives the materialize dialog into
+   *  Transfer mode with the destination pre-filled (the dialog still commits
+   *  through `createTransferPair`, so the four-check link_id invariant holds). */
+  suggestedTransferAccountId: number | null;
 }
 
 export interface ReconcileResult {
@@ -377,6 +383,14 @@ export async function computeReconcileForAccount(
     const suggestedCategoryId = ruleMatch
       ? pickCategoryFromActions(ruleMatch.actions)
       : null;
+    // A matched rule whose action set names a transfer destination routes
+    // the materialize dialog into Transfer mode. Drop self-transfers (a rule
+    // pointing back at the bank row's own account is a no-op pair).
+    const transferDest = ruleMatch
+      ? pickTransferDestFromActions(ruleMatch.actions)
+      : null;
+    const suggestedTransferAccountId =
+      transferDest != null && transferDest !== b.accountId ? transferDest : null;
     bankTransactions[b.id] = {
       id: b.id,
       date: b.date,
@@ -391,6 +405,7 @@ export async function computeReconcileForAccount(
       firstSeenAt: null,
       lastSeenAt: null,
       suggestedCategoryId,
+      suggestedTransferAccountId,
     };
   }
   // Pull the per-row freshness metadata in a single follow-up query.
@@ -470,6 +485,26 @@ function pickCategoryFromActions(actions: Action[]): number | null {
   for (const a of actions) {
     if (a.kind === "set_category" && typeof a.categoryId === "number") {
       return a.categoryId;
+    }
+  }
+  return null;
+}
+
+/**
+ * Pick the first `create_transfer` action's destination account id from a
+ * rule's action list, if any. Returns null when none of the actions is a
+ * `create_transfer`. Mirrors `pickCategoryFromActions`' first-wins semantics.
+ *
+ * Unlike the staging-approve path (which mints the transfer pair's `link_id`
+ * at approve time), this only SUGGESTS a destination so the reconcile
+ * materialize dialog can open in Transfer mode pre-filled; the actual pair is
+ * still written by the dialog through `createTransferPair`, preserving the
+ * four-check link_id invariant.
+ */
+function pickTransferDestFromActions(actions: Action[]): number | null {
+  for (const a of actions) {
+    if (a.kind === "create_transfer" && typeof a.destAccountId === "number") {
+      return a.destAccountId;
     }
   }
   return null;

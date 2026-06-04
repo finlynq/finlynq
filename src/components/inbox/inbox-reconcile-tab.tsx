@@ -119,6 +119,7 @@ interface BankSnapshot {
   firstSeenAt: string | null;
   lastSeenAt: string | null;
   suggestedCategoryId: number | null;
+  suggestedTransferAccountId: number | null;
 }
 
 export interface ReconcileData {
@@ -766,6 +767,29 @@ export function InboxReconcileTab({
         );
         return;
       }
+      // Issue A + B (2026-06-04): always seed the Transfer tab too (so
+      // switching tabs keeps the bank row's date/amount/source account), and
+      // — when a rule's `create_transfer` action names a destination — open
+      // the dialog directly in Transfer mode with the destination pre-filled.
+      // Investment destinations need a holding/qty a rule can't supply, so we
+      // fall back to Transaction mode (the Transfer tab is still seeded).
+      const transferDestId = snap.suggestedTransferAccountId;
+      const destAcct =
+        transferDestId != null
+          ? accounts.find((a) => a.id === transferDestId)
+          : undefined;
+      // Only auto-route to Transfer mode for an OUTFLOW row (amount < 0): the
+      // transfer's "From" leg lands on this bank account and `onSaved` links
+      // the bank row to that debit leg — correct only when money is leaving
+      // here (the "e-Tfr to …" case). Inflow rows would need the credit leg,
+      // which onSaved doesn't expose, so we leave them in Transaction mode
+      // (the Transfer tab is still seeded for manual use). Investment dests
+      // need a holding/qty a rule can't supply, so they fall back too.
+      const autoTransfer =
+        !!destAcct &&
+        destAcct.isInvestment !== true &&
+        destAcct.id !== snap.accountId &&
+        snap.amount < 0;
       setDialogInitial({
         kind: "transaction-prefill",
         values: {
@@ -778,6 +802,13 @@ export function InboxReconcileTab({
           currency: snap.currency,
           amount: String(snap.amount),
           payee: snap.payee ?? "",
+        },
+        transferSeed: {
+          fromAccountId: String(snap.accountId),
+          toAccountId: autoTransfer ? String(destAcct.id) : undefined,
+          date: snap.date,
+          amount: String(Math.abs(snap.amount)),
+          note: snap.payee ?? "",
         },
       });
       setMaterializeBankId(snap.id);
