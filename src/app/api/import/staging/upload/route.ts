@@ -275,6 +275,13 @@ export async function POST(request: NextRequest) {
     const confirmedMapping =
       typeof confirmedMappingRaw === "string" && confirmedMappingRaw === "1";
 
+    // §A (2026-06-04) — OFX/QFX confirm preview re-fire flag. The OfxConfirmDialog
+    // re-uploads with `confirmedImport=1` (+ the chosen payeeSource) so the
+    // route stages instead of returning the preview again.
+    const confirmedImportRaw = formData.get("confirmedImport");
+    const confirmedImport =
+      typeof confirmedImportRaw === "string" && confirmedImportRaw === "1";
+
     // Optional user-typed statement balance (CSV/XLSX where we can't parse it).
     const statementBalanceRaw = formData.get("statementBalance");
     let userStatementBalance: number | null = null;
@@ -344,28 +351,29 @@ export async function POST(request: NextRequest) {
     // else the bound account's saved preference (default 'name').
     const effectivePayeeSource: "name" | "memo" =
       formPayeeSource ?? boundAccountOfxPayeeSource;
-    // §B — two-layer confirm decision (mirrors §A's per-account-with-default
-    // shape). The per-account column is the override; the per-user setting is
-    // the default:
+    // Two-layer confirm decision (one setting governs BOTH CSV column-mapping
+    // §B and OFX/QFX field-mapping §A). The per-account `csv_mapping_mode`
+    // column is the override; the per-user `confirm_csv_mapping` setting is the
+    // default:
     //   - account === 'auto'   → explicit opt-out → ALWAYS silent.
-    //   - account === 'confirm'→ follow the per-user `confirm_csv_mapping`
-    //                            default (ON ⇒ confirm; OFF ⇒ silent).
+    //   - account === 'confirm'→ follow the per-user default (ON ⇒ confirm;
+    //                            OFF ⇒ silent).
     // The account column defaults to 'confirm' for every account (existing +
-    // new), so the global switch is what makes "OFF = silent everywhere
-    // except accounts explicitly set back" work without a schema flag for
-    // "never set." Also gated on: a bound account (cross-account CSV without
-    // a binding has no per-account preference), no explicit templateId (the
-    // user's confirmed/edited mapping takes the parsed path), and not a
-    // post-confirm re-fire. `/api/import/preview` never reaches here.
-    let confirmAutoMapping = false;
-    if (
-      accountId !== null &&
-      templateId === null &&
-      !confirmedMapping &&
-      boundAccountCsvMappingMode === "confirm"
-    ) {
-      confirmAutoMapping = await getConfirmCsvMappingDefault(userId);
+    // new), so the global switch is what makes "OFF = silent everywhere except
+    // accounts explicitly set back" work without a schema flag for "never set."
+    // Gated on a bound account (cross-account CSV without a binding has no
+    // per-account preference). `/api/import/preview` never reaches here.
+    let confirmImportsBase = false;
+    if (accountId !== null && boundAccountCsvMappingMode === "confirm") {
+      confirmImportsBase = await getConfirmCsvMappingDefault(userId);
     }
+    // §B CSV gate — also suppressed once the user has confirmed/edited the
+    // mapping (it re-fires with an explicit templateId, taking the parsed path).
+    const confirmAutoMapping =
+      confirmImportsBase && templateId === null && !confirmedMapping;
+    // §A OFX/QFX gate — suppressed once the user confirmed the field-mapping
+    // preview (re-fires with confirmedImport=1 + the chosen payeeSource).
+    const confirmOfxPreview = confirmImportsBase && !confirmedImport;
     const parseResult = await parseStatement(
       file,
       ext,
@@ -374,7 +382,12 @@ export async function POST(request: NextRequest) {
       defaultAccountName,
       { skipHeaderRows, skipFooterRows, dateFormatOverride, defaultCurrency },
       boundAccountCurrency,
-      { payeeSource: effectivePayeeSource, confirmAutoMapping, fileName: file.name },
+      {
+        payeeSource: effectivePayeeSource,
+        confirmAutoMapping,
+        confirmOfxPreview,
+        fileName: file.name,
+      },
     );
     if ("status" in parseResult) {
       return NextResponse.json(parseResult.body, { status: parseResult.status });
@@ -928,6 +941,7 @@ async function parseStatement(
   fieldMapping: {
     payeeSource: "name" | "memo";
     confirmAutoMapping: boolean;
+    confirmOfxPreview?: boolean;
     fileName: string;
   } = { payeeSource: "name", confirmAutoMapping: false, fileName: file.name },
 ): Promise<ParseSuccess | ParseFailure> {
@@ -1064,6 +1078,40 @@ async function parseStatement(
       return {
         status: 400,
         body: { error: "No transactions found in OFX/QFX file" },
+      };
+    }
+    // §A (2026-06-04) — field-mapping confirm preview. When the account is in
+    // 'confirm' mode (and the upload isn't the post-confirm re-fire), return the
+    // parsed rows as a preview INSTEAD of staging. The OfxConfirmDialog shows
+    // them with a live Name/Memo payee-source toggle; on confirm the drawer
+    // re-uploads with `confirmedImport=1` + the chosen payeeSource. Mirrors the
+    // CSV csv-confirm-mapping 422. Investment statements (handled above) have no
+    // NAME/MEMO choice, so they're never gated here.
+    if (fieldMapping.confirmOfxPreview) {
+      return {
+        status: 422,
+        body: {
+          type: "ofx-confirm",
+          error: "Confirm how this statement maps before importing.",
+          format: ext === "qfx" ? "qfx" : "ofx",
+          payeeSource: fieldMapping.payeeSource,
+          account: defaultAccountName,
+          currency: ofx.currency,
+          statementBalance: ofx.balanceAmount,
+          statementBalanceDate: ofx.balanceDate,
+          rowCount: ofx.transactions.length,
+          // Raw NAME + MEMO per row so the dialog can live-swap payee/note
+          // client-side without re-uploading on every toggle.
+          rows: ofx.transactions.map((t) => ({
+            date: t.date,
+            amount: t.amount,
+            name: t.name,
+            memo: t.rawMemo,
+            type: t.type,
+            fitId: t.fitId,
+          })),
+          fileName: file.name,
+        },
       };
     }
     const rows: RawTransaction[] = ofx.transactions.map((t) => ({

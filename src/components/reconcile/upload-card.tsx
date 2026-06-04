@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Combobox } from "@/components/ui/combobox";
 import { FileDropZone } from "@/app/(app)/import/components/file-drop-zone";
 import { Loader2 } from "lucide-react";
@@ -85,22 +85,21 @@ export function ReconcileUploadCard({
   loading,
   lockedAccount,
   ofxPayeeSource,
-  onOfxPayeeSourceChange,
+  // §A (2026-06-04) — the visible Name/Memo radio was replaced by the
+  // OfxConfirmDialog preview (the drawer persists the choice there), so this
+  // callback is no longer wired to a card control. Kept in Props for the
+  // drawer's call-site typecheck.
   onUpload,
 }: Props) {
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [tolerance, setTolerance] = useState<string>("3");
   const [statementBalance, setStatementBalance] = useState<string>("");
-  // §A (2026-06-04) — local OFX payee-source radio state, seeded from the
-  // bound account's saved value. Only rendered when `ofxPayeeSource` is set.
-  const [payeeSource, setPayeeSource] = useState<OfxPayeeSourceUi>(
-    ofxPayeeSource ?? "name",
-  );
-  // Re-seed when the bound account (and thus its saved preference) changes.
-  useEffect(() => {
-    if (ofxPayeeSource) setPayeeSource(ofxPayeeSource);
-  }, [ofxPayeeSource]);
+  // §A (2026-06-04) — the OFX/QFX payee-source choice now lives in the
+  // OfxConfirmDialog preview (the drawer persists it). The card just forwards
+  // the bound account's saved value as the initial upload hint; for a 'confirm'
+  // account the route ignores it and returns the preview, and the dialog's
+  // choice wins on re-fire. For an 'auto' account this saved value is applied.
 
   // FINLYNQ-54 parser knobs. The panel is <details>-collapsed by default;
   // defaults preserve the pre-FINLYNQ-54 behavior end-to-end.
@@ -219,35 +218,11 @@ export function ReconcileUploadCard({
       </div>
 
       {ofxPayeeSource && (
-        <div className="space-y-1.5 rounded-md border bg-muted/20 p-3">
-          <div className="text-xs font-medium text-muted-foreground">
-            OFX/QFX payee from
-          </div>
-          <div className="flex gap-4">
-            {(["name", "memo"] as const).map((opt) => (
-              <label
-                key={opt}
-                className="flex items-center gap-1.5 text-sm cursor-pointer"
-              >
-                <input
-                  type="radio"
-                  name="ofx-payee-source"
-                  value={opt}
-                  checked={payeeSource === opt}
-                  onChange={() => {
-                    setPayeeSource(opt);
-                    onOfxPayeeSourceChange?.(opt);
-                  }}
-                />
-                {opt === "name" ? "Name" : "Memo"}
-              </label>
-            ))}
-          </div>
-          <p className="text-[11px] text-muted-foreground">
-            Some banks put the merchant in Memo and a generic label in Name.
-            This only affects OFX/QFX uploads, and is remembered for this account.
-          </p>
-        </div>
+        <p className="rounded-md border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+          For OFX/QFX statements you&apos;ll get a preview to confirm how rows map
+          (and pick whether the Payee comes from the Name or Memo field) before
+          they&apos;re imported.
+        </p>
       )}
 
       <FileDropZone
@@ -285,7 +260,7 @@ export function ReconcileUploadCard({
             dateFormatOverride,
             defaultCurrency: defaultCurrency || null,
             // §A — only meaningful for OFX/QFX; server ignores it for CSV.
-            payeeSource: ofxPayeeSource ? payeeSource : undefined,
+            payeeSource: ofxPayeeSource,
           });
         }}
       />

@@ -27,6 +27,10 @@ import {
   ColumnMappingDialog,
   type ReparseResult,
 } from "@/app/(app)/import/components/column-mapping-dialog";
+import {
+  OfxConfirmDialog,
+  type OfxPreviewRow,
+} from "@/app/(app)/import/components/ofx-confirm-dialog";
 import type { ColumnMapping, ImportTemplate } from "@/lib/import-templates";
 import { autoDetectColumnMapping } from "@/lib/import-templates";
 import { formatCurrency } from "@/lib/currency";
@@ -108,6 +112,9 @@ interface UploadParams {
   /** §B (2026-06-04) — set after the user confirmed the column mapping in the
    *  dialog, so the route takes the parsed path instead of re-prompting. */
   confirmedMapping?: boolean;
+  /** §A (2026-06-04) — set after the user confirmed the OFX/QFX field-mapping
+   *  preview, so the route stages instead of returning the preview again. */
+  confirmedImport?: boolean;
 }
 
 interface UploadResponse {
@@ -213,6 +220,27 @@ export function UploadDrawer({
   // this mapping" affordance only in the confirm case.
   const [mappingConfirmMode, setMappingConfirmMode] = useState(false);
 
+  // §A (2026-06-04) — OFX/QFX field-mapping preview dialog state (the
+  // `ofx-confirm` 422). Holds the parsed preview + the pending re-upload.
+  const [ofxDialogOpen, setOfxDialogOpen] = useState(false);
+  const [ofxSubmitting, setOfxSubmitting] = useState(false);
+  const [ofxPreview, setOfxPreview] = useState<{
+    fileName: string;
+    account: string;
+    currency: string;
+    format: "ofx" | "qfx";
+    rows: OfxPreviewRow[];
+    rowCount: number;
+    statementBalance: number | null;
+    statementBalanceDate: string | null;
+    payeeSource: "name" | "memo";
+  } | null>(null);
+  const [ofxPendingFile, setOfxPendingFile] = useState<File | null>(null);
+  const [ofxPendingParams, setOfxPendingParams] = useState<Omit<
+    UploadParams,
+    "file" | "payeeSource" | "confirmedImport"
+  > | null>(null);
+
   const lockedAccount: AccountOption = useMemo(
     () => ({
       id: accountId,
@@ -279,6 +307,7 @@ export function UploadDrawer({
         defaultCurrency,
         payeeSource,
         confirmedMapping,
+        confirmedImport,
       } = params;
       setError(null);
       setUploadLoading(true);
@@ -303,6 +332,8 @@ export function UploadDrawer({
         // §B — flag the re-fire after the user confirmed a column mapping so
         // the route doesn't re-prompt (belt-and-suspenders alongside templateId).
         if (confirmedMapping) fd.append("confirmedMapping", "1");
+        // §A — flag the re-fire after the user confirmed the OFX/QFX preview.
+        if (confirmedImport) fd.append("confirmedImport", "1");
 
         const res = await fetch("/api/import/staging/upload", {
           method: "POST",
@@ -310,6 +341,54 @@ export function UploadDrawer({
         });
         const json = await res.json();
         if (!res.ok) {
+          // 422 ofx-confirm (§A) → open the OFX/QFX field-mapping preview.
+          if (
+            res.status === 422 &&
+            json &&
+            typeof json === "object" &&
+            json.type === "ofx-confirm"
+          ) {
+            setOfxPreview({
+              fileName:
+                typeof json.fileName === "string" && json.fileName
+                  ? json.fileName
+                  : file.name,
+              account: typeof json.account === "string" ? json.account : accountLabel,
+              currency:
+                typeof json.currency === "string" ? json.currency : accountCurrency,
+              format: json.format === "qfx" ? "qfx" : "ofx",
+              rows: Array.isArray(json.rows) ? (json.rows as OfxPreviewRow[]) : [],
+              rowCount:
+                typeof json.rowCount === "number"
+                  ? json.rowCount
+                  : Array.isArray(json.rows)
+                    ? json.rows.length
+                    : 0,
+              statementBalance:
+                typeof json.statementBalance === "number"
+                  ? json.statementBalance
+                  : null,
+              statementBalanceDate:
+                typeof json.statementBalanceDate === "string"
+                  ? json.statementBalanceDate
+                  : null,
+              payeeSource: json.payeeSource === "memo" ? "memo" : "name",
+            });
+            setOfxPendingFile(file);
+            setOfxPendingParams({
+              accountId,
+              tolerance,
+              templateId,
+              statementBalance,
+              skipHeaderRows,
+              skipFooterRows,
+              dateFormatOverride,
+              defaultCurrency,
+            });
+            setOfxDialogOpen(true);
+            setUploadLoading(false);
+            return;
+          }
           // 422 csv-needs-mapping OR csv-confirm-mapping → open the
           // column-mapping dialog. needs-mapping: nothing matched, user must
           // build the mapping. confirm-mapping (§B): a mapping was detected
@@ -361,7 +440,7 @@ export function UploadDrawer({
         setUploadLoading(false);
       }
     },
-    [accountId, onUploaded],
+    [accountId, accountLabel, accountCurrency, onUploaded],
   );
 
   // §A/§B (2026-06-04) — persist a per-account import preference. Fire-and-
@@ -431,10 +510,12 @@ export function UploadDrawer({
         return;
       }
       setMappingSubmitting(true);
-      // §B — persist the opt-out before re-firing (fire-and-forget).
-      if (params.dontAskAgain) {
-        void patchImportPrefs({ csvMappingMode: "auto" });
-      }
+      // §B — persist the per-account auto-vs-ask choice before re-firing
+      // (fire-and-forget). The radio is a true setting: 'auto' applies silently
+      // next time, 'confirm' keeps showing the preview.
+      void patchImportPrefs({
+        csvMappingMode: params.dontAskAgain ? "auto" : "confirm",
+      });
       try {
         // The dialog's skip / date-format / currency / headers WIN over the
         // upload card's values — the user set them here after seeing the
@@ -494,6 +575,44 @@ export function UploadDrawer({
       }
     },
     [pendingFile, pendingParams, submitUpload, patchImportPrefs],
+  );
+
+  // §A — the user confirmed the OFX/QFX field-mapping preview. Persist the
+  // chosen payee source (+ flip to 'auto' if they opted out of future prompts),
+  // then re-upload with confirmedImport=1 so the route stages this time.
+  const handleOfxConfirm = useCallback(
+    async (confirmParams: {
+      payeeSource: "name" | "memo";
+      dontAskAgain: boolean;
+    }) => {
+      if (!ofxPendingFile || !ofxPendingParams) {
+        setOfxDialogOpen(false);
+        return;
+      }
+      setOfxSubmitting(true);
+      // Persist the chosen payee source + the per-account auto-vs-ask choice.
+      setSavedOfxPayeeSource(confirmParams.payeeSource);
+      void patchImportPrefs({
+        ofxPayeeSource: confirmParams.payeeSource,
+        csvMappingMode: confirmParams.dontAskAgain ? "auto" : "confirm",
+      });
+      const file = ofxPendingFile;
+      const carried = ofxPendingParams;
+      setOfxDialogOpen(false);
+      setOfxPendingFile(null);
+      setOfxPendingParams(null);
+      try {
+        await submitUpload({
+          ...carried,
+          file,
+          payeeSource: confirmParams.payeeSource,
+          confirmedImport: true,
+        });
+      } finally {
+        setOfxSubmitting(false);
+      }
+    },
+    [ofxPendingFile, ofxPendingParams, submitUpload, patchImportPrefs],
   );
 
   const templateOptions = useMemo(
@@ -685,6 +804,31 @@ export function UploadDrawer({
         // checkbox + confirm-tailored copy.
         confirmMode={mappingConfirmMode}
       />
+
+      {ofxPreview && (
+        <OfxConfirmDialog
+          open={ofxDialogOpen}
+          onOpenChange={(o) => {
+            setOfxDialogOpen(o);
+            if (!o) {
+              setOfxPendingFile(null);
+              setOfxPendingParams(null);
+              setUploadLoading(false);
+            }
+          }}
+          fileName={ofxPreview.fileName}
+          account={ofxPreview.account}
+          currency={ofxPreview.currency}
+          format={ofxPreview.format}
+          rows={ofxPreview.rows}
+          rowCount={ofxPreview.rowCount}
+          statementBalance={ofxPreview.statementBalance}
+          statementBalanceDate={ofxPreview.statementBalanceDate}
+          initialPayeeSource={ofxPreview.payeeSource}
+          submitting={ofxSubmitting}
+          onConfirm={(p) => void handleOfxConfirm(p)}
+        />
+      )}
     </>
   );
 }

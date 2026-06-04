@@ -161,10 +161,11 @@ export default function ImportSettingsPage() {
             </div>
             <div>
               <CardTitle className="text-base">
-                Confirm detected column mapping before importing
+                Confirm field mapping before importing
               </CardTitle>
               <CardDescription>
-                When on, CSV uploads show the auto-detected column mapping for
+                When on, CSV uploads show the auto-detected column mapping and
+                OFX/QFX uploads show a field-mapping preview (Name vs Memo) for
                 your review before any rows are staged.
               </CardDescription>
             </div>
@@ -180,8 +181,8 @@ export default function ImportSettingsPage() {
               </p>
               <p className="text-xs text-muted-foreground mt-0.5">
                 {confirmCsvMapping
-                  ? "New accounts will ask you to confirm the detected mapping. Per-account overrides (the “Don’t ask again” checkbox) still apply."
-                  : "New accounts import with the auto-detected mapping silently. Set an individual account back to “confirm” from its upload drawer if needed."}
+                  ? "Accounts ask you to confirm before staging. Per-account overrides (the “Ask me first / Apply automatically” choice in the import preview) still apply."
+                  : "Accounts import silently using the detected mapping. Pick “Ask me to confirm first” in an account’s import preview to turn confirmation back on for it."}
               </p>
             </div>
             <Button

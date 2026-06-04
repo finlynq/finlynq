@@ -228,28 +228,32 @@ export function ColumnMappingDialog({
       defaultCurrency: defaultCurrency || null,
       dateFormatOverride: dateFormatOverride === "auto" ? null : dateFormatOverride,
       headers: localHeaders,
-      dontAskAgain: confirmMode ? dontAskAgain : undefined,
+      dontAskAgain,
     });
   };
 
   // Compute a live sample using the current mapping so the user sees what
   // each column resolves to before committing.
   const mappedSample = useMemo(() => {
-    return localSampleRows.slice(0, 3).map((row) => ({
+    return localSampleRows.slice(0, 5).map((row) => ({
       date: mapping.date ? row[mapping.date] ?? "" : "",
       amount: mapping.amount ? row[mapping.amount] ?? "" : "",
       payee: mapping.payee ? row[mapping.payee] ?? "" : "",
+      note: mapping.note ? row[mapping.note] ?? "" : "",
+      currency: mapping.currency
+        ? row[mapping.currency] ?? ""
+        : defaultCurrency || "",
       account: mapping.account
         ? row[mapping.account] ?? ""
         : defaultAccount || "(default account)",
     }));
-  }, [localSampleRows, mapping, defaultAccount]);
+  }, [localSampleRows, mapping, defaultAccount, defaultCurrency]);
 
   const noColumns = localHeaders.length === 0 && !redetecting;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+      <DialogContent className="sm:max-w-4xl max-h-[88vh] overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle>
             {confirmMode ? "Confirm Column Mapping" : "Map CSV Columns"}
@@ -423,27 +427,31 @@ export function ColumnMappingDialog({
             </Select>
           </div>
 
-          {/* Live sample */}
+          {/* Live sample — how rows land in staging with the current mapping. */}
           {mappedSample.length > 0 && (
             <div className="space-y-1.5">
-              <Label className="text-sm">Sample (first 3 rows)</Label>
-              <div className="rounded-lg border overflow-hidden">
+              <Label className="text-sm">Sample (first {mappedSample.length} rows)</Label>
+              <div className="rounded-lg border overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead className="bg-muted/50">
                     <tr>
-                      <th className="text-left px-2 py-1.5 font-medium">Date</th>
+                      <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Date</th>
                       <th className="text-left px-2 py-1.5 font-medium">Account</th>
                       <th className="text-left px-2 py-1.5 font-medium">Payee</th>
-                      <th className="text-right px-2 py-1.5 font-medium">Amount</th>
+                      <th className="text-left px-2 py-1.5 font-medium">Note</th>
+                      <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Currency</th>
+                      <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">Amount</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
                     {mappedSample.map((r, i) => (
                       <tr key={i}>
-                        <td className="px-2 py-1 font-mono">{r.date || "—"}</td>
+                        <td className="px-2 py-1 font-mono whitespace-nowrap">{r.date || "—"}</td>
                         <td className="px-2 py-1">{r.account || "—"}</td>
-                        <td className="px-2 py-1 truncate max-w-[220px]">{r.payee || "—"}</td>
-                        <td className="px-2 py-1 text-right font-mono">{r.amount || "—"}</td>
+                        <td className="px-2 py-1 truncate max-w-[200px]" title={r.payee}>{r.payee || "—"}</td>
+                        <td className="px-2 py-1 truncate max-w-[160px] text-muted-foreground" title={r.note}>{r.note || "—"}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">{r.currency || "—"}</td>
+                        <td className="px-2 py-1 text-right font-mono whitespace-nowrap">{r.amount || "—"}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -469,24 +477,45 @@ export function ColumnMappingDialog({
             </p>
           </div>
 
-          {/* §B — confirm-mode opt-out: stop confirming for this account. */}
-          {confirmMode && (
-            <label className="flex items-start gap-2 rounded-lg border bg-muted/20 px-3 py-2 cursor-pointer">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={dontAskAgain}
-                onChange={(e) => setDontAskAgain(e.target.checked)}
-              />
-              <span className="text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">
-                  Don&apos;t ask again for this account
-                </span>{" "}
-                — apply the detected mapping automatically on future uploads to
-                this account (you can re-enable confirmation in Settings → Import).
-              </span>
-            </label>
-          )}
+          {/* §B — per-account auto-vs-ask choice. Shown in BOTH modes (the
+              saved template auto-applies via header-match next time; this
+              controls whether that match is confirmed or applied silently). */}
+          <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+            <Label className="text-sm font-medium">On future uploads to this account</Label>
+            <div className="space-y-1.5">
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input
+                  type="radio"
+                  name="csv-future-mode"
+                  className="mt-0.5"
+                  checked={!dontAskAgain}
+                  onChange={() => setDontAskAgain(false)}
+                />
+                <span>
+                  <span className="font-medium">Ask me to confirm first</span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    Show this mapping for review each time (recommended).
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input
+                  type="radio"
+                  name="csv-future-mode"
+                  className="mt-0.5"
+                  checked={dontAskAgain}
+                  onChange={() => setDontAskAgain(true)}
+                />
+                <span>
+                  <span className="font-medium">Apply this mapping automatically</span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    Import silently — don&apos;t ask again for this account (re-enable
+                    in Settings → Import).
+                  </span>
+                </span>
+              </label>
+            </div>
+          </div>
 
           {error && (
             <div className="flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50/50 px-3 py-2">
