@@ -900,7 +900,11 @@ export function TransactionDialog({
     let debitTxId = transferEdit?.fromTxId ?? 0;
     try {
       const created = await res.clone().json();
-      if (typeof created?.fromTxId === "number") debitTxId = created.fromTxId;
+      // `/api/transactions/transfer` returns `fromTransactionId` (the debit
+      // leg). Read it first so the reconcile materialize flow can auto-link
+      // the bank row to that leg; `fromTxId`/`id` kept as defensive fallbacks.
+      if (typeof created?.fromTransactionId === "number") debitTxId = created.fromTransactionId;
+      else if (typeof created?.fromTxId === "number") debitTxId = created.fromTxId;
       else if (typeof created?.id === "number") debitTxId = created.id;
     } catch {
       /* response may not have JSON body — ignore */
