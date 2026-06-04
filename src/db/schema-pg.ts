@@ -50,6 +50,21 @@ export const accounts = pgTable("accounts", {
   // CHECK enforced in SQL (accounts_mode_check). Defaults to 'manual'
   // so every existing account keeps the legacy flow.
   mode: text("mode").notNull().default("manual").$type<"auto" | "approve" | "manual">(),
+  // Statement-upload field-mapping (2026-06-04).
+  // ofx_payee_source — which OFX/QFX field populates the canonical `payee`
+  //   column for bank/CC <STMTTRN> rows. 'name' (default = today's behavior:
+  //   NAME→payee, MEMO→note) or 'memo' (flip, for banks that bury the
+  //   merchant in MEMO). Investment statements ignore this — their per-row
+  //   payees are synthesized, not NAME/MEMO-derived.
+  // csv_mapping_mode — whether a CSV upload's auto-detected column mapping is
+  //   confirmed before staging. 'confirm' (default = the new safe behavior:
+  //   show the detected mapping for review) or 'auto' (silent auto-apply,
+  //   today's pre-2026-06-04 behavior). Per-account override on top of the
+  //   per-user `confirm_csv_mapping` setting default.
+  // Both CHECK-enforced in SQL (accounts_ofx_payee_source_check /
+  // accounts_csv_mapping_mode_check). See 20260604_import_field_mapping.sql.
+  ofxPayeeSource: text("ofx_payee_source").notNull().default("name").$type<"name" | "memo">(),
+  csvMappingMode: text("csv_mapping_mode").notNull().default("confirm").$type<"confirm" | "auto">(),
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
   aliasCt: text("alias_ct"),

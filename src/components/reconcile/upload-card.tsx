@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Combobox } from "@/components/ui/combobox";
 import { FileDropZone } from "@/app/(app)/import/components/file-drop-zone";
 import { Loader2 } from "lucide-react";
@@ -37,6 +37,9 @@ export type DateFormatOverrideUi =
   | "MM/DD/YYYY"
   | "YYYY-MM-DD";
 
+/** §A (2026-06-04) — which OFX/QFX field populates the payee. */
+export type OfxPayeeSourceUi = "name" | "memo";
+
 interface Props {
   accounts: AccountOption[];
   templates?: TemplateOption[];
@@ -46,6 +49,14 @@ interface Props {
    *  the destination account is already chosen by the surface. The standalone
    *  /import/reconcile caller leaves this undefined and keeps the picker. */
   lockedAccount?: AccountOption | null;
+  /** §A (2026-06-04) — the bound account's saved OFX payee source. When set,
+   *  the card renders a "Payee from: Name / Memo" radio defaulting to it
+   *  (OFX/QFX uploads only — the server ignores this for CSV). Undefined =>
+   *  hide the radio (standalone /import/reconcile caller). */
+  ofxPayeeSource?: OfxPayeeSourceUi;
+  /** Called when the user flips the OFX payee-source radio, so the parent can
+   *  persist it to the bound account (PATCH /api/accounts/[id]/import-prefs). */
+  onOfxPayeeSourceChange?: (value: OfxPayeeSourceUi) => void;
   onUpload: (params: {
     file: File;
     accountId: number | null;
@@ -60,6 +71,9 @@ interface Props {
     skipFooterRows: number;
     dateFormatOverride: DateFormatOverrideUi;
     defaultCurrency: string | null;
+    /** §A (2026-06-04) — OFX/QFX payee source for THIS upload. Server
+     *  ignores it for CSV. Undefined when the radio isn't shown. */
+    payeeSource?: OfxPayeeSourceUi;
   }) => void;
 }
 
@@ -70,12 +84,23 @@ export function ReconcileUploadCard({
   templates = [],
   loading,
   lockedAccount,
+  ofxPayeeSource,
+  onOfxPayeeSourceChange,
   onUpload,
 }: Props) {
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [tolerance, setTolerance] = useState<string>("3");
   const [statementBalance, setStatementBalance] = useState<string>("");
+  // §A (2026-06-04) — local OFX payee-source radio state, seeded from the
+  // bound account's saved value. Only rendered when `ofxPayeeSource` is set.
+  const [payeeSource, setPayeeSource] = useState<OfxPayeeSourceUi>(
+    ofxPayeeSource ?? "name",
+  );
+  // Re-seed when the bound account (and thus its saved preference) changes.
+  useEffect(() => {
+    if (ofxPayeeSource) setPayeeSource(ofxPayeeSource);
+  }, [ofxPayeeSource]);
 
   // FINLYNQ-54 parser knobs. The panel is <details>-collapsed by default;
   // defaults preserve the pre-FINLYNQ-54 behavior end-to-end.
@@ -193,6 +218,38 @@ export function ReconcileUploadCard({
         </div>
       </div>
 
+      {ofxPayeeSource && (
+        <div className="space-y-1.5 rounded-md border bg-muted/20 p-3">
+          <div className="text-xs font-medium text-muted-foreground">
+            OFX/QFX payee from
+          </div>
+          <div className="flex gap-4">
+            {(["name", "memo"] as const).map((opt) => (
+              <label
+                key={opt}
+                className="flex items-center gap-1.5 text-sm cursor-pointer"
+              >
+                <input
+                  type="radio"
+                  name="ofx-payee-source"
+                  value={opt}
+                  checked={payeeSource === opt}
+                  onChange={() => {
+                    setPayeeSource(opt);
+                    onOfxPayeeSourceChange?.(opt);
+                  }}
+                />
+                {opt === "name" ? "Name" : "Memo"}
+              </label>
+            ))}
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Some banks put the merchant in Memo and a generic label in Name.
+            This only affects OFX/QFX uploads, and is remembered for this account.
+          </p>
+        </div>
+      )}
+
       <FileDropZone
         accept={ACCEPT}
         disabled={loading}
@@ -227,6 +284,8 @@ export function ReconcileUploadCard({
             skipFooterRows: Number.isNaN(skipF) ? 0 : Math.max(0, Math.min(100, skipF)),
             dateFormatOverride,
             defaultCurrency: defaultCurrency || null,
+            // §A — only meaningful for OFX/QFX; server ignores it for CSV.
+            payeeSource: ofxPayeeSource ? payeeSource : undefined,
           });
         }}
       />

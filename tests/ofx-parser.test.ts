@@ -78,6 +78,16 @@ describe("parseOfx", () => {
       expect(txn.type).toBe("DEBIT");
     });
 
+    it("preserves raw NAME and MEMO alongside the resolved payee", () => {
+      const result = parseOfx(BANK_OFX);
+      const txn = result.transactions[0];
+      // Default 'name' source: payee=NAME, note(memo)=MEMO.
+      expect(txn.name).toBe("Coffee Shop");
+      expect(txn.rawMemo).toBe("Morning coffee");
+      expect(txn.payee).toBe("Coffee Shop");
+      expect(txn.memo).toBe("Morning coffee");
+    });
+
     it("extracts account info", () => {
       const result = parseOfx(BANK_OFX);
       expect(result.account.bankId).toBe("123456789");
@@ -108,6 +118,50 @@ describe("parseOfx", () => {
       const result = parseOfx(BANK_OFX);
       const dates = result.transactions.map((t) => t.date);
       expect(dates).toEqual([...dates].sort());
+    });
+  });
+
+  describe("payeeSource (NAME vs MEMO)", () => {
+    // A bank that buries the merchant in <MEMO> and stamps a generic type
+    // label in <NAME> — the exact case the §A field-mapping toggle solves.
+    const MEMO_FIRST_OFX = `<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS>
+<CURDEF>USD
+<BANKACCTFROM><BANKID>1<ACCTID>2<ACCTTYPE>CHECKING</BANKACCTFROM>
+<BANKTRANLIST>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240301<TRNAMT>-12.00<FITID>M1<NAME>POINT OF SALE PURCHASE<MEMO>STARBUCKS #123</STMTTRN>
+</BANKTRANLIST>
+</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`;
+
+    it("defaults to NAME → payee, MEMO → note", () => {
+      const result = parseOfx(MEMO_FIRST_OFX);
+      const txn = result.transactions[0];
+      expect(txn.payee).toBe("POINT OF SALE PURCHASE");
+      expect(txn.memo).toBe("STARBUCKS #123");
+    });
+
+    it("flips to MEMO → payee, NAME → note when payeeSource='memo'", () => {
+      const result = parseOfx(MEMO_FIRST_OFX, { payeeSource: "memo" });
+      const txn = result.transactions[0];
+      expect(txn.payee).toBe("STARBUCKS #123");
+      expect(txn.memo).toBe("POINT OF SALE PURCHASE");
+      // Raw fields are unchanged regardless of which won.
+      expect(txn.name).toBe("POINT OF SALE PURCHASE");
+      expect(txn.rawMemo).toBe("STARBUCKS #123");
+    });
+
+    it("falls back to NAME when MEMO is blank and payeeSource='memo'", () => {
+      const result = parseOfx(BANK_OFX, { payeeSource: "memo" });
+      // Second row has NAME but no MEMO → payee falls back to NAME, no note.
+      const employerRow = result.transactions.find((t) => t.fitId === "TXN002")!;
+      expect(employerRow.payee).toBe("Employer Inc");
+      expect(employerRow.memo).toBe("");
+    });
+
+    it("explicit payeeSource='name' matches the default", () => {
+      const a = parseOfx(MEMO_FIRST_OFX, { payeeSource: "name" });
+      const b = parseOfx(MEMO_FIRST_OFX);
+      expect(a.transactions[0].payee).toBe(b.transactions[0].payee);
+      expect(a.transactions[0].memo).toBe(b.transactions[0].memo);
     });
   });
 

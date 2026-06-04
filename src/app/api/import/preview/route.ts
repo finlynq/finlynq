@@ -230,6 +230,16 @@ async function respondWithCsvResult(
       fileName,
     });
   }
+  if (result.kind === "auto-detected") {
+    // Unreachable on this route — /api/import/preview never passes
+    // `confirmAutoMapping`, so the pipeline never returns "auto-detected"
+    // here. Guarded for the discriminated-union narrowing below (the
+    // confirm gate is a staging-upload-only concern, 2026-06-04).
+    return NextResponse.json(
+      { error: "Unexpected auto-detected mapping result" },
+      { status: 500 },
+    );
+  }
   const taggedRows = stampFormatTag(result.rows, "csv");
   const preview = await previewImport(taggedRows, userId, dek);
   if (result.errors.length > 0) {

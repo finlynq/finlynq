@@ -16,7 +16,11 @@
 
 import { parseOfxToCanonical } from "./ofx";
 import type { OfxCanonicalResult } from "./ofx";
+import type { OfxPayeeSource } from "@/lib/ofx-parser";
 
-export function parseQfxToCanonical(raw: string): OfxCanonicalResult {
-  return parseOfxToCanonical(raw, "qfx");
+export function parseQfxToCanonical(
+  raw: string,
+  opts?: { payeeSource?: OfxPayeeSource },
+): OfxCanonicalResult {
+  return parseOfxToCanonical(raw, "qfx", opts);
 }

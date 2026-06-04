@@ -71,6 +71,7 @@ import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
 import { simplifiedUpload } from "@/lib/import/simplified-upload";
 import { applyRulesToBankRows } from "@/lib/reconcile/match-engine";
+import { getConfirmCsvMappingDefault } from "@/app/api/settings/confirm-csv-mapping/route";
 
 export const dynamic = "force-dynamic";
 
@@ -104,6 +105,10 @@ interface ParseSuccess {
    *  the Balance column (one per date, last-in-file-order's value).
    *  OFX/QFX path: single anchor synthesized from <LEDGERBAL>. */
   anchors: ParsedAnchor[];
+  /** §A (2026-06-04) — OFX/QFX only — which field was used as the payee
+   *  ('name' | 'memo'), echoed back so the upload drawer can confirm what
+   *  was applied. Unset for CSV. */
+  payeeSource?: "name" | "memo";
 }
 
 interface ParseFailure {
@@ -243,6 +248,33 @@ export async function POST(request: NextRequest) {
       defaultCurrency = code;
     }
 
+    // ─── Statement-upload field-mapping (2026-06-04) ──────────────────────
+    // §A — OFX/QFX payee source. Optional per-upload override of the bound
+    // account's saved `ofx_payee_source`. Resolved to the saved value below
+    // (after the account row is read) when the form doesn't carry one.
+    const payeeSourceRaw = formData.get("payeeSource");
+    let formPayeeSource: "name" | "memo" | null = null;
+    if (payeeSourceRaw && typeof payeeSourceRaw === "string" && payeeSourceRaw.trim()) {
+      const v = payeeSourceRaw.trim().toLowerCase();
+      if (v !== "name" && v !== "memo") {
+        return NextResponse.json(
+          { error: "payeeSource must be 'name' or 'memo'" },
+          { status: 400 },
+        );
+      }
+      formPayeeSource = v;
+    }
+
+    // §B — when the user has confirmed/edited a CSV mapping in the
+    // ColumnMappingDialog, the drawer re-fires with an explicit `templateId`
+    // (the saved template). That explicit template takes the parsed path in
+    // the pipeline (step 1), so we must NOT re-gate the confirm flow.
+    // `confirmedMapping=1` lets a future inline-mapping path opt out too,
+    // but today the templateId presence is the signal.
+    const confirmedMappingRaw = formData.get("confirmedMapping");
+    const confirmedMapping =
+      typeof confirmedMappingRaw === "string" && confirmedMappingRaw === "1";
+
     // Optional user-typed statement balance (CSV/XLSX where we can't parse it).
     const statementBalanceRaw = formData.get("statementBalance");
     let userStatementBalance: number | null = null;
@@ -271,6 +303,9 @@ export async function POST(request: NextRequest) {
     let defaultAccountName: string | null = null;
     let boundAccountCurrency: string | null = null;
     let boundAccountMode: "auto" | "approve" | "manual" | null = null;
+    // Statement-upload field-mapping (2026-06-04). Per-account import knobs.
+    let boundAccountOfxPayeeSource: "name" | "memo" = "name";
+    let boundAccountCsvMappingMode: "confirm" | "auto" = "confirm";
     if (accountId !== null) {
       const acct = await db
         .select({
@@ -278,6 +313,8 @@ export async function POST(request: NextRequest) {
           nameCt: schema.accounts.nameCt,
           currency: schema.accounts.currency,
           mode: schema.accounts.mode,
+          ofxPayeeSource: schema.accounts.ofxPayeeSource,
+          csvMappingMode: schema.accounts.csvMappingMode,
         })
         .from(schema.accounts)
         .where(
@@ -296,9 +333,39 @@ export async function POST(request: NextRequest) {
       defaultAccountName = decryptName(acct.nameCt, dek, null) ?? "";
       boundAccountCurrency = acct.currency;
       boundAccountMode = acct.mode;
+      boundAccountOfxPayeeSource =
+        acct.ofxPayeeSource === "memo" ? "memo" : "name";
+      boundAccountCsvMappingMode =
+        acct.csvMappingMode === "auto" ? "auto" : "confirm";
     }
 
     const ext = file.name.split(".").pop()?.toLowerCase();
+    // §A — effective OFX payee source: the per-upload form override wins,
+    // else the bound account's saved preference (default 'name').
+    const effectivePayeeSource: "name" | "memo" =
+      formPayeeSource ?? boundAccountOfxPayeeSource;
+    // §B — two-layer confirm decision (mirrors §A's per-account-with-default
+    // shape). The per-account column is the override; the per-user setting is
+    // the default:
+    //   - account === 'auto'   → explicit opt-out → ALWAYS silent.
+    //   - account === 'confirm'→ follow the per-user `confirm_csv_mapping`
+    //                            default (ON ⇒ confirm; OFF ⇒ silent).
+    // The account column defaults to 'confirm' for every account (existing +
+    // new), so the global switch is what makes "OFF = silent everywhere
+    // except accounts explicitly set back" work without a schema flag for
+    // "never set." Also gated on: a bound account (cross-account CSV without
+    // a binding has no per-account preference), no explicit templateId (the
+    // user's confirmed/edited mapping takes the parsed path), and not a
+    // post-confirm re-fire. `/api/import/preview` never reaches here.
+    let confirmAutoMapping = false;
+    if (
+      accountId !== null &&
+      templateId === null &&
+      !confirmedMapping &&
+      boundAccountCsvMappingMode === "confirm"
+    ) {
+      confirmAutoMapping = await getConfirmCsvMappingDefault(userId);
+    }
     const parseResult = await parseStatement(
       file,
       ext,
@@ -307,6 +374,7 @@ export async function POST(request: NextRequest) {
       defaultAccountName,
       { skipHeaderRows, skipFooterRows, dateFormatOverride, defaultCurrency },
       boundAccountCurrency,
+      { payeeSource: effectivePayeeSource, confirmAutoMapping, fileName: file.name },
     );
     if ("status" in parseResult) {
       return NextResponse.json(parseResult.body, { status: parseResult.status });
@@ -656,6 +724,9 @@ export async function POST(request: NextRequest) {
           batchId: result.batchId,
           redirectTo: result.redirectTo,
           format: parseResult.format,
+          // §A — echo the resolved OFX payee source so the drawer can confirm
+          // which field populated the payee. Undefined for CSV.
+          ...(parseResult.payeeSource ? { payeeSource: parseResult.payeeSource } : {}),
           counts: {
             created: result.created,
             skippedDuplicates: result.skippedDuplicates,
@@ -817,6 +888,8 @@ export async function POST(request: NextRequest) {
       stagedImportId,
       redirectTo: `/import/pending?id=${encodeURIComponent(stagedImportId)}`,
       format: parseResult.format,
+      // §A — echo the resolved OFX payee source. Undefined for CSV.
+      ...(parseResult.payeeSource ? { payeeSource: parseResult.payeeSource } : {}),
       counts: {
         new: shaped.filter((r) => r.dedupStatus === "new").length,
         existing: shaped.filter((r) => r.dedupStatus === "existing").length,
@@ -848,6 +921,15 @@ async function parseStatement(
     defaultCurrency: string | null;
   },
   boundAccountCurrency: string | null,
+  // Statement-upload field-mapping (2026-06-04). §A payeeSource governs which
+  // OFX/QFX field becomes the payee; §B confirmAutoMapping gates the CSV
+  // auto-detect confirm flow. Defaults preserve today's behavior so the
+  // (unaffected) /api/import/preview path stays silent.
+  fieldMapping: {
+    payeeSource: "name" | "memo";
+    confirmAutoMapping: boolean;
+    fileName: string;
+  } = { payeeSource: "name", confirmAutoMapping: false, fileName: file.name },
 ): Promise<ParseSuccess | ParseFailure> {
   if (ext === "csv") {
     const text = await file.text();
@@ -861,6 +943,7 @@ async function parseStatement(
       dateFormatOverride: knobs.dateFormatOverride,
       defaultCurrency: knobs.defaultCurrency,
       anchorCurrency: boundAccountCurrency,
+      confirmAutoMapping: fieldMapping.confirmAutoMapping,
     });
     if (result.kind === "template-not-found") {
       return {
@@ -878,6 +961,26 @@ async function parseStatement(
           headers: result.headers,
           sampleRows: result.sampleRows,
           suggestedMapping: result.suggestedMapping,
+          fileName: file.name,
+        },
+      };
+    }
+    if (result.kind === "auto-detected") {
+      // §B — the pipeline detected a mapping but the account is in 'confirm'
+      // mode. Surface it for review before staging (mirrors the
+      // csv-needs-mapping 422, with the detected mapping + source pre-filled).
+      return {
+        status: 422,
+        body: {
+          type: "csv-confirm-mapping",
+          error:
+            "Confirm the detected column mapping before importing this CSV.",
+          headers: result.headers,
+          sampleRows: result.sampleRows,
+          suggestedMapping: result.mapping,
+          source: result.source,
+          ...(result.templateId != null ? { templateId: result.templateId } : {}),
+          rowCount: result.rowCount,
           fileName: file.name,
         },
       };
@@ -912,9 +1015,12 @@ async function parseStatement(
     const looksLikeInvestment = /<INVSTMTRS\b/i.test(text);
     if (looksLikeInvestment) {
       const isQfx = ext === "qfx";
+      // payeeSource only affects bank/CC <STMTTRN> rows — investment legs
+      // synthesize their own payees, so passing it here is a harmless no-op
+      // for the trade/income/transfer rows (kept for symmetry).
       const canonical = isQfx
-        ? parseQfxToCanonical(text)
-        : parseOfxToCanonical(text, "ofx");
+        ? parseQfxToCanonical(text, { payeeSource: fieldMapping.payeeSource })
+        : parseOfxToCanonical(text, "ofx", { payeeSource: fieldMapping.payeeSource });
       if (canonical.rows.length === 0) {
         return {
           status: 400,
@@ -946,11 +1052,14 @@ async function parseStatement(
         statementBalance: firstBal?.balanceAmount ?? null,
         statementBalanceDate: firstBal?.balanceDate ?? null,
         anchors,
+        payeeSource: fieldMapping.payeeSource,
       };
     }
 
     // Legacy bank/CC OFX path — extract <LEDGERBAL> for statement balance.
-    const ofx = parseOfx(text);
+    // §A — payeeSource selects which OFX field (NAME vs MEMO) becomes the
+    // payee; `t.payee` / `t.memo` already reflect that choice in the parser.
+    const ofx = parseOfx(text, { payeeSource: fieldMapping.payeeSource });
     if (ofx.transactions.length === 0) {
       return {
         status: 400,
@@ -983,6 +1092,7 @@ async function parseStatement(
       statementBalanceDate: ofx.balanceDate,
       statementCurrency: ofx.currency,
       anchors: ofxAnchors,
+      payeeSource: fieldMapping.payeeSource,
     };
   }
 

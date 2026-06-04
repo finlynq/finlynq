@@ -33,6 +33,8 @@ import {
   BookTemplate,
   Link as LinkIcon,
   Landmark,
+  ToggleLeft,
+  ToggleRight,
 } from "lucide-react";
 import { TemplateManager } from "@/app/(app)/import/components/template-manager";
 import { ConnectorTab } from "@/app/(app)/import/components/connector-tab";
@@ -47,6 +49,12 @@ export default function ImportSettingsPage() {
   const [importEmail, setImportEmail] = useState<string | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // §B (2026-06-04) — "Confirm detected column mapping before importing"
+  // per-user default. Seeds NEW accounts' csv_mapping_mode; a per-account
+  // override on the upload drawer (the "Don't ask again" checkbox) wins.
+  const [confirmCsvMapping, setConfirmCsvMapping] = useState(true);
+  const [confirmCsvLoading, setConfirmCsvLoading] = useState(false);
 
   // Fetch accounts, templates, and email config on mount.
   useEffect(() => {
@@ -70,7 +78,40 @@ export default function ImportSettingsPage() {
       .then((r) => r.json())
       .then((data) => setImportEmail(data.email))
       .catch(() => {});
+
+    fetch("/api/settings/confirm-csv-mapping")
+      .then((r) => r.json())
+      .then((data) => {
+        if (typeof data.confirmCsvMapping === "boolean") {
+          setConfirmCsvMapping(data.confirmCsvMapping);
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  const toggleConfirmCsvMapping = async () => {
+    const next = !confirmCsvMapping;
+    // Optimistic — revert on failure.
+    setConfirmCsvMapping(next);
+    setConfirmCsvLoading(true);
+    try {
+      const res = await fetch("/api/settings/confirm-csv-mapping", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmCsvMapping: next }),
+      });
+      const data = await res.json();
+      if (!res.ok || typeof data.confirmCsvMapping !== "boolean") {
+        setConfirmCsvMapping(!next);
+      } else {
+        setConfirmCsvMapping(data.confirmCsvMapping);
+      }
+    } catch {
+      setConfirmCsvMapping(!next);
+    } finally {
+      setConfirmCsvLoading(false);
+    }
+  };
 
   const generateEmail = async () => {
     setEmailLoading(true);
@@ -106,6 +147,59 @@ export default function ImportSettingsPage() {
           .
         </p>
       </div>
+
+      {/* §B (2026-06-04) — per-user default for CSV mapping confirmation. */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
+              {confirmCsvMapping ? (
+                <ToggleRight className="h-5 w-5" />
+              ) : (
+                <ToggleLeft className="h-5 w-5" />
+              )}
+            </div>
+            <div>
+              <CardTitle className="text-base">
+                Confirm detected column mapping before importing
+              </CardTitle>
+              <CardDescription>
+                When on, CSV uploads show the auto-detected column mapping for
+                your review before any rows are staged.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">
+                {confirmCsvMapping
+                  ? "Confirmation is ON"
+                  : "Confirmation is OFF"}
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {confirmCsvMapping
+                  ? "New accounts will ask you to confirm the detected mapping. Per-account overrides (the “Don’t ask again” checkbox) still apply."
+                  : "New accounts import with the auto-detected mapping silently. Set an individual account back to “confirm” from its upload drawer if needed."}
+              </p>
+            </div>
+            <Button
+              variant={confirmCsvMapping ? "default" : "outline"}
+              size="sm"
+              onClick={toggleConfirmCsvMapping}
+              disabled={confirmCsvLoading}
+            >
+              {confirmCsvMapping ? (
+                <ToggleRight className="h-4 w-4 mr-1.5" />
+              ) : (
+                <ToggleLeft className="h-4 w-4 mr-1.5" />
+              )}
+              {confirmCsvMapping ? "Disable" : "Enable"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       <Tabs defaultValue="templates">
         <TabsList>

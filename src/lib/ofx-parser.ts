@@ -16,12 +16,32 @@
 export interface OfxTransaction {
   date: string;       // YYYY-MM-DD
   amount: number;
+  /** Resolved payee. Defaults to NAME (falling back to MEMO when NAME is
+   *  blank); flips to MEMO-first when `payeeSource === "memo"` is threaded
+   *  through `parseOfx`/`parseStatement`. */
   payee: string;
   fitId: string;      // Bank-provided unique transaction ID
   type: string;       // DEBIT, CREDIT, CHECK, etc.
   accountType: string; // CHECKING, SAVINGS, CREDITCARD, etc.
+  /** The field NOT chosen as the payee (the "other" raw value). When NAME
+   *  wins, this is the MEMO; when MEMO wins, this is the NAME. */
   memo: string;
+  /** Raw `<NAME>` value, preserved verbatim so downstream callers can
+   *  re-resolve payee-vs-note without re-parsing. */
+  name: string;
+  /** Raw `<MEMO>` value, preserved verbatim (statement-upload field-mapping,
+   *  2026-06-04). `memo` above is the resolved "other" field; `rawMemo` is
+   *  always the literal MEMO tag. */
+  rawMemo: string;
 }
+
+/**
+ * Which OFX field populates the canonical `payee` column. Default `"name"`
+ * is today's behavior (NAME → payee, MEMO → note). `"memo"` flips it for
+ * banks that bury the meaningful merchant string in `<MEMO>` and put a
+ * generic type label in `<NAME>`. Statement-upload field-mapping (2026-06-04).
+ */
+export type OfxPayeeSource = "name" | "memo";
 
 export interface OfxAccountInfo {
   bankId: string;
@@ -187,6 +207,7 @@ function num(raw: string | undefined): number {
 function parseStatement(
   block: string,
   accountType: string,
+  payeeSource: OfxPayeeSource = "name",
 ): { transactions: OfxTransaction[]; account: OfxAccountInfo; balance: { amount: number; date: string } | null; currency: string } {
   // Currency
   const currency = getTagValue(block, "CURDEF") || "CAD";
@@ -213,7 +234,22 @@ function parseStatement(
     const trnType = getTagValue(txn, "TRNTYPE");
     const name = getTagValue(txn, "NAME");
     const memo = getTagValue(txn, "MEMO");
-    const payee = name || memo || "";
+    // Resolve payee vs note from the per-account preference. Default
+    // "name" → payee=NAME (fallback MEMO), note=MEMO. "memo" → payee=MEMO
+    // (fallback NAME), note=NAME. The "other" field is preserved in `memo`
+    // only when the chosen payee field actually had a value (so we don't
+    // surface a redundant note when payee fell back to the other field).
+    let payee: string;
+    let otherField: string;
+    if (payeeSource === "memo") {
+      payee = memo || name || "";
+      // If MEMO won as the payee, keep NAME as the note; if MEMO was blank
+      // and we fell back to NAME, there is no separate note.
+      otherField = memo ? name : "";
+    } else {
+      payee = name || memo || "";
+      otherField = name ? memo : "";
+    }
 
     const date = parseOfxDate(rawDate);
     const amount = parseFloat(rawAmount);
@@ -227,7 +263,9 @@ function parseStatement(
       fitId,
       type: trnType.toUpperCase() || "OTHER",
       accountType: account.accountType || accountType,
-      memo: name ? memo : "", // if name was used as payee, keep memo separate
+      memo: otherField, // the field NOT chosen as the payee (when present)
+      name,
+      rawMemo: memo,
     });
   }
 
@@ -550,7 +588,11 @@ function parseInvestmentStatement(
  * `transactions[]` for backward compatibility. Investment statements use
  * `parseOfxInvestments()` instead — they're a different shape entirely.
  */
-export function parseOfx(raw: string): OfxParseResult {
+export function parseOfx(
+  raw: string,
+  opts?: { payeeSource?: OfxPayeeSource },
+): OfxParseResult {
+  const payeeSource: OfxPayeeSource = opts?.payeeSource ?? "name";
   const content = stripHeaders(raw);
 
   // Try bank statements first
@@ -575,11 +617,11 @@ export function parseOfx(raw: string): OfxParseResult {
   }
 
   // Parse the first statement block
-  const result = parseStatement(stmtBlocks[0], accountType);
+  const result = parseStatement(stmtBlocks[0], accountType, payeeSource);
 
   // If multiple statement blocks, merge transactions
   for (let i = 1; i < stmtBlocks.length; i++) {
-    const extra = parseStatement(stmtBlocks[i], accountType);
+    const extra = parseStatement(stmtBlocks[i], accountType, payeeSource);
     result.transactions.push(...extra.transactions);
   }
 

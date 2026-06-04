@@ -61,6 +61,9 @@ interface Account {
   archived?: boolean;
   isInvestment?: boolean;
   mode: Mode;
+  /** Statement-upload field-mapping (2026-06-04). */
+  ofxPayeeSource?: "name" | "memo";
+  csvMappingMode?: "confirm" | "auto";
 }
 
 function defaultTabFor(m: Mode) {
@@ -444,6 +447,8 @@ function ImportPageInner() {
         accountLabel={safeAccountName(account)}
         accountCurrency={account.currency}
         policy={policy}
+        ofxPayeeSource={account.ofxPayeeSource === "memo" ? "memo" : "name"}
+        csvMappingMode={account.csvMappingMode === "auto" ? "auto" : "confirm"}
         onUploaded={() => {
           // Stay on /inbox; refresh the policy-appropriate tab so the
           // freshly-uploaded rows appear. setReconcileData(null) clears the

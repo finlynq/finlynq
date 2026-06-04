@@ -337,6 +337,109 @@ describe("parseCsvWithFallback — step 1 (explicit templateId)", () => {
   });
 });
 
+describe("parseCsvWithFallback — confirmAutoMapping gate (§B, 2026-06-04)", () => {
+  it("default (false) keeps canonical headers silent — kind 'parsed'", async () => {
+    const csv = `Date,Account,Amount,Payee
+2024-01-15,Checking,-12.50,Coffee`;
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    expect(r.kind).toBe("parsed");
+  });
+
+  it("confirmAutoMapping gates the canonical-headers step → 'auto-detected'", async () => {
+    const csv = `Date,Account,Amount,Payee
+2024-01-15,Checking,-12.50,Coffee
+2024-01-16,Checking,100.00,Salary`;
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      confirmAutoMapping: true,
+    });
+    expect(r.kind).toBe("auto-detected");
+    if (r.kind !== "auto-detected") return;
+    expect(r.source).toBe("canonical");
+    expect(r.rowCount).toBe(2);
+    expect(r.sampleRows.length).toBeGreaterThan(0);
+    // Canonical headers map 1:1.
+    expect(r.mapping.date).toBe("Date");
+    expect(r.mapping.amount).toBe("Amount");
+  });
+
+  it("confirmAutoMapping gates the saved-template step → 'auto-detected' w/ templateId", async () => {
+    const csv = `Transaction Date,Description,Debit,Credit
+2024-01-15,Coffee,12.50,`;
+    store.importTemplates.push({
+      id: 7,
+      userId: "u1",
+      name: "TD Checking",
+      fileHeaders: ["Transaction Date", "Description", "Debit", "Credit"],
+      columnMapping: { date: "Transaction Date", amount: "Debit", payee: "Description" },
+      defaultAccount: "TD Checking",
+      isDefault: false,
+      createdAt: "",
+      updatedAt: "",
+    });
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      confirmAutoMapping: true,
+    });
+    expect(r.kind).toBe("auto-detected");
+    if (r.kind !== "auto-detected") return;
+    expect(r.source).toBe("template");
+    expect(r.templateId).toBe(7);
+  });
+
+  it("confirmAutoMapping gates the auto-detect-direct step → 'auto-detected'", async () => {
+    // Non-canonical headers, no saved template → step 3.5 auto-detect drives.
+    const csv = `Transaction Date,Description,Amount
+2024-01-15,Coffee,-12.50`;
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      confirmAutoMapping: true,
+    });
+    expect(r.kind).toBe("auto-detected");
+    if (r.kind !== "auto-detected") return;
+    expect(r.source).toBe("auto-detect");
+    expect(r.mapping.payee).toBe("Description");
+  });
+
+  it("confirmAutoMapping still returns needs-mapping for unmappable files", async () => {
+    // No date/amount/payee detectable → step 4 unchanged.
+    const csv = `Foo,Bar\nx,y`;
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      confirmAutoMapping: true,
+    });
+    expect(r.kind).toBe("needs-mapping");
+  });
+
+  it("an explicit templateId takes the parsed path even with confirmAutoMapping", async () => {
+    const csv = `Transaction Date,Description,Debit
+2024-01-15,Coffee,12.50`;
+    store.importTemplates.push({
+      id: 9,
+      userId: "u1",
+      name: "TD",
+      fileHeaders: ["Transaction Date", "Description", "Debit"],
+      columnMapping: { date: "Transaction Date", amount: "Debit", payee: "Description" },
+      defaultAccount: "TD",
+      isDefault: false,
+      createdAt: "",
+      updatedAt: "",
+    });
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      templateId: 9,
+      confirmAutoMapping: true,
+    });
+    // Step 1 (explicit template) runs before any confirm gate.
+    expect(r.kind).toBe("parsed");
+  });
+});
+
 describe("buildEmptyCsvError", () => {
   it("includes byte count and first non-empty line", () => {
     const msg = buildEmptyCsvError("Date;Amount;Payee\n2024-01-15;12.50;Coffee");

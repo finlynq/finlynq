@@ -80,6 +80,17 @@ export interface CsvPipelineRequest {
    * currency so anchors land in the bank-side display unit.
    */
   anchorCurrency?: string | null;
+  /**
+   * Statement-upload field-mapping §B (2026-06-04). When true, the silent
+   * auto-apply steps (2 canonical headers, 3 saved-template match, 3.5
+   * auto-detect direct) return a `kind: "auto-detected"` result carrying the
+   * computed mapping + sample rows INSTEAD of committing — the route surfaces
+   * it for user confirmation before staging. Default false preserves today's
+   * silent behavior for `/api/import/preview` and every other caller. An
+   * explicit `templateId` always short-circuits to the parsed path (step 1)
+   * regardless of this flag — a confirmed/edited mapping the user re-fires.
+   */
+  confirmAutoMapping?: boolean;
 }
 
 /** Per-day bank balance anchor extracted from a CSV's Balance column.
@@ -107,6 +118,24 @@ export type CsvPipelineResult =
       headers: string[];
       sampleRows: Record<string, string>[];
       suggestedMapping: ColumnMapping | null;
+    }
+  | {
+      // Statement-upload field-mapping §B (2026-06-04). Returned ONLY when
+      // `confirmAutoMapping: true` and an auto-apply step (2 / 3 / 3.5) would
+      // otherwise have silently committed. The route surfaces the detected
+      // mapping for confirmation before staging. The user re-fires with an
+      // explicit templateId / mapping to take the parsed path.
+      kind: "auto-detected";
+      /** The mapping the auto-apply step computed. */
+      mapping: ColumnMapping;
+      /** Which auto-apply step produced it. */
+      source: "canonical" | "template" | "auto-detect";
+      /** Set when `source === "template"` — the matched saved template. */
+      templateId?: number;
+      headers: string[];
+      sampleRows: Record<string, string>[];
+      /** Estimated number of data rows (header excluded). */
+      rowCount: number;
     }
   | {
       kind: "template-not-found";
@@ -139,6 +168,7 @@ export async function parseCsvWithFallback(
     defaultCurrency = null,
     skipAutoMatchTemplate = false,
     anchorCurrency = null,
+    confirmAutoMapping = false,
   } = req;
   const anchorCcy = anchorCurrency ?? "CAD";
   // Apply header/footer trim BEFORE any header detection so the trim
@@ -225,6 +255,21 @@ export async function parseCsvWithFallback(
     const shouldFallthroughForPayee = allPayeesEmpty && autoFindsPayee;
 
     if (!shouldFallthroughForPayee) {
+      // §B confirm gate: surface the canonical mapping for review instead of
+      // committing silently. The canonical reader keys on the literal
+      // `Date`/`Amount`/`Payee`/`Account` columns; auto-detect reconstructs
+      // that mapping (plus any synonym Balance column) for the dialog.
+      if (confirmAutoMapping) {
+        const canonicalMapping = auto ?? canonicalFallbackMapping(headers);
+        return {
+          kind: "auto-detected",
+          mapping: canonicalMapping,
+          source: "canonical",
+          headers,
+          sampleRows: parseCSV(text).slice(0, 5),
+          rowCount: estimateRowCount(text),
+        };
+      }
       const filled = applyDefaultAccount(canonical.rows, defaultAccountName);
       // Canonical path has no explicit ColumnMapping; reuse auto-detect to
       // find a Balance column when present. Falls back to no anchors when
@@ -270,6 +315,19 @@ export async function parseCsvWithFallback(
       effCurrency,
     );
     if (mapped.rows.length > 0) {
+      // §B confirm gate: a high-confidence template match is pre-filled for
+      // one-click accept rather than applied silently.
+      if (confirmAutoMapping) {
+        return {
+          kind: "auto-detected",
+          mapping: best.template.columnMapping,
+          source: "template",
+          templateId: best.template.id,
+          headers,
+          sampleRows: parseCSV(text).slice(0, 5),
+          rowCount: estimateRowCount(text),
+        };
+      }
       const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
       const anchors = extractBalanceAnchors(
         text,
@@ -315,6 +373,19 @@ export async function parseCsvWithFallback(
       defaultCurrency,
     );
     if (mapped.rows.length > 0) {
+      // §B confirm gate: this is exactly the guess that's most worth
+      // confirming (it picks the payee column from the synonym list, which
+      // can bind the wrong column when a file has both Memo and Description).
+      if (confirmAutoMapping) {
+        return {
+          kind: "auto-detected",
+          mapping: directAuto,
+          source: "auto-detect",
+          headers,
+          sampleRows: parseCSV(text).slice(0, 5),
+          rowCount: estimateRowCount(text),
+        };
+      }
       const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
       const anchors = extractBalanceAnchors(
         text,
@@ -342,6 +413,42 @@ export async function parseCsvWithFallback(
     sampleRows,
     suggestedMapping,
   };
+}
+
+/**
+ * §B (2026-06-04) — best-effort mapping for the canonical-headers case when
+ * `autoDetectColumnMapping` returned null. The canonical reader keys on the
+ * literal `Date`/`Amount`/`Payee`/`Account`/… header names, so reflect any
+ * that are present so the confirm dialog isn't blank.
+ */
+function canonicalFallbackMapping(headers: string[]): ColumnMapping {
+  const has = (name: string) =>
+    headers.find((h) => h.trim().toLowerCase() === name.toLowerCase());
+  const mapping: ColumnMapping = {
+    date: has("Date") ?? "",
+    amount: has("Amount") ?? "",
+  };
+  const payee = has("Payee");
+  if (payee) mapping.payee = payee;
+  const account = has("Account");
+  if (account) mapping.account = account;
+  const category = has("Category");
+  if (category) mapping.category = category;
+  const currency = has("Currency");
+  if (currency) mapping.currency = currency;
+  const note = has("Note");
+  if (note) mapping.note = note;
+  const tags = has("Tags");
+  if (tags) mapping.tags = tags;
+  const balance = has("Balance");
+  if (balance) mapping.balance = balance;
+  return mapping;
+}
+
+/** §B (2026-06-04) — count data rows (header excluded) for the confirm
+ *  dialog's "N rows" hint. */
+function estimateRowCount(text: string): number {
+  return parseCSV(text).length;
 }
 
 /** Parse a CSV with a column mapping and apply a template-level default account. */

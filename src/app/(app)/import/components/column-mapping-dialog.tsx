@@ -59,8 +59,18 @@ interface ColumnMappingDialogProps {
     /** The headers the mapping was built against — reflects any re-detect, so
      *  the saved template stores the REAL column names, not the pre-trim junk row. */
     headers: string[];
+    /** §B (2026-06-04) — only meaningful in confirm mode: the user ticked
+     *  "Don't ask again for this account" → flip the account to 'auto'. */
+    dontAskAgain?: boolean;
   }) => Promise<void>;
   submitting: boolean;
+  /**
+   * §B (2026-06-04) — when true the dialog was opened to CONFIRM a mapping the
+   * pipeline auto-detected (the csv-confirm-mapping 422), not because nothing
+   * matched. Shows confirm-tailored copy + the "Don't ask again for this
+   * account" checkbox. Default false preserves the needs-mapping behavior.
+   */
+  confirmMode?: boolean;
 }
 
 const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
@@ -103,6 +113,7 @@ export function ColumnMappingDialog({
   onReparse,
   onConfirm,
   submitting,
+  confirmMode = false,
 }: ColumnMappingDialogProps) {
   // Displayed columns / sample / suggestion are LOCAL state so debounced
   // re-detection can replace them without the parent re-pushing props (which
@@ -122,6 +133,8 @@ export function ColumnMappingDialog({
   const [dateFormatOverride, setDateFormatOverride] = useState<DateFormatUi>("auto");
   const [redetecting, setRedetecting] = useState(false);
   const [error, setError] = useState("");
+  // §B (2026-06-04) — "Don't ask again for this account" (confirm mode only).
+  const [dontAskAgain, setDontAskAgain] = useState(false);
 
   // Monotonic guard: only the latest re-detect's response is applied.
   const reparseSeq = useRef(0);
@@ -145,6 +158,7 @@ export function ColumnMappingDialog({
     setDateFormatOverride("auto");
     setRedetecting(false);
     setError("");
+    setDontAskAgain(false);
     // Invalidate any in-flight re-detect from a previous file + clear debounce.
     reparseSeq.current++;
     if (debounceRef.current) {
@@ -214,6 +228,7 @@ export function ColumnMappingDialog({
       defaultCurrency: defaultCurrency || null,
       dateFormatOverride: dateFormatOverride === "auto" ? null : dateFormatOverride,
       headers: localHeaders,
+      dontAskAgain: confirmMode ? dontAskAgain : undefined,
     });
   };
 
@@ -236,11 +251,23 @@ export function ColumnMappingDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
         <DialogHeader>
-          <DialogTitle>Map CSV Columns</DialogTitle>
+          <DialogTitle>
+            {confirmMode ? "Confirm Column Mapping" : "Map CSV Columns"}
+          </DialogTitle>
           <DialogDescription>
-            We couldn&apos;t auto-match the columns in{" "}
-            <span className="font-mono text-xs">{fileName}</span>.
-            Tell us which column is which — we&apos;ll remember the mapping for next time.
+            {confirmMode ? (
+              <>
+                We detected a column mapping for{" "}
+                <span className="font-mono text-xs">{fileName}</span>. Review it
+                below — adjust any column that looks wrong, then import.
+              </>
+            ) : (
+              <>
+                We couldn&apos;t auto-match the columns in{" "}
+                <span className="font-mono text-xs">{fileName}</span>.
+                Tell us which column is which — we&apos;ll remember the mapping for next time.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -442,6 +469,25 @@ export function ColumnMappingDialog({
             </p>
           </div>
 
+          {/* §B — confirm-mode opt-out: stop confirming for this account. */}
+          {confirmMode && (
+            <label className="flex items-start gap-2 rounded-lg border bg-muted/20 px-3 py-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={dontAskAgain}
+                onChange={(e) => setDontAskAgain(e.target.checked)}
+              />
+              <span className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  Don&apos;t ask again for this account
+                </span>{" "}
+                — apply the detected mapping automatically on future uploads to
+                this account (you can re-enable confirmation in Settings → Import).
+              </span>
+            </label>
+          )}
+
           {error && (
             <div className="flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50/50 px-3 py-2">
               <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
@@ -455,7 +501,13 @@ export function ColumnMappingDialog({
             Cancel
           </Button>
           <Button onClick={handleConfirm} disabled={submitting || redetecting || noColumns}>
-            {submitting ? "Preparing preview..." : redetecting ? "Re-reading…" : "Continue"}
+            {submitting
+              ? "Preparing preview..."
+              : redetecting
+                ? "Re-reading…"
+                : confirmMode
+                  ? "Import with this mapping"
+                  : "Continue"}
           </Button>
         </DialogFooter>
       </DialogContent>

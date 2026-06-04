@@ -47,6 +47,7 @@ import type {
   OfxInvestmentTrade,
   OfxInvestmentIncome,
   OfxInvestmentTransfer,
+  OfxPayeeSource,
 } from "@/lib/ofx-parser";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { sourceTagFor, type FormatTag } from "@/lib/tx-source";
@@ -110,6 +111,7 @@ export interface OfxCanonicalResult {
 export function parseOfxToCanonical(
   raw: string,
   format: FormatTag = "ofx",
+  opts?: { payeeSource?: OfxPayeeSource },
 ): OfxCanonicalResult {
   const sourceTag = sourceTagFor(format);
   const externalAccounts: OfxExternalAccount[] = [];
@@ -117,7 +119,10 @@ export function parseOfxToCanonical(
   const balances: OfxCanonicalResult["balances"] = [];
 
   // ── Bank / credit-card path ──────────────────────────────────────────
-  const bank = parseOfx(raw);
+  // `payeeSource` only affects the bank/CC <STMTTRN> rows below — the
+  // investment path (parseOfxInvestments) synthesizes per-row payees from
+  // the trade/income/transfer legs, so it ignores this knob entirely.
+  const bank = parseOfx(raw, { payeeSource: opts?.payeeSource });
   if (bank.transactions.length > 0 || bank.account.accountId) {
     const externalId = ofxBankAccountExternalId(
       bank.account.bankId,
