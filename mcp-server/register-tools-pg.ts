@@ -17,6 +17,7 @@ import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
 import { encryptName, nameLookup } from "../src/lib/crypto/encrypted-columns";
 import { encryptRuleFields, decryptRuleFields } from "../src/lib/rules/crypto";
 import { resolveDividendsCategoryId } from "../src/lib/dividends-category";
+import { resolveOrCreateInvestmentIncomeCategory } from "../src/lib/investment-income-category";
 import {
   generateAmortizationSchedule,
   calculateDebtPayoff,
@@ -608,6 +609,10 @@ async function autoCategory(
   payee: string,
   dek: Buffer | null,
   isInvestmentAccount: boolean = false,
+  // When true, the investment dividend/interest pass may CREATE the canonical
+  // category if the user has none. MUST be false on dryRun (preview) paths —
+  // a dry run must not write to the DB.
+  allowCreate: boolean = false,
 ): Promise<number | null> {
   if (!payee) return null;
 
@@ -703,6 +708,28 @@ async function autoCategory(
     if (investmentHints) {
       const id = pickInvestmentCategoryByPayee(payee, investmentHints);
       if (id !== null) return id;
+    }
+    // 2b. Create-if-missing for dividend / interest payees. The keyword pass
+    //     above is lookup-only, so an MCP-recorded dividend on a user with no
+    //     "Dividends" category silently dropped out of the Dividend Income
+    //     report. Resolve-or-create the canonical category so it reports.
+    //     Gated on allowCreate so dryRun previews never write.
+    if (allowCreate) {
+      const lower = payee.toLowerCase();
+      const incomeKind = lower.includes("dividend")
+        ? ("dividend" as const)
+        : lower.includes("interest")
+          ? ("interest" as const)
+          : null;
+      if (incomeKind) {
+        const id = await resolveOrCreateInvestmentIncomeCategory(
+          db,
+          userId,
+          dek,
+          incomeKind,
+        );
+        if (id !== null) return id;
+      }
     }
     // 3. Fallback — prefers "Transfers" / "Investment Activity".
     if (investmentHints) {
@@ -2775,7 +2802,7 @@ export function registerPgTools(
         }
         catId = Number(cat.id);
       } else {
-        catId = await autoCategory(db, userId, payee, dek, isInvestment);
+        catId = await autoCategory(db, userId, payee, dek, isInvestment, !dryRun);
       }
 
       // Resolve the holding FK from either input form. Auto-create is
@@ -3328,6 +3355,7 @@ export function registerPgTools(
               t.payee,
               dek,
               investmentAccountIds.has(Number(acct.id)),
+              !dryRun,
             );
           }
 

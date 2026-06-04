@@ -57,6 +57,10 @@ const patchSchema = z.object({
   chosenCounterpartTxId: z.number().int().positive().nullable().optional(),
   chosenCounterpartMode: z.enum(["link_existing", "synth_new"]).nullable().optional(),
   chosenRelatedHoldingId: z.number().int().positive().nullable().optional(),
+  // Category for a pair-less income override (migration 20260614). Optional —
+  // for dividend/interest the apply path resolves-or-creates a default when
+  // this is NULL; the user may override here.
+  chosenCategoryId: z.number().int().positive().nullable().optional(),
 });
 
 export async function GET(
@@ -239,6 +243,7 @@ export async function PATCH(
       chosenCounterpartTxId,
       chosenCounterpartMode,
       chosenRelatedHoldingId,
+      chosenCategoryId,
     } = parsed.data;
 
     // Verify the proposal belongs to this run+user.
@@ -295,6 +300,7 @@ export async function PATCH(
     if (chosenCounterpartTxId !== undefined) patch.chosenCounterpartTxId = chosenCounterpartTxId;
     if (chosenCounterpartMode !== undefined) patch.chosenCounterpartMode = chosenCounterpartMode;
     if (chosenRelatedHoldingId !== undefined) patch.chosenRelatedHoldingId = chosenRelatedHoldingId;
+    if (chosenCategoryId !== undefined) patch.chosenCategoryId = chosenCategoryId;
     if (Object.keys(patch).length === 0) {
       return NextResponse.json({ ok: true, noop: true });
     }

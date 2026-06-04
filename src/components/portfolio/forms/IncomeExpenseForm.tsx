@@ -86,6 +86,12 @@ export default function IncomeExpenseForm() {
   const [direction, setDirection] = useState<Direction>("income");
   const [amount, setAmount] = useState<string>("");
   const [relatedHoldingId, setRelatedHoldingId] = useState<string>("");
+  // Entry type drives auto-categorization. A preset (dividend/interest/fee)
+  // resolves-or-creates its canonical category server-side; "other" falls back
+  // to the manual category picker below.
+  const [incomeType, setIncomeType] = useState<
+    "dividend" | "interest" | "fee" | "other"
+  >("dividend");
   const [categoryId, setCategoryId] = useState<string>("");
   const [date, setDate] = useState<string>(todayISO());
   const [payee, setPayee] = useState<string>("");
@@ -175,6 +181,9 @@ export default function IncomeExpenseForm() {
         }
         if (d.relatedHoldingId != null)
           setRelatedHoldingId(String(d.relatedHoldingId));
+        // Editing an existing row: keep its category exactly as-is via the
+        // manual picker — don't re-infer a preset and silently re-tag.
+        setIncomeType("other");
         if (d.categoryId != null) setCategoryId(String(d.categoryId));
         if (d.date) setDate(d.date);
         setPayee(d.payee ?? "");
@@ -271,7 +280,14 @@ export default function IncomeExpenseForm() {
         date,
       };
       if (relatedHoldingId) body.relatedHoldingId = Number(relatedHoldingId);
-      if (categoryId) body.categoryId = Number(categoryId);
+      // Preset entry types auto-resolve the category server-side; "other" uses
+      // the manually-picked category. An explicit categoryId always wins on the
+      // server, so for presets we deliberately omit it.
+      if (incomeType === "other") {
+        if (categoryId) body.categoryId = Number(categoryId);
+      } else {
+        body.incomeType = incomeType;
+      }
       if (payee.trim()) body.payee = payee.trim();
       if (note.trim()) body.note = note.trim();
       if (tags.trim()) body.tags = tags.trim();
@@ -398,7 +414,13 @@ export default function IncomeExpenseForm() {
               <Label>Direction</Label>
               <Select
                 value={direction}
-                onValueChange={(v) => setDirection((v ?? "income") as Direction)}
+                onValueChange={(v) => {
+                  const d = (v ?? "income") as Direction;
+                  setDirection(d);
+                  // Reset the entry-type preset to the sensible default for the
+                  // new sign (income→dividend, expense→fee).
+                  setIncomeType(d === "income" ? "dividend" : "fee");
+                }}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue />
@@ -437,6 +459,51 @@ export default function IncomeExpenseForm() {
                 <p className="text-xs text-destructive">{errors.currency}</p>
               )}
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Entry type</Label>
+            <Select
+              value={incomeType}
+              onValueChange={(v) =>
+                setIncomeType(
+                  (v ?? "other") as "dividend" | "interest" | "fee" | "other",
+                )
+              }
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false} side="bottom">
+                {direction === "income" ? (
+                  <>
+                    <SelectItem value="dividend">Dividend</SelectItem>
+                    <SelectItem value="interest">Interest</SelectItem>
+                    <SelectItem value="other">Other income</SelectItem>
+                  </>
+                ) : (
+                  <>
+                    <SelectItem value="fee">Fee</SelectItem>
+                    <SelectItem value="other">Other expense</SelectItem>
+                  </>
+                )}
+              </SelectContent>
+            </Select>
+            {incomeType !== "other" && (
+              <p className="text-xs text-muted-foreground">
+                Auto-categorized as{" "}
+                <span className="font-medium">
+                  {incomeType === "dividend"
+                    ? "Dividends"
+                    : incomeType === "interest"
+                      ? "Interest"
+                      : "Investment Fees"}
+                </span>{" "}
+                so it shows in the right report (the category is created if you
+                don&apos;t have it yet). Choose &ldquo;Other&rdquo; to pick a
+                category manually.
+              </p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -504,35 +571,37 @@ export default function IncomeExpenseForm() {
             </Select>
           </div>
 
-          <div className="space-y-1.5">
-            <Label>
-              Category{" "}
-              <span className="text-muted-foreground text-xs">(optional)</span>
-            </Label>
-            <Select
-              value={categoryId}
-              onValueChange={(v) => setCategoryId(v ?? "")}
-              disabled={categories.length === 0}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue
-                  placeholder={
-                    categories.length === 0
-                      ? "No categories available"
-                      : "Pick a category (e.g. Dividends)"
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent alignItemWithTrigger={false} side="bottom">
-                {categories.map((c) => (
-                  <SelectItem key={c.id} value={String(c.id)}>
-                    {c.name ?? `#${c.id}`}
-                    {c.group ? ` (${c.group})` : ""}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {incomeType === "other" && (
+            <div className="space-y-1.5">
+              <Label>
+                Category{" "}
+                <span className="text-muted-foreground text-xs">(optional)</span>
+              </Label>
+              <Select
+                value={categoryId}
+                onValueChange={(v) => setCategoryId(v ?? "")}
+                disabled={categories.length === 0}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue
+                    placeholder={
+                      categories.length === 0
+                        ? "No categories available"
+                        : "Pick a category (e.g. Dividends)"
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent alignItemWithTrigger={false} side="bottom">
+                  {categories.map((c) => (
+                    <SelectItem key={c.id} value={String(c.id)}>
+                      {c.name ?? `#${c.id}`}
+                      {c.group ? ` (${c.group})` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <Label>

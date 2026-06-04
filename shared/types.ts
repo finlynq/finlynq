@@ -660,6 +660,10 @@ export interface IncomeExpenseOpBody {
   amount: number;
   relatedHoldingId?: number | null;
   categoryId?: number | null;
+  /** Income-type hint. When a preset (dividend/interest/fee) and no explicit
+   *  categoryId is given, the server resolves-or-creates the canonical category
+   *  so the row reports correctly. 'other' (or unset) leaves the category as-is. */
+  incomeType?: "dividend" | "interest" | "fee" | "other";
   date: string;
   payee?: string;
   note?: string;

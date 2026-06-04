@@ -114,6 +114,8 @@ interface Proposal {
   chosenCounterpartTxId: number | null;
   chosenCounterpartMode: "link_existing" | "synth_new" | null;
   chosenRelatedHoldingId: number | null;
+  // 2026-06-14 — category for a pair-less income override (migration 20260614).
+  chosenCategoryId: number | null;
   status: string;
 }
 
@@ -224,6 +226,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
       chosenCounterpartTxId?: number | null;
       chosenCounterpartMode?: "link_existing" | "synth_new" | null;
       chosenRelatedHoldingId?: number | null;
+      chosenCategoryId?: number | null;
     },
   ) {
     setError("");
@@ -349,6 +352,7 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
                     chosenRelatedHoldingId: payload.chosenRelatedHoldingId ?? null,
                     chosenCounterpartMode: payload.chosenCounterpartMode ?? null,
                     chosenCounterpartTxId: payload.chosenCounterpartTxId ?? null,
+                    chosenCategoryId: payload.chosenCategoryId ?? null,
                   })
                 }
               />
@@ -453,6 +457,7 @@ function ProposalDetail({
     chosenRelatedHoldingId?: number | null;
     chosenCounterpartMode?: "link_existing" | "synth_new" | null;
     chosenCounterpartTxId?: number | null;
+    chosenCategoryId?: number | null;
   }) => Promise<boolean> | void;
 }) {
   const isDrift = proposal.proposalKind === "drift";
@@ -952,6 +957,7 @@ function KindOverridePicker({
     chosenRelatedHoldingId?: number | null;
     chosenCounterpartMode?: "link_existing" | "synth_new" | null;
     chosenCounterpartTxId?: number | null;
+    chosenCategoryId?: number | null;
   }) => Promise<boolean> | void;
   onReject: () => void;
 }) {
@@ -959,6 +965,9 @@ function KindOverridePicker({
   const [chosenKind, setChosenKind] = useState<OverrideKind | null>(proposal.chosenKind);
   const [chosenRelatedHoldingId, setChosenRelatedHoldingId] = useState<number | null>(
     proposal.chosenRelatedHoldingId,
+  );
+  const [chosenCategoryId, setChosenCategoryId] = useState<number | null>(
+    proposal.chosenCategoryId,
   );
   const [counterpartTxId, setCounterpartTxId] = useState<number | null>(
     proposal.chosenCounterpartTxId,
@@ -980,6 +989,24 @@ function KindOverridePicker({
   }, [holdingMap, orphanRow?.accountId]);
 
   const needsRelatedHolding = chosenKind === "portfolio_income" || chosenKind === "portfolio_expense";
+  // Pair-less income kinds let the user pick a category so the row reports
+  // correctly. dividend/interest auto-create the canonical category when left
+  // blank; portfolio_income/expense leave the category untouched when blank.
+  const showsCategory =
+    chosenKind === "dividend" ||
+    chosenKind === "interest" ||
+    chosenKind === "portfolio_income" ||
+    chosenKind === "portfolio_expense";
+  const categoryTypeFilter = chosenKind === "portfolio_expense" ? "E" : "I";
+  const categoryOptions = useMemo(
+    () =>
+      Object.entries(categoryMap)
+        .map(([k, c]) => [Number(k), c] as [number, CategoryMeta])
+        .filter(([, c]) => c.type === categoryTypeFilter),
+    [categoryMap, categoryTypeFilter],
+  );
+  const autoCategoryName =
+    chosenKind === "dividend" ? "Dividends" : chosenKind === "interest" ? "Interest" : null;
   const isPaired = chosenKind != null && OVERRIDE_PAIRED_ENABLED_KINDS.has(chosenKind);
   const supportsSynth = chosenKind != null && OVERRIDE_SYNTH_KINDS.has(chosenKind);
   const canApprove =
@@ -1022,9 +1049,10 @@ function KindOverridePicker({
       orphanRow,
       chosenKind,
       chosenRelatedHoldingId,
+      chosenCategoryId,
       holdingMap,
     });
-  }, [orphanRow, chosenKind, chosenRelatedHoldingId, holdingMap]);
+  }, [orphanRow, chosenKind, chosenRelatedHoldingId, chosenCategoryId, holdingMap]);
 
   // Paired preview: the orphan stock leg + the cash leg (synthesized, or the
   // picked existing row re-tagged in link_existing mode).
@@ -1215,6 +1243,34 @@ function KindOverridePicker({
         </div>
       )}
 
+      {showsCategory && (
+        <div className="space-y-1">
+          <div className="text-xs font-medium">Category</div>
+          <select
+            className="w-full rounded border border-border bg-background px-2 py-1 text-xs"
+            value={chosenCategoryId ?? ""}
+            onChange={(e) => setChosenCategoryId(e.target.value ? Number(e.target.value) : null)}
+          >
+            <option value="">
+              {autoCategoryName
+                ? `— auto: ${autoCategoryName} (created if needed) —`
+                : "— leave uncategorized —"}
+            </option>
+            {categoryOptions.map(([id, c]) => (
+              <option key={id} value={id}>
+                {c.name ?? `category #${id}`}
+              </option>
+            ))}
+          </select>
+          {autoCategoryName && chosenCategoryId == null && (
+            <p className="text-[11px] text-muted-foreground">
+              Leaving this blank tags the row as <span className="font-medium">{autoCategoryName}</span> so it
+              shows in the dividend / income report. Pick a different category to override.
+            </p>
+          )}
+        </div>
+      )}
+
       {preview && orphanRow && (
         <WillBecomeTable
           existing={orphanRow}
@@ -1279,6 +1335,7 @@ function KindOverridePicker({
               chosenCounterpartMode: isPaired ? chosenCounterpartMode : null,
               chosenCounterpartTxId:
                 isPaired && chosenCounterpartMode === "link_existing" ? counterpartTxId : null,
+              chosenCategoryId: showsCategory ? chosenCategoryId : null,
             });
           }}
         >
@@ -1297,11 +1354,13 @@ function computePairlessWillBecome({
   orphanRow,
   chosenKind,
   chosenRelatedHoldingId,
+  chosenCategoryId,
   holdingMap,
 }: {
   orphanRow: DisplacedRow;
   chosenKind: OverrideKind;
   chosenRelatedHoldingId: number | null;
+  chosenCategoryId: number | null;
   holdingMap: Record<number, HoldingMeta>;
 }): {
   willBecome: DisplacedRow;
@@ -1312,6 +1371,12 @@ function computePairlessWillBecome({
   if (orphanRow.kind !== chosenKind) {
     willBecome.kind = chosenKind;
     changedKeys.add("kind");
+  }
+  // An explicit category pick is reflected here; dividend/interest auto-resolve
+  // server-side (id unknown to the client), so that case is shown via a caption.
+  if (chosenCategoryId != null && orphanRow.categoryId !== chosenCategoryId) {
+    willBecome.categoryId = chosenCategoryId;
+    changedKeys.add("category");
   }
   if (chosenKind === "portfolio_income" || chosenKind === "portfolio_expense") {
     // Find matching cash sleeve in the same (account, currency).

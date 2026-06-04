@@ -47,6 +47,7 @@ import {
   type CounterpartRowForConvert,
 } from "@/lib/portfolio/operations";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
+import { resolveOrCreateInvestmentIncomeCategory } from "@/lib/investment-income-category";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import type {
   Confidence,
@@ -102,6 +103,11 @@ interface PersistedProposal {
    *  related_holding_id. Mirror of cash_dividend branch of
    *  dividend_reinvestment. NULL otherwise. */
   chosenRelatedHoldingId: number | null;
+  /** Category the user picked for a pair-less income override (dividend /
+   *  interest / portfolio_income / portfolio_expense). Apply stamps it on the
+   *  row. NULL → apply resolves-or-creates the canonical category for
+   *  dividend/interest. Migration 20260614. */
+  chosenCategoryId: number | null;
   status: string;
 }
 
@@ -610,6 +616,26 @@ async function applyOrphanOverride(
     };
   }
 
+  // Resolve the category for income overrides BEFORE the write tx (the
+  // resolver may CREATE a category, which we don't want inside the row-update
+  // transaction). The user-picked category wins; for dividend/interest with no
+  // pick we resolve-or-create the canonical "Dividends"/"Interest" category so
+  // the row lands in the Dividend Income / income reports. opening_balance is a
+  // carry-in position (no category); portfolio_income/expense stamp only when
+  // the user picked one (they already carry related-holding attribution).
+  let overrideCategoryId: number | null = proposal.chosenCategoryId ?? null;
+  if (
+    overrideCategoryId == null &&
+    (chosenKind === "dividend" || chosenKind === "interest")
+  ) {
+    overrideCategoryId = await resolveOrCreateInvestmentIncomeCategory(
+      db,
+      userId,
+      dek,
+      chosenKind,
+    );
+  }
+
   const updatedTxIds: number[] = [];
 
   await db.transaction(async (tx) => {
@@ -639,6 +665,13 @@ async function applyOrphanOverride(
         kind: chosenKind,
         updatedAt: sql`NOW()`,
       };
+
+      // Stamp the resolved category for income overrides so the row reports
+      // correctly. opening_balance (overrideCategoryId stays null unless the
+      // user explicitly picked) keeps its existing category.
+      if (overrideCategoryId != null) {
+        patch.categoryId = overrideCategoryId;
+      }
 
       // portfolio_income / portfolio_expense — swap onto the matching
       // cash sleeve and stamp the related holding. Mirror of the
@@ -1370,6 +1403,11 @@ export async function undoProposal(
       if ("portfolio_holding_id" in before) restorePatch.portfolioHoldingId = before.portfolio_holding_id ?? null;
       if ("relatedHoldingId" in before) restorePatch.relatedHoldingId = before.relatedHoldingId ?? null;
       if ("related_holding_id" in before) restorePatch.relatedHoldingId = before.related_holding_id ?? null;
+      // The income override (and any future category-touching apply path) also
+      // changes category_id — restore it or undo leaves the row tagged with the
+      // auto-resolved category.
+      if ("categoryId" in before) restorePatch.categoryId = before.categoryId ?? null;
+      if ("category_id" in before) restorePatch.categoryId = before.category_id ?? null;
       await tx
         .update(schema.transactions)
         .set(restorePatch)
@@ -1624,6 +1662,7 @@ async function loadProposal(
         | "synth_new"
         | null,
     chosenRelatedHoldingId: row.chosenRelatedHoldingId ?? null,
+    chosenCategoryId: row.chosenCategoryId ?? null,
     status: row.status,
   };
 }

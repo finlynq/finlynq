@@ -1721,6 +1721,12 @@ export const backfillProposals = pgTable("backfill_proposals", {
   // sleeve and stamps `related_holding_id` to this id. Mirror of the
   // `cash_dividend` branch of `dividend_reinvestment`. NULL otherwise.
   chosenRelatedHoldingId: integer("chosen_related_holding_id"),
+  // The category the user picked for a pair-less income override
+  // (chosenKind ∈ dividend/interest/portfolio_income/portfolio_expense).
+  // Apply stamps it on the row so it lands in the right report. NULL =
+  // apply resolves-or-creates the canonical category for dividend/interest.
+  // Migration 20260614. NULL for every non-income-override proposal.
+  chosenCategoryId: integer("chosen_category_id"),
   // 'pending' | 'approved' | 'rejected' | 'applied' | 'undone' | 'refused_with_reason'
   status: text("status").notNull().default("pending"),
   appliedAt: timestamp("applied_at", { withTimezone: true }),

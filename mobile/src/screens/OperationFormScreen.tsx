@@ -412,6 +412,9 @@ function FieldRenderer({
     }
 
     case "category": {
+      // The category field is only consumed for the "Other" entry type — a
+      // preset (dividend/interest/fee) auto-resolves its category server-side.
+      if (form.incomeType !== "other") return null;
       const c = ctx.categories.find((x) => x.id === form.categoryId);
       return (
         <FieldCard label={f.label} colors={colors}>
@@ -475,7 +478,13 @@ function FieldRenderer({
                 <TouchableOpacity
                   key={opt.label}
                   style={[styles.segBtn, active && { backgroundColor: opt.bg }]}
-                  onPress={() => set({ isExpense: opt.v })}
+                  onPress={() =>
+                    set({
+                      isExpense: opt.v,
+                      // Keep the entry-type preset consistent with the sign.
+                      incomeType: opt.v ? "fee" : "dividend",
+                    })
+                  }
                 >
                   <Text style={{ color: active ? "#fff" : colors.mutedForeground, fontWeight: "600", fontSize: 14 }}>
                     {opt.label}
@@ -486,6 +495,52 @@ function FieldRenderer({
           </View>
         </FieldCard>
       );
+
+    case "incomeType": {
+      const opts: Array<{ v: OpState["incomeType"]; label: string }> = form.isExpense
+        ? [
+            { v: "fee", label: "Fee" },
+            { v: "other", label: "Other" },
+          ]
+        : [
+            { v: "dividend", label: "Dividend" },
+            { v: "interest", label: "Interest" },
+            { v: "other", label: "Other" },
+          ];
+      const presetName =
+        form.incomeType === "dividend"
+          ? "Dividends"
+          : form.incomeType === "interest"
+            ? "Interest"
+            : form.incomeType === "fee"
+              ? "Investment Fees"
+              : null;
+      return (
+        <FieldCard label={f.label} colors={colors}>
+          <View style={[styles.seg, { backgroundColor: colors.secondary }]}>
+            {opts.map((opt) => {
+              const active = form.incomeType === opt.v;
+              return (
+                <TouchableOpacity
+                  key={opt.v}
+                  style={[styles.segBtn, active && { backgroundColor: colors.primary }]}
+                  onPress={() => set({ incomeType: opt.v })}
+                >
+                  <Text style={{ color: active ? "#fff" : colors.mutedForeground, fontWeight: "600", fontSize: 14 }}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {presetName && (
+            <Text style={{ color: colors.mutedForeground, fontSize: 12, marginTop: 6 }}>
+              Auto-categorized as {presetName} (created if needed). Pick “Other” to choose a category manually.
+            </Text>
+          )}
+        </FieldCard>
+      );
+    }
 
     case "lotPicker":
       return (
