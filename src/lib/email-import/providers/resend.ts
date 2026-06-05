@@ -64,6 +64,11 @@ class ResendProvider implements InboundEmailProvider {
   async deleteReceived(): Promise<void> {
     // No-op — Resend has no delete-received-email API.
   }
+
+  async listPending(): Promise<ParsedInboundEmail[]> {
+    // Nothing to poll — svix retries failed deliveries.
+    return [];
+  }
 }
 
 export const resendProvider = new ResendProvider();

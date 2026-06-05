@@ -111,6 +111,16 @@ export async function register() {
     } catch (err) {
       console.error("[instrumentation] Failed to start sweep-revoked-jtis cron:", err);
     }
+
+    // Mailpit poll-backstop (Epic A4). No-op unless INBOUND_EMAIL_PROVIDER=
+    // self-smtp. Mailpit doesn't retry failed webhooks, so this 5-min poll
+    // ingests + deletes any received email a dropped webhook missed.
+    try {
+      const { startMailpitPollTimer } = await import("./src/lib/cron/poll-mailpit");
+      startMailpitPollTimer();
+    } catch (err) {
+      console.error("[instrumentation] Failed to start mailpit poll cron:", err);
+    }
   } catch (err) {
     // Log but don't crash the server — healthz will report degraded state
     console.error("[instrumentation] Failed to initialize PostgreSQL adapter:", err);

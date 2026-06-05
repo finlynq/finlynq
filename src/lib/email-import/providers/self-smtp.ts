@@ -76,33 +76,33 @@ class SelfSmtpProvider implements InboundEmailProvider {
     } catch {
       return null;
     }
-    if (!raw || typeof raw !== "object") return null;
-    const data = raw as Record<string, unknown>;
+    return summaryToParsed(raw);
+  }
 
-    const providerMessageId =
-      typeof data.ID === "string"
-        ? data.ID
-        : typeof data.id === "string"
-          ? data.id
-          : null;
-
-    const from = extractAddress(data.From);
-    if (!from) return null;
-
-    const to = extractAddressList(data.To);
-    if (to.length === 0) return null;
-
-    const subject = typeof data.Subject === "string" ? data.Subject : null;
-    // Summary carries no body/attachment bytes — fetchContent fills these.
-    return {
-      providerMessageId,
-      from,
-      to,
-      subject,
-      text: null,
-      html: null,
-      attachments: [],
-    };
+  async listPending(limit: number): Promise<ParsedInboundEmail[]> {
+    const base = apiBase();
+    const auth = apiAuthHeader();
+    if (!base || !auth) return [];
+    try {
+      const resp = await fetch(`${base}/api/v1/messages?limit=${limit}`, {
+        headers: { Authorization: auth },
+      });
+      if (!resp.ok) {
+        console.warn(`[email-webhook] mailpit list HTTP ${resp.status}`);
+        return [];
+      }
+      const data = (await resp.json()) as { messages?: unknown[] };
+      const msgs = Array.isArray(data.messages) ? data.messages : [];
+      const out: ParsedInboundEmail[] = [];
+      for (const m of msgs) {
+        const parsed = summaryToParsed(m);
+        if (parsed) out.push(parsed);
+      }
+      return out;
+    } catch (e) {
+      console.warn("[email-webhook] mailpit list error:", e);
+      return [];
+    }
   }
 
   async fetchContent(messageId: string): Promise<InboundContent> {
@@ -198,6 +198,25 @@ interface MailpitMessage {
   Text?: string;
   HTML?: string;
   Attachments?: MailpitPart[];
+}
+
+/** Map a Mailpit message summary (webhook payload OR a list item) →
+ *  ParsedInboundEmail. Body/attachment bytes are fetched per message later. */
+function summaryToParsed(raw: unknown): ParsedInboundEmail | null {
+  if (!raw || typeof raw !== "object") return null;
+  const data = raw as Record<string, unknown>;
+  const providerMessageId =
+    typeof data.ID === "string"
+      ? data.ID
+      : typeof data.id === "string"
+        ? data.id
+        : null;
+  const from = extractAddress(data.From);
+  if (!from) return null;
+  const to = extractAddressList(data.To);
+  if (to.length === 0) return null;
+  const subject = typeof data.Subject === "string" ? data.Subject : null;
+  return { providerMessageId, from, to, subject, text: null, html: null, attachments: [] };
 }
 
 function extractAddress(raw: unknown): string | null {

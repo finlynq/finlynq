@@ -9,18 +9,14 @@
  *          attachments via REST; delete after store).
  *        - 'resend'    → Resend Inbound (svix-signed; no delete API) — default.
  *      Both share one handler via the InboundEmailProvider abstraction
- *      (src/lib/email-import/providers). The `to` address is routed through the
- *      3-way router (import / mailbox / trash):
- *        - import  → attachments stage at /import/pending; a transaction in the
- *                    BODY is heuristically parsed (no LLM) and staged too; in
- *                    both cases a per-user `email_inbox` row is created for the
- *                    Email tab in /import. The DEK-bearing sweep (B5) later
- *                    auto-records body emails that match a user rule.
- *        - mailbox → admin inbox, notify admins
- *        - trash   → admin inbox with 24h TTL, notify admins
- *      Always returns 200 on routed requests (no status-code leak). Returns
- *      401 on auth failure, 413 on oversize, 429 on rate limit. After durable
- *      store, the message is deleted from the provider (no-op for Resend).
+ *      (src/lib/email-import/providers) + the shared ingest path
+ *      (src/lib/email-import/ingest — also used by the poll-backstop cron). The
+ *      `to` address is routed import / mailbox / trash; import emails stage
+ *      attachments + heuristically parse a body transaction + write a per-user
+ *      email_inbox row; the DEK-bearing sweep (B5) later auto-records body
+ *      emails that match a user rule. Always 200 on routed requests; 401 on
+ *      auth failure, 413 on oversize. After durable store, the message is
+ *      deleted from the provider (no-op for Resend).
  *
  *   2. Self-hosted multipart (legacy path) — `multipart/form-data` with
  *      `x-webhook-secret` header. Still auto-imports into `transactions`
@@ -45,28 +41,11 @@ import { safeErrorMessage } from "@/lib/validate";
 import { deserializeTemplate, findBestTemplate, autoDetectColumnMapping } from "@/lib/import-templates";
 import { unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
-import { checkRateLimit } from "@/lib/rate-limit";
-import { routeAddress } from "@/lib/email-import/address-router";
-import { parseResendAttachments } from "@/lib/email-import/parse-attachments";
-import { stageEmailImport } from "@/lib/email-import/stage-email-import";
-import {
-  storeIncomingEmail,
-  notifyAdminsOfIncoming,
-} from "@/lib/email-import/store-incoming-email";
-import { sendBounceIfAuthenticated } from "@/lib/email-import/bounce";
 import { getInboundProvider } from "@/lib/email-import/providers";
-import type { ParsedInboundEmail } from "@/lib/email-import/providers";
-import { parseEmailBody } from "@/lib/email-import/parse-body";
-import {
-  storeEmailInbox,
-  type EmailInboxAction,
-} from "@/lib/email-import/store-email-inbox";
+import { ingestInboundEmail } from "@/lib/email-import/ingest";
 
 // 10 MB request-body cap on the JSON path.
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
-// 25 emails/hour/recipient address.
-const INBOUND_RATE_MAX = 25;
-const INBOUND_RATE_WINDOW_MS = 60 * 60 * 1000;
 
 export async function POST(request: NextRequest) {
   const ct = (request.headers.get("content-type") || "").toLowerCase();
@@ -82,7 +61,6 @@ export async function POST(request: NextRequest) {
 // ─── Provider JSON path (Resend OR Mailpit) ─────────────────────────────────
 
 async function handleProviderInbound(request: NextRequest): Promise<NextResponse> {
-  // Size cap via Content-Length fast-path before buffering the body.
   const lenHeader = request.headers.get("content-length");
   if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
     return NextResponse.json({ error: "Payload too large" }, { status: 413 });
@@ -98,8 +76,7 @@ async function handleProviderInbound(request: NextRequest): Promise<NextResponse
 
   const auth = await provider.verifyAuth(request, rawBody);
   if (!auth.ok) {
-    const msg =
-      auth.status === 500 ? "Webhook not configured" : "Unauthorized";
+    const msg = auth.status === 500 ? "Webhook not configured" : "Unauthorized";
     return NextResponse.json({ error: msg }, { status: auth.status });
   }
 
@@ -108,221 +85,27 @@ async function handleProviderInbound(request: NextRequest): Promise<NextResponse
     return NextResponse.json({ error: "Unrecognized payload shape" }, { status: 400 });
   }
 
-  // Enrich body + attachment bytes the webhook summary omitted. Resend inlines
-  // body but not attachments; Mailpit inlines neither. "Payload wins, else
-  // fetched." Never 5xx on a fetch miss — degrades to what the payload carried.
-  const messageId = parsed.providerMessageId;
-  let text = parsed.text;
-  let html = parsed.html;
-  let attachments = parsed.attachments;
-  if (messageId && (attachments.length === 0 || (text == null && html == null))) {
-    try {
-      const content = await provider.fetchContent(messageId);
-      if (text == null) text = content.text;
-      if (html == null) html = content.html;
-      if (attachments.length === 0) attachments = content.attachments;
-    } catch (e) {
-      console.warn("[email-webhook] fetchContent failed", e);
-    }
-  }
-
   const svixId = request.headers.get("svix-id") || null;
   const receivedDate = new Date().toISOString().slice(0, 10);
 
-  // Route each recipient. A single email can hit multiple finlynq mailboxes.
-  const results: Array<{ to: string; category: string; note?: string }> = [];
-  for (const to of parsed.to) {
-    const rl = checkRateLimit(
-      `email-inbound:${to.toLowerCase()}`,
-      INBOUND_RATE_MAX,
-      INBOUND_RATE_WINDOW_MS,
-    );
-    if (!rl.allowed) {
-      results.push({ to, category: "rate-limited" });
-      continue;
-    }
-
-    const route = await routeAddress(to);
-
-    if (route.category === "import" && route.userId) {
-      try {
-        const res = await ingestImportEmail({
-          userId: route.userId,
-          address: route.address,
-          parsed,
-          messageId,
-          svixId,
-          text,
-          html,
-          attachments,
-          receivedDate,
-        });
-        results.push({ to: route.address, category: "import", note: res });
-      } catch (e) {
-        console.error("[email-webhook] import path failed", e);
-        // 500 → Resend retries; Mailpit's poll backstop re-ingests. We do NOT
-        // deleteReceived here (message stays in Mailpit for the retry).
-        return NextResponse.json({ error: "Internal error" }, { status: 500 });
-      }
-    } else {
-      // mailbox or trash
-      await storeIncomingEmail({
-        category: route.category as "mailbox" | "trash",
-        toAddress: route.address,
-        fromAddress: parsed.from,
-        subject: parsed.subject,
-        bodyText: text,
-        bodyHtml: html,
-        attachmentCount: attachments.length,
-        svixId,
-      });
-      await notifyAdminsOfIncoming(
-        route.category as "mailbox" | "trash",
-        route.address,
-      );
-      if (route.category === "trash") {
-        sendBounceIfAuthenticated({
-          toAddress: route.address,
-          fromAddress: parsed.from,
-          subject: parsed.subject,
-          authVerdict: parsed.authVerdict ?? {},
-        }).catch((e) => console.warn("[email-webhook] bounce failed", e));
-      }
-      results.push({ to: route.address, category: route.category });
-    }
+  let results;
+  try {
+    results = await ingestInboundEmail(provider, parsed, { svixId, receivedDate });
+  } catch (e) {
+    console.error("[email-webhook] ingest failed", e);
+    // 500 → Resend retries; Mailpit's poll backstop re-ingests. We do NOT
+    // deleteReceived (message stays in the provider for the retry).
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 
-  // Durable store complete for every recipient — delete from the provider.
-  // No-op for Resend; real DELETE for Mailpit. Best-effort: a failed delete is
-  // backstopped by Mailpit's MP_MAX retention prune.
-  if (messageId) {
-    await provider.deleteReceived(messageId).catch((e) =>
+  // Durable store complete — delete from the provider (no-op for Resend).
+  if (parsed.providerMessageId) {
+    await provider.deleteReceived(parsed.providerMessageId).catch((e) =>
       console.warn("[email-webhook] deleteReceived failed", e),
     );
   }
 
   return NextResponse.json({ ok: true, results });
-}
-
-/**
- * Ingest one import-addressed email for one recipient: attachments → staging,
- * else heuristic body parse → 1-row staging, ALWAYS an `email_inbox` row.
- * Idempotent on the per-recipient dedupe key (skips re-delivery / poll racing).
- * Returns a short status note for the response.
- */
-async function ingestImportEmail(args: {
-  userId: string;
-  address: string;
-  parsed: ParsedInboundEmail;
-  messageId: string | null;
-  svixId: string | null;
-  text: string | null;
-  html: string | null;
-  attachments: ParsedInboundEmail["attachments"];
-  receivedDate: string;
-}): Promise<string> {
-  const { userId, address, parsed, messageId, svixId, text, html, attachments, receivedDate } = args;
-
-  const dedupeKey = `${messageId ?? svixId ?? "noid"}:${address}`;
-
-  // Idempotency: if this email+recipient was already stored, skip staging too
-  // (avoids a duplicate staged_import on webhook retry / poll backstop).
-  const pre = await db
-    .select({ id: schema.emailInbox.id })
-    .from(schema.emailInbox)
-    .where(eq(schema.emailInbox.dedupeKey, dedupeKey))
-    .limit(1);
-  if (pre[0]?.id) return "duplicate";
-
-  let sourceKind: "attachment" | "body";
-  let action: EmailInboxAction;
-  let stagedImportId: string | null = null;
-  let parseConfidence: "high" | "low" | null = null;
-  let totalRowCount = 0;
-
-  // 1) Attachments first (existing CSV/PDF/Excel pipeline).
-  const { rows, csvFallbackMeta } = await parseResendAttachments(attachments, userId);
-  if (rows.length > 0) {
-    sourceKind = "attachment";
-    action = "needs_review";
-    const stageResult = await stageEmailImport({
-      userId,
-      rows,
-      source: "email",
-      fromAddress: parsed.from,
-      subject: parsed.subject,
-      svixId,
-      headers: csvFallbackMeta?.headers ?? null,
-      sampleRows: csvFallbackMeta?.sampleRows ?? null,
-    });
-    stagedImportId = stageResult.stagedImportId;
-    totalRowCount = stageResult.totalRowCount;
-  } else {
-    // 2) No usable attachment — heuristic body parse.
-    sourceKind = "body";
-    const body = parseEmailBody({
-      text,
-      html,
-      subject: parsed.subject,
-      receivedDate,
-    });
-    if (body.candidate && body.confidence != null) {
-      action = "needs_review";
-      parseConfidence = body.confidence;
-      const raw: RawTransaction = {
-        date: body.candidate.date,
-        account: "", // resolved at sweep/record time from the email rule
-        amount: body.candidate.amount,
-        payee: body.candidate.payee,
-        currency: body.candidate.currency,
-        note: body.candidate.note,
-      };
-      const stageResult = await stageEmailImport({
-        userId,
-        rows: [raw],
-        source: "email",
-        fromAddress: parsed.from,
-        subject: parsed.subject,
-        svixId,
-      });
-      stagedImportId = stageResult.stagedImportId;
-      totalRowCount = stageResult.totalRowCount;
-    } else {
-      // Non-financial / unparseable body — keep it visible in the tab so the
-      // user can act, but no staged candidate.
-      action = "unparseable";
-    }
-  }
-
-  const stored = await storeEmailInbox({
-    userId,
-    dedupeKey,
-    messageId,
-    fromAddress: parsed.from,
-    subject: parsed.subject,
-    bodyText: text,
-    bodyHtml: html,
-    sourceKind,
-    action,
-    stagedImportId,
-    parseConfidence,
-  });
-
-  if (!stored.alreadyExisted && action !== "unparseable") {
-    await db.insert(schema.notifications).values({
-      type: "import",
-      title: "New email import pending",
-      message:
-        sourceKind === "attachment"
-          ? `${totalRowCount} transaction(s) from ${parsed.from} waiting at /import?tab=email`
-          : `A transaction from ${parsed.from} is waiting to be recorded at /import?tab=email`,
-      read: 0,
-      createdAt: new Date().toISOString(),
-      userId,
-    });
-  }
-
-  return action;
 }
 
 // ─── Self-hosted multipart path (unchanged from pre-Resend) ─────────────────
@@ -333,7 +116,6 @@ async function handleSelfHostedMultipart(request: NextRequest): Promise<NextResp
     if (!secret) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    // Stored value is a hash; compare by hashing the presented secret.
     const secretHash = authLookupHash(secret);
     const storedSecret = await db
       .select()

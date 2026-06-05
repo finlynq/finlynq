@@ -62,4 +62,9 @@ export interface InboundEmailProvider {
   /** Delete the message from the provider after durable store. No-op for
    *  Resend (no delete-received API); real DELETE for Mailpit. */
   deleteReceived(messageId: string): Promise<void>;
+  /** List messages still held by the provider (poll-backstop cron). Resend →
+   *  [] (svix retries; nothing to poll). Self-smtp → Mailpit GET
+   *  /api/v1/messages summaries (body/attachments fetched per message at
+   *  ingest, like the webhook). */
+  listPending(limit: number): Promise<ParsedInboundEmail[]>;
 }
