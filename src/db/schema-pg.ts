@@ -1214,6 +1214,120 @@ export const incomingEmails = pgTable("incoming_emails", {
   triagedBy: text("triaged_by").references(() => users.id),
 });
 
+// ─── Email-to-Transaction Inbox (Epic B2, 2026-06-05) ──────────────────────
+//
+// Per-user inbound email turned into transactions. Distinct from
+// `incoming_emails` (admin-triage, plaintext, no user_id, 24h TTL): this is
+// per-user, two-tier encrypted, 60-day TTL, and tracks an `action` lifecycle.
+//
+// Two-tier encryption mirrors staged_transactions / bank_transactions:
+//   - from_address / subject / body_text / body_html are 'service' (sv1:,
+//     PF_STAGING_KEY) at webhook ingest where no DEK exists, upgraded to
+//     'user' (v1:, user DEK) by the DEK-bearing sweep. Read paths branch on
+//     `encryption_tier` per row. NOT registered in user-encrypted-registry.ts
+//     (that drives the plaintext→v1 sweep, which would double-encrypt sv1:).
+//
+// body_html may contain attacker-controlled markup — the UI MUST render it in
+// a sandboxed iframe (no allow-scripts), never dangerouslySetInnerHTML.
+//
+// Migration: scripts/migrations/20260615_email_inbox.sql.
+export const emailInbox = pgTable(
+  "email_inbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // Two-tier encrypted (sv1:/v1:). from_address + subject are rule-match
+    // inputs; body_* render in the detail view (sandboxed iframe).
+    fromAddress: text("from_address"),
+    subject: text("subject"),
+    bodyText: text("body_text"),
+    bodyHtml: text("body_html"),
+    // 'service' | 'user' — CHECK enforced in SQL.
+    encryptionTier: text("encryption_tier").notNull().default("service"),
+    // Provider (Mailpit) message id — for fetch-back + deleteReceived + poll.
+    messageId: text("message_id"),
+    // Idempotency = provider message id. UNIQUE so re-delivery is a no-op.
+    dedupeKey: text("dedupe_key").notNull().unique(),
+    receivedAt: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    // 'pending' | 'auto_recorded' | 'duplicate_skipped' | 'needs_review' |
+    // 'unparseable' | 'discarded' | 'manually_recorded' — CHECK in SQL.
+    action: text("action").notNull().default("pending"),
+    // 'attachment' | 'body' — CHECK in SQL. v1 auto-routes body only.
+    sourceKind: text("source_kind").notNull(),
+    // The staged_imports row holding the parsed candidate. SET NULL (TTL'd).
+    stagedImportId: text("staged_import_id").references(() => stagedImports.id, {
+      onDelete: "set null",
+    }),
+    // The email rule that matched at auto-record time. FK added in SQL after
+    // both tables exist; SET NULL on rule delete.
+    matchedRuleId: integer("matched_rule_id"),
+    // 'high' | 'low' | NULL — body-parse confidence. low/NULL never auto-record.
+    parseConfidence: text("parse_confidence"),
+    // Materialized transaction id once recorded. SET NULL on tx delete.
+    recordedTransactionId: integer("recorded_transaction_id").references(
+      () => transactions.id,
+      { onDelete: "set null" },
+    ),
+  },
+  (t) => [
+    index("email_inbox_user_action_idx").on(t.userId, t.action, t.receivedAt),
+  ],
+);
+
+// ─── Email import rules — sender/subject → account auto-record (Epic B2) ────
+//
+// Per-user "when an email from X arrives, record it into account Y" rules.
+// Drives the DEK-bearing sweep (Epic B5). Sensitive free-text (name,
+// match_value) is user-DEK encrypted at rest (v1: always — written by the
+// CRUD route which always carries a session DEK), decrypted before matching.
+// Mirrors transaction_rules' crypto posture; NOT in user-encrypted-registry.ts
+// (handled by src/lib/email-rules/crypto.ts).
+export const emailImportRules = pgTable(
+  "email_import_rules",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // Display name — user-DEK encrypted (v1:).
+    name: text("name").notNull(),
+    // 'sender' (matches from_address) | 'subject' — CHECK in SQL.
+    matchType: text("match_type").notNull(),
+    // 'contains' | 'exact' | 'regex' — CHECK in SQL.
+    matchOp: text("match_op").notNull(),
+    // The needle — user-DEK encrypted (v1:). Decrypted before matching.
+    matchValue: text("match_value").notNull(),
+    accountId: integer("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    categoryId: integer("category_id").references(() => categories.id, {
+      onDelete: "set null",
+    }),
+    // 'auto' (auto-record) | 'review' (resolve account, wait for a click).
+    mode: text("mode").notNull().default("auto"),
+    isActive: boolean("is_active").notNull().default(true),
+    priority: integer("priority").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("email_import_rules_user_active_idx").on(
+      t.userId,
+      t.isActive,
+      t.priority,
+    ),
+  ],
+);
+
 // ─── MCP Idempotency Keys (issue [#98](https://github.com/finlynq/finlynq/issues/98)) ─────
 //
 // Caller-supplied retry safety for `bulk_record_transactions` (HTTP + stdio).
