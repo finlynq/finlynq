@@ -112,15 +112,11 @@ export async function register() {
       console.error("[instrumentation] Failed to start sweep-revoked-jtis cron:", err);
     }
 
-    // Mailpit poll-backstop (Epic A4). No-op unless INBOUND_EMAIL_PROVIDER=
-    // self-smtp. Mailpit doesn't retry failed webhooks, so this 5-min poll
-    // ingests + deletes any received email a dropped webhook missed.
-    try {
-      const { startMailpitPollTimer } = await import("./src/lib/cron/poll-mailpit");
-      startMailpitPollTimer();
-    } catch (err) {
-      console.error("[instrumentation] Failed to start mailpit poll cron:", err);
-    }
+    // (No inbound-email poll cron.) Under the DevManager push relay
+    // (INBOUND_EMAIL_PROVIDER=self-smtp) the app holds no Mailpit credentials
+    // and never polls a mail store — DevManager owns retries via its own
+    // reconciliation sweep (re-pushes any message we didn't 2xx). Resend
+    // self-retries via svix. So there is nothing for the app to back-stop.
   } catch (err) {
     // Log but don't crash the server — healthz will report degraded state
     console.error("[instrumentation] Failed to initialize PostgreSQL adapter:", err);

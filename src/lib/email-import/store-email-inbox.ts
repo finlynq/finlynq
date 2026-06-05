@@ -31,7 +31,7 @@ export interface StoreEmailInboxInput {
   userId: string;
   /** Stable idempotency key — provider message id + recipient address. */
   dedupeKey: string;
-  /** Provider (Mailpit) message id for fetch-back + deleteReceived. */
+  /** Provider message id (Resend id OR the DevManager push `message_id`). */
   messageId: string | null;
   fromAddress: string | null;
   subject: string | null;

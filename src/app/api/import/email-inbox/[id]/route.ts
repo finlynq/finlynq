@@ -4,7 +4,9 @@
  *   GET    — decrypted detail (from/subject/body) for the sandboxed-iframe view.
  *   PATCH  — { action: 'record', accountId, categoryId } → materialize a
  *            deduped transaction (manually_recorded), or { action: 'discard' }.
- *   DELETE — local delete + provider.deleteReceived (real delete from Mailpit).
+ *   DELETE — local delete (+ provider.deleteReceived, a no-op now: the
+ *            DevManager relay already deleted the Mailpit copy on the ingest 2xx;
+ *            Resend has no delete API).
  *
  * All requireEncryption. Cross-tenant access → 404 (never 403). Bare JSON
  * responses (the REST envelope is MCP-only).
@@ -149,9 +151,9 @@ export async function DELETE(
 
   await db.delete(schema.emailInbox).where(eq(schema.emailInbox.id, id));
 
-  // Real delete from the provider (Mailpit). No-op for Resend. Best-effort —
-  // the local row is already gone; a provider-delete miss is backstopped by
-  // Mailpit's retention prune.
+  // Provider delete. No-op for both providers today (the DevManager relay
+  // already removed the Mailpit copy at ingest; Resend has no delete API), but
+  // kept best-effort so a future provider with a real delete still gets called.
   if (rows[0].messageId) {
     await getInboundProvider()
       .deleteReceived(rows[0].messageId)

@@ -5,18 +5,19 @@
  *
  *   1. Provider JSON (production path) — `application/json`. The provider is
  *      selected by INBOUND_EMAIL_PROVIDER:
- *        - 'self-smtp' → self-hosted Mailpit (basic-auth; fetch body +
- *          attachments via REST; delete after store).
+ *        - 'self-smtp' → self-hosted via the DevManager push relay (HMAC-signed;
+ *          self-contained payload — body + attachments inline; DevManager owns
+ *          the Mailpit delete + retries, so the app makes no mail-store calls).
  *        - 'resend'    → Resend Inbound (svix-signed; no delete API) — default.
  *      Both share one handler via the InboundEmailProvider abstraction
  *      (src/lib/email-import/providers) + the shared ingest path
- *      (src/lib/email-import/ingest — also used by the poll-backstop cron). The
- *      `to` address is routed import / mailbox / trash; import emails stage
- *      attachments + heuristically parse a body transaction + write a per-user
- *      email_inbox row; the DEK-bearing sweep (B5) later auto-records body
- *      emails that match a user rule. Always 200 on routed requests; 401 on
- *      auth failure, 413 on oversize. After durable store, the message is
- *      deleted from the provider (no-op for Resend).
+ *      (src/lib/email-import/ingest). The `to`/`recipient` address is routed
+ *      import / mailbox / trash; import emails stage attachments + heuristically
+ *      parse a body transaction + write a per-user email_inbox row; the
+ *      DEK-bearing sweep (B5) later auto-records body emails that match a user
+ *      rule. Always 200 on routed requests; 401 on auth failure, 413 on
+ *      oversize. A non-2xx makes DevManager retain + retry the message (svix
+ *      retries for Resend), so a transient failure loses nothing.
  *
  *   2. Self-hosted multipart (legacy path) — `multipart/form-data` with
  *      `x-webhook-secret` header. Still auto-imports into `transactions`
@@ -44,8 +45,12 @@ import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache
 import { getInboundProvider } from "@/lib/email-import/providers";
 import { ingestInboundEmail } from "@/lib/email-import/ingest";
 
-// 10 MB request-body cap on the JSON path.
-const MAX_BODY_BYTES = 10 * 1024 * 1024;
+// Request-body cap on the JSON path. The DevManager push relay inlines
+// attachments as base64 (~+33%), so its 10 MB/message cap can yield a ~13.4 MB
+// JSON payload; a 413 here would loop DevManager's retry. 20 MB gives headroom
+// over the inflated worst case. (Resend payloads don't inline attachments, so
+// this is only ever exercised by the self-smtp push.)
+const MAX_BODY_BYTES = 20 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
   const ct = (request.headers.get("content-type") || "").toLowerCase();
@@ -93,12 +98,14 @@ async function handleProviderInbound(request: NextRequest): Promise<NextResponse
     results = await ingestInboundEmail(provider, parsed, { svixId, receivedDate });
   } catch (e) {
     console.error("[email-webhook] ingest failed", e);
-    // 500 → Resend retries; Mailpit's poll backstop re-ingests. We do NOT
-    // deleteReceived (message stays in the provider for the retry).
+    // 500 → DevManager retains the message + retries on its reconciliation
+    // sweep (svix retries for Resend). We do NOT deleteReceived.
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 
-  // Durable store complete — delete from the provider (no-op for Resend).
+  // Durable store complete. deleteReceived is a no-op for both providers now
+  // (Resend has no delete API; the DevManager relay deletes the Mailpit copy on
+  // this 2xx). Kept so a future provider with a real delete still gets called.
   if (parsed.providerMessageId) {
     await provider.deleteReceived(parsed.providerMessageId).catch((e) =>
       console.warn("[email-webhook] deleteReceived failed", e),

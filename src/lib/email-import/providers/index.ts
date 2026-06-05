@@ -1,7 +1,8 @@
 /**
  * Inbound-email provider selector (Epic B1). Picks the provider by
  * INBOUND_EMAIL_PROVIDER:
- *   - 'self-smtp' → Mailpit (self-hosted; basic-auth; fetch + delete)
+ *   - 'self-smtp' → self-hosted via the DevManager push relay (HMAC-signed,
+ *                   self-contained payload; no mail-store network access).
  *   - 'resend'    → Resend (legacy; svix; no delete) — the default so an
  *                   unset env keeps the pre-migration behavior.
  */

@@ -1,23 +1,42 @@
 /**
- * Self-hosted Mailpit inbound provider (Epic B1 / B4). Mailpit POSTs a message
- * *summary* JSON to MP_WEBHOOK_URL with basic-auth embedded in the URL (it
- * can't send custom secret headers). The summary carries NO body/attachment
- * bytes, so `fetchContent` pulls the full message via the Mailpit REST API,
- * and `deleteReceived` removes it after we've durably stored it.
+ * Self-hosted inbound provider — DevManager push relay (revised 2026-06-05).
+ *
+ * SUPERSEDES the original Mailpit basic-auth *pull* design. We keep DevManager
+ * as a filtering middleman: inbound mail lands in Mailpit on the DevManager box,
+ * DevManager receives + filters it (recipient allowlist, attachment hard-deny,
+ * size caps, rate limit, best-effort SPF), then PUSHes a self-contained
+ * `NormalizedInboundEmail` JSON (attachments inline as base64) to this app's
+ * webhook, HMAC-signed. The app NEVER talks to Mailpit — it only verifies the
+ * signature and stores. DevManager DELETEs the Mailpit copy on our 2xx; on a
+ * non-2xx it RETAINS + retries via its own ~2-min reconciliation sweep, so a
+ * brief app outage loses nothing (no app-side poll backstop needed).
+ *
+ * Consequences vs the old pull design:
+ *   - verifyAuth     → HMAC-SHA256 (X-Mail-Signature), NOT basic-auth.
+ *   - parsePayload   → maps the pushed NormalizedInboundEmail; attachments are
+ *                      already inline (base64) — no fetch.
+ *   - fetchContent   → no-op (payload is self-contained).
+ *   - deleteReceived → no-op (DevManager owns the Mailpit delete on our 2xx).
+ *   - listPending    → removed (DevManager owns retry; the app has no Mailpit
+ *                      network access to poll).
  *
  * Env:
- *   MAILPIT_API_URL              base URL, e.g. https://mail.finlynq.com
- *   MAILPIT_API_USER/PASS        MP_UI_AUTH basic-auth for the REST API
- *   MAILPIT_WEBHOOK_USER/PASS    basic-auth Mailpit embeds in MP_WEBHOOK_URL
- *                                (falls back to the API creds if unset)
+ *   FINLYNQ_INBOUND_SECRET   shared HMAC secret (>=16 chars), identical on the
+ *                            DevManager box (its `FINLYNQ_INBOUND_SECRET`).
  *
- * Mailpit API:
- *   GET    /api/v1/message/{ID}             full body + attachment parts
- *   GET    /api/v1/message/{ID}/part/{PID}  raw part bytes
- *   DELETE /api/v1/messages  (body {IDs:[…]}) delete after store
+ * HMAC contract (mirror of DevManager's `signPayload`):
+ *   headers:
+ *     X-Mail-Timestamp   ISO-8601 UTC, e.g. 2026-06-05T17:03:59.123Z
+ *     X-Mail-Signature   `sha256=<hex>` where
+ *                        <hex> = HMAC_SHA256(secret, `${X-Mail-Timestamp}.${rawBody}`)
+ *     X-Mail-Message-Id  the payload's message_id (informational)
+ *   Sign/verify over the RAW request body bytes (before JSON.parse) — the route
+ *   passes `await request.text()` to verifyAuth so whitespace/key-order can't
+ *   break the MAC. Freshness (|now - timestamp| <= 5 min) is enforced HERE
+ *   (DevManager does not) to bound replay. Failure → 401; missing secret → 500.
  */
 
-import { createHash, timingSafeEqual } from "crypto";
+import { createHmac, timingSafeEqual } from "crypto";
 import type { NextRequest } from "next/server";
 import type { ResendAttachment } from "../parse-attachments";
 import type {
@@ -27,46 +46,43 @@ import type {
   ParsedInboundEmail,
 } from "./types";
 
-function apiBase(): string {
-  return (process.env.MAILPIT_API_URL || "").replace(/\/+$/, "");
-}
+/** Replay window for X-Mail-Timestamp. */
+const SIGNATURE_FRESHNESS_MS = 5 * 60 * 1000;
 
-function apiAuthHeader(): string | null {
-  const user = process.env.MAILPIT_API_USER;
-  const pass = process.env.MAILPIT_API_PASS;
-  if (!user || !pass) return null;
-  return `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}`;
-}
-
-/** Constant-time compare of two strings via fixed-length SHA-256 digests. */
+/** Constant-time compare of two strings (already fixed-length hex here). */
 function safeEqual(a: string, b: string): boolean {
-  const da = createHash("sha256").update(a).digest();
-  const db = createHash("sha256").update(b).digest();
-  return timingSafeEqual(da, db);
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
 }
 
 class SelfSmtpProvider implements InboundEmailProvider {
   readonly name = "self-smtp" as const;
 
-  async verifyAuth(request: NextRequest): Promise<AuthResult> {
-    const user = process.env.MAILPIT_WEBHOOK_USER || process.env.MAILPIT_API_USER;
-    const pass = process.env.MAILPIT_WEBHOOK_PASS || process.env.MAILPIT_API_PASS;
-    if (!user || !pass) {
-      console.error("[email-webhook] MAILPIT_WEBHOOK_USER/PASS not set");
+  async verifyAuth(request: NextRequest, rawBody: string): Promise<AuthResult> {
+    const secret = process.env.FINLYNQ_INBOUND_SECRET;
+    if (!secret || secret.length < 16) {
+      console.error("[email-webhook] FINLYNQ_INBOUND_SECRET not set or too short (>=16 chars)");
       return { ok: false, status: 500 };
     }
-    const header = request.headers.get("authorization") || "";
-    const m = /^Basic\s+(.+)$/i.exec(header.trim());
-    if (!m) return { ok: false, status: 401 };
-    let decoded: string;
-    try {
-      decoded = Buffer.from(m[1], "base64").toString("utf8");
-    } catch {
+
+    const timestamp = request.headers.get("x-mail-timestamp");
+    const sigHeader = request.headers.get("x-mail-signature");
+    if (!timestamp || !sigHeader) {
       return { ok: false, status: 401 };
     }
-    return safeEqual(decoded, `${user}:${pass}`)
-      ? { ok: true }
-      : { ok: false, status: 401 };
+
+    // Freshness — bound replay. ISO-8601 → epoch ms.
+    const ts = Date.parse(timestamp);
+    if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > SIGNATURE_FRESHNESS_MS) {
+      return { ok: false, status: 401 };
+    }
+
+    // Mirror of DevManager: HMAC over `${timestamp}.${rawBody}`, with the
+    // literal "sha256=" prefix included in the compared string.
+    const mac = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex");
+    const expected = `sha256=${mac}`;
+    return safeEqual(expected, sigHeader) ? { ok: true } : { ok: false, status: 401 };
   }
 
   parsePayload(rawBody: string): ParsedInboundEmail | null {
@@ -76,154 +92,98 @@ class SelfSmtpProvider implements InboundEmailProvider {
     } catch {
       return null;
     }
-    return summaryToParsed(raw);
+    return normalizedToParsed(raw);
   }
 
-  async listPending(limit: number): Promise<ParsedInboundEmail[]> {
-    const base = apiBase();
-    const auth = apiAuthHeader();
-    if (!base || !auth) return [];
-    try {
-      const resp = await fetch(`${base}/api/v1/messages?limit=${limit}`, {
-        headers: { Authorization: auth },
-      });
-      if (!resp.ok) {
-        console.warn(`[email-webhook] mailpit list HTTP ${resp.status}`);
-        return [];
-      }
-      const data = (await resp.json()) as { messages?: unknown[] };
-      const msgs = Array.isArray(data.messages) ? data.messages : [];
-      const out: ParsedInboundEmail[] = [];
-      for (const m of msgs) {
-        const parsed = summaryToParsed(m);
-        if (parsed) out.push(parsed);
-      }
-      return out;
-    } catch (e) {
-      console.warn("[email-webhook] mailpit list error:", e);
-      return [];
-    }
+  async fetchContent(): Promise<InboundContent> {
+    // No-op — the DevManager push payload is self-contained (body + attachments
+    // inline), so there is nothing to fetch back.
+    return { text: null, html: null, attachments: [] };
   }
 
-  async fetchContent(messageId: string): Promise<InboundContent> {
-    const base = apiBase();
-    const auth = apiAuthHeader();
-    if (!base || !auth) {
-      console.warn("[email-webhook] MAILPIT_API_URL/USER/PASS not set — cannot fetch message");
-      return { text: null, html: null, attachments: [] };
-    }
-
-    let msg: MailpitMessage | null = null;
-    try {
-      const resp = await fetch(
-        `${base}/api/v1/message/${encodeURIComponent(messageId)}`,
-        { headers: { Authorization: auth } },
-      );
-      if (!resp.ok) {
-        console.warn(`[email-webhook] mailpit get-message HTTP ${resp.status} for ${messageId}`);
-        return { text: null, html: null, attachments: [] };
-      }
-      msg = (await resp.json()) as MailpitMessage;
-    } catch (e) {
-      console.warn(`[email-webhook] mailpit get-message error for ${messageId}:`, e);
-      return { text: null, html: null, attachments: [] };
-    }
-
-    const text = typeof msg.Text === "string" ? msg.Text : null;
-    const html = typeof msg.HTML === "string" ? msg.HTML : null;
-
-    const attachments: ResendAttachment[] = [];
-    const parts = Array.isArray(msg.Attachments) ? msg.Attachments : [];
-    for (const part of parts) {
-      const partId = part.PartID;
-      const filename = part.FileName;
-      if (!partId || !filename) continue;
-      try {
-        const partResp = await fetch(
-          `${base}/api/v1/message/${encodeURIComponent(messageId)}/part/${encodeURIComponent(partId)}`,
-          { headers: { Authorization: auth } },
-        );
-        if (!partResp.ok) {
-          console.warn(`[email-webhook] mailpit get-part HTTP ${partResp.status} for ${messageId}/${partId}`);
-          continue;
-        }
-        const buf = Buffer.from(await partResp.arrayBuffer());
-        attachments.push({
-          filename,
-          contentType: part.ContentType,
-          content: buf.toString("base64"),
-        });
-      } catch (e) {
-        console.warn(`[email-webhook] mailpit get-part error for ${messageId}/${partId}:`, e);
-      }
-    }
-
-    return { text, html, attachments };
-  }
-
-  async deleteReceived(messageId: string): Promise<void> {
-    const base = apiBase();
-    const auth = apiAuthHeader();
-    if (!base || !auth) return;
-    try {
-      const resp = await fetch(`${base}/api/v1/messages`, {
-        method: "DELETE",
-        headers: { Authorization: auth, "Content-Type": "application/json" },
-        body: JSON.stringify({ IDs: [messageId] }),
-      });
-      if (!resp.ok) {
-        console.warn(`[email-webhook] mailpit delete HTTP ${resp.status} for ${messageId}`);
-      }
-    } catch (e) {
-      console.warn(`[email-webhook] mailpit delete error for ${messageId}:`, e);
-    }
+  async deleteReceived(): Promise<void> {
+    // No-op — DevManager deletes the Mailpit copy on our 2xx. The app holds no
+    // Mailpit credentials and never talks to the mail store.
   }
 }
 
 export const selfSmtpProvider = new SelfSmtpProvider();
 
-// ─── Mailpit shapes (tolerant) ───────────────────────────────────────────────
+// ─── NormalizedInboundEmail (DevManager push payload) ────────────────────────
+//
+// {
+//   "message_id": "<mailpit id>",        // stable; our dedupe/idempotency key
+//   "smtp_message_id": "<...@host>|null",
+//   "from": { "name": "Bank|null", "address": "alerts@bank.com" },
+//   "to":   [ { "name": null, "address": "import-<hex>@<domain>" } ],
+//   "recipient": "import-<hex>@<domain>", // the matched address that routed it
+//   "subject": "...",
+//   "text": "...|null",
+//   "html": "<p>...</p>|null",
+//   "attachments": [ { "filename", "content_type", "size", "content_base64" } ],
+//   "received_at": "2026-06-05T10:00:00Z"
+// }
 
-interface MailpitAddress {
-  Name?: string;
-  Address?: string;
+interface NormalizedAddress {
+  name?: string | null;
+  address?: string | null;
 }
-interface MailpitPart {
-  PartID?: string;
-  FileName?: string;
-  ContentType?: string;
-  Size?: number;
-}
-interface MailpitMessage {
-  Text?: string;
-  HTML?: string;
-  Attachments?: MailpitPart[];
+interface NormalizedAttachment {
+  filename?: string;
+  content_type?: string;
+  size?: number;
+  content_base64?: string;
 }
 
-/** Map a Mailpit message summary (webhook payload OR a list item) →
- *  ParsedInboundEmail. Body/attachment bytes are fetched per message later. */
-function summaryToParsed(raw: unknown): ParsedInboundEmail | null {
+/** Map the DevManager push payload → ParsedInboundEmail (attachments inline). */
+function normalizedToParsed(raw: unknown): ParsedInboundEmail | null {
   if (!raw || typeof raw !== "object") return null;
   const data = raw as Record<string, unknown>;
+
   const providerMessageId =
-    typeof data.ID === "string"
-      ? data.ID
-      : typeof data.id === "string"
-        ? data.id
-        : null;
-  const from = extractAddress(data.From);
+    typeof data.message_id === "string" ? data.message_id : null;
+
+  const from = extractAddress(data.from);
   if (!from) return null;
-  const to = extractAddressList(data.To);
+
+  // DevManager already ran the recipient allowlist, so `recipient` is THE
+  // matched import address — route only that, not every `to`/cc recipient
+  // (which would spuriously land in the mailbox/trash router). Fall back to the
+  // `to` list only if `recipient` is somehow absent.
+  const to: string[] = [];
+  if (typeof data.recipient === "string" && data.recipient.trim()) {
+    to.push(data.recipient.trim());
+  } else {
+    for (const a of extractAddressList(data.to)) to.push(a);
+  }
   if (to.length === 0) return null;
-  const subject = typeof data.Subject === "string" ? data.Subject : null;
-  return { providerMessageId, from, to, subject, text: null, html: null, attachments: [] };
+
+  const subject = typeof data.subject === "string" ? data.subject : null;
+  const text = typeof data.text === "string" ? data.text : null;
+  const html = typeof data.html === "string" ? data.html : null;
+
+  const attachments: ResendAttachment[] = [];
+  if (Array.isArray(data.attachments)) {
+    for (const a of data.attachments) {
+      if (!a || typeof a !== "object") continue;
+      const rec = a as NormalizedAttachment;
+      if (typeof rec.filename !== "string" || typeof rec.content_base64 !== "string") continue;
+      attachments.push({
+        filename: rec.filename,
+        contentType: typeof rec.content_type === "string" ? rec.content_type : undefined,
+        content: rec.content_base64,
+      });
+    }
+  }
+
+  return { providerMessageId, from, to, subject, text, html, attachments };
 }
 
 function extractAddress(raw: unknown): string | null {
   if (typeof raw === "string") return raw;
   if (raw && typeof raw === "object") {
-    const a = raw as MailpitAddress;
-    if (typeof a.Address === "string") return a.Address;
+    const a = raw as NormalizedAddress;
+    if (typeof a.address === "string") return a.address;
   }
   return null;
 }

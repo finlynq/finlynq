@@ -1246,7 +1246,8 @@ export const emailInbox = pgTable(
     bodyHtml: text("body_html"),
     // 'service' | 'user' — CHECK enforced in SQL.
     encryptionTier: text("encryption_tier").notNull().default("service"),
-    // Provider (Mailpit) message id — for fetch-back + deleteReceived + poll.
+    // Provider message id (Resend id OR the DevManager push `message_id`, i.e.
+    // the underlying Mailpit id) — the idempotency / dedupe key.
     messageId: text("message_id"),
     // Idempotency = provider message id. UNIQUE so re-delivery is a no-op.
     dedupeKey: text("dedupe_key").notNull().unique(),
