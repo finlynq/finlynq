@@ -3,6 +3,12 @@ import { and, eq } from "drizzle-orm";
 import { generateImportHash, checkDuplicates } from "./import-hash";
 import type { RawTransaction } from "./import-pipeline";
 import { buildNameFields, decryptName, nameLookup } from "./crypto/encrypted-columns";
+// `parseAmount` moved to the dependency-free `./parse-amount` module
+// (2026-06-04) so client components can import it without pulling this file's
+// server-only `@/db` dependency into the browser bundle. Imported here for
+// internal use and re-exported below so every existing server-side
+// `import { parseAmount } from "./csv-parser"` callsite keeps working.
+import { parseAmount } from "./parse-amount";
 
 /**
  * Robust CSV parser that handles:
@@ -105,45 +111,11 @@ function parseCSVRow(line: string): string[] {
   return values;
 }
 
-/**
- * Parse a raw amount string, handling:
- * - Currency symbols ($, €, £, ¥)
- * - Thousands separators (commas and spaces)
- * - Parenthesized negatives: (1,234.56) → -1234.56
- * - Unicode minus (−)
- * - European format: 1.234,56 → 1234.56
- */
-export function parseAmount(raw: string): number {
-  if (!raw || !raw.trim()) return NaN;
-
-  let s = raw.trim();
-
-  // Remove currency symbols
-  s = s.replace(/[$€£¥₹]/g, "");
-
-  // Unicode minus → regular minus
-  s = s.replace(/−/g, "-");
-
-  // Parenthesized negatives
-  if (s.startsWith("(") && s.endsWith(")")) {
-    s = "-" + s.slice(1, -1);
-  }
-
-  s = s.trim();
-
-  // Detect European format: if there's exactly one comma and it has 2 digits after it
-  // AND either no dots or dots used as thousands separators
-  const europeanMatch = s.match(/^-?\d{1,3}(\.\d{3})*,\d{1,2}$/);
-  if (europeanMatch) {
-    s = s.replace(/\./g, "").replace(",", ".");
-  } else {
-    // Standard format: remove commas and spaces used as thousands separators
-    s = s.replace(/[,\s]/g, "");
-  }
-
-  const result = parseFloat(s);
-  return isNaN(result) ? NaN : result;
-}
+// Re-export so external `import { parseAmount } from "./csv-parser"` callers
+// (excel-parser, pdf-parser, import-pipeline, stage-email-import, tests) keep
+// working — the implementation now lives in the pure `./parse-amount` module
+// (imported above for this file's own internal use).
+export { parseAmount };
 
 /**
  * Date format override (FINLYNQ-54) — when the user picks an explicit format

@@ -21,7 +21,9 @@ import {
 } from "@/components/ui/select";
 import { AlertCircle, Loader2, Sparkles } from "lucide-react";
 import type { ColumnMapping, DateFormatOverride } from "@/lib/import-templates";
-import { parseAmount } from "@/lib/csv-parser";
+// Pure, dependency-free module — importing parseAmount from "@/lib/csv-parser"
+// would drag its server-only `@/db` (pg → dns/fs) import into this client bundle.
+import { parseAmount } from "@/lib/parse-amount";
 import { SUPPORTED_CURRENCIES } from "@/lib/fx/supported-currencies";
 
 type DateFormatUi = "auto" | DateFormatOverride;
