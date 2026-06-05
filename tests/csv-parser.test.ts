@@ -202,6 +202,49 @@ describe("default currency fallback", () => {
   });
 });
 
+describe("flip-sign template knob (mapped)", () => {
+  const csv = `When,Who,Value
+2024-01-15,Grocer,50
+2024-01-16,Refund,-12.34
+2024-01-17,Zero,0`;
+
+  it("leaves amounts untouched when flipSign is absent", () => {
+    const { rows } = csvToRawTransactionsWithMapping(csv, {
+      date: "When",
+      amount: "Value",
+      payee: "Who",
+    });
+    expect(rows.map((r) => r.amount)).toEqual([50, -12.34, 0]);
+  });
+
+  it("multiplies every parsed amount by -1 when flipSign is true", () => {
+    // flipSign is a real boolean in saved-template / dialog JSON; the param is
+    // typed Record<string, string> so cast through unknown to mirror callers.
+    const mapping = {
+      date: "When",
+      amount: "Value",
+      payee: "Who",
+      flipSign: true,
+    } as unknown as Record<string, string>;
+    const { rows } = csvToRawTransactionsWithMapping(csv, mapping);
+    expect(rows[0].amount).toBe(-50);
+    expect(rows[1].amount).toBe(12.34);
+    // Zero stays +0 (never -0) so downstream sign checks are unaffected.
+    expect(Object.is(rows[2].amount, 0)).toBe(true);
+  });
+
+  it("treats flipSign:false as no flip", () => {
+    const mapping = {
+      date: "When",
+      amount: "Value",
+      payee: "Who",
+      flipSign: false,
+    } as unknown as Record<string, string>;
+    const { rows } = csvToRawTransactionsWithMapping(csv, mapping);
+    expect(rows.map((r) => r.amount)).toEqual([50, -12.34, 0]);
+  });
+});
+
 describe("parseAmount", () => {
   it("parses standard amounts", () => {
     expect(parseAmount("100.50")).toBe(100.5);

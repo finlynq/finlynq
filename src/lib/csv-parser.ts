@@ -355,6 +355,13 @@ export function csvToRawTransactionsWithMapping(
     return { rows: [], errors: [{ row: 0, message: "Column mapping must include date and amount" }] };
   }
 
+  // Optional sign-flip parser knob (ColumnMapping.flipSign). The mapping is
+  // typed `Record<string, string>` for back-compat but a saved template's /
+  // dialog's JSON carries a real boolean here, so read it defensively. When
+  // true, every parsed amount is multiplied by -1 (cash amount only — never
+  // quantity, never the Balance anchor).
+  const flipSign = (mapping as { flipSign?: unknown }).flipSign === true;
+
   for (let i = 0; i < parsed.length; i++) {
     const row = parsed[i];
     const dateRaw = row[dateCol] ?? "";
@@ -366,11 +373,13 @@ export function csvToRawTransactionsWithMapping(
       continue;
     }
 
-    const amount = parseAmount(amountRaw);
-    if (isNaN(amount)) {
+    const parsedAmount = parseAmount(amountRaw);
+    if (isNaN(parsedAmount)) {
       errors.push({ row: i + 2, message: `Invalid amount: "${amountRaw}"` });
       continue;
     }
+    // Guard -0 so a zero amount stays +0 after the flip.
+    const amount = flipSign && parsedAmount !== 0 ? -parsedAmount : parsedAmount;
 
     rows.push({
       date,

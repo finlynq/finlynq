@@ -37,7 +37,11 @@ interface EditTemplateDialogProps {
   onSaved: (template: ImportTemplate) => void;
 }
 
-const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
+// flipSign is a boolean knob (rendered as a checkbox below), not a column
+// dropdown, so it's excluded from the field→header label map.
+type MappingColumnField = Exclude<keyof ColumnMapping, "flipSign">;
+
+const FIELD_LABELS: Record<MappingColumnField, string> = {
   date: "Date *",
   amount: "Amount *",
   account: "Account",
@@ -49,7 +53,7 @@ const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
   balance: "Balance (running)",
 };
 
-const MAPPING_FIELDS = Object.keys(FIELD_LABELS) as (keyof ColumnMapping)[];
+const MAPPING_FIELDS = Object.keys(FIELD_LABELS) as MappingColumnField[];
 
 const NONE_ACCOUNT = "__none_account__";
 
@@ -136,7 +140,7 @@ export function EditTemplateDialog({
     }
   };
 
-  const setMappingField = (field: keyof ColumnMapping, value: string) => {
+  const setMappingField = (field: MappingColumnField, value: string) => {
     setMapping((prev) => ({ ...prev, [field]: value || undefined }));
   };
 
@@ -353,6 +357,23 @@ export function EditTemplateDialog({
                   </Select>
                 </div>
               </div>
+              <label className="flex items-start gap-2.5 rounded-lg border bg-background px-3 py-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={mapping.flipSign === true}
+                  onChange={(e) =>
+                    setMapping((prev) => ({ ...prev, flipSign: e.target.checked }))
+                  }
+                  className="h-4 w-4 mt-0.5 rounded border-gray-300"
+                />
+                <span className="flex-1">
+                  <span className="block text-sm font-medium">Flip sign of amounts</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Multiply every amount by -1 on import. Use when this source
+                    exports expenses as positive (or income as negative).
+                  </span>
+                </span>
+              </label>
             </div>
           </details>
 

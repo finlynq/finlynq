@@ -111,6 +111,10 @@ export interface ColumnMapping {
   tags?: string;
   quantity?: string;
   portfolioHolding?: string;
+  // 2026-06-04 — see ColumnMapping.flipSign in import-templates.ts. Boolean
+  // parser knob (not a column header): when true, multiply every parsed
+  // amount by -1. Applied to `amount` only; quantity is untouched.
+  flipSign?: boolean;
 }
 
 export interface ExcelParseResult {
@@ -220,11 +224,14 @@ export async function extractExcelRows(
       continue;
     }
 
-    const amount = parseAmount(rawAmount);
-    if (isNaN(amount)) {
+    const parsedAmount = parseAmount(rawAmount);
+    if (isNaN(parsedAmount)) {
       errors.push({ row: rowNum, message: `Invalid amount: "${rawAmount}"` });
       continue;
     }
+    // Optional sign flip (template knob). Guard the -0 case so a zero amount
+    // stays +0. Applied to the cash amount only — quantity is never flipped.
+    const amount = mapping.flipSign && parsedAmount !== 0 ? -parsedAmount : parsedAmount;
 
     rows.push({
       date,

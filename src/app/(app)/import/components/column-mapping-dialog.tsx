@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { AlertCircle, Loader2, Sparkles } from "lucide-react";
 import type { ColumnMapping, DateFormatOverride } from "@/lib/import-templates";
+import { parseAmount } from "@/lib/csv-parser";
 import { SUPPORTED_CURRENCIES } from "@/lib/fx/supported-currencies";
 
 type DateFormatUi = "auto" | DateFormatOverride;
@@ -73,7 +74,11 @@ interface ColumnMappingDialogProps {
   confirmMode?: boolean;
 }
 
-const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
+// flipSign is a boolean knob (rendered as a checkbox below), not a column
+// dropdown, so it's excluded from the field→header label map.
+type MappingColumnField = Exclude<keyof ColumnMapping, "flipSign">;
+
+const FIELD_LABELS: Record<MappingColumnField, string> = {
   date: "Date *",
   amount: "Amount *",
   account: "Account",
@@ -86,7 +91,7 @@ const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
   // parser captures one anchor per date (last-in-file-order's value).
   balance: "Balance (running)",
 };
-const MAPPING_FIELDS = Object.keys(FIELD_LABELS) as (keyof ColumnMapping)[];
+const MAPPING_FIELDS = Object.keys(FIELD_LABELS) as MappingColumnField[];
 const NONE = "__none__";
 
 /** Clamp a string skip input to an integer in [0, 100]. */
@@ -175,7 +180,7 @@ export function ColumnMappingDialog({
     };
   }, []);
 
-  const setField = (field: keyof ColumnMapping, value: string) => {
+  const setField = (field: MappingColumnField, value: string) => {
     setMapping((prev) => ({ ...prev, [field]: value || undefined }));
   };
 
@@ -191,7 +196,13 @@ export function ColumnMappingDialog({
       setLocalHeaders(next.headers);
       setLocalSampleRows(next.sampleRows);
       setLocalSuggested(next.suggestedMapping);
-      setMapping(next.suggestedMapping ?? { date: "", amount: "" });
+      // Re-seed the column mappings from the fresh suggestion (the old ones
+      // point at pre-trim column names) but PRESERVE the flip-sign toggle —
+      // it's independent of which columns map where.
+      setMapping((prev) => ({
+        ...(next.suggestedMapping ?? { date: "", amount: "" }),
+        ...(prev.flipSign ? { flipSign: true } : {}),
+      }));
       setError("");
     } catch {
       if (seq === reparseSeq.current) {
@@ -235,9 +246,18 @@ export function ColumnMappingDialog({
   // Compute a live sample using the current mapping so the user sees what
   // each column resolves to before committing.
   const mappedSample = useMemo(() => {
+    // Reflect the flip-sign knob so the previewed Amount matches what lands
+    // in staging. Falls back to the raw cell text when it isn't a parseable
+    // number (the parser would reject that row anyway).
+    const displayAmount = (raw: string): string => {
+      if (!mapping.flipSign || !raw) return raw;
+      const n = parseAmount(raw);
+      if (Number.isNaN(n)) return raw;
+      return String(n === 0 ? 0 : -n);
+    };
     return localSampleRows.slice(0, 5).map((row) => ({
       date: mapping.date ? row[mapping.date] ?? "" : "",
-      amount: mapping.amount ? row[mapping.amount] ?? "" : "",
+      amount: displayAmount(mapping.amount ? row[mapping.amount] ?? "" : ""),
       payee: mapping.payee ? row[mapping.payee] ?? "" : "",
       note: mapping.note ? row[mapping.note] ?? "" : "",
       currency: mapping.currency
@@ -362,6 +382,24 @@ export function ColumnMappingDialog({
                   </Select>
                 </div>
               </div>
+              <label className="flex items-start gap-2.5 rounded-lg border bg-background px-3 py-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={mapping.flipSign === true}
+                  onChange={(e) =>
+                    setMapping((prev) => ({ ...prev, flipSign: e.target.checked }))
+                  }
+                  className="h-4 w-4 mt-0.5 rounded border-gray-300"
+                />
+                <span className="flex-1">
+                  <span className="block text-sm font-medium">Flip sign of amounts</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Multiply every amount by -1 on import — for sources that
+                    export expenses as positive (or income as negative). The
+                    sample below updates to match.
+                  </span>
+                </span>
+              </label>
               {redetecting && (
                 <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />

@@ -18,6 +18,15 @@ export interface ColumnMapping {
   // resulting anchors on `staged_imports.parsed_anchors`. Approve-time
   // validation compares them against the running total.
   balance?: string;
+  // 2026-06-04 — flip the sign of every parsed transaction amount (× -1).
+  // For banks that export debits as positive / credits as negative (or
+  // vice-versa) against Finlynq's "negative = outflow" convention. NOT a
+  // column header — a boolean parser knob persisted in the same JSON blob
+  // so it rides through the template POST/PUT routes + deserializeTemplate
+  // with no migration. Applied to `amount` ONLY (never quantity, and never
+  // the Balance anchor, which is an absolute running balance). Undefined /
+  // false = no flip (the default for every existing template).
+  flipSign?: boolean;
 }
 
 /** Parser-knob shape persisted on `import_templates`. Mirrors the upload
