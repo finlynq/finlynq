@@ -51,6 +51,7 @@ import { putDEK } from "@/lib/crypto/dek-cache";
 // no plaintext source; both helpers were deleted.
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
 import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
+import { enqueueProcessPendingInbox } from "@/lib/email-import/process-pending-inbox";
 import { enqueueUpgradeUserFieldEncryption } from "@/lib/crypto/upgrade-user-fields";
 
 // Accept either {identifier, password} (preferred) OR {email, password}
@@ -277,6 +278,10 @@ export async function POST(request: NextRequest) {
       // plaintext note/payee/tags columns + rule sensitive fields under the
       // user's DEK. Idempotent, fire-and-forget. Fixes legacy/stdio plaintext.
       enqueueUpgradeUserFieldEncryption(user.id, dek);
+      // Email-inbox sweep (Epic B5): upgrade service-tier inbox rows, then
+      // auto-record any body emails that match a user's email-import rule.
+      // Idempotent, fire-and-forget, DEK-bearing.
+      enqueueProcessPendingInbox(user.id, dek);
     }
 
     const response = NextResponse.json({ success: true });
