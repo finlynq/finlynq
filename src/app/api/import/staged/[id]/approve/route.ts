@@ -37,10 +37,15 @@
  *     (Pre-Phase-3 'linked' staged rows preserve their lineage; the new
  *     UI no longer exposes this workflow.)
  *   - Promotes anchors via upsertBankBalanceAnchors with the new batch id.
- *   - Marks staged_imports.status='approved'.
- *   - Deletes materialized staged_transactions rows so the batch can be
- *     re-approved cleanly (skipped_duplicate rows persist when not in
- *     explicit rowIds; the UI re-renders without them).
+ *   - Marks each materialized staged_transactions row row_status='approved'
+ *     and KEEPS it (2026-06-05). The rows stay on the staging review's file
+ *     side, highlighted as "imported", instead of vanishing — and the
+ *     "Loaded into the bank ledger" click re-opens this same review for the
+ *     batch. Re-sending is safe: imported rows are excluded from the approve
+ *     selection client-side, and upsertBankTransaction is idempotent.
+ *   - Marks staged_imports.status='approved' only once NO row remains with
+ *     row_status != 'approved' (so a fully-sent import leaves the pending
+ *     list while its rows persist for re-opening).
  *
  * Returns:
  *   { success, batchId, approved, skippedDuplicates, legacyLinked,
