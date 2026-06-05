@@ -23,6 +23,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Trash2, RefreshCcw, ChevronDown, ChevronRight } from "lucide-react";
+import { formatCurrency } from "@/lib/currency";
+
+/** One bank_transactions row a batch loaded — fetched on demand when the user
+ *  expands a batch to see what it brought in. */
+interface LoadedRow {
+  id: string;
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string | null;
+  note: string | null;
+  category: string | null;
+  /** Set once the row is materialized into the ledger (else bank-only). */
+  linkedTransactionId: number | null;
+}
 
 interface BatchRow {
   id: string;
@@ -65,6 +80,12 @@ export function RecentUploadsPanel({
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  // Click-to-view: which batch is expanded, its loaded rows (cached per
+  // batch), and per-batch load/error state.
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, LoadedRow[]>>({});
+  const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     if (accountId == null) {
@@ -78,12 +99,59 @@ export function RecentUploadsPanel({
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as BatchRow[];
       setBatches(data);
+      // Drop any cached expand/detail state — a refresh (or post-delete
+      // reload) may have changed row counts, so re-expanding refetches.
+      setExpandedId(null);
+      setDetails({});
+      setDetailError({});
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load recent uploads");
     } finally {
       setLoading(false);
     }
   }, [accountId]);
+
+  /** Fetch the rows a batch loaded (decrypted) — cached per batch. */
+  const loadDetail = useCallback(async (batchId: string) => {
+    setDetailLoadingId(batchId);
+    setDetailError((e) => {
+      if (!(batchId in e)) return e;
+      const next = { ...e };
+      delete next[batchId];
+      return next;
+    });
+    try {
+      const res = await fetch(`/api/import/uploads/${batchId}`);
+      if (res.status === 423) {
+        throw new Error("Unlock your session to view what this batch loaded.");
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setDetails((d) => ({ ...d, [batchId]: Array.isArray(data?.rows) ? data.rows : [] }));
+    } catch (e) {
+      setDetailError((er) => ({
+        ...er,
+        [batchId]: e instanceof Error ? e.message : "Failed to load rows",
+      }));
+    } finally {
+      setDetailLoadingId((cur) => (cur === batchId ? null : cur));
+    }
+  }, []);
+
+  /** Toggle a batch open/closed; fetch its rows on first open. */
+  const toggleExpand = useCallback(
+    (batchId: string) => {
+      if (expandedId === batchId) {
+        setExpandedId(null);
+        return;
+      }
+      setExpandedId(batchId);
+      if (!details[batchId] && detailLoadingId !== batchId) {
+        void loadDetail(batchId);
+      }
+    },
+    [expandedId, details, detailLoadingId, loadDetail],
+  );
 
   useEffect(() => {
     void load();
@@ -183,46 +251,106 @@ export function RecentUploadsPanel({
               {batches.map((b) => {
                 const dt = new Date(b.uploadedAt);
                 const dateLabel = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+                const isOpen = expandedId === b.id;
+                const rowsForBatch = details[b.id];
                 return (
-                  <li
-                    key={b.id}
-                    className="flex items-center justify-between gap-4 px-4 py-3 text-sm"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs text-muted-foreground">
-                          {dateLabel}
-                        </span>
-                        <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] uppercase">
-                          {b.mode}
-                        </span>
-                        <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] uppercase">
-                          {b.source}
-                        </span>
-                        {b.hasLinkedTransactions && (
-                          <span className="inline-block rounded border border-amber-200 bg-amber-50 px-1.5 py-0 text-[10px] text-amber-800">
-                            has linked tx
+                  <li key={b.id} className="text-sm">
+                    <div className="flex items-center justify-between gap-4 px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => toggleExpand(b.id)}
+                        aria-expanded={isOpen}
+                        className="min-w-0 flex-1 flex items-start gap-2 text-left hover:opacity-80"
+                        title="Show what this batch loaded"
+                      >
+                        {isOpen ? (
+                          <ChevronDown className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-2">
+                            <span className="font-mono text-xs text-muted-foreground">
+                              {dateLabel}
+                            </span>
+                            <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] uppercase">
+                              {b.mode}
+                            </span>
+                            <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] uppercase">
+                              {b.source}
+                            </span>
+                            {b.hasLinkedTransactions && (
+                              <span className="inline-block rounded border border-amber-200 bg-amber-50 px-1.5 py-0 text-[10px] text-amber-800">
+                                has linked tx
+                              </span>
+                            )}
                           </span>
+                          <span className="mt-0.5 block truncate text-xs">
+                            {b.filename ?? "(no filename)"}{" "}
+                            <span className="text-muted-foreground">
+                              · {b.currentRowCount}/{b.rowCount} rows
+                              {b.anchorCount > 0 && ` · ${b.anchorCount} anchor${b.anchorCount === 1 ? "" : "s"}`}
+                            </span>
+                          </span>
+                        </span>
+                      </button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-rose-700 hover:text-rose-800 hover:bg-rose-50"
+                        onClick={() => void deleteBatch(b.id, false)}
+                        disabled={deletingId === b.id}
+                      >
+                        <Trash2 className="h-4 w-4 mr-1.5" />
+                        {deletingId === b.id ? "Deleting…" : "Delete batch"}
+                      </Button>
+                    </div>
+
+                    {isOpen && (
+                      <div className="border-t bg-muted/20 px-4 py-2.5">
+                        {detailLoadingId === b.id && (
+                          <p className="text-xs text-muted-foreground">Loading what this batch loaded…</p>
+                        )}
+                        {detailError[b.id] && (
+                          <p className="text-xs text-rose-600">{detailError[b.id]}</p>
+                        )}
+                        {detailLoadingId !== b.id &&
+                          !detailError[b.id] &&
+                          rowsForBatch &&
+                          rowsForBatch.length === 0 && (
+                            <p className="text-xs text-muted-foreground">
+                              No rows remain from this batch — they were deleted from the bank ledger.
+                            </p>
+                          )}
+                        {rowsForBatch && rowsForBatch.length > 0 && (
+                          <ul className="divide-y divide-border/60">
+                            {rowsForBatch.map((row) => (
+                              <li
+                                key={row.id}
+                                className="flex items-center justify-between gap-3 py-1.5"
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono text-[11px] text-muted-foreground shrink-0">
+                                      {row.date}
+                                    </span>
+                                    <span className="truncate">{row.payee || "(no payee)"}</span>
+                                  </div>
+                                  <div className="text-[11px] text-muted-foreground">
+                                    {row.category ?? "uncategorized"}
+                                    {" · "}
+                                    {row.linkedTransactionId != null ? "in ledger" : "bank-only"}
+                                  </div>
+                                </div>
+                                <span className="font-mono shrink-0 tabular-nums">
+                                  {formatCurrency(row.amount, row.currency)}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
                         )}
                       </div>
-                      <div className="mt-0.5 truncate text-xs">
-                        {b.filename ?? "(no filename)"}{" "}
-                        <span className="text-muted-foreground">
-                          · {b.currentRowCount}/{b.rowCount} rows
-                          {b.anchorCount > 0 && ` · ${b.anchorCount} anchor${b.anchorCount === 1 ? "" : "s"}`}
-                        </span>
-                      </div>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-rose-700 hover:text-rose-800 hover:bg-rose-50"
-                      onClick={() => void deleteBatch(b.id, false)}
-                      disabled={deletingId === b.id}
-                    >
-                      <Trash2 className="h-4 w-4 mr-1.5" />
-                      {deletingId === b.id ? "Deleting…" : "Delete batch"}
-                    </Button>
+                    )}
                   </li>
                 );
               })}

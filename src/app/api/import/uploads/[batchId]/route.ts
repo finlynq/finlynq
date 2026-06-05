@@ -40,11 +40,130 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { tryDecryptField } from "@/lib/crypto/envelope";
+import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { safeErrorMessage } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * GET /api/import/uploads/[batchId]
+ *
+ * Returns the bank_transactions a single upload batch loaded — so the
+ * "Loaded into the bank ledger" section on /import can let the user click a
+ * processed batch and see exactly what it brought in (decrypted payee /
+ * amount / date + whether each row is now materialized in the ledger).
+ *
+ * Shows the CURRENT rows still linked to the batch (drops as the user deletes
+ * individual rows or runs batch-undo), matching the panel's
+ * `currentRowCount`. Tier-aware decrypt mirrors /api/import/bank-ledger:
+ * 'user' rows via the session DEK, 'service' rows via PF_STAGING_KEY.
+ *
+ * Cross-tenant batchId → 404 (consistent with the rest of the import surface).
+ */
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ batchId: string }> },
+) {
+  // Decryption needs a DEK — 423 if the session is locked (the panel surfaces
+  // a "unlock to view" hint). Mirrors the bank-ledger read.
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
+  const { batchId } = await params;
+
+  const batch = await db
+    .select({
+      id: schema.bankUploadBatches.id,
+      accountId: schema.bankUploadBatches.accountId,
+      filename: schema.bankUploadBatches.filename,
+      mode: schema.bankUploadBatches.mode,
+      source: schema.bankUploadBatches.source,
+      uploadedAt: schema.bankUploadBatches.uploadedAt,
+      rowCount: schema.bankUploadBatches.rowCount,
+      anchorCount: schema.bankUploadBatches.anchorCount,
+    })
+    .from(schema.bankUploadBatches)
+    .where(and(
+      eq(schema.bankUploadBatches.id, batchId),
+      eq(schema.bankUploadBatches.userId, userId),
+    ))
+    .get();
+  if (!batch) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  const rows = await db
+    .select({
+      id: schema.bankTransactions.id,
+      date: schema.bankTransactions.date,
+      amount: schema.bankTransactions.amount,
+      currency: schema.bankTransactions.currency,
+      payee: schema.bankTransactions.payee,
+      note: schema.bankTransactions.note,
+      encryptionTier: schema.bankTransactions.encryptionTier,
+      txId: schema.transactions.id,
+      txCategoryNameCt: schema.categories.nameCt,
+    })
+    .from(schema.bankTransactions)
+    .leftJoin(
+      schema.transactions,
+      and(
+        eq(schema.transactions.bankTransactionId, schema.bankTransactions.id),
+        eq(schema.transactions.userId, schema.bankTransactions.userId),
+      ),
+    )
+    .leftJoin(
+      schema.categories,
+      eq(schema.transactions.categoryId, schema.categories.id),
+    )
+    .where(and(
+      eq(schema.bankTransactions.userId, userId),
+      eq(schema.bankTransactions.uploadBatchId, batchId),
+    ))
+    .orderBy(desc(schema.bankTransactions.date), desc(schema.bankTransactions.id))
+    .all();
+
+  // Dedup by bank id (the leftJoin can fan out a row if it ever linked to
+  // more than one transaction — defensive, matches the bank-ledger read).
+  const seen = new Set<string>();
+  const out: Array<{
+    id: string;
+    date: string;
+    amount: number;
+    currency: string;
+    payee: string | null;
+    note: string | null;
+    category: string | null;
+    linkedTransactionId: number | null;
+  }> = [];
+  for (const r of rows) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    const tier = r.encryptionTier ?? "user";
+    const decode = (v: string | null): string | null => {
+      if (v == null) return null;
+      return tier === "user" ? tryDecryptField(dek, v) : decryptStaged(v);
+    };
+    out.push({
+      id: r.id,
+      date: r.date,
+      amount: Number(r.amount),
+      currency: r.currency,
+      payee: decode(r.payee),
+      note: decode(r.note),
+      category: r.txCategoryNameCt
+        ? tryDecryptField(dek, r.txCategoryNameCt, "categories.name_ct")
+        : null,
+      linkedTransactionId: r.txId ?? null,
+    });
+  }
+
+  return NextResponse.json({ batch, rows: out });
+}
 
 export async function DELETE(
   request: NextRequest,
