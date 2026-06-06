@@ -52,6 +52,7 @@ import {
 import { InboxReconciledTab } from "@/components/inbox/inbox-reconciled-tab";
 import { InboxToApproveTab } from "@/components/inbox/inbox-to-approve-tab";
 import { InboxToCategorizeTab } from "@/components/inbox/inbox-to-categorize-tab";
+import { InboxEmailTab } from "@/components/inbox/inbox-email-tab";
 
 interface Account {
   id: number;
@@ -200,9 +201,10 @@ function ImportPageInner() {
   }, [activeLens]);
 
   // Keep `tab` valid for the visible set. If the user picks a lens whose
-  // tab set doesn't include the current tab, snap to the lens default.
+  // tab set doesn't include the current tab, snap to the lens default. The
+  // account-agnostic "email" tab is always valid (it's not lens-scoped).
   useEffect(() => {
-    if (!visibleTabs.includes(tab)) {
+    if (tab !== "email" && !visibleTabs.includes(tab)) {
       setTab(defaultTabFor(activeLens));
     }
   }, [visibleTabs, tab, activeLens]);
@@ -380,6 +382,8 @@ function ImportPageInner() {
             <TabsTrigger value="to-categorize">To categorize</TabsTrigger>
           )}
           <TabsTrigger value="reconciled">Reconciled</TabsTrigger>
+          {/* Account-agnostic — emails aren't bound to an account until recorded. */}
+          <TabsTrigger value="email">Email</TabsTrigger>
         </TabsList>
 
         {visibleTabs.includes("staging") && (
@@ -437,6 +441,10 @@ function ImportPageInner() {
               showAutoRuleBanner
             />
           )}
+        </TabsContent>
+
+        <TabsContent value="email">
+          <InboxEmailTab />
         </TabsContent>
       </Tabs>
 

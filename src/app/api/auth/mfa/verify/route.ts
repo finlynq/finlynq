@@ -36,6 +36,7 @@ import { decryptField } from "@/lib/crypto/envelope";
 // remains and reads ciphertext directly.
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
 import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
+import { enqueueProcessPendingInbox } from "@/lib/email-import/process-pending-inbox";
 import { enqueueUpgradeUserFieldEncryption } from "@/lib/crypto/upgrade-user-fields";
 
 const verifySchema = z.object({
@@ -220,6 +221,8 @@ export async function POST(request: NextRequest) {
     enqueueUpgradeStagingEncryption(user.id, pendingDek);
     // Plaintext-gap closure backstop (2026-06-01) — see login route.
     enqueueUpgradeUserFieldEncryption(user.id, pendingDek);
+    // Email-inbox sweep (Epic B5) — see login route.
+    enqueueProcessPendingInbox(user.id, pendingDek);
 
     const response = NextResponse.json({ success: true });
 

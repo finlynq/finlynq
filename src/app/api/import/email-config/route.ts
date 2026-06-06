@@ -5,6 +5,7 @@ import { randomUUID, randomBytes } from "crypto";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { wrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
+import { importLocalpartPrefix } from "@/lib/email-import/import-address";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -38,10 +39,12 @@ export async function POST(request: NextRequest) {
     // email-import pipeline was rebuilt for Resend Inbound.
     const token = randomBytes(16).toString("hex");
     // Domain is configurable so self-hosters can point their own MX at the
-    // webhook. Managed/prod uses finlynq.com (Resend Inbound — see
-    // /api/import/email-webhook for the wiring TODO).
+    // webhook. Managed/prod uses finlynq.com.
     const domain = process.env.IMPORT_EMAIL_DOMAIN || "finlynq.com";
-    const email = `import-${token}@${domain}`;
+    // Local-part prefix is env-specific so DevManager's single Mailpit
+    // catch-all can route by prefix: 'import-' → prod, 'importdev-' → dev
+    // (IMPORT_EMAIL_LOCALPART_PREFIX, default 'import-'). See import-address.ts.
+    const email = `${importLocalpartPrefix()}${token}@${domain}`;
     const webhookSecret = randomBytes(32).toString("hex");
     const wrappedDek = wrapDEKForSecret(dek, webhookSecret);
 

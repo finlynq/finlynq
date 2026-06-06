@@ -39,6 +39,7 @@ import {
 import { TemplateManager } from "@/app/(app)/import/components/template-manager";
 import { ConnectorTab } from "@/app/(app)/import/components/connector-tab";
 import { InvestmentStatementImporter } from "@/app/(app)/import/components/investment-statement-importer";
+import { EmailRulesManager } from "@/components/inbox/email-rules-manager";
 import type { ImportTemplate } from "@/lib/import-templates";
 
 export default function ImportSettingsPage() {
@@ -322,14 +323,17 @@ export default function ImportSettingsPage() {
                       templates automatically.
                     </li>
                     <li>
-                      Parsed transactions wait for your review at{" "}
-                      <a
-                        href="/import/pending"
-                        className="underline hover:no-underline"
-                      >
-                        /import/pending
+                      A transaction in the email <span className="font-medium">body</span>{" "}
+                      (a bank &quot;you spent $X&quot; alert) is parsed too and
+                      shows up in the{" "}
+                      <a href="/import?tab=email" className="underline hover:no-underline">
+                        Email tab
                       </a>{" "}
-                      — nothing is imported until you approve.
+                      of Import.
+                    </li>
+                    <li>
+                      Set up an <span className="font-medium">email rule</span>{" "}
+                      below to auto-record body emails from a known sender.
                     </li>
                     <li>
                       Duplicate transactions are flagged and skipped on approve.
@@ -339,6 +343,8 @@ export default function ImportSettingsPage() {
                 </div>
               </CardContent>
             </Card>
+
+            <EmailRulesManager />
           </div>
         </TabsContent>
 

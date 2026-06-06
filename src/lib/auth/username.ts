@@ -12,7 +12,8 @@
  *
  * Reserved names mirror the email-import router's mailbox prefixes
  * (src/lib/email-import/address-router.ts) plus a defensive block on the
- * 'import-' prefix used by per-user import addresses. The reserved check
+ * import-address prefix used by per-user import addresses ('import-', and the
+ * env-specific prefix like 'importdev-' on dev). The reserved check
  * only applies to *bare* handles (no '@') — once a username contains '@',
  * it's an email-shaped string and 'admin@x.com' is fine because admin role
  * is decided by users.role, not by name.
@@ -21,6 +22,8 @@
  * versa) is the register route's responsibility — see isIdentifierClaimed
  * in src/lib/auth/queries.ts.
  */
+
+import { importLocalpartPrefix } from "@/lib/email-import/import-address";
 
 const USERNAME_RE = /^[a-z0-9._@+_-]{3,254}$/;
 
@@ -64,7 +67,11 @@ export function validateUsername(input: string): UsernameValidation {
   // Reserved names only apply to bare handles. Email-shaped usernames
   // (containing '@') bypass this check on purpose.
   if (!value.includes("@")) {
-    if (RESERVED_USERNAMES.has(value) || value.startsWith("import-")) {
+    if (
+      RESERVED_USERNAMES.has(value) ||
+      value.startsWith("import-") ||
+      value.startsWith(importLocalpartPrefix())
+    ) {
       return { ok: false, error: "This username is reserved." };
     }
   }

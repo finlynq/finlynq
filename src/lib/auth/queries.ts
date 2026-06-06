@@ -481,6 +481,12 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // user's session DEK after wipe, plus the staged-import plaintext buffer and
   // mcp_uploads metadata rows whose on-disk files were unlinked above.
   await tx.delete(s.mcpUploads).where(eq(s.mcpUploads.userId, userId));
+  // Email inbox + rules (Epic B2). email_inbox FKs email_import_rules
+  // (SET NULL), so delete the inbox first to keep the "email" group together.
+  // Both also carry user_id ON DELETE CASCADE for the delete-account path, but
+  // wipe keeps the user row so we delete explicitly here.
+  await tx.delete(s.emailInbox).where(eq(s.emailInbox.userId, userId));
+  await tx.delete(s.emailImportRules).where(eq(s.emailImportRules.userId, userId));
   await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
   await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
   await tx.delete(s.passwordResetTokens).where(eq(s.passwordResetTokens.userId, userId));

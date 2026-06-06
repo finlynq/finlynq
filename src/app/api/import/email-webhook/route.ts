@@ -1,24 +1,27 @@
 /**
  * Inbound email webhook.
  *
- * Two accepted transports:
+ * Three accepted transports:
  *
- *   1. Resend Inbound (production path) — JSON body, svix-signed. The Resend
- *      dashboard points a catch-all `*@finlynq.com` route here. We verify
- *      the svix signature, route the `to` address through the 3-way router
- *      (import / mailbox / trash), and dispatch:
- *        - import  → stage transactions for review at /import/pending
- *        - mailbox → store in admin inbox, notify admins
- *        - trash   → store in admin inbox with 24h TTL, notify admins
- *      Always returns 200 on routed requests (no status-code leak). Returns
- *      401 on signature failure, 413 on oversize, 429 on rate limit.
+ *   1. Provider JSON (production path) — `application/json`. The provider is
+ *      selected by INBOUND_EMAIL_PROVIDER:
+ *        - 'self-smtp' → self-hosted via the DevManager push relay (HMAC-signed;
+ *          self-contained payload — body + attachments inline; DevManager owns
+ *          the Mailpit delete + retries, so the app makes no mail-store calls).
+ *        - 'resend'    → Resend Inbound (svix-signed; no delete API) — default.
+ *      Both share one handler via the InboundEmailProvider abstraction
+ *      (src/lib/email-import/providers) + the shared ingest path
+ *      (src/lib/email-import/ingest). The `to`/`recipient` address is routed
+ *      import / mailbox / trash; import emails stage attachments + heuristically
+ *      parse a body transaction + write a per-user email_inbox row; the
+ *      DEK-bearing sweep (B5) later auto-records body emails that match a user
+ *      rule. Always 200 on routed requests; 401 on auth failure, 413 on
+ *      oversize. A non-2xx makes DevManager retain + retry the message (svix
+ *      retries for Resend), so a transient failure loses nothing.
  *
  *   2. Self-hosted multipart (legacy path) — `multipart/form-data` with
  *      `x-webhook-secret` header. Still auto-imports into `transactions`
- *      using the `email_webhook_dek` envelope. Kept for backward compat;
- *      will be removed once Phase B cutover lands.
- *
- * See Research/email-import-resend-plan.md.
+ *      using the `email_webhook_dek` envelope. Kept for backward compat.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -39,28 +42,20 @@ import { safeErrorMessage } from "@/lib/validate";
 import { deserializeTemplate, findBestTemplate, autoDetectColumnMapping } from "@/lib/import-templates";
 import { unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
-import { checkRateLimit } from "@/lib/rate-limit";
-import { extractSvixHeaders, verifySvixSignature, SvixVerifyError } from "@/lib/webhooks/svix";
-import { routeAddress } from "@/lib/email-import/address-router";
-import { parseResendAttachments, type ResendAttachment } from "@/lib/email-import/parse-attachments";
-import { fetchResendAttachments } from "@/lib/email-import/fetch-resend-attachments";
-import { stageEmailImport } from "@/lib/email-import/stage-email-import";
-import {
-  storeIncomingEmail,
-  notifyAdminsOfIncoming,
-} from "@/lib/email-import/store-incoming-email";
-import { sendBounceIfAuthenticated } from "@/lib/email-import/bounce";
+import { getInboundProvider } from "@/lib/email-import/providers";
+import { ingestInboundEmail } from "@/lib/email-import/ingest";
 
-// 10 MB request-body cap on the Resend path.
-const MAX_BODY_BYTES = 10 * 1024 * 1024;
-// 25 emails/hour/recipient address.
-const INBOUND_RATE_MAX = 25;
-const INBOUND_RATE_WINDOW_MS = 60 * 60 * 1000;
+// Request-body cap on the JSON path. The DevManager push relay inlines
+// attachments as base64 (~+33%), so its 10 MB/message cap can yield a ~13.4 MB
+// JSON payload; a 413 here would loop DevManager's retry. 20 MB gives headroom
+// over the inflated worst case. (Resend payloads don't inline attachments, so
+// this is only ever exercised by the self-smtp push.)
+const MAX_BODY_BYTES = 20 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
   const ct = (request.headers.get("content-type") || "").toLowerCase();
   if (ct.includes("application/json")) {
-    return handleResendInbound(request);
+    return handleProviderInbound(request);
   }
   if (ct.includes("multipart/form-data")) {
     return handleSelfHostedMultipart(request);
@@ -68,284 +63,56 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({ error: "Unsupported content-type" }, { status: 415 });
 }
 
-// ─── Resend path ────────────────────────────────────────────────────────────
+// ─── Provider JSON path (Resend OR Mailpit) ─────────────────────────────────
 
-async function handleResendInbound(request: NextRequest): Promise<NextResponse> {
-  // Size cap via Content-Length fast-path — we want to reject huge payloads
-  // before buffering the body.
+async function handleProviderInbound(request: NextRequest): Promise<NextResponse> {
   const lenHeader = request.headers.get("content-length");
   if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
     return NextResponse.json({ error: "Payload too large" }, { status: 413 });
   }
 
-  const secret = process.env.RESEND_WEBHOOK_SECRET;
-  if (!secret) {
-    // Misconfiguration — fail loud so the deploy is obviously broken.
-    console.error("[email-webhook] RESEND_WEBHOOK_SECRET not set");
-    return NextResponse.json({ error: "Webhook not configured" }, { status: 500 });
-  }
+  const provider = getInboundProvider();
 
-  // Read the raw body once — we need the exact bytes for both signature
-  // verification and JSON parsing. Re-parsing + stringifying would break
-  // the HMAC because whitespace matters.
+  // Read the raw body once — svix (Resend) needs the exact bytes for the HMAC.
   const rawBody = await request.text();
   if (rawBody.length > MAX_BODY_BYTES) {
     return NextResponse.json({ error: "Payload too large" }, { status: 413 });
   }
 
-  try {
-    verifySvixSignature(rawBody, extractSvixHeaders(request.headers), secret);
-  } catch (e) {
-    if (e instanceof SvixVerifyError) {
-      // Log reason internally (helps debug DNS / secret rotation issues) but
-      // don't leak details in the response.
-      console.warn(`[email-webhook] svix verify failed: ${e.reason}`);
-      return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
-    }
-    throw e;
+  const auth = await provider.verifyAuth(request, rawBody);
+  if (!auth.ok) {
+    const msg = auth.status === 500 ? "Webhook not configured" : "Unauthorized";
+    return NextResponse.json({ error: msg }, { status: auth.status });
   }
 
-  // Body is authentic. Parse.
-  let payload: unknown;
-  try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
-  const parsed = extractResendPayload(payload);
+  const parsed = provider.parsePayload(rawBody);
   if (!parsed) {
     return NextResponse.json({ error: "Unrecognized payload shape" }, { status: 400 });
   }
 
   const svixId = request.headers.get("svix-id") || null;
+  const receivedDate = new Date().toISOString().slice(0, 10);
 
-  // Route each recipient. A single email can be addressed to multiple
-  // finlynq mailboxes; each gets its own routing decision + dispatch.
-  const results: Array<{ to: string; category: string; note?: string }> = [];
-  for (const to of parsed.to) {
-    // Rate limit per-address. Shared across categories so an attacker can't
-    // cycle import-*@ → trash → flood.
-    const rl = checkRateLimit(
-      `email-inbound:${to.toLowerCase()}`,
-      INBOUND_RATE_MAX,
-      INBOUND_RATE_WINDOW_MS,
+  let results;
+  try {
+    results = await ingestInboundEmail(provider, parsed, { svixId, receivedDate });
+  } catch (e) {
+    console.error("[email-webhook] ingest failed", e);
+    // 500 → DevManager retains the message + retries on its reconciliation
+    // sweep (svix retries for Resend). We do NOT deleteReceived.
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
+
+  // Durable store complete. deleteReceived is a no-op for both providers now
+  // (Resend has no delete API; the DevManager relay deletes the Mailpit copy on
+  // this 2xx). Kept so a future provider with a real delete still gets called.
+  if (parsed.providerMessageId) {
+    await provider.deleteReceived(parsed.providerMessageId).catch((e) =>
+      console.warn("[email-webhook] deleteReceived failed", e),
     );
-    if (!rl.allowed) {
-      results.push({ to, category: "rate-limited" });
-      continue;
-    }
-
-    const route = await routeAddress(to);
-
-    if (route.category === "import" && route.userId) {
-      try {
-        // Resend's email.received webhook payload doesn't inline attachment
-        // bytes — only metadata. If the parser found nothing inline and we
-        // have a Resend received-email ID, fetch via the API. The helper
-        // returns the same ResendAttachment shape (filename + base64 content),
-        // so parseResendAttachments slots in unchanged.
-        let attachments = parsed.attachments;
-        if (attachments.length === 0 && parsed.resendEmailId) {
-          attachments = await fetchResendAttachments(parsed.resendEmailId);
-        }
-
-        const { rows, csvFallbackMeta } = await parseResendAttachments(attachments, route.userId);
-        if (rows.length === 0) {
-          // No usable attachments — treat as trash so admin can see the
-          // body (some banks send HTML bodies with no CSV).
-          await storeIncomingEmail({
-            category: "trash",
-            toAddress: route.address,
-            fromAddress: parsed.from,
-            subject: parsed.subject,
-            bodyText: parsed.text,
-            bodyHtml: parsed.html,
-            attachmentCount: attachments.length,
-            svixId,
-          });
-          await notifyAdminsOfIncoming("trash", route.address);
-          results.push({ to: route.address, category: "trash", note: "no-attachments" });
-          continue;
-        }
-
-        const stageResult = await stageEmailImport({
-          userId: route.userId,
-          rows,
-          source: "email",
-          fromAddress: parsed.from,
-          subject: parsed.subject,
-          svixId,
-          headers: csvFallbackMeta?.headers ?? null,
-          sampleRows: csvFallbackMeta?.sampleRows ?? null,
-        });
-
-        // User-facing notification — they'll see this next time they log in.
-        if (!stageResult.alreadyProcessed) {
-          await db.insert(schema.notifications).values({
-            type: "import",
-            title: "New email import pending",
-            message: `${stageResult.totalRowCount} transactions from ${parsed.from} waiting at /import/pending`,
-            read: 0,
-            createdAt: new Date().toISOString(),
-            userId: route.userId,
-          });
-        }
-        results.push({
-          to: route.address,
-          category: "import",
-          note: stageResult.alreadyProcessed ? "duplicate-svix" : "staged",
-        });
-      } catch (e) {
-        console.error("[email-webhook] import path failed", e);
-        // Don't surface the error publicly, but return 500 so Resend retries.
-        return NextResponse.json({ error: "Internal error" }, { status: 500 });
-      }
-    } else {
-      // mailbox or trash
-      await storeIncomingEmail({
-        category: route.category as "mailbox" | "trash",
-        toAddress: route.address,
-        fromAddress: parsed.from,
-        subject: parsed.subject,
-        bodyText: parsed.text,
-        bodyHtml: parsed.html,
-        attachmentCount: parsed.attachments.length,
-        svixId,
-      });
-      await notifyAdminsOfIncoming(
-        route.category as "mailbox" | "trash",
-        route.address,
-      );
-      // Fire-and-forget bounce for trash. Silently no-ops if RESEND_API_KEY
-      // isn't set OR SPF/DKIM didn't pass — no backscatter to spoofed senders.
-      if (route.category === "trash") {
-        sendBounceIfAuthenticated({
-          toAddress: route.address,
-          fromAddress: parsed.from,
-          subject: parsed.subject,
-          authVerdict: parsed.authVerdict,
-        }).catch((e) => console.warn("[email-webhook] bounce failed", e));
-      }
-      results.push({ to: route.address, category: route.category });
-    }
   }
 
   return NextResponse.json({ ok: true, results });
-}
-
-// ─── Resend payload shape — tolerant parser ─────────────────────────────────
-
-interface ParsedResendPayload {
-  /**
-   * Resend's received-email ID. Used to fetch attachment bytes via the
-   * Resend HTTP API when the webhook payload doesn't inline them — see
-   * `fetchResendAttachments`. May be null on payload-shape variants that
-   * don't expose the ID.
-   */
-  resendEmailId: string | null;
-  from: string;
-  to: string[];
-  subject: string | null;
-  text: string | null;
-  html: string | null;
-  attachments: ResendAttachment[];
-  authVerdict: {
-    spf?: string | null;
-    dkim?: string | null;
-    dmarc?: string | null;
-  };
-}
-
-/**
- * Resend's public Inbound payload shape isn't 100% pinned yet. We accept a
- * few common variants (nested `data` envelope, `email`/`address` field
- * names, `content`/`content_b64`) so we don't break when they tweak the
- * schema. Returns null if we can't find recognizable from/to fields.
- */
-function extractResendPayload(raw: unknown): ParsedResendPayload | null {
-  if (!raw || typeof raw !== "object") return null;
-  const outer = raw as Record<string, unknown>;
-  const data = (outer.data && typeof outer.data === "object"
-    ? (outer.data as Record<string, unknown>)
-    : outer);
-
-  // Received-email ID. Resend's payload shape isn't 100% pinned — accept a
-  // few variants. Used downstream to fetch attachment bytes via the API
-  // (the webhook payload itself doesn't inline them).
-  const resendEmailId =
-    typeof data.id === "string" ? data.id
-    : typeof data.email_id === "string" ? data.email_id
-    : typeof outer.id === "string" ? outer.id
-    : null;
-
-  const from = extractEmail(data.from);
-  if (!from) return null;
-
-  const toRaw = data.to;
-  const to: string[] = [];
-  if (Array.isArray(toRaw)) {
-    for (const t of toRaw) {
-      const addr = extractEmail(t);
-      if (addr) to.push(addr);
-    }
-  } else {
-    const single = extractEmail(toRaw);
-    if (single) to.push(single);
-  }
-  if (to.length === 0) return null;
-
-  const subject = typeof data.subject === "string" ? data.subject : null;
-  const text = typeof data.text === "string" ? data.text : null;
-  const html = typeof data.html === "string" ? data.html : null;
-
-  const attachments: ResendAttachment[] = [];
-  const attsRaw = data.attachments;
-  if (Array.isArray(attsRaw)) {
-    for (const a of attsRaw) {
-      if (!a || typeof a !== "object") continue;
-      const rec = a as Record<string, unknown>;
-      const filename = typeof rec.filename === "string" ? rec.filename
-        : typeof rec.name === "string" ? rec.name
-        : null;
-      // Accept `content`, `content_b64`, or `contentBase64`.
-      const content = typeof rec.content === "string" ? rec.content
-        : typeof rec.content_b64 === "string" ? rec.content_b64
-        : typeof rec.contentBase64 === "string" ? rec.contentBase64
-        : null;
-      if (!filename || !content) continue;
-      const contentType = typeof rec.content_type === "string" ? rec.content_type
-        : typeof rec.contentType === "string" ? rec.contentType
-        : undefined;
-      attachments.push({ filename, contentType, content });
-    }
-  }
-
-  // Resend exposes auth verdicts as top-level strings on data. Names aren't
-  // fully pinned — accept a few variants.
-  const authVerdict = {
-    spf: typeof data.spf_verdict === "string" ? data.spf_verdict
-      : typeof data.spf === "string" ? data.spf
-      : null,
-    dkim: typeof data.dkim_verdict === "string" ? data.dkim_verdict
-      : typeof data.dkim === "string" ? data.dkim
-      : null,
-    dmarc: typeof data.dmarc_verdict === "string" ? data.dmarc_verdict
-      : typeof data.dmarc === "string" ? data.dmarc
-      : null,
-  };
-
-  return { resendEmailId, from, to, subject, text, html, attachments, authVerdict };
-}
-
-function extractEmail(raw: unknown): string | null {
-  if (typeof raw === "string") return raw;
-  if (raw && typeof raw === "object") {
-    const rec = raw as Record<string, unknown>;
-    if (typeof rec.email === "string") return rec.email;
-    if (typeof rec.address === "string") return rec.address;
-  }
-  return null;
 }
 
 // ─── Self-hosted multipart path (unchanged from pre-Resend) ─────────────────
@@ -356,7 +123,6 @@ async function handleSelfHostedMultipart(request: NextRequest): Promise<NextResp
     if (!secret) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    // Stored value is a hash; compare by hashing the presented secret.
     const secretHash = authLookupHash(secret);
     const storedSecret = await db
       .select()

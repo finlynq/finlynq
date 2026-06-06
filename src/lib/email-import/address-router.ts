@@ -1,26 +1,33 @@
 /**
  * Email Import — 3-way `to` address router.
  *
- * Classifies an incoming `to` address into one of three categories:
+ * Classifies an incoming `to` address into one of four categories:
  *
- *   - `import`  — local-part matches /^import-[a-f0-9]{8,64}$/ AND resolves to
- *                 a user via settings.import_email. Transactions get staged for
- *                 review at /import/pending. (The regex is loose to cover both
- *                 legacy 8-hex tokens and the current 32-hex tokens; the DB
+ *   - `import`  — local-part matches the env import-prefix regex (see
+ *                 import-address.ts; 'import-' prod / 'importdev-' dev) AND
+ *                 resolves to a user via settings.import_email. Transactions get
+ *                 staged for review at /import. (The regex is loose, 8..64 hex,
+ *                 to cover legacy 8-hex tokens + current 32-hex tokens; the DB
  *                 lookup on the full address is what actually authorizes.)
+ *   - `discard` — import-shaped (matches the prefix regex) but NO user matches
+ *                 in this env (expired/rotated token, or spam to a guessed
+ *                 import address forwarded by the relay). The webhook 2xx's and
+ *                 writes NOTHING (no row, no bounce, no admin notify) so the
+ *                 DevManager relay deletes the Mailpit copy instead of looping.
  *   - `mailbox` — reserved prefixes (info/admin/support/hello/contact/sales/
  *                 help) OR matches a user's display_name (case-insensitive,
  *                 ascii-alphanumeric). Admin triages via /admin/inbox.
- *   - `trash`   — everything else. Auto-deleted after 24h.
+ *   - `trash`   — everything else (non-import junk). Auto-deleted after 24h.
  *
- * The webhook returns HTTP 200 for all three so no external status-code
+ * The webhook returns HTTP 200 for all categories so no external status-code
  * leak. See Research/email-import-resend-plan.md.
  */
 
 import { db, schema } from "@/db";
 import { and, eq, sql } from "drizzle-orm";
+import { importAddressRegex } from "./import-address";
 
-export type AddressCategory = "import" | "mailbox" | "trash";
+export type AddressCategory = "import" | "discard" | "mailbox" | "trash";
 
 export interface AddressRoute {
   category: AddressCategory;
@@ -32,7 +39,6 @@ export interface AddressRoute {
   address: string;
 }
 
-const IMPORT_PREFIX_RE = /^import-[a-f0-9]{8,64}$/;
 const MAILBOX_PREFIXES = new Set([
   "info",
   "admin",
@@ -48,8 +54,8 @@ const NAMED_HUMAN_RE = /^[a-z0-9][a-z0-9._-]{1,28}[a-z0-9]$/;
 /**
  * Parse and classify a single `to` address.
  *
- * @param rawTo  The address as received in the Resend payload (e.g.
- *               `"import-abc123de@finlynq.com"` or
+ * @param rawTo  The address as received in the inbound payload (e.g.
+ *               `"import-abc123de@mail.finlynq.com"` or
  *               `"Admin <admin@finlynq.com>"`). Case-insensitive.
  */
 export async function routeAddress(rawTo: string): Promise<AddressRoute> {
@@ -59,7 +65,7 @@ export async function routeAddress(rawTo: string): Promise<AddressRoute> {
   const [localPart] = address.split("@");
 
   // --- 1. Import address? ---
-  if (localPart && IMPORT_PREFIX_RE.test(localPart)) {
+  if (localPart && importAddressRegex().test(localPart)) {
     const row = await db
       .select({ userId: schema.settings.userId })
       .from(schema.settings)
@@ -71,8 +77,11 @@ export async function routeAddress(rawTo: string): Promise<AddressRoute> {
     if (row?.userId) {
       return { category: "import", userId: row.userId, localPart, address };
     }
-    // Import-shaped but no user match — probably expired/rotated. Trash.
-    return { category: "trash", localPart, address };
+    // Import-shaped but no user match — probably expired/rotated, or spam to a
+    // guessed import address the relay forwarded. Discard: 2xx + no row, so the
+    // DevManager relay deletes the Mailpit copy rather than looping (no bounce/
+    // admin-notify either — a rotated token shouldn't spam our admins).
+    return { category: "discard", localPart, address };
   }
 
   // --- 2. Reserved mailbox prefix? ---

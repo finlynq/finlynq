@@ -1,0 +1,130 @@
+/**
+ * /api/email-rules/[id] (Epic C2).
+ *
+ *   PUT    — update a rule (partial). Re-encrypts name/match_value; re-checks
+ *            account/category ownership when those change.
+ *   DELETE — remove a rule.
+ *
+ * requireEncryption. Cross-tenant → 404. Bare JSON.
+ */
+
+import { NextRequest, NextResponse } from "next/server";
+import { and, eq } from "drizzle-orm";
+import { z } from "zod";
+import { db, schema } from "@/db";
+import { requireEncryption } from "@/lib/auth/require-encryption";
+import { validateBody } from "@/lib/validate";
+import { encryptEmailRuleFields } from "@/lib/email-rules/crypto";
+
+export const dynamic = "force-dynamic";
+
+const updateSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  matchType: z.enum(["sender", "subject"]).optional(),
+  matchOp: z.enum(["contains", "exact", "regex"]).optional(),
+  matchValue: z.string().min(1).max(512).optional(),
+  accountId: z.number().int().positive().optional(),
+  categoryId: z.number().int().positive().nullable().optional(),
+  mode: z.enum(["auto", "review"]).optional(),
+  isActive: z.boolean().optional(),
+  priority: z.number().int().optional(),
+});
+
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
+  const { id } = await params;
+  const ruleId = parseInt(id, 10);
+  if (!Number.isFinite(ruleId)) {
+    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const parsed = validateBody(body, updateSchema);
+  if (parsed.error) return parsed.error;
+  const d = parsed.data;
+
+  // Ownership of the rule itself.
+  const existing = await db
+    .select({ id: schema.emailImportRules.id })
+    .from(schema.emailImportRules)
+    .where(and(eq(schema.emailImportRules.id, ruleId), eq(schema.emailImportRules.userId, userId)))
+    .limit(1);
+  if (!existing[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  if (d.accountId != null) {
+    const acct = await db
+      .select({ id: schema.accounts.id })
+      .from(schema.accounts)
+      .where(and(eq(schema.accounts.id, d.accountId), eq(schema.accounts.userId, userId)))
+      .limit(1);
+    if (!acct[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (d.categoryId != null) {
+    const cat = await db
+      .select({ id: schema.categories.id })
+      .from(schema.categories)
+      .where(and(eq(schema.categories.id, d.categoryId), eq(schema.categories.userId, userId)))
+      .limit(1);
+    if (!cat[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  const enc = encryptEmailRuleFields(dek, {
+    name: d.name,
+    matchValue: d.matchValue,
+  });
+
+  const set: Record<string, unknown> = { updatedAt: new Date() };
+  if (d.name !== undefined) set.name = enc.name ?? d.name;
+  if (d.matchType !== undefined) set.matchType = d.matchType;
+  if (d.matchOp !== undefined) set.matchOp = d.matchOp;
+  if (d.matchValue !== undefined) set.matchValue = enc.matchValue ?? d.matchValue;
+  if (d.accountId !== undefined) set.accountId = d.accountId;
+  if (d.categoryId !== undefined) set.categoryId = d.categoryId;
+  if (d.mode !== undefined) set.mode = d.mode;
+  if (d.isActive !== undefined) set.isActive = d.isActive;
+  if (d.priority !== undefined) set.priority = d.priority;
+
+  await db
+    .update(schema.emailImportRules)
+    .set(set)
+    .where(and(eq(schema.emailImportRules.id, ruleId), eq(schema.emailImportRules.userId, userId)));
+
+  return NextResponse.json({ ok: true });
+}
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId } = auth;
+  const { id } = await params;
+  const ruleId = parseInt(id, 10);
+  if (!Number.isFinite(ruleId)) {
+    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+  }
+
+  const existing = await db
+    .select({ id: schema.emailImportRules.id })
+    .from(schema.emailImportRules)
+    .where(and(eq(schema.emailImportRules.id, ruleId), eq(schema.emailImportRules.userId, userId)))
+    .limit(1);
+  if (!existing[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  await db
+    .delete(schema.emailImportRules)
+    .where(and(eq(schema.emailImportRules.id, ruleId), eq(schema.emailImportRules.userId, userId)));
+
+  return NextResponse.json({ ok: true });
+}

@@ -1,7 +1,7 @@
 /**
  * Bounce helper for the `trash` category.
  *
- * When an email arrives at a finlynq.com address that doesn't match a user,
+ * When an email arrives at a finlynq address that doesn't match a user,
  * we store it in incoming_emails.trash (24h TTL) AND optionally send a
  * bounce back to the sender telling them the mailbox doesn't exist.
  *
@@ -16,6 +16,8 @@
  * behavior is unchanged — the attacker/typo still sees a 200 from the
  * webhook, and gets a bounce only when their setup is legit.
  */
+
+import { importLocalpartPrefix } from "./import-address";
 
 export interface BounceInput {
   toAddress: string;       // the address that doesn't exist (the original `to`)
@@ -56,14 +58,19 @@ export async function sendBounceIfAuthenticated(input: BounceInput): Promise<boo
     ? `Undelivered mail: ${input.subject}`
     : "Undelivered mail";
 
+  // Import addresses live on IMPORT_EMAIL_DOMAIN (mail.finlynq.com as of
+  // 2026-06-05) with the env-specific local-part prefix — keep the bounce copy
+  // in sync so it never hardcodes a stale domain/prefix again.
+  const importDomain = process.env.IMPORT_EMAIL_DOMAIN || "finlynq.com";
+  const importPrefix = importLocalpartPrefix();
   const body = [
     `Your message to ${input.toAddress} could not be delivered.`,
     ``,
-    `This address does not exist on finlynq.com.`,
+    `This address does not exist on Finlynq.`,
     ``,
     `If you meant to send this to your Finlynq import address, check the`,
     `address in Finlynq → Import → Email Import. The address is unique`,
-    `to your account and looks like import-<8chars>@finlynq.com.`,
+    `to your account and looks like ${importPrefix}<random>@${importDomain}.`,
     ``,
     `-- Finlynq Mail Server`,
   ].join("\n");
