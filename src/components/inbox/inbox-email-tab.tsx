@@ -571,8 +571,9 @@ export function InboxEmailTab() {
           mode="fromEmail"
           initial={{
             name: ruleEmail.fromAddress ?? "Email rule",
-            matchType: "sender",
-            matchValue: ruleEmail.fromAddress ?? "",
+            conditions: [
+              { field: "sender", op: "contains", value: ruleEmail.fromAddress ?? "" },
+            ],
             accountId: pickAccount,
             categoryId: pickCategory,
           }}

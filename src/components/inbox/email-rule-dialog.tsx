@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Shared email-import rule editor dialog (2026-06-16).
+ * Shared email-import rule editor dialog (2026-06-16; multi-condition 2026-06-17).
  *
  * Two modes:
  *   - "manager"   — create/edit a rule from /settings/import (POST/PUT
@@ -11,8 +11,9 @@
  *                   computed with the pure applyEmailTransform; on save creates
  *                   the rule AND records THIS email through the same mapping.
  *
- * State is seeded once via useState initializers — the parent mounts this with
- * a `key` (rule id / email id) so each open gets a fresh form.
+ * A rule is an AND group of conditions over sender/subject/body/payee (text) +
+ * amount (numeric). State is seeded once via useState initializers — the parent
+ * mounts this with a `key` (rule id / email id) so each open gets a fresh form.
  */
 
 import { useMemo, useState } from "react";
@@ -31,16 +32,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Plus, Trash2 } from "lucide-react";
 import { applyEmailTransform } from "@/lib/email-import/apply-transform";
 import { formatCurrency } from "@/lib/currency";
 import { safeAccountName, safeName } from "@/lib/safe-name";
+import {
+  EMAIL_CONDITION_FIELDS,
+  defaultEmailConditionForField,
+  type EmailCondition,
+  type EmailConditionField,
+} from "@/lib/email-rules/schema";
 
 export interface RuleDraftInit {
   id?: number | null;
   name?: string;
-  matchType?: "sender" | "subject";
-  matchOp?: "contains" | "exact" | "regex";
-  matchValue?: string;
+  conditions?: EmailCondition[];
   accountId?: number | null;
   categoryId?: number | null;
   mode?: "auto" | "review";
@@ -68,6 +74,136 @@ export interface FromEmailCtx {
   receivedAt: string; // ISO
 }
 
+const PLACEHOLDER: Record<EmailConditionField, string> = {
+  sender: "alerts@chase.com",
+  subject: "transaction alert",
+  body: "withdrawal",
+  payee: "STARBUCKS",
+  amount: "",
+};
+
+function toNum(s: string): number {
+  if (s.trim() === "") return 0;
+  const n = Number(s);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+/** One condition row — field/op/value selects; field-change swaps the whole row
+ *  to a fresh typed default (mirrors the transaction-rules editor). */
+function EmailConditionRow({
+  cond,
+  onChange,
+  onRemove,
+  canRemove,
+}: {
+  cond: EmailCondition;
+  onChange: (next: EmailCondition) => void;
+  onRemove: () => void;
+  canRemove: boolean;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <Select
+        value={cond.field}
+        onValueChange={(v) => onChange(defaultEmailConditionForField((v as EmailConditionField) ?? "sender"))}
+      >
+        <SelectTrigger className="w-[110px] h-9"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {EMAIL_CONDITION_FIELDS.map((f) => (
+            <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      {cond.field === "amount" ? (
+        <>
+          <Select
+            value={cond.op}
+            onValueChange={(v) => {
+              const op = (v as "gt" | "lt" | "between") ?? "lt";
+              onChange(
+                op === "between"
+                  ? { field: "amount", op: "between", min: 0, max: 0 }
+                  : { field: "amount", op, value: 0 },
+              );
+            }}
+          >
+            <SelectTrigger className="w-[130px] h-9"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="gt">greater than</SelectItem>
+              <SelectItem value="lt">less than</SelectItem>
+              <SelectItem value="between">between</SelectItem>
+            </SelectContent>
+          </Select>
+          {cond.op === "between" ? (
+            <>
+              <input
+                type="number"
+                step="0.01"
+                className="h-9 w-[90px] rounded-md border bg-background px-2 text-sm"
+                value={String(cond.min)}
+                placeholder="min"
+                onChange={(e) => onChange({ field: "amount", op: "between", min: toNum(e.target.value), max: cond.max })}
+              />
+              <span className="text-xs text-muted-foreground">–</span>
+              <input
+                type="number"
+                step="0.01"
+                className="h-9 w-[90px] rounded-md border bg-background px-2 text-sm"
+                value={String(cond.max)}
+                placeholder="max"
+                onChange={(e) => onChange({ field: "amount", op: "between", min: cond.min, max: toNum(e.target.value) })}
+              />
+            </>
+          ) : (
+            <input
+              type="number"
+              step="0.01"
+              className="h-9 w-[120px] rounded-md border bg-background px-2 text-sm"
+              value={String(cond.value)}
+              placeholder="amount"
+              onChange={(e) => onChange({ field: "amount", op: cond.op, value: toNum(e.target.value) })}
+            />
+          )}
+          <span className="text-xs text-muted-foreground">(by magnitude)</span>
+        </>
+      ) : (
+        <>
+          <Select
+            value={cond.op}
+            onValueChange={(v) => onChange({ ...cond, op: (v as "contains" | "exact" | "regex") ?? "contains" })}
+          >
+            <SelectTrigger className="w-[120px] h-9"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="contains">contains</SelectItem>
+              <SelectItem value="exact">exact</SelectItem>
+              <SelectItem value="regex">regex</SelectItem>
+            </SelectContent>
+          </Select>
+          <input
+            className="h-9 flex-1 min-w-[140px] rounded-md border bg-background px-2 text-sm"
+            placeholder={PLACEHOLDER[cond.field]}
+            value={cond.value}
+            onChange={(e) => onChange({ ...cond, value: e.target.value })}
+          />
+        </>
+      )}
+
+      {canRemove && (
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-8 w-8 text-muted-foreground hover:text-rose-600"
+          onClick={onRemove}
+          title="Remove condition"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export function EmailRuleDialog({
   open,
   onOpenChange,
@@ -88,9 +224,11 @@ export function EmailRuleDialog({
   onSaved: () => void;
 }) {
   const [name, setName] = useState(initial?.name ?? "");
-  const [matchType, setMatchType] = useState<"sender" | "subject">(initial?.matchType ?? "sender");
-  const [matchOp, setMatchOp] = useState<"contains" | "exact" | "regex">(initial?.matchOp ?? "contains");
-  const [matchValue, setMatchValue] = useState(initial?.matchValue ?? "");
+  const [conditions, setConditions] = useState<EmailCondition[]>(
+    initial?.conditions && initial.conditions.length > 0
+      ? initial.conditions
+      : [defaultEmailConditionForField("sender")],
+  );
   const [accountId, setAccountId] = useState<number | null>(initial?.accountId ?? null);
   const [categoryId, setCategoryId] = useState<number | null>(initial?.categoryId ?? null);
   const [ruleMode, setRuleMode] = useState<"auto" | "review">(initial?.mode ?? "auto");
@@ -117,6 +255,13 @@ export function EmailRuleDialog({
     return c ? safeName(c.name, "category", c.id) : `Category #${id}`;
   };
 
+  const updateCondition = (i: number, next: EmailCondition) =>
+    setConditions((cs) => cs.map((c, j) => (j === i ? next : c)));
+  const addCondition = () =>
+    setConditions((cs) => [...cs, defaultEmailConditionForField("body")]);
+  const removeCondition = (i: number) =>
+    setConditions((cs) => cs.filter((_, j) => j !== i));
+
   // Live "will record" preview (fromEmail mode) — the pure transform applied to
   // the parsed candidate, so flip / date-source / rename are visible pre-save.
   const preview = useMemo(() => {
@@ -131,9 +276,19 @@ export function EmailRuleDialog({
   }, [mode, fromEmail, flipSign, dateSource, payeeOverride]);
 
   const save = async () => {
-    if (!name.trim() || !matchValue.trim() || accountId == null) {
-      setError("Name, match value, and account are required.");
+    if (!name.trim() || accountId == null) {
+      setError("Name and account are required.");
       return;
+    }
+    if (conditions.length === 0) {
+      setError("Add at least one condition.");
+      return;
+    }
+    for (const c of conditions) {
+      if (c.field !== "amount" && !c.value.trim()) {
+        setError("Every text condition needs a value.");
+        return;
+      }
     }
     if (mode === "fromEmail" && categoryId == null) {
       setError("Pick a category — recording this email now needs one.");
@@ -143,11 +298,12 @@ export function EmailRuleDialog({
     setError(null);
     setNotice(null);
     try {
+      const all = conditions.map((c) =>
+        c.field === "amount" ? c : { ...c, value: c.value.trim() },
+      );
       const payload = {
         name: name.trim(),
-        matchType,
-        matchOp,
-        matchValue: matchValue.trim(),
+        conditions: { all },
         accountId,
         categoryId,
         mode: ruleMode,
@@ -242,32 +398,21 @@ export function EmailRuleDialog({
             onChange={(e) => setName(e.target.value)}
           />
 
-          {/* Match */}
-          <div>
-            <label className="text-xs text-muted-foreground">When an email&apos;s…</label>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
-              <Select value={matchType} onValueChange={(v) => setMatchType((v as "sender" | "subject") ?? "sender")}>
-                <SelectTrigger className="w-[110px] h-9"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="sender">Sender</SelectItem>
-                  <SelectItem value="subject">Subject</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select value={matchOp} onValueChange={(v) => setMatchOp((v as "contains" | "exact" | "regex") ?? "contains")}>
-                <SelectTrigger className="w-[120px] h-9"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="contains">contains</SelectItem>
-                  <SelectItem value="exact">exact</SelectItem>
-                  <SelectItem value="regex">regex</SelectItem>
-                </SelectContent>
-              </Select>
-              <input
-                className="flex-1 min-w-[160px] rounded-md border bg-background px-2 py-1.5 text-sm"
-                placeholder="value (e.g. alerts@chase.com)"
-                value={matchValue}
-                onChange={(e) => setMatchValue(e.target.value)}
+          {/* Conditions (AND) */}
+          <div className="space-y-2">
+            <label className="text-xs text-muted-foreground">When ALL of these match</label>
+            {conditions.map((cond, i) => (
+              <EmailConditionRow
+                key={i}
+                cond={cond}
+                onChange={(next) => updateCondition(i, next)}
+                onRemove={() => removeCondition(i)}
+                canRemove={conditions.length > 1}
               />
-            </div>
+            ))}
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={addCondition}>
+              <Plus className="h-3.5 w-3.5" /> Add condition
+            </Button>
           </div>
 
           {/* Target */}

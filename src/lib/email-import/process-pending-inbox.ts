@@ -35,6 +35,7 @@ import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-inv
 import { invalidateUser } from "@/lib/mcp/user-tx-cache";
 import { loadActiveEmailRules, firstMatchingRule } from "@/lib/email-rules/load";
 import { applyEmailTransform, type EmailTransform } from "@/lib/email-import/apply-transform";
+import { htmlToText } from "@/lib/email-import/parse-body";
 
 export interface ProcessInboxResult {
   scanned: number;
@@ -102,6 +103,9 @@ export async function processPendingInboxEmails(
         id: schema.emailInbox.id,
         fromAddress: schema.emailInbox.fromAddress,
         subject: schema.emailInbox.subject,
+        bodyText: schema.emailInbox.bodyText,
+        bodyHtml: schema.emailInbox.bodyHtml,
+        stagedImportId: schema.emailInbox.stagedImportId,
         encryptionTier: schema.emailInbox.encryptionTier,
         parseConfidence: schema.emailInbox.parseConfidence,
       })
@@ -127,8 +131,31 @@ export async function processPendingInboxEmails(
 
         const fromAddress = decodeInbox(row.encryptionTier, dek, row.fromAddress);
         const subject = decodeInbox(row.encryptionTier, dek, row.subject);
+        // body / payee / amount for the new condition fields.
+        const bodyText = decodeInbox(row.encryptionTier, dek, row.bodyText);
+        const bodyHtml = decodeInbox(row.encryptionTier, dek, row.bodyHtml);
+        const body =
+          bodyText && bodyText.trim() ? bodyText : bodyHtml ? htmlToText(bodyHtml) : "";
 
-        const rule = firstMatchingRule(rules, { fromAddress, subject });
+        let payee: string | null = null;
+        let amount: number | null = null;
+        if (row.stagedImportId) {
+          const cand = await db
+            .select({
+              amount: schema.stagedTransactions.amount,
+              payee: schema.stagedTransactions.payee,
+              encryptionTier: schema.stagedTransactions.encryptionTier,
+            })
+            .from(schema.stagedTransactions)
+            .where(eq(schema.stagedTransactions.stagedImportId, row.stagedImportId))
+            .limit(1);
+          if (cand[0]) {
+            amount = cand[0].amount;
+            payee = decodeStaged(cand[0].encryptionTier, dek, cand[0].payee);
+          }
+        }
+
+        const rule = firstMatchingRule(rules, { fromAddress, subject, body, payee, amount });
         if (!rule) {
           result.needsReview += 1;
           continue;

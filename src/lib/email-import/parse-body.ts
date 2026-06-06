@@ -259,8 +259,9 @@ function extractLast4(haystack: string): string | null {
   return m ? m[1] : null;
 }
 
-/** Strip HTML tags → text. Lightweight (no dep) — collapses tags + entities. */
-function htmlToText(html: string): string {
+/** Strip HTML tags → text. Lightweight (no dep) — collapses tags + entities.
+ *  Exported so the rule-match sweep can search the body of HTML-only emails. */
+export function htmlToText(html: string): string {
   return html
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")

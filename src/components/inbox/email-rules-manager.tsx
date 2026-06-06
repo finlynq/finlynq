@@ -14,13 +14,12 @@ import { Badge } from "@/components/ui/badge";
 import { Plus, Trash2, Pencil } from "lucide-react";
 import { safeAccountName, safeName } from "@/lib/safe-name";
 import { EmailRuleDialog, type RuleDraftInit } from "./email-rule-dialog";
+import type { EmailCondition } from "@/lib/email-rules/schema";
 
 interface EmailRule {
   id: number;
   name: string;
-  matchType: "sender" | "subject";
-  matchOp: "contains" | "exact" | "regex";
-  matchValue: string;
+  conditions: EmailCondition[];
   accountId: number;
   categoryId: number | null;
   mode: "auto" | "review";
@@ -41,6 +40,18 @@ interface AccountOpt {
 interface CategoryOpt {
   id: number;
   name: string | null;
+}
+
+function summarizeCondition(c: EmailCondition): string {
+  if (c.field === "amount") {
+    if (c.op === "between") return `amount ${c.min}–${c.max}`;
+    return `amount ${c.op === "gt" ? ">" : "<"} ${c.value}`;
+  }
+  return `${c.field} ${c.op} “${c.value}”`;
+}
+function summarizeConditions(conds: EmailCondition[]): string {
+  if (!conds || conds.length === 0) return "(no conditions)";
+  return conds.map(summarizeCondition).join(" AND ");
 }
 
 export function EmailRulesManager() {
@@ -116,11 +127,12 @@ export function EmailRulesManager() {
           <div>
             <p className="text-sm font-medium">Email rules</p>
             <p className="text-xs text-muted-foreground">
-              Match a sender or subject to an account so body emails record
-              automatically (mode <span className="font-mono">auto</span>) or
-              wait for one click (<span className="font-mono">review</span>).
-              Add field mapping to reverse the amount sign, choose the date, or
-              rename the payee.
+              Match on sender / subject / body / payee / amount (all conditions
+              must match) → an account, so body emails record automatically
+              (mode <span className="font-mono">auto</span>) or wait for one
+              click (<span className="font-mono">review</span>). Add field
+              mapping to reverse the amount sign, choose the date, or rename the
+              payee.
             </p>
           </div>
           <Button size="sm" className="gap-1.5" onClick={() => setDialogInit({})}>
@@ -158,7 +170,7 @@ export function EmailRulesManager() {
                       {!r.isActive && <Badge variant="outline" className="text-[10px]">off</Badge>}
                     </div>
                     <div className="text-xs text-muted-foreground truncate">
-                      {r.matchType} {r.matchOp} “{r.matchValue}” → {acctLabel(r.accountId)}
+                      {summarizeConditions(r.conditions)} → {acctLabel(r.accountId)}
                       {catLabel(r.categoryId) ? ` · ${catLabel(r.categoryId)}` : ""}
                       {transforms.length > 0 ? ` · ${transforms.join(" · ")}` : ""}
                     </div>
@@ -174,9 +186,7 @@ export function EmailRulesManager() {
                       setDialogInit({
                         id: r.id,
                         name: r.name,
-                        matchType: r.matchType,
-                        matchOp: r.matchOp,
-                        matchValue: r.matchValue,
+                        conditions: r.conditions,
                         accountId: r.accountId,
                         categoryId: r.categoryId,
                         mode: r.mode,

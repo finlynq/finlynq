@@ -1311,12 +1311,19 @@ export const emailImportRules = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     // Display name — user-DEK encrypted (v1:).
     name: text("name").notNull(),
-    // 'sender' (matches from_address) | 'subject' — CHECK in SQL.
-    matchType: text("match_type").notNull(),
-    // 'contains' | 'exact' | 'regex' — CHECK in SQL.
-    matchOp: text("match_op").notNull(),
-    // The needle — user-DEK encrypted (v1:). Decrypted before matching.
-    matchValue: text("match_value").notNull(),
+    // 2026-06-17 — multi-condition AND group: { all: EmailCondition[] }. Source
+    // of truth going forward; text-field string values user-DEK encrypted (v1:),
+    // numeric amount thresholds plaintext (src/lib/email-rules/crypto.ts). NULL
+    // ⇒ read the flat match_type/op/value fallback (pre-migration rows).
+    conditions: jsonb("conditions"),
+    // Legacy flat match — FROZEN back-compat fallback (NOT NULL dropped in the
+    // 20260617 migration; new rows leave these NULL and use `conditions`).
+    // 'sender'|'subject' — CHECK in SQL (passes on NULL).
+    matchType: text("match_type"),
+    // 'contains' | 'exact' | 'regex'.
+    matchOp: text("match_op"),
+    // The needle — user-DEK encrypted (v1:).
+    matchValue: text("match_value"),
     accountId: integer("account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade" }),
