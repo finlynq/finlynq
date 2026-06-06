@@ -26,6 +26,9 @@ const updateSchema = z.object({
   accountId: z.number().int().positive().optional(),
   categoryId: z.number().int().positive().nullable().optional(),
   mode: z.enum(["auto", "review"]).optional(),
+  flipSign: z.boolean().optional(),
+  dateSource: z.enum(["parsed", "received"]).optional(),
+  payeeOverride: z.string().max(120).nullable().optional(),
   isActive: z.boolean().optional(),
   priority: z.number().int().optional(),
 });
@@ -81,6 +84,7 @@ export async function PUT(
   const enc = encryptEmailRuleFields(dek, {
     name: d.name,
     matchValue: d.matchValue,
+    payeeOverride: d.payeeOverride ?? undefined,
   });
 
   const set: Record<string, unknown> = { updatedAt: new Date() };
@@ -91,6 +95,11 @@ export async function PUT(
   if (d.accountId !== undefined) set.accountId = d.accountId;
   if (d.categoryId !== undefined) set.categoryId = d.categoryId;
   if (d.mode !== undefined) set.mode = d.mode;
+  if (d.flipSign !== undefined) set.flipSign = d.flipSign;
+  if (d.dateSource !== undefined) set.dateSource = d.dateSource;
+  // payee_override: explicit null clears it; a string is encrypted.
+  if (d.payeeOverride !== undefined)
+    set.payeeOverride = d.payeeOverride === null ? null : enc.payeeOverride ?? d.payeeOverride;
   if (d.isActive !== undefined) set.isActive = d.isActive;
   if (d.priority !== undefined) set.priority = d.priority;
 

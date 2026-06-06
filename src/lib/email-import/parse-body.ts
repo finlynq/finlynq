@@ -39,9 +39,32 @@ export interface ParsedBodyCandidate {
   last4?: string | null;
 }
 
+/**
+ * Diagnostic signals the parser computes while deciding confidence. Surfaced
+ * (additively) so the Email tab can show the user WHAT was identified and WHY a
+ * parse is low-confidence. Existing callers that only read candidate/confidence
+ * are unaffected.
+ */
+export interface ParseBodySignals {
+  /** Every amount the parser matched (the same value twice collapses to one). */
+  detectedAmounts: { value: number; currency: string }[];
+  /** >1 DISTINCT amount value found → the chosen amount is a guess. */
+  multipleAmounts: boolean;
+  /** The numeric date was ambiguous (MM/DD vs DD/MM, both ≤ 12). */
+  dateAmbiguous: boolean;
+  /** No date in the body → fell back to the email received date. */
+  usedFallbackDate: boolean;
+  /** The debit/credit sign came from explicit verbs (vs the outflow default). */
+  signExplicit: boolean;
+  /** Card last-4 mentioned in the body (display-only; never hashed). */
+  last4: string | null;
+}
+
 export interface ParseEmailBodyResult {
   candidate: ParsedBodyCandidate | null;
   confidence: "high" | "low" | null;
+  /** Optional — present on any return that reached amount collection. */
+  signals?: ParseBodySignals;
 }
 
 export interface ParseEmailBodyInput {
@@ -270,8 +293,20 @@ export function parseEmailBody(input: ParseEmailBodyInput): ParseEmailBodyResult
   if (!haystack) return { candidate: null, confidence: null };
 
   const amounts = collectAmounts(haystack);
+  const last4 = extractLast4(haystack);
   if (amounts.length === 0) {
-    return { candidate: null, confidence: null };
+    return {
+      candidate: null,
+      confidence: null,
+      signals: {
+        detectedAmounts: [],
+        multipleAmounts: false,
+        dateAmbiguous: false,
+        usedFallbackDate: false,
+        signExplicit: false,
+        last4,
+      },
+    };
   }
 
   // Distinct amount VALUES (the same $42.17 mentioned twice is one amount).
@@ -282,15 +317,26 @@ export function parseEmailBody(input: ParseEmailBodyInput): ParseEmailBodyResult
 
   const dateHit = extractDate(haystack);
   const usedFallbackDate = !dateHit;
+  const dateAmbiguous = dateHit?.ambiguous ?? false;
   const date = dateHit?.iso ?? input.receivedDate ?? null;
+
+  const { sign, explicit } = detectSign(haystack);
+
+  const signals: ParseBodySignals = {
+    detectedAmounts: amounts.map((a) => ({ value: a.value, currency: a.currency })),
+    multipleAmounts,
+    dateAmbiguous,
+    usedFallbackDate,
+    signExplicit: explicit,
+    last4,
+  };
+
   if (!date) {
     // No date in the body and no received-date fallback — can't build a hash.
-    return { candidate: null, confidence: null };
+    return { candidate: null, confidence: null, signals };
   }
 
-  const { sign } = detectSign(haystack);
   const payee = extractPayee(bodyText, subject);
-  const last4 = extractLast4(haystack);
 
   const candidate: ParsedBodyCandidate = {
     date,
@@ -302,12 +348,8 @@ export function parseEmailBody(input: ParseEmailBodyInput): ParseEmailBodyResult
   };
 
   // Confidence: high only when unambiguous on every axis.
-  const ambiguous =
-    multipleAmounts ||
-    usedFallbackDate ||
-    (dateHit?.ambiguous ?? false) ||
-    payee == null;
+  const ambiguous = multipleAmounts || usedFallbackDate || dateAmbiguous || payee == null;
   const confidence: "high" | "low" = ambiguous ? "low" : "high";
 
-  return { candidate, confidence };
+  return { candidate, confidence, signals };
 }

@@ -26,6 +26,12 @@ export interface ActiveEmailRule {
   accountId: number;
   categoryId: number | null;
   mode: "auto" | "review";
+  /** Multiply the parsed amount by -1 before recording (0 stays +0). */
+  flipSign: boolean;
+  /** 'parsed' (body date, default) | 'received' (email received date). */
+  dateSource: "parsed" | "received";
+  /** Decrypted rule-level payee rename, or null. */
+  payeeOverride: string | null;
   priority: number;
 }
 
@@ -44,6 +50,9 @@ export async function loadActiveEmailRules(
       accountId: schema.emailImportRules.accountId,
       categoryId: schema.emailImportRules.categoryId,
       mode: schema.emailImportRules.mode,
+      flipSign: schema.emailImportRules.flipSign,
+      dateSource: schema.emailImportRules.dateSource,
+      payeeOverride: schema.emailImportRules.payeeOverride,
       priority: schema.emailImportRules.priority,
     })
     .from(schema.emailImportRules)
@@ -60,6 +69,7 @@ export async function loadActiveEmailRules(
     const dec = decryptEmailRuleFields(dek, {
       name: r.name,
       matchValue: r.matchValue,
+      payeeOverride: r.payeeOverride,
     });
     return {
       id: r.id,
@@ -70,6 +80,9 @@ export async function loadActiveEmailRules(
       accountId: r.accountId,
       categoryId: r.categoryId,
       mode: r.mode as "auto" | "review",
+      flipSign: r.flipSign,
+      dateSource: (r.dateSource as "parsed" | "received") ?? "parsed",
+      payeeOverride: dec.payeeOverride ?? r.payeeOverride,
       priority: r.priority,
     };
   });

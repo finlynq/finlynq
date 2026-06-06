@@ -25,9 +25,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Trash2, RefreshCw, Mail } from "lucide-react";
+import { Trash2, RefreshCw, Mail, Wand2 } from "lucide-react";
 import { safeAccountName, safeName } from "@/lib/safe-name";
 import { formatCurrency } from "@/lib/currency";
+import { EmailRuleDialog } from "./email-rule-dialog";
 
 type Action =
   | "pending"
@@ -52,6 +53,22 @@ interface EmailInboxItem {
   candidate: { date: string; amount: number; currency: string; payee: string } | null;
 }
 
+interface BodyCandidate {
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string;
+  last4?: string | null;
+}
+interface BodySignals {
+  detectedAmounts: { value: number; currency: string }[];
+  multipleAmounts: boolean;
+  dateAmbiguous: boolean;
+  usedFallbackDate: boolean;
+  signExplicit: boolean;
+  last4: string | null;
+}
+
 interface EmailInboxDetail {
   id: string;
   fromAddress: string | null;
@@ -61,6 +78,8 @@ interface EmailInboxDetail {
   receivedAt: string;
   action: Action;
   sourceKind: "attachment" | "body";
+  candidate?: BodyCandidate | null;
+  signals?: BodySignals | null;
 }
 
 interface AccountOpt {
@@ -99,6 +118,12 @@ export function InboxEmailTab() {
   // Per-row record-picker selections.
   const [pickAccount, setPickAccount] = useState<number | null>(null);
   const [pickCategory, setPickCategory] = useState<number | null>(null);
+  // Per-email manual overrides (seeded from the parsed candidate on open).
+  const [editAmount, setEditAmount] = useState("");
+  const [editDate, setEditDate] = useState("");
+  const [editPayee, setEditPayee] = useState("");
+  // The email a "Create rule" dialog is open for (fromEmail mode).
+  const [ruleEmail, setRuleEmail] = useState<EmailInboxItem | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -135,6 +160,11 @@ export function InboxEmailTab() {
       setDetail(null);
       setPickAccount(null);
       setPickCategory(null);
+      // Seed the per-email manual-edit inputs from the parsed candidate.
+      const it = items.find((x) => x.id === id);
+      setEditAmount(it?.candidate ? String(it.candidate.amount) : "");
+      setEditDate(it?.candidate?.date ?? "");
+      setEditPayee(it?.candidate?.payee ?? "");
       try {
         const res = await fetch(`/api/import/email-inbox/${id}`);
         if (res.ok) setDetail(await res.json());
@@ -142,7 +172,7 @@ export function InboxEmailTab() {
         /* ignore — body just won't render */
       }
     },
-    [openId],
+    [openId, items],
   );
 
   const record = useCallback(
@@ -150,18 +180,30 @@ export function InboxEmailTab() {
       if (pickAccount == null || pickCategory == null) return;
       setActing(true);
       try {
+        const it = items.find((x) => x.id === id);
+        const body: Record<string, unknown> = {
+          action: "record",
+          accountId: pickAccount,
+          categoryId: pickCategory,
+        };
+        // Per-email manual corrections — send only what the user changed from
+        // the parse (unchanged fields stay omitted → the candidate is used).
+        if (it?.candidate) {
+          const amt = parseFloat(editAmount);
+          if (!Number.isNaN(amt) && amt !== it.candidate.amount) body.amount = amt;
+          if (editDate && editDate !== it.candidate.date) body.date = editDate;
+          if (editPayee.trim() && editPayee.trim() !== it.candidate.payee) {
+            body.payee = editPayee.trim();
+          }
+        }
         const res = await fetch(`/api/import/email-inbox/${id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "record",
-            accountId: pickAccount,
-            categoryId: pickCategory,
-          }),
+          body: JSON.stringify(body),
         });
         if (!res.ok) {
           const b = await res.json().catch(() => ({}));
-          throw new Error(b.error ?? `HTTP ${res.status}`);
+          throw new Error(b.code ? `${b.error} (${b.code})` : (b.error ?? `HTTP ${res.status}`));
         }
         setOpenId(null);
         setDetail(null);
@@ -172,7 +214,7 @@ export function InboxEmailTab() {
         setActing(false);
       }
     },
-    [pickAccount, pickCategory, load],
+    [pickAccount, pickCategory, editAmount, editDate, editPayee, items, load],
   );
 
   const discard = useCallback(
@@ -330,6 +372,79 @@ export function InboxEmailTab() {
                         )}
                       </div>
 
+                      {it.sourceKind === "body" && detail?.candidate && (
+                        <div className="rounded-lg border p-3 space-y-1.5 text-sm">
+                          <p className="text-xs font-medium text-muted-foreground">
+                            What we identified
+                          </p>
+                          <div className="grid grid-cols-[4.5rem_1fr] gap-x-3 gap-y-1">
+                            <span className="text-xs text-muted-foreground">Amount</span>
+                            <span>
+                              <span className="font-medium">
+                                {formatCurrency(detail.candidate.amount, detail.candidate.currency)}
+                              </span>
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                {detail.candidate.amount < 0 ? "outflow" : "inflow"}
+                                {detail.signals && !detail.signals.signExplicit ? " · sign assumed" : ""}
+                                {detail.candidate.last4 ? ` · card ending ${detail.candidate.last4}` : ""}
+                              </span>
+                            </span>
+                            <span className="text-xs text-muted-foreground">Payee</span>
+                            <span className="truncate">{detail.candidate.payee}</span>
+                            <span className="text-xs text-muted-foreground">Date</span>
+                            <span>
+                              {detail.candidate.date}
+                              {detail.signals?.usedFallbackDate && (
+                                <span className="ml-2 text-xs text-muted-foreground">
+                                  · from received date (none in body)
+                                </span>
+                              )}
+                              {detail.signals?.dateAmbiguous && (
+                                <span className="ml-2 text-xs text-muted-foreground">· ambiguous DD/MM</span>
+                              )}
+                            </span>
+                          </div>
+                          {(() => {
+                            const s = detail.signals;
+                            if (!s) return null;
+                            const reasons: string[] = [];
+                            if (s.multipleAmounts)
+                              reasons.push(
+                                `multiple amounts found (${s.detectedAmounts
+                                  .map((a) => formatCurrency(a.value, a.currency))
+                                  .join(", ")})`,
+                              );
+                            if (s.usedFallbackDate) reasons.push("no date in the email — used the received date");
+                            if (s.dateAmbiguous) reasons.push("ambiguous date format (DD/MM vs MM/DD)");
+                            if (!s.signExplicit) reasons.push("spend/deposit not stated — assumed an expense");
+                            if (detail.candidate?.payee === "Unknown") reasons.push("couldn't identify a payee");
+                            if (reasons.length === 0) return null;
+                            return (
+                              <div className="mt-1.5 border-t pt-1.5 text-xs text-amber-700 dark:text-amber-300">
+                                <span className="font-medium">Why this needs review:</span>
+                                <ul className="ml-4 list-disc">
+                                  {reasons.map((r) => (
+                                    <li key={r}>{r}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            );
+                          })()}
+                          {canRecord && (
+                            <div className="pt-1">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="gap-1.5"
+                                onClick={() => setRuleEmail(it)}
+                              >
+                                <Wand2 className="h-3.5 w-3.5" /> Create rule from this email
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       {canRecord && (
                         <div className="flex flex-wrap items-end gap-2">
                           <div className="space-y-1">
@@ -385,6 +500,33 @@ export function InboxEmailTab() {
                               </SelectContent>
                             </Select>
                           </div>
+                          <div className="space-y-1">
+                            <label className="text-xs text-muted-foreground">Amount</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              className="h-9 w-[110px] rounded-md border bg-background px-2 text-sm"
+                              value={editAmount}
+                              onChange={(e) => setEditAmount(e.target.value)}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs text-muted-foreground">Date</label>
+                            <input
+                              type="date"
+                              className="h-9 w-[150px] rounded-md border bg-background px-2 text-sm"
+                              value={editDate}
+                              onChange={(e) => setEditDate(e.target.value)}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs text-muted-foreground">Payee</label>
+                            <input
+                              className="h-9 w-[160px] rounded-md border bg-background px-2 text-sm"
+                              value={editPayee}
+                              onChange={(e) => setEditPayee(e.target.value)}
+                            />
+                          </div>
                           <Button
                             size="sm"
                             onClick={() => void record(it.id)}
@@ -415,6 +557,32 @@ export function InboxEmailTab() {
             );
           })}
         </div>
+      )}
+
+      {ruleEmail && (
+        <EmailRuleDialog
+          key={ruleEmail.id}
+          open
+          onOpenChange={(o) => {
+            if (!o) setRuleEmail(null);
+          }}
+          accounts={accounts}
+          categories={categories}
+          mode="fromEmail"
+          initial={{
+            name: ruleEmail.fromAddress ?? "Email rule",
+            matchType: "sender",
+            matchValue: ruleEmail.fromAddress ?? "",
+            accountId: pickAccount,
+            categoryId: pickCategory,
+          }}
+          fromEmail={{
+            emailId: ruleEmail.id,
+            candidate: ruleEmail.candidate,
+            receivedAt: ruleEmail.receivedAt,
+          }}
+          onSaved={() => void load()}
+        />
       )}
     </div>
   );

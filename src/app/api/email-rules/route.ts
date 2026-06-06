@@ -29,6 +29,9 @@ const createSchema = z.object({
   accountId: z.number().int().positive(),
   categoryId: z.number().int().positive().nullable().optional(),
   mode: z.enum(["auto", "review"]).optional(),
+  flipSign: z.boolean().optional(),
+  dateSource: z.enum(["parsed", "received"]).optional(),
+  payeeOverride: z.string().max(120).nullable().optional(),
   isActive: z.boolean().optional(),
   priority: z.number().int().optional(),
 });
@@ -48,6 +51,9 @@ export async function GET(request: NextRequest) {
       accountId: schema.emailImportRules.accountId,
       categoryId: schema.emailImportRules.categoryId,
       mode: schema.emailImportRules.mode,
+      flipSign: schema.emailImportRules.flipSign,
+      dateSource: schema.emailImportRules.dateSource,
+      payeeOverride: schema.emailImportRules.payeeOverride,
       isActive: schema.emailImportRules.isActive,
       priority: schema.emailImportRules.priority,
     })
@@ -57,7 +63,11 @@ export async function GET(request: NextRequest) {
     .all();
 
   const items = rows.map((r) => {
-    const dec = decryptEmailRuleFields(dek, { name: r.name, matchValue: r.matchValue });
+    const dec = decryptEmailRuleFields(dek, {
+      name: r.name,
+      matchValue: r.matchValue,
+      payeeOverride: r.payeeOverride,
+    });
     return {
       id: r.id,
       name: dec.name ?? r.name,
@@ -67,6 +77,9 @@ export async function GET(request: NextRequest) {
       accountId: r.accountId,
       categoryId: r.categoryId,
       mode: r.mode,
+      flipSign: r.flipSign,
+      dateSource: r.dateSource,
+      payeeOverride: dec.payeeOverride ?? r.payeeOverride,
       isActive: r.isActive,
       priority: r.priority,
     };
@@ -105,7 +118,11 @@ export async function POST(request: NextRequest) {
     if (!cat[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const enc = encryptEmailRuleFields(dek, { name: d.name, matchValue: d.matchValue });
+  const enc = encryptEmailRuleFields(dek, {
+    name: d.name,
+    matchValue: d.matchValue,
+    payeeOverride: d.payeeOverride ?? undefined,
+  });
   const inserted = await db
     .insert(schema.emailImportRules)
     .values({
@@ -117,6 +134,9 @@ export async function POST(request: NextRequest) {
       accountId: d.accountId,
       categoryId: d.categoryId ?? null,
       mode: d.mode ?? "auto",
+      flipSign: d.flipSign ?? false,
+      dateSource: d.dateSource ?? "parsed",
+      payeeOverride: enc.payeeOverride ?? d.payeeOverride ?? null,
       isActive: d.isActive ?? true,
       priority: d.priority ?? 0,
     })

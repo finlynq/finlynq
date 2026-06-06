@@ -15,6 +15,9 @@ function rule(p: Partial<ActiveEmailRule>): ActiveEmailRule {
     accountId: 1,
     categoryId: null,
     mode: "auto",
+    flipSign: false,
+    dateSource: "parsed",
+    payeeOverride: null,
     priority: 0,
     ...p,
   };

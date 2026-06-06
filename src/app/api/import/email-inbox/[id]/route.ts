@@ -24,6 +24,7 @@ import {
   decodeInbox,
 } from "@/lib/email-import/process-pending-inbox";
 import { getInboundProvider } from "@/lib/email-import/providers";
+import { parseEmailBody } from "@/lib/email-import/parse-body";
 
 export const dynamic = "force-dynamic";
 
@@ -57,18 +58,40 @@ export async function GET(
   const r = rows[0];
   if (!r) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  const subject = decodeInbox(r.encryptionTier, dek, r.subject);
+  const bodyText = decodeInbox(r.encryptionTier, dek, r.bodyText);
+  const bodyHtml = decodeInbox(r.encryptionTier, dek, r.bodyHtml);
+
+  // Re-run the (pure) body parser on the decrypted body so the Email tab can
+  // show WHAT we identified + WHY a parse is low-confidence. Derived at read —
+  // no stored signals column. Body emails only (attachments don't body-parse).
+  let candidate: ReturnType<typeof parseEmailBody>["candidate"] | null = null;
+  let signals: ReturnType<typeof parseEmailBody>["signals"] | null = null;
+  if (r.sourceKind === "body") {
+    const p = parseEmailBody({
+      text: bodyText,
+      html: bodyHtml,
+      subject,
+      receivedDate: r.receivedAt.toISOString().slice(0, 10),
+    });
+    candidate = p.candidate;
+    signals = p.signals ?? null;
+  }
+
   return NextResponse.json({
     id: r.id,
     fromAddress: decodeInbox(r.encryptionTier, dek, r.fromAddress),
-    subject: decodeInbox(r.encryptionTier, dek, r.subject),
-    bodyText: decodeInbox(r.encryptionTier, dek, r.bodyText),
-    bodyHtml: decodeInbox(r.encryptionTier, dek, r.bodyHtml),
+    subject,
+    bodyText,
+    bodyHtml,
     receivedAt: r.receivedAt.toISOString(),
     action: r.action,
     sourceKind: r.sourceKind,
     parseConfidence: r.parseConfidence,
     matchedRuleId: r.matchedRuleId,
     recordedTransactionId: r.recordedTransactionId,
+    candidate,
+    signals,
   });
 }
 
@@ -77,6 +100,15 @@ const patchSchema = z.union([
     action: z.literal("record"),
     accountId: z.number().int().positive(),
     categoryId: z.number().int().positive(),
+    // Optional transforms — rule mapping (when recording from a rule) and/or
+    // per-email manual corrections. Applied in recordEmailInboxRow before the
+    // hash/materialize (per-email overrides win; see apply-transform.ts).
+    flipSign: z.boolean().optional(),
+    dateSource: z.enum(["parsed", "received"]).optional(),
+    payeeOverride: z.string().max(120).optional(),
+    amount: z.number().optional(),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    payee: z.string().max(120).optional(),
   }),
   z.object({ action: z.literal("discard") }),
 ]);
@@ -110,6 +142,14 @@ export async function PATCH(
     accountId: parsed.data.accountId,
     categoryId: parsed.data.categoryId,
     finalAction: "manually_recorded",
+    transform: {
+      flipSign: parsed.data.flipSign,
+      dateSource: parsed.data.dateSource,
+      payeeOverride: parsed.data.payeeOverride,
+      amountOverride: parsed.data.amount,
+      dateOverride: parsed.data.date,
+      payeeOverridePerEmail: parsed.data.payee,
+    },
   });
   if (result.status === "not_found") {
     return NextResponse.json({ error: "Not found" }, { status: 404 });

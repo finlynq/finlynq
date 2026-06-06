@@ -17,6 +17,8 @@ import { encryptField, tryDecryptField, isEncrypted } from "@/lib/crypto/envelop
 export interface EmailRuleCryptoFields {
   name?: string | null;
   matchValue?: string | null;
+  /** Optional rule-level payee rename — free-text, encrypted like the others. */
+  payeeOverride?: string | null;
 }
 
 /** Encrypt the two sensitive fields for storage. Null DEK / already-`v1:`
@@ -37,6 +39,13 @@ export function encryptEmailRuleFields<T extends EmailRuleCryptoFields>(
   ) {
     out.matchValue = encryptField(dek, rule.matchValue) ?? rule.matchValue;
   }
+  if (
+    typeof rule.payeeOverride === "string" &&
+    rule.payeeOverride !== "" &&
+    !isEncrypted(rule.payeeOverride)
+  ) {
+    out.payeeOverride = encryptField(dek, rule.payeeOverride) ?? rule.payeeOverride;
+  }
   return out as T;
 }
 
@@ -54,6 +63,9 @@ export function decryptEmailRuleFields<T extends EmailRuleCryptoFields>(
   }
   if (typeof rule.matchValue === "string" && rule.matchValue !== "") {
     out.matchValue = tryDecryptField(dek, rule.matchValue) ?? rule.matchValue;
+  }
+  if (typeof rule.payeeOverride === "string" && rule.payeeOverride !== "") {
+    out.payeeOverride = tryDecryptField(dek, rule.payeeOverride) ?? rule.payeeOverride;
   }
   return out as T;
 }

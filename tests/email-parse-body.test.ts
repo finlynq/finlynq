@@ -128,3 +128,52 @@ describe("parseEmailBody", () => {
     expect(r.candidate).not.toBeNull();
   });
 });
+
+describe("parseEmailBody — signals", () => {
+  it("reports a single detected amount + clean signals on a high-confidence parse", () => {
+    const r = parseEmailBody({
+      text: "You spent $42.17 at STARBUCKS on Jun 5, 2026 with card ending 1234.",
+    });
+    expect(r.signals).toBeDefined();
+    expect(r.signals!.detectedAmounts).toHaveLength(1);
+    expect(r.signals!.detectedAmounts[0]).toEqual({ value: 42.17, currency: "USD" });
+    expect(r.signals!.multipleAmounts).toBe(false);
+    expect(r.signals!.usedFallbackDate).toBe(false);
+    expect(r.signals!.dateAmbiguous).toBe(false);
+    expect(r.signals!.signExplicit).toBe(true); // "spent"
+    expect(r.signals!.last4).toBe("1234");
+  });
+
+  it("flags multipleAmounts when distinct amounts appear", () => {
+    const r = parseEmailBody({
+      text: "Subtotal $40.00, tax $2.17, you spent $42.17 at STORE on 2026-06-05.",
+    });
+    expect(r.signals!.multipleAmounts).toBe(true);
+    expect(r.signals!.detectedAmounts.length).toBeGreaterThan(1);
+  });
+
+  it("flags usedFallbackDate when the date comes from the received-date fallback", () => {
+    const r = parseEmailBody({
+      text: "You were charged $9.99 at NETFLIX.",
+      receivedDate: "2026-06-05",
+    });
+    expect(r.signals!.usedFallbackDate).toBe(true);
+  });
+
+  it("flags dateAmbiguous for a numeric DD/MM-vs-MM/DD date", () => {
+    const r = parseEmailBody({ text: "You spent $20.00 at CAFE on 03/04/2026." });
+    expect(r.signals!.dateAmbiguous).toBe(true);
+  });
+
+  it("reports signExplicit=false when no debit/credit verb is present", () => {
+    const r = parseEmailBody({ text: "$15.00 at SHOP on 2026-06-05." });
+    expect(r.signals!.signExplicit).toBe(false);
+  });
+
+  it("returns empty detectedAmounts signals when no amount is found", () => {
+    const r = parseEmailBody({ subject: "Lunch?", text: "Are we on for lunch tomorrow?" });
+    expect(r.candidate).toBeNull();
+    expect(r.signals).toBeDefined();
+    expect(r.signals!.detectedAmounts).toHaveLength(0);
+  });
+});

@@ -1311,6 +1311,14 @@ export const emailImportRules = pgTable(
     }),
     // 'auto' (auto-record) | 'review' (resolve account, wait for a click).
     mode: text("mode").notNull().default("auto"),
+    // 2026-06-16 — v1 transforms applied in the single materialize path before
+    // the account-bound import_hash + ledger write. flip_sign / date_source are
+    // plaintext knobs (used by the record path, no secrecy value). payee_override
+    // is free-text → user-DEK encrypted (v1:) like name/match_value
+    // (src/lib/email-rules/crypto.ts).
+    flipSign: boolean("flip_sign").notNull().default(false),
+    dateSource: text("date_source").notNull().default("parsed"), // 'parsed' | 'received'
+    payeeOverride: text("payee_override"), // nullable, encrypted
     isActive: boolean("is_active").notNull().default(true),
     priority: integer("priority").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true })
