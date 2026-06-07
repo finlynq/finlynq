@@ -18,6 +18,7 @@ function rule(conditions: EmailCondition[], extra: Partial<ActiveEmailRule> = {}
     flipSign: false,
     dateSource: "parsed",
     payeeOverride: null,
+    currency: null,
     priority: 0,
     ...extra,
   };

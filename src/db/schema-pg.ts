@@ -1340,6 +1340,10 @@ export const emailImportRules = pgTable(
     flipSign: boolean("flip_sign").notNull().default(false),
     dateSource: text("date_source").notNull().default("parsed"), // 'parsed' | 'received'
     payeeOverride: text("payee_override"), // nullable, encrypted
+    // 2026-06-18 — recorded-currency override. NULL ⇒ use the target account's
+    // currency (the default); an ISO code forces that currency regardless of
+    // what the email body parsed (a bare `$` defaults USD). Plaintext.
+    currency: text("currency"),
     isActive: boolean("is_active").notNull().default(true),
     priority: integer("priority").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true })

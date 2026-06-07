@@ -35,6 +35,7 @@ import {
 import { Plus, Trash2 } from "lucide-react";
 import { applyEmailTransform } from "@/lib/email-import/apply-transform";
 import { formatCurrency } from "@/lib/currency";
+import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import { safeAccountName, safeName } from "@/lib/safe-name";
 import {
   EMAIL_CONDITION_FIELDS,
@@ -53,6 +54,8 @@ export interface RuleDraftInit {
   flipSign?: boolean;
   dateSource?: "parsed" | "received";
   payeeOverride?: string | null;
+  /** Recorded-currency override (ISO). null ⇒ use the account currency. */
+  currency?: string | null;
 }
 
 interface AccountOpt {
@@ -235,6 +238,8 @@ export function EmailRuleDialog({
   const [flipSign, setFlipSign] = useState(initial?.flipSign ?? false);
   const [dateSource, setDateSource] = useState<"parsed" | "received">(initial?.dateSource ?? "parsed");
   const [payeeOverride, setPayeeOverride] = useState(initial?.payeeOverride ?? "");
+  // null ⇒ inherit the target account's currency (the default).
+  const [currency, setCurrency] = useState<string | null>(initial?.currency ?? null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -244,6 +249,8 @@ export function EmailRuleDialog({
     () => accounts.filter((a) => !a.archived && a.isInvestment !== true),
     [accounts],
   );
+  const accountCurrency =
+    accountId != null ? accounts.find((a) => a.id === accountId)?.currency ?? null : null;
   const acctLabel = (id: number | null) => {
     if (id == null) return "Account";
     const a = accounts.find((x) => x.id === id);
@@ -272,8 +279,9 @@ export function EmailRuleDialog({
       { flipSign, dateSource, payeeOverride: payeeOverride.trim() || null },
       fromEmail.receivedAt ? fromEmail.receivedAt.slice(0, 10) : null,
     );
-    return { ...eff, currency: c.currency };
-  }, [mode, fromEmail, flipSign, dateSource, payeeOverride]);
+    // Display the currency the record path WILL use: override → account → parsed.
+    return { ...eff, currency: currency ?? accountCurrency ?? c.currency };
+  }, [mode, fromEmail, flipSign, dateSource, payeeOverride, currency, accountCurrency]);
 
   const save = async () => {
     if (!name.trim() || accountId == null) {
@@ -310,6 +318,7 @@ export function EmailRuleDialog({
         flipSign,
         dateSource,
         payeeOverride: payeeOverride.trim() || null,
+        currency: currency, // null ⇒ inherit the account currency
       };
       const res = await fetch(isEdit ? `/api/email-rules/${initial!.id}` : "/api/email-rules", {
         method: isEdit ? "PUT" : "POST",
@@ -333,6 +342,7 @@ export function EmailRuleDialog({
             flipSign,
             dateSource,
             payeeOverride: payeeOverride.trim() || undefined,
+            currency: currency ?? undefined,
           }),
         });
         if (!rec.ok) {
@@ -350,6 +360,16 @@ export function EmailRuleDialog({
         const body = await rec.json().catch(() => ({}));
         if (body.action === "duplicate_skipped") {
           setNotice("Rule created. This email matched an existing transaction, so it was skipped as a duplicate.");
+          onSaved();
+          setSaving(false);
+          return;
+        }
+        if (body.action === "possible_duplicate") {
+          setNotice(
+            `Rule created. This email looks like a possible duplicate of an existing transaction${
+              body.duplicateOfTransactionId ? ` (#${body.duplicateOfTransactionId})` : ""
+            }, so it wasn't recorded. Use “Record anyway” on the row if it's distinct.`,
+          );
           onSaved();
           setSaving(false);
           return;
@@ -491,6 +511,32 @@ export function EmailRuleDialog({
                 value={payeeOverride}
                 onChange={(e) => setPayeeOverride(e.target.value)}
               />
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <label className="text-xs text-muted-foreground w-20">Currency</label>
+              <Select
+                value={currency ?? "account"}
+                onValueChange={(v) => setCurrency(!v || v === "account" ? null : v)}
+              >
+                <SelectTrigger className="w-[200px] h-9">
+                  <SelectValue>
+                    {currency
+                      ? currency
+                      : `Account currency${accountCurrency ? ` (${accountCurrency})` : ""}`}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="account">
+                    Account currency{accountCurrency ? ` (${accountCurrency})` : ""}
+                  </SelectItem>
+                  {SUPPORTED_FIAT_CURRENCIES.map((c) => (
+                    <SelectItem key={c} value={c}>{c}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <span className="text-xs text-muted-foreground">
+                (email alerts often show only “$”)
+              </span>
             </div>
           </div>
 

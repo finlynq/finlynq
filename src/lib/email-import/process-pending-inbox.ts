@@ -25,7 +25,7 @@
  * email stays needs_review for an explicit user click.
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, gte, lte } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
@@ -36,19 +36,32 @@ import { invalidateUser } from "@/lib/mcp/user-tx-cache";
 import { loadActiveEmailRules, firstMatchingRule } from "@/lib/email-rules/load";
 import { applyEmailTransform, type EmailTransform } from "@/lib/email-import/apply-transform";
 import { htmlToText } from "@/lib/email-import/parse-body";
+import {
+  findStrictLedgerDuplicate,
+  shiftDays,
+  EMAIL_DEDUP_DATE_TOLERANCE_DAYS,
+} from "@/lib/email-import/dedup";
 
 export interface ProcessInboxResult {
   scanned: number;
   upgraded: number;
   autoRecorded: number;
   duplicateSkipped: number;
+  /** High-confidence rows the strict ledger-dup check held back from auto-record
+   *  (left needs_review for the user to resolve). */
+  possibleDuplicates: number;
   needsReview: number;
   failed: number;
 }
 
 export interface RecordEmailResult {
-  status: "recorded" | "duplicate" | "not_found" | "invalid";
+  /** `duplicate` = exact-hash match (already in the bank ledger; never created).
+   *  `possible_duplicate` = strict amount/date match against an existing ledger
+   *  row; NOT created unless the caller passes `force` (manual "Record anyway"). */
+  status: "recorded" | "duplicate" | "possible_duplicate" | "not_found" | "invalid";
   transactionId?: number;
+  /** For possible_duplicate — the existing transaction it matched. */
+  duplicateOfTransactionId?: number;
   reason?: string;
 }
 
@@ -89,6 +102,7 @@ export async function processPendingInboxEmails(
     upgraded: 0,
     autoRecorded: 0,
     duplicateSkipped: 0,
+    possibleDuplicates: 0,
     needsReview: 0,
     failed: 0,
   };
@@ -175,8 +189,12 @@ export async function processPendingInboxEmails(
         const recorded = await recordEmailInboxRow(userId, dek, row.id, {
           accountId: rule.accountId,
           categoryId: rule.categoryId,
+          // NULL ⇒ fall back to the account currency in recordEmailInboxRow.
+          currencyOverride: rule.currency,
           matchedRuleId: rule.id,
           finalAction: "auto_recorded",
+          // Auto-record never force-creates over a strict ledger duplicate —
+          // it holds the row at needs_review for the user to resolve.
           transform: {
             flipSign: rule.flipSign,
             dateSource: rule.dateSource,
@@ -185,6 +203,7 @@ export async function processPendingInboxEmails(
         });
         if (recorded.status === "recorded") result.autoRecorded += 1;
         else if (recorded.status === "duplicate") result.duplicateSkipped += 1;
+        else if (recorded.status === "possible_duplicate") result.possibleDuplicates += 1;
         else result.needsReview += 1;
       } catch (err) {
         result.failed += 1;
@@ -214,10 +233,17 @@ export async function recordEmailInboxRow(
   opts: {
     accountId: number;
     categoryId: number | null;
+    /** Rule-level recorded-currency override. NULL/undefined ⇒ use the target
+     *  account's currency (the default). An ISO code forces that currency. */
+    currencyOverride?: string | null;
     matchedRuleId?: number | null;
     finalAction: "auto_recorded" | "manually_recorded";
     /** Rule mapping + per-email manual overrides applied before hash/materialize. */
     transform?: EmailTransform;
+    /** When true, bypass the strict (fuzzy) ledger-duplicate hold-back and record
+     *  anyway. The exact-hash dedup is NEVER bypassed. Manual "Record anyway"
+     *  sets this; auto-record never does. */
+    force?: boolean;
   },
 ): Promise<RecordEmailResult> {
   const inboxRows = await db
@@ -262,7 +288,6 @@ export async function recordEmailInboxRow(
   const cand = staged[0];
   if (!cand) return { status: "invalid", reason: "no_candidate" };
   const rawPayee = decodeStaged(cand.encryptionTier, dek, cand.payee) ?? "";
-  const currency = (cand.currency ?? "USD").toUpperCase();
 
   // Apply the rule mapping (flip-sign / date-source / payee-rename) + any
   // per-email manual overrides BEFORE guards/hash/materialize, so the bank
@@ -279,6 +304,16 @@ export async function recordEmailInboxRow(
   const guard = await checkGuards(userId, dek, opts.accountId, opts.categoryId, eff.amount);
   if (!guard.ok) return { status: "invalid", reason: guard.reason };
 
+  // Recorded currency: rule override → account currency → USD last-ditch. The
+  // body-parsed currency (a bare `$` ⇒ USD) is deliberately NOT used — a CAD
+  // account must record CAD even when the alert only printed `$`.
+  const currency = (
+    (opts.currencyOverride && opts.currencyOverride.trim()) ||
+    guard.accountCurrency ||
+    "USD"
+  ).toUpperCase();
+
+  // Dedup 1 — exact-hash against the bank ledger (a byte-identical re-import).
   const hash = generateImportHash(eff.date, opts.accountId, eff.amount, eff.payee);
   const dup = await checkDuplicates([hash], userId);
   if (dup.has(hash)) {
@@ -287,7 +322,25 @@ export async function recordEmailInboxRow(
       .set({ action: "duplicate_skipped" })
       .where(eq(schema.emailInbox.id, inboxId));
     await markStagedRejected(inbox.stagedImportId, cand.id);
-    return { status: "duplicate" };
+    return { status: "duplicate", reason: "exact" };
+  }
+
+  // Dedup 2 — strict ledger match (amount ±$0.01 within a few days on the same
+  // account) catches the same alert delivered twice on different days, or an
+  // alert vs a manually-entered / statement-imported row whose payee differs.
+  // Held back unless `force` (manual "Record anyway"); auto-record never forces.
+  if (!opts.force) {
+    const dupTxId = await findExistingLedgerDuplicate(
+      userId,
+      opts.accountId,
+      eff.date,
+      eff.amount,
+    );
+    if (dupTxId != null) {
+      // Leave the row needs_review (do NOT mutate action) so the Email tab can
+      // surface "possible duplicate of #X" and the user resolves it.
+      return { status: "possible_duplicate", duplicateOfTransactionId: dupTxId };
+    }
   }
 
   const txId = await materialize({
@@ -458,10 +511,13 @@ async function checkGuards(
   accountId: number,
   categoryId: number,
   amount: number,
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<{ ok: boolean; reason?: string; accountCurrency?: string }> {
   // Investment-account guard — the body surface doesn't collect a holding.
   const acct = await db
-    .select({ isInvestment: schema.accounts.isInvestment })
+    .select({
+      isInvestment: schema.accounts.isInvestment,
+      currency: schema.accounts.currency,
+    })
     .from(schema.accounts)
     .where(and(eq(schema.accounts.id, accountId), eq(schema.accounts.userId, userId)))
     .limit(1);
@@ -480,7 +536,40 @@ async function checkGuards(
   const violation = await validateSignVsCategoryById(userId, dek, categoryId, amount);
   if (violation) return { ok: false, reason: "sign_category_mismatch" };
 
-  return { ok: true };
+  return { ok: true, accountCurrency: acct[0].currency ?? undefined };
+}
+
+/**
+ * Strict ledger-duplicate lookup for the record path. Pulls the candidate's
+ * date-window of existing transactions on the account (bounded query), then
+ * runs the pure {@link findStrictLedgerDuplicate} matcher (amount ±$0.01).
+ * Returns the matched transaction id, or null.
+ */
+async function findExistingLedgerDuplicate(
+  userId: string,
+  accountId: number,
+  date: string,
+  amount: number,
+): Promise<number | null> {
+  const lo = shiftDays(date, -EMAIL_DEDUP_DATE_TOLERANCE_DAYS);
+  const hi = shiftDays(date, EMAIL_DEDUP_DATE_TOLERANCE_DAYS);
+  const rows = await db
+    .select({
+      id: schema.transactions.id,
+      date: schema.transactions.date,
+      amount: schema.transactions.amount,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        eq(schema.transactions.accountId, accountId),
+        gte(schema.transactions.date, lo),
+        lte(schema.transactions.date, hi),
+      ),
+    )
+    .all();
+  return findStrictLedgerDuplicate({ date, amount }, rows);
 }
 
 // ─── Staged-import lifecycle helpers ─────────────────────────────────────────

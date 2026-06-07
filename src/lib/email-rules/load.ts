@@ -40,6 +40,8 @@ export interface ActiveEmailRule {
   dateSource: "parsed" | "received";
   /** Decrypted rule-level payee rename, or null. */
   payeeOverride: string | null;
+  /** Recorded-currency override (ISO). NULL ⇒ use the account currency. */
+  currency: string | null;
   priority: number;
 }
 
@@ -72,6 +74,7 @@ export async function loadActiveEmailRules(
       flipSign: schema.emailImportRules.flipSign,
       dateSource: schema.emailImportRules.dateSource,
       payeeOverride: schema.emailImportRules.payeeOverride,
+      currency: schema.emailImportRules.currency,
       priority: schema.emailImportRules.priority,
     })
     .from(schema.emailImportRules)
@@ -117,6 +120,7 @@ export async function loadActiveEmailRules(
       flipSign: r.flipSign,
       dateSource: (r.dateSource as "parsed" | "received") ?? "parsed",
       payeeOverride: dec.payeeOverride ?? r.payeeOverride,
+      currency: r.currency ?? null,
       priority: r.priority,
     };
   });

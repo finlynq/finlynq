@@ -124,6 +124,9 @@ export function InboxEmailTab() {
   const [editPayee, setEditPayee] = useState("");
   // The email a "Create rule" dialog is open for (fromEmail mode).
   const [ruleEmail, setRuleEmail] = useState<EmailInboxItem | null>(null);
+  // Set when a record attempt hit the strict ledger-duplicate hold-back. Offers
+  // "Record anyway" (re-PATCH with force:true).
+  const [dupPrompt, setDupPrompt] = useState<{ id: string; txId: number | null } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -160,6 +163,7 @@ export function InboxEmailTab() {
       setDetail(null);
       setPickAccount(null);
       setPickCategory(null);
+      setDupPrompt(null);
       // Seed the per-email manual-edit inputs from the parsed candidate.
       const it = items.find((x) => x.id === id);
       setEditAmount(it?.candidate ? String(it.candidate.amount) : "");
@@ -176,7 +180,7 @@ export function InboxEmailTab() {
   );
 
   const record = useCallback(
-    async (id: string) => {
+    async (id: string, opts?: { force?: boolean }) => {
       if (pickAccount == null || pickCategory == null) return;
       setActing(true);
       try {
@@ -186,6 +190,7 @@ export function InboxEmailTab() {
           accountId: pickAccount,
           categoryId: pickCategory,
         };
+        if (opts?.force) body.force = true;
         // Per-email manual corrections — send only what the user changed from
         // the parse (unchanged fields stay omitted → the candidate is used).
         if (it?.candidate) {
@@ -201,10 +206,17 @@ export function InboxEmailTab() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        if (!res.ok) {
-          const b = await res.json().catch(() => ({}));
+        const b = await res.json().catch(() => ({}));
+        if (!res.ok && b.action !== "possible_duplicate") {
           throw new Error(b.code ? `${b.error} (${b.code})` : (b.error ?? `HTTP ${res.status}`));
         }
+        // Strict ledger-duplicate hold-back — not recorded. Keep the row open
+        // and surface "Record anyway".
+        if (b.action === "possible_duplicate") {
+          setDupPrompt({ id, txId: b.duplicateOfTransactionId ?? null });
+          return;
+        }
+        setDupPrompt(null);
         setOpenId(null);
         setDetail(null);
         await load();
@@ -542,6 +554,34 @@ export function InboxEmailTab() {
                           >
                             Discard
                           </Button>
+                        </div>
+                      )}
+
+                      {canRecord && dupPrompt?.id === it.id && (
+                        <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                          <p>
+                            Possible duplicate of an existing transaction
+                            {dupPrompt.txId != null ? ` (#${dupPrompt.txId})` : ""} on this account
+                            (same amount, near date). Not recorded.
+                          </p>
+                          <div className="mt-2 flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void record(it.id, { force: true })}
+                              disabled={acting}
+                            >
+                              Record anyway
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => void discard(it.id)}
+                              disabled={acting}
+                            >
+                              Discard
+                            </Button>
+                          </div>
                         </div>
                       )}
 

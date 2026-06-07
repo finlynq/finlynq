@@ -32,6 +32,8 @@ const updateSchema = z.object({
   flipSign: z.boolean().optional(),
   dateSource: z.enum(["parsed", "received"]).optional(),
   payeeOverride: z.string().max(120).nullable().optional(),
+  // Recorded-currency override (ISO). Explicit null clears it (→ account currency).
+  currency: z.string().regex(/^[A-Za-z]{3,4}$/).nullable().optional(),
   isActive: z.boolean().optional(),
   priority: z.number().int().optional(),
 });
@@ -115,6 +117,9 @@ export async function PUT(
   // payee_override: explicit null clears it; a string is encrypted.
   if (d.payeeOverride !== undefined)
     set.payeeOverride = d.payeeOverride === null ? null : enc.payeeOverride ?? d.payeeOverride;
+  // currency: explicit null clears it (→ account currency); a code is uppercased.
+  if (d.currency !== undefined)
+    set.currency = d.currency === null ? null : d.currency.toUpperCase();
   if (d.isActive !== undefined) set.isActive = d.isActive;
   if (d.priority !== undefined) set.priority = d.priority;
 

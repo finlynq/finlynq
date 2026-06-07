@@ -44,6 +44,8 @@ const createSchema = z
     flipSign: z.boolean().optional(),
     dateSource: z.enum(["parsed", "received"]).optional(),
     payeeOverride: z.string().max(120).nullable().optional(),
+    // Recorded-currency override (ISO). NULL/omitted ⇒ use the account currency.
+    currency: z.string().regex(/^[A-Za-z]{3,4}$/).nullable().optional(),
     isActive: z.boolean().optional(),
     priority: z.number().int().optional(),
   })
@@ -91,6 +93,7 @@ export async function GET(request: NextRequest) {
       flipSign: schema.emailImportRules.flipSign,
       dateSource: schema.emailImportRules.dateSource,
       payeeOverride: schema.emailImportRules.payeeOverride,
+      currency: schema.emailImportRules.currency,
       isActive: schema.emailImportRules.isActive,
       priority: schema.emailImportRules.priority,
     })
@@ -120,6 +123,7 @@ export async function GET(request: NextRequest) {
       flipSign: r.flipSign,
       dateSource: r.dateSource,
       payeeOverride: dec.payeeOverride ?? r.payeeOverride,
+      currency: r.currency,
       isActive: r.isActive,
       priority: r.priority,
     };
@@ -184,6 +188,7 @@ export async function POST(request: NextRequest) {
       flipSign: d.flipSign ?? false,
       dateSource: d.dateSource ?? "parsed",
       payeeOverride: enc.payeeOverride ?? d.payeeOverride ?? null,
+      currency: d.currency ? d.currency.toUpperCase() : null,
       isActive: d.isActive ?? true,
       priority: d.priority ?? 0,
     })

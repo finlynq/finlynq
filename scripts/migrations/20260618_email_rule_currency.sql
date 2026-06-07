@@ -1,0 +1,14 @@
+-- 2026-06-18 — Email-import rule currency override.
+--
+-- Email body alerts often carry only a bare `$`, which the heuristic parser maps
+-- to USD. Recording into a non-USD account (e.g. CAD) then stored the wrong
+-- currency. The record path now defaults the recorded currency to the ACCOUNT's
+-- currency; this column lets a rule OVERRIDE that default for a specific feed.
+--
+-- NULL  ⇒ use the target account's currency (the new default).
+-- 'CAD' ⇒ force this ISO code regardless of what the body parsed.
+--
+-- Plaintext (a 3-4 letter ISO code has no secrecy value, like the existing
+-- flip_sign / date_source knobs). Additive — no backfill, existing rows read
+-- NULL and inherit the account currency.
+ALTER TABLE email_import_rules ADD COLUMN IF NOT EXISTS currency text;

@@ -26,6 +26,7 @@ interface EmailRule {
   flipSign: boolean;
   dateSource: "parsed" | "received";
   payeeOverride: string | null;
+  currency: string | null;
   isActive: boolean;
   priority: number;
 }
@@ -157,6 +158,7 @@ export function EmailRulesManager() {
                 r.flipSign ? "flip sign" : null,
                 r.dateSource === "received" ? "date: received" : null,
                 r.payeeOverride ? `payee: ${r.payeeOverride}` : null,
+                r.currency ? `currency: ${r.currency}` : null,
               ].filter(Boolean) as string[];
               return (
                 <div
@@ -193,6 +195,7 @@ export function EmailRulesManager() {
                         flipSign: r.flipSign,
                         dateSource: r.dateSource,
                         payeeOverride: r.payeeOverride,
+                        currency: r.currency,
                       })
                     }
                     title="Edit"

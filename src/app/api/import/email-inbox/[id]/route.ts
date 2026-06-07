@@ -109,6 +109,10 @@ const patchSchema = z.union([
     amount: z.number().optional(),
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     payee: z.string().max(120).optional(),
+    // Recorded-currency override (ISO). Omitted ⇒ use the account currency.
+    currency: z.string().regex(/^[A-Za-z]{3,4}$/).optional(),
+    // "Record anyway" — bypass the strict (fuzzy) ledger-duplicate hold-back.
+    force: z.boolean().optional(),
   }),
   z.object({ action: z.literal("discard") }),
 ]);
@@ -141,7 +145,9 @@ export async function PATCH(
   const result = await recordEmailInboxRow(userId, dek, id, {
     accountId: parsed.data.accountId,
     categoryId: parsed.data.categoryId,
+    currencyOverride: parsed.data.currency,
     finalAction: "manually_recorded",
+    force: parsed.data.force,
     transform: {
       flipSign: parsed.data.flipSign,
       dateSource: parsed.data.dateSource,
@@ -162,6 +168,15 @@ export async function PATCH(
   }
   if (result.status === "duplicate") {
     return NextResponse.json({ ok: true, action: "duplicate_skipped" });
+  }
+  if (result.status === "possible_duplicate") {
+    // Not recorded — the row stays needs_review. The client offers
+    // "Record anyway" (re-PATCH with force:true).
+    return NextResponse.json({
+      ok: false,
+      action: "possible_duplicate",
+      duplicateOfTransactionId: result.duplicateOfTransactionId,
+    });
   }
   return NextResponse.json({
     ok: true,
