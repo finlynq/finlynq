@@ -46,6 +46,10 @@ import {
 import { AccountSelector, type AccountOption } from "@/components/import/reconcile/account-selector";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
 import { safeName } from "@/lib/safe-name";
+import {
+  latestBankLedgerBalance,
+  sendableDelta,
+} from "@/lib/import/bank-ledger-projection";
 import { type DbTransactionRow } from "@/components/import/reconcile/db-pane";
 import {
   type SuggestionDisplay,
@@ -840,32 +844,27 @@ export function StagedReviewSurface({
     [dbRows, setDbRows],
   );
 
-  // FINLYNQ-56 Phase 4 — live "After approval" balance. The projection
-  // sums selected rows that will actually materialize into `transactions`
-  // on approve:
-  //   - SELECTED       (user checked it on the right pane)
-  //   - dedupStatus != 'existing'   (existing rows are already in the balance)
-  //   - reconcileState != 'linked'         (linked rows don't materialize — the
-  //                                         target tx is already in the balance)
-  //   - reconcileState != 'skipped_duplicate' (already-imported marker)
-  // Synchronous recompute on every `setDetail` / `setSelected` — the
-  // ≤500ms target is met by virtue of being client-side memoization.
-  const liveProjection = useMemo(() => {
-    if (!detail) return null;
-    const recon = detail.reconciliation;
-    const current = recon?.currentBalance ?? null;
-    if (current == null) return { current: null, projected: null };
-    const liveDelta = detail.rows
-      .filter(
-        (r) =>
-          selected.has(r.id) &&
-          r.dedupStatus !== "existing" &&
-          r.reconcileState !== "skipped_duplicate" &&
-          r.reconcileState !== "linked",
-      )
-      .reduce((acc, r) => acc + Number(r.amount ?? 0), 0);
-    return { current, projected: current + liveDelta };
-  }, [detail, selected]);
+  // FINLYNQ-124 — live BANK-ledger staging calc behind ReconciliationCallout.
+  // "Send to bank ledger" writes the file's rows ONLY to `bank_transactions`,
+  // so the banner projects against the bank-ledger running total (left pane),
+  // NOT the system-ledger balance (which duplicated the Reconcile tab and went
+  // dead after send).
+  //   - bankLedgerBalance = latest-dated dbRows runningBalance (what staged
+  //     rows land into).
+  //   - sendCount/sendDelta = the rows the Send button will write right now,
+  //     tracking the right-pane checkboxes via the same eligibility filter the
+  //     old liveProjection + server pendingDelta used (selected, non-existing,
+  //     non-skipped_duplicate, non-linked).
+  // Synchronous recompute on every `setDbRows` / `setDetail` / `setSelected` —
+  // the ≤500ms target is met by virtue of being client-side memoization.
+  const bankLedgerCalc = useMemo(() => {
+    const bankLedgerBalance = latestBankLedgerBalance(dbRows);
+    const { count: sendCount, delta: sendDelta } = sendableDelta(
+      detail?.rows ?? [],
+      selected,
+    );
+    return { bankLedgerBalance, sendCount, sendDelta };
+  }, [dbRows, detail, selected]);
 
   // Derive the displayable suggestion cards from the matcher's pairs,
   // filtering out (a) rejected pairs, (b) staged rows already at 'linked'
@@ -1144,8 +1143,9 @@ export function StagedReviewSurface({
           statementBalanceDate={detail.staged.statementBalanceDate ?? null}
           statementCurrency={detail.staged.statementCurrency ?? null}
           boundAccountId={detail.staged.boundAccountId ?? null}
-          currentBalance={liveProjection?.current ?? null}
-          projectedBalance={liveProjection?.projected ?? null}
+          bankLedgerBalance={bankLedgerCalc.bankLedgerBalance}
+          sendCount={bankLedgerCalc.sendCount}
+          sendDelta={bankLedgerCalc.sendDelta}
           boundAccountCurrency={detail.reconciliation?.boundAccountCurrency ?? null}
         />
       )}

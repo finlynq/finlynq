@@ -58,10 +58,10 @@ export interface StagedDetail {
     sampleRows?: Array<Record<string, string>> | null;
   };
   rows: StagedEditableRow[];
+  /** FINLYNQ-124 — the Staging banner now computes the bank-ledger staging
+   *  calc client-side; the server only carries the bound account's currency
+   *  for the banner's display fallback. */
   reconciliation?: {
-    currentBalance: number | null;
-    projectedBalance: number | null;
-    pendingDelta: number | null;
     boundAccountCurrency: string | null;
   };
   suggestedMatches?: Array<{
