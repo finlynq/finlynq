@@ -807,18 +807,29 @@ export async function getAccountBalances(userId: string, opts?: { includeArchive
 export async function getMonthlySpending(userId: string, startDate: string, endDate: string) {
   // Stream D Phase 4 — plaintext `categories.name` dropped. GROUP BY drops
   // the name leg; rows carry `categoryNameCt` for caller-side decryption.
+  //
+  // FINLYNQ-123 — monthly spending is a FLOW figure feeding anomaly/trend
+  // detection. Emit per-(month, category, currency, reporting_currency) slices
+  // with both the raw `amount` sum and the stored historical `reporting_amount`
+  // sum so the caller (/api/insights) can convert each slice to the display
+  // currency before aggregating. Without this, an FX swing between months reads
+  // as a spending spike. The caller collapses the slices back per (month,
+  // category).
   return db
     .select({
       month: monthExpr(transactions.date),
       categoryGroup: categories.group,
       categoryNameCt: categories.nameCt,
       categoryType: categories.type,
-      total: sql<number>`SUM(${transactions.amount})`,
+      currency: transactions.currency,
+      reportingCurrency: transactions.reportingCurrency,
+      totalAmount: sql<number>`SUM(${transactions.amount})`,
+      totalReporting: sql<number | null>`SUM(${transactions.reportingAmount})`,
     })
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .where(and(eq(transactions.userId, userId), gte(transactions.date, startDate), lte(transactions.date, endDate)))
-    .groupBy(monthExpr(transactions.date), categories.nameCt, categories.group, categories.type)
+    .groupBy(monthExpr(transactions.date), categories.nameCt, categories.group, categories.type, transactions.currency, transactions.reportingCurrency)
     .orderBy(monthExpr(transactions.date))
     .all();
 }

@@ -6,7 +6,7 @@ import {
   getNetWorthOverTime,
 } from "@/lib/queries";
 import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-service";
-import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
+import { selfHealReportingAmounts, convertReportingSlice } from "@/lib/fx/reporting-amount";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
@@ -92,22 +92,13 @@ export async function GET(request: NextRequest) {
     // convert each (currency, reporting_currency) slice to the display currency
     // (stored historical reporting_amount when it matches, else an on-the-fly
     // current-rate fallback) and re-aggregate to the shapes the client expects.
-    const displayUpper = displayCurrency.toUpperCase();
+    // FINLYNQ-123 single-sourced this convention as `convertReportingSlice`.
     const convertGroup = (row: {
       currency: string | null;
       reportingCurrency: string | null;
       totalAmount: number | null;
       totalReporting: number | null;
-    }): number => {
-      if (
-        row.reportingCurrency &&
-        row.reportingCurrency.toUpperCase() === displayUpper &&
-        row.totalReporting != null
-      ) {
-        return row.totalReporting;
-      }
-      return convertWithRateMap(row.totalAmount ?? 0, row.currency ?? displayUpper, rateMap);
-    };
+    }): number => convertReportingSlice(row, displayCurrency, rateMap);
 
     const iveSlices = await getIncomeVsExpenses(userId, startDate, endDate);
     const iveMap = new Map<string, { month: string; type: string | null; total: number }>();

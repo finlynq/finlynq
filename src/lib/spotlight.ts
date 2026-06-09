@@ -8,6 +8,7 @@
 import { db, schema } from "@/db";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
+import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 
 const { accounts, categories, transactions, budgets, goals, subscriptions } = schema;
 
@@ -24,6 +25,8 @@ export type SpotlightItem = {
 };
 
 const SEVERITY_ORDER: Record<SpotlightSeverity, number> = { critical: 0, warning: 1, info: 2 };
+
+type RateCtx = { displayCurrency: string; rateMap: Map<string, number> };
 
 function today(): string {
   return new Date().toISOString().split("T")[0];
@@ -275,18 +278,23 @@ async function getUncategorizedTransactions(userId: string): Promise<SpotlightIt
 }
 
 // 6. Low account balances (<$500)
-async function getLowBalances(userId: string, dek: Buffer | null): Promise<SpotlightItem[]> {
+// FINLYNQ-123 — an account balance is a POINT-IN-TIME figure, so convert it to
+// the user's display currency at the CURRENT rate before the (currency-agnostic)
+// $500/$100 threshold check. Previously the raw native SUM(amount) was compared
+// to a hardcoded ~$500: a C$600 account read as "low" against a $500 USD bar.
+async function getLowBalances(userId: string, dek: Buffer | null, fx: RateCtx): Promise<SpotlightItem[]> {
   const rows = await db
     .select({
       accountId: accounts.id,
       accountNameCt: accounts.nameCt,
       accountType: accounts.type,
+      currency: accounts.currency,
       balance: sql<number>`COALESCE(SUM(${transactions.amount}), 0)`,
     })
     .from(accounts)
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
     .where(and(eq(accounts.userId, userId), eq(accounts.type, "A")))
-    .groupBy(accounts.id, accounts.nameCt, accounts.type)
+    .groupBy(accounts.id, accounts.nameCt, accounts.type, accounts.currency)
     .all();
 
   const items: SpotlightItem[] = [];
@@ -295,15 +303,16 @@ async function getLowBalances(userId: string, dek: Buffer | null): Promise<Spotl
     const group = accountName.toLowerCase();
     if (group.includes("rrsp") || group.includes("tfsa") || group.includes("invest")) continue;
 
-    if (row.balance >= 0 && row.balance < 500) {
+    const balance = convertWithRateMap(row.balance, row.currency ?? fx.displayCurrency, fx.rateMap);
+    if (balance >= 0 && balance < 500) {
       items.push({
         id: `low-balance-${row.accountId}`,
         type: "low_balance",
-        severity: row.balance < 100 ? "critical" : "warning",
+        severity: balance < 100 ? "critical" : "warning",
         title: `${accountName || "Account"} balance is low`,
-        description: `Current balance: $${row.balance.toFixed(2)}`,
+        description: `Current balance: $${balance.toFixed(2)}`,
         actionUrl: "/accounts",
-        amount: row.balance,
+        amount: balance,
       });
     }
   }
@@ -348,6 +357,12 @@ async function getUpcomingSubscriptions(userId: string, dek: Buffer | null): Pro
 }
 
 export async function getSpotlightItems(userId: string, dek: Buffer | null = null): Promise<SpotlightItem[]> {
+  // FINLYNQ-123 — resolve the display currency + current-rate map once for the
+  // point-in-time low-balance threshold check.
+  const displayCurrency = await getDisplayCurrency(userId);
+  const rateMap = await getRateMap(displayCurrency, userId);
+  const fx: RateCtx = { displayCurrency, rateMap };
+
   const [
     overspent,
     largeBills,
@@ -362,7 +377,7 @@ export async function getSpotlightItems(userId: string, dek: Buffer | null = nul
     getGoalDeadlines(userId, dek),
     getSpendingAnomalies(userId, dek),
     getUncategorizedTransactions(userId),
-    getLowBalances(userId, dek),
+    getLowBalances(userId, dek, fx),
     getUpcomingSubscriptions(userId, dek),
   ]);
 

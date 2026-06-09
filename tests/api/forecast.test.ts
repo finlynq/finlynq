@@ -35,6 +35,15 @@ vi.mock("@/lib/recurring-detector", () => ({
   ]),
 }));
 
+// FINLYNQ-123 — forecast now resolves the display currency + rate map to
+// convert each account's starting balance (point-in-time). Mock fx-service with
+// identity conversion so the test exercises the route shape, not real FX.
+vi.mock("@/lib/fx-service", () => ({
+  getDisplayCurrency: vi.fn(async () => "USD"),
+  getRateMap: vi.fn(async () => new Map<string, number>([["USD", 1]])),
+  convertWithRateMap: vi.fn((amount: number) => amount),
+}));
+
 vi.mock("drizzle-orm", () => ({
   eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(),
 }));

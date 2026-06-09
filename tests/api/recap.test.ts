@@ -35,12 +35,14 @@ describe("API /api/recap", () => {
   it("passes date parameter", async () => {
     const req = createMockRequest("http://localhost:3000/api/recap?date=2024-01-15");
     await GET(req);
-    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", "2024-01-15");
+    // The route also forwards the session DEK as a 3rd arg (null in this test —
+    // no cached DEK) for payee decryption.
+    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", "2024-01-15", null);
   });
 
   it("uses undefined for missing date", async () => {
     const req = createMockRequest("http://localhost:3000/api/recap");
     await GET(req);
-    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", undefined);
+    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", undefined, null);
   });
 });

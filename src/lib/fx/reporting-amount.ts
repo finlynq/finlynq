@@ -17,9 +17,47 @@
 
 import { db, schema } from "@/db";
 import { and, eq, sql } from "drizzle-orm";
-import { getRateToUsdDetailed } from "@/lib/fx-service";
+import { getRateToUsdDetailed, convertWithRateMap } from "@/lib/fx-service";
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/**
+ * Flow-figure conversion (FINLYNQ-123) — single source of truth for converting
+ * a per-`(currency, reporting_currency)` aggregate slice to the user's display
+ * currency. Prefers the STORED historical `reporting_amount` when the row's
+ * `reporting_currency` already matches the display currency (locked at write
+ * time at each transaction's date rate); otherwise falls back to an on-the-fly
+ * CURRENT-rate conversion of the raw `amount` via the rate map.
+ *
+ * This is the exact convention the dashboard income/expense + spending tiles
+ * use (`convertGroup` in src/app/api/dashboard/route.ts, Phase 3). Use it for
+ * EVERY flow surface (Weekly Recap, Spending Insights, Reports) so the same
+ * period reports the same display-currency number everywhere. Do NOT hand-roll
+ * a `SUM(amount)` cross-currency sum under one currency label.
+ *
+ * @param displayCurrency caller-resolved display currency (any case).
+ * @param rateMap         current-rate map from `getRateMap(displayCurrency)`.
+ */
+export function convertReportingSlice(
+  row: {
+    currency: string | null;
+    reportingCurrency: string | null;
+    totalAmount: number | null;
+    totalReporting: number | null;
+  },
+  displayCurrency: string,
+  rateMap: Map<string, number>,
+): number {
+  const displayUpper = (displayCurrency ?? "").trim().toUpperCase();
+  if (
+    row.reportingCurrency &&
+    row.reportingCurrency.toUpperCase() === displayUpper &&
+    row.totalReporting != null
+  ) {
+    return row.totalReporting;
+  }
+  return convertWithRateMap(row.totalAmount ?? 0, row.currency ?? displayUpper, rateMap);
+}
 
 export type ReportingFields = {
   /** Currency `reportingAmount` is expressed in (the resolved display currency). */
