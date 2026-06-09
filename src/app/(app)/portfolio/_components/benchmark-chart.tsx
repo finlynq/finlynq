@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { ColorDot } from "@/components/csp-safe-bar";
 import { GlassTooltip } from "./portfolio-ui";
 import type { BenchmarkData } from "../_types";
+import { prepareTimeSeries } from "@/lib/chart-series";
 
 // ── Helper ──────────────────────────────────────────────────────────
 export function buildBenchmarkChartData(benchmarks: BenchmarkData[]): Record<string, unknown>[] {
@@ -43,7 +44,18 @@ export function BenchmarkChart({
   benchmarkPeriod: string;
   setBenchmarkPeriod: (p: string) => void;
 }) {
-  const benchmarkChartData = buildBenchmarkChartData(benchmarks);
+  const rawBenchmarkChartData = buildBenchmarkChartData(benchmarks);
+  const valueKeys = benchmarks.map((b) => b.name) as (keyof (typeof rawBenchmarkChartData)[number])[];
+  const { data: benchmarkChartData, domain } = prepareTimeSeries(
+    rawBenchmarkChartData as Record<string, unknown>[],
+    {
+      dateKey: "date",
+      valueKeys: valueKeys as (keyof Record<string, unknown>)[],
+      maxPoints: 200,
+      // percentages can legitimately go negative
+      clampZeroFloor: false,
+    },
+  );
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -94,6 +106,7 @@ export function BenchmarkChart({
                   tickLine={false}
                   axisLine={false}
                   tickFormatter={v => `${v > 0 ? "+" : ""}${v}%`}
+                  domain={domain}
                 />
                 <Tooltip
                   content={<GlassTooltip formatter={(v) => `${Number(v) > 0 ? "+" : ""}${Number(v).toFixed(2)}%`} />}

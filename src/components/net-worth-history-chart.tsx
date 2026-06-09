@@ -26,6 +26,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/lib/currency";
 import { RebuildSnapshotsButton } from "@/components/portfolio/rebuild-snapshots-button";
+import { prepareTimeSeries } from "@/lib/chart-series";
 
 type Period = "6m" | "1y" | "all";
 
@@ -136,7 +137,16 @@ export function NetWorthHistoryChart({
   }, [period, accountId]);
 
   const currency = data?.displayCurrency ?? "CAD";
-  const series = useMemo(() => data?.series ?? [], [data]);
+  const rawSeries = useMemo(() => data?.series ?? [], [data]);
+  const { data: series, domain } = useMemo(
+    () =>
+      prepareTimeSeries(rawSeries, {
+        dateKey: "date",
+        valueKeys: ["value"],
+        maxPoints: 200,
+      }),
+    [rawSeries],
+  );
   const hasAnyValue = useMemo(() => series.some((p) => p.value !== 0), [series]);
 
   return (
@@ -207,6 +217,7 @@ export function NetWorthHistoryChart({
                   width={48}
                   tick={{ fill: "var(--color-muted-foreground)" }}
                   tickFormatter={(v) => fmtAxis(Number(v))}
+                  domain={domain}
                 />
                 <Tooltip
                   content={<HistoryTooltip currency={currency} />}

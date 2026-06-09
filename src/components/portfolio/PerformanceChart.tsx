@@ -26,6 +26,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
+import { prepareTimeSeries } from "@/lib/chart-series";
 
 type Period = "1m" | "3m" | "6m" | "ytd" | "1y" | "all";
 
@@ -81,7 +82,17 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
 
   const fmtPct = (v: number) => `${(v * 100).toFixed(2)}%`;
 
-  const chartData = useMemo(() => data?.series ?? [], [data]);
+  const rawChartData = useMemo(() => data?.series ?? [], [data]);
+  const { data: chartData, domain, spansZero } = useMemo(
+    () =>
+      prepareTimeSeries(rawChartData, {
+        dateKey: "date",
+        // contribution is not plotted — exclude from domain computation
+        valueKeys: ["marketValue", "costBasis"],
+        maxPoints: 200,
+      }),
+    [rawChartData],
+  );
 
   return (
     <Card>
@@ -137,11 +148,12 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                   <YAxis
                     tick={{ fontSize: 11 }}
                     tickFormatter={(v) => formatCurrency(Number(v), data.currency)}
+                    domain={domain}
                   />
                   <Tooltip
                     formatter={(v) => formatCurrency(Number(v), data.currency)}
                   />
-                  <ReferenceLine y={0} stroke="#888" />
+                  {spansZero && <ReferenceLine y={0} stroke="#888" />}
                   <Line
                     type="monotone"
                     dataKey="marketValue"
