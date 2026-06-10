@@ -13,9 +13,11 @@ import type {
   ReconcileTxSnapshot,
 } from "../../../shared/types";
 import type { IconName } from "../components/icon";
+import { safeAccountName } from "../lib/format";
 
 /** Per-bank-row suggestion the RowCard renders. Either a match against an
- *  existing tx, or a rule-engine "create as <category>" proposal. */
+ *  existing tx, a rule-engine "create as <category>" proposal, or a
+ *  transfer-only rule "transfer to <account>" proposal (FINLYNQ-126). */
 export type CardSuggestion =
   | {
       kind: "match";
@@ -23,7 +25,17 @@ export type CardSuggestion =
       txPayee: string | null;
       txCategoryName: string | null;
     }
-  | { kind: "create"; categoryId: number; categoryName: string };
+  | { kind: "create"; categoryId: number; categoryName: string }
+  | { kind: "transfer"; destAccountId: number; destAccountName: string };
+
+/** Minimal account shape `buildSuggestionByBank` needs to resolve + label a
+ *  transfer suggestion's destination account. */
+export interface SuggestionAccount {
+  id: number;
+  name?: string | null;
+  alias?: string | null;
+  isInvestment?: boolean;
+}
 
 /** A pre-existing UNLINKED ledger transaction this bank row appears to
  *  duplicate. When present the RowCard warns + offers "Link to existing"
@@ -77,11 +89,15 @@ export function reconciledRows(
 /**
  * Build the per-bank-row suggestion map for the card UI. A match against an
  * existing tx wins; otherwise fall back to the rule-engine's
- * `suggestedCategoryId`. Mirrors web InboxToApproveTab.suggestionByBank.
+ * `suggestedCategoryId`; and finally — when `opts.includeTransfers` is set and
+ * `opts.accounts` is supplied — a transfer-only rule's
+ * `suggestedTransferAccountId`. Category wins over transfer when both exist.
+ * Mirrors web InboxToApproveTab.suggestionByBank (FINLYNQ-126).
  */
 export function buildSuggestionByBank(
   snap: ReconcileSuggestions | null,
   categoryName: (id: number) => string,
+  opts?: { accounts?: SuggestionAccount[]; includeTransfers?: boolean },
 ): Map<string, CardSuggestion> {
   const map = new Map<string, CardSuggestion>();
   if (!snap) return map;
@@ -97,7 +113,8 @@ export function buildSuggestionByBank(
       txCategoryName: tx.categoryName,
     });
   }
-  // 2) Fallback: the match-engine's suggestedCategoryId on the bank row.
+  // 2) Fallback: the match-engine's suggestedCategoryId (category wins over
+  //    transfer). 3) Then a transfer-only rule's suggestedTransferAccountId.
   for (const b of Object.values(snap.bankTransactions)) {
     if (map.has(b.id)) continue;
     if (b.suggestedCategoryId != null) {
@@ -106,6 +123,26 @@ export function buildSuggestionByBank(
         categoryId: b.suggestedCategoryId,
         categoryName: categoryName(b.suggestedCategoryId),
       });
+      continue;
+    }
+    // Transfer-only rule matched (no category). Guards mirror web
+    // inbox-to-approve-tab.tsx: outflow rows only (`amount < 0` — the source
+    // debit leg links to the bank row), dest must exist, be non-investment,
+    // and not be the source account (the /approve endpoint refuses those).
+    if (
+      opts?.includeTransfers &&
+      opts.accounts &&
+      b.suggestedTransferAccountId != null &&
+      b.amount < 0
+    ) {
+      const dest = opts.accounts.find((a) => a.id === b.suggestedTransferAccountId);
+      if (dest && dest.isInvestment !== true && dest.id !== b.accountId) {
+        map.set(b.id, {
+          kind: "transfer",
+          destAccountId: dest.id,
+          destAccountName: safeAccountName(dest),
+        });
+      }
     }
   }
   return map;
@@ -143,7 +180,8 @@ export function buildDuplicateByBank(
 /**
  * Resolve the categoryId to commit when the user taps the one-tap primary
  * action. Returns null when the choice needs the category picker — a 'match'
- * suggestion whose category can't be mapped to a known categoryId.
+ * suggestion whose category can't be mapped to a known categoryId, or a
+ * 'transfer' suggestion (which the screen handles via commitTransfer first).
  */
 export function resolveSuggestedCategoryId(
   suggestion: CardSuggestion | null | undefined,
@@ -151,6 +189,8 @@ export function resolveSuggestedCategoryId(
 ): number | null {
   if (!suggestion) return null;
   if (suggestion.kind === "create") return suggestion.categoryId;
+  // 'transfer' kinds carry no category — the screen branches on them first.
+  if (suggestion.kind === "transfer") return null;
   if (suggestion.txCategoryName) {
     return categoryIdByName(suggestion.txCategoryName);
   }

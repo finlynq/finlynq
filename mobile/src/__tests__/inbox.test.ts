@@ -38,9 +38,9 @@ const snap: ReconcileSuggestions = {
     20: { id: 20, date: "2026-05-02", amount: -25, currency: "CAD", payee: "Coffee", categoryName: "Dining", categoryType: "E" },
   },
   bankTransactions: {
-    b1: { id: "b1", date: "2026-04-30", amount: -50, currency: "CAD", payee: "HYDRO ONE", accountId: 1, suggestedCategoryId: null, duplicateOfTransactionId: null },
-    b2: { id: "b2", date: "2026-05-02", amount: -25, currency: "CAD", payee: "STARBUCKS", accountId: 1, suggestedCategoryId: null, duplicateOfTransactionId: null },
-    b3: { id: "b3", date: "2026-05-05", amount: -12, currency: "CAD", payee: "NETFLIX", accountId: 1, suggestedCategoryId: 7, duplicateOfTransactionId: null },
+    b1: { id: "b1", date: "2026-04-30", amount: -50, currency: "CAD", payee: "HYDRO ONE", accountId: 1, suggestedCategoryId: null, suggestedTransferAccountId: null, duplicateOfTransactionId: null },
+    b2: { id: "b2", date: "2026-05-02", amount: -25, currency: "CAD", payee: "STARBUCKS", accountId: 1, suggestedCategoryId: null, suggestedTransferAccountId: null, duplicateOfTransactionId: null },
+    b3: { id: "b3", date: "2026-05-05", amount: -12, currency: "CAD", payee: "NETFLIX", accountId: 1, suggestedCategoryId: 7, suggestedTransferAccountId: null, duplicateOfTransactionId: null },
   },
 };
 
@@ -100,6 +100,101 @@ describe("buildSuggestionByBank", () => {
     // b1 has neither a suggestion nor a suggestedCategoryId
     expect(map.has("b1")).toBe(false);
   });
+
+  // ─── Transfer-only-rule suggestions (FINLYNQ-126) ────────────────────────
+  const accounts = [
+    { id: 1, name: "Checking", isInvestment: false },
+    { id: 2, name: "Savings", isInvestment: false },
+    { id: 3, name: "Brokerage", isInvestment: true },
+  ];
+  // A fresh snapshot with a single outflow bank row carrying a transfer rule
+  // (dest = account 2, the Savings account). accountId 1 is the source.
+  const transferSnap = (
+    over: Partial<ReconcileSuggestions["bankTransactions"]["bt"]>,
+  ): ReconcileSuggestions => ({
+    linked: [],
+    suggestions: [],
+    bankOnly: ["bt"],
+    txOnly: [],
+    transactions: {},
+    bankTransactions: {
+      bt: {
+        id: "bt",
+        date: "2026-05-10",
+        amount: -200,
+        currency: "CAD",
+        payee: "XFER",
+        accountId: 1,
+        suggestedCategoryId: null,
+        suggestedTransferAccountId: 2,
+        duplicateOfTransactionId: null,
+        ...over,
+      },
+    },
+  });
+
+  it("builds a transfer suggestion for an outflow row with a non-investment non-self dest", () => {
+    const map = buildSuggestionByBank(transferSnap({}), catName, {
+      accounts,
+      includeTransfers: true,
+    });
+    expect(map.get("bt")).toEqual({
+      kind: "transfer",
+      destAccountId: 2,
+      destAccountName: "Savings",
+    });
+  });
+
+  it("suppresses the transfer suggestion when includeTransfers is off", () => {
+    const map = buildSuggestionByBank(transferSnap({}), catName, { accounts });
+    expect(map.has("bt")).toBe(false);
+  });
+
+  it("suppresses the transfer suggestion when no accounts are supplied", () => {
+    const map = buildSuggestionByBank(transferSnap({}), catName, {
+      includeTransfers: true,
+    });
+    expect(map.has("bt")).toBe(false);
+  });
+
+  it("suppresses the transfer suggestion when the dest is an investment account", () => {
+    const map = buildSuggestionByBank(
+      transferSnap({ suggestedTransferAccountId: 3 }),
+      catName,
+      { accounts, includeTransfers: true },
+    );
+    expect(map.has("bt")).toBe(false);
+  });
+
+  it("suppresses the transfer suggestion when the dest equals the source account", () => {
+    const map = buildSuggestionByBank(
+      transferSnap({ suggestedTransferAccountId: 1 }),
+      catName,
+      { accounts, includeTransfers: true },
+    );
+    expect(map.has("bt")).toBe(false);
+  });
+
+  it("suppresses the transfer suggestion for an inflow row (amount >= 0)", () => {
+    const map = buildSuggestionByBank(transferSnap({ amount: 200 }), catName, {
+      accounts,
+      includeTransfers: true,
+    });
+    expect(map.has("bt")).toBe(false);
+  });
+
+  it("prefers a category suggestion over a transfer when both are present", () => {
+    const map = buildSuggestionByBank(
+      transferSnap({ suggestedCategoryId: 7 }),
+      catName,
+      { accounts, includeTransfers: true },
+    );
+    expect(map.get("bt")).toEqual({
+      kind: "create",
+      categoryId: 7,
+      categoryName: "Cat#7",
+    });
+  });
 });
 
 describe("buildDuplicateByBank", () => {
@@ -118,7 +213,7 @@ describe("buildDuplicateByBank", () => {
       },
       bankTransactions: {
         ...snap.bankTransactions,
-        b9: { id: "b9", date: "2026-05-05", amount: -99, currency: "CAD", payee: "RENT CO", accountId: 1, suggestedCategoryId: null, duplicateOfTransactionId: 77 },
+        b9: { id: "b9", date: "2026-05-05", amount: -99, currency: "CAD", payee: "RENT CO", accountId: 1, suggestedCategoryId: null, suggestedTransferAccountId: null, duplicateOfTransactionId: 77 },
       },
     };
     const map = buildDuplicateByBank(dupSnap);
@@ -137,7 +232,7 @@ describe("buildDuplicateByBank", () => {
       ...snap,
       bankTransactions: {
         ...snap.bankTransactions,
-        b8: { id: "b8", date: "2026-05-06", amount: -5, currency: "CAD", payee: "X", accountId: 1, suggestedCategoryId: null, duplicateOfTransactionId: 999 },
+        b8: { id: "b8", date: "2026-05-06", amount: -5, currency: "CAD", payee: "X", accountId: 1, suggestedCategoryId: null, suggestedTransferAccountId: null, duplicateOfTransactionId: 999 },
       },
     };
     expect(buildDuplicateByBank(orphan).has("b8")).toBe(false);

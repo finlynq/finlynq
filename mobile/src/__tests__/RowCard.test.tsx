@@ -39,6 +39,23 @@ describe("RowCard", () => {
     expect(getByText("Approve")).toBeTruthy();
   });
 
+  it("renders 'transfer to <name>' + an Approve action for a transfer suggestion", () => {
+    const { getByText } = renderWithTheme(
+      <RowCard
+        bank={bank}
+        suggestion={{ kind: "transfer", destAccountId: 2, destAccountName: "Savings" }}
+        busy={false}
+        onPrimary={() => {}}
+        onChooseCategory={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    // "transfer to " and the bold account name render as separate text nodes.
+    expect(getByText(/transfer to/)).toBeTruthy();
+    expect(getByText("Savings")).toBeTruthy();
+    expect(getByText("Approve")).toBeTruthy();
+  });
+
   it("shows Categorize + the no-match line when there's no suggestion", () => {
     const { getByText } = renderWithTheme(
       <RowCard

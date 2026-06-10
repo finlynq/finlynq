@@ -1010,6 +1010,13 @@ export interface ReconcileBankSnapshot {
   payee: string | null;
   accountId: number;
   suggestedCategoryId: number | null;
+  /** Destination account id from a matched transfer-only rule
+   *  (`create_transfer`, no `set_category`). Mirrors `suggestedCategoryId`.
+   *  The server match engine (`computeReconcileForAccount`) sets it and the
+   *  suggestions route serializes it; the mobile inbox surfaces it as a
+   *  "transfer to <Account>" card that `/approve` materializes as a transfer
+   *  pair. null = no transfer rule matched (web parity, FINLYNQ-126). */
+  suggestedTransferAccountId: number | null;
   /** A pre-existing UNLINKED ledger transaction this bank row appears to
    *  duplicate (exact import_hash, or identical amount within the date
    *  tolerance — the strict, per-row signal, NOT the loose `suggestions`
@@ -1054,9 +1061,15 @@ export interface AutoRuleRecent {
   items: AutoRuleItem[];
 }
 
-/** Body for POST /api/bank-transactions/[bankId]/approve|categorize. */
+/** Body for POST /api/bank-transactions/[bankId]/approve|categorize.
+ *  Exactly one of `categoryId` / `transferDestAccountId` is sent (the server
+ *  enforces this): `categoryId` commits the row to the ledger under that
+ *  category; `transferDestAccountId` (approve-only — `/categorize` cannot write
+ *  transfers) materializes a transfer pair to that destination account
+ *  (FINLYNQ-126). */
 export interface BankRowCommitBody {
-  categoryId: number;
+  categoryId?: number;
+  transferDestAccountId?: number;
   payee?: string;
   accountId?: number;
 }

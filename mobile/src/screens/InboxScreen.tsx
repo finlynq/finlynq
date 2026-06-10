@@ -210,8 +210,12 @@ export default function InboxScreen() {
   // ─── Derived card data ──────────────────────────────────────────────────
   const unlinked = useMemo(() => unlinkedBankRows(snapshot), [snapshot]);
   const suggestionByBank = useMemo(
-    () => buildSuggestionByBank(snapshot, categoryNameById),
-    [snapshot, categoryNameById],
+    () =>
+      buildSuggestionByBank(snapshot, categoryNameById, {
+        accounts,
+        includeTransfers: true,
+      }),
+    [snapshot, categoryNameById, accounts],
   );
   // Possible ledger duplicates — bank rows the server match engine paired with
   // an existing UNLINKED ledger tx. Surfaced as "Link to existing vs Keep
@@ -295,9 +299,43 @@ export default function InboxScreen() {
     [activeLens, fetchSnapshot],
   );
 
+  /** Commit a transfer-only-rule row as a transfer pair (source leg on the
+   *  bank row's account → destAccountId). Always routes through /approve
+   *  regardless of the active lens — /categorize cannot write transfers
+   *  (FINLYNQ-126). Same error/refresh handling as `commit`. */
+  const commitTransfer = useCallback(
+    async (bankId: string, destAccountId: number) => {
+      setBusyBankId(bankId);
+      setActionError(null);
+      try {
+        const res = await endpoints.approveBankRow(bankId, {
+          transferDestAccountId: destAccountId,
+        });
+        if (res.ok) {
+          await fetchSnapshot({ silent: true });
+        } else {
+          setActionError(res.error?.error ?? "Failed to commit transfer");
+        }
+      } catch (e) {
+        const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        logger.error("inbox", "commit transfer threw", { detail });
+        setActionError("Cannot connect to server");
+      } finally {
+        setBusyBankId(null);
+      }
+    },
+    [fetchSnapshot],
+  );
+
   const onPrimary = useCallback(
     (bankId: string) => {
       const sug = suggestionByBank.get(bankId) ?? null;
+      // Transfer-only-rule row → write the pair via /approve (branch first;
+      // resolveSuggestedCategoryId returns null for transfer kinds).
+      if (sug?.kind === "transfer") {
+        void commitTransfer(bankId, sug.destAccountId);
+        return;
+      }
       const categoryId = resolveSuggestedCategoryId(sug, categoryIdByName);
       if (categoryId != null) {
         void commit(bankId, categoryId);
@@ -306,7 +344,7 @@ export default function InboxScreen() {
         setPickerBankId(bankId);
       }
     },
-    [suggestionByBank, categoryIdByName, commit],
+    [suggestionByBank, categoryIdByName, commit, commitTransfer],
   );
 
   const onPickCategory = useCallback(
@@ -385,10 +423,21 @@ export default function InboxScreen() {
     setActionError(null);
     const errors: string[] = [];
     for (const b of suggestedUnlinked) {
-      const categoryId = resolveSuggestedCategoryId(
-        suggestionByBank.get(b.id),
-        categoryIdByName,
-      );
+      const sug = suggestionByBank.get(b.id);
+      // Transfer-only-rule row → write the pair via /approve and skip the
+      // category path (FINLYNQ-126).
+      if (sug?.kind === "transfer") {
+        try {
+          const res = await endpoints.approveBankRow(b.id, {
+            transferDestAccountId: sug.destAccountId,
+          });
+          if (!res.ok) errors.push(`${safeName(b.payee, b.id)}: ${res.error?.error ?? "failed"}`);
+        } catch (e) {
+          errors.push(`${safeName(b.payee, b.id)}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        continue;
+      }
+      const categoryId = resolveSuggestedCategoryId(sug, categoryIdByName);
       if (categoryId == null) {
         errors.push(`${safeName(b.payee, b.id)}: no category resolved`);
         continue;

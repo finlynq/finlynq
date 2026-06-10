@@ -39,6 +39,16 @@ function SuggestionLine({ suggestion }: { suggestion: CardSuggestion | null }) {
       </View>
     );
   }
+  if (suggestion.kind === "transfer") {
+    return (
+      <View style={styles.sugRow}>
+        <Icon name="transfer" size={13} color={colors.chart4} />
+        <Text style={[styles.sugText, { color: colors.mutedForeground }]} numberOfLines={1}>
+          transfer to <Text style={{ fontWeight: "700" }}>{suggestion.destAccountName}</Text>
+        </Text>
+      </View>
+    );
+  }
   return (
     <View style={styles.sugRow}>
       <Icon name="sampleData" size={13} color={colors.pos} />
