@@ -17,6 +17,8 @@ import {
   decodeInbox,
   decodeStaged,
 } from "@/lib/email-import/process-pending-inbox";
+import { getEmailRetentionDays } from "@/app/api/settings/email-retention/route";
+import { nextPurgeAt } from "@/lib/email-import/retention";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +36,11 @@ export async function GET(request: NextRequest) {
   } catch (e) {
     console.warn("[email-inbox] sweep failed on list", e);
   }
+
+  // Live retention window — drives the per-row "next purge" indicator. The
+  // sweep evaluates this same setting at sweep time (FINLYNQ-138), so the date
+  // shown here matches when the row will actually be purged.
+  const retentionDays = await getEmailRetentionDays(userId);
 
   const rows = await db
     .select({
@@ -92,6 +99,9 @@ export async function GET(request: NextRequest) {
     fromAddress: decodeInbox(r.encryptionTier, dek, r.fromAddress),
     subject: decodeInbox(r.encryptionTier, dek, r.subject),
     receivedAt: r.receivedAt.toISOString(),
+    // Derived from the LIVE retention setting, not the stamped expires_at —
+    // matches when the sweep will actually purge this row.
+    nextPurgeAt: nextPurgeAt(r.receivedAt, retentionDays).toISOString(),
     action: r.action,
     sourceKind: r.sourceKind as "attachment" | "body",
     parseConfidence: r.parseConfidence as "high" | "low" | null,

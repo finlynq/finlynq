@@ -49,7 +49,18 @@ export interface StoreEmailInboxResult {
   alreadyExisted: boolean;
 }
 
-/** 60 days — matches the staged-import TTL. */
+/**
+ * Default retention window for the stamped `expires_at`, in ms (60 days).
+ *
+ * ADVISORY / display-only (FINLYNQ-138): the cleanup sweep does NOT trust this
+ * stamped value — it evaluates the user's LIVE retention setting at sweep time
+ * (received_at + per-user window). We keep stamping a default-60d expires_at so
+ * the column has a sane value for any consumer that reads it directly; the
+ * inbox "next purge" UI derives its date from the live setting, not this stamp.
+ *
+ * This is the email_inbox default window, NOT the staged-import TTL — those are
+ * different things (staged_imports keeps a separate fixed 14-day pending TTL).
+ */
 const INBOX_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 
 export async function storeEmailInbox(

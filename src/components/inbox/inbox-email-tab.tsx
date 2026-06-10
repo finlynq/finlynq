@@ -44,6 +44,8 @@ interface EmailInboxItem {
   fromAddress: string | null;
   subject: string | null;
   receivedAt: string;
+  /** Scheduled purge date derived from the user's live retention window. */
+  nextPurgeAt?: string | null;
   action: Action;
   sourceKind: "attachment" | "body";
   parseConfidence: "high" | "low" | null;
@@ -333,6 +335,14 @@ export function InboxEmailTab() {
                         <span className="truncate">{it.fromAddress || "(unknown sender)"}</span>
                         <span>·</span>
                         <span>{new Date(it.receivedAt).toLocaleDateString()}</span>
+                        {it.nextPurgeAt && (
+                          <>
+                            <span>·</span>
+                            <span title="When this email is automatically deleted, based on your retention setting">
+                              purges {new Date(it.nextPurgeAt).toLocaleDateString()}
+                            </span>
+                          </>
+                        )}
                         {it.candidate && (
                           <>
                             <span>·</span>

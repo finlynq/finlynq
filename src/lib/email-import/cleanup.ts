@@ -1,23 +1,37 @@
 /**
- * Background cleanup for email-import staging queue + admin inbox trash.
+ * Background cleanup for email-import artifacts + admin inbox trash.
  *
- * Runs two sweeps:
- *   1. staged_imports where expires_at < now AND status = 'pending'
- *      → status flipped to 'expired' AND rows deleted (cascade takes
- *        staged_transactions with them). 14-day TTL.
- *   2. incoming_emails where category = 'trash' AND expires_at < now
- *      → hard delete. 24-hour TTL.
+ * Runs three sweeps:
+ *   1. email_inbox (per-user raw imported emails) — purged on a PER-USER
+ *      retention window evaluated at SWEEP TIME against the live setting
+ *      (FINLYNQ-138). Default 60 days; user-configurable to 7/30/60/90.
+ *      `received_at + window < now` → hard delete. The stamped `expires_at`
+ *      is display-only and NOT trusted as the source of truth here.
+ *   2. staged_imports where expires_at < now AND status = 'pending'
+ *      → rows deleted (cascade takes staged_transactions with them). This is a
+ *        SEPARATE, fixed 14-day pending TTL — it is NOT governed by the
+ *        per-user email-retention setting (raw email only, per FINLYNQ-138).
+ *   3. incoming_emails where category = 'trash' AND expires_at < now
+ *      → hard delete. 24-hour TTL (admin trash, not user-facing).
+ *
+ * The email_inbox purge is a tier-agnostic HARD DELETE — no DEK needed, so the
+ * sweep stays DEK-free even though from/subject/body are two-tier encrypted.
  *
  * Bootstrapped by instrumentation.ts on the same 30-minute cadence as the
  * MCP upload cleanup. Kept dead simple — no job queue, no distributed lock;
- * a second instance will just run the same `DELETE WHERE expires_at < now`
- * and both will converge.
+ * a second instance will just run the same `DELETE WHERE expired` and both
+ * will converge.
  */
 
 import { db, schema } from "@/db";
-import { and, eq, lt } from "drizzle-orm";
+import { and, eq, lt, sql } from "drizzle-orm";
+import {
+  EMAIL_RETENTION_SETTING_KEY,
+  DEFAULT_EMAIL_RETENTION_DAYS,
+} from "./retention";
 
 export interface EmailCleanupResult {
+  inboxDeleted: number;
   stagedDeleted: number;
   trashDeleted: number;
 }
@@ -25,9 +39,38 @@ export interface EmailCleanupResult {
 export async function cleanupExpiredEmailArtifacts(): Promise<EmailCleanupResult> {
   const now = new Date();
 
-  // --- 1. Staged imports past their 14-day TTL ---
-  // Drizzle's delete returns a driver-specific shape; we count the returning
-  // rows to get a portable deleted-count.
+  // --- 1. Raw imported emails past their PER-USER retention window ---
+  // Single-pass DELETE ... USING settings (LEFT JOIN so users with no setting
+  // row still purge under the default). The window is read LIVE from the
+  // settings table at sweep time, so a settings change immediately governs all
+  // existing rows — NO re-stamp of email_inbox.expires_at happens. We compute
+  // the cutoff in SQL from received_at + interval, never trusting the stamped
+  // expires_at. COALESCE guards an unset OR non-numeric stored value down to
+  // the 60-day default so a junk row can't disable the sweep.
+  const inboxResult = await db.execute(sql`
+    DELETE FROM email_inbox e
+    USING (
+      SELECT u.id AS user_id,
+        COALESCE(
+          NULLIF(regexp_replace(s.value, '\\D', '', 'g'), '')::int,
+          ${DEFAULT_EMAIL_RETENTION_DAYS}
+        ) AS window_days
+      FROM users u
+      LEFT JOIN settings s
+        ON s.user_id = u.id
+        AND s.key = ${EMAIL_RETENTION_SETTING_KEY}
+    ) policy
+    WHERE e.user_id = policy.user_id
+      AND e.received_at < ${now} - (policy.window_days * INTERVAL '1 day')
+  `);
+  const inboxRc =
+    (inboxResult as unknown as { rowCount?: number }).rowCount ?? 0;
+
+  // --- 2. Staged imports past their FIXED 14-day pending TTL ---
+  // NOT the per-user email-retention window — staged_imports/staged_transactions
+  // keep their own staging TTL (FINLYNQ-138 scope = raw email only). Drizzle's
+  // delete returns a driver-specific shape; we read rowCount for a portable
+  // deleted-count.
   const stagedDeleted = await db
     .delete(schema.stagedImports)
     .where(and(
@@ -36,7 +79,7 @@ export async function cleanupExpiredEmailArtifacts(): Promise<EmailCleanupResult
     ));
   const stagedRc = (stagedDeleted as unknown as { rowCount?: number }).rowCount ?? 0;
 
-  // --- 2. Trash emails past their 24-hour TTL ---
+  // --- 3. Trash emails past their 24-hour TTL ---
   // Mailbox rows have NULL expires_at and are skipped by the `<` compare.
   const trashDeleted = await db
     .delete(schema.incomingEmails)
@@ -46,7 +89,7 @@ export async function cleanupExpiredEmailArtifacts(): Promise<EmailCleanupResult
     ));
   const trashRc = (trashDeleted as unknown as { rowCount?: number }).rowCount ?? 0;
 
-  return { stagedDeleted: stagedRc, trashDeleted: trashRc };
+  return { inboxDeleted: inboxRc, stagedDeleted: stagedRc, trashDeleted: trashRc };
 }
 
 let timer: NodeJS.Timeout | null = null;

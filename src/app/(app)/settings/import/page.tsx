@@ -27,6 +27,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Mail,
   Copy,
   RefreshCw,
@@ -56,6 +63,15 @@ export default function ImportSettingsPage() {
   // override on the upload drawer (the "Don't ask again" checkbox) wins.
   const [confirmCsvMapping, setConfirmCsvMapping] = useState(true);
   const [confirmCsvLoading, setConfirmCsvLoading] = useState(false);
+
+  // FINLYNQ-138 — per-user imported-email retention window (days). Governs how
+  // long raw forwarded emails (email_inbox) are kept before the cleanup sweep
+  // hard-deletes them. Bounded {7,30,60,90}; default 60.
+  const [retentionDays, setRetentionDays] = useState<number>(60);
+  const [retentionOptions, setRetentionOptions] = useState<number[]>([
+    7, 30, 60, 90,
+  ]);
+  const [retentionLoading, setRetentionLoading] = useState(false);
 
   // Fetch accounts, templates, and email config on mount.
   useEffect(() => {
@@ -88,7 +104,41 @@ export default function ImportSettingsPage() {
         }
       })
       .catch(() => {});
+
+    fetch("/api/settings/email-retention")
+      .then((r) => r.json())
+      .then((data) => {
+        if (typeof data.retentionDays === "number") {
+          setRetentionDays(data.retentionDays);
+        }
+        if (Array.isArray(data.options)) setRetentionOptions(data.options);
+      })
+      .catch(() => {});
   }, []);
+
+  const updateRetentionDays = async (next: number) => {
+    const prev = retentionDays;
+    // Optimistic — revert on failure.
+    setRetentionDays(next);
+    setRetentionLoading(true);
+    try {
+      const res = await fetch("/api/settings/email-retention", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retentionDays: next }),
+      });
+      const data = await res.json();
+      if (!res.ok || typeof data.retentionDays !== "number") {
+        setRetentionDays(prev);
+      } else {
+        setRetentionDays(data.retentionDays);
+      }
+    } catch {
+      setRetentionDays(prev);
+    } finally {
+      setRetentionLoading(false);
+    }
+  };
 
   const toggleConfirmCsvMapping = async () => {
     const next = !confirmCsvMapping;
@@ -338,8 +388,57 @@ export default function ImportSettingsPage() {
                     <li>
                       Duplicate transactions are flagged and skipped on approve.
                     </li>
-                    <li>Pending imports auto-expire after 14 days.</li>
+                    <li>
+                      Pending parsed imports auto-expire after 14 days. The raw
+                      forwarded emails are kept for your{" "}
+                      <span className="font-medium">retention window</span>{" "}
+                      (below), then permanently deleted.
+                    </li>
                   </ol>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* FINLYNQ-138 — imported-email retention window. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Imported-email retention
+                </CardTitle>
+                <CardDescription>
+                  How long Finlynq keeps the raw emails you forward to your
+                  import address before permanently deleting them. The cleanup
+                  sweep applies this to all existing imported emails the next
+                  time it runs.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium">Keep raw emails for</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Parsed transactions you&apos;ve recorded are unaffected —
+                      only the original email content is deleted.
+                    </p>
+                  </div>
+                  <Select
+                    value={String(retentionDays)}
+                    onValueChange={(v) =>
+                      v && void updateRetentionDays(parseInt(v, 10))
+                    }
+                    disabled={retentionLoading}
+                  >
+                    <SelectTrigger className="w-[140px] h-9">
+                      <SelectValue>{retentionDays} days</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {retentionOptions.map((d) => (
+                        <SelectItem key={d} value={String(d)}>
+                          {d} days
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </CardContent>
             </Card>
