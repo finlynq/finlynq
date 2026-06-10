@@ -24,7 +24,7 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq, lt, sql } from "drizzle-orm";
+import { and, eq, lt, sql, type SQL } from "drizzle-orm";
 import {
   EMAIL_RETENTION_SETTING_KEY,
   DEFAULT_EMAIL_RETENTION_DAYS,
@@ -36,18 +36,29 @@ export interface EmailCleanupResult {
   trashDeleted: number;
 }
 
-export async function cleanupExpiredEmailArtifacts(): Promise<EmailCleanupResult> {
-  const now = new Date();
-
-  // --- 1. Raw imported emails past their PER-USER retention window ---
-  // Single-pass DELETE ... USING settings (LEFT JOIN so users with no setting
-  // row still purge under the default). The window is read LIVE from the
-  // settings table at sweep time, so a settings change immediately governs all
-  // existing rows — NO re-stamp of email_inbox.expires_at happens. We compute
-  // the cutoff in SQL from received_at + interval, never trusting the stamped
-  // expires_at. COALESCE guards an unset OR non-numeric stored value down to
-  // the 60-day default so a junk row can't disable the sweep.
-  const inboxResult = await db.execute(sql`
+/**
+ * Build the per-user `email_inbox` retention-purge statement (FINLYNQ-138).
+ *
+ * Single-pass DELETE ... USING settings (LEFT JOIN so users with no setting row
+ * still purge under the default). The window is read LIVE from the settings
+ * table at sweep time, so a settings change immediately governs all existing
+ * rows — NO re-stamp of `email_inbox.expires_at` happens. The cutoff is computed
+ * in SQL from `received_at + interval`, never trusting the stamped `expires_at`.
+ * COALESCE guards an unset OR non-numeric stored value down to the 60-day
+ * default so a junk row can't disable the sweep.
+ *
+ * The predicate is `received_at + window < now` (NOT `received_at < now -
+ * window`) so the timestamptz column types BOTH operands, and `now` is cast
+ * `::timestamptz` explicitly. Inside the subtraction `now` was an unanchored
+ * bind param, so Postgres resolved `$1 - interval` to `interval - interval`
+ * (→ interval) and the comparison became `timestamptz < interval`, failing at
+ * runtime with "operator does not exist: timestamp with time zone < interval".
+ * The staged-imports / trash sweeps below compare a known timestamptz column to
+ * the param directly, so they never hit this. Extracted + exported so the SQL
+ * shape is unit-testable without a live DB.
+ */
+export function buildInboxRetentionPurge(now: Date): SQL {
+  return sql`
     DELETE FROM email_inbox e
     USING (
       SELECT u.id AS user_id,
@@ -61,8 +72,15 @@ export async function cleanupExpiredEmailArtifacts(): Promise<EmailCleanupResult
         AND s.key = ${EMAIL_RETENTION_SETTING_KEY}
     ) policy
     WHERE e.user_id = policy.user_id
-      AND e.received_at < ${now} - (policy.window_days * INTERVAL '1 day')
-  `);
+      AND e.received_at + (policy.window_days * INTERVAL '1 day') < ${now}::timestamptz
+  `;
+}
+
+export async function cleanupExpiredEmailArtifacts(): Promise<EmailCleanupResult> {
+  const now = new Date();
+
+  // --- 1. Raw imported emails past their PER-USER retention window ---
+  const inboxResult = await db.execute(buildInboxRetentionPurge(now));
   const inboxRc =
     (inboxResult as unknown as { rowCount?: number }).rowCount ?? 0;
 
