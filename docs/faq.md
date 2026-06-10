@@ -80,6 +80,10 @@ Every import path lands in a **unified staging queue at `/import/pending`** — 
 
 No. Finlynq fingerprints each incoming row with a **SHA-256 hash over the payee and the bank's transaction ID**, computed when the row first arrives and stable even if you later edit it. Re-imports of the same file are detected and skipped.
 
+### How long does Finlynq keep the emails I forward?
+
+The raw forwarded emails are retained for a configurable window and then permanently deleted by a background sweep. Pick your window (7, 30, 60, or 90 days; default 60) under **Settings → Import → Email Import**. The setting is evaluated live at sweep time, so changing it immediately governs all stored emails. Transactions you've already imported from those emails are unaffected — only the original email copies are purged.
+
 ### Can I connect directly to my bank?
 
 Not today. Bank-feed aggregator integration (services like Plaid, SnapTrade, and SimpleFIN) is on the roadmap, but there's no shipping date yet. For now, use file-based import: download statements from your bank's website (CSV / OFX / PDF), or forward email statements to your per-user import address.
