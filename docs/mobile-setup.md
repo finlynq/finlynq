@@ -54,7 +54,7 @@ For a self-hosted server you want to reach from anywhere, put it behind a revers
 
 ## Sign in
 
-The app signs you in with your **Finlynq account** — the same username (or email) and password you use on the web. You can also **create an account** from the sign-in screen (a username is required; an email is optional and used only for password recovery). Sessions are stored securely on the device. If your device supports it, you can enable **biometric unlock** (Face ID / fingerprint) and an **auto-lock** timeout in Settings, so the app re-locks after a period in the background. Auto-lock only takes effect when biometric unlock is enabled — otherwise there'd be no way back in short of signing in again.
+The app signs you in with your **Finlynq account** — the same username (or email) and password you use on the web. You can also **create an account** from the sign-in screen (a username is required; an email is optional and used only for password recovery). Sessions are stored securely on the device. If your device supports it, you can enable **biometric unlock** (Face ID / fingerprint) and an **auto-lock** timeout in Settings, so the app re-locks after a period in the background. Auto-lock only takes effect when biometric unlock is enabled — otherwise there'd be no way back in short of signing in again. With biometric sign-in enabled (FINLYNQ-134, shipped `mobile-dev`, on-device verification pending), the app also silently re-authenticates after a deploy-rotated or expired session token — a biometric prompt replaces the manual re-login prompt when stored credentials are present.
 
 > There's no separate "passphrase" — your account password is what unlocks your data, and your encryption key is derived from it server-side, exactly as on the web.
 
@@ -129,7 +129,13 @@ Apple Developer account (or EAS's Mac workers). See the
   they break `event-target-shim` (which RN's `fetch`/`AbortController` use) with
   `TypeError: cannot assign to read-only property 'NONE'`, making every network request
   throw. Hermes handles private fields natively in the cloud build.
-- **Sign-in uses the session cookie.** Login returns an httpOnly `pf_session` cookie
-  (no token in the body); React Native's native cookie jar carries it on subsequent
-  requests. The app treats HTTP 200 as a successful login. Point the app at your server
-  via the server-URL field on the sign-in screen (or the Settings screen).
+- **Sign-in uses the session cookie as the primary auth path.** Login returns an
+  httpOnly `pf_session` cookie; React Native's native cookie jar carries it on
+  subsequent requests. If the server also returns a Bearer token, the app stores it in
+  hardware-backed SecureStore (`pf_session_token`) and attaches it as a fallback
+  `Authorization: Bearer` header (FINLYNQ-134). A central 401 interceptor
+  (`setAuthFailureHandler` in `client.ts`, FINLYNQ-135) clears the stored token and
+  flips auth state to logged-out on any authed (non-`/api/auth/`) 401, so the
+  declarative navigator resets to LoginScreen. `/api/auth/*` requests are exempt (no
+  redirect loop). Point the app at your server via the server-URL field on the sign-in
+  screen (or the Settings screen).
