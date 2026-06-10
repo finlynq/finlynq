@@ -63,6 +63,13 @@ pf-server.log
 /e2e/
 *.ps1
 
+# Hosted-mode build overlay (managed finlynq.com only). These paths are
+# rsynced in from a private repo on the hosted box before `npm run build` and
+# must never be tracked here — the public app is complete without them.
+# See docs/cloud-overlay.md.
+/src/app/(cloud)/
+/src/lib/cloud/
+
 # Internal working docs, plans + design references — NOT exposed in the public
 # repo. Holds per-feature implementation plans (authored by /triage), the
 # architecture/ design docs (backfill, bank-ledger, webhook-events,
