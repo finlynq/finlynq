@@ -298,17 +298,22 @@ function todayISO(): string {
  * src/lib/external-import/zip-orchestrator.ts:275-298.
  *
  * Strategy:
- *   1. Find any existing category with type='R' for this user (preferred:
- *      one literally named "Transfer", else the first 'R' row).
- *   2. If none, INSERT one with `{type:'R', group:'Transfer', name:'Transfer'}`,
+ *   1. Find the user's `type='R'` category whose `name_lookup` HMAC matches
+ *      "Transfer" (requires a DEK — the lookup is unguessable without it).
+ *   2. If none matches, INSERT one with `{type:'R', group:'Transfer'}`,
  *      writing name_ct + name_lookup per Stream D.
  *
- * Auto-create is name-idempotent enough for the common case; if a user has
- * deleted their Transfer category we'll recreate it. Multiple 'R' categories
- * on the same user (Reconciliation, Transfer, ...) won't collide because
- * we ORDER BY id LIMIT 1 — the user's earliest-created reconciliation
- * category wins. Power users who want a specific transfer category can
- * always edit the row directly via the categories UI.
+ * FINLYNQ-131 — do NOT fall back to the FIRST `type='R'` row when no
+ * "Transfer"-named match exists. The 20260509c migration retyped every
+ * legacy `type='T'` category to `type='R'`, so a user can carry several
+ * unrelated `type='R'` categories (e.g. an imported "Balance Adjustment",
+ * "Non-Cash", broker reconciliation buckets). The old `existing[0]`
+ * fallback grabbed the lowest-id one of those and stamped it on every new
+ * transfer leg — surfacing "Balance Adjustment" as the transfer's category
+ * in the UI / MCP. Auto-creating the canonical "Transfer" category instead
+ * is name-idempotent and keeps every transfer's category meaningful. This
+ * only changes the WRITE path: existing transfer rows keep whatever
+ * category_id they already carry (no migration).
  */
 async function resolveTransferCategoryId(
   // Drizzle's PG transaction context is just a thin wrapper over the same
@@ -320,21 +325,25 @@ async function resolveTransferCategoryId(
   userId: string,
   dek: Buffer | null,
 ): Promise<number> {
-  // Stream D Phase 4 — plaintext name dropped. Match by name_lookup HMAC
-  // when DEK is available, otherwise fall back to the first 'R' row.
-  const existing = await tx
-    .select({ id: schema.categories.id, nameLookup: schema.categories.nameLookup })
-    .from(schema.categories)
-    .where(and(eq(schema.categories.userId, userId), eq(schema.categories.type, "R")))
-    .orderBy(schema.categories.id);
+  // Stream D Phase 4 — plaintext name dropped. Match by name_lookup HMAC.
+  // Only a row that IS the "Transfer" category is reused; any other
+  // type='R' row is left alone (FINLYNQ-131).
   if (dek) {
     const transferLookup = (await import("./crypto/encrypted-columns")).nameLookup(dek, "Transfer");
-    const preferred = existing.find(
-      (r: { nameLookup: string | null }) => r.nameLookup === transferLookup,
-    );
-    if (preferred) return preferred.id as number;
+    const existing = await tx
+      .select({ id: schema.categories.id })
+      .from(schema.categories)
+      .where(
+        and(
+          eq(schema.categories.userId, userId),
+          eq(schema.categories.type, "R"),
+          eq(schema.categories.nameLookup, transferLookup),
+        ),
+      )
+      .orderBy(schema.categories.id)
+      .limit(1);
+    if (existing.length > 0) return existing[0].id as number;
   }
-  if (existing.length > 0) return existing[0].id as number;
 
   // Auto-create.
   const enc = buildNameFields(dek, { name: "Transfer" });
@@ -1888,27 +1897,38 @@ export async function loadTransferPairViaSql(
  * Resolve (or auto-create) the Transfer category via raw SQL, sharing the
  * caller's transaction client so the auto-create commits atomically with
  * the rest of the transfer write. Mirrors the Drizzle variant.
+ *
+ * FINLYNQ-131 — match strictly on the "Transfer" `name_lookup` HMAC and
+ * auto-create otherwise. The previous version SELECTed the dropped
+ * plaintext `name` column (Stream D Phase 4 physically removed it) and fell
+ * back to the first `type='R'` row, which stamped an unrelated category
+ * (e.g. an imported "Balance Adjustment") onto transfers. Both the dropped-
+ * column read AND the wrong-row fallback are fixed here; existing rows are
+ * untouched (no migration).
  */
 async function resolveTransferCategoryIdViaSql(
   client: SqlClient,
   userId: string,
   dek: Buffer | null,
 ): Promise<number> {
-  const rows = await client.query<{ id: number; name: string | null }>(
-    `SELECT id, name FROM categories WHERE user_id = $1 AND type = 'R' ORDER BY id`,
-    [userId],
-  );
-  const preferred = rows.rows.find(
-    (r) => (r.name ?? "").trim().toLowerCase() === "transfer",
-  );
-  if (preferred) return preferred.id;
-  if (rows.rows.length > 0) return rows.rows[0].id;
+  // Only a row whose name_lookup IS the "Transfer" HMAC is reused; any
+  // other type='R' row is left alone. No DEK ⇒ no match ⇒ auto-create.
+  if (dek) {
+    const lookup = nameLookup(dek, "Transfer");
+    const rows = await client.query<{ id: number }>(
+      `SELECT id FROM categories
+       WHERE user_id = $1 AND type = 'R' AND name_lookup = $2
+       ORDER BY id LIMIT 1`,
+      [userId, lookup],
+    );
+    if (rows.rows.length > 0) return rows.rows[0].id;
+  }
 
   const ct = dek ? encryptField(dek, "Transfer") : null;
   const lookup = dek ? nameLookup(dek, "Transfer") : null;
   const ins = await client.query<{ id: number }>(
-    `INSERT INTO categories (user_id, type, "group", name, name_ct, name_lookup)
-     VALUES ($1, 'R', 'Transfer', 'Transfer', $2, $3)
+    `INSERT INTO categories (user_id, type, "group", name_ct, name_lookup)
+     VALUES ($1, 'R', 'Transfer', $2, $3)
      RETURNING id`,
     [userId, ct, lookup],
   );
