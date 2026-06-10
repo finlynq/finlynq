@@ -17,6 +17,7 @@ import {
   endpoints,
   getSession,
   getServerUrl,
+  setAuthFailureHandler,
   setAuthToken,
   setServerUrl,
 } from "../api/client";
@@ -468,6 +469,36 @@ function useAuthEngine() {
   }, []);
 
   /**
+   * FINLYNQ-135 — handle a mid-session auth failure (a 401 on an authed request,
+   * e.g. an expired / deploy-rotated DEPLOY_GENERATION JWT). Clears the session
+   * token (`clearSessionToken`, which PRESERVES the FINLYNQ-134 biometric stored
+   * credentials so next-launch silent re-login still works — NOT `signOut`,
+   * which would purge them) and flips auth state to logged-out so RootNavigator
+   * unmounts the authed tree and renders LoginScreen. The state flip IS the
+   * navigation reset under the declarative navigator — there is no authed route
+   * left to back-navigate into. Idempotent: a burst of parallel 401s collapses
+   * to the same logged-out state.
+   */
+  const handleAuthFailure = useCallback(() => {
+    logger.warn("auth", "auth failure (401) — clearing session, redirecting to login");
+    void clearSessionToken();
+    setState((s) => ({
+      ...s,
+      isUnlocked: false,
+      hasSession: false,
+      isAdmin: false,
+      pendingOnboarding: false,
+    }));
+  }, [clearSessionToken]);
+
+  // Register the central 401 interceptor handler with the API client. The
+  // client invokes it on a 401 from any authed (non-/api/auth/) request.
+  useEffect(() => {
+    setAuthFailureHandler(handleAuthFailure);
+    return () => setAuthFailureHandler(null);
+  }, [handleAuthFailure]);
+
+  /**
    * Clear the session token and return to the login screen. By default this
    * also purges the biometric stored credentials (an explicit user sign-out is
    * a full teardown). Pass `{ purgeCredentials: false }` to clear only the
@@ -566,6 +597,10 @@ function useAuthEngine() {
     // FINLYNQ-135 seam: clears the session token WITHOUT purging the biometric
     // stored credentials, so silent re-login still works on next launch.
     clearSessionToken,
+    // FINLYNQ-135 — the central 401 handler (registered with the API client via
+    // setAuthFailureHandler). Exposed for the test harness to assert the
+    // token-clear + state-flip without driving a real fetch through the client.
+    handleAuthFailure,
     biometricUnlock,
     saveServerUrl,
     setBiometricEnabled,

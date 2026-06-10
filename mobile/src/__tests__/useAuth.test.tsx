@@ -9,6 +9,8 @@ import { AuthProvider, useAuth } from "../hooks/useAuth";
 // imports endpoints/getSession/setAuthToken/getServerUrl/setServerUrl from here.
 const mockLogin = jest.fn();
 const mockGetSession = jest.fn();
+const mockSetAuthToken = jest.fn();
+const mockSetAuthFailureHandler = jest.fn();
 jest.mock("../api/client", () => ({
   endpoints: {
     login: (...args: unknown[]) => mockLogin(...args),
@@ -17,7 +19,8 @@ jest.mock("../api/client", () => ({
   getSession: (...args: unknown[]) => mockGetSession(...args),
   getServerUrl: jest.fn(() => "http://localhost:3000"),
   setServerUrl: jest.fn(),
-  setAuthToken: jest.fn(),
+  setAuthToken: (...args: unknown[]) => mockSetAuthToken(...args),
+  setAuthFailureHandler: (...args: unknown[]) => mockSetAuthFailureHandler(...args),
 }));
 
 const SECURE = SecureStore as jest.Mocked<typeof SecureStore>;
@@ -46,6 +49,8 @@ function resetMocks() {
   ASYNC.setItem.mockResolvedValue(undefined);
   mockLogin.mockReset();
   mockGetSession.mockReset();
+  mockSetAuthToken.mockReset();
+  mockSetAuthFailureHandler.mockReset();
 }
 
 describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential storage", () => {
@@ -211,6 +216,67 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
       });
       expect(SECURE.deleteItemAsync).toHaveBeenCalledWith(SESSION_TOKEN_KEY);
       expect(SECURE.deleteItemAsync).not.toHaveBeenCalledWith(STORED_CREDENTIALS_KEY);
+    });
+  });
+
+  // FINLYNQ-135 — the central 401 auth-failure handler (registered with the API
+  // client). This is the useAuth half of tc-1: under the DECLARATIVE navigator,
+  // a "navigation reset to login" is achieved by flipping hasSession=false so
+  // RootNavigator unmounts the authed tree and renders LoginScreen — there is
+  // no imperative reset. So we assert: clears the Bearer token (setAuthToken
+  // null) + deletes the SecureStore session token + flips state to logged-out,
+  // all WITHOUT purging the FINLYNQ-134 biometric stored credentials.
+  describe("FINLYNQ-135 — 401 auth-failure handler (tc-1 useAuth half)", () => {
+    /** Mount the hook in a signed-in (unlocked) state. */
+    async function mountSignedIn() {
+      ASYNC.getItem.mockImplementation(async (key: string) =>
+        key === BIOMETRIC_KEY ? "true" : null
+      );
+      LOCAL.hasHardwareAsync.mockResolvedValue(true);
+      LOCAL.isEnrolledAsync.mockResolvedValue(true);
+      mockLogin.mockResolvedValue({ ok: true, status: 200, data: {}, token: "jwt" });
+      mockGetSession.mockResolvedValue({ authenticated: true, isAdmin: true });
+      const hook = renderHook(() => useAuth(), { wrapper });
+      await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
+      await act(async () => {
+        await hook.result.current.signIn("alice", "hunter2hunter2");
+      });
+      await waitFor(() => expect(hook.result.current.hasSession).toBe(true));
+      return hook;
+    }
+
+    it("registers the handler with the API client on mount", async () => {
+      renderHook(() => useAuth(), { wrapper });
+      await waitFor(() => expect(mockSetAuthFailureHandler).toHaveBeenCalled());
+      // The registered arg is a function (the handler), not null.
+      const registered = mockSetAuthFailureHandler.mock.calls
+        .map(([fn]) => fn)
+        .find((fn) => typeof fn === "function");
+      expect(typeof registered).toBe("function");
+    });
+
+    it("clears the Bearer token, deletes the SecureStore session token, and flips to logged-out", async () => {
+      const { result } = await mountSignedIn();
+      mockSetAuthToken.mockClear();
+      SECURE.deleteItemAsync.mockClear();
+
+      await act(async () => {
+        result.current.handleAuthFailure();
+      });
+
+      // Bearer token cleared.
+      expect(mockSetAuthToken).toHaveBeenCalledWith(null);
+      // SecureStore session token deleted...
+      await waitFor(() =>
+        expect(SECURE.deleteItemAsync).toHaveBeenCalledWith(SESSION_TOKEN_KEY)
+      );
+      // ...but the biometric stored credential is PRESERVED (FINLYNQ-134).
+      expect(SECURE.deleteItemAsync).not.toHaveBeenCalledWith(STORED_CREDENTIALS_KEY);
+      // Auth state flipped to logged-out → RootNavigator renders LoginScreen
+      // (the declarative "navigation reset").
+      await waitFor(() => expect(result.current.hasSession).toBe(false));
+      expect(result.current.isUnlocked).toBe(false);
+      expect(result.current.isAdmin).toBe(false);
     });
   });
 });

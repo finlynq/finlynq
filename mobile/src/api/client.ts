@@ -14,6 +14,25 @@ import { logger, describeShape } from "../lib/logger";
 let _serverUrl = "https://finlynq.com";
 let _authToken: string | null = null;
 
+// FINLYNQ-135 — central auth-failure (401) interceptor seam. `request()` invokes
+// this handler exactly once when an AUTHED endpoint returns 401 (expired /
+// deploy-rotated DEPLOY_GENERATION JWT). useAuth registers it to clear the
+// session token + flip auth state to logged-out (RootNavigator → LoginScreen),
+// while PRESERVING FINLYNQ-134's biometric stored credentials so next-launch
+// silent re-login still works. Requests to /api/auth/* are EXEMPT (a failed
+// sign-in must not re-trigger the redirect — no loop). Best-effort: a throwing
+// handler must never break the request's error return.
+let _onAuthFailure: (() => void) | null = null;
+
+/**
+ * Register (or clear, with `null`) the central 401 auth-failure handler.
+ * Called once from useAuth. The handler fires on a 401 from any authed
+ * (non-/api/auth/) request routed through `request()`.
+ */
+export function setAuthFailureHandler(fn: (() => void) | null) {
+  _onAuthFailure = fn;
+}
+
 export function setServerUrl(url: string) {
   _serverUrl = url.replace(/\/$/, "");
 }
@@ -83,6 +102,23 @@ async function request<T>(
       error,
       authToken: _authToken ? "present" : "absent",
     });
+    // FINLYNQ-135 — a 401 on an AUTHED endpoint means the session is dead
+    // (expired / deploy-rotated DEPLOY_GENERATION JWT). Fire the central
+    // auth-failure handler exactly once so the app clears the session and
+    // resets to login. EXEMPT /api/auth/* (login/register/session) so a failed
+    // sign-in can surface its own error on the login screen without looping.
+    // authRequest()/getSession() bypass request() entirely; this path guard is
+    // the defensive belt-and-suspenders for any future authed wrapper around
+    // an /api/auth/ route. The handler is best-effort — never let it break the
+    // error return the caller expects.
+    if (res.status === 401 && _onAuthFailure && !path.startsWith("/api/auth/")) {
+      try {
+        _onAuthFailure();
+      } catch (e) {
+        const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        logger.error("api", "auth-failure handler threw", { detail });
+      }
+    }
     return { success: false, error };
   }
 

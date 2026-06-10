@@ -4,6 +4,7 @@ import {
   setServerUrl,
   endpoints,
   getSession,
+  setAuthFailureHandler,
 } from "../api/client";
 
 // Mock global fetch
@@ -528,6 +529,146 @@ describe("API Client", () => {
       );
       expect(res.success).toBe(false);
       expect(res.success === false && res.error).toContain("Cannot delete");
+    });
+  });
+
+  // FINLYNQ-135 — the central 401 auth-failure interceptor seam in request().
+  // These cover the CLIENT half of tc-1 (handler fires once on an authed 401)
+  // and tc-2 (auth endpoints are exempt → no loop). The useAuth half of tc-1
+  // (what the handler actually does: clear token + flip state) lives in
+  // useAuth.test.tsx.
+  describe("FINLYNQ-135 — central 401 interceptor (setAuthFailureHandler)", () => {
+    afterEach(() => {
+      // Unregister so a stale handler never bleeds into another test.
+      setAuthFailureHandler(null);
+    });
+
+    // tc-1 (client half) — a 401 on an authed endpoint fires the handler exactly once.
+    it("tc-1: fires the registered auth-failure handler exactly once on a 401 from an authed endpoint", async () => {
+      const onAuthFailure = jest.fn();
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: "Unauthorized" }),
+      });
+
+      const result = await api.get("/api/accounts");
+
+      // Return shape is unchanged (the existing error envelope).
+      expect(result).toEqual({ success: false, error: "Unauthorized" });
+      // Handler fired exactly once.
+      expect(onAuthFailure).toHaveBeenCalledTimes(1);
+    });
+
+    it("tc-1: fires once per failing authed request (a second 401 fires again, not twice for one)", async () => {
+      const onAuthFailure = jest.fn();
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: "Unauthorized" }),
+      });
+
+      await api.get("/api/accounts");
+      expect(onAuthFailure).toHaveBeenCalledTimes(1);
+      await api.get("/api/dashboard");
+      expect(onAuthFailure).toHaveBeenCalledTimes(2);
+    });
+
+    it("tc-1: does NOT fire on a non-401 error (e.g. 409/500) — only auth failures redirect", async () => {
+      const onAuthFailure = jest.fn();
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: () => Promise.resolve({ error: "Conflict" }),
+      });
+
+      await api.delete("/api/accounts?id=1");
+      expect(onAuthFailure).not.toHaveBeenCalled();
+    });
+
+    it("tc-1: does NOT fire on a 2xx success", async () => {
+      const onAuthFailure = jest.fn();
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve([{ id: 1 }]),
+      });
+
+      await api.get("/api/accounts");
+      expect(onAuthFailure).not.toHaveBeenCalled();
+    });
+
+    it("tc-1: a throwing handler never breaks the request's error return", async () => {
+      setAuthFailureHandler(() => {
+        throw new Error("handler boom");
+      });
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: "Unauthorized" }),
+      });
+
+      const result = await api.get("/api/accounts");
+      expect(result).toEqual({ success: false, error: "Unauthorized" });
+    });
+
+    // tc-2 (no redirect loop) — auth endpoints are exempt. authRequest()
+    // (login/register) bypasses request() entirely, AND request() defensively
+    // skips the handler for any /api/auth/ path.
+    it("tc-2: a 401 from endpoints.login records ZERO auth-failure handler calls", async () => {
+      const onAuthFailure = jest.fn();
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: "Invalid credentials" }),
+        headers: { get: () => null },
+      });
+
+      const res = await endpoints.login("alice", "wrongpassword");
+      // The failed sign-in surfaces its own status/error to the login screen.
+      expect(res.ok).toBe(false);
+      expect(res.status).toBe(401);
+      // ...and never triggers the global redirect.
+      expect(onAuthFailure).not.toHaveBeenCalled();
+    });
+
+    it("tc-2: a 401 from endpoints.register records ZERO auth-failure handler calls", async () => {
+      const onAuthFailure = jest.fn();
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: "Cannot register" }),
+        headers: { get: () => null },
+      });
+
+      await endpoints.register({
+        username: "alice",
+        email: undefined,
+        password: "correct horse battery",
+        displayName: "Alice",
+        acknowledgeNoRecovery: true,
+      });
+      expect(onAuthFailure).not.toHaveBeenCalled();
+    });
+
+    it("tc-2: defensively, a 401 routed through request() for an /api/auth/ path does NOT fire the handler", async () => {
+      const onAuthFailure = jest.fn();
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: "Unauthorized" }),
+      });
+
+      // Drive an /api/auth/* path through the generic request() helper directly.
+      await api.get("/api/auth/session");
+      expect(onAuthFailure).not.toHaveBeenCalled();
     });
   });
 });

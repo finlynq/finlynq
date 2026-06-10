@@ -309,4 +309,25 @@ describe("RootNavigator", () => {
     const { getByText } = renderWithTheme(<RootNavigator />);
     expect(getByText("LoginScreen")).toBeTruthy();
   });
+
+  // FINLYNQ-135 tc-3 — after signOut (or the 401 auth-failure handler) flips
+  // hasSession=false, RootNavigator renders ONLY the login stack: the authed
+  // tree (TabNavigator) is unmounted, so there is no authed screen left to
+  // back-navigate into. Under the declarative navigator this state-flip IS the
+  // navigation reset.
+  it("tc-3: after logout (hasSession=false) renders ONLY the login screen — no authed tabs remain", () => {
+    // Post-signOut / post-401 auth state.
+    mockAuthReturn.isUnlocked = false;
+    mockAuthReturn.hasSession = false;
+    mockAuthReturn.biometricAvailable = true; // even with biometrics available,
+    mockAuthReturn.biometricEnabled = true; // no session ⇒ LockScreen is not shown.
+    const { getByText, queryByText } = renderWithTheme(<RootNavigator />);
+
+    // The login stack is the only reachable surface.
+    expect(getByText("LoginScreen")).toBeTruthy();
+    // The authed tree is gone — none of the tab/authed screens are mounted, so
+    // the back action cannot return to an authed screen.
+    expect(queryByText("Home")).toBeNull();
+    expect(queryByText("LockScreen")).toBeNull();
+  });
 });
