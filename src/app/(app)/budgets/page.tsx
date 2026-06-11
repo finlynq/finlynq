@@ -707,7 +707,7 @@ export default function BudgetsPage() {
                           <Link
                             href={buildTxDrillUrl({ categoryId: String(b.categoryId), startDate: budgetMonthStart, endDate: budgetMonthEnd })}
                             className={`text-sm font-mono tabular-nums hover:underline ${envelopeAvailable < 0 ? "text-rose-600" : ""}`}
-                            title={`View ${b.categoryName} transactions for ${getMonthLabel(month)}`}
+                            title={b.categoryName ? `View ${b.categoryName} transactions for ${getMonthLabel(month)}` : `View transactions for ${getMonthLabel(month)}`}
                           >
                             {formatCurrency(envelopeAvailable, displayCurrency)} left
                           </Link>
@@ -715,7 +715,7 @@ export default function BudgetsPage() {
                           <Link
                             href={buildTxDrillUrl({ categoryId: String(b.categoryId), startDate: budgetMonthStart, endDate: budgetMonthEnd })}
                             className={`text-sm font-mono tabular-nums hover:underline ${over ? "text-rose-600" : ""}`}
-                            title={`View ${b.categoryName} transactions for ${getMonthLabel(month)}`}
+                            title={b.categoryName ? `View ${b.categoryName} transactions for ${getMonthLabel(month)}` : `View transactions for ${getMonthLabel(month)}`}
                           >
                             {formatCurrency(spent, displayCurrency)} / {formatCurrency(effectiveBudget, displayCurrency)}
                           </Link>
