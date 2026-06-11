@@ -5,7 +5,7 @@ export const metadata: Metadata = {
   title:
     "Finlynq vs Alderfi — two open-source MCP-first personal finance apps",
   description:
-    "Finlynq vs Alderfi: production-ready AGPL v3 PFM with 91 MCP tools, hosted demo, per-user envelope encryption, and multi-currency support — compared with Alderfi's pre-alpha Apache-2.0 project that ships local LLM (Llama 3 via llama.cpp). Side-by-side feature table, when to choose each, dated 2026-05-13.",
+    "Finlynq vs Alderfi: production-ready AGPL v3 PFM with 102 MCP tools, hosted demo, per-user envelope encryption, and multi-currency support — compared with Alderfi's pre-alpha Apache-2.0 project that ships local LLM (Llama 3 via llama.cpp). Side-by-side feature table, when to choose each, dated 2026-05-13.",
   alternates: {
     canonical: "/vs/alderfi",
   },
@@ -13,7 +13,7 @@ export const metadata: Metadata = {
     title:
       "Finlynq vs Alderfi — two open-source MCP-first personal finance apps",
     description:
-      "Two open-source MCP-first PFMs, honestly compared. Finlynq: AGPL v3, production, 91 MCP tools, hosted + self-host, per-user encryption. Alderfi: Apache-2.0, pre-alpha, local LLM via llama.cpp.",
+      "Two open-source MCP-first PFMs, honestly compared. Finlynq: AGPL v3, production, 102 MCP tools, hosted + self-host, per-user encryption. Alderfi: Apache-2.0, pre-alpha, local LLM via llama.cpp.",
     url: "/vs/alderfi",
     siteName: "Finlynq",
     type: "article",
@@ -23,7 +23,7 @@ export const metadata: Metadata = {
     title:
       "Finlynq vs Alderfi — two open-source MCP-first personal finance apps",
     description:
-      "AGPL v3 production PFM with 91 MCP tools vs Apache-2.0 pre-alpha with local LLM. Pick the one that matches your trade-offs.",
+      "AGPL v3 production PFM with 102 MCP tools vs Apache-2.0 pre-alpha with local LLM. Pick the one that matches your trade-offs.",
   },
 };
 
@@ -102,7 +102,7 @@ const content: VsPageContent = {
       <strong className="text-foreground">
         You want a large, audited MCP tool surface today.
       </strong>{" "}
-      Finlynq exposes <strong className="text-foreground">91 HTTP / 87 stdio</strong>{" "}
+      Finlynq exposes <strong className="text-foreground">102 HTTP / 93 stdio</strong>{" "}
       tools across accounts, transactions, budgets, categories, rules, portfolio
       (cost basis, dividends, FX-aware aggregation), goals, loans,
       subscriptions, recurring transactions, FX with overrides, spending
@@ -176,7 +176,7 @@ const content: VsPageContent = {
       label: "First-party MCP",
       finlynq: (
         <>
-          Yes — <strong className="text-foreground">91 HTTP / 87 stdio</strong>{" "}
+          Yes — <strong className="text-foreground">102 HTTP / 93 stdio</strong>{" "}
           tools
         </>
       ),

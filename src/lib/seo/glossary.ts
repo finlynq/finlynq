@@ -51,7 +51,7 @@ export const GLOSSARY: GlossaryEntry[] = [
       },
       {
         type: "p",
-        text: "Finlynq ships a first-party MCP server — not a community wrapper — exposing 91 HTTP tools and 87 stdio tools across budgets, transactions, portfolios, goals, loans, subscriptions, and rules. It supports three transports:",
+        text: "Finlynq ships a first-party MCP server — not a community wrapper — exposing 102 HTTP tools and 93 stdio tools across budgets, transactions, portfolios, goals, loans, subscriptions, and rules. It supports three transports:",
       },
       {
         type: "ul",

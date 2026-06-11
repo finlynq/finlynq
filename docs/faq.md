@@ -56,7 +56,7 @@ See the [Getting Started guide](./getting-started.md#connecting-an-ai-assistant-
 
 ### What can the AI assistant do?
 
-The MCP server registers **101 tools on HTTP / 86 tools on stdio** (as of server v3.2.0). They cover reads + writes across accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, recurring transactions, rules, imports, and the staging-review queue. Typical operations: record a transaction, log a transfer between accounts, create a budget or auto-categorize rule, run portfolio analysis, build a debt-payoff plan, review a pending CSV/email import.
+The MCP server registers **102 tools on HTTP / 93 tools on stdio** (as of server v3.2.0). They cover reads + writes across accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, recurring transactions, rules, imports, and the staging-review queue. Typical operations: record a transaction, log a transfer between accounts, create a budget or auto-categorize rule, run portfolio analysis, build a debt-payoff plan, review a pending CSV/email import.
 
 Destructive operations (delete account, delete category, bulk-categorize) use a **confirmation-token preview/execute pattern** so the AI has to show you the impact before it can act.
 

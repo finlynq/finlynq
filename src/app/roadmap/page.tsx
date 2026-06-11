@@ -56,7 +56,7 @@ const SECTIONS: Section[] = [
     items: [
       {
         title: "Talk to your money with any AI assistant",
-        desc: "A built-in MCP server (94 tools) for Claude, Cursor, and more, plus an in-app AI chat.",
+        desc: "A built-in MCP server (102 tools) for Claude, Cursor, and more, plus an in-app AI chat.",
         href: "/mcp-guide",
         hrefLabel: "See the MCP guide",
       },

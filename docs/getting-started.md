@@ -123,7 +123,7 @@ Every import lands in a **review queue** before anything is committed. You previ
 
 ## Connecting an AI assistant (optional)
 
-Finlynq's standout feature is its **MCP server**: it lets AI assistants query and manage your finances in natural language — "how much did I spend on groceries last month?", "record a $45 coffee from yesterday", "show an avalanche debt-payoff plan". The server exposes **101 tools over HTTP and 86 over stdio** (server v3.2.0) covering accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, rules, and imports.
+Finlynq's standout feature is its **MCP server**: it lets AI assistants query and manage your finances in natural language — "how much did I spend on groceries last month?", "record a $45 coffee from yesterday", "show an avalanche debt-payoff plan". The server exposes **102 tools over HTTP and 93 over stdio** (server v3.2.0) covering accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, rules, and imports.
 
 You don't even need an external client to start — the web UI ships a **built-in AI chat** (`/chat`) that runs over the same tools.
 

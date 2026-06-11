@@ -17,7 +17,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "What is Finlynq? — open-source personal finance with first-party MCP",
     description:
-      "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 91 MCP tools. Not affiliated with Finq.com or Finlync.",
+      "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 102 MCP tools. Not affiliated with Finq.com or Finlync.",
     url: "/about",
     siteName: "Finlynq",
     type: "article",
@@ -49,7 +49,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Monarch Money, YNAB, or Simplifi?",
-    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable with a first-party MCP server (91 HTTP / 87 stdio tools) and per-user envelope encryption that excludes even the operator from reading your data. Finlynq does not yet have first-party Plaid bank sync — it imports from CSV, OFX, QFX, and email today, with the SnapTrade brokerage integration on the roadmap. Side-by-side comparison at finlynq.com/vs/monarch.",
+    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable with a first-party MCP server (102 HTTP / 93 stdio tools) and per-user envelope encryption that excludes even the operator from reading your data. Finlynq does not yet have first-party Plaid bank sync — it imports from CSV, OFX, QFX, and email today, with the SnapTrade brokerage integration on the roadmap. Side-by-side comparison at finlynq.com/vs/monarch.",
   },
   {
     q: "How is Finlynq different from Firefly III or Actual Budget?",
@@ -176,7 +176,7 @@ export default function AboutPage() {
           <ul className="list-disc pl-6 space-y-2">
             <li>
               <strong className="text-foreground">First-party MCP server.</strong>{" "}
-              91 HTTP tools and 87 stdio tools at v3.1.0 — built into the
+              102 HTTP tools and 93 stdio tools at v3.2.0 — built into the
               project, not a community wrapper. OAuth 2.1 + Dynamic Client
               Registration, Bearer API keys, and stdio transports all
               supported.

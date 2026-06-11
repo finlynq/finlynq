@@ -51,7 +51,7 @@ const content: VsPageContent = {
     },
     {
       label: "First-party MCP",
-      finlynq: "Yes — 91 HTTP / 87 stdio tools",
+      finlynq: "Yes — 102 HTTP / 93 stdio tools",
       competitor:
         "No — proposed read-only Claude Agent SDK chat (unshipped); a small third-party community MCP wrapper exists",
     },

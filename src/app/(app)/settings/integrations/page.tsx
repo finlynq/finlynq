@@ -32,7 +32,7 @@ export default function IntegrationsSettingsPage() {
         <CardContent className="space-y-3">
           <p className="text-sm text-muted-foreground">
             The MCP server lets AI assistants like Claude and ChatGPT query and manage your
-            financial data in natural language. It exposes 101 tools over HTTP and 86 over stdio —
+            financial data in natural language. It exposes 102 tools over HTTP and 93 over stdio —
             accounts, transactions, budgets, portfolio, goals, loans, and imports. Destructive
             actions (deletes, bulk edits) always use a preview-then-confirm step.
           </p>

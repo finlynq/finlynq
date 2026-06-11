@@ -4,14 +4,14 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 export const metadata: Metadata = {
   title: "Finlynq vs Era — open-source vs closed AI personal finance",
   description:
-    "Finlynq vs Era: open-source AGPL v3 with self-host + 91 MCP tools + per-user envelope encryption, compared against Era's closed-source hosted SaaS with 27 MCP tools and operator-held keys. Side-by-side feature table, when to choose each, and migration steps.",
+    "Finlynq vs Era: open-source AGPL v3 with self-host + 102 MCP tools + per-user envelope encryption, compared against Era's closed-source hosted SaaS with 27 MCP tools and operator-held keys. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
     canonical: "/vs/era",
   },
   openGraph: {
     title: "Finlynq vs Era — open-source vs closed AI personal finance",
     description:
-      "Two MCP-first personal finance apps, compared. Finlynq: AGPL v3, self-hostable, 91 MCP tools, per-user envelope encryption. Era: closed SaaS, hosted-only, 27 MCP tools, operator-held keys.",
+      "Two MCP-first personal finance apps, compared. Finlynq: AGPL v3, self-hostable, 102 MCP tools, per-user envelope encryption. Era: closed SaaS, hosted-only, 27 MCP tools, operator-held keys.",
     url: "/vs/era",
     siteName: "Finlynq",
     type: "article",
@@ -20,7 +20,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Finlynq vs Era — open-source vs closed AI personal finance",
     description:
-      "Open-source self-hostable PFM with 91 MCP tools and per-user envelope encryption, compared with Era.",
+      "Open-source self-hostable PFM with 102 MCP tools and per-user envelope encryption, compared with Era.",
   },
 };
 
@@ -83,7 +83,7 @@ const content: VsPageContent = {
     </>,
     <>
       <strong className="text-foreground">You want the bigger MCP surface.</strong>{" "}
-      Finlynq exposes 91 HTTP tools and 87 stdio tools across budgets,
+      Finlynq exposes 102 HTTP tools and 93 stdio tools across budgets,
       transactions, portfolios, goals, loans, subscriptions, and rules.
       Era&apos;s public Context surface is 27 tools spanning accounts,
       connections, insights, billing, and a handful of other domains.
@@ -117,7 +117,7 @@ const content: VsPageContent = {
       label: "First-party MCP",
       finlynq: (
         <>
-          Yes — <strong className="text-foreground">91 HTTP / 87 stdio</strong>{" "}
+          Yes — <strong className="text-foreground">102 HTTP / 93 stdio</strong>{" "}
           tools
         </>
       ),

@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   title:
     "Finlynq MCP guide — connect Claude, Cursor & Windsurf to your finances",
   description:
-    "Connect Finlynq's first-party MCP server to Claude, Cursor, Windsurf, or any MCP client. OAuth 2.1 + Dynamic Client Registration, Bearer API key, or stdio. 91 HTTP / 87 stdio tools over your own financial data.",
+    "Connect Finlynq's first-party MCP server to Claude, Cursor, Windsurf, or any MCP client. OAuth 2.1 + Dynamic Client Registration, Bearer API key, or stdio. 102 HTTP / 93 stdio tools over your own financial data.",
   alternates: { canonical: "/mcp-guide" },
   openGraph: {
     title: "Finlynq MCP guide — connect any AI assistant to your finances",

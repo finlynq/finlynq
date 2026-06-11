@@ -8,7 +8,7 @@ const FEATURES = [
   {
     idx: "F.01 · AI NATIVE",
     title: "Talk to your money in plain English.",
-    desc: "Connect Claude, Cursor, or any MCP client — or use the in-app AI chat with zero setup. 91 HTTP / 87 stdio tools. Ask questions, get charts and structured answers — no custom exports, no BI tool needed.",
+    desc: "Connect Claude, Cursor, or any MCP client — or use the in-app AI chat with zero setup. 102 HTTP / 93 stdio tools. Ask questions, get charts and structured answers — no custom exports, no BI tool needed.",
     viz: "bars",
   },
   {
@@ -73,7 +73,7 @@ const MCP_TOOLS = [
 ];
 
 const PLAN_FEATS = [
-  "91 MCP tools (HTTP) · 87 (stdio) — read & write",
+  "102 MCP tools (HTTP) · 93 (stdio) — read & write",
   "Per-user AES-256-GCM envelope encryption · operator can't decrypt",
   "In-app AI chat — no MCP client setup required",
   "Native mobile app for iOS + Android (coming soon)",

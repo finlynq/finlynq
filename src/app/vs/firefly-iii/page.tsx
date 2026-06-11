@@ -5,7 +5,7 @@ export const metadata: Metadata = {
   title:
     "Finlynq vs Firefly III — open-source personal finance with first-party MCP",
   description:
-    "Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (91 HTTP / 87 stdio tools) with per-user envelope encryption. Side-by-side feature table, when to choose each, and migration steps.",
+    "Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (102 HTTP / 93 stdio tools) with per-user envelope encryption. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
     canonical: "/vs/firefly-iii",
   },
@@ -13,7 +13,7 @@ export const metadata: Metadata = {
     title:
       "Finlynq vs Firefly III — open-source personal finance with first-party MCP",
     description:
-      "Two AGPL v3 self-hostable PFMs, compared. Firefly III: 11-year-old double-entry, PSD2 bank sync, no first-party MCP. Finlynq: first-party MCP server with 91 HTTP / 87 stdio tools, per-user envelope encryption, native investment tracking.",
+      "Two AGPL v3 self-hostable PFMs, compared. Firefly III: 11-year-old double-entry, PSD2 bank sync, no first-party MCP. Finlynq: first-party MCP server with 102 HTTP / 93 stdio tools, per-user envelope encryption, native investment tracking.",
     url: "/vs/firefly-iii",
     siteName: "Finlynq",
     type: "article",
@@ -23,7 +23,7 @@ export const metadata: Metadata = {
     title:
       "Finlynq vs Firefly III — open-source personal finance with first-party MCP",
     description:
-      "AGPL v3 self-hostable PFMs compared. Firefly III's double-entry rigor + PSD2 vs Finlynq's first-party MCP (91 HTTP / 87 stdio) and per-user envelope encryption.",
+      "AGPL v3 self-hostable PFMs compared. Firefly III's double-entry rigor + PSD2 vs Finlynq's first-party MCP (102 HTTP / 93 stdio) and per-user envelope encryption.",
   },
 };
 
@@ -92,7 +92,7 @@ const content: VsPageContent = {
       <strong className="text-foreground">
         You want a first-party MCP server.
       </strong>{" "}
-      Finlynq ships <strong className="text-foreground">91 HTTP and 87 stdio</strong>{" "}
+      Finlynq ships <strong className="text-foreground">102 HTTP and 93 stdio</strong>{" "}
       MCP tools built and maintained by the project, with OAuth 2.1 + Dynamic
       Client Registration, Bearer API keys, and stdio transports. Firefly III
       has <strong className="text-foreground">no first-party MCP server</strong>{" "}
@@ -193,8 +193,8 @@ const content: VsPageContent = {
       finlynq: (
         <>
           Yes —{" "}
-          <strong className="text-foreground">91 HTTP / 87 stdio</strong> tools,
-          v3.1.0
+          <strong className="text-foreground">102 HTTP / 93 stdio</strong> tools,
+          v3.2.0
         </>
       ),
       competitor: (
@@ -390,7 +390,7 @@ const content: VsPageContent = {
           Access Token. There&apos;s no per-user envelope encryption, no
           confirmation-token preview/execute pattern for destructive ops, no
           OAuth 2.1 + DCR, and no first-party support. Finlynq&apos;s MCP is
-          part of the project (91 HTTP / 87 stdio tools at v3.1.0, the canonical{" "}
+          part of the project (102 HTTP / 93 stdio tools at v3.2.0, the canonical{" "}
           <code>{`{ success: true, data: <T> }`}</code> envelope, tool
           annotations for the Anthropic Connectors Directory, per-user
           encryption all the way through).
