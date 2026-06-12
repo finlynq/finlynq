@@ -58,7 +58,7 @@ export default function SelfHostedPage() {
             Quick Start with Docker Compose
           </h2>
           <pre className="overflow-x-auto rounded-xl bg-muted p-4 text-sm">
-            <code>{`curl -O https://raw.githubusercontent.com/finlynq/finlynq/main/pf-app/docker-compose.yml
+            <code>{`curl -O https://raw.githubusercontent.com/finlynq/finlynq/main/docker-compose.yml
 docker compose up -d`}</code>
           </pre>
           <p className="mt-3 text-sm text-muted-foreground">

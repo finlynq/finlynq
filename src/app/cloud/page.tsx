@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, useRef, Suspense } from "react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
+import { LogoMark } from "@/components/logo-mark";
 
 type Tab = "login" | "register";
 
@@ -201,18 +202,25 @@ function CloudAuthPageInner() {
           ← Back
         </Link>
 
-        <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary">
-          <span className="text-2xl font-extrabold tracking-wide text-primary-foreground">
-            PF
+        <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl border border-primary/30 bg-primary/10">
+          <span className="[&_svg]:h-9 [&_svg]:w-9">
+            <LogoMark />
           </span>
         </div>
 
         <h1 className="mb-2 text-3xl font-bold tracking-tight text-foreground">
-          Cloud Mode
+          {tab === "register" ? "Create your free Finlynq account" : "Welcome back"}
         </h1>
         <p className="mb-8 text-muted-foreground">
-          Sign in with your account. Access your data from any device.
+          {tab === "register"
+            ? "Sign up to track your money here and analyze it anywhere. Access your data from any device."
+            : "Sign in with your account. Access your data from any device."}
         </p>
+        {tab === "register" && (
+          <p className="mb-8 -mt-6 text-xs text-muted-foreground/80">
+            Free forever. AGPL v3. Encrypted with your password.
+          </p>
+        )}
 
         {mfaRequired ? (
           <form onSubmit={handleMfaVerify} className="space-y-4">
@@ -424,6 +432,17 @@ function CloudAuthPageInner() {
                 }
               </button>
             </form>
+
+            <p className="mt-6 text-center text-sm text-muted-foreground">
+              Just looking?{" "}
+              <Link
+                href="/try-demo?next=/dashboard"
+                className="font-medium text-primary underline underline-offset-2 hover:text-primary/80"
+              >
+                One-click demo
+              </Link>
+              . No signup, resets nightly.
+            </p>
           </>
         )}
       </div>

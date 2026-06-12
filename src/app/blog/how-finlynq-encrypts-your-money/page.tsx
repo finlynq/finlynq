@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { Metadata } from "next";
+import { AnalyticsConsent } from "@/components/analytics-consent";
 import {
   JsonLd,
   articleSchema,
@@ -34,6 +35,7 @@ export const metadata: Metadata = {
 export default function HowFinlynqEncryptsYourMoneyPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <AnalyticsConsent />
       <JsonLd
         data={articleSchema({
           title: "How Finlynq encrypts your money",
@@ -480,9 +482,9 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
             >
               Model Context Protocol
             </a>{" "}
-            server — 91 tools that let Claude, ChatGPT, Cursor, or any other
-            MCP-compatible AI assistant query and mutate your financial data on
-            your behalf.
+            server, with 102 HTTP tools (93 over stdio) that let Claude,
+            ChatGPT, Cursor, or any other MCP-compatible AI assistant query and
+            mutate your financial data on your behalf.
           </p>
 
           <p>

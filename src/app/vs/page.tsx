@@ -89,6 +89,12 @@ export default function VsIndexPage() {
               <span aria-hidden="true">→</span>
             </Link>
             <Link
+              href="/try-demo?next=/dashboard"
+              className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-muted/40 transition-colors"
+            >
+              Try the live demo (no signup)
+            </Link>
+            <Link
               href="/self-hosted"
               className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-muted/40 transition-colors"
             >

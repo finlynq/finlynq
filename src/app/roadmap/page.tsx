@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { Metadata } from "next";
+import { AnalyticsConsent } from "@/components/analytics-consent";
 import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
 
 const PATH = "/roadmap";
@@ -56,7 +57,7 @@ const SECTIONS: Section[] = [
     items: [
       {
         title: "Talk to your money with any AI assistant",
-        desc: "A built-in MCP server (102 tools) for Claude, Cursor, and more, plus an in-app AI chat.",
+        desc: "A built-in MCP server (102 HTTP / 93 stdio tools) for Claude, Cursor, and more.",
         href: "/mcp-guide",
         hrefLabel: "See the MCP guide",
       },
@@ -109,6 +110,10 @@ const SECTIONS: Section[] = [
         desc: "Android first (in final testing on Google Play), with iOS to follow.",
         href: "/blog/finlynq-mobile-app",
         hrefLabel: "Read the announcement",
+      },
+      {
+        title: "In-app AI chat",
+        desc: "Ask questions about your finances in plain English without setting up an external MCP client. In active development behind a feature flag.",
       },
       {
         title: "Automatic account connections",
@@ -198,6 +203,7 @@ function ItemLink({ href, label }: { href: string; label: string }) {
 export default function RoadmapPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <AnalyticsConsent />
       <JsonLd
         data={breadcrumbSchema([
           { name: "Home", path: "/" },
@@ -276,6 +282,12 @@ export default function RoadmapPage() {
               className="underline underline-offset-2 hover:text-primary"
             >
               Try Finlynq free →
+            </Link>
+            <Link
+              href="/try-demo?next=/dashboard"
+              className="underline underline-offset-2 hover:text-primary"
+            >
+              Try the live demo (no signup) →
             </Link>
           </div>
         </footer>

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff, Globe, Plus, Shield, Upload, Wand2, Radar, Landmark, Globe2, Scissors, Scale, Lightbulb, Briefcase, LifeBuoy } from "lucide-react";
+import { AnalyticsConsent } from "@/components/analytics-consent";
 
 type ClientTab = "claude-desktop" | "claude-web" | "chatgpt" | "cursor" | "cline" | "windsurf" | "custom";
 type StatusState = "checking" | "connected" | "disconnected";
@@ -308,6 +309,7 @@ export default function McpGuidePage() {
 
   return (
     <div className="min-h-screen bg-background">
+      <AnalyticsConsent />
       <div className="mx-auto max-w-4xl px-6 py-10">
         {/* Header */}
         <div className="mb-8">

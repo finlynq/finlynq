@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { Metadata } from "next";
+import { AnalyticsConsent } from "@/components/analytics-consent";
 
 export const metadata: Metadata = {
   title: "Blog — Finlynq",
@@ -49,6 +50,7 @@ const POSTS: Post[] = [
 export default function BlogIndexPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <AnalyticsConsent />
       <div className="mx-auto max-w-3xl px-6 py-16">
         <header className="mb-12 border-b border-border pb-8">
           <Link

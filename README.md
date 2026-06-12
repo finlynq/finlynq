@@ -29,7 +29,7 @@ Then open [http://localhost:3000](http://localhost:3000) and register. App + Pos
 
 ## Features
 
-- 90 MCP tools (HTTP) · 86 (stdio) — read & write
+- 100+ MCP tools (HTTP & stdio) — read & write
 - AES-256-GCM envelope encryption · scrypt-derived KEK
 - CSV, Excel, OFX/QFX, PDF import
 - Budgets, portfolio, goals, loans

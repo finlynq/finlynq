@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef } from "react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
+import { LogoMark } from "@/components/logo-mark";
 
 const FEATURES = [
   {
@@ -107,25 +108,6 @@ const ROADMAP_POINTS = [
 
 const ROADMAP_LEDE =
   "What's live, what we're building, and what's next. Directional, not a contract: Finlynq is open source.";
-
-function LogoMark() {
-  return (
-    <span className="logo-mark" aria-hidden="true">
-      <svg viewBox="0 0 22 22" width="22" height="22">
-        <rect x="1" y="1" width="20" height="20" rx="2" fill="none" stroke="#f5a623" strokeWidth="1.5" />
-        <path
-          d="M5 16 L5 9 L10 13 L10 6 L17 11"
-          fill="none"
-          stroke="#f5a623"
-          strokeWidth="1.6"
-          strokeLinejoin="miter"
-          strokeLinecap="square"
-        />
-        <circle cx="17" cy="11" r="1.6" fill="#f5a623" />
-      </svg>
-    </span>
-  );
-}
 
 function FeatureViz({ kind }: { kind: (typeof FEATURES)[number]["viz"] }) {
   switch (kind) {
@@ -281,6 +263,8 @@ export function LandingClient() {
             <a href="#privacy">Privacy</a>
             <a href="#roadmap">Roadmap</a>
             <a href="#pricing">Pricing</a>
+            <Link href="/vs">Compare</Link>
+            <Link href="/mcp-guide">MCP guide</Link>
           </nav>
           <div className="nav-cta">
             <Link href="/cloud" className="btn btn-ghost">Log in</Link>
@@ -297,7 +281,7 @@ export function LandingClient() {
           <div className="hero-copy reveal">
             <div className="hero-bar">
               <span className="tag">MCP</span>
-              <span>91 tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
+              <span>102 HTTP / 93 stdio tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
             </div>
 
             <Link href="/blog/finlynq-mobile-app" className="hero-bar hero-bar-mobile hero-bar-link">
@@ -334,8 +318,8 @@ export function LandingClient() {
 
             <div className="hero-meta">
               <div className="cell">
-                <div className="v num">91</div>
-                <div className="k">MCP tools</div>
+                <div className="v num">102</div>
+                <div className="k">MCP tools (HTTP)</div>
               </div>
               <div className="cell">
                 <div className="v num">AES-256-GCM</div>
@@ -536,7 +520,7 @@ export function LandingClient() {
               </h2>
             </div>
             <p className="lede reveal d2">
-              A built-in MCP server exposes 90 financial tools to any compatible client over OAuth 2.1 + DCR. No custom
+              A built-in MCP server exposes 102 HTTP financial tools (93 over stdio) to any compatible client over OAuth 2.1 + DCR. No custom
               code, no brittle exports, no exporting to a spreadsheet then copying into a prompt.
             </p>
           </div>
@@ -642,6 +626,9 @@ export function LandingClient() {
               <div className="mcp-cta-row">
                 <Link href="/cloud?tab=register" className="btn btn-primary">
                   Get started
+                </Link>
+                <Link href="/try-demo?next=/dashboard" className="btn btn-ghost">
+                  Try the live demo (no signup) <span aria-hidden="true">→</span>
                 </Link>
                 <Link href="/mcp-guide" className="btn btn-ghost">
                   View MCP guide <span aria-hidden="true">→</span>
@@ -834,6 +821,9 @@ export function LandingClient() {
               <Link href="/cloud?tab=register" className="btn btn-primary">
                 Get started free <span aria-hidden="true">→</span>
               </Link>
+              <Link href="/try-demo?next=/dashboard" className="btn btn-ghost">
+                Try the live demo (no signup)
+              </Link>
               <a
                 href="https://github.com/finlynq/finlynq"
                 className="btn btn-ghost"
@@ -886,8 +876,7 @@ export function LandingClient() {
                 <li><Link href="/about">What is Finlynq?</Link></li>
                 <li><a href="#features">Features</a></li>
                 <li><a href="#flow">How it works</a></li>
-                <li><Link href="/mcp-guide">MCP guide</Link></li>
-                <li><Link href="/api-docs">API docs</Link></li>
+                <li><Link href="/mcp-guide">MCP &amp; API guide</Link></li>
                 <li><Link href="/roadmap">Roadmap</Link></li>
                 <li><Link href="/glossary">Glossary</Link></li>
                 <li><Link href="/blog">Blog</Link></li>

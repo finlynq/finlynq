@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { Metadata } from "next";
+import { AnalyticsConsent } from "@/components/analytics-consent";
 import {
   JsonLd,
   articleSchema,
@@ -33,6 +34,7 @@ export const metadata: Metadata = {
 export default function FinlynqMobileAppPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <AnalyticsConsent />
       <JsonLd
         data={articleSchema({
           title: "Finlynq is going mobile: Android coming soon, iOS to follow",

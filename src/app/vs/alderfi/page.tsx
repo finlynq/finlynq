@@ -35,8 +35,8 @@ const content: VsPageContent = {
       Alderfi and Finlynq are both open-source, MCP-first personal finance
       projects. Alderfi is Apache-2.0, pre-alpha, and ships local LLM support
       out of the box. Finlynq is AGPL v3, production, hosted-or-self-hosted,
-      with a 91-tool MCP surface. This page exists so you can pick the one that
-      actually matches your trade-offs.
+      with a 102 HTTP / 93 stdio tool MCP surface. This page exists so you can
+      pick the one that actually matches your trade-offs.
     </>
   ),
   whenCompetitor: [
@@ -272,7 +272,7 @@ const content: VsPageContent = {
           You might. The two projects make different trade-offs. Alderfi&apos;s
           commitments (Apache-2.0, local-LLM-first) are structural and unlikely
           to change. Finlynq&apos;s commitments (AGPL v3, hosted + self-host
-          parity, current 91-tool surface) are also structural. If Apache-2.0
+          parity, current 102 HTTP / 93 stdio tool surface) are also structural. If Apache-2.0
           and local-LLM matter more than shipped surface, waiting is
           reasonable. If you need something running today against real
           transactions, Finlynq is the project that has it.
