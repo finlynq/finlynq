@@ -93,4 +93,6 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   adds the FINLYNQ-134 enable-time credential-capture fix (enabling biometrics while already logged
   in now prompts for the password instead of silently storing nothing) + tokenless bootstrap re-login;
   **1.0.11 / vc19 (Android only)** binds the stored credential to an OS-level auth gate
-  (`requireAuthentication`); iOS stayed on 1.0.10 for this one.
+  (`requireAuthentication`); iOS stayed on 1.0.10 for this one. **1.0.12 / vc20 (Android only)**
+  auto-recovers from a `session_locked` (lost-DEK) session via silent re-login instead of
+  stranding the user on undecryptable data.
