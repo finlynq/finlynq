@@ -97,4 +97,6 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   auto-recovers from a `session_locked` (lost-DEK) session via silent re-login instead of
   stranding the user on undecryptable data. **1.0.13 / vc21 (Android only)** moves the biometric
   opt-in onto the login screen (captures the password at login — kills the "enabled but nothing
-  stored" footgun).
+  stored" footgun). **1.0.14 / vc22 (Android only)** proactively recovers a lost-DEK session on
+  open/resume/unlock (consumes the new `/api/auth/session` `encryptionLocked` flag) instead of
+  only healing on a write — needs the web change deployed to the target backend.
