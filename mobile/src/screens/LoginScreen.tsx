@@ -16,11 +16,17 @@ import { FinlynqLogo } from "../components/FinlynqLogo";
 import type { RegisterPayload } from "../../../shared/types";
 
 interface Props {
-  onLogin: (identifier: string, password: string) => Promise<boolean>;
+  onLogin: (
+    identifier: string,
+    password: string,
+    opts?: { enableBiometric?: boolean }
+  ) => Promise<boolean>;
   onRegister: (payload: RegisterPayload) => Promise<boolean>;
   onServerUrlChange: (url: string) => void | Promise<void>;
   error: string | null;
   isLoading: boolean;
+  /** Device has biometric hardware — gates the "Enable biometric sign-in" opt-in. */
+  biometricAvailable?: boolean;
 }
 
 export default function LoginScreen({
@@ -29,6 +35,7 @@ export default function LoginScreen({
   onServerUrlChange,
   error,
   isLoading,
+  biometricAvailable,
 }: Props) {
   const theme = useTheme();
   const colors = theme.colors;
@@ -42,6 +49,10 @@ export default function LoginScreen({
   const [displayName, setDisplayName] = useState("");
   const [showPass, setShowPass] = useState(false);
   const [acknowledgeNoRecovery, setAcknowledgeNoRecovery] = useState(false);
+  // FINLYNQ-134 — opt into biometric sign-in at login (login mode only). Checking
+  // it captures the password during login, so the feature can never be "enabled
+  // but nothing stored", and it's discoverable instead of buried in Settings.
+  const [enableBiometric, setEnableBiometric] = useState(false);
 
   const [serverUrl, setServerUrl] = useState(getServerUrl());
   const [showServer, setShowServer] = useState(false);
@@ -68,7 +79,7 @@ export default function LoginScreen({
         acknowledgeNoRecovery: email.trim() ? undefined : true,
       });
     } else {
-      onLogin(identifier.trim(), password);
+      onLogin(identifier.trim(), password, { enableBiometric });
     }
   };
 
@@ -229,6 +240,38 @@ export default function LoginScreen({
               </Text>
             </TouchableOpacity>
           </View>
+
+          {/* Biometric opt-in (login only, when the device supports it) */}
+          {!isRegisterMode && biometricAvailable && (
+            <TouchableOpacity
+              style={[
+                styles.ackRow,
+                { borderColor: colors.border, backgroundColor: colors.secondary },
+              ]}
+              onPress={() => setEnableBiometric((v) => !v)}
+              activeOpacity={0.8}
+            >
+              <View
+                style={[
+                  styles.checkbox,
+                  {
+                    borderColor: enableBiometric ? colors.primary : colors.border,
+                    backgroundColor: enableBiometric ? colors.primary : "transparent",
+                  },
+                ]}
+              >
+                {enableBiometric && (
+                  <Text style={{ color: colors.primaryForeground, fontSize: 13 }}>
+                    ✓
+                  </Text>
+                )}
+              </View>
+              <Text style={[styles.ackText, { color: colors.mutedForeground }]}>
+                Enable biometric sign-in — use Face ID / fingerprint next time
+                instead of typing your password.
+              </Text>
+            </TouchableOpacity>
+          )}
 
           {/* No-recovery acknowledgement (register without an email) */}
           {needsAck && (

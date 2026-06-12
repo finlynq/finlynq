@@ -370,7 +370,11 @@ function useAuthEngine() {
   }, []);
 
   /** Account login — `identifier` is a username OR email. */
-  const signIn = useCallback(async (identifier: string, password: string) => {
+  const signIn = useCallback(async (
+    identifier: string,
+    password: string,
+    opts?: { enableBiometric?: boolean }
+  ) => {
     const trimmedId = identifier.trim();
     setState((s) => ({ ...s, isLoading: true, error: null }));
     try {
@@ -384,22 +388,41 @@ function useAuthEngine() {
           setAuthToken(res.token);
           await SecureStore.setItemAsync(SESSION_TOKEN_KEY, res.token);
         }
-        // FINLYNQ-134 — keep the credentials in memory so opting into biometric
-        // sign-in right after this login can persist them; and if biometric
-        // sign-in is already enabled, persist them now (hardware-backed
-        // SecureStore only) so the next deploy-rotated launch re-logs in
-        // silently after a biometric prompt.
         const creds: StoredCredentials = { identifier: trimmedId, password };
         lastCredentials.current = creds;
-        if (biometricEnabledRef.current) {
-          await persistCredentials(creds);
+        // FINLYNQ-134 — opt into biometric sign-in straight from the login
+        // screen. The password is in hand HERE, so capture is reliable — this is
+        // the structural fix for the "enabled in Settings but nothing stored"
+        // footgun. Enable + persist when requested AND a biometric is enrolled;
+        // otherwise keep the existing "persist if already enabled" behavior.
+        let enabledBiometricNow = false;
+        if (opts?.enableBiometric && !biometricEnabledRef.current) {
+          enabledBiometricNow = await LocalAuthentication.isEnrolledAsync().catch(() => false);
         }
-        logger.info("auth", "sign-in succeeded", { bearerStored: !!res.token });
+        if (enabledBiometricNow || biometricEnabledRef.current) {
+          // Best-effort: a secure-store write failure must never block login —
+          // it just means silent re-login won't be available.
+          try {
+            await persistCredentials(creds);
+          } catch (e) {
+            const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+            logger.warn("auth", "could not persist biometric credentials at login", { detail });
+          }
+        }
+        if (enabledBiometricNow) {
+          await AsyncStorage.setItem(BIOMETRIC_KEY, "true");
+          biometricEnabledRef.current = true;
+        }
+        logger.info("auth", "sign-in succeeded", {
+          bearerStored: !!res.token,
+          biometricEnabled: enabledBiometricNow || biometricEnabledRef.current,
+        });
         setState((s) => ({
           ...s,
           isUnlocked: true,
           hasSession: true,
           isLoading: false,
+          biometricEnabled: enabledBiometricNow ? true : s.biometricEnabled,
         }));
         // The login response doesn't carry admin/onboarding status; refresh it
         // from the session (rides the cookie jar). Non-blocking so login stays

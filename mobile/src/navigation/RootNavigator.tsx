@@ -71,6 +71,7 @@ export default function RootNavigator() {
           onServerUrlChange={auth.saveServerUrl}
           error={auth.error}
           isLoading={auth.isLoading}
+          biometricAvailable={auth.biometricAvailable}
         />
       );
     }

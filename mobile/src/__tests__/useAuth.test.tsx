@@ -441,4 +441,60 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
       expect(result.current.isUnlocked).toBe(true);
     });
   });
+
+  // FINLYNQ-134 — login-screen biometric opt-in. The LoginScreen checkbox passes
+  // { enableBiometric: true } to signIn so the password is captured AT login (the
+  // structural fix for "enabled in Settings but nothing stored").
+  describe("FINLYNQ-134 — login-screen biometric opt-in (signIn enableBiometric)", () => {
+    it("enables biometric + stores credentials when opted in at login and enrolled", async () => {
+      LOCAL.hasHardwareAsync.mockResolvedValue(true);
+      LOCAL.isEnrolledAsync.mockResolvedValue(true);
+      mockLogin.mockResolvedValue({ ok: true, status: 200, data: {}, token: "jwt" });
+      mockGetSession.mockResolvedValue({ authenticated: true, isAdmin: false });
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+      await act(async () => {
+        await result.current.signIn("alice", "hunter2hunter2", { enableBiometric: true });
+      });
+
+      // Credentials persisted to the OS-auth-gated secure store...
+      const credWrite = SECURE.setItemAsync.mock.calls.find(
+        ([key]) => key === STORED_CREDENTIALS_KEY
+      );
+      expect(credWrite).toBeDefined();
+      expect(credWrite![1]).toBe(
+        JSON.stringify({ identifier: "alice", password: "hunter2hunter2" })
+      );
+      expect(credWrite![2]).toEqual(
+        expect.objectContaining({ requireAuthentication: true })
+      );
+      // ...and biometric is flipped on (persisted flag + state).
+      expect(ASYNC.setItem).toHaveBeenCalledWith(BIOMETRIC_KEY, "true");
+      await waitFor(() => expect(result.current.biometricEnabled).toBe(true));
+    });
+
+    it("does NOT enable biometric when opted in but no biometric is enrolled", async () => {
+      LOCAL.hasHardwareAsync.mockResolvedValue(true);
+      LOCAL.isEnrolledAsync.mockResolvedValue(false);
+      mockLogin.mockResolvedValue({ ok: true, status: 200, data: {}, token: "jwt" });
+      mockGetSession.mockResolvedValue({ authenticated: true, isAdmin: false });
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+      await act(async () => {
+        await result.current.signIn("alice", "hunter2hunter2", { enableBiometric: true });
+      });
+
+      // Not enrolled → biometric stays off and no credential is stored.
+      expect(ASYNC.setItem).not.toHaveBeenCalledWith(BIOMETRIC_KEY, "true");
+      const credWrite = SECURE.setItemAsync.mock.calls.find(
+        ([key]) => key === STORED_CREDENTIALS_KEY
+      );
+      expect(credWrite).toBeUndefined();
+      expect(result.current.biometricEnabled).toBe(false);
+    });
+  });
 });
