@@ -59,6 +59,13 @@ export async function GET(request: NextRequest) {
     authMethod: auth.context.method,
     userId: auth.context.userId,
     mfaVerified: auth.context.mfaVerified,
+    // FINLYNQ-152 follow-up — true when authenticated but this session has no DEK
+    // (the server restarted since login, so encrypted fields can't be decrypted
+    // and writes return 423 session_locked). Lets the mobile app proactively
+    // re-authenticate on open/resume instead of silently showing ciphertext.
+    // Additive + advisory: the web app ignores it; reads still degrade to
+    // ciphertext-with-fallback regardless.
+    encryptionLocked: !auth.context.dek,
     onboardingComplete,
     isAdmin,
     username,
