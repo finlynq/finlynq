@@ -12,6 +12,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sql, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { stagedTransactions } from "../src/db/schema-pg";
+// Drizzle proxy (the `@/db` singleton). The `db` passed to registerPgTools is
+// the pg-compat shim (.execute only); libs like applyRulesToStagedBatch need
+// the full Drizzle query-builder, so we import it directly (FINLYNQ-150).
+import { db as drizzleDb } from "../src/db";
 import { normalizeDbRows } from "../src/lib/db-utils";
 import { decryptField, encryptField } from "../src/lib/crypto/envelope";
 import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
@@ -130,6 +134,23 @@ import {
   STALENESS_THRESHOLD_MULTIPLIER,
   type RecurringDropReason,
 } from "../src/lib/recurring-detection";
+// FINLYNQ-150 — bank-ledger reconciliation + rule-application surface. These
+// 7 HTTP-only tools reuse the EXACT web lib functions so MCP and the /import
+// page stay behavior-identical.
+import {
+  computeReconcileForAccount,
+  RECONCILE_DEFAULT_THRESHOLDS,
+  applyRulesToBankRows,
+  type ReconcileThresholds,
+} from "../src/lib/reconcile/match-engine";
+import { materializeBankRowAsTransaction } from "../src/lib/reconcile/materialize-transaction";
+import { materializeBankRowAsTransfer } from "../src/lib/reconcile/materialize-transfer";
+import {
+  linkTransactionToBank,
+  unlinkTransactionFromBank,
+  LinkError,
+} from "../src/lib/reconcile/links";
+import { applyRulesToStagedBatch } from "../src/lib/rules/apply-to-staged-batch";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -5391,7 +5412,7 @@ export function registerPgTools(
     "finlynq_help",
     "Discover available tools, schema, and usage examples",
     {
-      topic: z.enum(["tools", "schema", "examples", "write", "portfolio"]).optional().describe("Help topic (default: tools)"),
+      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile"]).optional().describe("Help topic (default: tools)"),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
     },
     async ({ topic, tool_name }) => {
@@ -5445,7 +5466,8 @@ export function registerPgTools(
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           trade_tools: ["record_transfer"],
-          tip: "Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts.",
+          reconcile_tools: ["get_reconcile_suggestions", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
+          tip: "Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
         });
       }
 
@@ -5507,6 +5529,16 @@ export function registerPgTools(
           note_on_writes: "Investment activity MUST go through the portfolio_* write tools (record_transaction / bulk_record_transactions reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — add_portfolio_holding a 'Cash' holding for that currency first if missing.",
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "All portfolio read tools return a disclaimer field. Not financial advice.",
+        });
+      }
+
+      if (t === "reconcile") {
+        return dataResponse({
+          read_tools: ["get_reconcile_suggestions"],
+          write_tools: ["materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
+          bulk_tools: ["apply_rules_to_bank_rows"],
+          flow: "1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
+          note: "All reconcile tools are HTTP-only and need an unlocked DEK. apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
         });
       }
 
@@ -11497,6 +11529,430 @@ export function registerPgTools(
       );
 
       return dataResponse({ stagedImportId });
+    },
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FINLYNQ-150 — Bank-ledger reconciliation + rule application (HTTP-only)
+  //
+  // 7 tools that give an AI assistant parity with the web /import page's
+  // bank-ledger reconcile layer. Every tool reuses the EXACT lib function the
+  // web route uses (no behavior drift); all need a DEK so they register here
+  // (HTTP transport) only, never on stdio. Canonical {success:true,data}
+  // envelope; cross-tenant ids resolve to err("Not found"); the wrapped libs
+  // already call invalidateUser after any `transactions` write, so only
+  // set_account_mode (which doesn't write transactions) skips it explicitly.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** Per-user reconcile thresholds from settings(key='reconcile_thresholds'),
+   *  falling back to RECONCILE_DEFAULT_THRESHOLDS. Mirrors the suggestions
+   *  route's loadThresholds (defense-in-depth on a malformed row). */
+  const loadReconcileThresholds = async (): Promise<ReconcileThresholds> => {
+    const rows = await q(
+      db,
+      sql`SELECT value FROM settings WHERE key = 'reconcile_thresholds' AND user_id = ${userId} LIMIT 1`,
+    );
+    if (!rows.length || rows[0].value == null) {
+      return { ...RECONCILE_DEFAULT_THRESHOLDS };
+    }
+    try {
+      const parsed =
+        typeof rows[0].value === "string"
+          ? JSON.parse(rows[0].value as string)
+          : (rows[0].value as Record<string, unknown>);
+      const numberOr = (v: unknown, fallback: number): number =>
+        typeof v === "number" && Number.isFinite(v) ? v : fallback;
+      return {
+        dateToleranceDays: numberOr(
+          parsed?.dateToleranceDays,
+          RECONCILE_DEFAULT_THRESHOLDS.dateToleranceDays,
+        ),
+        amountTolerancePct: numberOr(
+          parsed?.amountTolerancePct,
+          RECONCILE_DEFAULT_THRESHOLDS.amountTolerancePct,
+        ),
+        amountToleranceFloor: numberOr(
+          parsed?.amountToleranceFloor,
+          RECONCILE_DEFAULT_THRESHOLDS.amountToleranceFloor,
+        ),
+        scoreThreshold: numberOr(
+          parsed?.scoreThreshold,
+          RECONCILE_DEFAULT_THRESHOLDS.scoreThreshold,
+        ),
+      };
+    } catch {
+      return { ...RECONCILE_DEFAULT_THRESHOLDS };
+    }
+  };
+
+  // ── get_reconcile_suggestions ───────────────────────────────────────────────
+  server.tool(
+    "get_reconcile_suggestions",
+    "Reconcile snapshot for one account's bank ledger vs. its transactions (the /import page's three-layer match engine). Returns { linked, suggestions, bankOnly, txOnly, transactions, bankTransactions }. Each bankTransactions[id] carries suggestedCategoryId / suggestedTransferAccountId (rule-engine defaults for materialize) and duplicateOfTransactionId (strict possible-duplicate flag). Read-only. Requires an unlocked DEK (payees are decrypted to score fuzzy matches).",
+    {
+      accountId: z.number().int().positive().describe("accounts.id to reconcile."),
+      dateMin: z
+        .string()
+        .optional()
+        .describe("ISO YYYY-MM-DD floor on both tx + bank dates. Omit for no floor."),
+      dateMax: z
+        .string()
+        .optional()
+        .describe("ISO YYYY-MM-DD ceiling on both tx + bank dates. Omit for no ceiling."),
+      lookbackDays: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Legacy alternative to dateMin: last N days from today. dateMin wins when both set."),
+    },
+    async ({ accountId, dateMin, dateMax, lookbackDays }) => {
+      if (!dek) {
+        return err(
+          "get_reconcile_suggestions requires an unlocked DEK to decrypt payees for matching. Re-login to refresh your session.",
+        );
+      }
+      // Cross-tenant guard — 404-equivalent without leaking existence.
+      const acct = await q(
+        db,
+        sql`SELECT id FROM accounts WHERE id = ${accountId} AND user_id = ${userId} LIMIT 1`,
+      );
+      if (!acct.length) return err("Not found");
+
+      const thresholds = await loadReconcileThresholds();
+      const lookbackMin =
+        lookbackDays != null
+          ? new Date(Date.now() - lookbackDays * 86_400_000)
+              .toISOString()
+              .slice(0, 10)
+          : null;
+      const result = await computeReconcileForAccount({
+        userId,
+        dek,
+        accountId,
+        thresholds,
+        dateMin: dateMin ?? lookbackMin,
+        dateMax: dateMax ?? null,
+      });
+      return dataResponse({ ...result, thresholds });
+    },
+  );
+
+  // ── materialize_bank_row ────────────────────────────────────────────────────
+  // ONE tool, two modes. destAccountId set → transfer mode (outflow rows only,
+  // routes through createTransferPair via materializeBankRowAsTransfer). Else →
+  // category mode (the shared materializeBankRowAsTransaction chokepoint). Both
+  // wrapped libs invalidate the tx cache. Direct + reversible (delete the
+  // resulting tx / unlink to undo) so no confirmation token.
+  server.tool(
+    "materialize_bank_row",
+    "Create a real transaction from a bank-only ledger row. Category mode (set categoryId, or leave both unset for an uncategorized row) → {mode:'category', transactionId}. Transfer mode (set destAccountId; OUTFLOW rows only) → {mode:'transfer', fromTransactionId, toTransactionId, linkId}. Pass at most ONE of categoryId / destAccountId. Refuses investment accounts + sign-vs-category mismatch. Requires an unlocked DEK.",
+    {
+      bankTransactionId: z.string().uuid().describe("bank_transactions.id to materialize."),
+      categoryId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Category mode: stamp this category on the new tx (sign-vs-category enforced)."),
+      accountId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Category mode: target-account override (defaults to the bank row's account; never investment)."),
+      destAccountId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Transfer mode: destination account. Writes a transfer pair with the bank row as the source (outflow) leg."),
+    },
+    async ({ bankTransactionId, categoryId, accountId, destAccountId }) => {
+      if (!dek) {
+        return err(
+          "materialize_bank_row requires an unlocked DEK. Re-login to refresh your session.",
+        );
+      }
+      if (destAccountId != null && categoryId != null) {
+        return err(
+          "Pass at most one of destAccountId (transfer mode) or categoryId (category mode).",
+        );
+      }
+
+      // ── Transfer mode ──────────────────────────────────────────────────────
+      if (destAccountId != null) {
+        // Load + ownership-check the bank row; materializeBankRowAsTransfer
+        // needs the minimal {id, accountId, date, amount, currency} shape plus
+        // the decrypted payee for the pair note. Cross-tenant → "Not found".
+        const bankRows = await q(
+          db,
+          sql`
+            SELECT id, account_id, date, amount, currency, payee, encryption_tier
+            FROM bank_transactions
+            WHERE id = ${bankTransactionId} AND user_id = ${userId}
+            LIMIT 1
+          `,
+        );
+        if (!bankRows.length) return err("Not found");
+        const b = bankRows[0];
+        const tier = String(b.encryption_tier ?? "user");
+        const payeeRaw = b.payee as string | null;
+        let payeePlain: string | null = null;
+        if (payeeRaw != null && payeeRaw !== "") {
+          payeePlain =
+            tier === "user"
+              ? tryDecryptField(dek, payeeRaw, "bank_transactions")
+              : (() => {
+                  try {
+                    return decryptStaged(payeeRaw);
+                  } catch {
+                    return null;
+                  }
+                })();
+        }
+        const result = await materializeBankRowAsTransfer({
+          userId,
+          dek,
+          bank: {
+            id: String(b.id),
+            accountId: Number(b.account_id),
+            date: String(b.date),
+            amount: Number(b.amount),
+            currency: String(b.currency),
+          },
+          payeePlain,
+          destAccountId,
+          txSource: "reconcile_link",
+        });
+        if (!result.ok) {
+          if (result.code === "transfer_dest_not_found") return err("Not found");
+          return err(result.message);
+        }
+        return dataResponse({
+          mode: "transfer",
+          fromTransactionId: result.fromTransactionId,
+          toTransactionId: result.toTransactionId,
+          linkId: result.linkId,
+        });
+      }
+
+      // ── Category mode ──────────────────────────────────────────────────────
+      const result = await materializeBankRowAsTransaction({
+        userId,
+        dek,
+        bankTransactionId,
+        categoryId: categoryId ?? null,
+        accountId: accountId ?? null,
+      });
+      if (!result.ok) {
+        if (
+          result.code === "bank_not_found" ||
+          result.code === "account_not_found" ||
+          result.code === "category_not_found"
+        ) {
+          return err("Not found");
+        }
+        return err(result.message);
+      }
+      return dataResponse({ mode: "category", transactionId: result.transactionId });
+    },
+  );
+
+  // ── accept_reconcile_suggestion ─────────────────────────────────────────────
+  server.tool(
+    "accept_reconcile_suggestion",
+    "Link an existing transaction to a bank-ledger row (accept a reconcile suggestion). linkType 'primary' also sets transactions.bank_transaction_id when it's currently NULL; 'extra' just adds the join row. Idempotent. Returns {linkId, setPrimaryFk, alreadyLinked}. Reverse with unlink_reconcile.",
+    {
+      transactionId: z.number().int().positive().describe("transactions.id to link."),
+      bankTransactionId: z.string().uuid().describe("bank_transactions.id to link to."),
+      linkType: z
+        .enum(["primary", "extra"])
+        .default("extra")
+        .describe("'primary' sets the lineage FK if unset; 'extra' is an additional link."),
+    },
+    async ({ transactionId, bankTransactionId, linkType }) => {
+      try {
+        const result = await linkTransactionToBank({
+          userId,
+          transactionId,
+          bankTransactionId,
+          linkType,
+          source: "manual",
+        });
+        return dataResponse(result);
+      } catch (e) {
+        if (e instanceof LinkError) return err("Not found");
+        throw e;
+      }
+    },
+  );
+
+  // ── unlink_reconcile ────────────────────────────────────────────────────────
+  server.tool(
+    "unlink_reconcile",
+    "Remove a transaction ↔ bank-ledger link. If the removed link was 'primary' and the FK still pointed at this bank row, also clears transactions.bank_transaction_id. Idempotent (unlinking a never-linked pair returns {unlinked:false, clearedFk:false}). Returns {unlinked, clearedFk}.",
+    {
+      transactionId: z.number().int().positive().describe("transactions.id."),
+      bankTransactionId: z.string().uuid().describe("bank_transactions.id."),
+    },
+    async ({ transactionId, bankTransactionId }) => {
+      const result = await unlinkTransactionFromBank({
+        userId,
+        transactionId,
+        bankTransactionId,
+      });
+      return dataResponse(result);
+    },
+  );
+
+  // ── set_account_mode ────────────────────────────────────────────────────────
+  // Owner-scoped UPDATE of the per-account pipeline policy. NOT a transactions
+  // write → no invalidateUser. 0 rows (cross-tenant / missing) → "Not found".
+  server.tool(
+    "set_account_mode",
+    "Set an account's import pipeline mode: 'auto' (rules fire at upload), 'approve' (review each), or 'manual' (rules fire at materialize). Returns {id, mode}. Cross-tenant / missing id → Not found.",
+    {
+      accountId: z.number().int().positive().describe("accounts.id."),
+      mode: z
+        .enum(["auto", "approve", "manual"])
+        .describe("New pipeline mode for this account."),
+    },
+    async ({ accountId, mode }) => {
+      const rows = await q(
+        db,
+        sql`
+          UPDATE accounts SET mode = ${mode}
+          WHERE id = ${accountId} AND user_id = ${userId}
+          RETURNING id, mode
+        `,
+      );
+      if (!rows.length) return err("Not found");
+      return dataResponse({ id: Number(rows[0].id), mode: String(rows[0].mode) });
+    },
+  );
+
+  // ── apply_rules_to_staged_import ────────────────────────────────────────────
+  // Re-fire active rules over a pending staged import (the /import/pending
+  // "Re-apply rules" button). Mutates staged_transactions only → no
+  // invalidateUser. Requires a non-null DEK (the lib decrypts rule + row text).
+  server.tool(
+    "apply_rules_to_staged_import",
+    "Re-apply active transaction rules to a PENDING staged import in place (renames payees, flips tx_type to transfer, sets category/account, etc.) so the review surface reflects rule effects before approval. Optional rowIds = subset; optional onlyRuleId = a single rule. Returns {rowsTouched, matches}. Requires an unlocked DEK; staged import must be pending.",
+    {
+      stagedImportId: z.string().describe("staged_imports.id (must be status='pending')."),
+      rowIds: z
+        .array(z.string())
+        .optional()
+        .describe("Subset of staged_transactions.id to apply to. Omit for the whole batch."),
+      onlyRuleId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Restrict to a single transaction_rules.id (e.g. a just-created rule)."),
+    },
+    async ({ stagedImportId, rowIds, onlyRuleId }) => {
+      if (!dek) {
+        return err(
+          "apply_rules_to_staged_import requires an unlocked DEK to decrypt rules + staged rows. Re-login to refresh your session.",
+        );
+      }
+      // Ownership + pending-status pre-check (cross-tenant → Not found).
+      const staged = await q(
+        db,
+        sql`SELECT id, status FROM staged_imports WHERE id = ${stagedImportId} AND user_id = ${userId} LIMIT 1`,
+      );
+      if (!staged.length) return err("Not found");
+      if (String(staged[0].status) !== "pending") {
+        return err("Staged import is not pending — already processed.");
+      }
+      // The lib uses the Drizzle `@/db` proxy (same singleton the staging tools
+      // use); pass it directly so the in-tier re-encrypt path runs as on web.
+      const result = await applyRulesToStagedBatch(
+        drizzleDb,
+        userId,
+        dek,
+        stagedImportId,
+        { rowIds, onlyRuleId },
+      );
+      return dataResponse(result);
+    },
+  );
+
+  // ── apply_rules_to_bank_rows ────────────────────────────────────────────────
+  // Auto-pilot bulk: fire rules over a batch of bank rows and (on confirm)
+  // auto-materialize matched rows into transactions. Two-step confirmation
+  // token (precedent: approve_staged_rows) because this is a bulk ledger write.
+  // The lib invalidates the cache when it materializes anything.
+  server.tool(
+    "apply_rules_to_bank_rows",
+    "Auto-pilot bulk: fire active rules over a batch of bank-ledger rows and (on confirm) auto-materialize matched rows into transactions. Two-step: first call (no confirmation_token) runs a PREVIEW pass (autoMaterialize=false — no writes) and returns a summary + confirmationToken (5-min TTL); second call with the token + autoMaterialize:true commits. Returns {materialized, rulesFired, possibleDuplicates, perRow}. Requires an unlocked DEK when materializing.",
+    {
+      bankRowIds: z
+        .array(z.string().uuid())
+        .min(1)
+        .describe("bank_transactions.id UUIDs to run rules over."),
+      autoMaterialize: z
+        .boolean()
+        .optional()
+        .describe("Write matched rows to transactions. Only honored on the confirmed (token) call."),
+      confirmation_token: z
+        .string()
+        .optional()
+        .describe("Token from the preview call. Omit to preview; pass to commit."),
+    },
+    async ({ bankRowIds, autoMaterialize, confirmation_token }) => {
+      // Canonical payload — sort ids so preview/execute hash identically.
+      const canonicalIds = [...bankRowIds].sort();
+      const tokenPayload = { bankRowIds: canonicalIds };
+
+      // ── Preview branch (no writes) ─────────────────────────────────────────
+      if (!confirmation_token) {
+        // Planning pass: autoMaterialize=false never writes, so a null DEK
+        // still works (rules just won't match ciphertext payees).
+        const preview = await applyRulesToBankRows(userId, canonicalIds, dek, {
+          autoMaterialize: false,
+        });
+        const token = signConfirmationToken(
+          userId,
+          "apply_rules_to_bank_rows",
+          tokenPayload,
+        );
+        return dataResponse({
+          preview: true,
+          summary: {
+            bankRowCount: canonicalIds.length,
+            rulesFired: preview.rulesFired,
+            perRow: preview.perRow,
+          },
+          confirmationToken: token,
+        });
+      }
+
+      // ── Execute branch ─────────────────────────────────────────────────────
+      const check = verifyConfirmationToken(
+        confirmation_token,
+        userId,
+        "apply_rules_to_bank_rows",
+        tokenPayload,
+      );
+      if (!check.valid) {
+        return err(
+          `Confirmation token invalid: ${check.reason}. Re-call without confirmation_token to refresh.`,
+        );
+      }
+      const doMaterialize = autoMaterialize !== false; // default true on commit
+      if (doMaterialize && !dek) {
+        return err(
+          "apply_rules_to_bank_rows requires an unlocked DEK to materialize rows. Re-login to refresh your session.",
+        );
+      }
+      // The lib invalidates the per-user tx cache itself when materialized > 0.
+      const result = await applyRulesToBankRows(userId, canonicalIds, dek, {
+        autoMaterialize: doMaterialize,
+      });
+      return dataResponse(result);
     },
   );
 }

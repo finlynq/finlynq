@@ -52,7 +52,7 @@ const db = createPgCompat(pool);
 const server = withAutoAnnotations(new McpServer({
   name: "finlynq",
   title: "Finlynq",
-  version: "3.2.0",
+  version: "3.3.0",
   websiteUrl: "https://finlynq.com",
   description: "Track your money here, analyze it anywhere — open-source personal finance with 86 MCP tools.",
   icons: [
@@ -67,7 +67,7 @@ registerImportTemplateTools(server, db, { userId });
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`Finlynq MCP server v3.2 running on stdio (PostgreSQL mode, user=${userId})`);
+  console.error(`Finlynq MCP server v3.3 running on stdio (PostgreSQL mode, user=${userId})`);
 }
 
 main().catch(console.error);

@@ -167,9 +167,9 @@ export async function POST(request: NextRequest) {
   const server = withAutoAnnotations(new McpServer({
     name: "finlynq",
     title: "Finlynq",
-    version: "3.2.0",
+    version: "3.3.0",
     websiteUrl: "https://finlynq.com",
-    description: "Track your money here, analyze it anywhere — open-source personal finance with 102 MCP tools.",
+    description: "Track your money here, analyze it anywhere — open-source personal finance with 109 MCP tools.",
     icons: [
       { src: "https://finlynq.com/favicon.svg", mimeType: "image/svg+xml", sizes: ["any"] },
     ],
