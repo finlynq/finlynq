@@ -155,6 +155,13 @@ export default function AccountsPage() {
   const [showArchived, setShowArchived] = useState(false);
 
   const sortCurrency = useDropdownOrder("currency");
+  // FINLYNQ-148: the Settings → Dropdown Ordering "account" list is the user's
+  // configured account sort order. The /accounts list must honour it (it was
+  // ignoring the setting and rendering in raw API order). Pinned accounts lead
+  // in the saved order; the rest fall back to a null-safe name sort (account
+  // names are decrypted display values — defend against null per the safeName
+  // invariant).
+  const sortAccountOrder = useDropdownOrder("account");
 
   function loadAccounts(includeArchived = showArchived) {
     setLoading(true);
@@ -338,7 +345,20 @@ export default function AccountsPage() {
       const group = a.accountGroup || "Other";
       map.set(group, [...(map.get(group) ?? []), a]);
     });
-    return Array.from(map.entries());
+    // Honour the user's configured account order (Settings → Dropdown
+    // Ordering) within each group. Pinned accounts lead in saved order; the
+    // rest fall back to a null-safe name sort.
+    return Array.from(map.entries()).map(
+      ([group, accts]) =>
+        [
+          group,
+          sortAccountOrder(
+            accts,
+            (a) => a.accountId,
+            (a, b) => (a.accountName ?? "").localeCompare(b.accountName ?? ""),
+          ),
+        ] as const,
+    );
   };
 
   const renderSection = (
