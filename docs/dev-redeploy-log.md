@@ -11,3 +11,4 @@ redeploys instead of pushing throwaway commits.
 | When (UTC) | Why |
 |---|---|
 | 2026-06-12T09:47:46Z | Rotate `DEPLOY_GENERATION` so FINLYNQ-134 (biometric re-login) + FINLYNQ-135 (session-expiry redirect) can be tested on the mobile 1.0.9 build. |
+| 2026-06-12T15:27:21Z | Restart dev to wipe the in-memory DEK session so the mobile app (pointed at dev) can reproduce the `session_locked` / lost-DEK state for FINLYNQ-152. |
