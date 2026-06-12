@@ -40,6 +40,10 @@ import {
   Bell,
   BellOff,
 } from "lucide-react";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ErrorState } from "@/components/error-state";
+import { PageSkeleton } from "@/components/page-skeleton";
+import { parseSaveError } from "@/lib/save-error";
 
 type Subscription = {
   id: number;
@@ -86,17 +90,17 @@ const statusConfig: Record<
 > = {
   active: {
     label: "Active",
-    badgeClass: "bg-emerald-100 text-emerald-700 border-emerald-200",
+    badgeClass: "bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-900/60",
     borderClass: "border-l-emerald-500",
   },
   paused: {
     label: "Paused",
-    badgeClass: "bg-amber-100 text-amber-700 border-amber-200",
+    badgeClass: "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-900/60",
     borderClass: "border-l-amber-500",
   },
   cancelled: {
     label: "Cancelled",
-    badgeClass: "bg-rose-100 text-rose-700 border-rose-200",
+    badgeClass: "bg-rose-100 text-rose-700 border-rose-200 dark:bg-rose-950/50 dark:text-rose-300 dark:border-rose-900/60",
     borderClass: "border-l-rose-500",
   },
 };
@@ -118,12 +122,18 @@ function SubscriptionsPageContent() {
   const [subs, setSubs] = useState<Subscription[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [detectDialogOpen, setDetectDialogOpen] = useState(false);
   const [detected, setDetected] = useState<DetectedSub[]>([]);
   const [detecting, setDetecting] = useState(false);
   const [editSub, setEditSub] = useState<Subscription | null>(null);
   const [sortField, setSortField] = useState<SortField>("name");
+  const [formError, setFormError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [form, setForm] = useState({
     name: "",
     amount: "",
@@ -137,19 +147,24 @@ function SubscriptionsPageContent() {
   });
 
   const load = useCallback(() => {
+    setLoadError(false);
     fetch("/api/subscriptions")
-      .then((r) => r.json())
-      .then(setSubs);
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Failed to load subscriptions"))))
+      .then((data) => setSubs(Array.isArray(data) ? data : []))
+      .catch(() => setLoadError(true))
+      .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
     load();
     fetch("/api/categories")
-      .then((r) => r.json())
-      .then(setCategories);
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setCategories(Array.isArray(data) ? data : []))
+      .catch(() => {});
     fetch("/api/accounts")
-      .then((r) => r.json())
-      .then(setAccounts);
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setAccounts(Array.isArray(data) ? data : []))
+      .catch(() => {});
   }, [load]);
 
   const sortAccount = useDropdownOrder("account");
@@ -169,6 +184,7 @@ function SubscriptionsPageContent() {
       cancelReminderDate: "",
     });
     setEditSub(null);
+    setFormError("");
   }
 
   function openEdit(sub: Subscription) {
@@ -201,23 +217,34 @@ function SubscriptionsPageContent() {
       cancelReminderDate: form.cancelReminderDate || null,
     };
 
-    if (editSub) {
-      await fetch("/api/subscriptions", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: editSub.id, ...payload }),
-      });
-    } else {
-      await fetch("/api/subscriptions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    }
+    setSubmitting(true);
+    try {
+      const res = editSub
+        ? await fetch("/api/subscriptions", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: editSub.id, ...payload }),
+          })
+        : await fetch("/api/subscriptions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
 
-    setDialogOpen(false);
-    resetForm();
-    load();
+      if (!res.ok) {
+        // Keep the dialog open with the user's input; surface the reason.
+        setFormError(await parseSaveError(res, "Failed to save subscription"));
+        return;
+      }
+
+      setDialogOpen(false);
+      resetForm();
+      load();
+    } catch {
+      setFormError("Network error. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function handleStatusChange(sub: Subscription, newStatus: string) {
@@ -229,10 +256,19 @@ function SubscriptionsPageContent() {
     load();
   }
 
-  async function handleDelete(id: number) {
-    await fetch(`/api/subscriptions?id=${id}`, { method: "DELETE" });
-    load();
+  async function handleDelete() {
+    if (deleteId == null) return;
+    setDeleting(true);
+    try {
+      await fetch(`/api/subscriptions?id=${deleteId}`, { method: "DELETE" });
+      setDeleteId(null);
+      load();
+    } finally {
+      setDeleting(false);
+    }
   }
+
+  const deletingSub = subs.find((s) => s.id === deleteId) ?? null;
 
   async function handleDetect() {
     setDetecting(true);
@@ -363,7 +399,7 @@ function SubscriptionsPageContent() {
                           </Badge>
                         )}
                         {sub.cancelReminderDate && (
-                          <Badge className="bg-orange-100 text-orange-700 border-orange-200 gap-1">
+                          <Badge className="bg-orange-100 text-orange-700 border-orange-200 dark:bg-orange-950/50 dark:text-orange-300 dark:border-orange-900/60 gap-1">
                             <Bell className="h-3 w-3" />
                             Remind {formatDate(sub.cancelReminderDate)}
                           </Badge>
@@ -388,6 +424,7 @@ function SubscriptionsPageContent() {
                           size="icon"
                           className="h-8 w-8"
                           title="Pause"
+                          aria-label={`Pause subscription ${sub.name}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             handleStatusChange(sub, "paused");
@@ -403,6 +440,11 @@ function SubscriptionsPageContent() {
                             sub.cancelReminderDate
                               ? "Remove cancel reminder"
                               : "Set cancel reminder"
+                          }
+                          aria-label={
+                            sub.cancelReminderDate
+                              ? `Remove cancel reminder for ${sub.name}`
+                              : `Set cancel reminder for ${sub.name}`
                           }
                           onClick={(e) => {
                             e.stopPropagation();
@@ -420,6 +462,7 @@ function SubscriptionsPageContent() {
                           size="icon"
                           className="h-8 w-8 text-rose-500"
                           title="Cancel"
+                          aria-label={`Cancel subscription ${sub.name}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             handleStatusChange(sub, "cancelled");
@@ -435,6 +478,7 @@ function SubscriptionsPageContent() {
                         size="icon"
                         className="h-8 w-8"
                         title="Resume"
+                        aria-label={`Resume subscription ${sub.name}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           handleStatusChange(sub, "active");
@@ -449,6 +493,7 @@ function SubscriptionsPageContent() {
                         size="icon"
                         className="h-8 w-8"
                         title="Reactivate"
+                        aria-label={`Reactivate subscription ${sub.name}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           handleStatusChange(sub, "active");
@@ -462,9 +507,10 @@ function SubscriptionsPageContent() {
                       size="icon"
                       className="h-8 w-8 text-destructive"
                       title="Delete"
+                      aria-label={`Delete subscription ${sub.name}`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleDelete(sub.id);
+                        setDeleteId(sub.id);
                       }}
                     >
                       <Trash2 className="h-4 w-4" />
@@ -478,6 +524,9 @@ function SubscriptionsPageContent() {
       </div>
     );
   }
+
+  if (loading) return <PageSkeleton variant="list" rows={5} />;
+  if (loadError) return <ErrorState title="Couldn't load subscriptions" message="We couldn't load your subscriptions. Please try again." onRetry={() => { setLoading(true); load(); }} />;
 
   return (
     <div className="space-y-6">
@@ -636,8 +685,11 @@ function SubscriptionsPageContent() {
                     }
                   />
                 </div>
-                <Button type="submit" className="w-full">
-                  {editSub ? "Save Changes" : "Add Subscription"}
+                {formError && (
+                  <p className="text-sm text-destructive">{formError}</p>
+                )}
+                <Button type="submit" className="w-full" disabled={submitting}>
+                  {submitting ? "Saving…" : editSub ? "Save Changes" : "Add Subscription"}
                 </Button>
               </form>
             </DialogContent>
@@ -649,8 +701,8 @@ function SubscriptionsPageContent() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card>
           <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100">
-              <DollarSign className="h-5 w-5 text-indigo-600" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 dark:bg-indigo-950/40">
+              <DollarSign className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
             </div>
             <div>
               <p className="text-sm text-muted-foreground">Monthly Cost</p>
@@ -662,8 +714,8 @@ function SubscriptionsPageContent() {
         </Card>
         <Card>
           <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-100">
-              <CalendarDays className="h-5 w-5 text-rose-600" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-100 dark:bg-rose-950/40">
+              <CalendarDays className="h-5 w-5 text-rose-600 dark:text-rose-400" />
             </div>
             <div>
               <p className="text-sm text-muted-foreground">Annual Cost</p>
@@ -675,8 +727,8 @@ function SubscriptionsPageContent() {
         </Card>
         <Card>
           <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100">
-              <CreditCard className="h-5 w-5 text-emerald-600" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100 dark:bg-emerald-950/40">
+              <CreditCard className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
             </div>
             <div>
               <p className="text-sm text-muted-foreground">Active</p>
@@ -780,6 +832,16 @@ function SubscriptionsPageContent() {
           )}
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        onOpenChange={(open) => { if (!open) setDeleteId(null); }}
+        title="Delete subscription"
+        description={<>Are you sure you want to delete <strong>{deletingSub?.name ?? "this subscription"}</strong>? This cannot be undone.</>}
+        confirmLabel="Delete subscription"
+        busy={deleting}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }

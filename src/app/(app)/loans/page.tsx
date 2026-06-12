@@ -13,7 +13,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
@@ -21,6 +20,8 @@ import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from "recharts";
 import { Plus, Trash2, Landmark, CreditCard, FileText, Calendar } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
+import { ErrorState } from "@/components/error-state";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { CspSafeBar } from "@/components/csp-safe-bar";
 
 type Loan = {
@@ -71,11 +72,11 @@ const LOAN_TYPE_COLORS: Record<string, string> = {
 };
 
 const LOAN_TYPE_BADGE_COLORS: Record<string, string> = {
-  mortgage: "bg-indigo-100 text-indigo-700",
-  lease: "bg-amber-100 text-amber-700",
-  loan: "bg-cyan-100 text-cyan-700",
-  student_loan: "bg-violet-100 text-violet-700",
-  credit_card: "bg-rose-100 text-rose-700",
+  mortgage: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300",
+  lease: "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300",
+  loan: "bg-cyan-100 text-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-300",
+  student_loan: "bg-violet-100 text-violet-700 dark:bg-violet-950/50 dark:text-violet-300",
+  credit_card: "bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300",
 };
 
 function LoansSkeleton() {
@@ -142,7 +143,10 @@ function LoansPageContent() {
   const [loans, setLoans] = useState<Loan[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [selectedLoan, setSelectedLoan] = useState<Loan | null>(null);
   const [amort, setAmort] = useState<AmortResult | null>(null);
   const [whatIf, setWhatIf] = useState<WhatIf[]>([]);
@@ -168,9 +172,20 @@ function LoansPageContent() {
   const isFormValid = form.name.trim() !== "" && form.principal !== "" && parseFloat(form.principal) > 0 && form.annualRate !== "" && parseFloat(form.annualRate) >= 0 && parseFloat(form.annualRate) <= 100 && (form.termMonths !== "" ? parseInt(form.termMonths) > 0 : form.paymentAmount !== "" && parseFloat(form.paymentAmount) > 0) && form.startDate !== "";
 
   const load = useCallback(() => {
-    fetch("/api/loans").then((r) => r.json()).then((data) => { setLoans(data); setLoading(false); });
+    setLoadError(false);
+    fetch("/api/loans")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Failed to load loans"))))
+      .then((data) => { setLoans(Array.isArray(data) ? data : []); })
+      .catch(() => setLoadError(true))
+      .finally(() => setLoading(false));
   }, []);
-  useEffect(() => { load(); fetch("/api/accounts").then((r) => r.json()).then(setAccounts); }, [load]);
+  useEffect(() => {
+    load();
+    fetch("/api/accounts")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setAccounts(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, [load]);
 
   const sortAccount = useDropdownOrder("account");
 
@@ -200,16 +215,26 @@ function LoansPageContent() {
     load();
   }
 
-  async function handleDelete(id: number) {
-    await fetch(`/api/loans?id=${id}`, { method: "DELETE" });
-    load();
+  async function handleDelete() {
+    if (deleteId == null) return;
+    setDeleting(true);
+    try {
+      await fetch(`/api/loans?id=${deleteId}`, { method: "DELETE" });
+      setDeleteId(null);
+      load();
+    } finally {
+      setDeleting(false);
+    }
   }
+
+  const deletingLoan = loans.find((l) => l.id === deleteId) ?? null;
 
   const totalDebt = loans.reduce((s, l) => s + (l.remainingBalance ?? 0), 0);
   // Monthly-equivalent so weekly/quarterly/annual loans sum comparably.
   const totalMonthly = loans.reduce((s, l) => s + (l.monthlyEquivalentPayment ?? l.monthlyPayment ?? 0), 0);
 
   if (loading) return <LoansSkeleton />;
+  if (loadError) return <ErrorState title="Couldn't load loans" message="We couldn't load your loans. Please try again." onRetry={() => { setLoading(true); load(); }} />;
 
   return (
     <div className="space-y-6">
@@ -324,8 +349,8 @@ function LoansPageContent() {
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-100">
-                <Landmark className="h-5 w-5 text-rose-600" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-100 dark:bg-rose-950/40">
+                <Landmark className="h-5 w-5 text-rose-600 dark:text-rose-400" />
               </div>
               <CardTitle className="text-sm text-muted-foreground">Total Debt</CardTitle>
             </div>
@@ -335,8 +360,8 @@ function LoansPageContent() {
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100">
-                <Calendar className="h-5 w-5 text-amber-600" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 dark:bg-amber-950/40">
+                <Calendar className="h-5 w-5 text-amber-600 dark:text-amber-400" />
               </div>
               <CardTitle className="text-sm text-muted-foreground">Monthly Payments</CardTitle>
             </div>
@@ -346,8 +371,8 @@ function LoansPageContent() {
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100">
-                <FileText className="h-5 w-5 text-indigo-600" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 dark:bg-indigo-950/40">
+                <FileText className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
               </div>
               <CardTitle className="text-sm text-muted-foreground">Active Loans</CardTitle>
             </div>
@@ -381,7 +406,7 @@ function LoansPageContent() {
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={() => viewAmortization(loan)}>View Schedule</Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleDelete(loan.id)}><Trash2 className="h-4 w-4" /></Button>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" aria-label={`Delete loan ${loan.name}`} onClick={() => setDeleteId(loan.id)}><Trash2 className="h-4 w-4" /></Button>
                 </div>
               </div>
             </CardHeader>
@@ -478,6 +503,16 @@ function LoansPageContent() {
           </CardContent>
         </Card>
       )}
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        onOpenChange={(open) => { if (!open) setDeleteId(null); }}
+        title="Delete loan"
+        description={<>Are you sure you want to delete <strong>{deletingLoan?.name ?? "this loan"}</strong>? This cannot be undone.</>}
+        confirmLabel="Delete loan"
+        busy={deleting}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }

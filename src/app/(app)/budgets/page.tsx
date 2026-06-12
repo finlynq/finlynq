@@ -7,18 +7,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ErrorState } from "@/components/error-state";
+import { PageSkeleton } from "@/components/page-skeleton";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
+import { parseSaveError } from "@/lib/save-error";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import {
   Plus, ChevronLeft, ChevronRight, Trash2, PiggyBank, TrendingDown,
   Wallet, LayoutGrid, Save, FileDown, ArrowRightLeft, Clock,
-  AlertTriangle, ArrowDownRight,
+  AlertTriangle, ArrowDownRight, Copy,
 } from "lucide-react";
 
 type Budget = {
@@ -68,6 +71,14 @@ export default function BudgetsPage() {
   const [templates, setTemplates] = useState<BudgetTemplate[]>([]);
   const [ageOfMoney, setAgeOfMoney] = useState<AgeOfMoney | null>(null);
   const [mode, setMode] = useState<BudgetMode>("traditional");
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [copyError, setCopyError] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
   const [applyTemplateDialogOpen, setApplyTemplateDialogOpen] = useState(false);
@@ -78,6 +89,7 @@ export default function BudgetsPage() {
   const [moveFrom, setMoveFrom] = useState("");
   const [moveTo, setMoveTo] = useState("");
   const [moveAmount, setMoveAmount] = useState("");
+  const [moveError, setMoveError] = useState("");
 
   // Envelope mode: track per-category available amounts (income allocated)
   const [envelopeIncome, setEnvelopeIncome] = useState(0);
@@ -95,29 +107,35 @@ export default function BudgetsPage() {
   const isFormValid = form.categoryId !== "" && form.amount !== "" && parseFloat(form.amount) > 0;
 
   const loadData = useCallback(() => {
+    setLoadError(false);
     fetch(`/api/budgets?month=${month}&rollover=1&currency=${encodeURIComponent(displayCurrency)}`)
-      .then((r) => r.json())
-      .then(setBudgets);
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Failed to load budgets"))))
+      .then((data) => setBudgets(Array.isArray(data) ? data : []))
+      .catch(() => setLoadError(true))
+      .finally(() => setLoading(false));
 
     const startDate = `${month}-01`;
     const [y, m] = month.split("-").map(Number);
     const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
     fetch(`/api/dashboard?startDate=${startDate}&endDate=${endDate}&currency=${encodeURIComponent(displayCurrency)}`)
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        setSpending(d.spendingByCategory);
+        if (!d) return;
+        setSpending(Array.isArray(d.spendingByCategory) ? d.spendingByCategory : []);
         // Calculate total income for the month for envelope mode
         const income = (d.incomeVsExpenses ?? [])
           .filter((row: { type: string; total: number }) => row.type === "I")
           .reduce((s: number, row: { total: number }) => s + row.total, 0);
         setEnvelopeIncome(income);
-      });
+      })
+      .catch(() => {});
   }, [month, displayCurrency]);
 
   const loadTemplates = useCallback(() => {
     fetch("/api/budget-templates")
-      .then((r) => r.json())
-      .then(setTemplates);
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setTemplates(Array.isArray(data) ? data : []))
+      .catch(() => {});
   }, []);
 
   const loadAgeOfMoney = useCallback(() => {
@@ -135,8 +153,9 @@ export default function BudgetsPage() {
 
   useEffect(() => {
     fetch("/api/categories")
-      .then((r) => r.json())
-      .then((cats: Category[]) => setCategories(cats.filter((c) => c.type === "E")));
+      .then((r) => (r.ok ? r.json() : []))
+      .then((cats: Category[]) => setCategories(Array.isArray(cats) ? cats.filter((c) => c.type === "E") : []))
+      .catch(() => {});
     loadTemplates();
     loadAgeOfMoney();
   }, [loadTemplates, loadAgeOfMoney]);
@@ -144,25 +163,94 @@ export default function BudgetsPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!validateForm()) return;
-    await fetch("/api/budgets", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        categoryId: Number(form.categoryId),
-        month,
-        amount: parseFloat(form.amount),
-      }),
-    });
-    setDialogOpen(false);
-    setForm({ categoryId: "", amount: "" });
-    setErrors({});
-    loadData();
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/budgets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          categoryId: Number(form.categoryId),
+          month,
+          amount: parseFloat(form.amount),
+        }),
+      });
+      if (!res.ok) {
+        setFormError(await parseSaveError(res, "Failed to save budget"));
+        return;
+      }
+      setDialogOpen(false);
+      setForm({ categoryId: "", amount: "" });
+      setErrors({});
+      setFormError("");
+      loadData();
+    } catch {
+      setFormError("Network error. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
-  async function handleDelete(id: number) {
-    await fetch(`/api/budgets?id=${id}`, { method: "DELETE" });
-    loadData();
+  async function handleDelete() {
+    if (deleteId == null) return;
+    setDeleting(true);
+    try {
+      await fetch(`/api/budgets?id=${deleteId}`, { method: "DELETE" });
+      setDeleteId(null);
+      loadData();
+    } finally {
+      setDeleting(false);
+    }
   }
+
+  // Copy the previous month's budget rows into the currently-selected month.
+  // Reuses the upserting POST /api/budgets (no API change) — posts each prior
+  // row's native amount + currency so values clone exactly.
+  function prevMonthOf(m: string): string {
+    const [y, mm] = m.split("-").map(Number);
+    const d = new Date(y, mm - 2, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  async function handleCopyFromPrevMonth() {
+    setCopyError("");
+    setCopying(true);
+    try {
+      const prev = prevMonthOf(month);
+      const res = await fetch(`/api/budgets?month=${prev}`);
+      if (!res.ok) {
+        setCopyError(await parseSaveError(res, "Couldn't load last month's budgets"));
+        return;
+      }
+      const prevRows = await res.json();
+      if (!Array.isArray(prevRows) || prevRows.length === 0) {
+        setCopyError("No budgets in the previous month to copy.");
+        return;
+      }
+      for (const b of prevRows as Array<{ categoryId: number; amount: number; currency?: string }>) {
+        const post = await fetch("/api/budgets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            categoryId: b.categoryId,
+            month,
+            amount: b.amount,
+            ...(b.currency ? { currency: b.currency } : {}),
+          }),
+        });
+        if (!post.ok) {
+          setCopyError(await parseSaveError(post, "Failed to copy budgets"));
+          return;
+        }
+      }
+      loadData();
+    } catch {
+      setCopyError("Network error. Please try again.");
+    } finally {
+      setCopying(false);
+    }
+  }
+
+  const deletingBudget = budgets.find((b) => b.id === deleteId) ?? null;
 
   function changeMonth(delta: number) {
     const [y, m] = month.split("-").map(Number);
@@ -193,7 +281,7 @@ export default function BudgetsPage() {
   async function handleApplyTemplate(name: string) {
     const templateItems = templates.filter((t) => t.name === name);
     for (const t of templateItems) {
-      await fetch("/api/budgets", {
+      const res = await fetch("/api/budgets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -202,6 +290,12 @@ export default function BudgetsPage() {
           amount: t.amount,
         }),
       });
+      if (!res.ok) {
+        // Surface the reason (e.g. 423 locked) and stop applying the rest.
+        setCopyError(await parseSaveError(res, "Failed to apply template"));
+        loadData();
+        return;
+      }
     }
     setApplyTemplateDialogOpen(false);
     loadData();
@@ -224,33 +318,48 @@ export default function BudgetsPage() {
     const fromBudget = budgets.find((b) => b.categoryId === Number(moveFrom));
     const toBudget = budgets.find((b) => b.categoryId === Number(moveTo));
 
-    if (fromBudget) {
-      await fetch("/api/budgets", {
+    setMoveError("");
+    try {
+      if (fromBudget) {
+        const fromRes = await fetch("/api/budgets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            categoryId: fromBudget.categoryId,
+            month,
+            amount: Math.max(0, fromBudget.amount - amt),
+          }),
+        });
+        if (!fromRes.ok) {
+          setMoveError(await parseSaveError(fromRes, "Failed to move funds"));
+          return;
+        }
+      }
+
+      const toRes = await fetch("/api/budgets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          categoryId: fromBudget.categoryId,
+          categoryId: Number(moveTo),
           month,
-          amount: Math.max(0, fromBudget.amount - amt),
+          amount: (toBudget?.amount ?? 0) + amt,
         }),
       });
+      if (!toRes.ok) {
+        setMoveError(await parseSaveError(toRes, "Failed to move funds"));
+        loadData();
+        return;
+      }
+
+      setMoveMoneyDialogOpen(false);
+      setMoveFrom("");
+      setMoveTo("");
+      setMoveAmount("");
+      setMoveError("");
+      loadData();
+    } catch {
+      setMoveError("Network error. Please try again.");
     }
-
-    await fetch("/api/budgets", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        categoryId: Number(moveTo),
-        month,
-        amount: (toBudget?.amount ?? 0) + amt,
-      }),
-    });
-
-    setMoveMoneyDialogOpen(false);
-    setMoveFrom("");
-    setMoveTo("");
-    setMoveAmount("");
-    loadData();
   }
 
   const spendingMap = new Map(spending.map((s) => [s.categoryId, Math.abs(s.total)]));
@@ -286,8 +395,11 @@ export default function BudgetsPage() {
     const ratio = spent / budgetAmt;
     if (ratio > 1) return "[&_[data-slot=progress-indicator]]:bg-rose-500";
     if (ratio >= 0.75) return "[&_[data-slot=progress-indicator]]:bg-amber-500";
-    return "[&_[data-slot=progress-indicator]]:bg-indigo-500";
+    return "[&_[data-slot=progress-indicator]]:bg-primary";
   }
+
+  if (loading) return <PageSkeleton variant="list" rows={5} />;
+  if (loadError) return <ErrorState title="Couldn't load budgets" message="We couldn't load your budgets. Please try again." onRetry={() => { setLoading(true); loadData(); }} />;
 
   return (
     <div className="space-y-6">
@@ -364,7 +476,7 @@ export default function BudgetsPage() {
           )}
 
           {templateNames.length > 0 && (
-            <Dialog open={applyTemplateDialogOpen} onOpenChange={setApplyTemplateDialogOpen}>
+            <Dialog open={applyTemplateDialogOpen} onOpenChange={(open) => { setApplyTemplateDialogOpen(open); if (open) setCopyError(""); }}>
               <DialogTrigger render={<Button variant="outline" size="sm" />}>
                 <FileDown className="h-4 w-4 mr-1" /> Apply Template
               </DialogTrigger>
@@ -373,6 +485,7 @@ export default function BudgetsPage() {
                   <DialogTitle>Apply Budget Template</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-3">
+                  {copyError && <p className="text-sm text-destructive">{copyError}</p>}
                   {templateNames.map((name) => {
                     const items = templates.filter((t) => t.name === name);
                     const total = items.reduce((s, t) => s + t.amount, 0);
@@ -395,6 +508,7 @@ export default function BudgetsPage() {
                             variant="ghost"
                             size="icon"
                             className="h-8 w-8 text-muted-foreground"
+                            aria-label={`Delete template ${name}`}
                             onClick={() => handleDeleteTemplate(name)}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
@@ -410,7 +524,7 @@ export default function BudgetsPage() {
 
           {/* Move Money (envelope mode) */}
           {mode === "envelope" && budgets.length >= 2 && (
-            <Dialog open={moveMoneyDialogOpen} onOpenChange={setMoveMoneyDialogOpen}>
+            <Dialog open={moveMoneyDialogOpen} onOpenChange={(open) => { setMoveMoneyDialogOpen(open); if (!open) setMoveError(""); }}>
               <DialogTrigger render={<Button variant="outline" size="sm" />}>
                 <ArrowRightLeft className="h-4 w-4 mr-1" /> Move Money
               </DialogTrigger>
@@ -466,6 +580,7 @@ export default function BudgetsPage() {
                       placeholder="50.00"
                     />
                   </div>
+                  {moveError && <p className="text-sm text-destructive">{moveError}</p>}
                   <Button
                     className="w-full"
                     disabled={!moveFrom || !moveTo || !moveAmount || moveFrom === moveTo || parseFloat(moveAmount) <= 0}
@@ -478,7 +593,7 @@ export default function BudgetsPage() {
             </Dialog>
           )}
 
-          <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+          <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setFormError(""); setErrors({}); } }}>
             <DialogTrigger render={<Button />}>
               <Plus className="h-4 w-4 mr-1" /> Add Budget
             </DialogTrigger>
@@ -509,7 +624,8 @@ export default function BudgetsPage() {
                   <Input type="number" step="0.01" value={form.amount} onChange={(e) => { setForm({ ...form, amount: e.target.value }); setErrors({ ...errors, amount: "" }); }} placeholder="500.00" />
                   {errors.amount && <p className="text-xs text-destructive mt-1">{errors.amount}</p>}
                 </div>
-                <Button type="submit" className="w-full" disabled={!isFormValid}>Save Budget</Button>
+                {formError && <p className="text-sm text-destructive">{formError}</p>}
+                <Button type="submit" className="w-full" disabled={!isFormValid || submitting}>{submitting ? "Saving…" : "Save Budget"}</Button>
               </form>
             </DialogContent>
           </Dialog>
@@ -518,11 +634,11 @@ export default function BudgetsPage() {
 
       {/* Month nav */}
       <div className="inline-flex items-center gap-2 rounded-xl bg-muted/50 px-2 py-1.5">
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => changeMonth(-1)}>
+        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Previous month" onClick={() => changeMonth(-1)}>
           <ChevronLeft className="h-4 w-4" />
         </Button>
         <h2 className="text-sm font-semibold min-w-28 text-center">{getMonthLabel(month)}</h2>
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => changeMonth(1)}>
+        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Next month" onClick={() => changeMonth(1)}>
           <ChevronRight className="h-4 w-4" />
         </Button>
       </div>
@@ -533,8 +649,8 @@ export default function BudgetsPage() {
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm text-muted-foreground">Total Budget</CardTitle>
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100">
-                <PiggyBank className="h-5 w-5 text-indigo-600" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 dark:bg-indigo-950/40">
+                <PiggyBank className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
               </div>
             </div>
           </CardHeader>
@@ -552,8 +668,8 @@ export default function BudgetsPage() {
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm text-muted-foreground">Total Spent</CardTitle>
-              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${totalSpent > totalBudget ? "bg-rose-100" : "bg-emerald-100"}`}>
-                <TrendingDown className={`h-5 w-5 ${totalSpent > totalBudget ? "text-rose-600" : "text-emerald-600"}`} />
+              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${totalSpent > totalBudget ? "bg-rose-100 dark:bg-rose-950/40" : "bg-emerald-100 dark:bg-emerald-950/40"}`}>
+                <TrendingDown className={`h-5 w-5 ${totalSpent > totalBudget ? "text-rose-600 dark:text-rose-400" : "text-emerald-600 dark:text-emerald-400"}`} />
               </div>
             </div>
           </CardHeader>
@@ -567,8 +683,8 @@ export default function BudgetsPage() {
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm text-muted-foreground">Remaining</CardTitle>
-              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${totalRemaining >= 0 ? "bg-emerald-100" : "bg-rose-100"}`}>
-                <Wallet className={`h-5 w-5 ${totalRemaining >= 0 ? "text-emerald-600" : "text-rose-600"}`} />
+              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${totalRemaining >= 0 ? "bg-emerald-100 dark:bg-emerald-950/40" : "bg-rose-100 dark:bg-rose-950/40"}`}>
+                <Wallet className={`h-5 w-5 ${totalRemaining >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`} />
               </div>
             </div>
           </CardHeader>
@@ -585,8 +701,8 @@ export default function BudgetsPage() {
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-sm text-muted-foreground">Available to Budget</CardTitle>
-                <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${availableToBudget >= 0 ? "bg-emerald-100" : "bg-rose-100"}`}>
-                  <Wallet className={`h-5 w-5 ${availableToBudget >= 0 ? "text-emerald-600" : "text-rose-600"}`} />
+                <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${availableToBudget >= 0 ? "bg-emerald-100 dark:bg-emerald-950/40" : "bg-rose-100 dark:bg-rose-950/40"}`}>
+                  <Wallet className={`h-5 w-5 ${availableToBudget >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`} />
                 </div>
               </div>
             </CardHeader>
@@ -607,8 +723,8 @@ export default function BudgetsPage() {
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-sm text-muted-foreground">Age of Money</CardTitle>
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100">
-                  <Clock className="h-5 w-5 text-violet-600" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 dark:bg-violet-950/40">
+                  <Clock className="h-5 w-5 text-violet-600 dark:text-violet-400" />
                 </div>
               </div>
             </CardHeader>
@@ -646,13 +762,17 @@ export default function BudgetsPage() {
             <p className="text-sm text-muted-foreground max-w-xs mb-5">
               Set spending limits for your categories and track how you&apos;re doing throughout the month.
             </p>
-            <button
-              onClick={() => setDialogOpen(true)}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
-            >
-              <Plus className="h-4 w-4" />
-              Add your first budget
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button onClick={() => setDialogOpen(true)}>
+                <Plus className="h-4 w-4 mr-1" />
+                Add your first budget
+              </Button>
+              <Button variant="outline" disabled={copying} onClick={handleCopyFromPrevMonth}>
+                <Copy className="h-4 w-4 mr-1" />
+                {copying ? "Copying…" : `Copy from ${getMonthLabel(prevMonthOf(month))}`}
+              </Button>
+            </div>
+            {copyError && <p className="text-sm text-destructive mt-3">{copyError}</p>}
           </CardContent>
         </Card>
       ) : (
@@ -685,10 +805,10 @@ export default function BudgetsPage() {
                         <span className="text-sm font-medium truncate">{b.categoryName}</span>
                         <span className={`shrink-0 text-xs font-medium tabular-nums px-1.5 py-0.5 rounded-full ${
                           over
-                            ? "bg-rose-100 text-rose-700"
+                            ? "bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300"
                             : rawPct >= 75
-                              ? "bg-amber-100 text-amber-700"
-                              : "bg-indigo-100 text-indigo-700"
+                              ? "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300"
+                              : "bg-primary/10 text-primary"
                         }`}>
                           {Math.round(rawPct)}%
                         </span>
@@ -720,7 +840,7 @@ export default function BudgetsPage() {
                             {formatCurrency(spent, displayCurrency)} / {formatCurrency(effectiveBudget, displayCurrency)}
                           </Link>
                         )}
-                        <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => handleDelete(b.id)}>
+                        <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" aria-label={`Delete budget for ${b.categoryName}`} onClick={() => setDeleteId(b.id)}>
                           <Trash2 className="h-3 w-3" />
                         </Button>
                       </div>
@@ -736,6 +856,16 @@ export default function BudgetsPage() {
           </Card>
         ))
       )}
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        onOpenChange={(open) => { if (!open) setDeleteId(null); }}
+        title="Delete budget"
+        description={<>Are you sure you want to delete the budget for <strong>{deletingBudget?.categoryName ?? "this category"}</strong>? This cannot be undone.</>}
+        confirmLabel="Delete budget"
+        busy={deleting}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }

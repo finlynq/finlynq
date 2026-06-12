@@ -3,6 +3,7 @@
 import type { LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { motion } from "framer-motion";
+import { Button } from "@/components/ui/button";
 
 interface EmptyStateProps {
   icon: LucideIcon;
@@ -29,19 +30,13 @@ export function EmptyState({ icon: Icon, title, description, action }: EmptyStat
       <p className="text-sm text-muted-foreground mt-1 max-w-sm">{description}</p>
       {action && (
         action.href ? (
-          <Link
-            href={action.href}
-            className="mt-4 inline-flex items-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
-          >
+          <Button className="mt-4" render={<Link href={action.href} />}>
             {action.label}
-          </Link>
+          </Button>
         ) : (
-          <button
-            onClick={action.onClick}
-            className="mt-4 inline-flex items-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
-          >
+          <Button className="mt-4" onClick={action.onClick}>
             {action.label}
-          </button>
+          </Button>
         )
       )}
     </motion.div>

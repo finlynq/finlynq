@@ -15,6 +15,10 @@ import { useDisplayCurrency } from "@/components/currency-provider";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import { Plus, Trash2, Target, CheckCircle2, TrendingUp, Calendar, Pencil, X } from "lucide-react";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ErrorState } from "@/components/error-state";
+import { PageSkeleton } from "@/components/page-skeleton";
+import { parseSaveError } from "@/lib/save-error";
 
 type Goal = {
   id: number; name: string; type: string; targetAmount: number; currentAmount: number;
@@ -41,10 +45,10 @@ type FormState = {
 };
 
 const goalTypeConfig: Record<string, { label: string; badgeClass: string; borderClass: string }> = {
-  savings: { label: "Savings", badgeClass: "bg-emerald-100 text-emerald-700 border-emerald-200", borderClass: "border-l-emerald-500" },
-  debt_payoff: { label: "Debt Payoff", badgeClass: "bg-rose-100 text-rose-700 border-rose-200", borderClass: "border-l-rose-500" },
-  investment: { label: "Investment", badgeClass: "bg-indigo-100 text-indigo-700 border-indigo-200", borderClass: "border-l-indigo-500" },
-  emergency_fund: { label: "Emergency Fund", badgeClass: "bg-amber-100 text-amber-700 border-amber-200", borderClass: "border-l-amber-500" },
+  savings: { label: "Savings", badgeClass: "bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-900/60", borderClass: "border-l-emerald-500" },
+  debt_payoff: { label: "Debt Payoff", badgeClass: "bg-rose-100 text-rose-700 border-rose-200 dark:bg-rose-950/50 dark:text-rose-300 dark:border-rose-900/60", borderClass: "border-l-rose-500" },
+  investment: { label: "Investment", badgeClass: "bg-indigo-100 text-indigo-700 border-indigo-200 dark:bg-indigo-950/50 dark:text-indigo-300 dark:border-indigo-900/60", borderClass: "border-l-indigo-500" },
+  emergency_fund: { label: "Emergency Fund", badgeClass: "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-900/60", borderClass: "border-l-amber-500" },
 };
 
 function progressColorClass(progress: number): string {
@@ -157,21 +161,30 @@ function GoalEditForm({
         priority: parseInt(form.priority),
         note: form.note,
       };
+      let res: Response;
       if (mode === "edit" && goalId != null) {
         payload.id = goalId;
-        await fetch("/api/goals", {
+        res = await fetch("/api/goals", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
       } else {
-        await fetch("/api/goals", {
+        res = await fetch("/api/goals", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
       }
+      if (!res.ok) {
+        // Keep the dialog open with input intact; surface the reason.
+        setErrors({ ...errors, form: await parseSaveError(res, "Failed to save goal") });
+        return;
+      }
+      setErrors({ ...errors, form: "" });
       onSave();
+    } catch {
+      setErrors({ ...errors, form: "Network error. Please try again." });
     } finally {
       setSubmitting(false);
     }
@@ -274,6 +287,7 @@ function GoalEditForm({
         <Label>Note</Label>
         <Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
       </div>
+      {errors.form && <p className="text-sm text-destructive">{errors.form}</p>}
       <div className="flex gap-2">
         {mode === "edit" && (
           <Button type="button" variant="outline" className="flex-1" onClick={onCancel} disabled={submitting}>
@@ -292,27 +306,56 @@ export default function GoalsPage() {
   const { displayCurrency } = useDisplayCurrency();
   const [goals, setGoals] = useState<Goal[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [editGoal, setEditGoal] = useState<Goal | null>(null);
   const [seedForm, setSeedForm] = useState<FormState>(emptyForm(displayCurrency));
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  const load = useCallback(() => { fetch("/api/goals").then((r) => r.json()).then(setGoals); }, []);
-  useEffect(() => { load(); fetch("/api/accounts").then((r) => r.json()).then(setAccounts); }, [load]);
+  const load = useCallback(() => {
+    setLoadError(false);
+    fetch("/api/goals")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Failed to load goals"))))
+      .then((data) => setGoals(Array.isArray(data) ? data : []))
+      .catch(() => setLoadError(true))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => {
+    load();
+    fetch("/api/accounts")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setAccounts(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, [load]);
 
   async function toggleStatus(goal: Goal) {
     await fetch("/api/goals", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: goal.id, status: goal.status === "active" ? "completed" : "active" }) });
     load();
   }
 
-  async function handleDelete(id: number) {
-    await fetch(`/api/goals?id=${id}`, { method: "DELETE" });
-    load();
+  async function handleDelete() {
+    if (deleteId == null) return;
+    setDeleting(true);
+    try {
+      await fetch(`/api/goals?id=${deleteId}`, { method: "DELETE" });
+      setDeleteId(null);
+      load();
+    } finally {
+      setDeleting(false);
+    }
   }
+
+  const deletingGoal = goals.find((g) => g.id === deleteId) ?? null;
 
   const active = goals.filter((g) => g.status === "active");
   const completed = goals.filter((g) => g.status === "completed");
   const totalTarget = active.reduce((s, g) => s + g.targetAmount, 0);
   const totalCurrent = active.reduce((s, g) => s + g.currentAmount, 0);
+
+  if (loading) return <PageSkeleton variant="cards" rows={3} />;
+  if (loadError) return <ErrorState title="Couldn't load goals" message="We couldn't load your goals. Please try again." onRetry={() => { setLoading(true); load(); }} />;
 
   return (
     <div className="space-y-6">
@@ -360,8 +403,8 @@ export default function GoalsPage() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Card>
             <CardContent className="flex items-center gap-4 pt-6">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100">
-                <Target className="h-5 w-5 text-indigo-600" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 dark:bg-indigo-950/40">
+                <Target className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
               </div>
               <div>
                 <p className="text-sm text-muted-foreground">Total Target</p>
@@ -371,8 +414,8 @@ export default function GoalsPage() {
           </Card>
           <Card>
             <CardContent className="flex items-center gap-4 pt-6">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100">
-                <TrendingUp className="h-5 w-5 text-emerald-600" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100 dark:bg-emerald-950/40">
+                <TrendingUp className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
               </div>
               <div>
                 <p className="text-sm text-muted-foreground">Current Progress</p>
@@ -382,8 +425,8 @@ export default function GoalsPage() {
           </Card>
           <Card>
             <CardContent className="flex items-center gap-4 pt-6">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100">
-                <CheckCircle2 className="h-5 w-5 text-violet-600" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 dark:bg-violet-950/40">
+                <CheckCircle2 className="h-5 w-5 text-violet-600 dark:text-violet-400" />
               </div>
               <div>
                 <p className="text-sm text-muted-foreground">Completed</p>
@@ -463,13 +506,13 @@ export default function GoalsPage() {
                   </div>
                 </div>
                 <div className="flex gap-1">
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setEditGoal(g)} title="Edit">
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setEditGoal(g)} title="Edit" aria-label={`Edit goal ${g.name}`}>
                     <Pencil className="h-4 w-4" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleStatus(g)} title="Mark complete">
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleStatus(g)} title="Mark complete" aria-label={`Mark goal ${g.name} complete`}>
                     <CheckCircle2 className="h-4 w-4" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleDelete(g.id)} title="Delete">
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => setDeleteId(g.id)} title="Delete" aria-label={`Delete goal ${g.name}`}>
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
@@ -483,7 +526,7 @@ export default function GoalsPage() {
                 <div className="flex justify-between text-xs text-muted-foreground">
                   <span>Remaining: <span className="font-medium text-foreground">{formatCurrency(g.remaining, displayCurrency)}</span></span>
                   {g.monthlyNeeded > 0 && (
-                    <span className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-200">
+                    <span className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-200 dark:bg-indigo-950/40 dark:text-indigo-300 dark:ring-indigo-900/60">
                       {formatCurrency(g.monthlyNeeded, displayCurrency)}/mo needed
                     </span>
                   )}
@@ -502,23 +545,23 @@ export default function GoalsPage() {
             Completed Goals
           </h2>
           {completed.map((g) => (
-            <Card key={g.id} className="border-l-4 border-l-emerald-400 bg-emerald-50/30">
+            <Card key={g.id} className="border-l-4 border-l-emerald-400 bg-emerald-50/30 dark:bg-emerald-950/20">
               <CardContent className="py-3 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                  <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                   <div>
                     <span className="line-through text-muted-foreground">{g.name}</span>
-                    <Badge className="ml-2 bg-emerald-100 text-emerald-700 border-emerald-200">{formatCurrency(g.targetAmount, displayCurrency)}</Badge>
+                    <Badge className="ml-2 bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-900/60">{formatCurrency(g.targetAmount, displayCurrency)}</Badge>
                   </div>
                 </div>
                 <div className="flex gap-1">
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditGoal(g)} title="Edit">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditGoal(g)} title="Edit" aria-label={`Edit goal ${g.name}`}>
                     <Pencil className="h-3 w-3" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => toggleStatus(g)} title="Reactivate">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => toggleStatus(g)} title="Reactivate" aria-label={`Reactivate goal ${g.name}`}>
                     <Target className="h-3 w-3" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => handleDelete(g.id)}>
+                  <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => setDeleteId(g.id)} title="Delete" aria-label={`Delete goal ${g.name}`}>
                     <Trash2 className="h-3 w-3" />
                   </Button>
                 </div>
@@ -527,6 +570,16 @@ export default function GoalsPage() {
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        onOpenChange={(open) => { if (!open) setDeleteId(null); }}
+        title="Delete goal"
+        description={<>Are you sure you want to delete <strong>{deletingGoal?.name ?? "this goal"}</strong>? This cannot be undone.</>}
+        confirmLabel="Delete goal"
+        busy={deleting}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }
