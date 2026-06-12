@@ -12,7 +12,7 @@ import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { Badge } from "@/components/ui/badge";
-import { Plus, ChevronLeft, ChevronRight, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp, Download } from "lucide-react";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./_components/split-dialog";
 import { TransactionDialog, type TransactionDialogInitialState, type DialogLinkedSibling } from "@/components/transactions/transaction-dialog";
@@ -30,6 +30,9 @@ import type {
 import { useLookups, useTxColumnPrefs, useTxSortPref, useTxFilterPrefs } from "./_hooks/use-tx-prefs";
 import { useTransactions } from "./_hooks/use-transactions";
 import { TransactionTable } from "./_components/transaction-table";
+import { buildTransactionQuery } from "@/lib/transactions/build-query";
+import { exportCsv, type CsvColumn } from "@/lib/csv-export";
+import { todayISO } from "@/lib/utils/date";
 
 // Types (Transaction / LinkedSibling / Account / Category / Holding /
 // ColFilterShape), the ColumnFilterPopover, the SplitBadge, and the
@@ -225,6 +228,54 @@ function TransactionsPageInner() {
     setColFilters([]);
     setSortPref({ columnId: null, direction: null });
     setPage(0);
+  }
+
+  // ── CSV export of the current filtered view ──────────────────────────
+  // Re-fetches GET /api/transactions with the SAME buildTransactionQuery the
+  // table uses (FINLYNQ-115 — never hand-roll params), but with page 0 + a
+  // high limit so a single request returns the whole filtered set. The route
+  // caps the underlying candidate set at 1000 rows whenever a post-decrypt
+  // (search / tag / encrypted-substring) filter is active — surfaced inline.
+  const [exporting, setExporting] = useState(false);
+  // Mirrors the server's `postDecryptFilter`: text search, tag, or any
+  // text-type per-column filter forces the in-memory 1000-row pass.
+  const hasTextSearchFilter =
+    !!filters.search ||
+    !!filters.tag ||
+    colFilters.some((f) => f.type === "text");
+  const exportColumns: CsvColumn<Transaction>[] = [
+    { header: "Date", accessor: (t) => t.date },
+    { header: "Account", accessor: (t) => t.accountAlias || t.accountName },
+    { header: "Category", accessor: (t) => t.categoryName },
+    { header: "Payee", accessor: (t) => t.payee },
+    { header: "Note", accessor: (t) => t.note },
+    { header: "Tags", accessor: (t) => t.tags },
+    { header: "Quantity", accessor: (t) => t.quantity ?? "" },
+    { header: "Amount", accessor: (t) => t.amount },
+    { header: "Currency", accessor: (t) => t.currency },
+    { header: "Portfolio", accessor: (t) => t.portfolioHolding ?? "" },
+    { header: "Source", accessor: (t) => t.source ?? "" },
+  ];
+
+  async function handleExport() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      // Same builder + filter/sort state the table uses; page 0 + high limit
+      // pulls the entire filtered view in one shot (the route honors `limit`
+      // directly when no post-decrypt filter is set, else caps at 1000).
+      const params = buildTransactionQuery(filters, sortPref, colFilters, accounts, {
+        page: 0,
+        limit: 100000,
+      });
+      const res = await fetch(`/api/transactions?${params}`);
+      if (!res.ok) return;
+      const json: { data?: Transaction[] } = await res.json();
+      const rows = json.data ?? [];
+      exportCsv(rows, exportColumns, `transactions-${todayISO()}.csv`);
+    } finally {
+      setExporting(false);
+    }
   }
 
   /* resetForm / handleSubmit / handleTransferSubmit / handleTransferDelete
@@ -710,7 +761,22 @@ function TransactionsPageInner() {
                 <X className="h-3 w-3" /> Clear all
               </button>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs gap-1.5 ml-auto"
+              onClick={handleExport}
+              disabled={exporting || total === 0}
+            >
+              <Download className="h-3.5 w-3.5" />
+              {exporting ? "Exporting…" : "Export CSV"}
+            </Button>
           </div>
+          {hasTextSearchFilter && (
+            <p className="text-xs text-muted-foreground">
+              Exports of a text-searched view are capped at the first 1,000 matching transactions.
+            </p>
+          )}
           {/* Issue #59 — per-column filter chips. Each chip drops just its
               own filter when clicked; "Clear all" above wipes the lot. */}
           {(colFilters.length > 0 || sortPref.columnId) && (
@@ -943,7 +1009,7 @@ function TransactionsPageInner() {
           setDeleteBlockedError(null);
         }
       }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-4 w-4" />
@@ -1009,7 +1075,7 @@ function TransactionsPageInner() {
 
       {/* Bulk delete confirmation dialog */}
       <Dialog open={bulkDeleteConfirm} onOpenChange={(open) => { if (!open) setBulkDeleteConfirm(false); }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-4 w-4" />

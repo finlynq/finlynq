@@ -101,7 +101,7 @@ export function ConnectorReconciliationDialog({ open, onOpenChange }: ConnectorR
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-3xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Balance reconciliation</DialogTitle>
           <DialogDescription>

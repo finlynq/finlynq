@@ -282,7 +282,7 @@ export default function InvestmentsSettingsPage() {
           if (!open) setDialogState(null);
         }}
       >
-        <DialogContent className="max-w-md">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
               {dialogState?.mode === "edit" ? "Edit Holding" : "Add Holding"}

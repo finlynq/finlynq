@@ -267,7 +267,7 @@ export default function PortfolioPage() {
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              {data.undecryptedTxCount} transaction{data.undecryptedTxCount === 1 ? "" : "s"} couldn't be decrypted
+              {data.undecryptedTxCount} transaction{data.undecryptedTxCount === 1 ? "" : "s"} couldn&apos;t be decrypted
             </p>
             <p className="text-xs text-amber-800/80 dark:text-amber-300/80 mt-0.5">
               Your session needs to refresh after the last deploy.{" "}
@@ -542,7 +542,7 @@ export default function PortfolioPage() {
           }
         }}
       >
-        <DialogContent className="max-w-md">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
               {editingHolding ? "Edit Holding" : "Add Holding"}

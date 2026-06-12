@@ -62,6 +62,7 @@ import {
 } from "lucide-react";
 import { labelForSource, type TransactionSource } from "@/lib/tx-source";
 import { safeName } from "@/lib/safe-name";
+import { todayISO } from "@/lib/utils/date";
 import {
   RuleEditorDialog,
   type Category as RuleEditorCategory,
@@ -256,7 +257,7 @@ interface TransferEditState {
 const emptySplitRow = (): SplitRow => ({ categoryId: "", amount: "", note: "" });
 
 const FORM_DEFAULTS: TransactionFormValues = {
-  date: new Date().toISOString().split("T")[0],
+  date: todayISO(),
   accountId: "",
   categoryId: "",
   currency: "CAD",
@@ -270,7 +271,7 @@ const FORM_DEFAULTS: TransactionFormValues = {
 };
 
 const TRANSFER_DEFAULTS: TransferFormState = {
-  date: new Date().toISOString().split("T")[0],
+  date: todayISO(),
   fromAccountId: "",
   toAccountId: "",
   amount: "",
@@ -481,14 +482,14 @@ export function TransactionDialog({
     setDialogMode("transaction");
     setForm({
       ...FORM_DEFAULTS,
-      date: new Date().toISOString().split("T")[0],
+      date: todayISO(),
     });
     setShowAdvanced(false);
     setShowSplits(false);
     setSplitRows([emptySplitRow(), emptySplitRow()]);
     setTransferForm({
       ...TRANSFER_DEFAULTS,
-      date: new Date().toISOString().split("T")[0],
+      date: todayISO(),
     });
     setTransferReceivedTouched(false);
     setDestHoldingTouched(false);
@@ -1066,7 +1067,7 @@ export function TransactionDialog({
         }
       }}
     >
-      <DialogContent className="max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>
             {dialogMode === "transfer"

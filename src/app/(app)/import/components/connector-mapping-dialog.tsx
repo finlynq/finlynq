@@ -86,7 +86,7 @@ export function ConnectorMappingDialog({ open, onOpenChange, probe, state, onCon
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
+      <DialogContent className="sm:max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>Map WealthPosition to Finlynq</DialogTitle>
           <DialogDescription>
