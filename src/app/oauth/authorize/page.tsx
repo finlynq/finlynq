@@ -279,12 +279,17 @@ function AuthorizePageInner() {
   const showRegisteredName = !wellKnown && clientMeta.client_name && clientMeta.client_name !== clientId;
 
   // Warning banner logic:
-  // Show a red/amber banner when EITHER the client is not in our well-known
-  // list OR the redirect_uri points outside the finlynq.com / localhost
-  // allowlist. A legitimate Claude / Cursor integration pointing at a finlynq
-  // or localhost URI is considered verified; anything else is not.
+  // Show a red/amber banner ONLY when the client is not in our well-known list
+  // AND the redirect_uri points outside the finlynq.com / localhost allowlist —
+  // i.e. the genuine phishing case (an arbitrary DCR client delivering the code
+  // to an external host). A well-known client (Claude, Cursor, …) legitimately
+  // redirects to its OWN non-finlynq host (claude.ai, cursor.com), so keying on
+  // `wellKnown` keeps that path unchanged. Safe because the redirect host is
+  // exact-match validated server-side per registered client (a well-known
+  // client can't be redirected to an attacker host) and an attacker can't make
+  // `knownClientName` truthy (it's keyed on hardcoded client ids).
   const redirectHost = redirectUriHost(redirectUri);
-  const showUnverifiedBanner = !wellKnown || !isFinlynqHost(redirectHost);
+  const showUnverifiedBanner = !wellKnown && !isFinlynqHost(redirectHost);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background bg-dot-pattern ambient-glow">
