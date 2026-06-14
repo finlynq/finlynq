@@ -10,6 +10,7 @@ import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { wrapDEKForSecret, unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
 import { normalizeDbRows } from "@/lib/db-utils";
+import { bumpLastActive } from "@/lib/auth/last-active";
 import { DEFAULT_SCOPE, normalizeRequestedScope } from "@/lib/oauth-scopes";
 
 export { DEFAULT_SCOPE, InvalidScopeError } from "@/lib/oauth-scopes";
@@ -302,6 +303,10 @@ export async function validateOauthToken(token: string): Promise<{ userId: strin
   }
   // Pre-PR rows have no scope; treat absence as DEFAULT_SCOPE for back-compat.
   const scope = (rows[0].scope && rows[0].scope.trim().length > 0) ? rows[0].scope : DEFAULT_SCOPE;
+  // FINLYNQ-166 — advance last_active_at on every successful OAuth/MCP token
+  // validation. This is the path last_login_at misses entirely. DB-side-throttled
+  // + fire-and-forget so it never blocks or fails token validation.
+  void bumpLastActive(rows[0].user_id);
   return { userId: rows[0].user_id, dek, scope };
 }
 

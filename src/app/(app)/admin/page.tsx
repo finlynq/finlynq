@@ -26,6 +26,7 @@ import {
   ChevronsUpDown,
 } from "lucide-react";
 import { motion } from "framer-motion";
+import { DORMANT_DAYS, isDormant, compareLastActive } from "@/lib/auth/dormancy";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -40,10 +41,14 @@ interface AdminUser {
   onboardingComplete: number;
   plan: string;
   planExpiresAt: string | null;
+  lastActiveAt: string | null;
   createdAt: string;
   updatedAt: string;
   transactionCount: number;
 }
+
+// FINLYNQ-166 — DORMANT_DAYS + the dormancy/sort math live in the pure,
+// dependency-free @/lib/auth/dormancy module (unit-tested in isolation).
 
 interface LoginActivityRow {
   id: string;
@@ -79,6 +84,7 @@ type SortColumn =
   | "verified"
   | "mfa"
   | "txns"
+  | "lastActive"
   | "joined";
 type SortDirection = "asc" | "desc";
 
@@ -119,6 +125,10 @@ function sortUsers(
         break;
       case "txns":
         cmp = (a.transactionCount ?? 0) - (b.transactionCount ?? 0);
+        break;
+      case "lastActive":
+        // Null-safe: never-active (null) sorts as least-recently-active.
+        cmp = compareLastActive(a.lastActiveAt, b.lastActiveAt);
         break;
       case "joined":
         cmp =
@@ -439,6 +449,7 @@ export default function AdminPage() {
                           { col: "verified" as SortColumn, label: "Verified", align: "" },
                           { col: "mfa" as SortColumn, label: "MFA", align: "" },
                           { col: "txns" as SortColumn, label: "Txns", align: "text-right" },
+                          { col: "lastActive" as SortColumn, label: "Last active", align: "" },
                           { col: "joined" as SortColumn, label: "Joined", align: "" },
                         ] as const
                       ).map(({ col, label, align }) => (
@@ -499,6 +510,34 @@ export default function AdminPage() {
                         <TableCell className="text-right font-mono text-sm">
                           {(user.transactionCount ?? 0).toLocaleString()}
                         </TableCell>
+                        <TableCell className="text-sm">
+                          {(() => {
+                            // FINLYNQ-166 — dormant (null OR >DORMANT_DAYS) renders muted.
+                            const dormant = isDormant(user.lastActiveAt);
+                            return (
+                              <span
+                                className={
+                                  dormant
+                                    ? "text-muted-foreground"
+                                    : "text-foreground"
+                                }
+                                title={
+                                  user.lastActiveAt === null
+                                    ? "No authenticated activity recorded"
+                                    : dormant
+                                      ? `Dormant: inactive over ${DORMANT_DAYS} days`
+                                      : undefined
+                                }
+                              >
+                                {user.lastActiveAt === null
+                                  ? "Never"
+                                  : new Date(
+                                      user.lastActiveAt as string
+                                    ).toLocaleDateString()}
+                              </span>
+                            );
+                          })()}
+                        </TableCell>
                         <TableCell className="text-sm text-muted-foreground">
                           {new Date(user.createdAt).toLocaleDateString()}
                         </TableCell>
@@ -532,7 +571,7 @@ export default function AdminPage() {
                     {users.length === 0 && (
                       <TableRow>
                         <TableCell
-                          colSpan={8}
+                          colSpan={9}
                           className="text-center py-8 text-muted-foreground"
                         >
                           No users found.

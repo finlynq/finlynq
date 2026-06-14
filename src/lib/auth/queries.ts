@@ -238,6 +238,11 @@ export async function recordSuccessfulLogin(userId: string) {
     .where(eq(getSchema().users.id, userId));
 }
 
+// FINLYNQ-166 — the throttled last-active bump lives in lib/auth/last-active.ts
+// (bumpLastActive), wired from requireAuth (web + pf_ API key) and
+// validateOauthToken (OAuth/MCP). It is intentionally NOT here to avoid a
+// queries.ts ↔ require-auth.ts import cycle.
+
 // ─── Password reset token queries ───────────────────────────────────────────
 
 export async function createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string) {
@@ -350,12 +355,13 @@ export async function listUsers(options: { limit?: number; offset?: number } = {
       planExpiresAt: s.users.planExpiresAt,
       loginCount: s.users.loginCount,
       lastLoginAt: s.users.lastLoginAt,
+      lastActiveAt: s.users.lastActiveAt,
       createdAt: s.users.createdAt,
       updatedAt: s.users.updatedAt,
     })
     .from(s.users)
     .limit(limit)
-    .offset(offset) as Promise<{ id: string; username: string | null; email: string | null; displayName: string | null; role: string; emailVerified: number | boolean; mfaEnabled: number | boolean; onboardingComplete: number | boolean; plan: string; planExpiresAt: string | null; loginCount: number; lastLoginAt: string | null; createdAt: string; updatedAt: string }[]>;
+    .offset(offset) as Promise<{ id: string; username: string | null; email: string | null; displayName: string | null; role: string; emailVerified: number | boolean; mfaEnabled: number | boolean; onboardingComplete: number | boolean; plan: string; planExpiresAt: string | null; loginCount: number; lastLoginAt: string | null; lastActiveAt: string | Date | null; createdAt: string; updatedAt: string }[]>;
 }
 
 export async function getUserCount() {
