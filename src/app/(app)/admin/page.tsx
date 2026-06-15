@@ -24,6 +24,7 @@ import {
   ChevronUp,
   ChevronDown,
   ChevronsUpDown,
+  KeyRound,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { DORMANT_DAYS, isDormant, compareLastActive } from "@/lib/auth/dormancy";
@@ -73,6 +74,19 @@ interface UsageStats {
   activeUsersLast30Days: number;
   loginsLast24Hours?: number;
   recentLogins?: LoginActivityRow[];
+}
+
+// FINLYNQ-167 — a live OAuth grant across all users for the admin panel.
+interface AdminGrant {
+  id: number;
+  userId: string;
+  userLabel: string;
+  clientId: string;
+  clientName: string;
+  scope: string;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
 }
 
 // ─── Sort ───────────────────────────────────────────────────────────────────
@@ -245,6 +259,9 @@ export default function AdminPage() {
   const [error, setError] = useState<string | null>(null);
   const [updatingUser, setUpdatingUser] = useState<string | null>(null);
   const [sort, setSort] = useState<SortState | null>(null);
+  // FINLYNQ-167 — OAuth grants panel.
+  const [grants, setGrants] = useState<AdminGrant[]>([]);
+  const [revokingGrant, setRevokingGrant] = useState<number | null>(null);
 
   const handleSort = useCallback((column: SortColumn) => {
     setSort((prev) => {
@@ -258,9 +275,10 @@ export default function AdminPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [usersRes, statsRes] = await Promise.all([
+      const [usersRes, statsRes, grantsRes] = await Promise.all([
         fetch("/api/admin/users"),
         fetch("/api/admin/stats"),
+        fetch("/api/admin/oauth-grants"),
       ]);
 
       if (!usersRes.ok || !statsRes.ok) {
@@ -279,6 +297,12 @@ export default function AdminPage() {
       setUsers(usersData.users);
       setTotal(usersData.total);
       setStats(statsData);
+      // Grants are non-fatal: a failed grants fetch leaves the panel empty
+      // rather than blanking the whole admin page.
+      if (grantsRes.ok) {
+        const grantsData = await grantsRes.json();
+        setGrants(grantsData.grants ?? []);
+      }
       setLoading(false);
     } catch {
       setError("Failed to connect to server.");
@@ -324,6 +348,23 @@ export default function AdminPage() {
       }
     } finally {
       setUpdatingUser(null);
+    }
+  };
+
+  // FINLYNQ-167 — admin revoke of a grant (kills access + refresh). Reuses the
+  // FINLYNQ-154 revoke path via the admin-scoped route; drops the row from the
+  // active list on success.
+  const handleRevokeGrant = async (grantId: number) => {
+    setRevokingGrant(grantId);
+    try {
+      const res = await fetch(`/api/admin/oauth-grants?id=${grantId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setGrants((prev) => prev.filter((g) => g.id !== grantId));
+      }
+    } finally {
+      setRevokingGrant(null);
     }
   };
 
@@ -696,6 +737,120 @@ export default function AdminPage() {
                           className="text-center py-8 text-muted-foreground"
                         >
                           No login activity yet.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+
+            {/* FINLYNQ-167 — OAuth grants across users */}
+            <Card>
+              <CardContent className="p-0">
+                <div className="px-6 py-4 border-b">
+                  <h2 className="font-semibold flex items-center gap-2">
+                    <KeyRound className="h-4 w-4" />
+                    OAuth grants ({grants.length})
+                  </h2>
+                  <p className="text-sm text-muted-foreground">
+                    Live OAuth / MCP grants across all users. A grant is dormant
+                    when it has not been used in over {DORMANT_DAYS} days.
+                  </p>
+                </div>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>App</TableHead>
+                      <TableHead>User</TableHead>
+                      <TableHead>Scope</TableHead>
+                      <TableHead>Granted</TableHead>
+                      <TableHead>Last used</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {grants.map((grant) => {
+                      // FINLYNQ-166's pure dormancy predicate — reused here for
+                      // last_used_at (null OR >DORMANT_DAYS ago = dormant).
+                      const dormant = isDormant(grant.lastUsedAt);
+                      return (
+                        <TableRow key={grant.id}>
+                          <TableCell>
+                            <p className="font-medium">{grant.clientName}</p>
+                            <p className="text-xs text-muted-foreground font-mono">
+                              {grant.clientId}
+                            </p>
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {grant.userLabel}
+                          </TableCell>
+                          <TableCell className="text-xs font-mono text-muted-foreground">
+                            {grant.scope}
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground">
+                            {new Date(grant.createdAt).toLocaleDateString()}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            <span className="flex items-center gap-2">
+                              <span
+                                className={
+                                  dormant
+                                    ? "text-muted-foreground"
+                                    : "text-foreground"
+                                }
+                                title={
+                                  grant.lastUsedAt === null
+                                    ? "Never used since tracking began"
+                                    : dormant
+                                      ? `Dormant: unused over ${DORMANT_DAYS} days`
+                                      : undefined
+                                }
+                              >
+                                {grant.lastUsedAt === null
+                                  ? "Never"
+                                  : new Date(
+                                      grant.lastUsedAt
+                                    ).toLocaleDateString()}
+                              </span>
+                              {dormant ? (
+                                <Badge
+                                  variant="outline"
+                                  className="bg-zinc-100 text-zinc-500 border-zinc-200"
+                                >
+                                  Dormant
+                                </Badge>
+                              ) : (
+                                <Badge
+                                  variant="outline"
+                                  className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30"
+                                >
+                                  Active
+                                </Badge>
+                              )}
+                            </span>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <button
+                              className="text-xs px-2 py-1 rounded border border-destructive/40 text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+                              disabled={revokingGrant === grant.id}
+                              onClick={() => handleRevokeGrant(grant.id)}
+                            >
+                              {revokingGrant === grant.id
+                                ? "Revoking…"
+                                : "Revoke"}
+                            </button>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                    {grants.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={6}
+                          className="text-center py-8 text-muted-foreground"
+                        >
+                          No active OAuth grants.
                         </TableCell>
                       </TableRow>
                     )}

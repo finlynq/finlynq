@@ -772,6 +772,10 @@ export const oauthAccessTokens = pgTable("oauth_access_tokens", {
   // reuse-detection event. Live tokens have revoked_at IS NULL. See
   // scripts/migrate-oauth-revoked-at.sql.
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  // FINLYNQ-167 — advanced on each successful token validation (throttled
+  // DB-side, >15 min). Drives the admin OAuth-grants panel's last-used column
+  // + active/dormant flag. NULL = never validated since the column was added.
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
 });
 
 // ─── MCP Uploads (Wave 1 — Part 1: File upload) ────────────────────────────

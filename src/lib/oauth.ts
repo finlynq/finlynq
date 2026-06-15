@@ -27,6 +27,14 @@ export const AUTH_CODE_TTL_MS = 60 * 1000;                    // 60 seconds
 export const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;            // 1 hour
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+/**
+ * FINLYNQ-167 — minimum staleness before another `last_used_at` bump is written.
+ * Mirrors FINLYNQ-166's `LAST_ACTIVE_THROTTLE_MINUTES` (15–30 min budget): the
+ * UPDATE only matches when the stored value is NULL or older than this window,
+ * so token validation is NOT a write-per-request.
+ */
+export const LAST_USED_THROTTLE_MINUTES = 15;
+
 /** Cap on `redirect_uris` per registered client. RFC 7591 doesn't mandate one,
  * but accepting an unbounded list lets a single DCR call seed every URI a
  * future attacker might want to reuse. Five is plenty for legitimate clients
@@ -277,6 +285,37 @@ type TokenRow = {
 };
 
 /**
+ * FINLYNQ-167 — throttled bump of `oauth_access_tokens.last_used_at` for the
+ * grant whose access token hashes to `tokenHash`.
+ *
+ * Like FINLYNQ-166's `bumpLastActive`, the throttle is DB-SIDE: the UPDATE's
+ * WHERE clause only matches when the stored value is NULL or older than the
+ * window, so a second validation inside the window matches zero rows and writes
+ * nothing (no read-then-write race, no write-per-request storm). Keyed on the
+ * access-token hash (matches `token`, not `refresh_token`) so per-grant
+ * last-used reflects active-token use. Fire-and-forget: callers MUST NOT await
+ * it on the request critical path and it NEVER throws (errors swallowed).
+ *
+ * Returns a Promise that always resolves; safe to call without awaiting.
+ */
+async function bumpTokenLastUsed(tokenHash: string): Promise<void> {
+  try {
+    await pgDb.execute(sql`
+      UPDATE oauth_access_tokens
+         SET last_used_at = NOW()
+       WHERE token = ${tokenHash}
+         AND revoked_at IS NULL
+         AND (
+           last_used_at IS NULL
+           OR last_used_at < NOW() - (${LAST_USED_THROTTLE_MINUTES} || ' minutes')::interval
+         )
+    `);
+  } catch {
+    // Never block or fail the token-validation path on a metadata-write error.
+  }
+}
+
+/**
  * Validate an OAuth access token. Returns {userId, dek} if valid, null otherwise.
  * Revoked tokens (rotated or killed by reuse-detection) are rejected.
  */
@@ -307,6 +346,10 @@ export async function validateOauthToken(token: string): Promise<{ userId: strin
   // validation. This is the path last_login_at misses entirely. DB-side-throttled
   // + fire-and-forget so it never blocks or fails token validation.
   void bumpLastActive(rows[0].user_id);
+  // FINLYNQ-167 — advance THIS grant's last_used_at (DB-side-throttled,
+  // fire-and-forget) so the admin OAuth-grants panel can show per-grant
+  // last-used + an active/dormant flag.
+  void bumpTokenLastUsed(tokenHash);
   return { userId: rows[0].user_id, dek, scope };
 }
 
@@ -522,6 +565,107 @@ export async function listConnectedApps(userId: string): Promise<ConnectedApp[]>
     createdAt: r.created_at,
     expiresAt: r.expires_at,
   }));
+}
+
+// ─── Admin OAuth-grants panel (FINLYNQ-167) ───────────────────────────────────
+
+/** A live OAuth grant across all users, for the operator-side admin panel. */
+export interface AdminGrant {
+  /** Row id — used as the revoke target. */
+  id: number;
+  /** Owning user id. */
+  userId: string;
+  /** Owner identity for display (best-effort; plaintext columns on `users`). */
+  userLabel: string;
+  clientId: string;
+  clientName: string;
+  scope: string;
+  createdAt: string;
+  /** Access-token expiry (ISO). */
+  expiresAt: string;
+  /** Last successful token validation (ISO), throttled DB-side. NULL = never
+   *  validated since the column was added. Drives the dormant flag. */
+  lastUsedAt: string | null;
+}
+
+/**
+ * List every live OAuth grant across ALL users for the admin panel.
+ *
+ * "Live" mirrors `listConnectedApps`: not revoked AND the refresh token hasn't
+ * expired (the access token may already be past its 1h TTL but the grant is
+ * still re-issuable until the 30-day refresh window lapses). Joins
+ * `oauth_clients` for the human-readable client name and `users` for an owner
+ * label (displayName ?? username ?? email — all plaintext columns on `users`).
+ *
+ * Operator-scoped: callers MUST gate this behind `requireAdmin`. The dormant
+ * flag (last_used_at NULL or > 60d) is computed at the UI boundary via the pure
+ * `isDormant` helper, NOT here, so this stays a plain listing query.
+ */
+export async function listAllGrants(): Promise<AdminGrant[]> {
+  const nowIso = new Date().toISOString();
+  const result = await pgDb.execute(sql`
+    SELECT t.id, t.user_id, t.client_id, t.scope, t.created_at, t.expires_at, t.last_used_at,
+           c.client_name, u.display_name, u.username, u.email
+      FROM oauth_access_tokens t
+      LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+      LEFT JOIN users u ON u.id = t.user_id
+     WHERE t.revoked_at IS NULL
+       AND t.refresh_expires_at > ${nowIso}
+     ORDER BY t.last_used_at DESC NULLS LAST, t.created_at DESC
+  `);
+  type Row = {
+    id: number;
+    user_id: string;
+    client_id: string;
+    scope: string | null;
+    created_at: string;
+    expires_at: string;
+    last_used_at: string | null;
+    client_name: string | null;
+    display_name: string | null;
+    username: string | null;
+    email: string | null;
+  };
+  const rows = normalizeDbRows<Row>(result);
+  return rows.map((r) => {
+    const label =
+      (r.display_name && r.display_name.trim().length > 0 && r.display_name) ||
+      (r.username && r.username.trim().length > 0 && r.username) ||
+      (r.email && r.email.trim().length > 0 && r.email) ||
+      r.user_id;
+    return {
+      id: r.id,
+      userId: r.user_id,
+      userLabel: label,
+      clientId: r.client_id,
+      clientName: (r.client_name && r.client_name.trim().length > 0) ? r.client_name : r.client_id,
+      scope: (r.scope && r.scope.trim().length > 0) ? r.scope : DEFAULT_SCOPE,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at,
+      lastUsedAt: r.last_used_at,
+    };
+  });
+}
+
+/**
+ * Admin revoke of a single grant by its row id — NOT owner-scoped.
+ *
+ * The operator-side analogue of `revokeGrantById`: there is no `user_id`
+ * predicate because an admin acts across users. Callers MUST gate this behind
+ * `requireAdmin`. Flipping `revoked_at` kills both the access and refresh sides
+ * of the grant at once. Returns true if a live row was revoked, false if the id
+ * was unknown or already revoked.
+ */
+export async function revokeGrantByIdAdmin(grantId: number): Promise<boolean> {
+  const result = await pgDb.execute(sql`
+    UPDATE oauth_access_tokens
+       SET revoked_at = now()
+     WHERE id = ${grantId}
+       AND revoked_at IS NULL
+     RETURNING id
+  `);
+  const rows = normalizeDbRows<{ id: number }>(result);
+  return rows.length > 0;
 }
 
 // ─── Redirect URI validation ──────────────────────────────────────────────────
