@@ -1,10 +1,18 @@
 /**
- * GET /api/portfolio/performance/holdings?period=1m|3m|6m|ytd|1y|all&accountId=…
+ * GET /api/portfolio/performance/holdings?period=1m|3m|6m|ytd|1y|all&accountId=…&groupBy=holding|account
  *
- * Per-HOLDING daily market-value series for FINLYNQ-129's stacked Performance
- * view ("By holding (value)"). The base /api/portfolio/performance endpoint
- * reads `portfolio_snapshots`, which is per-ACCOUNT grain — it has no
- * per-holding rows — so the stacked view needs this companion endpoint.
+ * Per-MEMBER daily market-value series for the stacked Performance view. The
+ * base /api/portfolio/performance endpoint reads `portfolio_snapshots`, which
+ * is per-ACCOUNT grain — it has no per-holding rows — so the stacked view needs
+ * this companion endpoint.
+ *
+ * `groupBy` selects the band granularity (FINLYNQ-172):
+ *   - `holding` (default) — one band per holding ("By holding (value)", FINLYNQ-129).
+ *   - `account`           — one band per account ("By account"), summed from the
+ *                           SAME per-holding pricing core via the holding→account
+ *                           map (no extra pricing work). Account display names are
+ *                           DEK-resolved here at the API boundary via
+ *                           `safeAccountName` (the pure pricing core stays name-free).
  *
  * Why a SEPARATE, lazily-fetched endpoint (FINLYNQ-128 deferred this): a true
  * per-holding historical series means re-valuing every holding on every grid
@@ -15,10 +23,10 @@
  * (always including the latest) and fetch ONLY when the user toggles stacked
  * mode — the aggregate Performance chart keeps using the cheap snapshot route.
  *
- * Each point ties to the portfolio market value: the per-holding values are
+ * Each point ties to the portfolio market value: the per-member values are
  * summed in the holding's account currency then converted to the reporting
- * currency, so Σ(holdings) at a day equals that day's snapshot market value
- * (the stacked outer edge equals the aggregate line — tc-2).
+ * currency, so Σ(members) at a day equals that day's snapshot market value
+ * (the stacked outer edge equals the aggregate line — tc-1).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -31,7 +39,8 @@ import {
   type HoldingValue,
 } from "@/lib/holdings-value";
 import { getRate, getDisplayCurrency } from "@/lib/fx-service";
-import { safeName } from "@/lib/safe-name";
+import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { safeName, safeAccountName } from "@/lib/safe-name";
 import { logApiError } from "@/lib/validate";
 import { todayISO } from "@/lib/utils/date";
 
@@ -77,11 +86,36 @@ export async function GET(request: NextRequest) {
   const accountId = params.get("accountId")
     ? parseInt(params.get("accountId")!, 10)
     : null;
+  // FINLYNQ-172 — band granularity. Anything other than "account" (incl. the
+  // legacy unset case) keeps the per-holding behavior.
+  const groupBy = params.get("groupBy") === "account" ? "account" : "holding";
 
   try {
     const asOfDate = todayISO();
     const from = rangeStart(period, asOfDate);
     const displayCurrency = await getDisplayCurrency(userId, params.get("currency"));
+
+    // FINLYNQ-172 — when grouping by account, DEK-resolve account display names
+    // ONCE up front (alias preferred via safeAccountName). The per-holding
+    // pricing core stays name-free; names are attached here at the boundary.
+    const accountNameById = new Map<number, string>();
+    if (groupBy === "account") {
+      const acctRows = await db
+        .select({
+          id: schema.accounts.id,
+          nameCt: schema.accounts.nameCt,
+          aliasCt: schema.accounts.aliasCt,
+        })
+        .from(schema.accounts)
+        .where(eq(schema.accounts.userId, userId));
+      const decrypted = decryptNamedRows(acctRows, dek, {
+        nameCt: "name",
+        aliasCt: "alias",
+      }) as Array<(typeof acctRows)[number] & { name: string | null; alias: string | null }>;
+      for (const a of decrypted) {
+        accountNameById.set(a.id, safeAccountName(a));
+      }
+    }
 
     // Snapshot dates define the grid (same dates the aggregate chart plots).
     const preds = [
@@ -138,7 +172,6 @@ export async function GET(request: NextRequest) {
       total: number;
       members: { id: number; name: string; value: number }[];
     }> = [];
-    const nameById = new Map<number, string>();
 
     for (const date of gridDates) {
       let rows: HoldingValue[];
@@ -147,16 +180,29 @@ export async function GET(request: NextRequest) {
       } catch {
         rows = [];
       }
-      const members: { id: number; name: string; value: number }[] = [];
+      // Group key + display name differ per `groupBy`, but the value is the
+      // SAME per-holding market value (display-ccy) either way, so account
+      // bands sum to the identical grand total as the holding bands (tc-1).
+      const memberAcc = new Map<number, { id: number; name: string; value: number }>();
       let total = 0;
       for (const h of rows) {
         if (!Number.isFinite(h.value) || h.value === 0) continue;
         const converted = await convert(h.value, h.currency, date);
-        const name = safeName(h.name, "Holding", h.holdingId);
-        nameById.set(h.holdingId, name);
-        members.push({ id: h.holdingId, name, value: Math.round(converted * 100) / 100 });
+        const id = groupBy === "account" ? h.accountId : h.holdingId;
+        const name =
+          groupBy === "account"
+            ? accountNameById.get(h.accountId) ?? safeAccountName({ id: h.accountId, name: null })
+            : safeName(h.name, "Holding", h.holdingId);
+        const existing = memberAcc.get(id);
+        if (existing) existing.value += converted;
+        else memberAcc.set(id, { id, name, value: converted });
         total += converted;
       }
+      const members = [...memberAcc.values()].map((m) => ({
+        id: m.id,
+        name: m.name,
+        value: Math.round(m.value * 100) / 100,
+      }));
       points.push({ date, total: Math.round(total * 100) / 100, members });
     }
 
@@ -165,6 +211,7 @@ export async function GET(request: NextRequest) {
       data: {
         period,
         accountId,
+        groupBy,
         from,
         to: asOfDate,
         currency: displayCurrency,

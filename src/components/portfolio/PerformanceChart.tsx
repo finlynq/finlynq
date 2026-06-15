@@ -29,10 +29,17 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { prepareTimeSeries } from "@/lib/chart-series";
-import { buildStackedSeries, type StackPoint } from "@/lib/chart-stack";
+import {
+  buildStackedSeries,
+  type StackPoint,
+  type StackLegendEntry,
+} from "@/lib/chart-stack";
 import { StackedChartLegend } from "@/components/chart-stack-legend";
+import { TooltipBreakdownList, type BreakdownRow } from "@/components/chart-breakdown-list";
 
 type Period = "1m" | "3m" | "6m" | "ytd" | "1y" | "all";
+/** FINLYNQ-172 — stacked grouping mode (was a boolean in FINLYNQ-129). */
+type GroupMode = "off" | "holding" | "account";
 
 interface SeriesPoint {
   date: string;
@@ -71,6 +78,51 @@ interface ApiResponse {
 
 const PERIODS: Period[] = ["1m", "3m", "6m", "ytd", "1y", "all"];
 
+/**
+ * Compact, stack-ordered tooltip for the stacked Performance view (FINLYNQ-172).
+ *
+ * Recharts hands back one payload entry per `<Area>` keyed by `dataKey`; we map
+ * each `legend` band's key to its value at the hovered point and render the
+ * shared `TooltipBreakdownList` (height-capped + scrollable, FINLYNQ-128) so the
+ * list never overflows a phone-width viewport (tc-2).
+ *
+ * Row order MIRRORS the visual stack (tc-3): the stack draws `legend[0]` (the
+ * largest band) at the BOTTOM, so we reverse the legend order to put the largest
+ * row at the bottom of the tooltip too. Applies to both by-holding and by-account
+ * modes (the by-holding view had the inverted order before this).
+ */
+function StackTooltip({
+  active,
+  payload,
+  label,
+  currency,
+  legend,
+}: {
+  active?: boolean;
+  payload?: { dataKey?: string | number; value?: number | string }[];
+  label?: string;
+  currency: string;
+  legend: StackLegendEntry[];
+}) {
+  if (!active || !payload?.length) return null;
+  const valueByKey = new Map<string, number>();
+  for (const entry of payload) {
+    if (entry.dataKey != null) valueByKey.set(String(entry.dataKey), Number(entry.value) || 0);
+  }
+  // Stack-order rows: largest band sits at the BOTTOM of the chart, so reverse
+  // the legend (which is largest-first) to anchor the largest at the bottom.
+  const rows: BreakdownRow[] = [...legend]
+    .reverse()
+    .map((b) => ({ name: b.name, value: valueByKey.get(b.key) ?? 0 }))
+    .filter((r) => r.value !== 0);
+  return (
+    <div className="rounded-xl border border-border/50 bg-card/95 backdrop-blur-sm px-3.5 py-2.5 shadow-lg max-w-[260px]">
+      <p className="text-[11px] font-medium text-muted-foreground mb-1">{label ?? ""}</p>
+      <TooltipBreakdownList rows={rows} currency={currency} />
+    </div>
+  );
+}
+
 export interface PerformanceChartProps {
   /** Restrict the chart to one account; null/undefined = whole portfolio aggregate. */
   accountId?: number | null;
@@ -80,12 +132,16 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
   const [period, setPeriod] = useState<Period>("1y");
   const [data, setData] = useState<ApiResponse["data"] | null>(null);
   const [loading, setLoading] = useState(true);
-  // FINLYNQ-129 — component-only "By holding (value)" toggle (resets on reload).
-  // The per-holding $ series is a SEPARATE, lazily-fetched endpoint (prices+FX
-  // per holding per grid day), so only load it once the user opts in.
-  const [stacked, setStacked] = useState(false);
+  // FINLYNQ-129/172 — component-only stacked grouping toggle (resets on reload).
+  // "holding" = per-holding bands, "account" = per-account bands; both pull from
+  // the SAME lazily-fetched endpoint (prices+FX per holding per grid day) via the
+  // groupBy param, so only load it once the user opts into a stacked mode.
+  const [groupMode, setGroupMode] = useState<GroupMode>("off");
   const [holdings, setHoldings] = useState<{ currency: string; points: HoldingsPoint[] } | null>(null);
   const [holdingsLoading, setHoldingsLoading] = useState(false);
+  // "By account" is meaningless when the chart is already scoped to one account
+  // (it'd be a single band) — only offer it for the whole-portfolio aggregate (tc-4).
+  const canGroupByAccount = accountId == null;
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -102,12 +158,20 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
       .finally(() => setLoading(false));
   }, [period, accountId]);
 
-  // Lazy per-holding fetch — only when stacked mode is on. Re-fetches on
-  // period/account change so the stack re-ranks for the new window.
+  // If the chart re-scopes to a single account while "By account" is active,
+  // that mode no longer makes sense (one band) — fall back to "off" (tc-4).
   useEffect(() => {
-    if (!stacked) return;
+    if (!canGroupByAccount && groupMode === "account") setGroupMode("off");
+  }, [canGroupByAccount, groupMode]);
+
+  // Lazy member fetch — only when a stacked mode is on. Re-fetches on
+  // mode/period/account change so the stack re-ranks (and re-groups) for the
+  // new window. groupBy selects per-holding vs per-account bands (FINLYNQ-172).
+  useEffect(() => {
+    if (groupMode === "off") return;
     const params = new URLSearchParams();
     params.set("period", period);
+    params.set("groupBy", groupMode);
     if (accountId != null) params.set("accountId", String(accountId));
     setHoldingsLoading(true);
     fetch(`/api/portfolio/performance/holdings?${params.toString()}`)
@@ -118,7 +182,7 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
       })
       .catch(() => setHoldings(null))
       .finally(() => setHoldingsLoading(false));
-  }, [stacked, period, accountId]);
+  }, [groupMode, period, accountId]);
 
   const fmtPct = (v: number) => `${(v * 100).toFixed(2)}%`;
 
@@ -145,7 +209,9 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
       ),
     [holdings],
   );
+  const stacked = groupMode !== "off";
   const showStacked = stacked && legend.length > 0;
+  const axisGroupLabel = groupMode === "account" ? "account" : "holding";
 
   return (
     <Card>
@@ -155,12 +221,22 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
           <div className="flex flex-wrap items-center gap-1">
             <Button
               size="sm"
-              variant={stacked ? "default" : "outline"}
-              onClick={() => setStacked((s) => !s)}
+              variant={groupMode === "holding" ? "default" : "outline"}
+              onClick={() => setGroupMode((m) => (m === "holding" ? "off" : "holding"))}
               title="Stack per-holding market value (dollar axis)"
             >
               By holding (value)
             </Button>
+            {canGroupByAccount && (
+              <Button
+                size="sm"
+                variant={groupMode === "account" ? "default" : "outline"}
+                onClick={() => setGroupMode((m) => (m === "account" ? "off" : "account"))}
+                title="Stack per-account market value (dollar axis)"
+              >
+                By account
+              </Button>
+            )}
             {PERIODS.map((p) => (
               <Button
                 key={p}
@@ -206,7 +282,7 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                 dollar stack in stacked mode (tc-2: "y-axis switches to $"). */}
             <p className="text-[11px] text-muted-foreground mb-1">
               {showStacked
-                ? `Market value by holding (${stackCurrency})`
+                ? `Market value by ${axisGroupLabel} (${stackCurrency})`
                 : `Market value (${data.currency})`}
             </p>
             <div className="h-72 w-full">
@@ -219,7 +295,9 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                       tickFormatter={(v) => formatCurrency(Number(v), stackCurrency)}
                     />
                     <Tooltip
-                      formatter={(v, n) => [formatCurrency(Number(v), stackCurrency), n]}
+                      content={
+                        <StackTooltip currency={stackCurrency} legend={legend} />
+                      }
                     />
                     {legend.map((b) => (
                       <Area
