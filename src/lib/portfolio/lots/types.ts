@@ -131,6 +131,59 @@ export interface LotClosurePlan {
   strategy: LotSelectionStrategy;
 }
 
+// ─── FINLYNQ-176 — lot reallocation preview shapes ───────────────────────
+//
+// When a user edits/deletes a buy/transfer-in whose opened lot has since
+// been consumed by a sell/transfer-out closure, the engine re-plans the
+// dependent closures against the post-mutation inventory (re-FIFO; overflow
+// opens a short lot) rather than hard-blocking. `planLotReallocation`
+// (replan.ts) is the pure core that produces this preview; the DB-bound
+// `replanLotsAfterMutation` orchestrator turns it into writes.
+
+/**
+ * One dependent closure after re-planning. `lotId` is the lot the closure
+ * now lands on; in a preview, a freshly-opened short lot is referenced by a
+ * negative placeholder id (`isNewShortLot=true`). `realizedGain` is the
+ * NEW realized gain in the closure's currency.
+ */
+export interface ProposedClosure {
+  closeTxId: number;
+  lotId: number;
+  qtyClosed: number;
+  costPerShare: number;
+  proceedsPerShare: number;
+  realizedGain: number;
+  closeKind: HoldingLotClosure["closeKind"];
+  /** True when this closure forced a short-lot open (no long inventory left). */
+  isNewShortLot: boolean;
+  /** YYYY-MM-DD close date — used to bucket the realized-gain delta by year. */
+  closeDate: string;
+}
+
+/**
+ * Result of re-planning the dependent closures of a target tx mutation.
+ * Returned by both the dry-run preview path and consumed by the commit
+ * path. Empty (all arrays empty, `realizedGainDeltaByYear={}`) when the
+ * target tx has no dependent closures (no reallocation needed).
+ */
+export interface LotReallocationPreview {
+  affectedHoldingIds: number[];
+  /** The sell/transfer tx ids whose closures get replayed. */
+  dependentCloseTxIds: number[];
+  proposedClosures: ProposedClosure[];
+  openedShortLots: Array<{
+    holdingId: number;
+    accountId: number;
+    qty: number;
+    costPerShare: number;
+    currency: string;
+  }>;
+  /** Σ(new realizedGain) − Σ(old realizedGain) bucketed by close_date's
+   *  calendar year ("YYYY"). Surfaced in the confirm dialog so the user
+   *  sees which years' realized gains restate. Omits zero-delta years. */
+  realizedGainDeltaByYear: Record<string, number>;
+}
+
 /**
  * Per-(holding, account) metrics returned by computeHoldingMetricsFromLots.
  * Replaces the inline avg-cost computation in the three aggregators.
