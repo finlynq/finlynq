@@ -33,6 +33,8 @@ import { TransactionTable } from "./_components/transaction-table";
 import { buildTransactionQuery } from "@/lib/transactions/build-query";
 import { exportCsv, type CsvColumn } from "@/lib/csv-export";
 import { todayISO } from "@/lib/utils/date";
+import { LotReallocationNotice } from "@/components/portfolio/lot-reallocation-notice";
+import type { LotReallocationPreview } from "@/lib/portfolio/lots/types";
 
 // Types (Transaction / LinkedSibling / Account / Category / Holding /
 // ColFilterShape), the ColumnFilterPopover, the SplitBadge, and the
@@ -194,6 +196,11 @@ function TransactionsPageInner() {
   } | null>(null);
   const [deleteConfirmPayee, setDeleteConfirmPayee] = useState("");
   const [deleting, setDeleting] = useState(false);
+  // FINLYNQ-176 — warn-and-reallocate. When a delete is lot-locked, fetch the
+  // dry-run preview so the user can see the proposed reallocation (affected
+  // calendar years + any short lot that will open) and choose to proceed.
+  const [reallocPreview, setReallocPreview] = useState<LotReallocationPreview | null>(null);
+  const [reallocLoading, setReallocLoading] = useState(false);
 
   // Split dialog (for existing transactions)
   const [splitDialogOpen, setSplitDialogOpen] = useState(false);
@@ -434,24 +441,62 @@ function TransactionsPageInner() {
     const res = await fetch(`/api/transactions?id=${deleteConfirmId}`, { method: "DELETE" });
     setDeleting(false);
     if (!res.ok) {
-      // Portfolio edit-guard refusal (Phase 2 of the ops refactor). The server
-      // returns 409 + the list of dependent closure tx ids when the row being
-      // deleted opens a lot that's been sold or transferred out. Surface the
-      // list so the user can jump to the blocking row and delete it first.
+      // Portfolio edit-guard refusal. The server returns 409 + the list of
+      // dependent closure tx ids when the row being deleted opens a lot that's
+      // been sold or transferred out. FINLYNQ-176 — instead of dead-ending,
+      // fetch the reallocation preview so the user can proceed.
       const data = await res.json().catch(() => ({}));
       if (data?.code === "portfolio_edit_blocked") {
+        const blockingIds: number[] = Array.isArray(data.blockingClosureTxIds)
+          ? (data.blockingClosureTxIds as number[])
+          : [];
         setDeleteBlockedError({
           message: data.error ?? "Delete blocked by portfolio dependencies",
-          blockingIds: Array.isArray(data.blockingClosureTxIds)
-            ? (data.blockingClosureTxIds as number[])
-            : [],
+          blockingIds,
         });
+        // Fetch the dry-run reallocation preview (best-effort).
+        setReallocPreview(null);
+        setReallocLoading(true);
+        try {
+          const pRes = await fetch("/api/transactions/lot-replan-preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ op: "delete", id: deleteConfirmId }),
+          });
+          if (pRes.ok) {
+            const pData = await pRes.json().catch(() => null);
+            if (pData?.preview) setReallocPreview(pData.preview as LotReallocationPreview);
+          }
+        } finally {
+          setReallocLoading(false);
+        }
         return;
       }
       alert(data?.error ?? `Delete failed (${res.status})`);
       return;
     }
     setDeleteConfirmId(null);
+    setReallocPreview(null);
+    loadTxns();
+  }
+
+  // FINLYNQ-176 — proceed with the lot-locked delete, reallocating dependents.
+  async function handleReallocateDelete() {
+    if (!deleteConfirmId) return;
+    setDeleting(true);
+    const res = await fetch(
+      `/api/transactions?id=${deleteConfirmId}&confirmReallocation=1`,
+      { method: "DELETE" },
+    );
+    setDeleting(false);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data?.error ?? `Delete failed (${res.status})`);
+      return;
+    }
+    setDeleteConfirmId(null);
+    setDeleteBlockedError(null);
+    setReallocPreview(null);
     loadTxns();
   }
 
@@ -1004,9 +1049,10 @@ function TransactionsPageInner() {
 
       {/* Single delete confirmation dialog */}
       <Dialog open={deleteConfirmId !== null} onOpenChange={(open) => {
-        if (!open) {
+        if (!open && !deleting) {
           setDeleteConfirmId(null);
           setDeleteBlockedError(null);
+          setReallocPreview(null);
         }
       }}>
         <DialogContent className="sm:max-w-sm">
@@ -1019,22 +1065,25 @@ function TransactionsPageInner() {
           {deleteBlockedError ? (
             <div className="space-y-3">
               <p className="text-sm text-amber-900 dark:text-amber-200">
-                {deleteBlockedError.message}
+                This transaction opened a lot that has since been sold or
+                transferred out. You can still delete it — the dependent
+                transactions below will be re-matched to your other lots.
               </p>
+              {/* FINLYNQ-176 — reallocation preview (affected years + shorts). */}
+              <LotReallocationNotice preview={reallocPreview} loading={reallocLoading} />
               {deleteBlockedError.blockingIds.length > 0 && (
-                <div className="rounded-md border border-amber-300/60 bg-amber-50 dark:bg-amber-950/40 dark:border-amber-800/60 p-3 text-xs">
-                  <p className="font-medium text-amber-900 dark:text-amber-200 mb-1.5">
-                    Dependent rows:
-                  </p>
+                <div className="rounded-md border border-border bg-muted/40 p-3 text-xs">
+                  <p className="font-medium mb-1.5">Dependent rows:</p>
                   <ul className="space-y-1">
                     {deleteBlockedError.blockingIds.map((id) => (
                       <li key={id}>
                         <Link
                           href={`/transactions?search=%23${id}`}
-                          className="text-amber-700 dark:text-amber-300 underline hover:no-underline"
+                          className="text-primary underline hover:no-underline"
                           onClick={() => {
                             setDeleteConfirmId(null);
                             setDeleteBlockedError(null);
+                            setReallocPreview(null);
                           }}
                         >
                           Transaction #{id}
@@ -1048,12 +1097,22 @@ function TransactionsPageInner() {
                 <Button
                   variant="outline"
                   className="flex-1"
+                  disabled={deleting}
                   onClick={() => {
                     setDeleteConfirmId(null);
                     setDeleteBlockedError(null);
+                    setReallocPreview(null);
                   }}
                 >
-                  Close
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  className="flex-1"
+                  disabled={deleting || reallocLoading}
+                  onClick={handleReallocateDelete}
+                >
+                  {deleting ? "Deleting…" : "Reallocate & delete"}
                 </Button>
               </div>
             </div>

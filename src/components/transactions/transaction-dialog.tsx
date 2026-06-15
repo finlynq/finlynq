@@ -71,6 +71,8 @@ import {
 } from "@/components/rules/rule-editor-dialog";
 import { buildPayeeCategoryRule } from "@/lib/rules/build-payee-category-rule";
 import type { Condition, Action } from "@/lib/rules/schema";
+import { LotReallocationNotice } from "@/components/portfolio/lot-reallocation-notice";
+import type { LotReallocationPreview } from "@/lib/portfolio/lots/types";
 
 // ─── Public types ──────────────────────────────────────────────────────
 
@@ -322,6 +324,10 @@ export function TransactionDialog({
 
   // UI state
   const [submitError, setSubmitError] = useState<{ message: string; currency?: string } | null>(null);
+  // FINLYNQ-176 — when an edit is lot-locked, hold the reallocation preview so
+  // the user can confirm proceeding (reallocate dependents) instead of failing.
+  const [reallocPreview, setReallocPreview] = useState<LotReallocationPreview | null>(null);
+  const [reallocPending, setReallocPending] = useState(false);
   const [linkedSiblings, setLinkedSiblings] = useState<DialogLinkedSibling[]>([]);
   const [transferDeleting, setTransferDeleting] = useState(false);
 
@@ -694,10 +700,12 @@ export function TransactionDialog({
   async function handleSubmit(
     e: React.FormEvent,
     ruleIntent: "none" | "auto" | "customize" = "none",
+    confirmReallocation = false,
   ) {
     e.preventDefault();
     setSubmitError(null);
     setRuleNotice(null);
+    if (!confirmReallocation) setReallocPreview(null);
 
     if (!form.accountId) {
       setSubmitError({ message: "Pick an account" });
@@ -731,6 +739,8 @@ export function TransactionDialog({
     };
     if (form.quantity) body.quantity = parseFloat(form.quantity);
     if (form.portfolioHoldingId) body.portfolioHolding = form.portfolioHoldingId;
+    // FINLYNQ-176 — on the confirm pass, opt into reallocating dependents.
+    if (confirmReallocation && editId) body.confirmReallocation = true;
 
     const res = await fetch("/api/transactions", {
       method: editId ? "PUT" : "POST",
@@ -745,11 +755,37 @@ export function TransactionDialog({
           message: `No FX rate for ${data.currency ?? form.currency}.`,
           currency: data.currency ?? form.currency,
         });
+      } else if (data?.code === "portfolio_edit_blocked" && editId) {
+        // The edited row opened a lot that's been sold/transferred out.
+        // FINLYNQ-176 — fetch the reallocation preview and let the user
+        // confirm proceeding instead of dead-ending.
+        setSubmitError({
+          message:
+            "This transaction opened a lot that has since been sold or transferred out. " +
+            "You can still save your edit — the dependent transactions will be re-matched to your other lots.",
+        });
+        setReallocPreview(null);
+        setReallocPending(true);
+        try {
+          const pRes = await fetch("/api/transactions/lot-replan-preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ op: "edit", id: editId }),
+          });
+          if (pRes.ok) {
+            const pData = await pRes.json().catch(() => null);
+            if (pData?.preview) setReallocPreview(pData.preview as LotReallocationPreview);
+          }
+        } finally {
+          setReallocPending(false);
+        }
       } else {
         setSubmitError({ message: data?.error ?? `Save failed (${res.status})` });
       }
       return;
     }
+    // A successful (re)save clears any pending reallocation prompt.
+    setReallocPreview(null);
 
     let savedTxId = editId;
     if (!savedTxId && res.ok) {
@@ -1502,6 +1538,24 @@ export function TransactionDialog({
                     Add a custom rate
                   </Link>
                 )}
+              </div>
+            )}
+
+            {/* FINLYNQ-176 — lot-locked edit: show the reallocation preview and
+                a confirm button to proceed (reallocate dependents). */}
+            {(reallocPreview || reallocPending) && (
+              <div className="space-y-2">
+                <LotReallocationNotice preview={reallocPreview} loading={reallocPending} />
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  className="w-full"
+                  disabled={reallocPending}
+                  onClick={(e) => handleSubmit(e, "none", true)}
+                >
+                  Reallocate &amp; save
+                </Button>
               </div>
             )}
 
