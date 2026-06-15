@@ -12,8 +12,10 @@
  */
 
 import Link from "next/link";
-import { ChevronDown, ChevronUp, Download } from "lucide-react";
+import { useState } from "react";
+import { ChevronDown, ChevronUp, Download, Layers } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { LotInspectorDialog } from "@/components/portfolio/lot-inspector-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -83,7 +85,16 @@ export function HoldingsTable({
 }) {
   const { summary, byType } = data;
 
+  // FINLYNQ-176 — read-only lot inspector (opened per-account-holding row).
+  const [inspect, setInspect] = useState<{
+    holdingId: number;
+    accountId: number | null;
+    holdingName: string;
+    accountName: string;
+  } | null>(null);
+
   return (
+    <>
     <Card>
       <CardHeader className="pb-2">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -358,14 +369,32 @@ export function HoldingsTable({
                                           ) : <span className="text-muted-foreground">--</span>}
                                         </TableCell>
                                         <TableCell className="text-right">
-                                          <Link
-                                            href={buildTxDrillUrl({ portfolioHolding: h.name, accountId: h.accountId ? String(h.accountId) : undefined })}
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="text-[11px] text-primary hover:underline whitespace-nowrap"
-                                            title="View transactions for this holding in this account"
-                                          >
-                                            View txns →
-                                          </Link>
+                                          <div className="flex items-center justify-end gap-2 whitespace-nowrap">
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setInspect({
+                                                  holdingId: h.id,
+                                                  accountId: h.accountId ?? null,
+                                                  holdingName: h.name,
+                                                  accountName: h.accountName,
+                                                });
+                                              }}
+                                              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+                                              title="Inspect lots: see how this holding's lots are consumed"
+                                            >
+                                              <Layers className="h-3 w-3" /> Lots
+                                            </button>
+                                            <Link
+                                              href={buildTxDrillUrl({ portfolioHolding: h.name, accountId: h.accountId ? String(h.accountId) : undefined })}
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="text-[11px] text-primary hover:underline"
+                                              title="View transactions for this holding in this account"
+                                            >
+                                              View txns →
+                                            </Link>
+                                          </div>
                                         </TableCell>
                                       </TableRow>
                                     );
@@ -421,5 +450,14 @@ export function HoldingsTable({
         </div>
       </CardContent>
     </Card>
+    <LotInspectorDialog
+      open={inspect !== null}
+      onOpenChange={(open) => { if (!open) setInspect(null); }}
+      holdingId={inspect?.holdingId ?? null}
+      accountId={inspect?.accountId ?? null}
+      holdingName={inspect?.holdingName}
+      accountName={inspect?.accountName}
+    />
+    </>
   );
 }
