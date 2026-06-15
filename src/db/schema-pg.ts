@@ -608,6 +608,14 @@ export const users = pgTable(
     stripeCustomerId: text("stripe_customer_id"),
     loginCount: integer("login_count").notNull().default(0),
     lastLoginAt: text("last_login_at"),
+    // FINLYNQ-166 — last authenticated access of ANY kind (web session,
+    // OAuth/MCP token validation, pf_ API-key). Distinct from last_login_at
+    // (web password logins only) — it also reflects MCP / API-key activity, so
+    // the admin "Last active" column can flag dormant accounts. Bumped
+    // DB-side-throttled (>15 min stale) + fire-and-forget via
+    // src/lib/auth/last-active.ts (bumpLastActive). Nullable = never seen active.
+    // Migration: 20260620_user_last_active.sql.
+    lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
     // Envelope encryption: per-user DEK wrapped with a password-derived KEK.
     // All fields are base64-encoded. See src/lib/crypto/envelope.ts.
     // Nullable during migration — accounts created before encryption rollout

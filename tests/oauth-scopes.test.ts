@@ -17,6 +17,7 @@ import {
   DEFAULT_SCOPE,
   SCOPE_MCP_READ,
   SCOPE_MCP_WRITE,
+  scopeWasUnspecified,
 } from "@/lib/oauth-scopes";
 
 describe("mcpToolIsReadOnly — name-prefix classification", () => {
@@ -125,6 +126,24 @@ describe("normalizeRequestedScope", () => {
     expect(() => normalizeRequestedScope("mcp:read mcp:bogus")).toThrow(InvalidScopeError);
     expect(() => normalizeRequestedScope("read")).toThrow(InvalidScopeError);
     expect(() => normalizeRequestedScope("write")).toThrow(InvalidScopeError);
+  });
+});
+
+describe("scopeWasUnspecified — FINLYNQ-163 empty-scope detection", () => {
+  it("is true for exactly the inputs normalizeRequestedScope defaults to DEFAULT_SCOPE", () => {
+    // Lockstep guard: every input that defaults to full access must be
+    // detected as "unspecified" so the issuance log fires for it (and only it).
+    for (const input of [null, undefined, "", "   ", "\t\n"]) {
+      expect(scopeWasUnspecified(input)).toBe(true);
+      expect(normalizeRequestedScope(input)).toBe(DEFAULT_SCOPE);
+    }
+  });
+
+  it("is false when the client supplied a real (non-empty) scope", () => {
+    expect(scopeWasUnspecified("mcp:read")).toBe(false);
+    expect(scopeWasUnspecified("mcp:read mcp:write")).toBe(false);
+    // Even an unknown token is "specified" — it rejects rather than defaulting.
+    expect(scopeWasUnspecified("mcp:admin")).toBe(false);
   });
 });
 

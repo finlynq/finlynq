@@ -9,7 +9,7 @@
 import { db } from "@/db";
 import type { DrizzleDb } from "@/db";
 import * as pgSchema from "@/db/schema-pg";
-import { eq, count, sql, inArray, and } from "drizzle-orm";
+import { eq, count, sql, inArray, and, isNull } from "drizzle-orm";
 import crypto from "crypto";
 
 /** Returns the PostgreSQL schema tables */
@@ -238,6 +238,11 @@ export async function recordSuccessfulLogin(userId: string) {
     .where(eq(getSchema().users.id, userId));
 }
 
+// FINLYNQ-166 — the throttled last-active bump lives in lib/auth/last-active.ts
+// (bumpLastActive), wired from requireAuth (web + pf_ API key) and
+// validateOauthToken (OAuth/MCP). It is intentionally NOT here to avoid a
+// queries.ts ↔ require-auth.ts import cycle.
+
 // ─── Password reset token queries ───────────────────────────────────────────
 
 export async function createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string) {
@@ -350,12 +355,13 @@ export async function listUsers(options: { limit?: number; offset?: number } = {
       planExpiresAt: s.users.planExpiresAt,
       loginCount: s.users.loginCount,
       lastLoginAt: s.users.lastLoginAt,
+      lastActiveAt: s.users.lastActiveAt,
       createdAt: s.users.createdAt,
       updatedAt: s.users.updatedAt,
     })
     .from(s.users)
     .limit(limit)
-    .offset(offset) as Promise<{ id: string; username: string | null; email: string | null; displayName: string | null; role: string; emailVerified: number | boolean; mfaEnabled: number | boolean; onboardingComplete: number | boolean; plan: string; planExpiresAt: string | null; loginCount: number; lastLoginAt: string | null; createdAt: string; updatedAt: string }[]>;
+    .offset(offset) as Promise<{ id: string; username: string | null; email: string | null; displayName: string | null; role: string; emailVerified: number | boolean; mfaEnabled: number | boolean; onboardingComplete: number | boolean; plan: string; planExpiresAt: string | null; loginCount: number; lastLoginAt: string | null; lastActiveAt: string | Date | null; createdAt: string; updatedAt: string }[]>;
 }
 
 export async function getUserCount() {
@@ -531,6 +537,17 @@ export async function wipeUserDataAndRewrap(
   // FK failure (e.g. cross-tenant transaction_splits) left the user signed
   // in to a half-wiped account whose DEK was never rotated.
   await db.transaction(async (tx) => {
+    // FINLYNQ-154 — revoke every live OAuth grant FIRST. `deleteAllUserDataTx`
+    // already DELETEs these rows, so the security outcome (the orphaned wrapped
+    // DEK in any old access/refresh token can no longer be used → validateOauthToken
+    // 401s) is guaranteed either way. We flip `revoked_at` explicitly before the
+    // delete so the intent is encoded at the WIPE chokepoint and the post-reset
+    // window (between this UPDATE and the row delete in the same tx) is closed.
+    await tx
+      .update(s.oauthAccessTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(s.oauthAccessTokens.userId, userId), isNull(s.oauthAccessTokens.revokedAt)));
+
     await deleteAllUserDataTx(tx, userId);
 
     // Rewrap the DEK with the new password + bump encryption version so any

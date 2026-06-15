@@ -1,13 +1,15 @@
 "use client";
 
 /**
- * /settings/integrations — MCP server reference (issue #57).
+ * /settings/integrations — MCP server reference (issue #57) + Connected apps
+ * (FINLYNQ-154 — per-user OAuth grant list + revoke).
  * Extracted from the monolith /settings/page.tsx.
  */
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Server, Shield } from "lucide-react";
+import { ConnectedApps } from "./connected-apps";
 
 export default function IntegrationsSettingsPage() {
   return (
@@ -76,6 +78,8 @@ export default function IntegrationsSettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <ConnectedApps />
     </div>
   );
 }

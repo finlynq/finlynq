@@ -415,4 +415,48 @@ describe("transformTransactions", () => {
     expect(rows).toHaveLength(2);
     expect(rows.some((s) => s.categoryId === null)).toBe(true);
   });
+
+  // FINLYNQ-159 — reject absurd-magnitude amounts, not just non-numeric ones.
+  it("errors on an out-of-range amount (|amount| > 1e12) instead of emitting it", () => {
+    const rbc = wpAccount("acc-rbc", "RBC Checking", "A", "CAD");
+    const exp = wpCategory("cat-exp", "Misc", "E");
+    const { mapping, byName } = buildMapping([rbc], [exp]);
+
+    const tx: ExternalTransaction = {
+      id: "tx-huge",
+      date: "2026-04-20",
+      reviewed: false,
+      tags: [],
+      entries: [
+        { categorization: "RBC Checking", amount: "1e29", currency: "CAD", holding: null, note: "" },
+        { categorization: "Misc", amount: "1e29", currency: "CAD", holding: null, note: "" },
+      ],
+    };
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
+    expect(r.flat).toHaveLength(0);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0].externalId).toBe("tx-huge");
+    expect(r.errors[0].reason).toMatch(/out of range/);
+  });
+
+  it("still errors on a non-numeric amount with the non-numeric message", () => {
+    const rbc = wpAccount("acc-rbc", "RBC Checking", "A", "CAD");
+    const exp = wpCategory("cat-exp", "Misc", "E");
+    const { mapping, byName } = buildMapping([rbc], [exp]);
+
+    const tx: ExternalTransaction = {
+      id: "tx-nan",
+      date: "2026-04-20",
+      reviewed: false,
+      tags: [],
+      entries: [
+        { categorization: "RBC Checking", amount: "not-a-number", currency: "CAD", holding: null, note: "" },
+        { categorization: "Misc", amount: "not-a-number", currency: "CAD", holding: null, note: "" },
+      ],
+    };
+    const r = transformTransactions([tx], mapping, byName, { formatTag: "csv" });
+    expect(r.flat).toHaveLength(0);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0].reason).toMatch(/non-numeric/);
+  });
 });

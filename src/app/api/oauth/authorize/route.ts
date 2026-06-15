@@ -18,7 +18,7 @@ import {
   InvalidScopeError,
   DEFAULT_SCOPE,
 } from "@/lib/oauth";
-import { normalizeRequestedScope } from "@/lib/oauth-scopes";
+import { normalizeRequestedScope, scopeWasUnspecified } from "@/lib/oauth-scopes";
 import { getDEK } from "@/lib/crypto/dek-cache";
 
 export async function POST(request: NextRequest) {
@@ -133,6 +133,21 @@ export async function POST(request: NextRequest) {
       );
     }
     throw err;
+  }
+
+  // FINLYNQ-163 (least-privilege observability): the auth grant is where the
+  // client's RAW requested scope first arrives. When it's omitted/empty/
+  // whitespace it silently defaults to full access (DEFAULT_SCOPE = mcp:read
+  // mcp:write) for back-compat (Claude/Cursor rely on this). Behaviour is
+  // UNCHANGED — we only log so a future tightening can be data-driven. Logged
+  // here (once per grant) rather than in createAccessToken because callers
+  // pre-default the scope before the token-row write, so the "was it
+  // unspecified?" signal is only observable at this boundary.
+  if (scopeWasUnspecified(rawScope)) {
+    console.warn(
+      "[oauth] token issued with unspecified scope; defaulted to DEFAULT_SCOPE",
+      { clientId: client_id, scope: DEFAULT_SCOPE }
+    );
   }
 
   const code = await createAuthCode({

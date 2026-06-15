@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 import { parsePdfToTransactions } from "@/lib/pdf-parser";
 import { parseExcelSheets } from "@/lib/excel-parser";
 import { parseOfx } from "@/lib/ofx-parser";
-import { previewImport } from "@/lib/import-pipeline";
+import { previewImport, findUnreasonableAmountError } from "@/lib/import-pipeline";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { sourceTagFor, type FormatTag } from "@/lib/tx-source";
 import { requireAuth } from "@/lib/auth/require-auth";
@@ -94,6 +94,12 @@ export async function POST(request: NextRequest) {
             { status: 400 },
           );
         }
+        // FINLYNQ-159 — these rows skip previewImport, so enforce the
+        // finite / sane-magnitude bound here before returning a 200.
+        const amountErr = findUnreasonableAmountError(canonical.rows);
+        if (amountErr) {
+          return NextResponse.json({ error: amountErr }, { status: 400 });
+        }
         return NextResponse.json({
           type: "investment-statement",
           format: "ibkr-xml",
@@ -119,6 +125,11 @@ export async function POST(request: NextRequest) {
             { status: 400 },
           );
         }
+        // FINLYNQ-159 — direct-row path (no previewImport); enforce bound here.
+        const amountErr = findUnreasonableAmountError(canonical.rows);
+        if (amountErr) {
+          return NextResponse.json({ error: amountErr }, { status: 400 });
+        }
         return NextResponse.json({
           type: "investment-statement",
           format: canonical.format,
@@ -137,6 +148,16 @@ export async function POST(request: NextRequest) {
           { error: "No transactions found in OFX/QFX file." },
           { status: 400 },
         );
+      }
+
+      // FINLYNQ-159 — legacy bank/CC OFX transactions are surfaced verbatim
+      // (rows are built client-side after account selection), so they never
+      // pass through previewImport. Enforce the finite / sane-magnitude bound
+      // here. OfxTransaction only carries `amount` (no entered/quantity), so
+      // the shared scanner just checks that field.
+      const amountErr = findUnreasonableAmountError(ofxResult.transactions);
+      if (amountErr) {
+        return NextResponse.json({ error: amountErr }, { status: 400 });
       }
 
       // Return OFX metadata + preview — account assignment happens on the

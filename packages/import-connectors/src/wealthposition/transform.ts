@@ -10,7 +10,7 @@ import type {
   TransformResult,
   TransformSplitRow,
 } from "../types";
-import { isFormatTag, sourceTagFor } from "../types";
+import { isFormatTag, sourceTagFor, isReasonableAmount, MAX_REASONABLE_AMOUNT } from "../types";
 
 interface ClassifiedEntry {
   entry: ExternalTransactionEntry;
@@ -84,13 +84,15 @@ export function transformTransactions(
   for (const tx of externalTxs) {
     const classified = tx.entries.map((e) => classifyEntryFull(e, mapping, byName));
 
-    // Validate amounts
-    const badAmount = classified.find((c) => !Number.isFinite(c.amount));
+    // Validate amounts — non-numeric (NaN/±Infinity) OR out-of-range
+    // magnitude (FINLYNQ-159: reject |amount| > 1e12 instead of silently
+    // emitting a garbage ledger row).
+    const badAmount = classified.find((c) => !isReasonableAmount(c.amount));
     if (badAmount) {
-      errors.push({
-        externalId: tx.id,
-        reason: `Entry "${badAmount.entry.categorization}" has non-numeric amount "${badAmount.entry.amount}"`,
-      });
+      const reason = Number.isFinite(badAmount.amount)
+        ? `Entry "${badAmount.entry.categorization}" amount "${badAmount.entry.amount}" is out of range (max ±${MAX_REASONABLE_AMOUNT.toLocaleString()})`
+        : `Entry "${badAmount.entry.categorization}" has non-numeric amount "${badAmount.entry.amount}"`;
+      errors.push({ externalId: tx.id, reason });
       continue;
     }
 

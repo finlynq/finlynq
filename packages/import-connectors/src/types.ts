@@ -101,6 +101,22 @@ export function sourceTagFor(format: FormatTag): string {
   return `source:${format}`;
 }
 
+// ─── Numeric sanity bound (FINLYNQ-159) ───────────────────────────────────────
+//
+// Upper magnitude bound for any imported financial figure. A trillion in any
+// currency is already absurd for a personal-finance ledger; values past this
+// (e.g. `1e29` from a malformed export) are rejected rather than silently
+// transformed into a ledger row. Mirror of `MAX_REASONABLE_AMOUNT` /
+// `isReasonableAmount` in `pf-app/src/lib/utils/number.ts` — duplicated here so
+// the connectors package stays zero-dep / npm-publishable. Keep both in sync.
+export const MAX_REASONABLE_AMOUNT = 1e12;
+
+/** True when `n` is finite AND within ±{@link MAX_REASONABLE_AMOUNT}. Rejects
+ *  NaN, ±Infinity, and out-of-range magnitudes. */
+export function isReasonableAmount(n: number): boolean {
+  return Number.isFinite(n) && Math.abs(n) <= MAX_REASONABLE_AMOUNT;
+}
+
 export interface ConnectorListTransactionsOpts {
   /** ISO date (YYYY-MM-DD). */
   startDate?: string;

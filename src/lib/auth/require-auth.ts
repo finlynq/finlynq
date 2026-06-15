@@ -14,6 +14,7 @@
 import { NextRequest } from "next/server";
 import { AccountStrategy } from "./strategies/account";
 import { ApiKeyStrategy } from "./strategies/api-key";
+import { bumpLastActive } from "./last-active";
 import type { AuthResult, AuthStrategy } from "./strategy";
 
 // Singleton strategy instances
@@ -28,7 +29,14 @@ const apiKeyStrategy = new ApiKeyStrategy();
  * 2. Otherwise, use the account (JWT cookie) strategy.
  */
 export async function requireAuth(request: NextRequest): Promise<AuthResult> {
-  return selectStrategy(request).authenticate(request);
+  const result = await selectStrategy(request).authenticate(request);
+  // FINLYNQ-166 — advance last_active_at on any successful authed access (web
+  // session + pf_ API-key both funnel through here). DB-side-throttled +
+  // fire-and-forget so it never blocks or fails the request.
+  if (result.authenticated) {
+    void bumpLastActive(result.context.userId);
+  }
+  return result;
 }
 
 function selectStrategy(request: NextRequest): AuthStrategy {

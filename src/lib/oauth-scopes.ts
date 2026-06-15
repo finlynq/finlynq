@@ -112,10 +112,25 @@ export class InvalidScopeError extends Error {
   }
 }
 
+/**
+ * True iff `input` is the empty/unspecified scope that `normalizeRequestedScope`
+ * maps to `DEFAULT_SCOPE`. Single source of truth for "was the scope defaulted
+ * because the client omitted it?" — kept in lockstep with the L1 branch of
+ * `normalizeRequestedScope` so the issuance log line (FINLYNQ-163) detects the
+ * exact same condition that triggers the default. Pure; no side effects.
+ */
+export function scopeWasUnspecified(input: string | null | undefined): boolean {
+  return input == null || input.trim().length === 0;
+}
+
 export function normalizeRequestedScope(input: string | null | undefined): string {
-  if (input == null || input.trim().length === 0) return DEFAULT_SCOPE;
+  if (scopeWasUnspecified(input)) return DEFAULT_SCOPE;
+  // `scopeWasUnspecified` already excluded null/undefined/whitespace-only, but
+  // it returns a plain boolean (so the log-site can call it without a guard),
+  // which TS can't use to narrow `input`. The `?? ""` is unreachable — the
+  // guard above guarantees a non-empty string here.
   const seen = new Set<string>();
-  for (const tok of input.split(/\s+/).filter(Boolean)) {
+  for (const tok of (input ?? "").split(/\s+/).filter(Boolean)) {
     if (!VALID_SCOPE_TOKENS.has(tok)) {
       throw new InvalidScopeError(tok);
     }

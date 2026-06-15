@@ -32,8 +32,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatCurrency } from "@/lib/currency";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import LotPicker from "./LotPicker";
 import { todayISO } from "@/lib/utils/date";
+import { isOversell, shortAmount } from "@/lib/portfolio/oversell";
 import { useEditId } from "@/lib/hooks/useEditId";
 import { usePortfolioFormData } from "@/lib/hooks/usePortfolioFormData";
 import { useAccountHoldingSelection } from "@/lib/hooks/useAccountHoldingSelection";
@@ -71,6 +73,9 @@ export default function SellForm() {
   const [blockingClosureTxIds, setBlockingClosureTxIds] = useState<number[]>(
     [],
   );
+  // Oversell confirmation (FINLYNQ-162) — selling more than the current long
+  // position opens a short (a supported feature); warn-but-allow before commit.
+  const [oversellConfirmOpen, setOversellConfirmOpen] = useState(false);
 
   useEffect(() => {
     if (!editData) return;
@@ -128,7 +133,15 @@ export default function SellForm() {
     return Object.keys(e).length === 0;
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  // Current long position for the selected holding, from data the form already
+  // has (cached/displayed qty — advisory only). accountHoldings already excludes
+  // cash sleeves, so the oversell concept never applies to a cash row.
+  const heldQty = Number(selectedHolding?.currentShares ?? 0);
+  const wouldOpenShort =
+    !isEdit && isOversell(effectiveSellQty, heldQty);
+  const shortUnits = shortAmount(effectiveSellQty, heldQty);
+
+  function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitError(null);
     setBlockingClosureTxIds([]);
@@ -139,6 +152,17 @@ export default function SellForm() {
       );
       return;
     }
+    // Oversell gate (FINLYNQ-162): if the sell exceeds the long position, ask
+    // for confirmation BEFORE committing. Confirming proceeds; the sell is
+    // never blocked (a short lot opens — supported via holding_lots.side).
+    if (wouldOpenShort) {
+      setOversellConfirmOpen(true);
+      return;
+    }
+    void performSubmit();
+  }
+
+  async function performSubmit() {
     setSubmitting(true);
     try {
       // Phase 3 — when the lot picker is active the qty is the sum of per-lot
@@ -250,6 +274,7 @@ export default function SellForm() {
     !!cashSleeve;
 
   return (
+    <>
     <Card>
       <CardHeader>
         <CardTitle>{isEdit ? "Edit Sell" : "Sell"}</CardTitle>
@@ -523,5 +548,31 @@ export default function SellForm() {
         </form>
       </CardContent>
     </Card>
+
+      {/* Oversell confirmation (FINLYNQ-162) — warn-but-allow opening a short. */}
+      <ConfirmDialog
+        open={oversellConfirmOpen}
+        onOpenChange={setOversellConfirmOpen}
+        title="Sell more than you hold?"
+        description={
+          <>
+            This will open a short position of{" "}
+            <span className="font-medium text-foreground">
+              {shortUnits.toLocaleString()}
+            </span>{" "}
+            {selectedHolding?.symbol ?? "units"} (you hold{" "}
+            {heldQty.toLocaleString()}, selling{" "}
+            {effectiveSellQty.toLocaleString()}). Short positions are supported —
+            continue?
+          </>
+        }
+        confirmLabel="Open short & sell"
+        cancelLabel="Cancel"
+        onConfirm={() => {
+          setOversellConfirmOpen(false);
+          void performSubmit();
+        }}
+      />
+    </>
   );
 }

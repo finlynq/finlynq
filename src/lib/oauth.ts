@@ -10,6 +10,7 @@ import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { wrapDEKForSecret, unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
 import { normalizeDbRows } from "@/lib/db-utils";
+import { bumpLastActive } from "@/lib/auth/last-active";
 import { DEFAULT_SCOPE, normalizeRequestedScope } from "@/lib/oauth-scopes";
 
 export { DEFAULT_SCOPE, InvalidScopeError } from "@/lib/oauth-scopes";
@@ -302,6 +303,10 @@ export async function validateOauthToken(token: string): Promise<{ userId: strin
   }
   // Pre-PR rows have no scope; treat absence as DEFAULT_SCOPE for back-compat.
   const scope = (rows[0].scope && rows[0].scope.trim().length > 0) ? rows[0].scope : DEFAULT_SCOPE;
+  // FINLYNQ-166 — advance last_active_at on every successful OAuth/MCP token
+  // validation. This is the path last_login_at misses entirely. DB-side-throttled
+  // + fire-and-forget so it never blocks or fails token validation.
+  void bumpLastActive(rows[0].user_id);
   return { userId: rows[0].user_id, dek, scope };
 }
 
@@ -385,6 +390,138 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
   const preservedScope = (oldScope && oldScope.trim().length > 0) ? oldScope : DEFAULT_SCOPE;
 
   return createAccessToken(user_id, clientId, dek, preservedScope);
+}
+
+// ─── Token revocation (RFC 7009 + connected-apps + reset) ─────────────────────
+
+/**
+ * Revoke a single presented token (RFC 7009).
+ *
+ * Each `oauth_access_tokens` row IS one grant — it carries both the access
+ * token (`token`) and its refresh token (`refresh_token`). A presented token
+ * could be either, so we match on EITHER column and flip the whole row to
+ * `revoked_at = now()`. That kills the access AND refresh side of the grant in
+ * one shot, which also satisfies RFC 7009 §2.1's "if the token passed is a
+ * refresh token … the authorization server SHOULD revoke … access tokens based
+ * on the same authorization grant."
+ *
+ * Only live rows are touched (`revoked_at IS NULL`), so re-revoking an
+ * already-revoked token is a no-op. The caller (the RFC 7009 endpoint) returns
+ * 200 regardless of how many rows matched — never leaking whether the token
+ * existed.
+ *
+ * `token_type_hint` is accepted by the endpoint but intentionally ignored here:
+ * matching both columns is correct whether the hint is right, wrong, or absent.
+ */
+export async function revokeGrant(token: string): Promise<void> {
+  const tokenHash = authLookupHash(token);
+  await pgDb.execute(sql`
+    UPDATE oauth_access_tokens
+       SET revoked_at = now()
+     WHERE (token = ${tokenHash} OR refresh_token = ${tokenHash})
+       AND revoked_at IS NULL
+  `);
+}
+
+/**
+ * Revoke a single grant by its row id, scoped to the owning user.
+ *
+ * Used by the Settings "Connected apps" Revoke button. The `user_id` predicate
+ * is load-bearing — it prevents one user revoking another user's grant by
+ * guessing a row id. Flipping `revoked_at` on the row kills both the access and
+ * refresh sides of that grant at once.
+ *
+ * Returns true if a live row was revoked, false if the id was unknown,
+ * already-revoked, or owned by a different user.
+ */
+export async function revokeGrantById(userId: string, grantId: number): Promise<boolean> {
+  const result = await pgDb.execute(sql`
+    UPDATE oauth_access_tokens
+       SET revoked_at = now()
+     WHERE id = ${grantId}
+       AND user_id = ${userId}
+       AND revoked_at IS NULL
+     RETURNING id
+  `);
+  const rows = normalizeDbRows<{ id: number }>(result);
+  return rows.length > 0;
+}
+
+/**
+ * Revoke ALL live grants for a user.
+ *
+ * Called from the forgot-password WIPE flow so a reset cuts off every OAuth
+ * client that still holds a (now-orphaned) wrapped DEK. (The wipe also DELETEs
+ * these rows, so this is defense-in-depth / explicit intent — and it's the
+ * primitive a future password-change rewrap path can reuse without a wipe.)
+ *
+ * Returns the number of rows revoked.
+ */
+export async function revokeAllForUser(userId: string): Promise<number> {
+  const result = await pgDb.execute(sql`
+    UPDATE oauth_access_tokens
+       SET revoked_at = now()
+     WHERE user_id = ${userId}
+       AND revoked_at IS NULL
+     RETURNING id
+  `);
+  const rows = normalizeDbRows<{ id: number }>(result);
+  return rows.length;
+}
+
+/** A live OAuth grant as shown in Settings → Connected apps. */
+export interface ConnectedApp {
+  /** Row id — used as the revoke target. */
+  id: number;
+  clientId: string;
+  clientName: string;
+  scope: string;
+  createdAt: string;
+  /** Access-token expiry (ISO). The refresh token (30d) keeps the grant alive
+   *  past this — surfaced so the UI can note an idle vs. fresh grant later. */
+  expiresAt: string;
+}
+
+/**
+ * List a user's live OAuth grants for the Connected-apps UI.
+ *
+ * "Live" = not revoked AND the refresh token hasn't expired (the access token
+ * may already be past its 1h TTL but the grant is still re-issuable until the
+ * 30-day refresh window lapses — that's the meaningful "is this app still
+ * connected" signal). Joins `oauth_clients` for the human-readable name; an
+ * orphaned client_id (client row gone) falls back to the raw client_id.
+ *
+ * Per the FINLYNQ-154 triage scope this deliberately omits last-used —
+ * `last_used_at` was split to FINLYNQ-167.
+ */
+export async function listConnectedApps(userId: string): Promise<ConnectedApp[]> {
+  const nowIso = new Date().toISOString();
+  const result = await pgDb.execute(sql`
+    SELECT t.id, t.client_id, t.scope, t.created_at, t.expires_at, c.client_name
+      FROM oauth_access_tokens t
+      LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+     WHERE t.user_id = ${userId}
+       AND t.revoked_at IS NULL
+       AND t.refresh_expires_at > ${nowIso}
+     ORDER BY t.created_at DESC
+  `);
+  type Row = {
+    id: number;
+    client_id: string;
+    scope: string | null;
+    created_at: string;
+    expires_at: string;
+    client_name: string | null;
+  };
+  const rows = normalizeDbRows<Row>(result);
+  return rows.map((r) => ({
+    id: r.id,
+    clientId: r.client_id,
+    clientName: (r.client_name && r.client_name.trim().length > 0) ? r.client_name : r.client_id,
+    scope: (r.scope && r.scope.trim().length > 0) ? r.scope : DEFAULT_SCOPE,
+    createdAt: r.created_at,
+    expiresAt: r.expires_at,
+  }));
 }
 
 // ─── Redirect URI validation ──────────────────────────────────────────────────

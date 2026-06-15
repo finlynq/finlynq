@@ -112,6 +112,23 @@ export async function register() {
       console.error("[instrumentation] Failed to start sweep-revoked-jtis cron:", err);
     }
 
+    // Inactive DCR client expiry (FINLYNQ-160, audit #284 / M7). Daily sweep —
+    // delete `oauth_clients` rows with no token activity for 60 days AND no
+    // live (non-revoked, unexpired) tokens. Open DCR (RFC 7591) lets anyone
+    // register a client; this bounds table growth and reaps abandoned /
+    // leftover test clients once their tokens lapse. DEK-free hard delete.
+    try {
+      const { startExpireDcrClientsTimer, expireInactiveDcrClients } = await import(
+        "./src/lib/cron/expire-dcr-clients"
+      );
+      expireInactiveDcrClients().catch((err) => {
+        console.error("[instrumentation] initial expire-dcr-clients sweep failed:", err);
+      });
+      startExpireDcrClientsTimer();
+    } catch (err) {
+      console.error("[instrumentation] Failed to start expire-dcr-clients cron:", err);
+    }
+
     // (No inbound-email poll cron.) Under the DevManager push relay
     // (INBOUND_EMAIL_PROVIDER=self-smtp) the app holds no Mailpit credentials
     // and never polls a mail store — DevManager owns retries via its own

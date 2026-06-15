@@ -43,6 +43,9 @@ const SECURITY_HEADERS = [
 ];
 
 const nextConfig: NextConfig = {
+  // Drop the X-Powered-By: Next.js header (FINLYNQ-157 — tech-stack disclosure).
+  // The Via: 1.1 Caddy header is stripped by the Caddy reverse proxy; see ops note.
+  poweredByHeader: false,
   reactCompiler: true,
   // Standalone output for Docker deployments (produces .next/standalone)
   output: "standalone",

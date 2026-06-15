@@ -15,6 +15,7 @@ import { computePureActionPatch } from "./rules/execute";
 import { decryptRuleFields } from "./rules/crypto";
 import type { ConditionGroup, Action } from "./rules/schema";
 import { normalizeDate, parseAmount as parseAmountStr } from "./csv-parser";
+import { isReasonableAmount, MAX_REASONABLE_AMOUNT } from "./utils/number";
 import { encryptField, decryptField, tryDecryptField } from "./crypto/envelope";
 import { nameLookup } from "./crypto/encrypted-columns";
 import { buildHoldingResolver } from "./external-import/portfolio-holding-resolver";
@@ -172,6 +173,41 @@ async function buildLookups(userId: string, dek?: Buffer) {
   return { accountMap, accountCurrencyMap, categoryMap };
 }
 
+/**
+ * FINLYNQ-159 — pure scan for non-finite / absurd-magnitude numeric fields
+ * across already-parsed canonical rows. Returns a human-readable error string
+ * naming the first offending row + field, or `null` when every row is within
+ * the sane bound. Used by the OFX/QFX/IBKR preview branches that emit rows
+ * DIRECTLY (without going through {@link previewImport}, whose own per-row loop
+ * applies the same check). DEK-free and side-effect-free.
+ */
+export function findUnreasonableAmountError(
+  // Structural — accepts canonical RawTransaction rows AND the leaner
+  // OfxTransaction shape (which carries only `amount`). Optional numeric
+  // fields may be undefined OR null; both are skipped at runtime.
+  rows: Array<{
+    amount: number;
+    enteredAmount?: number | null;
+    quantity?: number | null;
+  }>,
+): string | null {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const fields: Array<[string, number | null | undefined]> = [
+      ["amount", row.amount],
+      ["entered amount", row.enteredAmount],
+      ["quantity", row.quantity],
+    ];
+    for (const [label, value] of fields) {
+      if (value == null) continue;
+      if (!isReasonableAmount(value)) {
+        return `Row ${i + 1}: ${label} out of range ("${value}"). Must be a finite value within ±${MAX_REASONABLE_AMOUNT.toLocaleString()}.`;
+      }
+    }
+  }
+  return null;
+}
+
 export async function previewImport(
   rows: RawTransaction[],
   userId: string,
@@ -230,6 +266,22 @@ export async function previewImport(
     }
     if (isNaN(row.amount)) {
       errors.push({ rowIndex: i, message: "Invalid amount" });
+      continue;
+    }
+    // FINLYNQ-159 — reject non-finite / absurd-magnitude numbers so a
+    // malformed file (e.g. amount `1e29`) can't slip a garbage figure into
+    // the ledger. Applies to amount, the entered-currency amount, and the
+    // portfolio quantity/price when present.
+    if (!isReasonableAmount(row.amount)) {
+      errors.push({ rowIndex: i, message: `Amount out of range: "${row.amount}". Must be a finite value within ±${MAX_REASONABLE_AMOUNT.toLocaleString()}.` });
+      continue;
+    }
+    if (row.enteredAmount != null && !isReasonableAmount(row.enteredAmount)) {
+      errors.push({ rowIndex: i, message: `Entered amount out of range: "${row.enteredAmount}". Must be a finite value within ±${MAX_REASONABLE_AMOUNT.toLocaleString()}.` });
+      continue;
+    }
+    if (row.quantity != null && !isReasonableAmount(row.quantity)) {
+      errors.push({ rowIndex: i, message: `Quantity out of range: "${row.quantity}". Must be a finite value within ±${MAX_REASONABLE_AMOUNT.toLocaleString()}.` });
       continue;
     }
 
