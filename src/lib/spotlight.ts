@@ -290,7 +290,7 @@ async function getLowBalances(userId: string, dek: Buffer | null, fx: RateCtx): 
     })
     .from(accounts)
     .leftJoin(transactions, eq(accounts.id, transactions.accountId))
-    .where(and(eq(accounts.userId, userId), eq(accounts.type, "A")))
+    .where(and(eq(accounts.userId, userId), eq(accounts.type, "A"), eq(accounts.archived, false)))
     .groupBy(accounts.id, accounts.nameCt, accounts.type, accounts.currency)
     .all();
 
