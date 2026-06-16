@@ -310,8 +310,12 @@ export default function InvestmentsSettingsPage() {
     }
     setLookupLoading(true);
     try {
+      // Only FORCE the crypto path when the user MANUALLY ticked the box — an
+      // auto-detected crypto flag left over from a previous ticker must not
+      // force-classify the next one (else BTC→AAPL stays "crypto" + no name).
+      const forceCrypto = cryptoTouchedRef.current && crypto;
       const res = await fetch(
-        `/api/securities/lookup?symbol=${encodeURIComponent(symbol)}${crypto ? "&crypto=1" : ""}`,
+        `/api/securities/lookup?symbol=${encodeURIComponent(symbol)}${forceCrypto ? "&crypto=1" : ""}`,
       );
       let name: string | null = null;
       let currency: string | null = null;
