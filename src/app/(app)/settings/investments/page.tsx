@@ -221,6 +221,23 @@ export default function InvestmentsSettingsPage() {
     return accounts.filter((a) => a.isInvestment && !a.archived && !taken.has(a.id));
   }, [securities, accounts, linkSecurityId]);
 
+  // base-ui Select renders the raw value in its trigger unless the Root is given
+  // an `items` value→label map; build one so the trigger shows the symbol /
+  // account name instead of the numeric id.
+  const securityLabelById = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const s of securities ?? []) {
+      const d = descriptionOf(s);
+      m[String(s.id)] = `${symbolLabel(s)}${d ? ` — ${d}` : ""} (${s.currency})`;
+    }
+    return m;
+  }, [securities]);
+  const accountLabelById = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const a of accounts) m[String(a.id)] = `${a.name} (${a.currency})`;
+    return m;
+  }, [accounts]);
+
   // ---- Add to portfolio ------------------------------------------------
 
   function openAdd() {
@@ -569,6 +586,7 @@ export default function InvestmentsSettingsPage() {
               <div>
                 <Label>Security</Label>
                 <Select
+                  items={securityLabelById}
                   value={linkSecurityId}
                   onValueChange={(v) => {
                     setLinkSecurityId(v ?? "");
@@ -597,7 +615,11 @@ export default function InvestmentsSettingsPage() {
               </div>
               <div>
                 <Label>Account</Label>
-                <Select value={linkAccountId} onValueChange={(v) => setLinkAccountId(v ?? "")}>
+                <Select
+                  items={accountLabelById}
+                  value={linkAccountId}
+                  onValueChange={(v) => setLinkAccountId(v ?? "")}
+                >
                   <SelectTrigger>
                     <SelectValue placeholder={linkSecurityId ? "Choose an account" : "Pick a security first"} />
                   </SelectTrigger>
