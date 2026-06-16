@@ -22,7 +22,7 @@ import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
 import { encryptName, nameLookup } from "../src/lib/crypto/encrypted-columns";
 import { encryptRuleFields, decryptRuleFields } from "../src/lib/rules/crypto";
 import { resolveDividendsCategoryId } from "../src/lib/dividends-category";
-import { resolveOrCreateSecurity } from "../src/lib/securities/resolve";
+import { resolveOrCreateSecurity, gcOrphanSecurity } from "../src/lib/securities/resolve";
 import { resolveOrCreateInvestmentIncomeCategory } from "../src/lib/investment-income-category";
 import {
   buildLoanSchedule,
@@ -5838,7 +5838,7 @@ export function registerPgTools(
       }
 
       const rawHoldings = await q(db, sql`
-        SELECT id, account_id, name_ct, symbol_ct
+        SELECT id, account_id, name_ct, symbol_ct, security_id, currency, is_crypto, is_cash
         FROM portfolio_holdings
         WHERE user_id = ${userId}
       `);
@@ -5876,6 +5876,34 @@ export function registerPgTools(
       if (note !== undefined) updates.push(sql`note = ${note}`);
       if (!updates.length) return err("No fields to update");
 
+      // Securities master edit-path dual-write (parity with PUT /api/portfolio):
+      // re-cluster the position under the NEW identity when symbol/name/currency/
+      // isCrypto changes. Null DEK (stdio) ⇒ resolveOrCreateSecurity returns null
+      // ⇒ security_id untouched (the login backfill reconciles on next web login).
+      const oldSecurityId: number | null =
+        h.security_id != null ? Number(h.security_id) : null;
+      let securityChanged = false;
+      if (name !== undefined || symbol !== undefined || currency !== undefined || isCrypto !== undefined) {
+        const nextName = name !== undefined ? name : ((h.name as string | null) ?? null);
+        const nextSymbol =
+          symbol !== undefined
+            ? (symbol.trim() ? symbol.trim() : null)
+            : ((h.symbol as string | null) ?? null);
+        const nextCurrency = currency !== undefined ? currency : String(h.currency ?? "");
+        const nextIsCrypto = isCrypto !== undefined ? isCrypto : Number(h.is_crypto ?? 0) === 1;
+        const resolved = await resolveOrCreateSecurity(userId, dek, {
+          symbol: nextSymbol,
+          name: nextName,
+          isCryptoFlag: nextIsCrypto,
+          isCash: h.is_cash === true,
+          currency: nextCurrency,
+        });
+        if (resolved != null && resolved !== oldSecurityId) {
+          updates.push(sql`security_id = ${resolved}`);
+          securityChanged = true;
+        }
+      }
+
       try {
         const result = await db.execute(
           sql`UPDATE portfolio_holdings SET ${sql.join(updates, sql`, `)} WHERE id = ${h.id} AND user_id = ${userId}`
@@ -5885,6 +5913,8 @@ export function registerPgTools(
             ? (result as { rowCount: number }).rowCount
             : null;
         if (affected === 0) return err(`Holding "${h.name}" not found or not owned by this user`);
+        // GC the prior security if this edit left it backing zero positions.
+        if (securityChanged) await gcOrphanSecurity(userId, oldSecurityId);
         return text({ success: true, data: { holdingId: h.id, message: `Holding "${h.name}" updated` } });
       } catch (e) {
         // 23505 = unique_violation: tried to rename into an existing

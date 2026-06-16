@@ -24,7 +24,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { requireEncryption } from "@/lib/auth/require-encryption";
-import { encryptName } from "@/lib/crypto/encrypted-columns";
+import { encryptName, decryptName } from "@/lib/crypto/encrypted-columns";
+import { resolveOrCreateSecurity, gcOrphanSecurity } from "@/lib/securities/resolve";
 import { safeErrorMessage, logApiError } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
@@ -38,6 +39,9 @@ export async function POST(request: NextRequest) {
         id: schema.portfolioHoldings.id,
         currency: schema.portfolioHoldings.currency,
         symbolCt: schema.portfolioHoldings.symbolCt,
+        nameCt: schema.portfolioHoldings.nameCt,
+        securityId: schema.portfolioHoldings.securityId,
+        isCrypto: schema.portfolioHoldings.isCrypto,
       })
       .from(schema.portfolioHoldings)
       .where(
@@ -71,6 +75,30 @@ export async function POST(request: NextRequest) {
             eq(schema.portfolioHoldings.userId, userId),
           ),
         );
+      // Securities master: stamping a symbol on a metal sleeve (currency XAU/…)
+      // moves its cluster from cash#<CCY> to metal:<hmac>, so re-resolve and
+      // re-point security_id. Plain fiat cash sleeves resolve to the SAME
+      // security (cluster keyed on currency) → no-op. Mirrors the PUT path.
+      const resolved = await resolveOrCreateSecurity(userId, dek, {
+        symbol: h.currency,
+        name: decryptName(h.nameCt, dek, null),
+        isCryptoFlag: (h.isCrypto ?? 0) === 1,
+        isCash: true,
+        currency: h.currency,
+      });
+      const oldSecurityId = h.securityId ?? null;
+      if (resolved != null && resolved !== oldSecurityId) {
+        await db
+          .update(schema.portfolioHoldings)
+          .set({ securityId: resolved })
+          .where(
+            and(
+              eq(schema.portfolioHoldings.id, h.id),
+              eq(schema.portfolioHoldings.userId, userId),
+            ),
+          );
+        await gcOrphanSecurity(userId, oldSecurityId);
+      }
       fixed += 1;
     }
 

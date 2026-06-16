@@ -22,7 +22,7 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { buildNameFields, nameLookup } from "@/lib/crypto/encrypted-columns";
 import {
   classifyHoldingForSecurity,
@@ -144,4 +144,38 @@ export async function resolveOrCreateSecurity(
     )
     .get();
   return after?.id ?? null;
+}
+
+/**
+ * Garbage-collect a security row that no position references any more.
+ *
+ * Called after an EDIT re-points a position at a DIFFERENT security
+ * (`resolveOrCreateSecurity` returned a new id on a symbol/name/currency
+ * change): if the OLD security now backs zero positions, delete it so its
+ * `cluster_key` frees up and the management UI (/settings/investments) doesn't
+ * show a phantom ticker. A security may legitimately back many positions (the
+ * same ticker across accounts — the merge case), so we only delete on a true
+ * zero-reference count.
+ *
+ * Atomic NOT EXISTS guard — a concurrent insert that re-links a position keeps
+ * the row. The `portfolio_holdings.security_id` FK is `ON DELETE SET NULL`, so
+ * even a lost race only nulls a position's `security_id` (the login backfill /
+ * next resolve re-links it); positions / lots / transactions are never touched.
+ *
+ * No-op when `securityId` is null. Per-user scoped.
+ */
+export async function gcOrphanSecurity(
+  userId: string,
+  securityId: number | null,
+): Promise<void> {
+  if (securityId == null) return;
+  await db.execute(sql`
+    DELETE FROM securities
+    WHERE id = ${securityId}
+      AND user_id = ${userId}
+      AND NOT EXISTS (
+        SELECT 1 FROM portfolio_holdings
+        WHERE security_id = ${securityId} AND user_id = ${userId}
+      )
+  `);
 }

@@ -6,7 +6,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptName, decryptNamedRows, nameLookup } from "@/lib/crypto/encrypted-columns";
-import { resolveOrCreateSecurity } from "@/lib/securities/resolve";
+import { resolveOrCreateSecurity, gcOrphanSecurity } from "@/lib/securities/resolve";
 import {
   holdingCreateSchema,
   holdingUpdateSchema,
@@ -178,6 +178,10 @@ export async function PUT(request: NextRequest) {
         id: schema.portfolioHoldings.id,
         nameCt: schema.portfolioHoldings.nameCt,
         symbolCt: schema.portfolioHoldings.symbolCt,
+        securityId: schema.portfolioHoldings.securityId,
+        currency: schema.portfolioHoldings.currency,
+        isCrypto: schema.portfolioHoldings.isCrypto,
+        isCash: schema.portfolioHoldings.isCash,
       })
       .from(schema.portfolioHoldings)
       .where(
@@ -191,26 +195,31 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Holding not found" }, { status: 404 });
     }
 
+    // Decrypt the current identity once, then derive the EFFECTIVE post-edit
+    // identity — a field the caller didn't send keeps its current value. Used
+    // by BOTH the canonical-name guard and the securities-master re-resolve.
+    const currentName = decryptName(existing.nameCt, auth.dek, null);
+    const currentSymbol = decryptName(existing.symbolCt, auth.dek, null);
+    const nextName = data.name !== undefined ? data.name : currentName;
+    const nextSymbol =
+      data.symbol !== undefined
+        ? (data.symbol && data.symbol.trim() ? data.symbol.trim() : null)
+        : currentSymbol;
+    const nextCurrency = data.currency !== undefined ? data.currency : existing.currency;
+    const nextIsCrypto =
+      data.isCrypto !== undefined ? data.isCrypto === 1 : existing.isCrypto === 1;
+
     // Section F (issue #25): block Name edits on canonical rows. The
     // canonicalize helper would rewrite a user-typed name back to symbol /
     // "Cash" / "Cash <CCY>" on next login, so silently dropping the edit is
     // worse than rejecting it up front. Symbol / currency / isCrypto / note
     // are still editable — change the symbol to rename a tickered position.
-    if (data.name !== undefined) {
-      const currentName = decryptName(existing.nameCt, auth.dek, null);
-      const currentSymbol = decryptName(existing.symbolCt, auth.dek, null);
-      // The "next" symbol is the about-to-write value when the user is also
-      // editing symbol; otherwise the existing symbol. Likewise for the row
-      // type on cash-sleeve rows (no symbol → name "Cash" gates).
-      const nextSymbol = data.symbol !== undefined
-        ? (data.symbol && data.symbol.trim() ? data.symbol.trim() : null)
-        : currentSymbol;
-      if (isCanonicalHolding(currentName, nextSymbol)) {
-        return NextResponse.json(
-          { error: "name is auto-managed for this holding type — edit the symbol or currency to rename" },
-          { status: 400 },
-        );
-      }
+    // (nextSymbol is the about-to-write value when symbol is also edited.)
+    if (data.name !== undefined && isCanonicalHolding(currentName, nextSymbol)) {
+      return NextResponse.json(
+        { error: "name is auto-managed for this holding type — edit the symbol or currency to rename" },
+        { status: 400 },
+      );
     }
 
     // Stream D Phase 4 — plaintext name/symbol dropped. Re-encrypt and strip
@@ -227,10 +236,39 @@ export async function PUT(request: NextRequest) {
     delete (dataNoNames as Record<string, unknown>).name;
     delete (dataNoNames as Record<string, unknown>).symbol;
 
+    // Securities master edit-path dual-write — when an identity field changes
+    // (symbol / name / currency / isCrypto) the position must re-cluster under
+    // the NEW identity instead of clinging to its old security_id (e.g.
+    // GOOGL → GOOG has to move to the GOOG security). Mirrors the INSERT-side
+    // dual-write; runs regardless of the read-flip flag (writes always link).
+    // Never overwrite a live security_id with null — an un-clusterable resolve
+    // leaves it for the login backfill to heal. → securities.md
+    const identityChanged =
+      data.symbol !== undefined ||
+      data.name !== undefined ||
+      data.currency !== undefined ||
+      data.isCrypto !== undefined;
+    let newSecurityId: number | null = existing.securityId;
+    if (identityChanged) {
+      const resolved = await resolveOrCreateSecurity(auth.userId, auth.dek, {
+        symbol: nextSymbol,
+        name: nextName,
+        isCryptoFlag: nextIsCrypto,
+        isCash: existing.isCash === true,
+        currency: nextCurrency,
+      });
+      if (resolved != null) newSecurityId = resolved;
+    }
+    const securityIdChanged = newSecurityId !== existing.securityId;
+
     try {
       const updated = await db
         .update(schema.portfolioHoldings)
-        .set({ ...dataNoNames, ...encFields })
+        .set({
+          ...dataNoNames,
+          ...encFields,
+          ...(securityIdChanged ? { securityId: newSecurityId } : {}),
+        })
         .where(
           and(
             eq(schema.portfolioHoldings.id, id),
@@ -239,6 +277,8 @@ export async function PUT(request: NextRequest) {
         )
         .returning()
         .get();
+      // GC the prior security if this edit left it backing zero positions.
+      if (securityIdChanged) await gcOrphanSecurity(auth.userId, existing.securityId);
       return NextResponse.json(updated);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
