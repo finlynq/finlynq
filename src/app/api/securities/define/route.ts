@@ -26,6 +26,8 @@ import { db, schema } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
 import { resolveOrCreateSecurity } from "@/lib/securities/resolve";
 import { currencyCode } from "@/lib/schemas/holding";
+import { isSupportedCurrency, isCryptoCurrency } from "@/lib/fx/supported-currencies";
+import { symbolToCoinGeckoId } from "@/lib/crypto-service";
 
 const defineSchema = z.object({
   symbol: z.string().trim().min(1).max(50),
@@ -37,6 +39,23 @@ const defineSchema = z.object({
 export const POST = apiHandler(
   { auth: "encryption", body: defineSchema, fallbackMessage: "Failed to add security" },
   async ({ userId, dek, body }) => {
+    // A fiat/metal currency code (USD/EUR/XAU) is a CASH position, not a
+    // tradable security — those are account-bound sleeves. Reject + guide to the
+    // dedicated "+ Cash" flow so we never mint a bare cash#<CCY> security with
+    // no sleeve. Crypto codes (BTC/ETH) are allowed (they're real securities).
+    const sym = body.symbol.trim().toUpperCase();
+    const looksCrypto =
+      body.isCrypto === true || symbolToCoinGeckoId(sym) != null || isCryptoCurrency(sym);
+    if (!looksCrypto && isSupportedCurrency(sym)) {
+      return NextResponse.json(
+        {
+          error:
+            `“${sym}” is a currency. Add a cash position from the “By account” tab (+ Cash) instead.`,
+        },
+        { status: 400 },
+      );
+    }
+
     const securityId = await resolveOrCreateSecurity(userId, dek, {
       symbol: body.symbol,
       name: body.name ?? body.symbol,

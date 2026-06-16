@@ -21,7 +21,7 @@
  * SWR). → plan/architecture/securities.md
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -142,13 +142,24 @@ export default function InvestmentsSettingsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [addSymbol, setAddSymbol] = useState("");
   const [addName, setAddName] = useState("");
-  const [addNameTouched, setAddNameTouched] = useState(false);
   const [addCurrency, setAddCurrency] = useState("USD");
-  const [addCurrencyTouched, setAddCurrencyTouched] = useState(false);
   const [addIsCrypto, setAddIsCrypto] = useState(false);
   const [addErrors, setAddErrors] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
   const [lookupLoading, setLookupLoading] = useState(false);
+  // Auto-fill bookkeeping (refs avoid stale-closure reads inside the async
+  // lookup): which fields the user edited by hand + a sequence guard so a slow
+  // lookup for a previous ticker can't clobber a newer one.
+  const nameTouchedRef = useRef(false);
+  const currencyTouchedRef = useRef(false);
+  const cryptoTouchedRef = useRef(false);
+  const lookupSeqRef = useRef(0);
+
+  // Add-cash-sleeve dialog (Tab 3 "+ Cash").
+  const [cashAccountId, setCashAccountId] = useState<number | null>(null);
+  const [cashCurrency, setCashCurrency] = useState("");
+  const [cashError, setCashError] = useState("");
+  const [cashSubmitting, setCashSubmitting] = useState(false);
 
   // Rename dialog.
   const [renameSecurity, setRenameSecurity] = useState<Security | null>(null);
@@ -277,31 +288,89 @@ export default function InvestmentsSettingsPage() {
   function openAdd() {
     setAddSymbol("");
     setAddName("");
-    setAddNameTouched(false);
     setAddCurrency("USD");
-    setAddCurrencyTouched(false);
     setAddIsCrypto(false);
+    nameTouchedRef.current = false;
+    currencyTouchedRef.current = false;
+    cryptoTouchedRef.current = false;
+    lookupSeqRef.current++; // invalidate any in-flight lookup
     setAddErrors({});
     setAddOpen(true);
   }
 
-  async function lookupTicker(raw: string) {
-    const symbol = raw.trim();
-    if (!symbol) return;
+  // Resolve name/currency (+ crypto detection) for a ticker. Refreshes the
+  // auto-managed fields to match THIS ticker — clearing a stale auto-name when
+  // the new ticker is unknown — but never overwrites a field the user edited.
+  async function lookupTicker(rawSymbol: string, crypto: boolean) {
+    const symbol = rawSymbol.trim();
+    const seq = ++lookupSeqRef.current;
+    if (!symbol) {
+      if (!nameTouchedRef.current) setAddName("");
+      return;
+    }
     setLookupLoading(true);
     try {
-      const res = await fetch(`/api/securities/lookup?symbol=${encodeURIComponent(symbol)}`);
-      if (!res.ok) return;
-      const json = await res.json();
-      const d = (json.data ?? json) as { found?: boolean; name?: string | null; currency?: string | null };
-      if (d?.found) {
-        if (!addNameTouched && d.name) setAddName(d.name);
-        if (!addCurrencyTouched && d.currency) setAddCurrency(d.currency);
+      const res = await fetch(
+        `/api/securities/lookup?symbol=${encodeURIComponent(symbol)}${crypto ? "&crypto=1" : ""}`,
+      );
+      let name: string | null = null;
+      let currency: string | null = null;
+      let isCrypto: boolean | undefined;
+      if (res.ok) {
+        const json = await res.json();
+        const d = (json.data ?? json) as {
+          found?: boolean;
+          name?: string | null;
+          currency?: string | null;
+          isCrypto?: boolean;
+        };
+        name = d?.name ?? null;
+        currency = d?.currency ?? null;
+        isCrypto = d?.isCrypto;
       }
+      if (seq !== lookupSeqRef.current) return; // superseded by a newer lookup
+      if (!nameTouchedRef.current) setAddName(name ?? "");
+      if (!currencyTouchedRef.current && currency) setAddCurrency(currency);
+      if (!cryptoTouchedRef.current && typeof isCrypto === "boolean") setAddIsCrypto(isCrypto);
     } catch {
       /* best-effort — manual entry */
     } finally {
-      setLookupLoading(false);
+      if (seq === lookupSeqRef.current) setLookupLoading(false);
+    }
+  }
+
+  function openCash(accountId: number) {
+    setCashAccountId(accountId);
+    setCashCurrency("");
+    setCashError("");
+  }
+
+  async function submitCash() {
+    if (cashAccountId == null) return;
+    const currency = cashCurrency.trim().toUpperCase();
+    if (!/^[A-Z]{3,4}$/.test(currency)) {
+      setCashError("Enter a 3-4 letter currency code");
+      return;
+    }
+    setCashSubmitting(true);
+    try {
+      const res = await fetch("/api/portfolio/holdings/cash-sleeve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: cashAccountId, currency }),
+      });
+      if (!res.ok) {
+        const msg = await parseSaveError(res, "Failed to add cash sleeve");
+        setCashError(msg);
+        return;
+      }
+      setCashAccountId(null);
+      showToast("success", "Cash sleeve added");
+      await load();
+    } catch (e) {
+      setCashError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setCashSubmitting(false);
     }
   }
 
@@ -825,9 +894,14 @@ export default function InvestmentsSettingsPage() {
                             </div>
                           ))
                         )}
-                        <Button variant="outline" size="sm" onClick={() => openLinkSecurity(account.id)}>
-                          <Plus className="h-3.5 w-3.5 mr-1" /> Security
-                        </Button>
+                        <div className="flex flex-wrap gap-2">
+                          <Button variant="outline" size="sm" onClick={() => openLinkSecurity(account.id)}>
+                            <Plus className="h-3.5 w-3.5 mr-1" /> Security
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={() => openCash(account.id)}>
+                            <Plus className="h-3.5 w-3.5 mr-1" /> Cash
+                          </Button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -876,8 +950,11 @@ export default function InvestmentsSettingsPage() {
               <div className="relative">
                 <Input
                   value={addSymbol}
-                  onChange={(e) => setAddSymbol(e.target.value)}
-                  onBlur={() => lookupTicker(addSymbol)}
+                  onChange={(e) => {
+                    setAddSymbol(e.target.value);
+                    if (!nameTouchedRef.current) setAddName(""); // drop stale auto-name
+                  }}
+                  onBlur={() => lookupTicker(addSymbol, addIsCrypto)}
                   placeholder="e.g. AAPL, VTI, BTC"
                   autoFocus
                 />
@@ -896,7 +973,7 @@ export default function InvestmentsSettingsPage() {
                 value={addName}
                 onChange={(e) => {
                   setAddName(e.target.value);
-                  setAddNameTouched(true);
+                  nameTouchedRef.current = true;
                 }}
                 placeholder="auto-filled from the ticker, or type it"
               />
@@ -908,7 +985,7 @@ export default function InvestmentsSettingsPage() {
                   value={addCurrency}
                   onChange={(e) => {
                     setAddCurrency(e.target.value.toUpperCase());
-                    setAddCurrencyTouched(true);
+                    currencyTouchedRef.current = true;
                   }}
                   placeholder="USD"
                   maxLength={4}
@@ -919,7 +996,11 @@ export default function InvestmentsSettingsPage() {
                 <input
                   type="checkbox"
                   checked={addIsCrypto}
-                  onChange={(e) => setAddIsCrypto(e.target.checked)}
+                  onChange={(e) => {
+                    setAddIsCrypto(e.target.checked);
+                    cryptoTouchedRef.current = true;
+                    lookupTicker(addSymbol, e.target.checked);
+                  }}
                 />
                 Crypto asset
               </label>
@@ -977,6 +1058,40 @@ export default function InvestmentsSettingsPage() {
             </Button>
             <Button onClick={submitLink} disabled={linking}>
               {linking ? "Adding…" : "Add"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Add cash sleeve dialog (Tab 3 "+ Cash") ───────────────────── */}
+      <Dialog open={cashAccountId != null} onOpenChange={(o) => { if (!o) setCashAccountId(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add cash sleeve</DialogTitle>
+            <DialogDescription>
+              Add a per-currency cash position to this account (e.g. a USD sleeve in a
+              CAD account). One sleeve per currency.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label>Currency</Label>
+              <Input
+                value={cashCurrency}
+                onChange={(e) => setCashCurrency(e.target.value.toUpperCase())}
+                placeholder="e.g. USD, EUR, XAU"
+                maxLength={4}
+                autoFocus
+              />
+              {cashError && <p className="text-xs text-rose-600 mt-1">{cashError}</p>}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCashAccountId(null)} disabled={cashSubmitting}>
+              Cancel
+            </Button>
+            <Button onClick={submitCash} disabled={cashSubmitting}>
+              {cashSubmitting ? "Adding…" : "Add cash sleeve"}
             </Button>
           </DialogFooter>
         </DialogContent>
