@@ -1,10 +1,13 @@
 /**
  * GET /api/reconcile/summary — per-account reconciliation summary
- * (FINLYNQ-147, 2026-06-12).
+ * (FINLYNQ-147, 2026-06-12; FINLYNQ-184, 2026-06-17).
  *
  * Powers the "what's up to date / what's stale" panel on /import. Each row:
- *   { accountId, accountName, currency, archived, isInvestment,
- *     hidden, lastImportAt, lastReconciledAt, pendingCount }
+ *   { accountId, accountName, currency, lastImportAt, lastReconciledAt, pendingCount }
+ *
+ * Archived accounts and accounts in reconcile_hidden_accounts are excluded
+ * (FINLYNQ-184). The user has intentionally tucked these away; surfacing them
+ * in the summary would clutter the panel with accounts they don't manage here.
  *
  * All money-in figures are DERIVED from existing tables (bank_upload_batches +
  * transactions.bank_transaction_id lineage + bank_transactions anti-join) — no
@@ -29,9 +32,8 @@ export async function GET(request: NextRequest) {
   const { userId, dek } = auth.context;
 
   try {
-    // Include archived so the summary can surface stale archived accounts;
-    // the UI labels them. (The dropdown still hides archived separately.)
-    const rawAccounts = await getAccounts(userId, { includeArchived: true });
+    // Exclude archived accounts — they've been intentionally closed off.
+    const rawAccounts = await getAccounts(userId);
     // decryptNamedRows writes the decrypted `name`/`alias` onto the rows at
     // runtime (the plaintext columns were physically dropped in Stream D
     // Phase 4, so they're not in the static row type — cast through unknown,
@@ -44,7 +46,6 @@ export async function GET(request: NextRequest) {
       name: string | null;
       alias?: string | null;
       currency: string;
-      archived?: boolean;
       isInvestment?: boolean;
     }>;
 
@@ -55,20 +56,22 @@ export async function GET(request: NextRequest) {
     const summaryByAccount = new Map(summary.map((s) => [s.accountId, s]));
     const hiddenSet = new Set(hidden);
 
-    const rows = accounts.map((a) => {
-      const s = summaryByAccount.get(a.id);
-      return {
-        accountId: a.id,
-        accountName: safeAccountName(a),
-        currency: a.currency,
-        archived: a.archived === true,
-        isInvestment: a.isInvestment === true,
-        hidden: hiddenSet.has(a.id),
-        lastImportAt: s?.lastImportAt ?? null,
-        lastReconciledAt: s?.lastReconciledAt ?? null,
-        pendingCount: s?.pendingCount ?? 0,
-      };
-    });
+    // Filter out hidden accounts (user tucked them out of the dropdown via
+    // /settings/import). Archived accounts are already excluded by not passing
+    // { includeArchived: true } above (FINLYNQ-184).
+    const rows = accounts
+      .filter((a) => !hiddenSet.has(a.id))
+      .map((a) => {
+        const s = summaryByAccount.get(a.id);
+        return {
+          accountId: a.id,
+          accountName: safeAccountName(a),
+          currency: a.currency,
+          lastImportAt: s?.lastImportAt ?? null,
+          lastReconciledAt: s?.lastReconciledAt ?? null,
+          pendingCount: s?.pendingCount ?? 0,
+        };
+      });
 
     return NextResponse.json({ rows });
   } catch (error: unknown) {

@@ -7,8 +7,8 @@
  *
  * Each row: account name, last import date, last reconciled date, pending
  * (unreconciled) bank-row count, and a quick "Open" link that selects that
- * account on /import. Hidden + archived accounts are surfaced with a label so
- * the user can spot stale ones they've tucked out of the dropdown.
+ * account on /import. Archived and hidden accounts are excluded server-side
+ * (FINLYNQ-184) — the API route filters them before returning.
  *
  * Bespoke fetch/useState/useEffect per the FINLYNQ-118 money-page pattern (no
  * SWR). Lazy: only fetches when first expanded.
@@ -22,9 +22,6 @@ export interface ReconcileSummaryApiRow {
   accountId: number;
   accountName: string;
   currency: string;
-  archived: boolean;
-  isInvestment: boolean;
-  hidden: boolean;
   lastImportAt: string | null;
   lastReconciledAt: string | null;
   pendingCount: number;
@@ -151,16 +148,6 @@ export function ReconcileSummaryPanel({
                         <span className="ml-1 text-xs text-muted-foreground">
                           {r.currency}
                         </span>
-                        {r.archived && (
-                          <span className="ml-1.5 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                            archived
-                          </span>
-                        )}
-                        {r.hidden && (
-                          <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
-                            hidden
-                          </span>
-                        )}
                       </td>
                       <td className="py-2 pr-4 text-muted-foreground">
                         {fmtDate(r.lastImportAt)}
