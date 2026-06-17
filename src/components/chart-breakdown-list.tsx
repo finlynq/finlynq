@@ -10,6 +10,12 @@
  * via `rankBreakdown` in src/lib/chart-breakdown.ts) — this component only
  * renders. Reused by the Net Worth and Income vs Expenses tooltips, and is the
  * intended render target for FINLYNQ-129's stacked-member view legend.
+ *
+ * The default keeps the `max-h-40` cap + inner scroll (small-viewport safety for
+ * the dashboard sparkline / Net Worth / Income-Expenses tooltips). Pass
+ * `uncapped` to drop the cap so the list auto-sizes to its full content — used
+ * ONLY by the Performance chart's StackTooltip (FINLYNQ-181), where clipping the
+ * holdings list behind an inner scrollbar was the reported bug.
  */
 
 import { formatCurrency } from "@/lib/currency";
@@ -24,10 +30,19 @@ export function TooltipBreakdownList({
   currency,
   /** Heading above the list, e.g. "By account" / "By category". */
   heading,
+  /**
+   * Drop the `max-h-40` height cap + inner scroll so the list auto-sizes to its
+   * full content. Default `false` preserves the capped+scrollable behavior that
+   * the dashboard sparkline / Net Worth / Income-Expenses tooltips rely on for
+   * small-viewport safety. Opt in ONLY from the Performance StackTooltip
+   * (FINLYNQ-181).
+   */
+  uncapped = false,
 }: {
   rows: BreakdownRow[] | undefined;
   currency: string;
   heading?: string;
+  uncapped?: boolean;
 }) {
   if (!rows || rows.length === 0) return null;
   return (
@@ -37,8 +52,9 @@ export function TooltipBreakdownList({
           {heading}
         </p>
       )}
-      {/* Cap height so a long list scrolls instead of running off small screens. */}
-      <div className="max-h-40 overflow-y-auto pr-1 space-y-0.5">
+      {/* Cap height so a long list scrolls instead of running off small screens,
+          UNLESS `uncapped` — then auto-size to show the full list (FINLYNQ-181). */}
+      <div className={uncapped ? "pr-1 space-y-0.5" : "max-h-40 overflow-y-auto pr-1 space-y-0.5"}>
         {rows.map((r, i) => (
           <div key={`${r.name}-${i}`} className="flex items-center gap-3 text-xs">
             <span className="text-muted-foreground truncate max-w-[140px]" title={r.name}>
