@@ -13,6 +13,7 @@ import { clusterFromAssetType } from "@/lib/securities/canonical";
 import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import { cashLegSkipSql, dividendAttributionHoldingIdSql } from "@/lib/portfolio/aggregation-predicates";
+import { aggregateMovers } from "@/lib/portfolio/top-movers";
 import { todayISO } from "@/lib/utils/date";
 
 export async function GET(request: NextRequest) {
@@ -889,21 +890,6 @@ export async function GET(request: NextRequest) {
       ]
     : namedStocks;
 
-  // 10. Gainers & losers (top movers by absolute dollar value change)
-  // Rank by dayChangeDisplay (display-currency day change) so that holdings
-  // with the largest real-dollar impact surface first. Percentage is retained
-  // as a secondary display column but is NOT the ranking key.
-  // Tie-break: equal dayChangeDisplay → symbol alphabetically ascending.
-  const movers = enrichedHoldings
-    .filter(h => h.dayChangeDisplay !== null && h.symbol)
-    .sort((a, b) => {
-      const diff = Math.abs(b.dayChangeDisplay!) - Math.abs(a.dayChangeDisplay!);
-      if (diff !== 0) return diff;
-      return (a.symbol ?? "").localeCompare(b.symbol ?? "");
-    });
-  const topGainers = movers.filter(h => (h.dayChangeDisplay ?? 0) > 0).slice(0, 5);
-  const topLosers = movers.filter(h => (h.dayChangeDisplay ?? 0) < 0).slice(0, 5);
-
   // Add pctOfPortfolio to each holding
   const holdingsWithPct = enrichedHoldings.map(h => ({
     ...h,
@@ -944,6 +930,34 @@ export async function GET(request: NextRequest) {
   // the first member's canonicalKey, keeping the response identical.
   const useSecurityGrouping = await securitiesReadEnabledForUser(userId);
 
+  // Single canonical bucket key, shared by the All-Holdings rollup (byHoldingMap)
+  // AND the Top Movers aggregation (FINLYNQ-190) — there is exactly ONE grouping
+  // path. Bucket on the real security_id FK when the read-flip is on and the row
+  // is backfilled; otherwise the legacy canonicalKey string (un-backfilled rows
+  // converge to the same key).
+  const moverBucketKey = (h: typeof enrichedHoldings[number]): string =>
+    useSecurityGrouping && h.securityId != null ? `sec:${h.securityId}` : canonicalKey(h).key;
+
+  // 10. Gainers & losers (top movers by absolute dollar value change).
+  // FINLYNQ-190: aggregate per-position holdings into ONE row per ticker
+  // (canonical security key) BEFORE the top-5 slice — a ticker held across N
+  // accounts must surface once. The consolidated day-change $ is the sum across
+  // accounts; the % is a value-weighted aggregate (Σ day-change ÷ Σ prior-day
+  // value), NOT one account's percent. Cash/metals/custom (no symbol) stay
+  // excluded by aggregateMovers. Rank by absolute display-currency day-change
+  // (tie-break: symbol asc), then cap at 5 — AFTER aggregation.
+  const aggregatedMovers = aggregateMovers(
+    enrichedHoldings,
+    moverBucketKey,
+    (h) => canonicalKey(h),
+  ).sort((a, b) => {
+    const diff = Math.abs(b.dayChangeDisplay) - Math.abs(a.dayChangeDisplay);
+    if (diff !== 0) return diff;
+    return (a.symbol ?? "").localeCompare(b.symbol ?? "");
+  });
+  const topGainers = aggregatedMovers.filter(m => m.dayChangeDisplay > 0).slice(0, 5);
+  const topLosers = aggregatedMovers.filter(m => m.dayChangeDisplay < 0).slice(0, 5);
+
   type ByHoldingAccum = {
     key: string;
     symbol: string | null;
@@ -966,11 +980,9 @@ export async function GET(request: NextRequest) {
   const byHoldingMap = new Map<string, ByHoldingAccum>();
   for (const h of enrichedHoldings) {
     const ck = canonicalKey(h);
-    // Bucket on security_id when the flag is on and the row is backfilled;
-    // otherwise the legacy canonicalKey string. `acc.key` stays the legacy
-    // string regardless (opaque React key / display id).
-    const bucketKey =
-      useSecurityGrouping && h.securityId != null ? `sec:${h.securityId}` : ck.key;
+    // Same canonical bucket key as Top Movers (moverBucketKey). `acc.key` stays
+    // the legacy canonicalKey string regardless (opaque React key / display id).
+    const bucketKey = moverBucketKey(h);
     let acc = byHoldingMap.get(bucketKey);
     if (!acc) {
       acc = {

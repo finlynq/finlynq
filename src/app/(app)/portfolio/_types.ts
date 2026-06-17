@@ -177,8 +177,20 @@ export type OverviewData = {
     sectors: Record<string, number>;
     aggregatedStocks: AggregatedStock[];
   };
-  topGainers: EnrichedHolding[];
-  topLosers: EnrichedHolding[];
+  topGainers: Mover[];
+  topLosers: Mover[];
+};
+
+// FINLYNQ-190: a consolidated Top Movers row — one per ticker (canonical
+// security key), with the day-change $ summed across accounts and a
+// value-weighted aggregate %. Keyed on the canonical key, NOT a per-position id.
+export type Mover = {
+  key: string;
+  symbol: string | null;
+  name: string;
+  image: string | null;
+  dayChangeDisplay: number;
+  changePct: number | null;
 };
 
 export type BenchmarkData = {
