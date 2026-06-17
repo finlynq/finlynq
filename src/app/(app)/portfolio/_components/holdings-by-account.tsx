@@ -50,6 +50,7 @@ export function HoldingsByAccount({
           const stocks = items.filter(h => h.assetType === "stock").length;
           const cryptos = items.filter(h => h.assetType === "crypto").length;
           const cash = items.filter(h => h.assetType === "cash").length;
+          const metals = items.filter(h => h.assetType === "metal").length;
           // Inline aggregate stats per account — sum the per-holding
           // *Display fields the API already emits in displayCurrency.
           const acctMktValue = items.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
@@ -131,6 +132,20 @@ export function HoldingsByAccount({
                         }}
                       >
                         {cash} Cash
+                      </Badge>
+                    )}
+                    {metals > 0 && (
+                      <Badge
+                        variant="secondary"
+                        className="text-[10px] h-4"
+                        ref={(el: HTMLElement | null) => {
+                          if (el) {
+                            el.style.borderColor = ASSET_TYPE_CONFIG.metal.color;
+                            el.style.color = ASSET_TYPE_CONFIG.metal.color;
+                          }
+                        }}
+                      >
+                        {metals} Metal
                       </Badge>
                     )}
                   </div>

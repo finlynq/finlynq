@@ -519,15 +519,20 @@ export async function GET(request: NextRequest) {
   }
 
   // 7. Build enriched holdings
-  type AssetType = "etf" | "stock" | "crypto" | "cash";
+  type AssetType = "etf" | "stock" | "crypto" | "cash" | "metal";
 
   const enrichedHoldings = holdings.map(h => {
     const isCrypto = h.isCrypto === 1 || (h.symbol ? isCryptoSymbol(h.symbol) : false);
     const symbolIsCurrency = symbolIsCash(h.symbol);
     const isEtf = h.symbol && !symbolIsCurrency ? (getEtfRegionBreakdown(h.symbol) !== null) : false;
 
+    // Display asset-type — metals (XAU/XAG/XPT/XPD) get their OWN "metal" type
+    // (not "cash") so the badge matches the Securities tab, whose stored
+    // `asset_type` is "metal" (clusterFromAssetType). Order: crypto → metal →
+    // cash (currency-code / no-symbol) → etf → stock.
     let assetType: AssetType = "cash";
     if (isCrypto) assetType = "crypto";
+    else if (h.symbol && isMetalCurrency(h.symbol.toUpperCase())) assetType = "metal";
     else if (!h.symbol || symbolIsCurrency) assetType = "cash";
     else if (isEtf) assetType = "etf";
     else assetType = "stock";
@@ -742,6 +747,7 @@ export async function GET(request: NextRequest) {
     stock: { count: 0, value: 0 },
     crypto: { count: 0, value: 0 },
     cash: { count: 0, value: 0 },
+    metal: { count: 0, value: 0 },
   };
   for (const h of enrichedHoldings) {
     byType[h.assetType].count++;
@@ -921,7 +927,10 @@ export async function GET(request: NextRequest) {
   // for cash, ticker otherwise).
   const canonicalKey = (h: typeof enrichedHoldings[number]): ByHoldingKey => {
     const c = clusterFromAssetType({
-      assetType: h.assetType,
+      // clusterFromAssetType takes the 4-value CanonicalAssetType and re-derives
+      // "metal" from the symbol itself, so feed it "cash" for our display-only
+      // "metal" type (a metal symbol + assetType "cash" → the metal cluster).
+      assetType: h.assetType === "metal" ? "cash" : h.assetType,
       symbol: h.symbol,
       currency: h.currency,
       name: h.name,

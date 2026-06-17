@@ -7,7 +7,7 @@
  */
 
 import {
-  BarChart3, Coins, DollarSign, Layers, type LucideIcon,
+  BarChart3, Coins, DollarSign, Layers, Gem, type LucideIcon,
 } from "lucide-react";
 import { isMetalCurrency } from "@/lib/fx/supported-currencies";
 
@@ -42,6 +42,7 @@ export const ASSET_TYPE_CONFIG: Record<string, { label: string; color: string; i
   stock: { label: "Stocks", color: "#06b6d4", icon: BarChart3 },
   crypto: { label: "Crypto", color: "#f59e0b", icon: Coins },
   cash: { label: "Cash", color: "#10b981", icon: DollarSign },
+  metal: { label: "Metals", color: "#ca8a04", icon: Gem },
 };
 
 export const REGION_COLORS: Record<string, string> = {
@@ -56,7 +57,7 @@ export const SECTOR_COLORS: Record<string, string> = {
 };
 
 // ── Types ───────────────────────────────────────────────────────────
-export type AssetType = "etf" | "stock" | "crypto" | "cash";
+export type AssetType = "etf" | "stock" | "crypto" | "cash" | "metal";
 
 export type EnrichedHolding = {
   id: number;

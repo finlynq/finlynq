@@ -107,7 +107,7 @@ export function HoldingsTable({
           </div>
           <div className="flex items-center gap-2">
             <div className="flex gap-1 flex-wrap">
-              {(["all", "etf", "stock", "crypto", "cash"] as const).map(t => (
+              {(["all", "etf", "stock", "crypto", "metal", "cash"] as const).map(t => (
                 <Button
                   key={t}
                   variant={filter === t ? "default" : "outline"}
