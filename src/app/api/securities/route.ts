@@ -24,7 +24,7 @@
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, desc, asc } from "drizzle-orm";
 
 import { db, schema } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
@@ -158,27 +158,44 @@ export const PATCH = apiHandler(
     if (updated.length === 0) {
       return NextResponse.json({ error: "Security not found" }, { status: 404 });
     }
-    // Copy the rename down onto every member position. A same-account legacy
-    // duplicate could trip the (user,account,name_lookup) partial unique index;
-    // the security rename already committed, so swallow that edge — it's a
-    // separate data-cleanup concern, not a reason to fail the rename.
+    // Copy the rename down onto every member position — ONE AT A TIME, not a
+    // single atomic batch. A stray member (e.g. a non-cash holding mis-linked
+    // to a cash security, or a legacy duplicate) sharing an account with a
+    // legitimate member would make both end up with the same name → the
+    // (user,account,name_lookup) partial unique index trips. A batch UPDATE then
+    // fails ATOMICALLY and renames NOTHING; per-member updates rename every good
+    // position and skip only the colliding stray. Cash sleeves are renamed FIRST
+    // (is_cash DESC) so they win the name and the stray is the one skipped.
+    const members = await db
+      .select({ id: schema.portfolioHoldings.id })
+      .from(schema.portfolioHoldings)
+      .where(
+        and(
+          eq(schema.portfolioHoldings.securityId, body.id),
+          eq(schema.portfolioHoldings.userId, userId),
+        ),
+      )
+      .orderBy(desc(schema.portfolioHoldings.isCash), asc(schema.portfolioHoldings.id));
     let positions = 0;
-    try {
-      const rows = await db
-        .update(schema.portfolioHoldings)
-        .set({ nameCt, nameLookup })
-        .where(
-          and(
-            eq(schema.portfolioHoldings.securityId, body.id),
-            eq(schema.portfolioHoldings.userId, userId),
-          ),
-        )
-        .returning({ id: schema.portfolioHoldings.id });
-      positions = rows.length;
-    } catch {
-      /* legacy same-account name collision — leave those positions as-is */
+    let skipped = 0;
+    for (const m of members) {
+      try {
+        await db
+          .update(schema.portfolioHoldings)
+          .set({ nameCt, nameLookup })
+          .where(
+            and(
+              eq(schema.portfolioHoldings.id, m.id),
+              eq(schema.portfolioHoldings.userId, userId),
+            ),
+          );
+        positions++;
+      } catch {
+        // Same-account name collision for this member — leave it as-is.
+        skipped++;
+      }
     }
-    return { id: body.id, name: body.name, positions };
+    return { id: body.id, name: body.name, positions, skipped };
   },
 );
 
