@@ -30,13 +30,22 @@ export type WeeklyRecap = {
   netWorthChange: number;
 };
 
-function getWeekBounds(endDate?: string): { weekStart: string; weekEnd: string; prevWeekStart: string; prevWeekEnd: string } {
-  const end = endDate ? new Date(endDate + "T00:00:00") : new Date();
-  // Find the Sunday of the current week (or use endDate's week)
-  const dayOfWeek = end.getDay();
-  const weekEnd = new Date(end);
-  // Set to Saturday end of week
-  weekEnd.setDate(weekEnd.getDate() + (6 - dayOfWeek));
+export function getWeekBounds(endDate?: string): { weekStart: string; weekEnd: string; prevWeekStart: string; prevWeekEnd: string } {
+  const anchor = endDate ? new Date(endDate + "T00:00:00") : new Date();
+  const dayOfWeek = anchor.getDay();
+  const weekEnd = new Date(anchor);
+  if (endDate) {
+    // Explicit-date callers (e.g. MCP get_weekly_recap): return the week CONTAINING the given date.
+    weekEnd.setDate(weekEnd.getDate() + (6 - dayOfWeek));
+  } else {
+    // No-arg / default path (web widget): anchor on the last COMPLETED Sun→Sat week so
+    // the recap never includes future days. Shift back to the most recent past Saturday
+    // by subtracting (dayOfWeek + 1) days — works for every day of the week:
+    //   Sun (0) → -1 → last Saturday ✓
+    //   Tue (2) → -3 → last Saturday ✓
+    //   Sat (6) → -7 → the Saturday one week ago ✓
+    weekEnd.setDate(weekEnd.getDate() - (dayOfWeek + 1));
+  }
   const weekStart = new Date(weekEnd);
   weekStart.setDate(weekStart.getDate() - 6);
 
