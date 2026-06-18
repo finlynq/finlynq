@@ -7,6 +7,7 @@ import {
   faqSchema,
   breadcrumbSchema,
 } from "@/components/seo/json-ld";
+import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title: "What is Finlynq? — open-source personal finance app with first-party MCP",
@@ -18,7 +19,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "What is Finlynq? — open-source personal finance with first-party MCP",
     description:
-      "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 102 MCP tools. Not affiliated with Finq.com or Finlync.",
+      "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 109 MCP tools. Not affiliated with Finq.com or Finlync.",
     url: "/about",
     siteName: "Finlynq",
     type: "article",
@@ -50,7 +51,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Monarch Money, YNAB, or Simplifi?",
-    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable with a first-party MCP server (102 HTTP / 93 stdio tools) and per-user envelope encryption that excludes even the operator from reading your data. Finlynq does not yet have first-party Plaid bank sync — it imports from CSV, OFX, QFX, and email today, with the SnapTrade brokerage integration on the roadmap. Side-by-side comparison at finlynq.com/vs/monarch.",
+    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable with a first-party MCP server (109 HTTP / 93 stdio tools) and per-user envelope encryption that excludes even the operator from reading your data. Finlynq does not yet have first-party Plaid bank sync — it imports from CSV, OFX, QFX, and email today, with the SnapTrade brokerage integration on the roadmap. Side-by-side comparison at finlynq.com/vs/monarch.",
   },
   {
     q: "How is Finlynq different from Firefly III or Actual Budget?",
@@ -58,7 +59,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Era?",
-    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Finlynq's specific differentiators vs Era: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for AES-256-at-rest), and a 102 HTTP / 93 stdio tool MCP surface (v3.2.0) vs Era's 27. Era has stronger US bank sync, native iOS/Android, and shared household features. Side-by-side comparison at finlynq.com/vs/era.",
+    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Finlynq's specific differentiators vs Era: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for AES-256-at-rest), and a 109 HTTP / 93 stdio tool MCP surface (v3.3.0) vs Era's 27. Era has stronger US bank sync, native iOS/Android, and shared household features. Side-by-side comparison at finlynq.com/vs/era.",
   },
   {
     q: "Does Finlynq sync with my bank automatically?",
@@ -178,10 +179,10 @@ export default function AboutPage() {
           <ul className="list-disc pl-6 space-y-2">
             <li>
               <strong className="text-foreground">First-party MCP server.</strong>{" "}
-              102 HTTP tools and 93 stdio tools at v3.2.0 — built into the
-              project, not a community wrapper. OAuth 2.1 + Dynamic Client
-              Registration, Bearer API keys, and stdio transports all
-              supported.
+              {MCP_TOOL_COUNTS.http} HTTP tools and {MCP_TOOL_COUNTS.stdio} stdio
+              tools at v{MCP_SERVER_VERSION} — built into the project, not a
+              community wrapper. OAuth 2.1 + Dynamic Client Registration, Bearer
+              API keys, and stdio transports all supported.
             </li>
             <li>
               <strong className="text-foreground">

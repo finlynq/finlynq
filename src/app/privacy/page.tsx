@@ -30,7 +30,7 @@ export default function PrivacyPage() {
           </Link>
           <h1 className="mt-4 text-4xl font-bold tracking-tight">Privacy Policy</h1>
           <p className="mt-3 text-sm text-muted-foreground">
-            Last updated: 2026-05-08
+            Last updated: 2026-06-18
           </p>
         </header>
 
@@ -279,7 +279,7 @@ export default function PrivacyPage() {
             <li>
               You can wipe your account from{" "}
               <code>Settings → Data → Delete account</code>. This removes every
-              row scoped to your <code>user_id</code> across all 22 tables in a
+              row in every table scoped to your <code>user_id</code> in a
               single transaction.
             </li>
             <li>Operational logs are retained for 30 days, then rotated.</li>

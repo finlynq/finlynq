@@ -51,7 +51,7 @@ const content: VsPageContent = {
     },
     {
       label: "First-party MCP",
-      finlynq: "Yes — 102 HTTP / 93 stdio tools",
+      finlynq: "Yes — 109 HTTP / 93 stdio tools",
       competitor:
         "No — but a public REST API has spawned community MCPs (calebl/ynab-mcp-server and others)",
     },

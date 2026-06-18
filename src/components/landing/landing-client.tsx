@@ -9,7 +9,7 @@ const FEATURES = [
   {
     idx: "F.01 · AI NATIVE",
     title: "Talk to your money in plain English.",
-    desc: "Connect Claude, Cursor, or any MCP client — or use the in-app AI chat with zero setup. 102 HTTP / 93 stdio tools. Ask questions, get charts and structured answers — no custom exports, no BI tool needed.",
+    desc: "Connect Claude, Cursor, or any MCP client — or use the in-app AI chat with zero setup. 109 HTTP / 93 stdio tools. Ask questions, get charts and structured answers — no custom exports, no BI tool needed.",
     viz: "bars",
   },
   {
@@ -74,7 +74,7 @@ const MCP_TOOLS = [
 ];
 
 const PLAN_FEATS = [
-  "102 MCP tools (HTTP) · 93 (stdio) — read & write",
+  "109 MCP tools (HTTP) · 93 (stdio) — read & write",
   "Per-user AES-256-GCM envelope encryption · operator can't decrypt",
   "In-app AI chat — no MCP client setup required",
   "Native mobile app for iOS + Android (coming soon)",
@@ -281,7 +281,7 @@ export function LandingClient() {
           <div className="hero-copy reveal">
             <div className="hero-bar">
               <span className="tag">MCP</span>
-              <span>102 HTTP / 93 stdio tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
+              <span>109 HTTP / 93 stdio tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
             </div>
 
             <Link href="/blog/finlynq-mobile-app" className="hero-bar hero-bar-mobile hero-bar-link">
@@ -318,7 +318,7 @@ export function LandingClient() {
 
             <div className="hero-meta">
               <div className="cell">
-                <div className="v num">102</div>
+                <div className="v num">109</div>
                 <div className="k">MCP tools (HTTP)</div>
               </div>
               <div className="cell">
@@ -520,7 +520,7 @@ export function LandingClient() {
               </h2>
             </div>
             <p className="lede reveal d2">
-              A built-in MCP server exposes 102 HTTP financial tools (93 over stdio) to any compatible client over OAuth 2.1 + DCR. No custom
+              A built-in MCP server exposes 109 HTTP financial tools (93 over stdio) to any compatible client over OAuth 2.1 + DCR. No custom
               code, no brittle exports, no exporting to a spreadsheet then copying into a prompt.
             </p>
           </div>
