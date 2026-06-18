@@ -5,23 +5,34 @@
  * date / what's stale" table for the /import surface. Reads GET
  * /api/reconcile/summary (figures derived from existing tables, no new column).
  *
- * Each row: account name, last import date, last reconciled date, pending
- * (unreconciled) bank-row count, and a quick "Open" link that selects that
- * account on /import. Archived and hidden accounts are excluded server-side
- * (FINLYNQ-184) — the API route filters them before returning.
+ * Each row: account name, current balance, last import date, last reconciled
+ * date, pending (unreconciled) bank-row count, and a quick "Open" link that
+ * selects that account on /import. Archived and hidden accounts are excluded
+ * server-side (FINLYNQ-184) — the API route filters them before returning.
+ *
+ * FINLYNQ-196 — the table now renders via the shared sortable `DataTable`
+ * (src/components/ui/data-table.tsx): every data column is click-to-sort, and a
+ * Current balance column shows the per-account balance in the account's own
+ * currency (investment accounts marked to MARKET via the FINLYNQ-151 overlay at
+ * the API route — NOT a naive SUM(amount)). The "Open" column is a non-sortable
+ * action column.
  *
  * Bespoke fetch/useState/useEffect per the FINLYNQ-118 money-page pattern (no
  * SWR). Lazy: only fetches when first expanded.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { formatCurrency } from "@/lib/currency";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 
 export interface ReconcileSummaryApiRow {
   accountId: number;
   accountName: string;
   currency: string;
+  /** Current balance in the account's own currency (market for investment). */
+  currentBalance: number;
   lastImportAt: string | null;
   lastReconciledAt: string | null;
   pendingCount: number;
@@ -72,6 +83,81 @@ export function ReconcileSummaryPanel({
     if (open) void load();
   }, [open, reloadKey, load]);
 
+  const columns = useMemo<DataTableColumn<ReconcileSummaryApiRow>[]>(
+    () => [
+      {
+        key: "account",
+        header: "Account",
+        accessor: (r) => r.accountName,
+        render: (r) => (
+          <>
+            <span className="font-medium">{r.accountName}</span>
+            <span className="ml-1 text-xs text-muted-foreground">
+              {r.currency}
+            </span>
+          </>
+        ),
+      },
+      {
+        key: "balance",
+        header: "Current balance",
+        align: "right",
+        accessor: (r) => r.currentBalance,
+        render: (r) => formatCurrency(r.currentBalance, r.currency),
+      },
+      {
+        key: "lastImport",
+        header: "Last import",
+        accessor: (r) => r.lastImportAt,
+        render: (r) => (
+          <span className="text-muted-foreground">{fmtDate(r.lastImportAt)}</span>
+        ),
+      },
+      {
+        key: "lastReconciled",
+        header: "Last reconciled",
+        accessor: (r) => r.lastReconciledAt,
+        render: (r) => (
+          <span className="text-muted-foreground">
+            {fmtDate(r.lastReconciledAt)}
+          </span>
+        ),
+      },
+      {
+        key: "pending",
+        header: "Pending",
+        align: "right",
+        accessor: (r) => r.pendingCount,
+        render: (r) =>
+          r.pendingCount > 0 ? (
+            <span className="font-medium text-amber-700 dark:text-amber-400">
+              {r.pendingCount}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">0</span>
+          ),
+      },
+      {
+        key: "open",
+        header: "",
+        sortable: false,
+        align: "right",
+        accessor: () => null,
+        render: (r) => (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            onClick={() => onOpenAccount(r.accountId)}
+          >
+            Open
+          </Button>
+        ),
+      },
+    ],
+    [onOpenAccount],
+  );
+
   return (
     <div className="rounded-xl border bg-card">
       <button
@@ -88,7 +174,7 @@ export function ReconcileSummaryPanel({
           )}
           <span className="text-sm font-medium">Reconciliation summary</span>
           <span className="text-xs text-muted-foreground">
-            last import &amp; reconcile per account
+            balance, last import &amp; reconcile per account
           </span>
         </div>
         {open && (
@@ -129,55 +215,12 @@ export function ReconcileSummaryPanel({
             </p>
           )}
           {!error && rows && rows.length > 0 && (
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
-                    <th className="py-2 pr-4 font-medium">Account</th>
-                    <th className="py-2 pr-4 font-medium">Last import</th>
-                    <th className="py-2 pr-4 font-medium">Last reconciled</th>
-                    <th className="py-2 pr-4 font-medium text-right">Pending</th>
-                    <th className="py-2 font-medium" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r) => (
-                    <tr key={r.accountId} className="border-t">
-                      <td className="py-2 pr-4">
-                        <span className="font-medium">{r.accountName}</span>
-                        <span className="ml-1 text-xs text-muted-foreground">
-                          {r.currency}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-4 text-muted-foreground">
-                        {fmtDate(r.lastImportAt)}
-                      </td>
-                      <td className="py-2 pr-4 text-muted-foreground">
-                        {fmtDate(r.lastReconciledAt)}
-                      </td>
-                      <td className="py-2 pr-4 text-right tabular-nums">
-                        {r.pendingCount > 0 ? (
-                          <span className="font-medium text-amber-700 dark:text-amber-400">
-                            {r.pendingCount}
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground">0</span>
-                        )}
-                      </td>
-                      <td className="py-2 text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          onClick={() => onOpenAccount(r.accountId)}
-                        >
-                          Open
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="mt-3">
+              <DataTable
+                columns={columns}
+                rows={rows}
+                rowKey={(r) => r.accountId}
+              />
             </div>
           )}
         </div>
