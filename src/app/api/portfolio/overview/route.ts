@@ -1,8 +1,8 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and, isNotNull, sql, ne } from "drizzle-orm";
+import { eq, and, isNotNull, sql, ne, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { fetchMultipleQuotes, aggregatePortfolioExposure, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, getAvailableEtfSymbols, autoSeedEtfIfMissing } from "@/lib/price-service";
+import { fetchMultipleQuotes, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, isEtfQuoteType } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, convertCurrency, getDisplayCurrency, getRate } from "@/lib/fx-service";
 import { isMetalCurrency, isCryptoSymbol, isCurrencyCodeSymbol } from "@/lib/fx/supported-currencies";
@@ -66,6 +66,11 @@ export async function GET(request: NextRequest) {
       isCrypto: schema.portfolioHoldings.isCrypto,
       securityId: schema.portfolioHoldings.securityId,
       securityNameCt: sec.nameCt,
+      // FINLYNQ-201: the security's stored asset_type — the durable, user-
+      // settable ETF classification (user override > persisted Yahoo quoteType).
+      // The cluster_key (NOT asset_type) is the grouping key, so this is purely
+      // cosmetic and never re-clusters (canonical.ts).
+      securityAssetType: sec.assetType,
       note: schema.portfolioHoldings.note,
     })
     .from(schema.portfolioHoldings)
@@ -528,18 +533,23 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // 6c. Auto-seed any ETF symbols not yet in the shared ETF database
-  for (const h of nonCryptoWithSymbol) {
-    if (h.symbol) autoSeedEtfIfMissing(h.symbol);
-  }
-
   // 7. Build enriched holdings
   type AssetType = "etf" | "stock" | "crypto" | "cash" | "metal";
 
   const enrichedHoldings = holdings.map(h => {
     const isCrypto = h.isCrypto === 1 || (h.symbol ? isCryptoSymbol(h.symbol) : false);
     const symbolIsCurrency = symbolIsCash(h.symbol);
-    const isEtf = h.symbol && !symbolIsCurrency ? (getEtfRegionBreakdown(h.symbol) !== null) : false;
+    // FINLYNQ-201: ETF-vs-stock is no longer keyed on a hardcoded list.
+    // Resolution order (durable, stable across warm/cold price_cache):
+    //   1. user override / persisted Yahoo type — `securities.asset_type === 'etf'`
+    //   2. live Yahoo `quoteType` ('ETF') on this fetch (null on a warm-cache hit)
+    //   3. fallback → stock
+    // (1) wins so a user choice + a previously-persisted Yahoo classification
+    // survive a warm cache (when the live quoteType is unavailable). The persist
+    // step below writes a fresh live 'ETF' back onto `securities.asset_type`.
+    const userOrPersistedEtf = (h.securityAssetType ?? "").toLowerCase() === "etf";
+    const liveEtf = h.symbol && !symbolIsCurrency ? isEtfQuoteType(quotes.get(h.symbol)?.quoteType) : false;
+    const isEtf = h.symbol && !symbolIsCurrency ? (userOrPersistedEtf || liveEtf) : false;
 
     // Display asset-type — metals (XAU/XAG/XPT/XPD) get their OWN "metal" type
     // (not "cash") so the badge matches the Securities tab, whose stored
@@ -717,6 +727,42 @@ export async function GET(request: NextRequest) {
       daysHeld,
     };
   });
+
+  // 7b. FINLYNQ-201: persist a freshly-resolved Yahoo ETF classification onto
+  // `securities.asset_type` so the badge is DURABLE (stable across warm-cache
+  // reads, when the live quoteType is unavailable). One-time promotion only:
+  // we upgrade a security currently typed "stock" (the default for the eq:
+  // bucket) → "etf". A non-"stock" stored type (a user override, or an already-
+  // persisted "etf") is left untouched, so the USER OVERRIDE ALWAYS WINS.
+  // asset_type is cosmetic (canonical.ts) — this NEVER changes cluster_key and
+  // never re-clusters. Fire-and-forget; best-effort (no DEK needed).
+  if (dek) {
+    const promoteSecIds = new Set<number>();
+    for (const h of nonCryptoWithSymbol) {
+      if (h.securityId == null || !h.symbol) continue;
+      if ((h.securityAssetType ?? "").toLowerCase() !== "stock") continue; // override/etf → leave
+      if (isEtfQuoteType(quotes.get(h.symbol)?.quoteType)) promoteSecIds.add(h.securityId);
+    }
+    if (promoteSecIds.size > 0) {
+      const ids = [...promoteSecIds];
+      void (async () => {
+        try {
+          await db
+            .update(schema.securities)
+            .set({ assetType: "etf", updatedAt: sql`NOW()` })
+            .where(
+              and(
+                eq(schema.securities.userId, userId),
+                eq(schema.securities.assetType, "stock"),
+                inArray(schema.securities.id, ids),
+              ),
+            );
+        } catch {
+          // best-effort durable badge — never block / fail the read.
+        }
+      })();
+    }
+  }
 
   // 8. Compute summaries
   const totalValueDisplay = enrichedHoldings.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
