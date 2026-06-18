@@ -48,6 +48,11 @@ const READ_PREFIXES = [
 
 const IDEMPOTENT_WRITE_PREFIXES = ["set_", "update_", "replace_"];
 
+// Read tools that fetch live external prices / FX rates reach an "open world"
+// (Yahoo / CoinGecko / Stooq); everything else operates only on the user's
+// own database. openWorldHint is advisory per the MCP spec.
+const EXTERNAL_WORLD_TOOLS = new Set(["get_fx_rate", "convert_amount"]);
+
 export function inferAnnotations(name: string): ToolAnnotations {
   const isReadOnly =
     READ_PREFIXES.some((p) => name.startsWith(p)) ||
@@ -67,9 +72,15 @@ export function inferAnnotations(name: string): ToolAnnotations {
   return {
     title: toTitle(name),
     readOnlyHint: isReadOnly,
-    destructiveHint: isDestructive,
+    // A read-only tool must NEVER also be marked destructive — per the MCP
+    // spec destructiveHint is only meaningful when readOnlyHint is false, and
+    // the directory's annotation gate rejects a tool that is both. Gating on
+    // !isReadOnly stops preview_* tools whose NAME embeds a delete/reject token
+    // (preview_bulk_delete, preview_delete_category — both pure reads that only
+    // sample + sign a confirmation token) from inheriting a contradictory hint.
+    destructiveHint: isDestructive && !isReadOnly,
     idempotentHint: isIdempotent,
-    openWorldHint: false,
+    openWorldHint: EXTERNAL_WORLD_TOOLS.has(name),
   };
 }
 

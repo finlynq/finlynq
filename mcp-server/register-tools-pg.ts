@@ -1323,7 +1323,7 @@ export function registerPgTools(
     "get_account_balances",
     "Get current balances for all accounts. Each account's balance is in its own (account) currency. INVESTMENT accounts are valued at MARKET (current `holdings.value`, cash sleeve included), matching the web dashboard — but only on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key (no key) investment accounts fall back to ledger (net contributions = SUM(transactions.amount)) and a top-level `note` explains the fallback. Each account row carries `isInvestment` and `balanceBasis` ('market'|'ledger'); market-valued rows also carry `costBasis` and `cashFlowBasis` (the underlying tx-sum). When reportingCurrency is set, also returns a unified total converted to that currency. Default reporting = user's display currency.",
     {
-      currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter rows by currency"),
+      currency: z.string().optional().describe("Filter rows by currency (ISO code, e.g. USD/CAD/EUR; omit or 'all' for every currency)"),
       reportingCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) — if set, response includes per-account converted balance + a grand total in this currency. Defaults to user's display currency."),
     },
     async ({ currency, reportingCurrency }) => {
@@ -1726,7 +1726,7 @@ export function registerPgTools(
     "get_net_worth",
     "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). INVESTMENT accounts are valued at MARKET (current holdings value, cash sleeve included), matching the web dashboard and get_account_balances, on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key they fall back to ledger (net contributions) and a top-level `note` explains it. The current-totals response carries `basis` ('market'|'ledger'); `total.net.amount` equals `get_account_balances.totalReporting.amount` on identical state. Pass `priorMonths` > 0 for a month-by-month trend (returns the current month plus N priors, with `currentMonth` flagged separately) — the trend is ALWAYS contribution-basis (`basis: 'ledger'`; marking history to market needs daily snapshots and is out of scope), so the current-month trend row won't match a market-valued current-totals call. Omit `priorMonths` for current totals only. Issue #210: legacy `months` param is accepted as a deprecated alias.",
     {
-      currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency (per-row)"),
+      currency: z.string().optional().describe("Filter by currency (per-row ISO code, e.g. USD/CAD/EUR; omit or 'all' for every currency)"),
       priorMonths: z.number().optional().describe("If set, return a trend covering the current (partial) month plus N prior months. Omit or set to 0 for current totals."),
       months: z.number().optional().describe("DEPRECATED (issue #210) — alias for priorMonths. New callers should use priorMonths."),
       reportingCurrency: z.string().optional().describe("ISO code — unified total currency. Defaults to user's display currency."),
@@ -2890,7 +2890,7 @@ export function registerPgTools(
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. INVESTMENT ACCOUNTS ARE REJECTED — record_transaction cannot write to an is_investment account; route all investment activity through the dedicated portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) instead. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns, so callers can preview routing before committing.",
+    "Bookkeeping only: writes an entry to the user's own Finlynq ledger (Finlynq never connects to a bank or moves real money). Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. INVESTMENT ACCOUNTS ARE REJECTED — record_transaction cannot write to an is_investment account; route all investment activity through the dedicated portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) instead. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns, so callers can preview routing before committing.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
       payee: z.string().describe("Payee or merchant name"),
@@ -4089,7 +4089,7 @@ export function registerPgTools(
   // /api/transactions/transfer POST handler — both call into createTransferPair().
   server.tool(
     "record_transfer",
-    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit on source, credit on destination) atomically with a shared link_id so they show up as a paired transfer in the UI. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over name; pass at least the name when ids aren't known. When only the names are given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency transfers (pass `receivedAmount` to lock the bank's landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares between brokerage accounts; `amount` may be 0 for pure in-kind moves). BOTH the source and destination holdings MUST already exist in their respective accounts. Investment accounts require a cash holding for the transaction currency — if a destination cash sleeve is missing, call `add_portfolio_holding` first with the transaction currency. For brokerage stock/ETF/crypto buys and sells use `portfolio_buy` / `portfolio_sell`; to move a holding between two brokerage accounts use `portfolio_transfer`; to fund or withdraw brokerage cash use `portfolio_deposit` / `portfolio_withdrawal`. SAME-ACCOUNT FOREX (cash sleeve ↔ cash sleeve in different conceptual currencies inside ONE account, e.g. 'Cash - USD' → 'Cash - CAD'): both sleeves inherit the parent account's currency at the schema level, so the conceptual currency lives only in the holding name suffix (`... - XXX` ISO-4217 code). When source and destination resolve to two cash sleeves with divergent suffixes, `receivedAmount` is honored and drives both the destination cash leg's `amount` and the destination `quantity` (cash sleeves track quantity = amount). When the suffixes match (or are missing), `receivedAmount` is ignored as before — pass `destQuantity` explicitly if you need asymmetric in-kind semantics for same-currency cash sleeves.",
+    "Bookkeeping only: records a transfer entry between two of the user's own tracked accounts in Finlynq; it never initiates a real bank or wire transfer or moves any actual money. Record a transfer between two of the user's accounts. Creates BOTH legs (debit on source, credit on destination) atomically with a shared link_id so they show up as a paired transfer in the UI. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over name; pass at least the name when ids aren't known. When only the names are given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency transfers (pass `receivedAmount` to lock the bank's landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares between brokerage accounts; `amount` may be 0 for pure in-kind moves). BOTH the source and destination holdings MUST already exist in their respective accounts. Investment accounts require a cash holding for the transaction currency — if a destination cash sleeve is missing, call `add_portfolio_holding` first with the transaction currency. For brokerage stock/ETF/crypto buys and sells use `portfolio_buy` / `portfolio_sell`; to move a holding between two brokerage accounts use `portfolio_transfer`; to fund or withdraw brokerage cash use `portfolio_deposit` / `portfolio_withdrawal`. SAME-ACCOUNT FOREX (cash sleeve ↔ cash sleeve in different conceptual currencies inside ONE account, e.g. 'Cash - USD' → 'Cash - CAD'): both sleeves inherit the parent account's currency at the schema level, so the conceptual currency lives only in the holding name suffix (`... - XXX` ISO-4217 code). When source and destination resolve to two cash sleeves with divergent suffixes, `receivedAmount` is honored and drives both the destination cash leg's `amount` and the destination `quantity` (cash sleeves track quantity = amount). When the suffixes match (or are missing), `receivedAmount` is ignored as before — pass `destQuantity` explicitly if you need asymmetric in-kind semantics for same-currency cash sleeves.",
     {
       fromAccount: z.string().optional().describe("Source account name or alias — fuzzy matched against name, exact on alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided."),
       toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided."),
@@ -4342,7 +4342,7 @@ export function registerPgTools(
 
   server.tool(
     "portfolio_buy",
-    "Buy shares/units of a holding in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg positive, cash leg negative, sum 0), opens a cost-basis lot, and debits the cash sleeve for the holding's currency — that sleeve must already exist (add_portfolio_holding a 'Cash' holding for the currency first if missing). Resolve the account by `account` name (strict fuzzy) or exact `account_id`, and the position by `holding` name/ticker or exact `holdingId`. CREATE-ONLY (edit on the web). Replaces the removed record_trade buy path.",
+    "Bookkeeping only: records a BUY entry in the user's own Finlynq tracking ledger. Finlynq never connects to a brokerage, places a real order, or moves real money or crypto. Buy shares/units of a holding in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg positive, cash leg negative, sum 0), opens a cost-basis lot, and debits the cash sleeve for the holding's currency — that sleeve must already exist (add_portfolio_holding a 'Cash' holding for the currency first if missing). Resolve the account by `account` name (strict fuzzy) or exact `account_id`, and the position by `holding` name/ticker or exact `holdingId`. CREATE-ONLY (edit on the web). Replaces the removed record_trade buy path.",
     {
       account: z.string().optional().describe("Brokerage account name or alias (strict fuzzy). Pass this or account_id."),
       account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
@@ -4379,7 +4379,7 @@ export function registerPgTools(
 
   server.tool(
     "portfolio_sell",
-    "Sell shares/units of a holding in a brokerage account. Writes sell + sell_cash_leg (stock leg negative, cash leg positive, sum 0), closes cost-basis lots, and credits the cash sleeve. `lotSelection.method` is FIFO (default), HIFO, or SPECIFIC (SPECIFIC needs lotIds or per-lot lots[]). CREATE-ONLY. Replaces the removed record_trade sell path.",
+    "Bookkeeping only: records a SELL entry in the user's own Finlynq tracking ledger. No real order is placed and no real money or crypto moves. Sell shares/units of a holding in a brokerage account. Writes sell + sell_cash_leg (stock leg negative, cash leg positive, sum 0), closes cost-basis lots, and credits the cash sleeve. `lotSelection.method` is FIFO (default), HIFO, or SPECIFIC (SPECIFIC needs lotIds or per-lot lots[]). CREATE-ONLY. Replaces the removed record_trade sell path.",
     {
       account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
       account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
@@ -4424,7 +4424,7 @@ export function registerPgTools(
 
   server.tool(
     "portfolio_swap",
-    "Exchange one holding for another inside a SINGLE brokerage account in one atomic operation (an internal sell of the source + buy of the destination, sharing a swap_link_id). Both holdings must already exist in the account. CREATE-ONLY.",
+    "Bookkeeping only: records a swap entry in the user's own Finlynq ledger; no real trade occurs. Exchange one holding for another inside a SINGLE brokerage account in one atomic operation (an internal sell of the source + buy of the destination, sharing a swap_link_id). Both holdings must already exist in the account. CREATE-ONLY.",
     {
       account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
       account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
@@ -4465,7 +4465,7 @@ export function registerPgTools(
 
   server.tool(
     "portfolio_transfer",
-    "Move shares/units of the SAME holding between two different brokerage accounts (in-kind, no cash). Cascades cost basis from source to destination. The holding is resolved in the SOURCE account; source and destination accounts must differ. CREATE-ONLY.",
+    "Bookkeeping only: records an in-kind move between two of the user's own tracked accounts; no real shares or money move. Move shares/units of the SAME holding between two different brokerage accounts (in-kind, no cash). Cascades cost basis from source to destination. The holding is resolved in the SOURCE account; source and destination accounts must differ. CREATE-ONLY.",
     {
       sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
       sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
@@ -4503,7 +4503,7 @@ export function registerPgTools(
 
   server.tool(
     "portfolio_income_expense",
-    "Record portfolio income (dividend/interest, amount > 0) or an expense (fee, amount < 0) on a brokerage cash sleeve. The cash sleeve for `currency` must already exist. `incomeType` resolves the canonical category (Dividends/Interest/Fees) when no explicit categoryId is given and the sign matches. Optionally tie the row to the holding that earned it via relatedHolding/relatedHoldingId. CREATE-ONLY.",
+    "Bookkeeping only: records an income/expense entry in the user's own Finlynq ledger; no real money moves. Record portfolio income (dividend/interest, amount > 0) or an expense (fee, amount < 0) on a brokerage cash sleeve. The cash sleeve for `currency` must already exist. `incomeType` resolves the canonical category (Dividends/Interest/Fees) when no explicit categoryId is given and the sign matches. Optionally tie the row to the holding that earned it via relatedHolding/relatedHoldingId. CREATE-ONLY.",
     {
       account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
       account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
@@ -4554,7 +4554,7 @@ export function registerPgTools(
 
   server.tool(
     "portfolio_fx_conversion",
-    "Convert cash from one currency to another inside a SINGLE brokerage account (e.g. USD sleeve → CAD sleeve). Writes fx_from + fx_to (+ optional fx_fee). Both currency sleeves (and the fee sleeve, if any) must already exist. CREATE-ONLY.",
+    "Bookkeeping only: records a currency-conversion entry between two of the user's own tracked cash sleeves; no real FX trade occurs. Convert cash from one currency to another inside a SINGLE brokerage account (e.g. USD sleeve → CAD sleeve). Writes fx_from + fx_to (+ optional fx_fee). Both currency sleeves (and the fee sleeve, if any) must already exist. CREATE-ONLY.",
     {
       account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
       account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
@@ -4590,7 +4590,7 @@ export function registerPgTools(
 
   server.tool(
     "portfolio_deposit",
-    "Fund a brokerage cash sleeve from a non-investment (bank/chequing) account. Writes a brokerage_deposit_out / brokerage_deposit_in pair linked by link_id. The destination cash sleeve must already exist (or pass destCashSleeveHoldingId). CREATE-ONLY.",
+    "Bookkeeping only: records a deposit entry between two of the user's own tracked accounts; no real bank or brokerage transfer occurs. Fund a brokerage cash sleeve from a non-investment (bank/chequing) account. Writes a brokerage_deposit_out / brokerage_deposit_in pair linked by link_id. The destination cash sleeve must already exist (or pass destCashSleeveHoldingId). CREATE-ONLY.",
     {
       sourceAccount: z.string().optional().describe("Source (non-investment) account name or alias. Pass this or sourceAccount_id."),
       sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
@@ -4626,7 +4626,7 @@ export function registerPgTools(
 
   server.tool(
     "portfolio_withdrawal",
-    "Withdraw cash from a brokerage cash sleeve to a non-investment (bank/chequing) account. Writes a brokerage_withdrawal_out / brokerage_withdrawal_in pair linked by link_id. The source cash sleeve must already exist (or pass sourceCashSleeveHoldingId). CREATE-ONLY.",
+    "Bookkeeping only: records a withdrawal entry between two of the user's own tracked accounts; no real bank or brokerage transfer occurs. Withdraw cash from a brokerage cash sleeve to a non-investment (bank/chequing) account. Writes a brokerage_withdrawal_out / brokerage_withdrawal_in pair linked by link_id. The source cash sleeve must already exist (or pass sourceCashSleeveHoldingId). CREATE-ONLY.",
     {
       sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
       sourceAccount_id: z.number().int().optional().describe("Source brokerage account id (exact; wins over name)."),
@@ -5556,7 +5556,7 @@ export function registerPgTools(
   // ── finlynq_help ───────────────────────────────────────────────────────────
   server.tool(
     "finlynq_help",
-    "Discover available tools, schema, and usage examples",
+    "Discover available Finlynq tools, schema, and usage examples. Finlynq is a personal-finance TRACKING app: every write tool records a bookkeeping entry in the user's own database and never connects to a bank or brokerage or moves real money. Full docs: https://finlynq.com/mcp-guide",
     {
       topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile"]).optional().describe("Help topic (default: tools)"),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
@@ -5586,9 +5586,9 @@ export function registerPgTools(
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
           get_account_balances: "get_account_balances(currency?, reportingCurrency?) — Current balance per account in its own currency, plus a unified total in reportingCurrency. INVESTMENT accounts are valued at MARKET (holdings.value, cash sleeve incl.) on OAuth/built-in-chat (DEK present); a pf_ API key falls back to ledger (SUM(amount)) + a top-level note. Each row carries isInvestment + balanceBasis; market rows also costBasis + cashFlowBasis (the net-contribution tx-sum).",
           get_net_worth: "get_net_worth(currency?, priorMonths? [months? deprecated alias], reportingCurrency?) — Omit priorMonths for current totals; set priorMonths>0 for a month-by-month trend. Current totals value INVESTMENT accounts at MARKET (matching the web + get_account_balances) on OAuth/built-in-chat; a pf_ API key falls back to ledger + a note. Response carries basis ('market'|'ledger'); total.net.amount == get_account_balances.totalReporting.amount on identical state. The trend is ALWAYS contribution-basis (basis:'ledger').",
-          record_transfer: "record_transfer(from_account_id? OR fromAccount, to_account_id? OR toAccount, amount, ...) — Atomic transfer pair between two accounts. PREFER from_account_id/to_account_id (exact); the name path is strict fuzzy with fail-loud ambiguity. Mismatched name+id pairs fail loud. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
-          portfolio_buy: "portfolio_buy(account_id? OR account, holdingId? OR holding, qty, totalCost, date?, payee?, note?, tags?) — Buy shares in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg +, cash leg −, sum 0), opens a cost-basis lot, debits the cash sleeve. The cash sleeve for the holding's currency must already exist (add_portfolio_holding a 'Cash' holding first). Replaces the removed record_trade buy path.",
-          portfolio_sell: "portfolio_sell(account_id? OR account, holdingId? OR holding, qty, totalProceeds, date?, lotSelection?, payee?, note?, tags?) — Sell shares. Writes sell + sell_cash_leg, closes lots (lotSelection.method FIFO|HIFO|SPECIFIC, default FIFO), credits the cash sleeve. Replaces the removed record_trade sell path.",
+          record_transfer: "record_transfer(from_account_id? OR fromAccount, to_account_id? OR toAccount, amount, ...) — Atomic transfer pair (bookkeeping only; moves no real money) between two of your own accounts. PREFER from_account_id/to_account_id (exact); the name path is strict fuzzy with fail-loud ambiguity. Mismatched name+id pairs fail loud. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
+          portfolio_buy: "portfolio_buy(account_id? OR account, holdingId? OR holding, qty, totalCost, date?, payee?, note?, tags?) — Records a BUY entry in your own tracking ledger (bookkeeping only; no real order is placed). Writes the canonical buy + buy_cash_leg pair (stock leg +, cash leg −, sum 0), opens a cost-basis lot, debits the cash sleeve. The cash sleeve for the holding's currency must already exist (add_portfolio_holding a 'Cash' holding first). Replaces the removed record_trade buy path.",
+          portfolio_sell: "portfolio_sell(account_id? OR account, holdingId? OR holding, qty, totalProceeds, date?, lotSelection?, payee?, note?, tags?) — Records a SELL entry in your own tracking ledger (bookkeeping only; no real order is placed). Writes sell + sell_cash_leg, closes lots (lotSelection.method FIFO|HIFO|SPECIFIC, default FIFO), credits the cash sleeve. Replaces the removed record_trade sell path.",
           portfolio_swap: "portfolio_swap(account_id? OR account, sourceHolding(Id), sourceQty, sourceProceeds, destHolding(Id), destQty, destCost, date?, ...) — Exchange one holding for another inside one account in a single atomic op (sell + buy sharing a swap_link_id).",
           portfolio_transfer: "portfolio_transfer(sourceAccount(_id), destAccount(_id), holding(Id), qty, date?, ...) — In-kind move of the SAME holding between two brokerage accounts (no cash). Cascades cost basis source→dest.",
           portfolio_income_expense: "portfolio_income_expense(account_id? OR account, currency, amount, incomeType?(dividend|interest|fee|other), relatedHolding(Id)?, categoryId?, date?, ...) — Dividend/interest (amount>0) or fee (amount<0) on a cash sleeve. incomeType resolves the canonical category when no categoryId is given.",
@@ -5608,13 +5608,13 @@ export function registerPgTools(
 
       if (t === "tools") {
         return dataResponse({
-          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast", "preview_delete_category"],
+          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast", "preview_delete_category"],
           write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
-          trade_tools: ["record_transfer"],
+          transfer_tools: ["record_transfer"],
           reconcile_tools: ["get_reconcile_suggestions", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
-          tip: "Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
+          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
         });
       }
 
@@ -5988,7 +5988,7 @@ export function registerPgTools(
   // populated by the nightly cron + backfill script.
   server.tool(
     "get_portfolio_performance_v2",
-    "Time-series performance for the portfolio: daily market_value + cost_basis series, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
+    "(Distinct capability, not a newer version of get_portfolio_performance: that tool is per-holding average-cost realized P&L; this one is the portfolio time-series return series.) Time-series performance for the portfolio: daily market_value + cost_basis series, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
     {
       period: z.enum(["1m", "3m", "6m", "ytd", "1y", "all"]).optional().describe("Lookback period; defaults to '1y'"),
       accountId: z.number().int().optional().describe("Scope to one accounts.id; omit for whole-portfolio aggregate"),
@@ -9082,6 +9082,7 @@ export function registerPgTools(
         tags: z.string().optional(),
       })).min(1).describe("New set of splits (replaces all existing)"),
     },
+    { title: "Replace Splits", destructiveHint: true, idempotentHint: true },
     async ({ transaction_id, splits }) => {
       const owner = await q(db, sql`SELECT id, amount FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
@@ -10298,6 +10299,7 @@ export function registerPgTools(
     "cancel_import",
     "Cancel a pending MCP upload — marks the row as cancelled and deletes the file from disk.",
     { upload_id: z.string() },
+    { title: "Cancel Import", destructiveHint: true },
     async ({ upload_id }) => {
       const uploads = await q(db, sql`
         SELECT id, storage_path, status FROM mcp_uploads

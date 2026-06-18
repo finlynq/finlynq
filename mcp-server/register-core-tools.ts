@@ -787,7 +787,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Stream D Phase 4 (stdio): pass `account_id` (numeric) — `account` (name) is refused because stdio has no DEK to resolve names. `category` (name) is also refused; pass `category_id` instead, or omit for auto-detection. For cross-currency entries pass enteredAmount + enteredCurrency. Pass `dryRun: true` to validate + resolve without writing.",
+    "Bookkeeping only: writes an entry to the user's own Finlynq ledger (Finlynq never connects to a bank or moves real money). Record a transaction. Stream D Phase 4 (stdio): pass `account_id` (numeric) — `account` (name) is refused because stdio has no DEK to resolve names. `category` (name) is also refused; pass `category_id` instead, or omit for auto-detection. For cross-currency entries pass enteredAmount + enteredCurrency. Pass `dryRun: true` to validate + resolve without writing.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income)."),
       payee: z.string().describe("Payee or merchant name"),
@@ -928,7 +928,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Stream D Phase 4: stdio cannot resolve account/category names without a DEK and the helper SELECTs that fuzzy-match names hit dropped plaintext columns — refused entirely. Use HTTP MCP at /mcp (full feature set) or the web UI.",
+    "Bookkeeping only: writes entries to the user's own Finlynq ledger; no real money moves. Record multiple transactions at once. Stream D Phase 4: stdio cannot resolve account/category names without a DEK and the helper SELECTs that fuzzy-match names hit dropped plaintext columns — refused entirely. Use HTTP MCP at /mcp (full feature set) or the web UI.",
     {
       account_id: z.number().int().optional(),
       dryRun: z.boolean().optional(),
@@ -1122,7 +1122,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // inner prepare() calls each acquire their own pool client.
   server.tool(
     "record_transfer",
-    "Record a transfer between two of the user's accounts. Stream D Phase 4 (stdio): pass `from_account_id` and `to_account_id` (numeric) — the `fromAccount`/`toAccount`/`holding`/`destHolding` name fields are refused because stdio cannot resolve names. For investment buys/sells/transfers use the portfolio_* tools on HTTP MCP. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount.",
+    "Bookkeeping only: records a transfer entry between two of the user's own tracked accounts in Finlynq; it never initiates a real bank or wire transfer or moves any actual money. Record a transfer between two of the user's accounts. Stream D Phase 4 (stdio): pass `from_account_id` and `to_account_id` (numeric) — the `fromAccount`/`toAccount`/`holding`/`destHolding` name fields are refused because stdio cannot resolve names. For investment buys/sells/transfers use the portfolio_* tools on HTTP MCP. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount.",
     {
       fromAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `from_account_id` instead."),
       toAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `to_account_id` instead."),
@@ -1845,8 +1845,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_net_worth", "get_categories", "get_loans", "get_goals", "get_recurring_transactions", "get_income_statement", "get_spotlight_items", "get_weekly_recap", "get_transaction_rules"],
         write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
         portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
-        trade_tools: ["record_transfer"],
-        tip: "Use tool_name='record_transaction' for usage details. Investment accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the HTTP-MCP portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion), which are unavailable on stdio (no DEK). record_transfer remains the path for plain cash transfers between non-investment accounts.",
+        transfer_tools: ["record_transfer"],
+        tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for usage details. Investment accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the HTTP-MCP portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion), which are unavailable on stdio (no DEK). record_transfer remains the path for plain cash transfers between non-investment accounts.",
       });
 
       if (t === "schema") return dataResponse({
@@ -2617,6 +2617,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         tags: z.string().optional(),
       })).min(1),
     },
+    { title: "Replace Splits", destructiveHint: true, idempotentHint: true },
     async ({ transaction_id, splits }) => {
       const owner = await sqlite.prepare(`SELECT id, amount FROM transactions WHERE id = ? AND user_id = ?`).get(transaction_id, userId) as { id: number; amount: number } | undefined;
       if (!owner) return sqliteErr(`Transaction #${transaction_id} not found`);
@@ -3286,6 +3287,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "cancel_import",
     "Cancel a pending MCP upload — marks the row as cancelled and deletes the file.",
     { upload_id: z.string() },
+    { title: "Cancel Import", destructiveHint: true },
     async ({ upload_id }) => {
       const u = await sqlite.prepare(`SELECT id, storage_path, status FROM mcp_uploads WHERE id = ? AND user_id = ?`).get(upload_id, userId) as { id: string; storage_path: string; status: string } | undefined;
       if (!u) return sqliteErr(`Upload #${upload_id} not found`);

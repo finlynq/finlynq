@@ -482,7 +482,7 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
             >
               Model Context Protocol
             </a>{" "}
-            server, with 102 HTTP tools (93 over stdio) that let Claude,
+            server, with 109 HTTP tools (93 over stdio) that let Claude,
             ChatGPT, Cursor, or any other MCP-compatible AI assistant query and
             mutate your financial data on your behalf.
           </p>

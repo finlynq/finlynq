@@ -54,7 +54,7 @@ const server = withAutoAnnotations(new McpServer({
   title: "Finlynq",
   version: "3.3.0",
   websiteUrl: "https://finlynq.com",
-  description: "Track your money here, analyze it anywhere — open-source personal finance with 86 MCP tools.",
+  description: "Track your money here, analyze it anywhere. Open-source personal-finance TRACKER (bookkeeping only; never connects to a bank or brokerage or moves real money) with 93 MCP tools.",
   icons: [
     { src: "https://finlynq.com/favicon.svg", mimeType: "image/svg+xml", sizes: ["any"] },
   ],

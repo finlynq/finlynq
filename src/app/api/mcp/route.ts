@@ -169,7 +169,7 @@ export async function POST(request: NextRequest) {
     title: "Finlynq",
     version: "3.3.0",
     websiteUrl: "https://finlynq.com",
-    description: "Track your money here, analyze it anywhere — open-source personal finance with 109 MCP tools.",
+    description: "Track your money here, analyze it anywhere. Open-source personal finance TRACKER with 109 MCP tools. Bookkeeping only: tools read and write entries in your own database and never connect to a bank or brokerage or move real money.",
     icons: [
       { src: "https://finlynq.com/favicon.svg", mimeType: "image/svg+xml", sizes: ["any"] },
     ],

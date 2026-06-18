@@ -57,7 +57,8 @@ const SECTIONS: Section[] = [
     items: [
       {
         title: "Talk to your money with any AI assistant",
-        desc: "A built-in MCP server (102 HTTP / 93 stdio tools) for Claude, Cursor, and more.",
+        // keep in sync with src/lib/mcp/tool-counts.ts
+        desc: "A built-in MCP server (109 HTTP / 93 stdio tools) for Claude, Cursor, and more.",
         href: "/mcp-guide",
         hrefLabel: "See the MCP guide",
       },
