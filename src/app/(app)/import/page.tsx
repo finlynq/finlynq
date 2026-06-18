@@ -54,6 +54,7 @@ import { InboxToApproveTab } from "@/components/inbox/inbox-to-approve-tab";
 import { InboxToCategorizeTab } from "@/components/inbox/inbox-to-categorize-tab";
 import { InboxEmailTab } from "@/components/inbox/inbox-email-tab";
 import { ReconcileSummaryPanel } from "@/components/inbox/reconcile-summary-panel";
+import { takeHandoffFile } from "@/lib/import/file-handoff";
 
 interface Account {
   id: number;
@@ -88,6 +89,11 @@ function ImportPageInner() {
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [accountId, setAccountId] = useState<number | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  // FINLYNQ-188 — a file carried in from the dashboard Quick Import card.
+  // Consumed once from the module-level handoff store on mount; opening the
+  // UploadDrawer with this seeded file auto-runs the existing preview/staging
+  // pipeline so the picked file isn't discarded.
+  const [handoffFile, setHandoffFileState] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Bumped after a successful in-drawer upload (Phase 2). Threaded into each
    *  tab body's `key` so a bump remounts the active tab → it refetches and the
@@ -181,6 +187,18 @@ function ImportPageInner() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // FINLYNQ-188 — consume a file handed off by the dashboard Quick Import card.
+  // Runs once on mount; clearing-on-read in the store means a refresh / repeat
+  // mount won't re-trigger it. Seeding the drawer auto-fires the existing
+  // upload pipeline against this file (see UploadDrawer `initialFile`).
+  useEffect(() => {
+    const f = takeHandoffFile();
+    if (f) {
+      setHandoffFileState(f);
+      setUploadOpen(true);
+    }
   }, []);
 
   // Persist ?account= and ?tab= so deep links + legacy-route redirects land
@@ -489,13 +507,21 @@ function ImportPageInner() {
 
       <UploadDrawer
         open={uploadOpen}
-        onOpenChange={setUploadOpen}
+        onOpenChange={(o) => {
+          setUploadOpen(o);
+          // Drop the carried file once the drawer closes so it isn't re-fired
+          // if the user reopens the drawer manually. (FINLYNQ-188)
+          if (!o) setHandoffFileState(null);
+        }}
         accountId={account.id}
         accountLabel={safeAccountName(account)}
         accountCurrency={account.currency}
         policy={policy}
         ofxPayeeSource={account.ofxPayeeSource === "memo" ? "memo" : "name"}
         csvMappingMode={account.csvMappingMode === "auto" ? "auto" : "confirm"}
+        // FINLYNQ-188 — when set (carried from the dashboard Quick Import), the
+        // drawer auto-runs the upload pipeline against this file on open.
+        initialFile={handoffFile}
         onUploaded={() => {
           // Stay on /inbox; refresh the policy-appropriate tab so the
           // freshly-uploaded rows appear. setReconcileData(null) clears the

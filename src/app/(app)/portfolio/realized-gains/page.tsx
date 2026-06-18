@@ -28,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Download, ArrowDownLeft, ArrowUpLeft, RefreshCw, Coins } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
+import { useDisplayCurrency } from "@/components/currency-provider";
 
 // Phase 3 follow-up (2026-05-26): short_close = a Buy that covered a short
 // position; gain inverts (cost − buy_price). short_open = the audit-marker
@@ -56,7 +57,7 @@ const CLOSE_KIND_META: Record<string, { icon: typeof ArrowDownLeft; label: strin
     icon: Coins,
     label: "Currency",
     className: "border-violet-500 text-violet-600 dark:border-violet-400 dark:text-violet-400",
-    tooltip: "Currency-on-currency FX gain — a cash lot in this sleeve was closed by an FX conversion. The realized gain in the sleeve currency is 0 (cost=1, proceeds=1); the actual gain shows in the base-currency view (toggle above).",
+    tooltip: "Currency-on-currency FX gain — a cash lot in this sleeve was closed by an FX conversion. The realized gain in the sleeve currency is 0 (cost=1, proceeds=1); the actual gain shows in the unified display-currency view (toggle above).",
   },
 };
 
@@ -97,9 +98,12 @@ interface ApiResponse {
 const CURRENT_YEAR = new Date().getFullYear();
 
 export default function RealizedGainsPage() {
+  const { displayCurrency } = useDisplayCurrency();
   const [taxYear, setTaxYear] = useState<number | null>(CURRENT_YEAR);
   const [term, setTerm] = useState<"all" | "short" | "long">("all");
-  const [showInBase, setShowInBase] = useState(false);
+  // FINLYNQ-183: the toggle now switches between per-row native currency and
+  // the unified DISPLAY-currency view (there is no separate "base currency").
+  const [showUnified, setShowUnified] = useState(false);
   const [data, setData] = useState<ApiResponse["data"] | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -107,7 +111,7 @@ export default function RealizedGainsPage() {
     const params = new URLSearchParams();
     if (taxYear) params.set("taxYear", String(taxYear));
     params.set("term", term);
-    if (showInBase) params.set("currency", "base");
+    if (showUnified) params.set("unified", "1");
     setLoading(true);
     fetch(`/api/portfolio/realized-gains?${params.toString()}`)
       .then((r) => r.json())
@@ -117,18 +121,21 @@ export default function RealizedGainsPage() {
       })
       .catch(() => setData(null))
       .finally(() => setLoading(false));
-  }, [taxYear, term, showInBase]);
+  }, [taxYear, term, showUnified]);
 
   const csvHref = useMemo(() => {
     const params = new URLSearchParams();
     if (taxYear) params.set("taxYear", String(taxYear));
     params.set("term", term);
     params.set("format", "csv");
-    if (showInBase) params.set("currency", "base");
+    if (showUnified) params.set("unified", "1");
     return `/api/portfolio/realized-gains?${params.toString()}`;
-  }, [taxYear, term, showInBase]);
+  }, [taxYear, term, showUnified]);
 
-  const baseCurrencyLabel = data?.rows[0]?.baseCurrency ?? null;
+  // The unified currency is always the user's display currency; the server
+  // stamps it onto each row's `baseCurrency`, so prefer that and fall back to
+  // the provider value before any row loads.
+  const unifiedCurrency = data?.rows[0]?.baseCurrency ?? displayCurrency;
 
   const yearChoices = [
     CURRENT_YEAR,
@@ -192,14 +199,11 @@ export default function RealizedGainsPage() {
         <label className="ml-4 flex items-center gap-2 text-sm cursor-pointer">
           <input
             type="checkbox"
-            checked={showInBase}
-            onChange={(e) => setShowInBase(e.target.checked)}
+            checked={showUnified}
+            onChange={(e) => setShowUnified(e.target.checked)}
             className="h-3.5 w-3.5"
           />
-          <span>
-            Show in base currency
-            {baseCurrencyLabel && showInBase ? ` (${baseCurrencyLabel})` : ""}
-          </span>
+          <span>Show in {unifiedCurrency}</span>
         </label>
       </div>
 
@@ -216,15 +220,15 @@ export default function RealizedGainsPage() {
         <CardContent>
           {!loading && data && Object.entries(data.totals.byCurrency).length > 0 && (
             <div className="mb-4 flex flex-wrap gap-3 text-sm">
-              {showInBase && data.totalRealizedGainInBase != null && baseCurrencyLabel ? (
+              {showUnified && data.totalRealizedGainInBase != null ? (
                 <Badge
                   variant={
                     data.totalRealizedGainInBase >= 0 ? "default" : "destructive"
                   }
                   className="px-3 py-1"
                 >
-                  {formatCurrency(data.totalRealizedGainInBase, baseCurrencyLabel)}{" "}
-                  {baseCurrencyLabel} (base)
+                  {formatCurrency(data.totalRealizedGainInBase, unifiedCurrency)}{" "}
+                  {unifiedCurrency}
                 </Badge>
               ) : (
                 Object.entries(data.totals.byCurrency).map(([ccy, t]) => (
@@ -303,14 +307,14 @@ export default function RealizedGainsPage() {
                     </TableCell>
                     <TableCell
                       className={`text-right font-mono ${
-                        (showInBase && r.realizedGainInBase != null
+                        (showUnified && r.realizedGainInBase != null
                           ? r.realizedGainInBase
                           : r.realizedGain) >= 0
                           ? "text-green-600"
                           : "text-red-600"
                       }`}
                     >
-                      {showInBase && r.realizedGainInBase != null && r.baseCurrency
+                      {showUnified && r.realizedGainInBase != null && r.baseCurrency
                         ? formatCurrency(r.realizedGainInBase, r.baseCurrency)
                         : formatCurrency(r.realizedGain, r.currency)}
                     </TableCell>

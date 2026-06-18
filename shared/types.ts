@@ -506,6 +506,16 @@ export interface DividendRow {
   payee: string | null;
 }
 
+// FINLYNQ-182 — additive optional fields. Legacy native callers (mobile, MCP)
+// keep reading `amount`/`currency`; the new fields appear only when the web
+// report opts into pivot/reporting via the new query params.
+export interface DividendCurrencyCell {
+  amount: number;
+  rowCount: number;
+  reinvestedCount: number;
+  withholdingCount: number;
+}
+
 export interface DividendGroupRow {
   bucket: string;
   label: string;
@@ -514,6 +524,10 @@ export interface DividendGroupRow {
   rowCount: number;
   reinvestedCount: number;
   withholdingCount: number;
+  /** Native pivot mode only — per-currency breakdown for the period. */
+  byCurrency?: Record<string, DividendCurrencyCell>;
+  /** Reporting mode only — rows in this period lacking stored reporting fields. */
+  unratedCount?: number;
 }
 
 export interface DividendIncomeResult {
@@ -523,7 +537,13 @@ export interface DividendIncomeResult {
     amount: number;
     rowCount: number;
     byCurrency: Record<string, number>;
+    /** Reporting mode only — rows excluded from totals (no stored reporting fields). */
+    unratedCount?: number;
   };
+  /** FINLYNQ-182 — active aggregation mode. Absent ⇒ legacy native. */
+  mode?: "native" | "reporting";
+  /** FINLYNQ-182 — reporting mode: the display currency totals are expressed in. */
+  reportingCurrency?: string;
   filter: Record<string, unknown>;
 }
 

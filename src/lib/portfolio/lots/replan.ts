@@ -229,6 +229,183 @@ export function planLotReallocation(
   };
 }
 
+// ─── FINLYNQ-178 — SPECIFIC manual reassignment ──────────────────────────
+//
+// Manual lot reassignment lets the user re-point a SINGLE closure (one
+// sell / transfer-out tx) onto lots of their choosing, rather than the
+// automatic FIFO `planLotReallocation` does. The engine foundation already
+// supports it (`selectLotsToClose({ strategy:"SPECIFIC", lotIds })` + the
+// `closeLotsForSellHook` `perLotQty` path); this pure core mirrors them so
+// the inspector can PREVIEW the user's pick before committing.
+//
+// STRICT contract (validated by the caller, asserted here too): the sum of
+// `perLotQty.qty` MUST equal the closure's total qty. The plan closes
+// EXACTLY the requested qty from each named lot (clamped at the lot's open
+// qty) and routes any overflow (requesting more than a lot holds, or naming
+// a lot with no/insufficient long inventory) into ONE short lot at the
+// closure's proceeds price — identical to `closeLotsForSellHook`'s overflow
+// branch (write-hooks.ts ~L388) and `planLotReallocation`'s short branch.
+//
+// Only the named closure's realized gain restates; the caller reverses ONLY
+// that one close-tx's closures before redo, so sibling closures stay
+// byte-identical (load-bearing FINLYNQ-178 invariant).
+
+export interface PlanLotReassignmentInput {
+  /** The close-tx being reassigned (the sell / transfer-out leg). */
+  closeTx: TxRowForLots;
+  /** That close-tx's ORIGINAL stored closures — recovers total qty,
+   *  proceeds-per-share, currency, kind, close date, and the OLD realized
+   *  gain for the delta accounting. */
+  originalClosures: HoldingLotClosure[];
+  /** User-chosen allocation: close `qty` from `lotId`, in priority order.
+   *  Σ qty must equal the closure total (caller validates STRICT). */
+  perLotQty: Array<{ lotId: number; qty: number }>;
+  /**
+   * Post-reversal LONG+SHORT lot snapshot for the holding. The caller has
+   * ALREADY reversed THIS close-tx's closures (restored the qty they
+   * consumed); no other tx is touched.
+   */
+  lots: HoldingLot[];
+}
+
+/**
+ * Pure SPECIFIC reassignment planner. Drives the lot pick from `perLotQty`
+ * instead of re-FIFO. Returns a `LotReallocationPreview` (proposed
+ * closures + opened shorts + realized-gain delta by calendar year). Mutates
+ * nothing.
+ */
+export function planLotReassignment(
+  input: PlanLotReassignmentInput,
+): LotReallocationPreview {
+  const { closeTx, originalClosures, perLotQty, lots } = input;
+
+  const empty: LotReallocationPreview = {
+    affectedHoldingIds: [],
+    dependentCloseTxIds: [],
+    proposedClosures: [],
+    openedShortLots: [],
+    realizedGainDeltaByYear: {},
+  };
+  if (originalClosures.length === 0) return empty;
+
+  const holdingId = closeTx.portfolioHoldingId;
+  const accountId = closeTx.accountId;
+  if (holdingId == null || accountId == null) return empty;
+
+  // Recover the close economics from the original closures (all share
+  // proceedsPerShare, currency, kind, closeDate).
+  const ref = originalClosures[0];
+  const proceedsPerShare = ref.proceedsPerShare;
+  const currency = ref.currency;
+  const closeKind = ref.closeKind;
+  const closeDate = ref.closeDate;
+  const isTransferOut = closeKind === "transfer_out";
+
+  // Working copy of the holding's LONG inventory keyed by lot id (shorts are
+  // never closed by a sell). qtyRemaining is depleted as we consume.
+  const longById = new Map<number, HoldingLot>();
+  for (const l of lots) {
+    if (
+      l.holdingId === holdingId &&
+      l.side === "long" &&
+      l.status === "open" &&
+      l.qtyRemaining > EPS
+    ) {
+      longById.set(l.id, { ...l });
+    }
+  }
+
+  const proposedClosures: ProposedClosure[] = [];
+  const openedShortLots: LotReallocationPreview["openedShortLots"] = [];
+
+  const oldGainByYear = new Map<string, number>();
+  const newGainByYear = new Map<string, number>();
+  const addGain = (m: Map<string, number>, date: string, g: number) => {
+    const year = (date ?? "").slice(0, 4) || "unknown";
+    m.set(year, (m.get(year) ?? 0) + g);
+  };
+  for (const oc of originalClosures) {
+    addGain(oldGainByYear, oc.closeDate, oc.realizedGain);
+  }
+
+  let shortOverflow = 0;
+  // Walk the user-chosen lots in priority order, closing EXACTLY the named
+  // qty from each (clamped at the lot's open qty). A lot that's unknown /
+  // short / fully consumed contributes its whole requested qty to overflow.
+  for (const sel of perLotQty) {
+    if (sel.qty <= EPS) continue;
+    const lot = longById.get(sel.lotId);
+    if (!lot) {
+      shortOverflow += sel.qty;
+      continue;
+    }
+    const closeQty = Math.min(lot.qtyRemaining, sel.qty);
+    const lotOverflow = Math.max(0, sel.qty - lot.qtyRemaining);
+    if (closeQty > EPS) {
+      // transfer_out realizes 0 (proceeds forced to the lot's cost basis).
+      const effProceeds = isTransferOut ? lot.costPerShare : proceedsPerShare;
+      const realizedGain = (effProceeds - lot.costPerShare) * closeQty;
+      proposedClosures.push({
+        closeTxId: closeTx.id,
+        lotId: lot.id,
+        qtyClosed: closeQty,
+        costPerShare: lot.costPerShare,
+        proceedsPerShare: effProceeds,
+        realizedGain,
+        closeKind,
+        isNewShortLot: false,
+        closeDate,
+      });
+      addGain(newGainByYear, closeDate, realizedGain);
+      lot.qtyRemaining -= closeQty;
+    }
+    shortOverflow += lotOverflow;
+  }
+
+  // Overflow → ONE short lot at the proceeds price (mirror of
+  // closeLotsForSellHook / planLotReallocation). transfer_out can't short.
+  if (shortOverflow > EPS && !isTransferOut) {
+    proposedClosures.push({
+      closeTxId: closeTx.id,
+      lotId: -1, // negative placeholder for the preview
+      qtyClosed: shortOverflow,
+      costPerShare: proceedsPerShare,
+      proceedsPerShare,
+      realizedGain: 0, // opening a short realizes nothing
+      closeKind,
+      isNewShortLot: true,
+      closeDate,
+    });
+    openedShortLots.push({
+      holdingId,
+      accountId,
+      qty: shortOverflow,
+      costPerShare: proceedsPerShare,
+      currency,
+    });
+  }
+
+  const years = new Set<string>([
+    ...oldGainByYear.keys(),
+    ...newGainByYear.keys(),
+  ]);
+  const realizedGainDeltaByYear: Record<string, number> = {};
+  for (const y of years) {
+    const delta = (newGainByYear.get(y) ?? 0) - (oldGainByYear.get(y) ?? 0);
+    if (Math.abs(delta) > EPS) {
+      realizedGainDeltaByYear[y] = Math.round(delta * 100) / 100;
+    }
+  }
+
+  return {
+    affectedHoldingIds: [holdingId],
+    dependentCloseTxIds: [closeTx.id],
+    proposedClosures,
+    openedShortLots,
+    realizedGainDeltaByYear,
+  };
+}
+
 /**
  * Helper kept here (not engine.ts) because it's re-plan-specific: re-export
  * daysBetween so the DB orchestrator computing `daysHeld` for the new

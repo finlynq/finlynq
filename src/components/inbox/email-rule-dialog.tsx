@@ -50,6 +50,10 @@ export interface RuleDraftInit {
   conditions?: EmailCondition[];
   accountId?: number | null;
   categoryId?: number | null;
+  /** FINLYNQ-189 — transfer destination. When set, the rule records a transfer
+   *  (account → this account) instead of a category/expense. Mutually exclusive
+   *  with categoryId. */
+  transferDestAccountId?: number | null;
   mode?: "auto" | "review";
   flipSign?: boolean;
   dateSource?: "parsed" | "received";
@@ -234,6 +238,13 @@ export function EmailRuleDialog({
   );
   const [accountId, setAccountId] = useState<number | null>(initial?.accountId ?? null);
   const [categoryId, setCategoryId] = useState<number | null>(initial?.categoryId ?? null);
+  // FINLYNQ-189 — target kind: "category" (income/expense) or "transfer".
+  const [targetKind, setTargetKind] = useState<"category" | "transfer">(
+    initial?.transferDestAccountId != null ? "transfer" : "category",
+  );
+  const [transferDestAccountId, setTransferDestAccountId] = useState<number | null>(
+    initial?.transferDestAccountId ?? null,
+  );
   const [ruleMode, setRuleMode] = useState<"auto" | "review">(initial?.mode ?? "auto");
   const [flipSign, setFlipSign] = useState(initial?.flipSign ?? false);
   const [dateSource, setDateSource] = useState<"parsed" | "received">(initial?.dateSource ?? "parsed");
@@ -260,6 +271,17 @@ export function EmailRuleDialog({
     if (id == null) return "No category";
     const c = categories.find((x) => x.id === id);
     return c ? safeName(c.name, "category", c.id) : `Category #${id}`;
+  };
+  // FINLYNQ-189 — transfer destinations: recordable (non-investment, non-archived)
+  // accounts EXCLUDING the chosen source account.
+  const destAccounts = useMemo(
+    () => recordableAccounts.filter((a) => a.id !== accountId),
+    [recordableAccounts, accountId],
+  );
+  const destLabel = (id: number | null) => {
+    if (id == null) return "Destination account";
+    const a = accounts.find((x) => x.id === id);
+    return a ? `${safeAccountName(a)} · ${a.currency}` : `Account #${id}`;
   };
 
   const updateCondition = (i: number, next: EmailCondition) =>
@@ -298,7 +320,20 @@ export function EmailRuleDialog({
         return;
       }
     }
-    if (mode === "fromEmail" && categoryId == null) {
+    if (targetKind === "transfer") {
+      if (transferDestAccountId == null) {
+        setError("Pick a destination account for the transfer.");
+        return;
+      }
+      // v1 same-currency only — mirror the web cross-currency transfer refusal.
+      const destCurrency = accounts.find((a) => a.id === transferDestAccountId)?.currency;
+      if (accountCurrency && destCurrency && accountCurrency !== destCurrency) {
+        setError(
+          `Transfers must be same-currency for now: the account is ${accountCurrency} but the destination is ${destCurrency}.`,
+        );
+        return;
+      }
+    } else if (mode === "fromEmail" && categoryId == null) {
       setError("Pick a category — recording this email now needs one.");
       return;
     }
@@ -309,11 +344,14 @@ export function EmailRuleDialog({
       const all = conditions.map((c) =>
         c.field === "amount" ? c : { ...c, value: c.value.trim() },
       );
+      const isTransfer = targetKind === "transfer";
       const payload = {
         name: name.trim(),
         conditions: { all },
         accountId,
-        categoryId,
+        // Mutually exclusive: transfer mode clears the category.
+        categoryId: isTransfer ? null : categoryId,
+        transferDestAccountId: isTransfer ? transferDestAccountId : null,
         mode: ruleMode,
         flipSign,
         dateSource,
@@ -338,7 +376,9 @@ export function EmailRuleDialog({
           body: JSON.stringify({
             action: "record",
             accountId,
-            categoryId,
+            // Transfer mode records a transfer (category ignored).
+            categoryId: isTransfer ? undefined : categoryId,
+            transferDestAccountId: isTransfer ? transferDestAccountId : undefined,
             flipSign,
             dateSource,
             payeeOverride: payeeOverride.trim() || undefined,
@@ -441,7 +481,14 @@ export function EmailRuleDialog({
             <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
               <Select
                 value={accountId != null ? String(accountId) : ""}
-                onValueChange={(v) => setAccountId(v ? parseInt(v, 10) : null)}
+                onValueChange={(v) => {
+                  const next = v ? parseInt(v, 10) : null;
+                  setAccountId(next);
+                  // Keep the transfer dest valid (can't equal the new source).
+                  if (next != null && transferDestAccountId === next) {
+                    setTransferDestAccountId(null);
+                  }
+                }}
               >
                 <SelectTrigger className="w-[190px] h-9">
                   <SelectValue placeholder="Account">{acctLabel(accountId)}</SelectValue>
@@ -454,22 +501,62 @@ export function EmailRuleDialog({
                   ))}
                 </SelectContent>
               </Select>
+
+              {/* FINLYNQ-189 — Category vs Transfer (mutually exclusive). */}
               <Select
-                value={categoryId != null ? String(categoryId) : "none"}
-                onValueChange={(v) => setCategoryId(v && v !== "none" ? parseInt(v, 10) : null)}
+                value={targetKind}
+                onValueChange={(v) => {
+                  const kind = (v as "category" | "transfer") ?? "category";
+                  setTargetKind(kind);
+                  // Clear the other side so we never persist both.
+                  if (kind === "transfer") setCategoryId(null);
+                  else setTransferDestAccountId(null);
+                }}
               >
-                <SelectTrigger className="w-[180px] h-9">
-                  <SelectValue placeholder="Category">{catLabel(categoryId)}</SelectValue>
-                </SelectTrigger>
+                <SelectTrigger className="w-[120px] h-9"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">No category</SelectItem>
-                  {categories.map((c) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {safeName(c.name, "category", c.id)}
-                    </SelectItem>
-                  ))}
+                  <SelectItem value="category">Category</SelectItem>
+                  <SelectItem value="transfer">Transfer to</SelectItem>
                 </SelectContent>
               </Select>
+
+              {targetKind === "transfer" ? (
+                <Select
+                  value={transferDestAccountId != null ? String(transferDestAccountId) : ""}
+                  onValueChange={(v) => setTransferDestAccountId(v ? parseInt(v, 10) : null)}
+                >
+                  <SelectTrigger className="w-[190px] h-9">
+                    <SelectValue placeholder="Destination account">
+                      {destLabel(transferDestAccountId)}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {destAccounts.map((a) => (
+                      <SelectItem key={a.id} value={String(a.id)}>
+                        {safeAccountName(a)} · {a.currency}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Select
+                  value={categoryId != null ? String(categoryId) : "none"}
+                  onValueChange={(v) => setCategoryId(v && v !== "none" ? parseInt(v, 10) : null)}
+                >
+                  <SelectTrigger className="w-[180px] h-9">
+                    <SelectValue placeholder="Category">{catLabel(categoryId)}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No category</SelectItem>
+                    {categories.map((c) => (
+                      <SelectItem key={c.id} value={String(c.id)}>
+                        {safeName(c.name, "category", c.id)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+
               <Select value={ruleMode} onValueChange={(v) => setRuleMode((v as "auto" | "review") ?? "auto")}>
                 <SelectTrigger className="w-[110px] h-9"><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -478,6 +565,11 @@ export function EmailRuleDialog({
                 </SelectContent>
               </Select>
             </div>
+            {targetKind === "transfer" && (
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Records a transfer from the account above into the destination. Same-currency only for now.
+              </p>
+            )}
           </div>
 
           {/* Mapping / transforms */}

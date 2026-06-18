@@ -99,7 +99,13 @@ const patchSchema = z.union([
   z.object({
     action: z.literal("record"),
     accountId: z.number().int().positive(),
-    categoryId: z.number().int().positive(),
+    // Category is required in category/expense mode; OPTIONAL in transfer mode
+    // (FINLYNQ-189) — the record path resolves the canonical Transfer category.
+    categoryId: z.number().int().positive().nullable().optional(),
+    // FINLYNQ-189 — transfer destination. When set, record a TRANSFER from
+    // accountId → this account instead of a categorized income/expense. v1 is
+    // same-currency only; cross-currency is refused (400 transfer_currency_mismatch).
+    transferDestAccountId: z.number().int().positive().nullable().optional(),
     // Optional transforms — rule mapping (when recording from a rule) and/or
     // per-email manual corrections. Applied in recordEmailInboxRow before the
     // hash/materialize (per-email overrides win; see apply-transform.ts).
@@ -141,10 +147,20 @@ export async function PATCH(
     return NextResponse.json({ ok: true, action: "discarded" });
   }
 
-  // action === 'record'
+  // action === 'record'. Transfer mode (FINLYNQ-189) when transferDestAccountId
+  // is set; else category/expense mode, which needs a category.
+  const isTransfer = parsed.data.transferDestAccountId != null;
+  if (!isTransfer && parsed.data.categoryId == null) {
+    return NextResponse.json(
+      { error: "Cannot record this email", code: "no_category" },
+      { status: 400 },
+    );
+  }
+
   const result = await recordEmailInboxRow(userId, dek, id, {
     accountId: parsed.data.accountId,
-    categoryId: parsed.data.categoryId,
+    categoryId: parsed.data.categoryId ?? null,
+    transferDestAccountId: parsed.data.transferDestAccountId ?? null,
     currencyOverride: parsed.data.currency,
     finalAction: "manually_recorded",
     force: parsed.data.force,

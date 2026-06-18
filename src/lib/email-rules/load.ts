@@ -33,6 +33,10 @@ export interface ActiveEmailRule {
   conditions: EmailCondition[];
   accountId: number;
   categoryId: number | null;
+  /** FINLYNQ-189 — when set, record a TRANSFER from `accountId` (source/outflow)
+   *  → this account (inflow) instead of a categorized income/expense.
+   *  Mutually exclusive with `categoryId` (transfer wins; category is ignored). */
+  transferDestAccountId: number | null;
   mode: "auto" | "review";
   /** Multiply the parsed amount by -1 before recording (0 stays +0). */
   flipSign: boolean;
@@ -70,6 +74,7 @@ export async function loadActiveEmailRules(
       matchValue: schema.emailImportRules.matchValue,
       accountId: schema.emailImportRules.accountId,
       categoryId: schema.emailImportRules.categoryId,
+      transferDestAccountId: schema.emailImportRules.transferDestAccountId,
       mode: schema.emailImportRules.mode,
       flipSign: schema.emailImportRules.flipSign,
       dateSource: schema.emailImportRules.dateSource,
@@ -116,6 +121,7 @@ export async function loadActiveEmailRules(
       conditions,
       accountId: r.accountId,
       categoryId: r.categoryId,
+      transferDestAccountId: r.transferDestAccountId ?? null,
       mode: r.mode as "auto" | "review",
       flipSign: r.flipSign,
       dateSource: (r.dateSource as "parsed" | "received") ?? "parsed",

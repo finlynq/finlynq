@@ -30,6 +30,11 @@ export const STACK_KEY_PREFIX = "m_";
 /** Reserved data key for the collapsed "Other" residual band. */
 export const OTHER_STACK_KEY = "__other";
 
+/** Recharts stackId for the above-axis (asset / positive-contribution) group. */
+export const POSITIVE_STACK_ID = "pos";
+/** Recharts stackId for the below-axis (liability / negative-contribution) group. */
+export const NEGATIVE_STACK_ID = "neg";
+
 /** One point on the value-over-time axis with its per-member decomposition. */
 export interface StackPoint {
   /** X-axis value (ISO date or "YYYY-MM" month label). */
@@ -47,6 +52,19 @@ export interface BuildStackedSeriesOptions {
   dateKey?: string;
   /** Label for the residual band. Default "Other". */
   otherLabel?: string;
+  /**
+   * FINLYNQ-187 — split mixed-sign bands into a positive (above-axis) and a
+   * negative (below-axis) Recharts stack. When true, each legend entry gets a
+   * `stackId` of {@link POSITIVE_STACK_ID} / {@link NEGATIVE_STACK_ID} chosen by
+   * the SIGN of that band's summed contribution across the window, so liability
+   * accounts (whose `members[]` contribution is negative) render below the zero
+   * axis instead of stacking as positive bands above it. The band VALUES are
+   * untouched (still signed), so the reconciled net — top of the positive stack
+   * minus bottom of the negative stack — still equals the aggregate `total` at
+   * every point. Default false (legacy single-stack behaviour, byte-identical
+   * for the all-same-sign Income/Expenses + Performance stacks).
+   */
+  signSplit?: boolean;
 }
 
 /** One coloured band in the legend / one `<Area>` to render, in stack order. */
@@ -59,6 +77,14 @@ export interface StackLegendEntry {
   color: string;
   /** True for the collapsed "Other" residual band. */
   isOther: boolean;
+  /**
+   * FINLYNQ-187 — only populated when `signSplit` is enabled: the Recharts
+   * stackId this band belongs to ({@link POSITIVE_STACK_ID} for an above-axis
+   * asset band, {@link NEGATIVE_STACK_ID} for a below-axis liability band).
+   * Undefined in legacy (single-stack) mode — callers keep their own literal
+   * stackId, so same-sign charts are unaffected.
+   */
+  stackId?: string;
 }
 
 export interface StackedSeriesResult {
@@ -106,18 +132,23 @@ export function buildStackedSeries(
   const maxMembers = options.maxMembers ?? 10;
   const dateKey = options.dateKey ?? "date";
   const otherLabel = options.otherLabel ?? "Other";
+  const signSplit = options.signSplit ?? false;
 
-  // ── 1. Aggregate each member across the window: sum |value| + remember name ──
+  // ── 1. Aggregate each member across the window: sum |value| + signed sum + name
   const agg = new Map<
     string,
-    { key: string; name: string; absSum: number }
+    { key: string; name: string; absSum: number; signedSum: number }
   >();
   for (const p of points) {
     for (const m of p.members) {
       if (!Number.isFinite(m.value) || m.value === 0) continue;
       const key = memberKey(m);
-      const cur = agg.get(key) ?? { key, name: m.name, absSum: 0 };
+      const cur = agg.get(key) ?? { key, name: m.name, absSum: 0, signedSum: 0 };
       cur.absSum += Math.abs(m.value);
+      // Signed sum drives the FINLYNQ-187 above/below-axis stack assignment: a
+      // member whose net contribution over the window is negative (a liability)
+      // lands in the below-axis stack even if a single point flips sign.
+      cur.signedSum += m.value;
       // Prefer the most recent non-empty name we see (names are stable per key).
       if (m.name) cur.name = m.name;
       agg.set(key, cur);
@@ -136,19 +167,33 @@ export function buildStackedSeries(
   const hasOther = ranked.length > maxMembers;
   const topKeySet = new Set(topKeys.map((r) => r.key));
 
+  // FINLYNQ-187 — when sign-splitting, classify each band into the above-axis
+  // (positive) or below-axis (negative) Recharts stack by the sign of its net
+  // contribution over the window. A negative signedSum (a liability account)
+  // → below-axis. Zero/positive → above-axis. `undefined` in legacy mode.
+  const stackIdFor = (signedSum: number): string | undefined =>
+    signSplit ? (signedSum < 0 ? NEGATIVE_STACK_ID : POSITIVE_STACK_ID) : undefined;
+
   // ── 2. Build the legend (top-N in rank order, then "Other" in the last slot) ──
   const legend: StackLegendEntry[] = topKeys.map((r, i) => ({
     key: r.key,
     name: r.name,
     color: bandColor(i),
     isOther: false,
+    stackId: stackIdFor(r.signedSum),
   }));
   if (hasOther) {
+    // The residual's net sign over the window decides which stack it joins so
+    // the below-axis tail of mixed-sign liabilities still reconciles.
+    const topSignedSum = topKeys.reduce((s, r) => s + r.signedSum, 0);
+    const totalSum = points.reduce((s, p) => s + p.total, 0);
+    const otherSignedSum = totalSum - topSignedSum;
     legend.push({
       key: OTHER_STACK_KEY,
       name: otherLabel,
       color: CHART_COLORS.neutral,
       isOther: true,
+      stackId: stackIdFor(otherSignedSum),
     });
   }
 

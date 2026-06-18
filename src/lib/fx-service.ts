@@ -129,6 +129,12 @@ for (const k of Object.keys(FALLBACK_RATE_TO_USD)) FALLBACK_CURRENCY_SET.add(k);
 
 /**
  * Resolve the display currency for an API request.
+ *
+ * FINLYNQ-183: this is the app's SINGLE user-facing currency. There is no
+ * separate "base currency" any more — display currency IS the reporting and
+ * lot-level realized-gain accounting basis. (The old `users.base_currency`
+ * orphan + `getBaseCurrency()` were dropped; everything resolves here.)
+ *
  * Priority: explicit `?currency=` query param → user's `settings.display_currency` → "USD".
  */
 export async function getDisplayCurrency(
@@ -148,31 +154,6 @@ export async function getDisplayCurrency(
         eq(schema.settings.userId, userId)
       )
     )
-    .limit(1);
-  return row[0]?.value ?? "USD";
-}
-
-/**
- * Resolve the base currency for lot-level realized-gain accounting.
- *
- * Distinct from `getDisplayCurrency`: base currency is the accounting
- * basis (snapshotted FX, used to compute realized_gain_in_base) and
- * shouldn't be flipped mid-year. Display currency is a UI preference.
- *
- * Priority: explicit `?baseCurrency=` query param → user.base_currency → "USD".
- */
-export async function getBaseCurrency(
-  userId: string,
-  queryParam?: string | null
-): Promise<string> {
-  if (queryParam) {
-    const trimmed = queryParam.trim().toUpperCase();
-    if (/^[A-Z]{3}$/.test(trimmed)) return trimmed;
-  }
-  const row = await db
-    .select({ value: schema.users.baseCurrency })
-    .from(schema.users)
-    .where(eq(schema.users.id, userId))
     .limit(1);
   return row[0]?.value ?? "USD";
 }

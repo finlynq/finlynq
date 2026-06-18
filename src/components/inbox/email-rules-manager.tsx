@@ -22,6 +22,8 @@ interface EmailRule {
   conditions: EmailCondition[];
   accountId: number;
   categoryId: number | null;
+  /** FINLYNQ-189 — transfer destination (mutually exclusive with categoryId). */
+  transferDestAccountId: number | null;
   mode: "auto" | "review";
   flipSign: boolean;
   dateSource: "parsed" | "received";
@@ -173,7 +175,11 @@ export function EmailRulesManager() {
                     </div>
                     <div className="text-xs text-muted-foreground truncate">
                       {summarizeConditions(r.conditions)} → {acctLabel(r.accountId)}
-                      {catLabel(r.categoryId) ? ` · ${catLabel(r.categoryId)}` : ""}
+                      {r.transferDestAccountId != null
+                        ? ` → transfer to ${acctLabel(r.transferDestAccountId)}`
+                        : catLabel(r.categoryId)
+                          ? ` · ${catLabel(r.categoryId)}`
+                          : ""}
                       {transforms.length > 0 ? ` · ${transforms.join(" · ")}` : ""}
                     </div>
                   </div>
@@ -191,6 +197,7 @@ export function EmailRulesManager() {
                         conditions: r.conditions,
                         accountId: r.accountId,
                         categoryId: r.categoryId,
+                        transferDestAccountId: r.transferDestAccountId,
                         mode: r.mode,
                         flipSign: r.flipSign,
                         dateSource: r.dateSource,

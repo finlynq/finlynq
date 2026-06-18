@@ -83,8 +83,10 @@ const PERIODS: Period[] = ["1m", "3m", "6m", "ytd", "1y", "all"];
  *
  * Recharts hands back one payload entry per `<Area>` keyed by `dataKey`; we map
  * each `legend` band's key to its value at the hovered point and render the
- * shared `TooltipBreakdownList` (height-capped + scrollable, FINLYNQ-128) so the
- * list never overflows a phone-width viewport (tc-2).
+ * shared `TooltipBreakdownList` (FINLYNQ-128). We pass `uncapped` (FINLYNQ-181)
+ * so the tooltip auto-sizes to the FULL holdings list instead of clipping it
+ * behind an inner scrollbar — the cap stays the default for the other (smaller)
+ * tooltips.
  *
  * Row order MIRRORS the visual stack (tc-3): the stack draws `legend[0]` (the
  * largest band) at the BOTTOM, so we reverse the legend order to put the largest
@@ -118,7 +120,8 @@ function StackTooltip({
   return (
     <div className="rounded-xl border border-border/50 bg-card/95 backdrop-blur-sm px-3.5 py-2.5 shadow-lg max-w-[260px]">
       <p className="text-[11px] font-medium text-muted-foreground mb-1">{label ?? ""}</p>
-      <TooltipBreakdownList rows={rows} currency={currency} />
+      {/* uncapped: show the FULL holdings list (no inner scrollbar) — FINLYNQ-181 */}
+      <TooltipBreakdownList rows={rows} currency={currency} uncapped />
     </div>
   );
 }

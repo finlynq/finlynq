@@ -40,6 +40,9 @@ const createSchema = z
     matchValue: z.string().min(1).max(512).optional(),
     accountId: z.number().int().positive(),
     categoryId: z.number().int().positive().nullable().optional(),
+    // FINLYNQ-189 — optional transfer destination. When set, a matched email
+    // records a transfer (accountId → this account) instead of a category/expense.
+    transferDestAccountId: z.number().int().positive().nullable().optional(),
     mode: z.enum(["auto", "review"]).optional(),
     flipSign: z.boolean().optional(),
     dateSource: z.enum(["parsed", "received"]).optional(),
@@ -74,6 +77,32 @@ function rowConditions(
   return [];
 }
 
+/**
+ * FINLYNQ-189 — shared transfer-destination ownership + shape guard. Returns a
+ * NextResponse error (404 cross-tenant / 400 investment) when the destination
+ * is invalid, else null. The dest must be an owned, NON-investment account (the
+ * email body surface collects no holding). Same-account + cross-currency are
+ * caller-/record-path-enforced.
+ */
+async function validateTransferDest(
+  userId: string,
+  destAccountId: number,
+): Promise<NextResponse | null> {
+  const dest = await db
+    .select({ id: schema.accounts.id, isInvestment: schema.accounts.isInvestment })
+    .from(schema.accounts)
+    .where(and(eq(schema.accounts.id, destAccountId), eq(schema.accounts.userId, userId)))
+    .limit(1);
+  if (!dest[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (dest[0].isInvestment) {
+    return NextResponse.json(
+      { error: "Transfer destination cannot be an investment account." },
+      { status: 400 },
+    );
+  }
+  return null;
+}
+
 export async function GET(request: NextRequest) {
   const auth = await requireEncryption(request);
   if (!auth.ok) return auth.response;
@@ -89,6 +118,7 @@ export async function GET(request: NextRequest) {
       matchValue: schema.emailImportRules.matchValue,
       accountId: schema.emailImportRules.accountId,
       categoryId: schema.emailImportRules.categoryId,
+      transferDestAccountId: schema.emailImportRules.transferDestAccountId,
       mode: schema.emailImportRules.mode,
       flipSign: schema.emailImportRules.flipSign,
       dateSource: schema.emailImportRules.dateSource,
@@ -119,6 +149,7 @@ export async function GET(request: NextRequest) {
       }),
       accountId: r.accountId,
       categoryId: r.categoryId,
+      transferDestAccountId: r.transferDestAccountId,
       mode: r.mode,
       flipSign: r.flipSign,
       dateSource: r.dateSource,
@@ -161,6 +192,19 @@ export async function POST(request: NextRequest) {
       .limit(1);
     if (!cat[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
+  // FINLYNQ-189 — transfer destination ownership + shape guards. Category and
+  // transfer destination are mutually exclusive; the destination must be an
+  // owned, NON-investment account that differs from the source.
+  if (d.transferDestAccountId != null) {
+    if (d.transferDestAccountId === d.accountId) {
+      return NextResponse.json(
+        { error: "Transfer destination must differ from the source account." },
+        { status: 400 },
+      );
+    }
+    const destErr = await validateTransferDest(userId, d.transferDestAccountId);
+    if (destErr) return destErr;
+  }
 
   // Normalize to conditions (legacy flat tri → single condition).
   const conditionsGroup = d.conditions ?? {
@@ -183,7 +227,9 @@ export async function POST(request: NextRequest) {
       matchOp: null,
       matchValue: null,
       accountId: d.accountId,
-      categoryId: d.categoryId ?? null,
+      // Mutually exclusive: a transfer rule ignores any category — store NULL.
+      categoryId: d.transferDestAccountId != null ? null : d.categoryId ?? null,
+      transferDestAccountId: d.transferDestAccountId ?? null,
       mode: d.mode ?? "auto",
       flipSign: d.flipSign ?? false,
       dateSource: d.dateSource ?? "parsed",

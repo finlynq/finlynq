@@ -28,6 +28,9 @@ const updateSchema = z.object({
   matchValue: z.string().min(1).max(512).optional(),
   accountId: z.number().int().positive().optional(),
   categoryId: z.number().int().positive().nullable().optional(),
+  // FINLYNQ-189 — transfer destination. Set ⇒ transfer mode (category cleared);
+  // explicit null ⇒ back to category/expense mode.
+  transferDestAccountId: z.number().int().positive().nullable().optional(),
   mode: z.enum(["auto", "review"]).optional(),
   flipSign: z.boolean().optional(),
   dateSource: z.enum(["parsed", "received"]).optional(),
@@ -63,7 +66,10 @@ export async function PUT(
 
   // Ownership of the rule itself.
   const existing = await db
-    .select({ id: schema.emailImportRules.id })
+    .select({
+      id: schema.emailImportRules.id,
+      accountId: schema.emailImportRules.accountId,
+    })
     .from(schema.emailImportRules)
     .where(and(eq(schema.emailImportRules.id, ruleId), eq(schema.emailImportRules.userId, userId)))
     .limit(1);
@@ -84,6 +90,28 @@ export async function PUT(
       .where(and(eq(schema.categories.id, d.categoryId), eq(schema.categories.userId, userId)))
       .limit(1);
     if (!cat[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  // FINLYNQ-189 — transfer destination ownership + shape (when setting one).
+  if (d.transferDestAccountId != null) {
+    const sourceAccountId = d.accountId ?? existing[0].accountId;
+    if (d.transferDestAccountId === sourceAccountId) {
+      return NextResponse.json(
+        { error: "Transfer destination must differ from the source account." },
+        { status: 400 },
+      );
+    }
+    const dest = await db
+      .select({ id: schema.accounts.id, isInvestment: schema.accounts.isInvestment })
+      .from(schema.accounts)
+      .where(and(eq(schema.accounts.id, d.transferDestAccountId), eq(schema.accounts.userId, userId)))
+      .limit(1);
+    if (!dest[0]) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (dest[0].isInvestment) {
+      return NextResponse.json(
+        { error: "Transfer destination cannot be an investment account." },
+        { status: 400 },
+      );
+    }
   }
 
   // Normalize to conditions: explicit group, else synthesize from a full flat
@@ -111,6 +139,13 @@ export async function PUT(
   }
   if (d.accountId !== undefined) set.accountId = d.accountId;
   if (d.categoryId !== undefined) set.categoryId = d.categoryId;
+  // FINLYNQ-189 — transfer destination is mutually exclusive with a category.
+  // Setting a destination CLEARS the category (transfer wins); explicit null
+  // returns to category/expense mode and leaves the category to the caller.
+  if (d.transferDestAccountId !== undefined) {
+    set.transferDestAccountId = d.transferDestAccountId;
+    if (d.transferDestAccountId != null) set.categoryId = null;
+  }
   if (d.mode !== undefined) set.mode = d.mode;
   if (d.flipSign !== undefined) set.flipSign = d.flipSign;
   if (d.dateSource !== undefined) set.dateSource = d.dateSource;

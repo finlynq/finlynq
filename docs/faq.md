@@ -111,7 +111,7 @@ Create a budget by picking a category and setting a monthly limit. Finlynq track
 
 ### Can I use multiple currencies?
 
-Yes. Finlynq supports multi-currency accounts with automatic FX-rate fetching (Yahoo Finance for fiat, CoinGecko for crypto, Stooq for precious metals). Each account has its own currency; reports convert to your base currency on the fly. Pairs without a direct rate (e.g. EUR → CAD) are converted via USD, and Finlynq shows you the source of each rate so you can tell when one is stale or manually overridden.
+Yes. Finlynq supports multi-currency accounts with automatic FX-rate fetching (Yahoo Finance for fiat, CoinGecko for crypto, Stooq for precious metals). Each account has its own currency; reports convert to your display currency on the fly. Pairs without a direct rate (e.g. EUR → CAD) are converted via USD, and Finlynq shows you the source of each rate so you can tell when one is stale or manually overridden.
 
 ## Troubleshooting
 

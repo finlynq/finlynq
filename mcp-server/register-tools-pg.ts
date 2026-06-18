@@ -6104,7 +6104,7 @@ export function registerPgTools(
   // `holding_lot_closures` populated by Phase 1's lot engine.
   server.tool(
     "get_realized_gains",
-    "Lot-level realized gains for the user, sourced from the FIFO lot engine. One row per closure (a sell that consumed a buy lot). Filter by tax year, date range, holding/account, or term (short ≤365d / long >365d / all). Each row carries pre-computed `realizedGain` in the holding's own currency (post issue #96 paired-cash-leg substitution). Pre-Phase-1 history requires running the lot-backfill admin script.",
+    "Lot-level realized gains for the user, sourced from the FIFO lot engine. One row per closure (a sell that consumed a buy lot). Filter by tax year, date range, holding/account, or term (short ≤365d / long >365d / all). Each row carries pre-computed `realizedGain` in the holding's own currency (post issue #96 paired-cash-leg substitution) AND a `realizedGainInBase` converted into the user's display currency at historical FX; `totalRealizedGainInBase` is the unified grand total. FINLYNQ-183: the unified view is ALWAYS the user's display currency — there is no base/reporting-currency override parameter. Pre-Phase-1 history requires running the lot-backfill admin script.",
     {
       from: z.string().optional().describe("Inclusive close_date lower bound, YYYY-MM-DD"),
       to: z.string().optional().describe("Inclusive close_date upper bound, YYYY-MM-DD"),
@@ -6114,7 +6114,7 @@ export function registerPgTools(
       term: z.enum(["short", "long", "all"]).optional().describe("Holding-period term (US tax convention; days_held threshold = 365)"),
     },
     async ({ from, to, taxYear, holdingId, accountId, term }) => {
-      const { listRealizedGainClosures } = await import("../src/lib/portfolio/realized-gains");
+      const { listRealizedGainClosures, augmentWithBaseCurrency } = await import("../src/lib/portfolio/realized-gains");
       const result = await listRealizedGainClosures(userId, dek, {
         from,
         to,
@@ -6123,7 +6123,11 @@ export function registerPgTools(
         accountId,
         term: term ?? "all",
       });
-      return text({ success: true, data: result });
+      // FINLYNQ-183: report in the user's single display currency. No
+      // override param — the unified figures are always the display ccy.
+      const displayCurrency = await resolveReportingCurrency(db, userId, null);
+      const augmented = await augmentWithBaseCurrency(result, userId, displayCurrency);
+      return text({ success: true, data: augmented });
     },
   );
 

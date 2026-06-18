@@ -18,7 +18,7 @@ import {
   realizedGainsToCsv,
   type RealizedGainsFilter,
 } from "@/lib/portfolio/realized-gains";
-import { getBaseCurrency } from "@/lib/fx-service";
+import { getDisplayCurrency } from "@/lib/fx-service";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -44,17 +44,19 @@ export async function GET(request: NextRequest) {
 
   const result = await listRealizedGainClosures(userId, dek, filter);
 
-  // Phase 5 — base-currency augmentation when ?currency=base is set.
-  const useBase = params.get("currency") === "base";
+  // FINLYNQ-183 — unified-currency augmentation when ?unified=1 is set.
+  // The "unified" view converts every closure into the user's single
+  // display currency (no separate base-currency concept / override). The
+  // toggle still distinguishes per-row native currency vs the unified view.
+  // (Legacy `?currency=base` is still accepted for backward-compat links.)
+  const useUnified =
+    params.get("unified") === "1" || params.get("currency") === "base";
   let augmented:
     | (typeof result & { totalRealizedGainInBase: number })
     | null = null;
-  if (useBase) {
-    const baseCurrency = await getBaseCurrency(
-      userId,
-      params.get("baseCurrency"),
-    );
-    augmented = await augmentWithBaseCurrency(result, userId, baseCurrency);
+  if (useUnified) {
+    const displayCurrency = await getDisplayCurrency(userId);
+    augmented = await augmentWithBaseCurrency(result, userId, displayCurrency);
   }
 
   if (params.get("format") === "csv") {

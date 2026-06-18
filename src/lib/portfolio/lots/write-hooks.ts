@@ -51,7 +51,11 @@ import {
   inferCashCloseKind,
   openCashLotHook,
 } from "./cash-hooks";
-import { planLotReallocation, type DependentCloseInput } from "./replan";
+import {
+  planLotReallocation,
+  planLotReassignment,
+  type DependentCloseInput,
+} from "./replan";
 import type {
   CashLegHint,
   HoldingLot,
@@ -1288,6 +1292,216 @@ export async function replanLotsAfterMutation(
         })),
       realizedGainDeltaByYear: {},
     };
+  } finally {
+    __setLotWriteHookStrictMode(prevStrict);
+  }
+}
+
+// ─── reassignClosureLots — FINLYNQ-178 manual lot reassignment ────────────
+//
+// Fast-follow to FINLYNQ-176. Lets the user re-point a SINGLE closure (one
+// sell / transfer-out tx) onto lots of their choosing, instead of the
+// automatic FIFO `replanLotsAfterMutation` does. Reuses the engine
+// foundation: the pure `planLotReassignment` (preview) + the existing
+// `closeLotsForSellHook` `perLotQty` path (commit).
+//
+//   dryRun=true  — read the close-tx's lots + its closures, simulate the
+//                  post-reversal inventory (restore ONLY this close-tx's
+//                  consumed qty), run the pure core, return the preview.
+//                  Writes NOTHING.
+//   dryRun=false — STRICT, all-or-nothing. Reverse ONLY this close-tx's
+//                  closures (restoring the lots they consumed; deleting any
+//                  short lots it opened), then re-close it via
+//                  closeLotsForSellHook's `perLotQty` path (close exactly the
+//                  named qty per lot; overflow → one short). lot-hook strict
+//                  mode is forced ON so any failure throws and the caller
+//                  rolls back.
+//
+// Load-bearing: only THIS close-tx is reversed/redone, so sibling closures
+// stay byte-identical (their realized gains do not restate). Position qty
+// stays live SUM(quantity) — only lot/closure rows move. NEVER DELETE+INSERTs
+// a `transactions` row. Same-account-only: the route guards that every
+// chosen lot belongs to the same (holding, account) as the close-tx.
+
+export interface ReassignResult {
+  /** The preview the pure core produced (proposed closures + opened shorts
+   *  + realized-gain delta by year). On commit, `proposedClosures` /
+   *  `openedShortLots` reflect the dry-run plan (the committed writes mirror
+   *  it). */
+  preview: LotReallocationPreview;
+}
+
+export type ReassignError =
+  | { ok: false; code: "close_tx_not_found" }
+  | { ok: false; code: "no_closures" }
+  | { ok: false; code: "not_reassignable"; closeKind: string }
+  | { ok: false; code: "qty_mismatch"; expected: number; got: number }
+  | { ok: false; code: "lot_not_in_scope"; lotId: number };
+
+export type ReassignOutcome =
+  | ({ ok: true } & ReassignResult)
+  | ReassignError;
+
+const REASSIGN_EPS = 1e-6;
+
+/**
+ * Reassign a single closure's lot allocation. Pure-validated + DB-bound.
+ *
+ * `perLotQty` is the user's chosen allocation; Σ qty MUST equal the
+ * closure's total qty (STRICT — else `{ ok:false, code:"qty_mismatch" }`,
+ * no write). Every named lot must belong to the same (holding, account) as
+ * the close-tx (else `{ ok:false, code:"lot_not_in_scope" }`).
+ */
+export async function reassignClosureLots(
+  userId: string,
+  args: {
+    holdingId: number;
+    closeTxId: number;
+    perLotQty: Array<{ lotId: number; qty: number }>;
+  },
+  opts: { dryRun: boolean; dek?: Buffer | null },
+): Promise<ReassignOutcome> {
+  const { holdingId, closeTxId, perLotQty } = args;
+
+  // 1. Load the close-tx (owner + holding scoped).
+  const closeTxRows = await db
+    .select(LOT_TX_SELECT)
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        eq(schema.transactions.id, closeTxId),
+        eq(schema.transactions.portfolioHoldingId, holdingId),
+      ),
+    );
+  const closeTxRow = closeTxRows[0];
+  if (!closeTxRow) return { ok: false, code: "close_tx_not_found" };
+  const closeTx = txRowToLots(closeTxRow);
+  const accountId = closeTx.accountId;
+  if (accountId == null) return { ok: false, code: "close_tx_not_found" };
+
+  // 2. Load this close-tx's ORIGINAL closures (before any reversal).
+  const closureRows = await db
+    .select()
+    .from(schema.holdingLotClosures)
+    .where(
+      and(
+        eq(schema.holdingLotClosures.userId, userId),
+        eq(schema.holdingLotClosures.closeTxId, closeTxId),
+      ),
+    );
+  if (closureRows.length === 0) return { ok: false, code: "no_closures" };
+
+  // Only plain SELL closures are reassignable: the commit path replays via
+  // closeLotsForSellHook's `perLotQty` branch, which stamps closeKind='sell'
+  // + sizes proceeds from the sell's cash leg. transfer_out / swap_out /
+  // fx_conversion / short_* closures carry different economics that this
+  // path would corrupt — refuse cleanly rather than mis-write.
+  const distinctKinds = new Set(closureRows.map((c) => c.closeKind));
+  if (!(distinctKinds.size === 1 && distinctKinds.has("sell"))) {
+    return {
+      ok: false,
+      code: "not_reassignable",
+      closeKind: closureRows[0].closeKind as string,
+    };
+  }
+
+  const originalClosures: HoldingLotClosure[] = closureRows.map((c) => ({
+    id: c.id,
+    userId: c.userId,
+    lotId: c.lotId,
+    closeTxId: c.closeTxId,
+    closeDate: c.closeDate,
+    qtyClosed: Number(c.qtyClosed),
+    proceedsPerShare: Number(c.proceedsPerShare),
+    costPerShare: Number(c.costPerShare),
+    realizedGain: Number(c.realizedGain),
+    currency: c.currency,
+    daysHeld: Number(c.daysHeld),
+    closeKind: c.closeKind as HoldingLotClosure["closeKind"],
+    source: c.source as TransactionSource,
+  }));
+
+  // 3. STRICT qty validation: Σ perLotQty == closure total.
+  const closureTotal = originalClosures.reduce((s, c) => s + c.qtyClosed, 0);
+  const requestedTotal = perLotQty.reduce((s, p) => s + p.qty, 0);
+  if (Math.abs(requestedTotal - closureTotal) > REASSIGN_EPS) {
+    return {
+      ok: false,
+      code: "qty_mismatch",
+      expected: Math.round(closureTotal * 1e6) / 1e6,
+      got: Math.round(requestedTotal * 1e6) / 1e6,
+    };
+  }
+
+  // 4. Same-account-only scope: every named lot must belong to this
+  //    (user, holding, account). (Reading all the holding's lots once.)
+  const liveLots = await loadLotsForHoldings(userId, [holdingId]);
+  const lotsInScope = new Map(
+    liveLots
+      .filter((l) => l.accountId === accountId)
+      .map((l) => [l.id, l]),
+  );
+  for (const sel of perLotQty) {
+    if (sel.qty <= REASSIGN_EPS) continue;
+    if (!lotsInScope.has(sel.lotId)) {
+      return { ok: false, code: "lot_not_in_scope", lotId: sel.lotId };
+    }
+  }
+
+  // 5. Post-reversal inventory: restore the qty THIS close-tx's closures
+  //    consumed (mirror of reverseLotsForDeleteHook, in memory) and drop any
+  //    SHORT lot this close-tx opened (its overflow lot, if any). No other
+  //    tx is touched, so siblings are untouched.
+  const restoreByLot = new Map<number, number>();
+  for (const c of originalClosures) {
+    if (c.lotId > 0) {
+      restoreByLot.set(c.lotId, (restoreByLot.get(c.lotId) ?? 0) + c.qtyClosed);
+    }
+  }
+  const postReversal: HoldingLot[] = liveLots
+    .filter((l) => l.openTxId !== closeTxId) // drop the short this close opened
+    .map((l) => {
+      const restore = restoreByLot.get(l.id) ?? 0;
+      const qtyRemaining = l.qtyRemaining + restore;
+      return {
+        ...l,
+        qtyRemaining,
+        status: qtyRemaining > 1e-9 ? "open" : l.status,
+      };
+    });
+
+  const preview = planLotReassignment({
+    closeTx,
+    originalClosures,
+    perLotQty,
+    lots: postReversal,
+  });
+
+  // ─── dry-run: return the preview, write nothing ───────────────────────
+  if (opts.dryRun) {
+    return { ok: true, preview };
+  }
+
+  // ─── commit: STRICT reverse → redo via the perLotQty path ─────────────
+  const ctx = await buildLotContext(userId, opts.dek ?? null);
+  const holdingCurrency =
+    ctx.holdingCurrencyById.get(holdingId) ?? closeTx.currency ?? "USD";
+  const prevStrict = strictMode;
+  __setLotWriteHookStrictMode(true);
+  try {
+    // Reverse ONLY this close-tx's lot effects (restores the lots it
+    // consumed; deletes its closure rows + any short lot it opened).
+    await reverseLotsForDeleteHook(userId, closeTxId);
+
+    // Re-close via the existing perLotQty path: close EXACTLY the named qty
+    // from each named lot; overflow → one short at the proceeds price.
+    await closeLotsForSellHook(closeTx, {
+      perLotQty,
+      holdingCurrency,
+    });
+
+    return { ok: true, preview };
   } finally {
     __setLotWriteHookStrictMode(prevStrict);
   }

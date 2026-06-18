@@ -12,6 +12,8 @@ import { describe, it, expect } from "vitest";
 import {
   buildStackedSeries,
   OTHER_STACK_KEY,
+  POSITIVE_STACK_ID,
+  NEGATIVE_STACK_ID,
   type StackPoint,
 } from "@/lib/chart-stack";
 import type { BreakdownMember } from "@/lib/chart-breakdown";
@@ -116,5 +118,109 @@ describe("buildStackedSeries", () => {
     const { rows, legend } = buildStackedSeries([]);
     expect(rows).toEqual([]);
     expect(legend).toEqual([]);
+  });
+
+  // ── FINLYNQ-187 — sign-split (Net Worth "By account" liabilities below axis) ──
+  describe("signSplit (FINLYNQ-187)", () => {
+    it("tc-2: keeps the liability member NEGATIVE and reconciles net to 500000", () => {
+      // Net Worth: one grid point — assets +800000, mortgage −300000 → net 500000.
+      const points: StackPoint[] = [
+        {
+          date: "2026-06-01",
+          total: 500000,
+          members: [m(1, "Assets", 800000), m(2, "Mortgage", -300000)],
+        },
+      ];
+      const { rows, legend } = buildStackedSeries(points, {
+        maxMembers: 10,
+        signSplit: true,
+      });
+
+      const assets = legend.find((l) => l.name === "Assets")!;
+      const mortgage = legend.find((l) => l.name === "Mortgage")!;
+
+      // Liabilities land in the below-axis stack, assets in the above-axis stack.
+      expect(assets.stackId).toBe(POSITIVE_STACK_ID);
+      expect(mortgage.stackId).toBe(NEGATIVE_STACK_ID);
+
+      // Signed members are PRESERVED (not abs-valued): the mortgage band is −300000.
+      expect(rows[0][mortgage.key]).toBeCloseTo(-300000, 6);
+      expect(rows[0][assets.key]).toBeCloseTo(800000, 6);
+
+      // Reconciled net (top of positive stack − bottom of negative stack) = Σ bands
+      // = 800000 + (−300000) = 500000 == aggregate total.
+      expect(rowBandSum(rows[0])).toBeCloseTo(500000, 6);
+    });
+
+    it("classifies a sign-flipping member by its NET window sign (stays below axis)", () => {
+      // A liability that briefly dips positive on one point but is net-negative
+      // over the window must still land in the below-axis stack.
+      const points: StackPoint[] = [
+        { date: "d1", total: 100, members: [m(1, "Asset", 200), m(2, "Loan", -100)] },
+        { date: "d2", total: 280, members: [m(1, "Asset", 250), m(2, "Loan", 30)] },
+      ];
+      const { rows, legend } = buildStackedSeries(points, { signSplit: true });
+      const loan = legend.find((l) => l.name === "Loan")!;
+      // Net Loan contribution = −100 + 30 = −70 < 0 → below-axis.
+      expect(loan.stackId).toBe(NEGATIVE_STACK_ID);
+      // Per-point signed values are untouched, so each point still reconciles.
+      expect(rowBandSum(rows[0])).toBeCloseTo(100, 6);
+      expect(rowBandSum(rows[1])).toBeCloseTo(280, 6);
+    });
+
+    it("routes a net-negative Other residual into the below-axis stack and still reconciles", () => {
+      // 2 big assets kept; a tail of small liabilities collapses into Other with a
+      // net-negative residual → below-axis. Net still ties to total.
+      const points: StackPoint[] = [
+        {
+          date: "d1",
+          total: 500,
+          members: [
+            m(1, "AssetA", 600),
+            m(2, "AssetB", 400),
+            m(3, "Lien1", -200),
+            m(4, "Lien2", -300),
+          ],
+        },
+      ];
+      const { rows, legend } = buildStackedSeries(points, {
+        maxMembers: 2,
+        signSplit: true,
+      });
+      const other = legend.find((l) => l.isOther)!;
+      // Residual = total − (AssetA + AssetB) = 500 − 1000 = −500 → below-axis.
+      expect(other.stackId).toBe(NEGATIVE_STACK_ID);
+      expect(rows[0][OTHER_STACK_KEY]).toBeCloseTo(-500, 6);
+      expect(rowBandSum(rows[0])).toBeCloseTo(500, 6);
+    });
+
+    it("tc-2b: all-same-sign output is byte-identical with vs without signSplit (no-op for Income/Expenses + Performance)", () => {
+      // Mirrors how the same-sign charts call buildStackedSeries: 12 positive
+      // members so an Other band exists too. The ONLY difference must be the new
+      // optional `stackId` field — rows + every other legend field unchanged.
+      const members = Array.from({ length: 12 }, (_, i) => m(i, `cat${i}`, i + 1));
+      const total = members.reduce((s, x) => s + x.value, 0);
+      const pts: StackPoint[] = [{ date: "2026-03", total, members }];
+
+      const legacy = buildStackedSeries(pts, { maxMembers: 10 });
+      const split = buildStackedSeries(pts, { maxMembers: 10, signSplit: true });
+
+      // Rows are byte-identical (no value or key change).
+      expect(split.rows).toEqual(legacy.rows);
+
+      // Legacy legend carries NO stackId at all (undefined) — same-sign callers
+      // keep their own literal stackId and never read this field.
+      for (const b of legacy.legend) expect(b.stackId).toBeUndefined();
+
+      // Stripping the new optional field reproduces the legacy legend exactly.
+      const stripped = split.legend.map(({ stackId, ...rest }) => {
+        void stackId;
+        return rest;
+      });
+      expect(stripped).toEqual(legacy.legend);
+
+      // And every same-sign band lands in the positive (above-axis) stack.
+      for (const b of split.legend) expect(b.stackId).toBe(POSITIVE_STACK_ID);
+    });
   });
 });

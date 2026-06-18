@@ -179,7 +179,10 @@ export function NetWorthHistoryChart({
             members: p.members ?? [],
           }),
         ),
-        { maxMembers: 10 },
+        // FINLYNQ-187 — sign-split so liability accounts (negative per-account
+        // contribution) stack BELOW the zero axis; the reconciled net (top of
+        // positive stack − bottom of negative stack) still equals `value`.
+        { maxMembers: 10, signSplit: true },
       ),
     [series],
   );
@@ -267,7 +270,10 @@ export function NetWorthHistoryChart({
                       type="monotone"
                       dataKey={b.key}
                       name={b.name}
-                      stackId="nw"
+                      // FINLYNQ-187 — per-band stackId from the sign-split:
+                      // positive→above-axis, negative→below-axis. Falls back to
+                      // the single "nw" stack if sign-split were ever disabled.
+                      stackId={b.stackId ?? "nw"}
                       stroke={b.color}
                       strokeWidth={1}
                       fill={b.color}

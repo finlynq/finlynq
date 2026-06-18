@@ -695,10 +695,14 @@ export const users = pgTable(
     // bumps this column. The login flow reads it and passes through to
     // deriveKEK so unrotated rows still unwrap with the old pepper.
     pepperVersion: integer("pepper_version").notNull().default(1),
-    // 2026-05-28 Phase 5 — base currency for realized-gain accounting.
-    // Distinct from `settings.display_currency` (UI presentation) — base
-    // currency drives the lot-level realized-gain math in base.
-    baseCurrency: text("base_currency").notNull().default("USD"),
+    // FINLYNQ-183 (2026-06-17): the former `base_currency` column was dropped.
+    // The app now has ONE user-facing currency (`settings.display_currency`),
+    // which also serves as the realized-gain accounting basis. The physical
+    // DROP COLUMN ships via the LOOSE migration path
+    // (scripts/migrate-drop-base-currency.sql), applied manually after deploy
+    // per docs/migrations.md (code-first, then SQL). This schema is safe to
+    // run while the column still exists — Drizzle selects explicit columns and
+    // the column's NOT NULL DEFAULT 'USD' covers any inserts in the gap.
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
@@ -1426,6 +1430,20 @@ export const emailImportRules = pgTable(
     categoryId: integer("category_id").references(() => categories.id, {
       onDelete: "set null",
     }),
+    // FINLYNQ-189 (2026-06-17) — optional transfer destination. NULL ⇒
+    // category/expense mode (today's behavior). When set, a matched email
+    // records a TRANSFER from `account_id` (outflow/source) → this account
+    // (inflow) via the canonical web transfer write path (resolveTransferCategoryId
+    // → the "Transfer" category, FINLYNQ-131; one server-generated link_id),
+    // and `category_id` is ignored (mutually exclusive). v1 is SAME-CURRENCY
+    // only — the record path refuses a cross-currency source/dest pair. ON
+    // DELETE SET NULL (like category_id): deleting the dest account clears the
+    // destination (rule degrades to category mode), never cascade-deletes the
+    // rule the way the NOT-NULL source account_id does.
+    transferDestAccountId: integer("transfer_dest_account_id").references(
+      () => accounts.id,
+      { onDelete: "set null" },
+    ),
     // 'auto' (auto-record) | 'review' (resolve account, wait for a click).
     mode: text("mode").notNull().default("auto"),
     // 2026-06-16 — v1 transforms applied in the single materialize path before

@@ -14,6 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { formatCurrency } from "@/lib/currency";
+import { exportCsv } from "@/lib/csv-export";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { CHART_COLORS } from "@/lib/chart-colors";
 import { todayISO } from "@/lib/utils/date";
@@ -325,17 +326,34 @@ export default function ReportsPage() {
     });
   }, []);
 
+  // Balance Sheet export (retains simple key-value shape, no period columns)
   function exportCSV(data: Record<string, unknown>[], filename: string) {
     if (!data.length) return;
     const headers = Object.keys(data[0]);
-    const csv = [headers.join(","), ...data.map((row) => headers.map((h) => String(row[h] ?? "")).join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    exportCsv(data, headers.map((h) => ({ header: h, accessor: (row: Record<string, unknown>) => row[h] })), filename);
+  }
+
+  // Income/Expenses breakdown export — full period set (uncapped, CSV has no width limit)
+  function exportBreakdownCSV(items: BreakdownItem[], filename: string) {
+    if (!items.length || !trendsData) return;
+    const ts = trendsData.timeseries;
+    exportCsv(
+      items,
+      [
+        { header: "Group", accessor: (i) => i.group },
+        { header: "Name", accessor: (i) => i.name },
+        ...ts.map((pt) => ({
+          header: pt.label,
+          accessor: (i: BreakdownItem) => {
+            const v = i.periods[pt.period];
+            return v != null && v !== 0 ? v : "";
+          },
+        })),
+        { header: "Total", accessor: (i) => i.total },
+        { header: "Transactions", accessor: (i) => i.count },
+      ],
+      filename,
+    );
   }
 
   const periodLabels: Record<Period, string> = {
@@ -701,12 +719,7 @@ export default function ReportsPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() =>
-                        exportCSV(
-                          trendsData.income.map((i) => ({ group: i.group, name: i.name, total: i.total, transactions: i.count })),
-                          "income-breakdown.csv"
-                        )
-                      }
+                      onClick={() => exportBreakdownCSV(trendsData.income, "income-breakdown.csv")}
                     >
                       <Download className="h-4 w-4 mr-1" /> Export
                     </Button>
@@ -723,9 +736,10 @@ export default function ReportsPage() {
                       currency={displayCurrency}
                       startDate={startDate}
                       endDate={endDate}
+                      timeseries={trendsData.timeseries}
                     />
                   ) : (
-                    <FlatTable items={trendsData.income} colorClass="text-emerald-600 dark:text-emerald-400" currency={displayCurrency} startDate={startDate} endDate={endDate} />
+                    <FlatTable items={trendsData.income} colorClass="text-emerald-600 dark:text-emerald-400" currency={displayCurrency} startDate={startDate} endDate={endDate} timeseries={trendsData.timeseries} />
                   )}
                   <div className="flex justify-between items-center p-3 mt-3 rounded-xl bg-muted/50">
                     <span className="font-semibold text-sm">Total Income</span>
@@ -754,12 +768,7 @@ export default function ReportsPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() =>
-                        exportCSV(
-                          trendsData.expenses.map((e) => ({ group: e.group, name: e.name, total: e.total, transactions: e.count })),
-                          "expense-breakdown.csv"
-                        )
-                      }
+                      onClick={() => exportBreakdownCSV(trendsData.expenses, "expense-breakdown.csv")}
                     >
                       <Download className="h-4 w-4 mr-1" /> Export
                     </Button>
@@ -776,9 +785,10 @@ export default function ReportsPage() {
                       currency={displayCurrency}
                       startDate={startDate}
                       endDate={endDate}
+                      timeseries={trendsData.timeseries}
                     />
                   ) : (
-                    <FlatTable items={trendsData.expenses} colorClass="text-rose-600 dark:text-rose-400" currency={displayCurrency} startDate={startDate} endDate={endDate} />
+                    <FlatTable items={trendsData.expenses} colorClass="text-rose-600 dark:text-rose-400" currency={displayCurrency} startDate={startDate} endDate={endDate} timeseries={trendsData.timeseries} />
                   )}
                   <div className="flex justify-between items-center p-3 mt-3 rounded-xl bg-muted/50">
                     <span className="font-semibold text-sm">Total Expenses</span>
@@ -1232,6 +1242,32 @@ export default function ReportsPage() {
   );
 }
 
+// ── Period-pivot helpers ──
+
+const MAX_PERIOD_COLUMNS = 30;
+
+/** Muted "--" cell for zero/missing period values (avoids $0.00 noise across 30 cols). */
+function PeriodCell({ value, currency, colorClass }: { value: number | undefined; currency: string; colorClass: string }) {
+  if (value == null || value === 0) {
+    return <TableCell className="text-right text-xs text-muted-foreground/50 font-mono">--</TableCell>;
+  }
+  return (
+    <TableCell className={`text-right font-mono text-xs ${colorClass}`}>
+      {formatCurrency(value, currency)}
+    </TableCell>
+  );
+}
+
+/** Truncation notice rendered above the table when the series was capped. */
+function TruncationNotice({ visible, shown, total }: { visible: boolean; shown: number; total: number }) {
+  if (!visible) return null;
+  return (
+    <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">
+      Showing the most recent {shown} of {total} periods &mdash; Total reflects the full range.
+    </p>
+  );
+}
+
 // ── Grouped Table (collapsible category groups) ──
 
 function GroupedTable({
@@ -1243,8 +1279,9 @@ function GroupedTable({
   currency,
   startDate,
   endDate,
+  timeseries,
 }: {
-  groups: { name: string; items: { name: string; group: string; categoryId?: number | null; total: number; count: number }[]; total: number }[];
+  groups: { name: string; items: BreakdownItem[]; total: number }[];
   expanded: Set<string>;
   onToggle: (group: string) => void;
   colorClass: string;
@@ -1252,37 +1289,52 @@ function GroupedTable({
   currency: string;
   startDate: string;
   endDate: string;
+  timeseries: TimeseriesPoint[];
 }) {
+  const allTs = timeseries;
+  const truncated = allTs.length > MAX_PERIOD_COLUMNS;
+  const visibleTs = truncated ? allTs.slice(-MAX_PERIOD_COLUMNS) : allTs;
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead className="w-8"></TableHead>
-          <TableHead>Name</TableHead>
-          <TableHead className="text-right">Transactions</TableHead>
-          <TableHead className="text-right">Amount</TableHead>
-          <TableHead className="text-right w-20">%</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {groups.map((group) => {
-          const isOpen = expanded.has(group.name);
-          return (
-            <GroupRow
-              key={group.name}
-              group={group}
-              isOpen={isOpen}
-              onToggle={() => onToggle(group.name)}
-              colorClass={colorClass}
-              total={total}
-              currency={currency}
-              startDate={startDate}
-              endDate={endDate}
-            />
-          );
-        })}
-      </TableBody>
-    </Table>
+    <>
+      <TruncationNotice visible={truncated} shown={MAX_PERIOD_COLUMNS} total={allTs.length} />
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-8"></TableHead>
+              <TableHead className="min-w-[140px]">Name</TableHead>
+              {visibleTs.map((pt) => (
+                <TableHead key={pt.period} className="text-right text-xs whitespace-nowrap min-w-[80px]">
+                  {pt.label}
+                </TableHead>
+              ))}
+              <TableHead className="text-right font-semibold min-w-[90px]">Total</TableHead>
+              <TableHead className="text-right w-20">%</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {groups.map((group) => {
+              const isOpen = expanded.has(group.name);
+              return (
+                <GroupRow
+                  key={group.name}
+                  group={group}
+                  isOpen={isOpen}
+                  onToggle={() => onToggle(group.name)}
+                  colorClass={colorClass}
+                  total={total}
+                  currency={currency}
+                  startDate={startDate}
+                  endDate={endDate}
+                  visibleTs={visibleTs}
+                />
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   );
 }
 
@@ -1295,8 +1347,9 @@ function GroupRow({
   currency,
   startDate,
   endDate,
+  visibleTs,
 }: {
-  group: { name: string; items: { name: string; categoryId?: number | null; total: number; count: number }[]; total: number };
+  group: { name: string; items: BreakdownItem[]; total: number };
   isOpen: boolean;
   onToggle: () => void;
   colorClass: string;
@@ -1304,8 +1357,10 @@ function GroupRow({
   currency: string;
   startDate: string;
   endDate: string;
+  visibleTs: TimeseriesPoint[];
 }) {
   const pct = total > 0 ? ((group.total / total) * 100).toFixed(1) : "0.0";
+
   return (
     <>
       <TableRow
@@ -1320,9 +1375,10 @@ function GroupRow({
           )}
         </TableCell>
         <TableCell className="text-sm font-semibold">{group.name}</TableCell>
-        <TableCell className="text-right text-xs text-muted-foreground">
-          {group.items.reduce((s, i) => s + Number(i.count), 0)}
-        </TableCell>
+        {visibleTs.map((pt) => {
+          const periodSum = group.items.reduce((s, item) => s + (item.periods[pt.period] ?? 0), 0);
+          return <PeriodCell key={pt.period} value={periodSum} currency={currency} colorClass={`${colorClass} font-semibold`} />;
+        })}
         <TableCell className={`text-right font-mono text-sm font-semibold ${colorClass}`}>
           {formatCurrency(group.total, currency)}
         </TableCell>
@@ -1349,7 +1405,9 @@ function GroupRow({
                     item.name
                   )}
                 </TableCell>
-                <TableCell className="text-right text-xs text-muted-foreground">{item.count}</TableCell>
+                {visibleTs.map((pt) => (
+                  <PeriodCell key={pt.period} value={item.periods[pt.period]} currency={currency} colorClass={colorClass} />
+                ))}
                 <TableCell className={`text-right font-mono text-sm ${colorClass}`}>
                   {formatCurrency(item.total, currency)}
                 </TableCell>
@@ -1369,51 +1427,68 @@ function FlatTable({
   currency,
   startDate,
   endDate,
+  timeseries,
 }: {
-  items: { name: string; group: string; categoryId?: number | null; total: number; count: number }[];
+  items: BreakdownItem[];
   colorClass: string;
   currency: string;
   startDate: string;
   endDate: string;
+  timeseries: TimeseriesPoint[];
 }) {
   const total = items.reduce((s, i) => s + i.total, 0);
+  const allTs = timeseries;
+  const truncated = allTs.length > MAX_PERIOD_COLUMNS;
+  const visibleTs = truncated ? allTs.slice(-MAX_PERIOD_COLUMNS) : allTs;
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Name</TableHead>
-          <TableHead className="text-right">Transactions</TableHead>
-          <TableHead className="text-right">Amount</TableHead>
-          <TableHead className="text-right w-20">%</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {items.map((item, i) => {
-          const pct = total > 0 ? ((item.total / total) * 100).toFixed(1) : "0.0";
-          return (
-            <TableRow key={i} className="hover:bg-muted/30">
-              <TableCell className="text-sm">
-                {item.categoryId != null ? (
-                  <Link
-                    href={buildTxDrillUrl({ categoryId: String(item.categoryId), startDate, endDate })}
-                    className="hover:underline"
-                    title={`View ${item.name} transactions for this period`}
-                  >
-                    {item.name}
-                  </Link>
-                ) : (
-                  item.name
-                )}
-              </TableCell>
-              <TableCell className="text-right text-xs text-muted-foreground">{item.count}</TableCell>
-              <TableCell className={`text-right font-mono text-sm font-semibold ${colorClass}`}>
-                {formatCurrency(item.total, currency)}
-              </TableCell>
-              <TableCell className="text-right text-xs text-muted-foreground">{pct}%</TableCell>
+    <>
+      <TruncationNotice visible={truncated} shown={MAX_PERIOD_COLUMNS} total={allTs.length} />
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="min-w-[140px]">Name</TableHead>
+              {visibleTs.map((pt) => (
+                <TableHead key={pt.period} className="text-right text-xs whitespace-nowrap min-w-[80px]">
+                  {pt.label}
+                </TableHead>
+              ))}
+              <TableHead className="text-right font-semibold min-w-[90px]">Total</TableHead>
+              <TableHead className="text-right w-20">%</TableHead>
             </TableRow>
-          );
-        })}
-      </TableBody>
-    </Table>
+          </TableHeader>
+          <TableBody>
+            {items.map((item, i) => {
+              const pct = total > 0 ? ((item.total / total) * 100).toFixed(1) : "0.0";
+              return (
+                <TableRow key={i} className="hover:bg-muted/30">
+                  <TableCell className="text-sm">
+                    {item.categoryId != null ? (
+                      <Link
+                        href={buildTxDrillUrl({ categoryId: String(item.categoryId), startDate, endDate })}
+                        className="hover:underline"
+                        title={`View ${item.name} transactions for this period`}
+                      >
+                        {item.name}
+                      </Link>
+                    ) : (
+                      item.name
+                    )}
+                  </TableCell>
+                  {visibleTs.map((pt) => (
+                    <PeriodCell key={pt.period} value={item.periods[pt.period]} currency={currency} colorClass={colorClass} />
+                  ))}
+                  <TableCell className={`text-right font-mono text-sm font-semibold ${colorClass}`}>
+                    {formatCurrency(item.total, currency)}
+                  </TableCell>
+                  <TableCell className="text-right text-xs text-muted-foreground">{pct}%</TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   );
 }

@@ -31,6 +31,7 @@ import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { generateImportHash, checkDuplicates } from "@/lib/import-hash";
 import { upsertBankTransaction } from "@/lib/bank-ledger";
+import { createTransferPair } from "@/lib/transfer";
 import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 import { invalidateUser } from "@/lib/mcp/user-tx-cache";
 import { loadActiveEmailRules, firstMatchingRule } from "@/lib/email-rules/load";
@@ -175,9 +176,14 @@ export async function processPendingInboxEmails(
           continue;
         }
 
-        if (rule.mode !== "auto" || rule.categoryId == null) {
+        // A transfer rule (FINLYNQ-189) auto-records with NO category — the
+        // record path resolves the canonical Transfer category itself. A
+        // category/expense rule still needs a category to auto-record.
+        const isTransferRule = rule.transferDestAccountId != null;
+        if (rule.mode !== "auto" || (!isTransferRule && rule.categoryId == null)) {
           // Resolve the rule but wait for a user click (review mode, or an
-          // auto rule with no category). Stamp the rule so the tab pre-fills.
+          // auto category-rule with no category). Stamp the rule so the tab
+          // pre-fills.
           await db
             .update(schema.emailInbox)
             .set({ matchedRuleId: rule.id })
@@ -189,6 +195,8 @@ export async function processPendingInboxEmails(
         const recorded = await recordEmailInboxRow(userId, dek, row.id, {
           accountId: rule.accountId,
           categoryId: rule.categoryId,
+          // FINLYNQ-189 — transfer rules record a transfer (category ignored).
+          transferDestAccountId: rule.transferDestAccountId,
           // NULL ⇒ fall back to the account currency in recordEmailInboxRow.
           currencyOverride: rule.currency,
           matchedRuleId: rule.id,
@@ -233,6 +241,13 @@ export async function recordEmailInboxRow(
   opts: {
     accountId: number;
     categoryId: number | null;
+    /** FINLYNQ-189 — when set, record a TRANSFER from `accountId` (source/outflow)
+     *  → this account (inflow) instead of a categorized income/expense. Takes
+     *  precedence over `categoryId` (category is ignored in transfer mode). v1
+     *  is SAME-CURRENCY only — a cross-currency source/dest pair is refused with
+     *  `{ status:"invalid", reason:"transfer_currency_mismatch" }` and no rows
+     *  are written. */
+    transferDestAccountId?: number | null;
     /** Rule-level recorded-currency override. NULL/undefined ⇒ use the target
      *  account's currency (the default). An ISO code forces that currency. */
     currencyOverride?: string | null;
@@ -246,6 +261,7 @@ export async function recordEmailInboxRow(
     force?: boolean;
   },
 ): Promise<RecordEmailResult> {
+  const transferMode = opts.transferDestAccountId != null;
   const inboxRows = await db
     .select({
       id: schema.emailInbox.id,
@@ -271,7 +287,11 @@ export async function recordEmailInboxRow(
       .where(eq(schema.emailInbox.id, inboxId));
   }
 
-  if (opts.categoryId == null) return { status: "invalid", reason: "no_category" };
+  // Category is required in category/expense mode only — transfer mode resolves
+  // the canonical "Transfer" category itself (FINLYNQ-131 / createTransferPair).
+  if (!transferMode && opts.categoryId == null) {
+    return { status: "invalid", reason: "no_category" };
+  }
 
   const staged = await db
     .select({
@@ -301,7 +321,16 @@ export async function recordEmailInboxRow(
     receivedDate,
   );
 
-  const guard = await checkGuards(userId, dek, opts.accountId, opts.categoryId, eff.amount);
+  // Source/outflow account guard. In transfer mode the category check is
+  // skipped (createTransferPair resolves the canonical Transfer category); the
+  // sign-vs-category advisory doesn't apply to a transfer leg.
+  const guard = await checkGuards(
+    userId,
+    dek,
+    opts.accountId,
+    transferMode ? null : opts.categoryId,
+    eff.amount,
+  );
   if (!guard.ok) return { status: "invalid", reason: guard.reason };
 
   // Recorded currency: rule override → account currency → USD last-ditch. The
@@ -313,7 +342,26 @@ export async function recordEmailInboxRow(
     "USD"
   ).toUpperCase();
 
+  // Transfer mode (FINLYNQ-189) — validate the destination account up front so
+  // we refuse BEFORE any write: must exist + be owned, be a NON-investment
+  // account (the body surface collects no holding), differ from the source, and
+  // share the source's currency (v1 = same-currency only, mirroring the web
+  // cross-currency transfer refusal). On a mismatch we write NO rows.
+  let transferGuard: TransferGuardOk | null = null;
+  if (transferMode) {
+    const tg = await checkTransferGuards(
+      userId,
+      opts.accountId,
+      opts.transferDestAccountId!,
+      guard.accountCurrency,
+    );
+    if (!tg.ok) return { status: "invalid", reason: tg.reason };
+    transferGuard = tg;
+  }
+
   // Dedup 1 — exact-hash against the bank ledger (a byte-identical re-import).
+  // Keyed on the SOURCE/outflow account in both modes (the leg the alert is
+  // about), so re-importing the same alert never double-books a transfer.
   const hash = generateImportHash(eff.date, opts.accountId, eff.amount, eff.payee);
   const dup = await checkDuplicates([hash], userId);
   if (dup.has(hash)) {
@@ -343,11 +391,41 @@ export async function recordEmailInboxRow(
     }
   }
 
+  if (transferMode && transferGuard) {
+    // Transfer write — reuse the canonical web transfer path (createTransferPair):
+    // the two legs share ONE server-generated link_id and land on the canonical
+    // "Transfer" category (resolveTransferCategoryId, FINLYNQ-131). The rule's
+    // account is the SOURCE/outflow leg; the destination is the inflow. The
+    // bank-ledger lineage row is stamped on the source leg (the side the alert
+    // reports), matching the category-mode `materialize` path.
+    const res = await materializeTransfer({
+      userId,
+      dek,
+      fromAccountId: opts.accountId,
+      toAccountId: opts.transferDestAccountId!,
+      // enteredAmount is a positive magnitude; the alert's sign is heuristic and
+      // the source leg is always the outflow.
+      enteredAmount: Math.abs(eff.amount),
+      date: eff.date,
+      currency,
+      payee: eff.payee,
+      importHash: hash,
+    });
+    if (!res.ok) return { status: "invalid", reason: res.reason };
+
+    await db
+      .update(schema.emailInbox)
+      .set({ action: opts.finalAction, recordedTransactionId: res.fromTransactionId })
+      .where(eq(schema.emailInbox.id, inboxId));
+    await markStagedImported(inbox.stagedImportId, cand.id);
+    return { status: "recorded", transactionId: res.fromTransactionId };
+  }
+
   const txId = await materialize({
     userId,
     dek,
     accountId: opts.accountId,
-    categoryId: opts.categoryId,
+    categoryId: opts.categoryId!,
     date: eff.date,
     amount: eff.amount,
     currency,
@@ -509,7 +587,9 @@ async function checkGuards(
   userId: string,
   dek: Buffer,
   accountId: number,
-  categoryId: number,
+  // null ⇒ transfer mode: skip the category FK + sign-vs-category checks
+  // (createTransferPair resolves the canonical Transfer category itself).
+  categoryId: number | null,
   amount: number,
 ): Promise<{ ok: boolean; reason?: string; accountCurrency?: string }> {
   // Investment-account guard — the body surface doesn't collect a holding.
@@ -524,19 +604,124 @@ async function checkGuards(
   if (!acct[0]) return { ok: false, reason: "account_not_found" };
   if (acct[0].isInvestment) return { ok: false, reason: "investment_account" };
 
-  // Cross-tenant FK guard on the category.
-  const cat = await db
-    .select({ id: schema.categories.id })
-    .from(schema.categories)
-    .where(and(eq(schema.categories.id, categoryId), eq(schema.categories.userId, userId)))
-    .limit(1);
-  if (!cat[0]) return { ok: false, reason: "category_not_found" };
+  if (categoryId != null) {
+    // Cross-tenant FK guard on the category.
+    const cat = await db
+      .select({ id: schema.categories.id })
+      .from(schema.categories)
+      .where(and(eq(schema.categories.id, categoryId), eq(schema.categories.userId, userId)))
+      .limit(1);
+    if (!cat[0]) return { ok: false, reason: "category_not_found" };
 
-  // Sign-vs-category — same enforcement as /approve.
-  const violation = await validateSignVsCategoryById(userId, dek, categoryId, amount);
-  if (violation) return { ok: false, reason: "sign_category_mismatch" };
+    // Sign-vs-category — same enforcement as /approve.
+    const violation = await validateSignVsCategoryById(userId, dek, categoryId, amount);
+    if (violation) return { ok: false, reason: "sign_category_mismatch" };
+  }
 
   return { ok: true, accountCurrency: acct[0].currency ?? undefined };
+}
+
+type TransferGuardOk = { ok: true; destCurrency: string };
+type TransferGuardFail = { ok: false; reason: string };
+
+/**
+ * FINLYNQ-189 — validate the transfer DESTINATION before any write. Mirrors the
+ * source-account guards (`checkGuards`): the dest must exist + be owned, be a
+ * NON-investment account (the email body surface collects no holding), differ
+ * from the source, and — v1 — share the source's currency. Cross-currency is
+ * REFUSED (`transfer_currency_mismatch`), mirroring the web transfer's
+ * cross-currency refusal; no rows are written.
+ */
+async function checkTransferGuards(
+  userId: string,
+  fromAccountId: number,
+  toAccountId: number,
+  sourceCurrency: string | undefined,
+): Promise<TransferGuardOk | TransferGuardFail> {
+  if (fromAccountId === toAccountId) {
+    return { ok: false, reason: "transfer_same_account" };
+  }
+  const dest = await db
+    .select({
+      isInvestment: schema.accounts.isInvestment,
+      currency: schema.accounts.currency,
+    })
+    .from(schema.accounts)
+    .where(and(eq(schema.accounts.id, toAccountId), eq(schema.accounts.userId, userId)))
+    .limit(1);
+  if (!dest[0]) return { ok: false, reason: "transfer_dest_not_found" };
+  if (dest[0].isInvestment) return { ok: false, reason: "transfer_dest_investment" };
+
+  const destCurrency = (dest[0].currency ?? "USD").toUpperCase();
+  const srcCurrency = (sourceCurrency ?? "USD").toUpperCase();
+  // v1 same-currency only — mirror the web cross-currency transfer refusal.
+  if (destCurrency !== srcCurrency) {
+    return { ok: false, reason: "transfer_currency_mismatch" };
+  }
+  return { ok: true, destCurrency };
+}
+
+type MaterializeTransferResult =
+  | { ok: true; fromTransactionId: number; toTransactionId: number }
+  | { ok: false; reason: string };
+
+/**
+ * FINLYNQ-189 — materialize an email alert as a TRANSFER. Stamps a bank-ledger
+ * lineage row on the SOURCE/outflow leg (the side the alert reports — same as
+ * the category-mode `materialize`), then delegates to the canonical web transfer
+ * write path `createTransferPair`: both legs share ONE server-generated link_id
+ * and land on the canonical "Transfer" category (resolveTransferCategoryId,
+ * FINLYNQ-131). createTransferPair calls invalidateUser on commit. Caller has
+ * already enforced same-currency, so cross-currency FX never runs here.
+ */
+async function materializeTransfer(args: {
+  userId: string;
+  dek: Buffer;
+  fromAccountId: number;
+  toAccountId: number;
+  enteredAmount: number;
+  date: string;
+  currency: string;
+  payee: string;
+  importHash: string;
+}): Promise<MaterializeTransferResult> {
+  const { userId, dek, fromAccountId, toAccountId, enteredAmount, date, currency, payee, importHash } = args;
+
+  // Mint the bank-ledger row for the OUTFLOW (negative) leg — the side the alert
+  // records — so future statement reconciliations dedup against it.
+  const { id: bankTxId } = await upsertBankTransaction(dek, {
+    userId,
+    accountId: fromAccountId,
+    importHash,
+    occurrenceIndex: 0,
+    date,
+    amount: -Math.abs(enteredAmount),
+    currency,
+    payee,
+    source: "import",
+  });
+
+  const result = await createTransferPair({
+    userId,
+    dek,
+    fromAccountId,
+    toAccountId,
+    enteredAmount: Math.abs(enteredAmount),
+    date,
+    note: payee,
+    txSource: "import",
+    // Bank-statement lineage on the source/outflow leg only (the alert's side).
+    fromLegBankTransactionId: bankTxId,
+  });
+  if (!result.ok) {
+    return { ok: false, reason: `transfer_${result.code}` };
+  }
+  // createTransferPair already invalidated the user tx cache on commit.
+  return {
+    ok: true,
+    fromTransactionId: result.fromTransactionId,
+    toTransactionId: result.toTransactionId,
+  };
 }
 
 /**

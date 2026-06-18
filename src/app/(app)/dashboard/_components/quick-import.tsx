@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Upload, FileText, FileUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { setHandoffFile } from "@/lib/import/file-handoff";
 
 type DropState = "idle" | "hover";
 
@@ -13,18 +14,35 @@ export function QuickImport() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [state, setState] = useState<DropState>("idle");
 
-  const goToImport = useCallback(() => router.push("/import"), [router]);
+  // Carry the picked/dropped file to /import via the module-level handoff
+  // store (a File can't be JSON-serialized through sessionStorage/URL, but the
+  // module instance survives a client-side router.push). /import consumes it on
+  // mount, opens its UploadDrawer, and runs the same preview/staging pipeline.
+  // When no file is provided, fall back to a bare navigation. (FINLYNQ-188)
+  const goToImport = useCallback(
+    (file?: File | null) => {
+      if (file) setHandoffFile(file);
+      router.push("/import");
+    },
+    [router],
+  );
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setState("idle");
-    goToImport();
+    goToImport(e.dataTransfer.files?.[0] ?? null);
   }, [goToImport]);
 
   const onDragOver = (e: React.DragEvent) => { e.preventDefault(); setState("hover"); };
   const onDragLeave = () => setState("idle");
 
-  const onFileInput = () => goToImport();
+  const onFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    // Reset the input value so re-selecting the SAME filename re-fires onChange
+    // (the file is already captured above; the reset only affects future picks).
+    e.target.value = "";
+    goToImport(file);
+  };
 
   const isActive = state === "hover";
 

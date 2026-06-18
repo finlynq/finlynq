@@ -17,7 +17,7 @@
  * behavior so the user knows where the rows will land.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { X, CheckCircle2, AlertCircle } from "lucide-react";
 import { MODES, type Mode } from "./modes";
@@ -157,6 +157,7 @@ export function UploadDrawer({
   // so it can surface a reset affordance when the account is set to 'auto' —
   // otherwise the preview never reappears and there's no way back from here.
   csvMappingMode = "confirm",
+  initialFile = null,
   onUploaded,
 }: {
   open: boolean;
@@ -173,6 +174,12 @@ export function UploadDrawer({
    *  auto-detected mapping silently (the route enforces this — the prop is
    *  used here only to seed the "Don't ask again" checkbox default state). */
   csvMappingMode?: "confirm" | "auto";
+  /** FINLYNQ-188 — a file carried in from the dashboard Quick Import card. When
+   *  set and the drawer is open, the drawer auto-runs the upload pipeline
+   *  against it once (with the same default params the upload card produces),
+   *  so the user lands directly in the preview/staging flow instead of having
+   *  to re-pick the file. Undefined/null = normal manual upload. */
+  initialFile?: File | null;
   /** Called after a successful upload so the parent surface can refresh the
    *  policy-appropriate tab. The drawer stays open showing a result panel; the
    *  parent decides when to close it (the "View rows" button calls this). */
@@ -452,6 +459,31 @@ export function UploadDrawer({
     },
     [accountId, accountLabel, accountCurrency, onUploaded],
   );
+
+  // FINLYNQ-188 — when a file is carried in from the dashboard Quick Import
+  // card, auto-run the upload pipeline against it once on open, using the same
+  // default params the upload card produces for a no-frills pick. This routes
+  // the file straight into the existing preview/staging flow (including the
+  // OFX-confirm / column-mapping 422 branches) rather than discarding it. The
+  // ref guards against re-firing on re-render or if the same File ref reopens.
+  const autoFiredFileRef = useRef<File | null>(null);
+  useEffect(() => {
+    if (!open || !initialFile) return;
+    if (autoFiredFileRef.current === initialFile) return;
+    autoFiredFileRef.current = initialFile;
+    void submitUpload({
+      file: initialFile,
+      accountId,
+      tolerance: 3,
+      templateId: null,
+      statementBalance: null,
+      skipHeaderRows: 0,
+      skipFooterRows: 0,
+      dateFormatOverride: "auto",
+      defaultCurrency: null,
+      payeeSource: savedOfxPayeeSource,
+    });
+  }, [open, initialFile, accountId, savedOfxPayeeSource, submitUpload]);
 
   // §A/§B (2026-06-04) — persist a per-account import preference. Fire-and-
   // forget: a failed PATCH just means the next upload re-asks/re-defaults; we

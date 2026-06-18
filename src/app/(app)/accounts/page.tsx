@@ -18,6 +18,15 @@ import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
 import {
+  ACCOUNT_GROUP_DEFAULTS,
+  orderGroups,
+  parseGroupOrder,
+  type AccountGroupOrder,
+  type AccountGroupType,
+} from "@/lib/accounts/groups";
+import { GroupField } from "./_components/group-field";
+import { ManageGroupsDialog } from "./_components/manage-groups-dialog";
+import {
   TrendingUp,
   TrendingDown,
   Wallet,
@@ -28,6 +37,7 @@ import {
   Archive,
   ArchiveRestore,
   Trash2,
+  FolderCog,
 } from "lucide-react";
 
 type AccountBalance = {
@@ -48,10 +58,11 @@ const ACCOUNT_TYPES = [
   { value: "L", label: "Liability" },
 ];
 
-const ACCOUNT_GROUPS: Record<string, string[]> = {
-  A: ["Cash", "Checking", "Savings", "Investment", "Property", "Other"],
-  L: ["Credit Card", "Loan", "Mortgage", "Other"],
-};
+// FINLYNQ-179: the default group suggestions now live in the shared
+// src/lib/accounts/groups.ts (single source of truth, also used by the
+// settings route + management dialog). The group field is free-text — these
+// are seed suggestions, NOT an allow-list.
+const ACCOUNT_GROUPS: Record<string, string[]> = ACCOUNT_GROUP_DEFAULTS;
 
 function aliasWarning(list: AccountBalance[], alias: string, excludeId: number | null): string {
   const a = alias.trim().toLowerCase();
@@ -162,6 +173,24 @@ export default function AccountsPage() {
   // names are decrypted display values — defend against null per the safeName
   // invariant).
   const sortAccountOrder = useDropdownOrder("account");
+
+  // FINLYNQ-179: user-customizable account groups. The saved per-type display
+  // order is a settings key/value (no migration); the management surface
+  // (rename / reorder / merge-into-Other) lives behind the "Manage groups"
+  // button.
+  const [groupOrder, setGroupOrder] = useState<AccountGroupOrder>({ A: [], L: [] });
+  const [manageGroupsOpen, setManageGroupsOpen] = useState(false);
+
+  function loadGroupOrder() {
+    fetch("/api/settings/account-group-order")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.order) setGroupOrder(parseGroupOrder(JSON.stringify(d.order)));
+      })
+      .catch(() => {});
+  }
+
+  useEffect(() => { loadGroupOrder(); }, []);
 
   function loadAccounts(includeArchived = showArchived) {
     setLoading(true);
@@ -339,21 +368,38 @@ export default function AccountsPage() {
   const activeAssets = assets.filter((a) => !a.archived);
   const activeLiabilities = liabilities.filter((a) => !a.archived);
 
+  // FINLYNQ-179: the set of group names currently in use, for combobox
+  // suggestions (any type) and the management dialog (scoped per type).
+  const existingGroups = Array.from(
+    new Set(accounts.map((a) => (a.accountGroup || "").trim()).filter(Boolean)),
+  );
+  const groupsByType: Record<AccountGroupType, string[]> = {
+    A: Array.from(new Set(assets.map((a) => a.accountGroup || "Other"))),
+    L: Array.from(new Set(liabilities.map((a) => a.accountGroup || "Other"))),
+  };
+
   const groups = (list: AccountBalance[]) => {
     const map = new Map<string, AccountBalance[]>();
     list.forEach((a) => {
       const group = a.accountGroup || "Other";
       map.set(group, [...(map.get(group) ?? []), a]);
     });
-    // Honour the user's configured account order (Settings → Dropdown
-    // Ordering) within each group. Pinned accounts lead in saved order; the
-    // rest fall back to a null-safe name sort.
-    return Array.from(map.entries()).map(
-      ([group, accts]) =>
+    // FINLYNQ-179: order the GROUP SECTIONS by the user's saved per-type order
+    // (settings key/value), with "Other" always last and the rest alphabetical.
+    const type: AccountGroupType = list[0]?.accountType === "L" ? "L" : "A";
+    const orderedGroupNames = orderGroups(
+      Array.from(map.keys()),
+      groupOrder[type] ?? [],
+    );
+    // Within each group, honour the user's configured account order (Settings →
+    // Dropdown Ordering). Pinned accounts lead in saved order; the rest fall
+    // back to a null-safe name sort.
+    return orderedGroupNames.map(
+      (group) =>
         [
           group,
           sortAccountOrder(
-            accts,
+            map.get(group) ?? [],
             (a) => a.accountId,
             (a, b) => (a.accountName ?? "").localeCompare(b.accountName ?? ""),
           ),
@@ -486,16 +532,14 @@ export default function AccountsPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>Group</Label>
-              <Select value={form.group} onValueChange={(v) => setForm({ ...form, group: v ?? "" })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {(ACCOUNT_GROUPS[form.type] ?? []).map((g) => (
-                    <SelectItem key={g} value={g}>{g}</SelectItem>
-                  ))}
-                  <SelectItem value="Other">Other</SelectItem>
-                </SelectContent>
-              </Select>
+              <Label htmlFor="create-account-group">Group</Label>
+              <GroupField
+                inputId="create-account-group"
+                type={form.type}
+                value={form.group}
+                existingGroups={existingGroups}
+                onChange={(v) => setForm({ ...form, group: v })}
+              />
               {formErrors.group && <p className="text-xs text-destructive">{formErrors.group}</p>}
             </div>
           </div>
@@ -595,6 +639,15 @@ export default function AccountsPage() {
           <Button
             variant="outline"
             size="sm"
+            onClick={() => setManageGroupsOpen(true)}
+            title="Rename, reorder, or merge account groups"
+          >
+            <FolderCog className="h-4 w-4 mr-1.5" />
+            Manage groups
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => setShowArchived((v) => !v)}
             title={showArchived ? "Hide archived accounts" : "Show archived accounts"}
           >
@@ -673,14 +726,14 @@ export default function AccountsPage() {
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label>Group</Label>
-                <Select value={editForm.group} onValueChange={(v) => setEditForm({ ...editForm, group: v ?? "" })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(ACCOUNT_GROUPS[editForm.type] ?? []).map((g) => <SelectItem key={g} value={g}>{g}</SelectItem>)}
-                    <SelectItem value="Other">Other</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Label htmlFor="edit-account-group">Group</Label>
+                <GroupField
+                  inputId="edit-account-group"
+                  type={editForm.type}
+                  value={editForm.group}
+                  existingGroups={existingGroups}
+                  onChange={(v) => setEditForm({ ...editForm, group: v })}
+                />
               </div>
             </div>
             <div className="space-y-1.5">
@@ -772,6 +825,17 @@ export default function AccountsPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* FINLYNQ-179 — rename / reorder / merge-into-Other account groups */}
+      <ManageGroupsDialog
+        open={manageGroupsOpen}
+        onOpenChange={setManageGroupsOpen}
+        groupsByType={groupsByType}
+        onChanged={() => {
+          loadAccounts();
+          loadGroupOrder();
+        }}
+      />
     </div>
   );
 }

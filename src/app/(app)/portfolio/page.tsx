@@ -417,14 +417,16 @@ export default function PortfolioPage() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {topGainers.map(h => (
-                    <div key={h.id} className="flex items-center justify-between py-1">
+                  {topGainers.map(m => (
+                    <div key={m.key} className="flex items-center justify-between py-1">
                       <div className="flex items-center gap-2">
-                        {h.image && <img src={h.image} alt="" className="h-5 w-5 rounded-full" />}
-                        <span className="text-sm font-medium">{h.symbol ?? h.name}</span>
-                        <span className="text-xs text-muted-foreground hidden sm:inline">{h.name}</span>
+                        {m.image && <img src={m.image} alt="" className="h-5 w-5 rounded-full" />}
+                        <span className="text-sm font-medium">{m.symbol ?? m.name}</span>
+                        {m.name !== (m.symbol ?? m.name) && (
+                          <span className="text-xs text-muted-foreground hidden sm:inline">{m.name}</span>
+                        )}
                       </div>
-                      <DayChange pct={h.changePct} amount={h.dayChangeDisplay} currency={displayCurrency} />
+                      <DayChange pct={m.changePct} amount={m.dayChangeDisplay} currency={displayCurrency} />
                     </div>
                   ))}
                 </div>
@@ -441,14 +443,16 @@ export default function PortfolioPage() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {topLosers.map(h => (
-                    <div key={h.id} className="flex items-center justify-between py-1">
+                  {topLosers.map(m => (
+                    <div key={m.key} className="flex items-center justify-between py-1">
                       <div className="flex items-center gap-2">
-                        {h.image && <img src={h.image} alt="" className="h-5 w-5 rounded-full" />}
-                        <span className="text-sm font-medium">{h.symbol ?? h.name}</span>
-                        <span className="text-xs text-muted-foreground hidden sm:inline">{h.name}</span>
+                        {m.image && <img src={m.image} alt="" className="h-5 w-5 rounded-full" />}
+                        <span className="text-sm font-medium">{m.symbol ?? m.name}</span>
+                        {m.name !== (m.symbol ?? m.name) && (
+                          <span className="text-xs text-muted-foreground hidden sm:inline">{m.name}</span>
+                        )}
                       </div>
-                      <DayChange pct={h.changePct} amount={h.dayChangeDisplay} currency={displayCurrency} />
+                      <DayChange pct={m.changePct} amount={m.dayChangeDisplay} currency={displayCurrency} />
                     </div>
                   ))}
                 </div>

@@ -156,8 +156,9 @@ export default function GeneralSettingsPage() {
             <DialogTitle>Switch display currency to {pendingCurrency}?</DialogTitle>
             <DialogDescription>
               This recalculates all your reports into {pendingCurrency} using each
-              transaction&apos;s historical exchange rate. It runs in the background;
-              your reports stay usable while it finishes.
+              transaction&apos;s historical exchange rate. Your realized gains and
+              tax figures will also re-base to {pendingCurrency}. It runs in the
+              background; your reports stay usable while it finishes.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

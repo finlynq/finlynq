@@ -14,6 +14,7 @@ function rule(conditions: EmailCondition[], extra: Partial<ActiveEmailRule> = {}
     conditions,
     accountId: 1,
     categoryId: null,
+    transferDestAccountId: null,
     mode: "auto",
     flipSign: false,
     dateSource: "parsed",
