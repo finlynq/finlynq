@@ -16,8 +16,8 @@ function periodExpr(period: Period) {
     case "daily":
       return sql<string>`${schema.transactions.date}`;
     case "weekly":
-      // ISO week: YYYY-Www
-      return sql<string>`SUBSTR(${schema.transactions.date}, 1, 4) || '-W' || SUBSTR('0' || ((CAST(STRFTIME('%j', ${schema.transactions.date}) AS INTEGER) - 1) / 7 + 1), -2)`;
+      // ISO week: YYYY-Www — native Postgres (transactions.date is TEXT 'YYYY-MM-DD', cast to date)
+      return sql<string>`to_char(${schema.transactions.date}::date, 'IYYY"-W"IW')`;
     case "monthly":
       return sql<string>`SUBSTR(${schema.transactions.date}, 1, 7)`;
     case "quarterly":
