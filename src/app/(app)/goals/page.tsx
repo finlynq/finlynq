@@ -51,6 +51,19 @@ const goalTypeConfig: Record<string, { label: string; badgeClass: string; border
   emergency_fund: { label: "Emergency Fund", badgeClass: "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-900/60", borderClass: "border-l-amber-500" },
 };
 
+// value→label maps for base-ui Select triggers (FINLYNQ-197).
+const GOAL_TYPE_LABELS: Record<string, string> = {
+  savings: "Savings",
+  debt_payoff: "Debt Payoff",
+  investment: "Investment",
+  emergency_fund: "Emergency Fund",
+};
+const GOAL_PRIORITY_LABELS: Record<string, string> = {
+  "1": "High",
+  "2": "Medium",
+  "3": "Low",
+};
+
 function progressColorClass(progress: number): string {
   if (progress < 33) return "[&_[data-slot=progress-indicator]]:bg-rose-500";
   if (progress <= 66) return "[&_[data-slot=progress-indicator]]:bg-amber-500";
@@ -200,7 +213,7 @@ function GoalEditForm({
       <div className="grid grid-cols-2 gap-3">
         <div>
           <Label>Type</Label>
-          <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v ?? "savings" })}>
+          <Select items={GOAL_TYPE_LABELS} value={form.type} onValueChange={(v) => setForm({ ...form, type: v ?? "savings" })}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="savings">Savings</SelectItem>
@@ -234,7 +247,7 @@ function GoalEditForm({
         </div>
         <div>
           <Label>Priority</Label>
-          <Select value={form.priority} onValueChange={(v) => setForm({ ...form, priority: v ?? "1" })}>
+          <Select items={GOAL_PRIORITY_LABELS} value={form.priority} onValueChange={(v) => setForm({ ...form, priority: v ?? "1" })}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="1">High</SelectItem>

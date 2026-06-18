@@ -91,6 +91,38 @@ export default function TransferForm() {
     [holdingId, sourceHoldings],
   );
 
+  // value→label maps so base-ui Select triggers show names, not ids (FINLYNQ-197).
+  const sourceAccountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        investmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [investmentAccounts],
+  );
+  const destAccountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        destAccountOptions.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [destAccountOptions],
+  );
+  const holdingLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        sourceHoldings.map((h) => [
+          String(h.id),
+          `${h.symbol ? `${h.symbol} — ` : ""}${h.name ?? `#${h.id}`} (${h.currency})`,
+        ]),
+      ),
+    [sourceHoldings],
+  );
+
   function validate(): boolean {
     const e: Record<string, string> = {};
     if (!sourceAccountId) e.sourceAccountId = "Pick a source account";
@@ -214,6 +246,7 @@ export default function TransferForm() {
             <div className="space-y-1.5">
               <Label>Source account</Label>
               <Select
+                items={sourceAccountLabelById}
                 value={sourceAccountId}
                 onValueChange={(v) => {
                   setSourceAccountId(v ?? "");
@@ -241,6 +274,7 @@ export default function TransferForm() {
             <div className="space-y-1.5">
               <Label>Destination account</Label>
               <Select
+                items={destAccountLabelById}
                 value={destAccountId}
                 onValueChange={(v) => setDestAccountId(v ?? "")}
                 disabled={!sourceAccountId}
@@ -271,6 +305,7 @@ export default function TransferForm() {
           <div className="space-y-1.5">
             <Label>Holding (from source account)</Label>
             <Select
+              items={holdingLabelById}
               value={holdingId}
               onValueChange={(v) => setHoldingId(v ?? "")}
               disabled={!sourceAccount}

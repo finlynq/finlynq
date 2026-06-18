@@ -84,6 +84,28 @@ export default function BuyForm() {
     [holdingId, accountHoldings],
   );
 
+  // value→label maps so base-ui Select triggers show names, not ids (FINLYNQ-197).
+  const accountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        investmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [investmentAccounts],
+  );
+  const holdingLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        accountHoldings.map((h) => [
+          String(h.id),
+          `${h.symbol ? `${h.symbol} — ` : ""}${h.name ?? `#${h.id}`} (${h.currency})`,
+        ]),
+      ),
+    [accountHoldings],
+  );
+
   // Cash-sleeve check: matching (account, currency, isCash=true) row must exist.
   const cashSleeve = useMemo(() => {
     if (!selectedAccount || !selectedHolding) return null;
@@ -234,6 +256,7 @@ export default function BuyForm() {
           <div className="space-y-1.5">
             <Label>Account</Label>
             <Select
+              items={accountLabelById}
               value={accountId}
               onValueChange={(v) => {
                 setAccountId(v ?? "");
@@ -259,6 +282,7 @@ export default function BuyForm() {
           <div className="space-y-1.5">
             <Label>Holding</Label>
             <Select
+              items={holdingLabelById}
               value={holdingId}
               onValueChange={(v) => setHoldingId(v ?? "")}
               disabled={!selectedAccount}

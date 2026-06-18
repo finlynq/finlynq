@@ -107,6 +107,38 @@ export default function WithdrawalForm() {
     });
   }, [eligibleSleeves]);
 
+  // value→label maps so base-ui Select triggers show names, not ids (FINLYNQ-197).
+  const sourceAccountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        investmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [investmentAccounts],
+  );
+  const destAccountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        nonInvestmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [nonInvestmentAccounts],
+  );
+  const sleeveLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        eligibleSleeves.map((s) => [
+          String(s.id),
+          s.name ?? `Cash ${s.currency}`,
+        ]),
+      ),
+    [eligibleSleeves],
+  );
+
   const currencyMismatch = useMemo(() => {
     if (!sourceAcct || !destAcct) return false;
     return eligibleSleeves.length === 0;
@@ -214,6 +246,7 @@ export default function WithdrawalForm() {
           <div className="space-y-1.5">
             <Label>From brokerage</Label>
             <Select
+              items={sourceAccountLabelById}
               value={sourceAccountId}
               onValueChange={(v) => setSourceAccountId(v ?? "")}
             >
@@ -236,6 +269,7 @@ export default function WithdrawalForm() {
           <div className="space-y-1.5">
             <Label>To account (non-investment)</Label>
             <Select
+              items={destAccountLabelById}
               value={destAccountId}
               onValueChange={(v) => setDestAccountId(v ?? "")}
             >
@@ -277,6 +311,7 @@ export default function WithdrawalForm() {
             <div className="space-y-1.5">
               <Label>Cash sleeve</Label>
               <Select
+                items={sleeveLabelById}
                 value={sourceCashSleeveHoldingId}
                 onValueChange={(v) => setSourceCashSleeveHoldingId(v ?? "")}
               >

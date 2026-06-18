@@ -107,6 +107,38 @@ export default function DepositForm() {
     });
   }, [eligibleSleeves]);
 
+  // value→label maps so base-ui Select triggers show names, not ids (FINLYNQ-197).
+  const sourceAccountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        nonInvestmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [nonInvestmentAccounts],
+  );
+  const destAccountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        investmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [investmentAccounts],
+  );
+  const sleeveLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        eligibleSleeves.map((s) => [
+          String(s.id),
+          s.name ?? `Cash ${s.currency}`,
+        ]),
+      ),
+    [eligibleSleeves],
+  );
+
   const currencyMismatch = useMemo(() => {
     if (!sourceAcct || !destAcct) return false;
     // The brokerage may have multiple sleeves; the form refuses only when
@@ -217,6 +249,7 @@ export default function DepositForm() {
           <div className="space-y-1.5">
             <Label>From account (non-investment)</Label>
             <Select
+              items={sourceAccountLabelById}
               value={sourceAccountId}
               onValueChange={(v) => setSourceAccountId(v ?? "")}
             >
@@ -239,6 +272,7 @@ export default function DepositForm() {
           <div className="space-y-1.5">
             <Label>To brokerage</Label>
             <Select
+              items={destAccountLabelById}
               value={destAccountId}
               onValueChange={(v) => setDestAccountId(v ?? "")}
             >
@@ -281,6 +315,7 @@ export default function DepositForm() {
             <div className="space-y-1.5">
               <Label>Cash sleeve</Label>
               <Select
+                items={sleeveLabelById}
                 value={destCashSleeveHoldingId}
                 onValueChange={(v) => setDestCashSleeveHoldingId(v ?? "")}
               >

@@ -39,7 +39,7 @@
  * to every Phase-3 plaintext-NULL'd read path.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -194,6 +194,16 @@ export function HoldingEditForm({
       cancelled = true;
     };
   }, [holdingId, isCreateMode, initialHolding]);
+
+  // value→label map so the base-ui Select trigger shows the account name
+  // rather than the raw numeric id (FINLYNQ-197).
+  const accountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        accounts.map((a) => [String(a.id), `${a.name} (${a.currency})`]),
+      ),
+    [accounts],
+  );
 
   const accountIdNum = form.accountId ? parseInt(form.accountId, 10) : NaN;
   const accountCurrency = (
@@ -418,6 +428,7 @@ export function HoldingEditForm({
         <div className="space-y-1.5">
           <Label>Account</Label>
           <Select
+            items={accountLabelById}
             value={form.accountId}
             onValueChange={(v) => setForm({ ...form, accountId: v ?? "" })}
           >

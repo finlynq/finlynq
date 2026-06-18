@@ -86,6 +86,18 @@ export default function FxConversionForm() {
   const { investmentAccounts, selectedAccount } =
     useAccountHoldingSelection(accounts, holdings, accountId);
 
+  // value→label map so the account trigger shows a name, not an id (FINLYNQ-197).
+  const accountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        investmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [investmentAccounts],
+  );
+
   const cashSleeves = useMemo(
     () =>
       selectedAccount
@@ -258,6 +270,7 @@ export default function FxConversionForm() {
           <div className="space-y-1.5">
             <Label>Account</Label>
             <Select
+              items={accountLabelById}
               value={accountId}
               onValueChange={(v) => {
                 setAccountId(v ?? "");
