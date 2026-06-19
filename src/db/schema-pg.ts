@@ -446,6 +446,15 @@ export const priceCache = pgTable("price_cache", {
   // doesn't have a prior-day reference) and on rows written before this migration.
   // Readers fall back to change: 0, changePct: 0 when null.
   previousClose: doublePrecision("previous_close"),
+  // FINLYNQ-204 (2026-06-25): when this row was last refreshed from the upstream
+  // quote API. A today-dated row (date == todayISO()) older than
+  // PRICE_CACHE_TODAY_TTL_MS (30 min, price-service.ts) is treated as STALE and
+  // lazily re-fetched on read; historical rows (date != today) are immutable and
+  // never re-fetched regardless of age. Additive: existing rows default to now()
+  // and read as fresh for 30 min after deploy. The refresh write is an explicit
+  // UPDATE ... WHERE symbol AND date (the (symbol,date) index is non-unique +
+  // prod has duplicate rows) — never an ON CONFLICT upsert.
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 // Canonical USD-anchored FX rate cache. Cross-rates are derived by

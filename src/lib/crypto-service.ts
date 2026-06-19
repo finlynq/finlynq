@@ -4,6 +4,11 @@
 import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { todayISO } from "@/lib/utils/date";
+// FINLYNQ-204: share the stock path's 30-min today-row TTL + staleness predicate
+// so crypto VALUATIONS (dashboard / net-worth / getHoldingsValueByAccount) refresh
+// intraday instead of freezing at the first cache fill of the UTC day. (The
+// overview's *displayed* crypto day-change already reads CoinGecko live.)
+import { isPriceCacheRowStale } from "@/lib/price-service";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
@@ -108,8 +113,8 @@ export async function getCryptoPrices(coinIds: string[]): Promise<CryptoPrice[]>
 async function readCryptoCacheBulk(
   symbols: string[],
   date: string,
-): Promise<Map<string, { price: number; currency: string }>> {
-  const out = new Map<string, { price: number; currency: string }>();
+): Promise<Map<string, { price: number; currency: string; stale: boolean }>> {
+  const out = new Map<string, { price: number; currency: string; stale: boolean }>();
   if (symbols.length === 0) return out;
   const cacheSymbols = [...new Set(symbols.map((s) => `CRYPTO:${s.toUpperCase()}`))];
   try {
@@ -117,7 +122,17 @@ async function readCryptoCacheBulk(
       .select()
       .from(schema.priceCache)
       .where(and(inArray(schema.priceCache.symbol, cacheSymbols), eq(schema.priceCache.date, date)));
-    for (const r of rows) out.set(r.symbol, { price: r.price, currency: r.currency ?? "CAD" });
+    for (const r of rows) {
+      // Keep the FIRST row per symbol (duplicate (symbol,date) rows are possible
+      // — non-unique index). FINLYNQ-204: stamp staleness for today-rows; a
+      // historical date is never stale (isPriceCacheRowStale guards date != today).
+      if (out.has(r.symbol)) continue;
+      out.set(r.symbol, {
+        price: r.price,
+        currency: r.currency ?? "CAD",
+        stale: isPriceCacheRowStale(r.date, r.fetchedAt, date),
+      });
+    }
   } catch {
     // A cache-read failure degrades to "all misses" -> live fetch below.
   }
@@ -171,7 +186,13 @@ export async function getCryptoSpotPrices(
   const today = todayISO();
   const symbols = coins.filter((c) => c.coinId && c.symbol).map((c) => c.symbol);
   const cacheMap = await readCryptoCacheBulk(symbols, today);
-  const { hits, misses } = splitCryptoCacheHits(coins, new Set(cacheMap.keys()));
+  // FINLYNQ-204: only FRESH today-rows count as hits; a stale today-row (>30 min)
+  // is routed to `misses` so it re-fetches live (it remains in `cacheMap` as a
+  // retain-on-failure fallback below). Mirrors the stock path.
+  const freshKeys = new Set(
+    [...cacheMap.entries()].filter(([, v]) => !v.stale).map(([k]) => k),
+  );
+  const { hits, misses } = splitCryptoCacheHits(coins, freshKeys);
 
   const out: CryptoPrice[] = [];
   for (const h of hits) {
@@ -190,15 +211,35 @@ export async function getCryptoSpotPrices(
   }
 
   if (misses.length > 0) {
-    // Live fetch for the misses; getCryptoPrices() also writes price_cache, so
-    // the next call (e.g. the next day in a rebuild) hits the cache instead.
+    // Live fetch for the misses (true misses + stale today-rows); getCryptoPrices()
+    // also writes price_cache (UPDATE-in-place stamps fetched_at), so the next call
+    // within the TTL hits the cache instead.
     const live = await getCryptoPrices(misses.map((m) => m.coinId));
     const liveById = new Map(live.map((p) => [p.id, p]));
     for (const m of misses) {
       const lp = liveById.get(m.coinId);
-      // Re-key to the CALLER's symbol so downstream symbol-keyed lookups resolve
-      // even when CoinGecko returns a different symbol for the same coin id.
-      if (lp) out.push({ ...lp, symbol: m.symbol });
+      if (lp) {
+        // Re-key to the CALLER's symbol so downstream symbol-keyed lookups resolve
+        // even when CoinGecko returns a different symbol for the same coin id.
+        out.push({ ...lp, symbol: m.symbol });
+        continue;
+      }
+      // FINLYNQ-204 retain-on-failure: live fetch returned nothing for this coin.
+      // If we had a stale today-row, keep serving its last-known price rather than
+      // dropping the holding (its fetched_at is left untouched → re-tries next read).
+      const stale = cacheMap.get(`CRYPTO:${m.symbol}`);
+      if (stale) {
+        out.push({
+          id: m.coinId,
+          symbol: m.symbol,
+          name: m.symbol,
+          price: stale.price,
+          change24h: 0,
+          changePct24h: 0,
+          marketCap: 0,
+          image: undefined,
+        });
+      }
     }
   }
 
@@ -390,8 +431,10 @@ async function cacheCryptoPrice(symbol: string, price: number, currency: string)
       .get();
 
     if (existing) {
+      // FINLYNQ-204: stamp fetched_at on refresh so today's crypto row resets the
+      // 30-min intraday TTL (parity with the stock writePriceCache UPDATE path).
       await db.update(schema.priceCache)
-        .set({ price, currency })
+        .set({ price, currency, fetchedAt: new Date() })
         .where(eq(schema.priceCache.id, existing.id))
         ;
     } else {

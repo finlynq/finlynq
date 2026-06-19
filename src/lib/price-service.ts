@@ -3,9 +3,13 @@
 //
 // Cache architecture:
 //   - All Yahoo quote calls go through `price_cache` (table) keyed on
-//     (symbol, date). Today's price is cached under date=today and reused
-//     for the rest of the calendar day. Historical prices are cached
-//     forever (immutable). The cache is populated on first miss.
+//     (symbol, date). Today's price is cached under date=today and reused,
+//     but only for PRICE_CACHE_TODAY_TTL_MS (30 min) — a today-dated row older
+//     than that is STALE and lazily re-fetched on read (FINLYNQ-204), so
+//     intraday day-change tracks within 30 min instead of freezing at the first
+//     cache fill of the UTC day. Historical prices (date != today) are cached
+//     forever (immutable) and never re-fetched. The cache is populated on first
+//     miss.
 //   - Mirrors the FX cache pattern in fx-service.ts (fx_rates table +
 //     getRateToUsd lookup ladder). Both surfaces work the same way:
 //       cache hit → return; cache miss → API → INSERT → return.
@@ -70,6 +74,36 @@ const QUOTE_FETCH_TIMEOUT_MS = 4000;
 const NEGATIVE_QUOTE_TTL_MS = 10 * 60 * 1000; // 10 min
 const negativeQuoteCache = new Map<string, number>(); // symbol -> expiry epoch ms
 
+// ── Intraday TTL for "today's" cache row (FINLYNQ-204) ──────────────────────
+// A price_cache row dated todayISO() is reused as a cache hit only for this long;
+// past the TTL it's treated as stale and lazily re-fetched on read so the
+// Portfolio day-change tracks intraday (and converges to the official close
+// within 30 min of the close) instead of freezing at the first cache fill of the
+// UTC day. Historical rows (date != today) are immutable — never stale. Shared
+// with crypto-service.ts so both quote paths use one source of truth.
+export const PRICE_CACHE_TODAY_TTL_MS = 30 * 60 * 1000; // 30 min
+
+/**
+ * Decide whether a cached row should be treated as stale (and re-fetched live).
+ * Pure + null-safe so it's unit-testable without a DB. A row is stale ONLY when
+ * it is dated `today` (intraday) AND was last fetched more than the TTL ago.
+ * Historical rows (date != today) are immutable and never stale, regardless of
+ * `fetchedAt` (which may even be null on a legacy/pre-migration row).
+ */
+export function isPriceCacheRowStale(
+  rowDate: string,
+  fetchedAt: Date | string | number | null | undefined,
+  today: string,
+  now: number = Date.now(),
+  ttlMs: number = PRICE_CACHE_TODAY_TTL_MS,
+): boolean {
+  if (rowDate !== today) return false; // historical → immutable, never stale
+  if (fetchedAt == null) return true; // today-row with no stamp → refresh
+  const stampMs = fetchedAt instanceof Date ? fetchedAt.getTime() : new Date(fetchedAt).getTime();
+  if (Number.isNaN(stampMs)) return true; // unparseable stamp → refresh
+  return now - stampMs > ttlMs;
+}
+
 function isQuoteNegativelyCached(symbol: string): boolean {
   const exp = negativeQuoteCache.get(symbol);
   if (exp == null) return false;
@@ -116,8 +150,14 @@ export function deriveDayChange(price: number, previousClose: number | null | un
   };
 }
 
-// Single-row cache lookup. Returns null on miss.
-async function readPriceCache(symbol: string, date: string): Promise<QuoteResult | null> {
+// A cache hit, plus whether it's a stale today-row that should be re-fetched
+// live (FINLYNQ-204). On a stale hit the `quote` is still the LAST-known value
+// so callers can fall back to it if the live re-fetch fails (retain-on-failure).
+type CacheHit = { quote: QuoteResult; stale: boolean };
+
+// Single-row cache lookup. Returns null on a true miss; on a hit reports whether
+// the today-row is stale (older than the TTL) so the fetch path can refresh it.
+async function readPriceCache(symbol: string, date: string): Promise<CacheHit | null> {
   const row = await db
     .select()
     .from(schema.priceCache)
@@ -126,18 +166,23 @@ async function readPriceCache(symbol: string, date: string): Promise<QuoteResult
   if (!row) return null;
   const { change, changePct } = deriveDayChange(row.price, row.previousClose);
   return {
-    symbol,
-    price: row.price,
-    currency: row.currency ?? "USD",
-    name: symbol,
-    change,
-    changePct,
-    previousClose: row.previousClose ?? null,
+    quote: {
+      symbol,
+      price: row.price,
+      currency: row.currency ?? "USD",
+      name: symbol,
+      change,
+      changePct,
+      previousClose: row.previousClose ?? null,
+    },
+    stale: isPriceCacheRowStale(row.date, row.fetchedAt, date),
   };
 }
 
-// Bulk cache lookup. Returns a map of symbol → QuoteResult for hits.
-async function readPriceCacheBulk(symbols: string[], date: string): Promise<Map<string, QuoteResult>> {
+// Bulk cache lookup. Returns a map of symbol → CacheHit for hits (each carrying
+// its own `stale` flag). A stale today-row is still returned (as a fallback) but
+// the caller re-fetches it live and only overwrites on success.
+async function readPriceCacheBulk(symbols: string[], date: string): Promise<Map<string, CacheHit>> {
   if (symbols.length === 0) return new Map();
   const rows = await db
     .select()
@@ -146,25 +191,36 @@ async function readPriceCacheBulk(symbols: string[], date: string): Promise<Map<
       inArray(schema.priceCache.symbol, symbols),
       eq(schema.priceCache.date, date),
     ));
-  const out = new Map<string, QuoteResult>();
+  const out = new Map<string, CacheHit>();
   for (const r of rows) {
+    // With duplicate (symbol, date) rows possible (non-unique index), keep the
+    // FIRST row seen per symbol — deterministic and matches the single-row .get().
+    if (out.has(r.symbol)) continue;
     const { change, changePct } = deriveDayChange(r.price, r.previousClose);
     out.set(r.symbol, {
-      symbol: r.symbol,
-      price: r.price,
-      currency: r.currency ?? "USD",
-      name: r.symbol,
-      change,
-      changePct,
-      previousClose: r.previousClose ?? null,
+      quote: {
+        symbol: r.symbol,
+        price: r.price,
+        currency: r.currency ?? "USD",
+        name: r.symbol,
+        change,
+        changePct,
+        previousClose: r.previousClose ?? null,
+      },
+      stale: isPriceCacheRowStale(r.date, r.fetchedAt, date),
     });
   }
   return out;
 }
 
-// Idempotent insert; ignores duplicate-key errors so concurrent callers
-// don't race-fail. FINLYNQ-92: writes previousClose alongside price so the
-// next cache-hit read can compute live day-change.
+// Write a fresh quote into price_cache. FINLYNQ-92: writes previousClose
+// alongside price so the next cache-hit read can compute live day-change.
+// FINLYNQ-204: if a row for (symbol, date) already exists this is a REFRESH —
+// UPDATE it in place (price, currency, previousClose, fetched_at=now()) rather
+// than inserting a second row. The (symbol, date) index is NON-unique and prod
+// already has duplicate rows, so this is an explicit UPDATE ... WHERE symbol AND
+// date (never an ON CONFLICT upsert); it touches every duplicate row for the key
+// so a stale read can't survive on a sibling. On a true miss it inserts.
 async function writePriceCache(
   symbol: string,
   date: string,
@@ -173,8 +229,14 @@ async function writePriceCache(
   previousClose: number | null = null,
 ) {
   try {
+    const updated = await db
+      .update(schema.priceCache)
+      .set({ price, currency, previousClose, fetchedAt: new Date() })
+      .where(and(eq(schema.priceCache.symbol, symbol), eq(schema.priceCache.date, date)))
+      .returning({ id: schema.priceCache.id });
+    if (Array.isArray(updated) && updated.length > 0) return; // refreshed existing row(s)
     await db.insert(schema.priceCache).values({ symbol, date, price, currency, previousClose });
-  } catch { /* duplicate-key is fine */ }
+  } catch { /* duplicate-key / concurrent insert is fine */ }
 }
 
 /**
@@ -230,12 +292,18 @@ export async function fetchQuoteLive(symbol: string): Promise<QuoteResult | null
 export async function fetchQuote(symbol: string): Promise<QuoteResult | null> {
   const today = todayISO();
   const cached = await readPriceCache(symbol, today);
-  if (cached) return cached;
-  if (isQuoteNegativelyCached(symbol)) return null;
+  // Fresh today-row or any historical row → cache hit, no API call.
+  if (cached && !cached.stale) return cached.quote;
+  // A stale today-row is negatively-cached too → keep serving the stale value
+  // (retain-on-failure) rather than re-stalling on a known-bad symbol.
+  if (isQuoteNegativelyCached(symbol)) return cached ? cached.quote : null;
   const live = await fetchQuoteLive(symbol);
   if (!live) {
     markQuoteMiss(symbol, "no data / timeout");
-    return null;
+    // FINLYNQ-204: a failed re-fetch of a stale today-row RETAINS the stale value
+    // (its fetched_at is left untouched, so it re-tries on the next read) — never
+    // blank a previously-priced holding. A true miss still returns null.
+    return cached ? cached.quote : null;
   }
   await writePriceCache(symbol, today, live.price, live.currency, live.previousClose ?? null);
   return live;
@@ -250,20 +318,35 @@ export async function fetchMultipleQuotes(symbols: string[]): Promise<Map<string
   const unique = [...new Set(symbols.filter(Boolean))];
   if (unique.length === 0) return new Map();
   const today = todayISO();
-  const results = await readPriceCacheBulk(unique, today);
-  // Skip cache hits AND symbols recently known to return no data — otherwise a
-  // single dead/slow ticker re-stalls every load (it never lands in price_cache).
-  const missing = unique.filter(s => !results.has(s) && !isQuoteNegativelyCached(s));
-  if (missing.length === 0) return results;
+  const hits = await readPriceCacheBulk(unique, today);
 
-  // Fetch misses in batches of 5 to avoid rate limiting.
-  for (let i = 0; i < missing.length; i += 5) {
-    const batch = missing.slice(i, i + 5);
+  // Seed results with EVERY cache hit — including stale today-rows — so a failed
+  // live re-fetch keeps the last-known price (retain-on-failure) instead of
+  // blanking the holding (FINLYNQ-204). Stale rows are overwritten below on a
+  // successful live fetch.
+  const results = new Map<string, QuoteResult>();
+  for (const [sym, hit] of hits) results.set(sym, hit.quote);
+
+  // Refetch set = (cache misses) ∪ (stale today-rows). Skip symbols recently
+  // known to return no data — a single dead/slow ticker must not re-stall every
+  // load (a stale row's last-known value already sits in `results` as fallback).
+  const refetch = unique.filter((s) => {
+    const hit = hits.get(s);
+    const needs = !hit || hit.stale; // miss or stale-today
+    return needs && !isQuoteNegativelyCached(s);
+  });
+  if (refetch.length === 0) return results;
+
+  // Fetch in batches of 5 to avoid rate limiting.
+  for (let i = 0; i < refetch.length; i += 5) {
+    const batch = refetch.slice(i, i + 5);
     const quotes = await Promise.all(batch.map((s) => fetchQuoteLive(s)));
     for (let j = 0; j < batch.length; j++) {
       const q = quotes[j];
       if (!q) {
         markQuoteMiss(batch[j], "no data / timeout");
+        // Stale today-row: leave the seeded last-known value in `results` and its
+        // fetched_at untouched so it re-tries next read. True miss: stays absent.
         continue;
       }
       results.set(q.symbol, q);
@@ -284,7 +367,8 @@ export async function fetchMultipleQuotes(symbols: string[]): Promise<Map<string
  */
 export async function fetchQuoteAtDate(symbol: string, date: string): Promise<QuoteResult | null> {
   const cached = await readPriceCache(symbol, date);
-  if (cached) return cached;
+  // Historical rows are immutable (never stale), so any hit is returned as-is.
+  if (cached) return cached.quote;
   try {
     // Window: 7 days before to 1 day after the target so a weekend/holiday
     // target still lands on a real close. Yahoo returns the trading-day
@@ -344,7 +428,10 @@ export async function fetchMultipleQuotesAtDate(
 ): Promise<Map<string, QuoteResult>> {
   const unique = [...new Set(symbols.filter(Boolean))];
   if (unique.length === 0) return new Map();
-  const results = await readPriceCacheBulk(unique, date);
+  // Historical date → all hits are immutable (never stale); unwrap to QuoteResult.
+  const hits = await readPriceCacheBulk(unique, date);
+  const results = new Map<string, QuoteResult>();
+  for (const [sym, hit] of hits) results.set(sym, hit.quote);
   const missing = unique.filter(s => !results.has(s));
   if (missing.length === 0) return results;
   for (let i = 0; i < missing.length; i += 5) {
@@ -368,8 +455,10 @@ export async function cachePrice(symbol: string, price: number, currency: string
     .get();
 
   if (existing) {
+    // FINLYNQ-204: stamp fetched_at so a manual price write also marks today's
+    // row fresh (resets the 30-min intraday TTL).
     await db.update(schema.priceCache)
-      .set({ price, currency })
+      .set({ price, currency, fetchedAt: new Date() })
       .where(eq(schema.priceCache.id, existing.id))
       ;
   } else {
