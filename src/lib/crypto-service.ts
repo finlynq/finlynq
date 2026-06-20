@@ -12,6 +12,33 @@ import { isPriceCacheRowStale } from "@/lib/price-service";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
+// CoinGecko's free tier only serves ~365 days of daily history. A historical
+// valuation for a date OLDER than this can never be satisfied by a market_chart
+// fetch — the request just re-returns the same trailing 365-day window and
+// covers nothing new — so calling it for old dates is pure waste (it was firing
+// one doomed CoinGecko request per old date per coin during a multi-year
+// snapshot rebuild). `isWithinCryptoHistoryWindow` gates that call; out-of-window
+// dates fall straight through to the cache-first spot-price approximation.
+export const CRYPTO_FREE_HISTORY_DAYS = 365;
+
+/**
+ * True iff `date` is recent enough that CoinGecko's free market_chart history can
+ * still cover it (within the last `maxDays`). Pure + null-safe for unit-testing.
+ * A strict `<` keeps us off the exact-365 boundary, where CoinGecko sometimes
+ * returns slightly fewer than `days` bars and the oldest day would miss anyway.
+ */
+export function isWithinCryptoHistoryWindow(
+  date: string,
+  today: string,
+  maxDays: number = CRYPTO_FREE_HISTORY_DAYS,
+): boolean {
+  const dMs = Date.parse(`${date}T00:00:00Z`);
+  const tMs = Date.parse(`${today}T00:00:00Z`);
+  if (!Number.isFinite(dMs) || !Number.isFinite(tMs)) return false;
+  const ageDays = Math.floor((tMs - dMs) / 86_400_000);
+  return ageDays < maxDays;
+}
+
 export type CryptoPrice = {
   id: string;
   symbol: string;
@@ -339,9 +366,14 @@ export async function getCryptoPricesAtDate(
   // 1. Cache-read for the historical date.
   let cacheMap = await readCryptoCacheBulk(symbols, date);
 
-  // 2. For misses, fetch [date, today] history per coin and re-read.
+  // 2. For misses, fetch [date, today] history per coin and re-read — but ONLY
+  //    when `date` is within CoinGecko's free ~365-day history window. For older
+  //    dates the call can never cover the date (it just re-returns the trailing
+  //    365 days), so we skip it entirely and let step 3 use the spot
+  //    approximation — avoiding one wasted CoinGecko request per old date per
+  //    coin across a multi-year rebuild walk.
   const missing = [...uniq].filter(([, sym]) => !cacheMap.has(`CRYPTO:${sym}`));
-  if (missing.length > 0) {
+  if (missing.length > 0 && isWithinCryptoHistoryWindow(date, today)) {
     for (const [coinId, sym] of missing) {
       await fetchCryptoHistoryToCache(coinId, sym, date);
     }
@@ -359,8 +391,11 @@ export async function getCryptoPricesAtDate(
     }
   }
 
-  // 3. Dates beyond cache reach (>365d old, or an API failure) degrade to the
-  //    live spot price so we never drop a holding from a historical snapshot.
+  // 3. Dates beyond cache reach (older than the ~365d window — where step 2 is
+  //    skipped — or an in-window API failure) degrade to the cache-first spot
+  //    price so we never drop a holding from a historical snapshot. The spot
+  //    path reads today's cached row first, so this is ~1 call per coin, not one
+  //    per day.
   if (stillMissing.length > 0) {
     const spot = await getCryptoSpotPrices(stillMissing);
     const spotById = new Map(spot.map((p) => [p.id, p]));
