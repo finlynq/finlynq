@@ -200,6 +200,14 @@ export async function rebuildPortfolioSnapshots(
 
   // Total days in the (clamped) walk — drives the determinate progress bar.
   const totalDays = dayspanInclusive(from, to);
+  // Publish the denominator BEFORE the first (potentially slow, cold-cache) day
+  // so the status registry immediately reports a determinate "day 0 of N". The
+  // per-day onProgress below only fires AFTER each buildDailySnapshot returns, so
+  // without this the UI sits on the indeterminate "starting…" state for the
+  // entire duration of day 1 — which on a large, cold-cache account (many
+  // holdings × historical pricing) is minutes, making a healthy run look hung
+  // (FINLYNQ-205).
+  onProgress?.(0, totalDays);
 
   let day = from;
   let daysProcessed = 0;

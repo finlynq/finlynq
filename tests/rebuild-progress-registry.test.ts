@@ -166,8 +166,11 @@ describe("rebuildPortfolioSnapshots wires the onProgress callback per day", () =
     );
 
     expect(result.daysProcessed).toBe(3);
-    // One callback per day; total is the inclusive span and stays constant.
+    // A leading (0, total) is emitted BEFORE the walk so the UI shows a
+    // determinate bar immediately, then one callback per day; total is the
+    // inclusive span and stays constant (FINLYNQ-205).
     expect(calls).toEqual([
+      [0, 3],
       [1, 3],
       [2, 3],
       [3, 3],

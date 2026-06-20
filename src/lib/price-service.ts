@@ -17,7 +17,7 @@
 //     batch (`fetchMultipleQuotes` already de-dupes via Set).
 
 import { db, schema } from "@/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import { todayISO } from "@/lib/utils/date";
 
 // FINLYNQ-201: the ETF-vs-stock classification no longer relies on a hardcoded
@@ -356,6 +356,100 @@ export async function fetchMultipleQuotes(symbols: string[]): Promise<Map<string
   return results;
 }
 
+// ── Windowed historical caching (efficient cold-cache fill) ─────────────────
+// A snapshot rebuild walks history one CALENDAR day at a time and prices every
+// holding as-of each day. Caching only the single target date meant a cold
+// cache forced ~1 Yahoo call PER (symbol, day) — tens of thousands of timeouts.
+// Instead, one historical fetch already returns a whole WINDOW of daily closes,
+// so we persist the entire window (forward-filled to one row per calendar day),
+// turning the walk into ~1 Yahoo call per `HISTORICAL_WINDOW_FORWARD_DAYS` per
+// symbol. Historical price rows are immutable, so over-caching is always safe.
+const HISTORICAL_WINDOW_FORWARD_DAYS = 60;
+
+/** Add `n` calendar days to a `YYYY-MM-DD` string (UTC, n may be negative). */
+function addCalendarDays(iso: string, n: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Forward-fill a sparse run of trading-day closes into one row PER CALENDAR DATE
+ * across `[fillFrom, fillTo]` (inclusive). Each weekend/holiday inherits the most
+ * recent close on/before it — matching `fetchQuoteAtDate`'s "close on the most
+ * recent trading day on/before `date`" contract — so the day-by-day walk gets a
+ * cache hit for every calendar day, not just trading days.
+ *
+ * Pure + deterministic (no DB, no clock) for unit-testing. Rules:
+ *  - `bars` MUST be ascending by date and hold only real trading-day closes.
+ *  - never emits a row for `today` or any future date (today's row is TTL-managed
+ *    by the live quote path — writing it here would clobber that).
+ *  - calendar days before the first bar are skipped (no known close yet).
+ */
+export function buildForwardFilledRows(
+  symbol: string,
+  currency: string,
+  bars: Array<{ date: string; close: number }>,
+  fillFrom: string,
+  fillTo: string,
+  today: string,
+): Array<{ symbol: string; date: string; price: number; currency: string }> {
+  if (bars.length === 0) return [];
+  // Clamp the upper bound below today — historical rows only.
+  const yesterday = addCalendarDays(today, -1);
+  const upper = fillTo < yesterday ? fillTo : yesterday;
+  if (upper < fillFrom) return [];
+  const out: Array<{ symbol: string; date: string; price: number; currency: string }> = [];
+  let bi = 0;
+  let lastClose: number | null = null;
+  for (let d = fillFrom; d <= upper; d = addCalendarDays(d, 1)) {
+    while (bi < bars.length && bars[bi].date <= d) {
+      lastClose = bars[bi].close;
+      bi++;
+    }
+    if (lastClose == null) continue; // before the first known bar
+    out.push({ symbol, date: d, price: lastClose, currency });
+  }
+  return out;
+}
+
+/**
+ * Persist the full fetched window into `price_cache` (one row per calendar day,
+ * forward-filled). Reads the existing rows in range ONCE and inserts only the
+ * missing dates in a single multi-row INSERT — historical rows are immutable, so
+ * an existing `(symbol, date)` is already correct and must not be duplicated
+ * (the index is NON-unique). Best-effort: a cache-fill failure never breaks the
+ * caller (a missed date just re-fetches later).
+ */
+async function cacheHistoricalWindow(
+  symbol: string,
+  currency: string,
+  bars: Array<{ date: string; close: number }>,
+  fillFrom: string,
+  fillTo: string,
+): Promise<void> {
+  const rows = buildForwardFilledRows(symbol, currency, bars, fillFrom, fillTo, todayISO());
+  if (rows.length === 0) return;
+  try {
+    const existing = await db
+      .select({ date: schema.priceCache.date })
+      .from(schema.priceCache)
+      .where(
+        and(
+          eq(schema.priceCache.symbol, symbol),
+          gte(schema.priceCache.date, rows[0].date),
+          lte(schema.priceCache.date, rows[rows.length - 1].date),
+        ),
+      );
+    const have = new Set(existing.map((r) => r.date));
+    const missing = rows.filter((r) => !have.has(r.date));
+    if (missing.length === 0) return;
+    await db.insert(schema.priceCache).values(missing);
+  } catch {
+    /* concurrent insert / duplicate key is fine — cache fill is best-effort */
+  }
+}
+
 /**
  * Fetch the close price on a specific historical date (or the most recent
  * trading day on/before it). Uses Yahoo's chart API with period1/period2
@@ -370,14 +464,20 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
   // Historical rows are immutable (never stale), so any hit is returned as-is.
   if (cached) return cached.quote;
   try {
-    // Window: 7 days before to 1 day after the target so a weekend/holiday
-    // target still lands on a real close. Yahoo returns the trading-day
-    // closes inside the window — we pick the last one on/before `date`.
+    // Window: 7 days BEFORE the target (so a weekend/holiday target still lands
+    // on a real close) through HISTORICAL_WINDOW_FORWARD_DAYS AFTER it (capped at
+    // now). The forward span is what makes a sequential day-walk efficient — one
+    // fetch caches the next ~2 months, so the walk re-fetches only ~once per
+    // window instead of once per day. We still pick the last close on/before
+    // `date` as the returned value.
     const target = new Date(date + "T00:00:00Z");
     const windowStart = new Date(target.getTime() - 7 * 86400000);
-    const windowEnd = new Date(target.getTime() + 86400000);
+    const windowEndMs = Math.min(
+      target.getTime() + (HISTORICAL_WINDOW_FORWARD_DAYS + 1) * 86400000,
+      Date.now(),
+    );
     const period1 = Math.floor(windowStart.getTime() / 1000);
-    const period2 = Math.floor(windowEnd.getTime() / 1000);
+    const period2 = Math.floor(windowEndMs / 1000);
     const url = `${YAHOO_BASE}/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${period2}&interval=1d`;
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -393,21 +493,32 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
     const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
     if (timestamps.length === 0) return null;
     const targetEpoch = Math.floor(target.getTime() / 1000);
+    // Collect every real trading-day close (ascending) so the whole window can be
+    // persisted, while still tracking the last close on/before the target.
+    const bars: Array<{ date: string; close: number }> = [];
     let chosen: { ts: number; close: number } | null = null;
     for (let i = 0; i < timestamps.length; i++) {
       const c = closes[i];
       if (c == null) continue;
+      bars.push({ date: new Date(timestamps[i] * 1000).toISOString().slice(0, 10), close: c });
       if (timestamps[i] <= targetEpoch + 86400) {
         chosen = { ts: timestamps[i], close: c };
       }
     }
     if (!chosen) return null;
     const currency = meta.currency ?? "USD";
-    // FINLYNQ-92: historical bars don't carry a meaningful "day change" — we'd
-    // need the bar BEFORE `chosen` for that and we don't currently fetch it.
-    // Writing null keeps the column honest; the day-change badge already
-    // doesn't render for historical date queries.
-    await writePriceCache(symbol, date, chosen.close, currency, null);
+    // Persist the FULL window (forward-filled to one row per calendar day) — not
+    // just the target date — so the next ~2 months of the walk are cache hits.
+    // FINLYNQ-92: historical bars carry no meaningful "day change" (we don't
+    // fetch the prior bar), so previous_close stays null; the day-change badge
+    // already doesn't render for historical date queries.
+    await cacheHistoricalWindow(
+      symbol,
+      currency,
+      bars,
+      date,
+      addCalendarDays(date, HISTORICAL_WINDOW_FORWARD_DAYS),
+    );
     return {
       symbol,
       price: chosen.close,
