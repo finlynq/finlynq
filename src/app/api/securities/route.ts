@@ -124,18 +124,38 @@ export const GET = apiHandler(
   },
 );
 
-const patchSchema = z.object({
-  id: z.number().int().positive(),
-  name: z.string().trim().min(1).max(200),
-});
+// FINLYNQ-201: the user-settable display asset class. `asset_type` is COSMETIC
+// — the cluster_key (symbol-based) is the grouping/uniqueness key, so changing
+// it NEVER re-clusters (canonical.ts). The badge resolution order is
+// user/persisted `asset_type` → live Yahoo quoteType → stock; setting it here is
+// the durable user override that always wins.
+const ASSET_TYPES = ["stock", "etf", "crypto", "cash", "metal", "custom"] as const;
+
+const patchSchema = z
+  .object({
+    id: z.number().int().positive(),
+    name: z.string().trim().min(1).max(200).optional(),
+    assetType: z.enum(ASSET_TYPES).optional(),
+  })
+  .refine((b) => b.name !== undefined || b.assetType !== undefined, {
+    message: "Provide a name and/or an assetType",
+  });
 
 /**
- * PATCH /api/securities — rename a security's display name. Re-encrypts
- * name_ct/name_lookup; does NOT touch cluster_key (renaming never re-clusters).
+ * PATCH /api/securities — update a security's display name and/or asset type.
  *
- * Propagation (2026-06-17): the rename is ALSO copied onto every member position
- * (`portfolio_holdings` with this `security_id`), so surfaces that read the
- * per-position holding name — the account-detail "Cash sleeves" list, the
+ * `name` (optional): re-encrypts name_ct/name_lookup AND copies the new name
+ * onto every member position (see below).
+ * `assetType` (optional, FINLYNQ-201): sets the user-settable ETF-vs-stock (etc.)
+ * display class on the `securities` row. Cosmetic — does NOT touch cluster_key,
+ * so it NEVER re-clusters; it is the durable user override the badge prefers
+ * over Yahoo's quoteType.
+ *
+ * Neither change touches cluster_key, so a rename / retype never re-clusters.
+ *
+ * Name propagation (2026-06-17): the rename is ALSO copied onto every member
+ * position (`portfolio_holdings` with this `security_id`), so surfaces that read
+ * the per-position holding name — the account-detail "Cash sleeves" list, the
  * transactions ledger when the read-flip is OFF — reflect it too, not just the
  * centralized securities row. A security can back several cash sleeves across
  * accounts ("multiple members"); all get the new name. The position's
@@ -145,18 +165,34 @@ const patchSchema = z.object({
  * ledger identity is the symbol anyway).
  */
 export const PATCH = apiHandler(
-  { auth: "encryption", body: patchSchema, fallbackMessage: "Failed to rename security" },
+  { auth: "encryption", body: patchSchema, fallbackMessage: "Failed to update security" },
   async ({ userId, dek, body }) => {
-    const enc = buildNameFields(dek!, { name: body.name });
-    const nameCt = (enc.nameCt as string | null) ?? null;
-    const nameLookup = (enc.nameLookup as string | null) ?? null;
+    // Build the SET partial: asset_type and/or the re-encrypted name.
+    const setFields: Record<string, unknown> = { updatedAt: sql`NOW()` };
+    let nameCt: string | null = null;
+    let nameLookup: string | null = null;
+    const renaming = body.name !== undefined;
+    if (renaming) {
+      const enc = buildNameFields(dek!, { name: body.name! });
+      nameCt = (enc.nameCt as string | null) ?? null;
+      nameLookup = (enc.nameLookup as string | null) ?? null;
+      setFields.nameCt = nameCt;
+      setFields.nameLookup = nameLookup;
+    }
+    if (body.assetType !== undefined) setFields.assetType = body.assetType;
+
     const updated = await db
       .update(schema.securities)
-      .set({ nameCt, nameLookup, updatedAt: sql`NOW()` })
+      .set(setFields)
       .where(and(eq(schema.securities.id, body.id), eq(schema.securities.userId, userId)))
       .returning({ id: schema.securities.id });
     if (updated.length === 0) {
       return NextResponse.json({ error: "Security not found" }, { status: 404 });
+    }
+    // Only the name change propagates to member positions; asset_type lives on
+    // the securities row alone (display-only, no per-position column).
+    if (!renaming) {
+      return { id: body.id, assetType: body.assetType, positions: 0, skipped: 0 };
     }
     // Copy the rename down onto every member position — ONE AT A TIME, not a
     // single atomic batch. A stray member (e.g. a non-cash holding mis-linked

@@ -23,6 +23,12 @@ import { formatCurrency } from "@/lib/currency";
 export interface BreakdownRow {
   name: string;
   value: number;
+  /**
+   * FINLYNQ-192 — optional band/legend color. When present, a colored dot is
+   * rendered before the name so the tooltip, chart band, and legend chip agree.
+   * Omitted = no dot (legacy consumers stay byte-identical).
+   */
+  color?: string;
 }
 
 export function TooltipBreakdownList({
@@ -38,11 +44,18 @@ export function TooltipBreakdownList({
    * (FINLYNQ-181).
    */
   uncapped = false,
+  /**
+   * FINLYNQ-192 — raise/remove the per-name truncation so full names read on one
+   * line. Opt in ONLY for the widened stacked tooltip; default keeps the
+   * `max-w-[140px]` clamp the dashboard / Income-Expenses consumers rely on.
+   */
+  wide = false,
 }: {
   rows: BreakdownRow[] | undefined;
   currency: string;
   heading?: string;
   uncapped?: boolean;
+  wide?: boolean;
 }) {
   if (!rows || rows.length === 0) return null;
   return (
@@ -57,7 +70,24 @@ export function TooltipBreakdownList({
       <div className={uncapped ? "pr-1 space-y-0.5" : "max-h-40 overflow-y-auto pr-1 space-y-0.5"}>
         {rows.map((r, i) => (
           <div key={`${r.name}-${i}`} className="flex items-center gap-3 text-xs">
-            <span className="text-muted-foreground truncate max-w-[140px]" title={r.name}>
+            {/* FINLYNQ-192 — colored dot only when a color is supplied; set via
+                ref-callback so no inline style attribute hits the HTML (CSP). */}
+            {r.color != null && (
+              <span
+                className="h-2 w-2 rounded-full shrink-0"
+                ref={(el) => {
+                  if (el && r.color) el.style.backgroundColor = r.color;
+                }}
+              />
+            )}
+            <span
+              className={
+                wide
+                  ? "text-muted-foreground"
+                  : "text-muted-foreground truncate max-w-[140px]"
+              }
+              title={r.name}
+            >
               {r.name}
             </span>
             <span className="font-medium tabular-nums ml-auto whitespace-nowrap">

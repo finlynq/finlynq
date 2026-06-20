@@ -9,9 +9,11 @@
  * If a field gets added on one surface and not propagated, this catches
  * it because there's only one component to test.
  *
- * Also asserts the canonical-row UX: when symbol = "VCN.TO", the Name
- * input is disabled and the helper hint copy is rendered. Mirrors the
- * server-side `isCanonicalHolding()` check in the API route.
+ * FINLYNQ-198 (2026-06-18): the former canonical-row Name lock (disabled
+ * Name input + "auto-managed" hint on tickered/cash rows) was retired —
+ * display names are now managed at the `securities` level. The test below
+ * now asserts the Name field stays ENABLED on a tickered row and the hint
+ * copy is gone.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
@@ -181,8 +183,8 @@ describe("<HoldingEditForm>", () => {
     expect(deleteBtn).not.toBeNull();
   });
 
-  it("disables the Name field on a canonical row (tickered)", async () => {
-    const { container, getByText } = render(
+  it("keeps the Name field editable on a tickered row (FINLYNQ-198)", async () => {
+    const { container, queryByText } = render(
       <HoldingEditForm
         holdingId={1}
         initialHolding={{
@@ -199,16 +201,15 @@ describe("<HoldingEditForm>", () => {
       />,
     );
 
-    // Tickered row → name input MUST be disabled. The hint copy MUST be
-    // rendered next to the field (mirrors PR #77's UX decision).
+    // Tickered row → name input is now ENABLED (the old "auto-managed" lock
+    // was retired; display names are managed at the securities level). The
+    // hint copy MUST NOT be rendered.
     const nameInput = container.querySelector(
       'input[value="VCN.TO"]',
     ) as HTMLInputElement | null;
     expect(nameInput).not.toBeNull();
-    expect(nameInput!.disabled).toBe(true);
-    expect(
-      getByText(/Name is auto-managed for this holding type/),
-    ).toBeTruthy();
+    expect(nameInput!.disabled).toBe(false);
+    expect(queryByText(/Name is auto-managed for this holding type/)).toBeNull();
   });
 
   it("calls onCancel when Cancel is clicked", async () => {

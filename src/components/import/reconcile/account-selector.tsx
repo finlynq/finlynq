@@ -14,6 +14,7 @@
  * history.replaceState so a tab close + reopen restores state.
  */
 
+import { useMemo } from "react";
 import {
   Select,
   SelectContent,
@@ -42,6 +43,19 @@ export function AccountSelector({
   value: number | null;
   onChange: (accountId: number) => void;
 }) {
+  // value→label map so the base-ui Select trigger shows the account name
+  // rather than the raw numeric id (FINLYNQ-197). Must be above early returns.
+  const accountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        options.map((o) => [
+          String(o.id),
+          `${o.name} · ${o.currency} (${o.rowCount} ${o.rowCount === 1 ? "row" : "rows"})`,
+        ]),
+      ),
+    [options],
+  );
+
   if (options.length === 0) {
     return (
       <p className="text-xs text-muted-foreground italic">
@@ -74,6 +88,7 @@ export function AccountSelector({
         Account:
       </label>
       <Select
+        items={accountLabelById}
         value={selected}
         onValueChange={(v) => {
           const n = parseInt(v ?? "", 10);

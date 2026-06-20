@@ -100,6 +100,11 @@ type Account = {
   archived?: boolean;
 };
 
+// base-ui Select needs an items value→label map so the trigger shows the label
+// (not the raw value). FINLYNQ-201: user-settable asset type for tradable
+// securities. Cosmetic — never re-clusters.
+const ASSET_TYPE_LABELS: Record<string, string> = { stock: "Stock", etf: "ETF" };
+
 function symbolLabel(s: Security): string {
   return s.symbol?.trim() || s.name?.trim() || "—";
 }
@@ -161,9 +166,10 @@ export default function InvestmentsSettingsPage() {
   const [cashError, setCashError] = useState("");
   const [cashSubmitting, setCashSubmitting] = useState(false);
 
-  // Rename dialog.
+  // Edit dialog (rename + FINLYNQ-201 user-settable asset type).
   const [renameSecurity, setRenameSecurity] = useState<Security | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [assetTypeValue, setAssetTypeValue] = useState("stock");
   const [renameErrors, setRenameErrors] = useState<Record<string, string>>({});
   const [renaming, setRenaming] = useState(false);
 
@@ -413,10 +419,11 @@ export default function InvestmentsSettingsPage() {
     }
   }
 
-  // ---- Rename ----
+  // ---- Edit (rename + asset type) ----
   function openRename(s: Security) {
     setRenameSecurity(s);
     setRenameValue(s.name ?? "");
+    setAssetTypeValue(s.assetType || "stock");
     setRenameErrors({});
   }
 
@@ -430,21 +437,30 @@ export default function InvestmentsSettingsPage() {
     setRenameErrors({});
     setRenaming(true);
     try {
+      // Send the asset type only when the user changed it (FINLYNQ-201). It's a
+      // cosmetic, user-settable override — the server never re-clusters on it.
+      const body: { id: number; name: string; assetType?: string } = {
+        id: renameSecurity.id,
+        name,
+      };
+      if (assetTypeValue && assetTypeValue !== renameSecurity.assetType) {
+        body.assetType = assetTypeValue;
+      }
       const res = await fetch("/api/securities", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: renameSecurity.id, name }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
-        const msg = await parseSaveError(res, "Failed to rename security");
+        const msg = await parseSaveError(res, "Failed to update security");
         setRenameErrors({ name: msg });
         return;
       }
       setRenameSecurity(null);
-      showToast("success", "Security renamed");
+      showToast("success", "Security updated");
       await load();
     } catch (e) {
-      setRenameErrors({ name: e instanceof Error ? e.message : "Rename failed" });
+      setRenameErrors({ name: e instanceof Error ? e.message : "Update failed" });
     } finally {
       setRenaming(false);
     }
@@ -725,7 +741,7 @@ export default function InvestmentsSettingsPage() {
                         <TableCell className="text-right">
                           <div className="inline-flex gap-1">
                             <Button variant="ghost" size="sm" onClick={() => openRename(r.s)}>
-                              <Pencil className="h-3.5 w-3.5 mr-1" /> Rename
+                              <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
                             </Button>
                             {r.s.accounts.length === 0 && (
                               <Button
@@ -1101,14 +1117,14 @@ export default function InvestmentsSettingsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ── Rename dialog ──────────────────────────────────────────────── */}
+      {/* ── Edit dialog (rename + asset type, FINLYNQ-201) ─────────────── */}
       <Dialog open={renameSecurity != null} onOpenChange={(o) => { if (!o) setRenameSecurity(null); }}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Rename security</DialogTitle>
+            <DialogTitle>Edit security</DialogTitle>
             <DialogDescription>
               Update the display label for {renameSecurity ? symbolLabel(renameSecurity) : "this security"}.
-              This renames it across every account that holds it.
+              This applies across every account that holds it.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -1121,6 +1137,31 @@ export default function InvestmentsSettingsPage() {
               />
               {renameErrors.name && <p className="text-xs text-rose-600 mt-1">{renameErrors.name}</p>}
             </div>
+            {/* Asset type override is meaningful only for tradable securities
+                (the eq: stock/etf bucket). Cash sleeves / metals / crypto derive
+                their type and aren't user-retypable here. Changing it is purely
+                a display override (never re-clusters). */}
+            {renameSecurity && !renameSecurity.isCash && !renameSecurity.isCrypto && (
+              <div>
+                <Label>Asset type</Label>
+                <Select
+                  items={ASSET_TYPE_LABELS}
+                  value={assetTypeValue}
+                  onValueChange={(v) => setAssetTypeValue(v ?? "stock")}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Asset type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="stock">Stock</SelectItem>
+                    <SelectItem value="etf">ETF</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Overrides the automatic classification (from Yahoo) for the badge.
+                </p>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRenameSecurity(null)} disabled={renaming}>

@@ -64,6 +64,12 @@ export type EnrichedHolding = {
   accountId: number | null;
   accountName: string;
   name: string;
+  // FINLYNQ-194: the decrypted `securities.name_ct` for this position's
+  // security, or null when the read-flip is off / the row is un-backfilled /
+  // no DEK. When present it is the SINGLE source of the display name (a user
+  // rename in the Securities catalog), preferred over Yahoo `quoteName` and the
+  // per-position `name` so All Holdings + Top Movers + By Account all agree.
+  securityName: string | null;
   symbol: string | null;
   // FINLYNQ-174: human-readable long name from the quote layer (Yahoo
   // `meta.shortName`). Null for cash/metals/custom holdings and on a

@@ -17,11 +17,13 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getAccounts } from "@/lib/queries";
+import { getAccounts, getAccountBalances } from "@/lib/queries";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { safeAccountName } from "@/lib/safe-name";
 import { getReconcileSummary } from "@/lib/reconcile/summary";
 import { getReconcileHiddenAccountIds } from "@/lib/reconcile/hidden-accounts";
+import { getHoldingsValueByAccount } from "@/lib/holdings-value";
+import { applyInvestmentMarketOverlay } from "../../../../../mcp-server/investment-balance-overlay";
 import { safeErrorMessage, logApiError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
@@ -49,12 +51,40 @@ export async function GET(request: NextRequest) {
       isInvestment?: boolean;
     }>;
 
+    // Raw ledger balance per account — COALESCE(SUM(transactions.amount), 0).
+    // For investment accounts this is net contributions, NOT market value; the
+    // overlay below marks those to market (FINLYNQ-196).
+    const ledgerBalances = await getAccountBalances(userId);
+
     const [summary, hidden] = await Promise.all([
       getReconcileSummary(userId),
       getReconcileHiddenAccountIds(userId),
     ]);
     const summaryByAccount = new Map(summary.map((s) => [s.accountId, s]));
     const hiddenSet = new Set(hidden);
+
+    // Current balance per account, following the load-bearing invariant
+    // "Account balance for accounts with holdings = holdings.value". Investment
+    // accounts are marked to MARKET via the SAME overlay the MCP balance tools
+    // use (applyInvestmentMarketOverlay, FINLYNQ-151) — never a naive
+    // SUM(transactions.amount). This is a web-session route (requireAuth, DEK
+    // present), so the overlay can price holdings; a DEK-null caller degrades
+    // to the ledger balance per the overlay's own guard. Cash accounts keep
+    // their ledger balance. Each balance is displayed in the account's OWN
+    // currency client-side (formatCurrency) — no cross-currency conversion.
+    const overlay = await applyInvestmentMarketOverlay(
+      ledgerBalances.map((b) => ({
+        id: b.accountId,
+        currency: b.currency,
+        isInvestment: b.isInvestment === true,
+        ledgerBalance: Number(b.balance),
+      })),
+      dek,
+      () => getHoldingsValueByAccount(userId, dek),
+    );
+    const balanceByAccount = new Map(
+      overlay.rows.map((r) => [r.id, r.balance]),
+    );
 
     // Filter out hidden accounts (user tucked them out of the dropdown via
     // /settings/import). Archived accounts are already excluded by not passing
@@ -67,6 +97,7 @@ export async function GET(request: NextRequest) {
           accountId: a.id,
           accountName: safeAccountName(a),
           currency: a.currency,
+          currentBalance: balanceByAccount.get(a.id) ?? 0,
           lastImportAt: s?.lastImportAt ?? null,
           lastReconciledAt: s?.lastReconciledAt ?? null,
           pendingCount: s?.pendingCount ?? 0,

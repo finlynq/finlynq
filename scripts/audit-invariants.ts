@@ -285,12 +285,6 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // the holding; identity (symbol/name/currency/isCrypto) is untouched.
   "src/app/api/holding-accounts/route.ts:securities-dual-write-on-edit":
     "only updates account_id (primary-pairing mirror); never touches symbol/name/currency/isCrypto, so the cluster_key — and security_id — cannot change.",
-  // canonicalize: rewrites name_ct back to the canonical form (symbol / "Cash"
-  // / "Cash <CCY>") for ALREADY-canonical (tickered/cash) rows. Those cluster
-  // on HMAC(symbol)/currency, never name, so the cluster is invariant; custom
-  // rows (the only name-keyed cluster) are never rewritten by classify().
-  "src/lib/crypto/stream-d-canonicalize-portfolio.ts:securities-dual-write-on-edit":
-    "rewrites name_ct to canonical form for tickered/cash rows only; their cluster keys on symbol/currency (not name), so security_id is invariant. Runs at login alongside the backfill.",
   // backfill: backfillSecuritiesForUser IS the security-assignment path — its
   // UPDATE sets security_id from its own inline cluster resolution (the
   // resolveOrCreateSecurity logic, not the helper). Self-referential.

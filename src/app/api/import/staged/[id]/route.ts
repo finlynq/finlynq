@@ -83,6 +83,10 @@ export async function GET(
       // shape as live transactions.tags) — also unencrypted at staging.
       txType: schema.stagedTransactions.txType,
       quantity: schema.stagedTransactions.quantity,
+      // FINLYNQ-195 — investment-import capture (v1). Encrypted free-text;
+      // decoded tier-aware below alongside payee/category/accountName/note.
+      ticker: schema.stagedTransactions.ticker,
+      securityName: schema.stagedTransactions.securityName,
       portfolioHoldingId: schema.stagedTransactions.portfolioHoldingId,
       enteredAmount: schema.stagedTransactions.enteredAmount,
       enteredCurrency: schema.stagedTransactions.enteredCurrency,
@@ -119,6 +123,9 @@ export async function GET(
       category: decode(r.category),
       accountName: decode(r.accountName),
       note: decode(r.note),
+      // FINLYNQ-195 — investment-import capture (v1), decoded per-row tier.
+      ticker: decode(r.ticker),
+      securityName: decode(r.securityName),
     };
   });
 

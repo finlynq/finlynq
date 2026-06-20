@@ -10,7 +10,6 @@ import { resolveOrCreateSecurity, gcOrphanSecurity } from "@/lib/securities/reso
 import {
   holdingCreateSchema,
   holdingUpdateSchema,
-  isCanonicalHolding,
 } from "@/lib/schemas/holding";
 
 export async function GET(request: NextRequest) {
@@ -197,7 +196,10 @@ export async function PUT(request: NextRequest) {
 
     // Decrypt the current identity once, then derive the EFFECTIVE post-edit
     // identity — a field the caller didn't send keeps its current value. Used
-    // by BOTH the canonical-name guard and the securities-master re-resolve.
+    // by the securities-master re-resolve below. (FINLYNQ-198: the former
+    // canonical-name guard that 400'd Name edits on tickered/cash rows was
+    // retired — names are now managed at the `securities` level, so a
+    // per-position Name edit is a legitimate write again.)
     const currentName = decryptName(existing.nameCt, auth.dek, null);
     const currentSymbol = decryptName(existing.symbolCt, auth.dek, null);
     const nextName = data.name !== undefined ? data.name : currentName;
@@ -208,19 +210,6 @@ export async function PUT(request: NextRequest) {
     const nextCurrency = data.currency !== undefined ? data.currency : existing.currency;
     const nextIsCrypto =
       data.isCrypto !== undefined ? data.isCrypto === 1 : existing.isCrypto === 1;
-
-    // Section F (issue #25): block Name edits on canonical rows. The
-    // canonicalize helper would rewrite a user-typed name back to symbol /
-    // "Cash" / "Cash <CCY>" on next login, so silently dropping the edit is
-    // worse than rejecting it up front. Symbol / currency / isCrypto / note
-    // are still editable — change the symbol to rename a tickered position.
-    // (nextSymbol is the about-to-write value when symbol is also edited.)
-    if (data.name !== undefined && isCanonicalHolding(currentName, nextSymbol)) {
-      return NextResponse.json(
-        { error: "name is auto-managed for this holding type — edit the symbol or currency to rename" },
-        { status: 400 },
-      );
-    }
 
     // Stream D Phase 4 — plaintext name/symbol dropped. Re-encrypt and strip
     // the plaintext keys from the UPDATE set.

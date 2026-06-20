@@ -34,8 +34,14 @@ interface SaveTemplateDialogProps {
 }
 
 // flipSign is a boolean knob (rendered as a checkbox below), not a column
-// dropdown, so it's excluded from the field→header label map.
-type MappingColumnField = Exclude<keyof ColumnMapping, "flipSign">;
+// dropdown, so it's excluded from the field→header label map. The FINLYNQ-195
+// investment columns (ticker / portfolioHolding / quantity) are also excluded —
+// they ride through this template's JSON blob untouched but aren't surfaced in
+// this cash-oriented editor in v1.
+type MappingColumnField = Exclude<
+  keyof ColumnMapping,
+  "flipSign" | "ticker" | "portfolioHolding" | "quantity"
+>;
 
 const FIELD_LABELS: Record<MappingColumnField, string> = {
   date: "Date *",

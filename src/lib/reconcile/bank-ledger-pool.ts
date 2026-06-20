@@ -39,6 +39,15 @@ export interface BankCandidateRow {
   /** Always set on bank_transactions (NOT NULL column). */
   importHash: string;
   fitId: string | null;
+  /** Investment-import capture (FINLYNQ-195). Plaintext TICKER/symbol after
+   *  tier-aware decrypt; null for cash rows OR on auth-tag failure. */
+  tickerPlain: string | null;
+  /** Plaintext security NAME after tier-aware decrypt; null for cash rows OR
+   *  on auth-tag failure. */
+  securityNamePlain: string | null;
+  /** Share/unit count for an investment row; null for cash rows. Numeric —
+   *  never encrypted. */
+  quantity: number | null;
 }
 
 export interface BankCandidatePool {
@@ -82,6 +91,9 @@ export async function buildBankLedgerCandidatePool(
       payee: schema.bankTransactions.payee,
       importHash: schema.bankTransactions.importHash,
       fitId: schema.bankTransactions.fitId,
+      ticker: schema.bankTransactions.ticker,
+      securityName: schema.bankTransactions.securityName,
+      quantity: schema.bankTransactions.quantity,
       encryptionTier: schema.bankTransactions.encryptionTier,
     })
     .from(schema.bankTransactions)
@@ -97,7 +109,27 @@ export async function buildBankLedgerCandidatePool(
 
   for (const r of rows) {
     const tier = r.encryptionTier ?? "user";
-    const payeePlain = decryptBankPayee(tier, input.dek, r.payee);
+    const payeePlain = decryptBankField(
+      tier,
+      input.dek,
+      r.payee,
+      "bank_transactions.payee",
+    );
+    // FINLYNQ-195/207 — ticker + security name are SENSITIVE free-text,
+    // encrypted-in-place per the row's tier exactly like payee. Decrypt the
+    // same way (null on auth-tag failure / no DEK — never raw ciphertext).
+    const tickerPlain = decryptBankField(
+      tier,
+      input.dek,
+      r.ticker,
+      "bank_transactions.ticker",
+    );
+    const securityNamePlain = decryptBankField(
+      tier,
+      input.dek,
+      r.securityName,
+      "bank_transactions.security_name",
+    );
     const row: BankCandidateRow = {
       id: r.id,
       accountId: r.accountId,
@@ -107,6 +139,10 @@ export async function buildBankLedgerCandidatePool(
       payeePlain,
       importHash: r.importHash,
       fitId: r.fitId,
+      tickerPlain,
+      securityNamePlain,
+      // Numeric — never encrypted. NULL for cash rows.
+      quantity: r.quantity ?? null,
     };
     const arr = pool.byAccount.get(r.accountId) ?? [];
     arr.push(row);
@@ -116,23 +152,26 @@ export async function buildBankLedgerCandidatePool(
 }
 
 /**
- * Tier-aware decrypt for `bank_transactions.payee`. Mirrors the pattern in
+ * Tier-aware decrypt for an encrypted-in-place text column on
+ * `bank_transactions` (payee / ticker / security_name). Mirrors the pattern in
  * `pf-app/src/app/api/import/bank-ledger/route.ts`.
  *
  * `tryDecryptField` returns null on auth-tag failure (load-bearing —
  * CLAUDE.md "Footgun"). On null we surface null to the caller; the fuzzy
  * scorer skips the payee-similarity hint for that row but can still match
- * on date + amount.
+ * on date + amount, and the UI renders "—" for an undecryptable investment
+ * field rather than leaking ciphertext.
  */
-function decryptBankPayee(
+function decryptBankField(
   tier: string,
   dek: Buffer | null,
   value: string | null,
+  label: string,
 ): string | null {
   if (value == null) return null;
   if (tier === "user") {
     if (!dek) return null;
-    return tryDecryptField(dek, value, "bank_transactions.payee");
+    return tryDecryptField(dek, value, label);
   }
   // service tier
   try {

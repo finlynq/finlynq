@@ -122,6 +122,51 @@ export default function IncomeExpenseForm() {
     });
   }, [selectedAccount, cashSleeves]);
 
+  // value→label maps so base-ui Select triggers show names, not ids (FINLYNQ-197).
+  const accountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        investmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [investmentAccounts],
+  );
+  const relatedHoldingLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        accountHoldings.map((h) => [
+          String(h.id),
+          `${h.symbol ? `${h.symbol} — ` : ""}${h.name ?? `#${h.id}`}`,
+        ]),
+      ),
+    [accountHoldings],
+  );
+  const categoryLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        categories.map((c) => [
+          String(c.id),
+          `${c.name ?? `#${c.id}`}${c.group ? ` (${c.group})` : ""}`,
+        ]),
+      ),
+    [categories],
+  );
+  // Direction and entry-type enum→label maps (value differs from displayed text).
+  const directionLabels: Record<string, string> = {
+    income: "Income (+)",
+    expense: "Expense (−)",
+  };
+  // incomeType labels depend on direction context; cover the full set to
+  // handle both directions without re-computing on direction change.
+  const incomeTypeLabels: Record<string, string> = {
+    dividend: "Dividend",
+    interest: "Interest",
+    fee: "Fee",
+    other: direction === "income" ? "Other income" : "Other expense",
+  };
+
   function validate(): boolean {
     const e: Record<string, string> = {};
     if (!accountId) e.accountId = "Pick an account";
@@ -257,6 +302,7 @@ export default function IncomeExpenseForm() {
           <div className="space-y-1.5">
             <Label>Account</Label>
             <Select
+              items={accountLabelById}
               value={accountId}
               onValueChange={(v) => {
                 setAccountId(v ?? "");
@@ -283,6 +329,7 @@ export default function IncomeExpenseForm() {
             <div className="space-y-1.5">
               <Label>Direction</Label>
               <Select
+                items={directionLabels}
                 value={direction}
                 onValueChange={(v) => {
                   const d = (v ?? "income") as Direction;
@@ -334,6 +381,7 @@ export default function IncomeExpenseForm() {
           <div className="space-y-1.5">
             <Label>Entry type</Label>
             <Select
+              items={incomeTypeLabels}
               value={incomeType}
               onValueChange={(v) =>
                 setIncomeType(
@@ -415,6 +463,7 @@ export default function IncomeExpenseForm() {
               <span className="text-muted-foreground text-xs">(optional)</span>
             </Label>
             <Select
+              items={relatedHoldingLabelById}
               value={relatedHoldingId}
               onValueChange={(v) => setRelatedHoldingId(v ?? "")}
               disabled={!selectedAccount || accountHoldings.length === 0}
@@ -448,6 +497,7 @@ export default function IncomeExpenseForm() {
                 <span className="text-muted-foreground text-xs">(optional)</span>
               </Label>
               <Select
+                items={categoryLabelById}
                 value={categoryId}
                 onValueChange={(v) => setCategoryId(v ?? "")}
                 disabled={categories.length === 0}

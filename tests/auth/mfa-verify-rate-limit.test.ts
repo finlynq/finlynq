@@ -78,9 +78,6 @@ vi.mock("@/lib/auth/mfa", () => ({
 }));
 
 // Side-effect imports we don't care about for this test.
-vi.mock("@/lib/crypto/stream-d-canonicalize-portfolio", () => ({
-  enqueueCanonicalizePortfolioNames: vi.fn(),
-}));
 vi.mock("@/lib/email-import/upgrade-staging-encryption", () => ({
   enqueueUpgradeStagingEncryption: vi.fn(),
 }));

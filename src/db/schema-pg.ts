@@ -446,6 +446,15 @@ export const priceCache = pgTable("price_cache", {
   // doesn't have a prior-day reference) and on rows written before this migration.
   // Readers fall back to change: 0, changePct: 0 when null.
   previousClose: doublePrecision("previous_close"),
+  // FINLYNQ-204 (2026-06-25): when this row was last refreshed from the upstream
+  // quote API. A today-dated row (date == todayISO()) older than
+  // PRICE_CACHE_TODAY_TTL_MS (30 min, price-service.ts) is treated as STALE and
+  // lazily re-fetched on read; historical rows (date != today) are immutable and
+  // never re-fetched regardless of age. Additive: existing rows default to now()
+  // and read as fresh for 30 min after deploy. The refresh write is an explicit
+  // UPDATE ... WHERE symbol AND date (the (symbol,date) index is non-unique +
+  // prod has duplicate rows) — never an ON CONFLICT upsert.
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 // Canonical USD-anchored FX rate cache. Cross-rates are derived by
@@ -985,6 +994,15 @@ export const stagedTransactions = pgTable("staged_transactions", {
   // dedup_status='new', row_status='pending', everything else NULL.
   txType: text("tx_type").notNull().default("E"), // 'E' | 'I' | 'R' (CHECK enforced in SQL)
   quantity: doublePrecision("quantity"), // for investment trades; NULL for cash-only
+  // FINLYNQ-195 — investment-import capture (v1, staging only). The TICKER /
+  // SYMBOL and the security NAME mapped from a brokerage CSV when the target is
+  // an investment account. SENSITIVE free-text → encrypted-in-place under the
+  // row's two-tier scheme (v1: user-DEK / sv1: PF_STAGING_KEY), exactly like
+  // `payee`/`note`. Read paths branch per-row on `encryption_tier`. NULL for
+  // every cash-account row. v1 captures only — these do NOT materialize into
+  // `transactions` / lot-aware portfolio ops (deferred follow-up).
+  ticker: text("ticker"),
+  securityName: text("security_name"),
   // Resolved holding when the row is on an investment account. Set by the
   // user / classifier in staging; required at approve time for investment
   // accounts (see CLAUDE.md "Investment-account constraint").
@@ -1147,6 +1165,13 @@ export const bankTransactions = pgTable("bank_transactions", {
   payee: text("payee").notNull(),
   note: text("note"),
   tags: text("tags"),
+  // FINLYNQ-195 — investment-import capture (v1). TICKER/SYMBOL + security NAME
+  // mapped from a brokerage CSV when the target is an investment account.
+  // Encrypted-in-place under the row's tier like `payee`/`note`/`tags`. NULL for
+  // cash-account rows. Captured only in v1 — never materialized into
+  // `transactions` / portfolio ops (deferred follow-up).
+  ticker: text("ticker"),
+  securityName: text("security_name"),
   // Free-text account label from the source file's header. Display-only —
   // the `account_id` FK is the truth.
   accountName: text("account_name"),

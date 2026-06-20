@@ -95,6 +95,16 @@ export interface BankLedgerRowInput {
   tags?: string | null;
   /** Free-text account label from the source file's header. */
   accountName?: string | null;
+  /**
+   * FINLYNQ-195 — investment-import capture (v1). Security TICKER/SYMBOL +
+   * security NAME mapped from a brokerage CSV when the target is an investment
+   * account. PLAINTEXT in — the helper encrypts at the row's tier (v1: user-DEK
+   * via encryptField, sv1: PF_STAGING_KEY via encryptStaged) exactly like
+   * payee/note/tags/accountName. NULL for cash-account rows. Captured only —
+   * v1 does NOT materialize lot-aware portfolio ops (deferred follow-up).
+   */
+  ticker?: string | null;
+  securityName?: string | null;
   source: BankLedgerSource;
   /** Source filename. Wrapped into a single-element array. */
   filename?: string | null;
@@ -138,6 +148,20 @@ export async function upsertBankTransaction(
       : dek
         ? encryptField(dek, row.accountName)
         : encryptStaged(row.accountName);
+  // FINLYNQ-195 — TICKER + security NAME encrypted at the row's tier, same as
+  // payee/note/tags/accountName. NULL stays NULL (cash-account rows).
+  const ticker =
+    row.ticker == null
+      ? null
+      : dek
+        ? encryptField(dek, row.ticker)
+        : encryptStaged(row.ticker);
+  const securityName =
+    row.securityName == null
+      ? null
+      : dek
+        ? encryptField(dek, row.securityName)
+        : encryptStaged(row.securityName);
 
   // source_filenames is TEXT[]. Drizzle's `${jsArray}::TEXT[]` pattern
   // doesn't serialize a JS array to PG's `{elem1,elem2}` literal form —
@@ -167,7 +191,8 @@ export async function upsertBankTransaction(
     INSERT INTO bank_transactions (
       user_id, account_id, import_hash, occurrence_index, fit_id, date,
       amount, currency, entered_amount, entered_currency, entered_fx_rate,
-      quantity, payee, note, tags, account_name, encryption_tier, source,
+      quantity, payee, note, tags, account_name, ticker, security_name,
+      encryption_tier, source,
       source_filenames, original_staged_import_id, upload_batch_id
     )
     VALUES (
@@ -187,6 +212,8 @@ export async function upsertBankTransaction(
       ${note},
       ${tags},
       ${accountName},
+      ${ticker},
+      ${securityName},
       ${tier},
       ${row.source},
       ${filenamesFragment},

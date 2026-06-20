@@ -32,10 +32,9 @@ import { prepareTimeSeries } from "@/lib/chart-series";
 import {
   buildStackedSeries,
   type StackPoint,
-  type StackLegendEntry,
 } from "@/lib/chart-stack";
 import { StackedChartLegend } from "@/components/chart-stack-legend";
-import { TooltipBreakdownList, type BreakdownRow } from "@/components/chart-breakdown-list";
+import { StackedAreaTooltip } from "@/components/chart-stack-tooltip";
 
 type Period = "1m" | "3m" | "6m" | "ytd" | "1y" | "all";
 /** FINLYNQ-172 — stacked grouping mode (was a boolean in FINLYNQ-129). */
@@ -77,54 +76,6 @@ interface ApiResponse {
 }
 
 const PERIODS: Period[] = ["1m", "3m", "6m", "ytd", "1y", "all"];
-
-/**
- * Compact, stack-ordered tooltip for the stacked Performance view (FINLYNQ-172).
- *
- * Recharts hands back one payload entry per `<Area>` keyed by `dataKey`; we map
- * each `legend` band's key to its value at the hovered point and render the
- * shared `TooltipBreakdownList` (FINLYNQ-128). We pass `uncapped` (FINLYNQ-181)
- * so the tooltip auto-sizes to the FULL holdings list instead of clipping it
- * behind an inner scrollbar — the cap stays the default for the other (smaller)
- * tooltips.
- *
- * Row order MIRRORS the visual stack (tc-3): the stack draws `legend[0]` (the
- * largest band) at the BOTTOM, so we reverse the legend order to put the largest
- * row at the bottom of the tooltip too. Applies to both by-holding and by-account
- * modes (the by-holding view had the inverted order before this).
- */
-function StackTooltip({
-  active,
-  payload,
-  label,
-  currency,
-  legend,
-}: {
-  active?: boolean;
-  payload?: { dataKey?: string | number; value?: number | string }[];
-  label?: string;
-  currency: string;
-  legend: StackLegendEntry[];
-}) {
-  if (!active || !payload?.length) return null;
-  const valueByKey = new Map<string, number>();
-  for (const entry of payload) {
-    if (entry.dataKey != null) valueByKey.set(String(entry.dataKey), Number(entry.value) || 0);
-  }
-  // Stack-order rows: largest band sits at the BOTTOM of the chart, so reverse
-  // the legend (which is largest-first) to anchor the largest at the bottom.
-  const rows: BreakdownRow[] = [...legend]
-    .reverse()
-    .map((b) => ({ name: b.name, value: valueByKey.get(b.key) ?? 0 }))
-    .filter((r) => r.value !== 0);
-  return (
-    <div className="rounded-xl border border-border/50 bg-card/95 backdrop-blur-sm px-3.5 py-2.5 shadow-lg max-w-[260px]">
-      <p className="text-[11px] font-medium text-muted-foreground mb-1">{label ?? ""}</p>
-      {/* uncapped: show the FULL holdings list (no inner scrollbar) — FINLYNQ-181 */}
-      <TooltipBreakdownList rows={rows} currency={currency} uncapped />
-    </div>
-  );
-}
 
 export interface PerformanceChartProps {
   /** Restrict the chart to one account; null/undefined = whole portfolio aggregate. */
@@ -299,7 +250,9 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                     />
                     <Tooltip
                       content={
-                        <StackTooltip currency={stackCurrency} legend={legend} />
+                        // Shared stacked-area tooltip (FINLYNQ-192) — colored dot
+                        // per band, full names, rows mirror the visual stack.
+                        <StackedAreaTooltip currency={stackCurrency} legend={legend} wide />
                       }
                     />
                     {legend.map((b) => (

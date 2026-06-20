@@ -370,6 +370,9 @@ export function csvToRawTransactionsWithMapping(
       tags: mapping["tags"] ? (row[mapping["tags"]] ?? "") : undefined,
       quantity: mapping["quantity"] ? (parseFloat(row[mapping["quantity"]] ?? "") || undefined) : undefined,
       portfolioHolding: mapping["portfolioHolding"] ? (row[mapping["portfolioHolding"]] || undefined) : undefined,
+      // FINLYNQ-195 — security TICKER/SYMBOL (investment-account imports only;
+      // mapping["ticker"] is unset for cash accounts so this stays undefined).
+      ticker: mapping["ticker"] ? (row[mapping["ticker"]] || undefined) : undefined,
     });
   }
 

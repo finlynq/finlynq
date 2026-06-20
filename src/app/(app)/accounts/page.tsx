@@ -57,6 +57,10 @@ const ACCOUNT_TYPES = [
   { value: "A", label: "Asset" },
   { value: "L", label: "Liability" },
 ];
+// value→label map for base-ui Select trigger (FINLYNQ-197).
+const ACCOUNT_TYPE_LABELS: Record<string, string> = Object.fromEntries(
+  ACCOUNT_TYPES.map((t) => [t.value, t.label]),
+);
 
 // FINLYNQ-179: the default group suggestions now live in the shared
 // src/lib/accounts/groups.ts (single source of truth, also used by the
@@ -514,6 +518,7 @@ export default function AccountsPage() {
             <div className="space-y-1.5">
               <Label>Type</Label>
               <Select
+                items={ACCOUNT_TYPE_LABELS}
                 value={form.type}
                 onValueChange={(v) => {
                   const t = v ?? "A";
@@ -714,7 +719,7 @@ export default function AccountsPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label>Type</Label>
-                <Select value={editForm.type} onValueChange={(v) => {
+                <Select items={ACCOUNT_TYPE_LABELS} value={editForm.type} onValueChange={(v) => {
                   const t = v ?? "A";
                   const defaultGroup = ACCOUNT_GROUPS[t]?.[0] ?? "";
                   setEditForm({ ...editForm, type: t, group: defaultGroup });

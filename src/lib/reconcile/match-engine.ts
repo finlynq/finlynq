@@ -147,6 +147,19 @@ export interface ReconcileBankSnapshot {
    *  per-row-independent signal used to flag duplicates in Auto-pilot /
    *  Approve-each (where bank-side dedup can't see the ledger). */
   duplicateOfTransactionId: number | null;
+  /** Investment-import capture (FINLYNQ-195 store / FINLYNQ-207 surface).
+   *  Plaintext TICKER/symbol after per-`encryption_tier` decrypt. Present
+   *  ONLY on rows that actually captured an investment field (an investment
+   *  account import); OMITTED entirely for cash rows so the cash reconcile
+   *  view + API shape stay byte-identical. `null` here means "captured but
+   *  undecryptable" (no DEK / auth-tag failure) — never raw ciphertext. */
+  ticker?: string | null;
+  /** Plaintext security NAME, same per-tier decrypt + same present-only-when-
+   *  captured rule as `ticker`. */
+  securityName?: string | null;
+  /** Share/unit count for an investment row. Numeric, never encrypted.
+   *  Present only when captured; omitted for cash rows. */
+  quantity?: number | null;
 }
 
 export interface ReconcileResult {
@@ -431,7 +444,7 @@ export async function computeReconcileForAccount(
       : null;
     const suggestedTransferAccountId =
       transferDest != null && transferDest !== b.accountId ? transferDest : null;
-    bankTransactions[b.id] = {
+    const snap: ReconcileBankSnapshot = {
       id: b.id,
       date: b.date,
       amount: b.amount,
@@ -448,6 +461,22 @@ export async function computeReconcileForAccount(
       suggestedTransferAccountId,
       duplicateOfTransactionId: strictDupFor(b),
     };
+    // FINLYNQ-207 — surface the FINLYNQ-195 investment-import capture. Attach
+    // ticker/securityName/quantity ONLY when the row actually captured one (an
+    // investment-account import); cash rows leave all three NULL so the keys
+    // stay OFF the snapshot and the cash reconcile view + API shape are
+    // byte-identical to today. The plaintext is already per-tier-decrypted in
+    // the candidate pool (null on no-DEK / auth-tag failure — never ciphertext).
+    if (
+      b.tickerPlain != null ||
+      b.securityNamePlain != null ||
+      b.quantity != null
+    ) {
+      snap.ticker = b.tickerPlain;
+      snap.securityName = b.securityNamePlain;
+      snap.quantity = b.quantity;
+    }
+    bankTransactions[b.id] = snap;
   }
   // Pull the per-row freshness metadata in a single follow-up query.
   // We didn't include this on the candidate pool because the scorer

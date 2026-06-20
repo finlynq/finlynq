@@ -120,6 +120,11 @@ interface BankSnapshot {
   lastSeenAt: string | null;
   suggestedCategoryId: number | null;
   suggestedTransferAccountId: number | null;
+  // FINLYNQ-207 — investment-import capture, present only on investment-account
+  // rows (absent on cash snapshots).
+  ticker?: string | null;
+  securityName?: string | null;
+  quantity?: number | null;
 }
 
 export interface ReconcileData {
@@ -173,6 +178,13 @@ export function InboxReconcileTab({
     null,
   );
   const router = useRouter();
+
+  // FINLYNQ-207 — whether the currently-reconciled account is an investment
+  // account. Drives the gated Ticker / Security / Qty columns in the BankPane.
+  const isInvestmentAccount = useMemo(
+    () => accounts.find((a) => a.id === accountId)?.isInvestment === true,
+    [accounts, accountId],
+  );
 
   const [highlightedTxIds, setHighlightedTxIds] = useState<
     ReadonlySet<number>
@@ -468,6 +480,11 @@ export function InboxReconcileTab({
         seenCount: b.seenCount,
         suggestedCategoryId: b.suggestedCategoryId,
         accountId: b.accountId,
+        // FINLYNQ-207 — undefined on cash rows (the BankPane only renders
+        // these when isInvestment is true).
+        ticker: b.ticker ?? null,
+        securityName: b.securityName ?? null,
+        quantity: b.quantity ?? null,
       };
     });
 
@@ -930,6 +947,7 @@ export function InboxReconcileTab({
             selectedBankIds={selectedBankIds}
             onToggleSelect={onToggleBankSelect}
             onToggleSelectAll={onToggleAllBank}
+            isInvestment={isInvestmentAccount}
           />
         }
       />

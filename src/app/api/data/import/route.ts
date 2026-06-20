@@ -445,7 +445,10 @@ export async function POST(request: NextRequest) {
     const bankTxIdMap = new Map<string, string>();
     if (d.bankTransactions?.length) {
       const BANK_LEDGER_SOURCES_RESTORE = new Set(["import", "connector", "backup_restore"]);
-      const BANK_TX_ENC_FIELDS = ["payee", "note", "tags", "accountName"] as const;
+      // FINLYNQ-195 — ticker + securityName are investment-import capture columns
+      // exported as plaintext; re-encrypt under the restoring user's DEK like
+      // payee/note/tags/accountName.
+      const BANK_TX_ENC_FIELDS = ["payee", "note", "tags", "accountName", "ticker", "securityName"] as const;
       const remapped = d.bankTransactions
         .map((row) => {
           const { id: _id, userId: _uid, accountId, source: rawSource, uploadBatchId: rawBatchId, ...rest } = row;

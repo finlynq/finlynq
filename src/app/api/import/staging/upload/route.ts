@@ -69,6 +69,7 @@ import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
 // is the only file-side dedup; fuzzy matching belongs on the bank-ledger
 // → transactions reconciliation surface (future).
 import type { RawTransaction } from "@/lib/import-pipeline";
+import { findUnreasonableAmountError } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
 import { simplifiedUpload } from "@/lib/import/simplified-upload";
 import { applyRulesToBankRows } from "@/lib/reconcile/match-engine";
@@ -408,6 +409,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // FINLYNQ-159 / FINLYNQ-195 — reject non-finite / absurd-magnitude numeric
+    // fields (amount, entered amount, AND the investment QUANTITY) before any
+    // row lands in staging. The staging-upload path does NOT route through
+    // previewImport (whose per-row loop applies the same check), so enforce the
+    // finite / sane bound here exactly like the OFX/QFX/IBKR direct-emit
+    // branches in /api/import/preview. Covers a garbage qty (e.g. 1e29) on an
+    // investment CSV. Returns 400, never stages.
+    const amountErr = findUnreasonableAmountError(parseResult.rows);
+    if (amountErr) {
+      return NextResponse.json({ error: amountErr }, { status: 400 });
+    }
+
     // ─── Classify rows ──────────────────────────────────────────────────
     // Replicates the three-way classifier from src/lib/reconcile.ts so the
     // review UI can render NEW / EXISTING / PROBABLE_DUPLICATE counts
@@ -429,6 +442,8 @@ export async function POST(request: NextRequest) {
       tags?: string;
       quantity?: number;
       portfolioHolding?: string;
+      // FINLYNQ-195 — security TICKER/SYMBOL mapped on investment-account imports.
+      ticker?: string;
       fitId?: string;
       hash: string;
       dedupStatus: "new" | "existing" | "probable_duplicate";
@@ -481,6 +496,7 @@ export async function POST(request: NextRequest) {
         tags: row.tags,
         quantity: row.quantity,
         portfolioHolding: row.portfolioHolding,
+        ticker: row.ticker,
         fitId: row.fitId,
         hash,
         dedupStatus: "new",
@@ -677,6 +693,10 @@ export async function POST(request: NextRequest) {
             enteredCurrency: r.enteredCurrency ?? defaultCurrency ?? null,
             enteredFxRate: null,
             quantity: r.quantity ?? null,
+            // FINLYNQ-195 — investment-import capture. PLAINTEXT here; the
+            // bank-ledger writer encrypts at the row's tier (like payee).
+            ticker: r.ticker ?? null,
+            securityName: r.portfolioHolding ?? null,
             importHash: r.hash,
           })),
           anchors: parseResult.anchors,
@@ -824,6 +844,14 @@ export async function POST(request: NextRequest) {
       encryptionTier: "user",
       txType: txTypeFor(r.amount),
       quantity: r.quantity ?? null,
+      // FINLYNQ-195 — investment-import capture (v1). TICKER + security NAME are
+      // SENSITIVE free-text, so encrypt-in-place under the user's DEK (v1:
+      // envelope) exactly like payee/category/note above. Read paths branch on
+      // encryption_tier per row (staged/[id] GET). NULL for cash-account rows
+      // (mapping never sets ticker/portfolioHolding for non-investment imports).
+      // The portfolioHolding name maps to the new `securityName` column.
+      ticker: encryptField(dek, r.ticker ?? null),
+      securityName: encryptField(dek, r.portfolioHolding ?? null),
       portfolioHoldingId: null,
       enteredAmount: r.enteredAmount ?? null,
       // Default-currency knob also backstops entered_currency (FINLYNQ-54)

@@ -63,6 +63,15 @@ export interface RawTransaction {
   quantity?: number;
   portfolioHolding?: string;
   /**
+   * FINLYNQ-195 — the security TICKER/SYMBOL mapped from a brokerage CSV when
+   * the import target is an investment account. Distinct from
+   * `portfolioHolding` (the security NAME). v1 carries it through preview →
+   * staging → bank_transactions for CAPTURE ONLY; it is NOT resolved into a
+   * `portfolio_holdings` row or materialized into a lot-aware op (deferred
+   * follow-up). Undefined for cash-account imports.
+   */
+  ticker?: string;
+  /**
    * Issue #155: explicit portfolio_holdings.id override. When set, takes
    * precedence over the holding-name resolver — `portfolioHolding` is
    * ignored. Used by the staging-approve flow where the user picked a

@@ -1,5 +1,12 @@
 -- portfolio-canonical-names (2026-05-01) — Section F follow-on.
 --
+-- HISTORICAL: FINLYNQ-198 (2026-06-18) RETIRED the runtime canonicalizer this
+-- migration prepped (the securities master now owns display names via the
+-- read-flip + copy-on-rename). The `users.portfolio_names_canonicalized_at`
+-- flag column added below is KEPT (dropping it is a needless destructive
+-- migration); it is simply no longer read/written. The description below
+-- documents the original, now-removed behavior.
+--
 -- Per-user lazy canonicalization of portfolio_holdings display names. Rows
 -- whose holding type is "tickered" / "cash sleeve" / "currency code" get
 -- their `name` rewritten to the canonical key (uppercased symbol for

@@ -198,10 +198,17 @@ export function HoldingsByAccount({
                         <TableBody>
                           {items.map(h => {
                             const hasMetrics = h.quantity !== null && h.quantity !== 0;
-                            // FINLYNQ-174: prefer the quote long name (Yahoo
-                            // shortName); fall back to the stored holding name
+                            // FINLYNQ-194: single source of names. When the
+                            // security catalog name resolves (read-flip on +
+                            // backfilled), it WINS — a user rename beats Yahoo's
+                            // quoteName and the per-position name, so this view
+                            // agrees with All Holdings + Top Movers. Otherwise
+                            // keep FINLYNQ-174 behavior: prefer the quote long
+                            // name, fall back to the stored holding name
                             // (null-safe) so the cell is never empty.
-                            const label = holdingDescription({ quoteName: h.quoteName, name: h.name, symbol: h.symbol })
+                            const secName = (h.securityName ?? "").trim();
+                            const label = (secName.length > 0 ? secName : null)
+                              ?? holdingDescription({ quoteName: h.quoteName, name: h.name, symbol: h.symbol })
                               ?? safeName(h.name, "Holding", h.id);
                             return (
                               <TableRow key={h.id} className="hover:bg-muted/30 transition-colors">

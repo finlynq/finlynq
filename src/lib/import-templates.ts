@@ -27,6 +27,20 @@ export interface ColumnMapping {
   // the Balance anchor, which is an absolute running balance). Undefined /
   // false = no flip (the default for every existing template).
   flipSign?: boolean;
+  // ─── FINLYNQ-195 — investment-import column mapping (v1) ──────────────
+  // Offered in the column mapper ONLY when the target is an investment
+  // account; cash-account imports never see/persist these. Already parsed by
+  // csvToRawTransactionsWithMapping (quantity + portfolioHolding pre-existed
+  // as bare `mapping[...]` reads; ticker is new). All three persist in the
+  // same JSON blob via the template POST/PUT routes — NO migration.
+  //   quantity        — share/unit count column (numeric).
+  //   portfolioHolding — the security NAME column (free text).
+  //   ticker           — the security SYMBOL/TICKER column (free text).
+  // v1 captures these into staging / bank_transactions only — it does NOT
+  // materialize lot-aware portfolio operations (deferred follow-up).
+  quantity?: string;
+  portfolioHolding?: string;
+  ticker?: string;
 }
 
 /** Parser-knob shape persisted on `import_templates`. Mirrors the upload

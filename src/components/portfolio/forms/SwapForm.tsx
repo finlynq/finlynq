@@ -107,6 +107,38 @@ function SwapCreateForm() {
     [destHoldingId, destHoldings],
   );
 
+  // value→label maps so base-ui Select triggers show names, not ids (FINLYNQ-197).
+  const accountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        investmentAccounts.map((a) => [
+          String(a.id),
+          `${a.name ?? `#${a.id}`} (${a.currency})`,
+        ]),
+      ),
+    [investmentAccounts],
+  );
+  const sourceHoldingLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        accountHoldings.map((h) => [
+          String(h.id),
+          `${h.symbol ? `${h.symbol} — ` : ""}${h.name ?? `#${h.id}`} (${h.currency})`,
+        ]),
+      ),
+    [accountHoldings],
+  );
+  const destHoldingLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        destHoldings.map((h) => [
+          String(h.id),
+          `${h.symbol ? `${h.symbol} — ` : ""}${h.name ?? `#${h.id}`} (${h.currency})`,
+        ]),
+      ),
+    [destHoldings],
+  );
+
   function validate(): boolean {
     const e: Record<string, string> = {};
     if (!accountId) e.accountId = "Pick an account";
@@ -232,6 +264,7 @@ function SwapCreateForm() {
           <div className="space-y-1.5">
             <Label>Account</Label>
             <Select
+              items={accountLabelById}
               value={accountId}
               onValueChange={(v) => {
                 setAccountId(v ?? "");
@@ -259,6 +292,7 @@ function SwapCreateForm() {
             <div className="space-y-1.5">
               <Label>Source holding (sell)</Label>
               <Select
+                items={sourceHoldingLabelById}
                 value={sourceHoldingId}
                 onValueChange={(v) => {
                   setSourceHoldingId(v ?? "");
@@ -287,6 +321,7 @@ function SwapCreateForm() {
             <div className="space-y-1.5">
               <Label>Destination holding (buy)</Label>
               <Select
+                items={destHoldingLabelById}
                 value={destHoldingId}
                 onValueChange={(v) => setDestHoldingId(v ?? "")}
                 disabled={!selectedAccount || !sourceHoldingId}

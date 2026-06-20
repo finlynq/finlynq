@@ -75,10 +75,20 @@ export async function listDirtySnapshotUsers(): Promise<DirtySnapshotRow[]> {
  * value captured before the rebuild started). A write that arrived mid-rebuild
  * bumps marked_at to NOW() > markedAt, so the row survives and is re-drained
  * next tick — no lost edits.
+ *
+ * `marked_at` is `timestamptz` with MICROSECOND precision (e.g. `…45.010582`),
+ * but `markedAt` is captured through `listDirtySnapshotUsers` → JS `Date` →
+ * `.toISOString()`, which only has MILLISECOND precision (`…45.010Z`). A naive
+ * `marked_at <= ${markedAt}` then compares `.010582 <= .010000` → FALSE, so the
+ * row is NEVER deleted and the marker re-triggers a full self-heal on every
+ * chart load forever (the bug this fixes). Truncate the stored value to
+ * milliseconds before comparing so it matches the captured precision; a genuine
+ * mid-rebuild re-stamp lands in a LATER millisecond and still survives.
  */
 export async function clearDirtyIfUnchanged(userId: string, markedAt: string): Promise<void> {
   await db.execute(sql`
     DELETE FROM portfolio_snapshot_dirty
-    WHERE user_id = ${userId} AND marked_at <= ${markedAt}
+    WHERE user_id = ${userId}
+      AND date_trunc('milliseconds', marked_at) <= ${markedAt}::timestamptz
   `);
 }

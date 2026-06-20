@@ -74,11 +74,24 @@ interface ColumnMappingDialogProps {
    * account" checkbox. Default false preserves the needs-mapping behavior.
    */
   confirmMode?: boolean;
+  /**
+   * FINLYNQ-195 — when the import target is an investment account, offer the
+   * three investment-specific column mappings (Ticker/Symbol, Security name,
+   * Quantity). Default false: a NON-investment account never sees/persists
+   * them, so the cash import flow is byte-identical. v1 captures these into
+   * staging / bank_transactions only — no lot-aware portfolio materialization.
+   */
+  isInvestment?: boolean;
 }
 
 // flipSign is a boolean knob (rendered as a checkbox below), not a column
-// dropdown, so it's excluded from the field→header label map.
-type MappingColumnField = Exclude<keyof ColumnMapping, "flipSign">;
+// dropdown, so it's excluded from the field→header label map. The FINLYNQ-195
+// investment columns (ticker / portfolioHolding / quantity) are also excluded —
+// they render in their own investment-only section, not the cash field table.
+type MappingColumnField = Exclude<
+  keyof ColumnMapping,
+  "flipSign" | "ticker" | "portfolioHolding" | "quantity"
+>;
 
 const FIELD_LABELS: Record<MappingColumnField, string> = {
   date: "Date *",
@@ -95,6 +108,19 @@ const FIELD_LABELS: Record<MappingColumnField, string> = {
 };
 const MAPPING_FIELDS = Object.keys(FIELD_LABELS) as MappingColumnField[];
 const NONE = "__none__";
+
+// FINLYNQ-195 — investment-account-only column mappings. Rendered as a separate
+// section below the cash fields ONLY when `isInvestment` is set. `quantity` is
+// numeric; `ticker` / `portfolioHolding` are the security SYMBOL / NAME.
+type InvestmentColumnField = "ticker" | "portfolioHolding" | "quantity";
+const INVESTMENT_FIELD_LABELS: Record<InvestmentColumnField, string> = {
+  ticker: "Ticker / Symbol",
+  portfolioHolding: "Security name",
+  quantity: "Quantity",
+};
+const INVESTMENT_FIELDS = Object.keys(
+  INVESTMENT_FIELD_LABELS,
+) as InvestmentColumnField[];
 
 /** Clamp a string skip input to an integer in [0, 100]. */
 function clampSkip(raw: string): number {
@@ -121,6 +147,7 @@ export function ColumnMappingDialog({
   onConfirm,
   submitting,
   confirmMode = false,
+  isInvestment = false,
 }: ColumnMappingDialogProps) {
   // Displayed columns / sample / suggestion are LOCAL state so debounced
   // re-detection can replace them without the parent re-pushing props (which
@@ -186,6 +213,11 @@ export function ColumnMappingDialog({
     setMapping((prev) => ({ ...prev, [field]: value || undefined }));
   };
 
+  // FINLYNQ-195 — same shape as setField for the investment column keys.
+  const setInvestmentField = (field: InvestmentColumnField, value: string) => {
+    setMapping((prev) => ({ ...prev, [field]: value || undefined }));
+  };
+
   // Re-detect columns by re-parsing the file with the new skip values. The
   // old mapping points at pre-trim column names, so re-seed it from the fresh
   // suggestion; defaultAccount / templateName / currency are left untouched.
@@ -232,8 +264,18 @@ export function ColumnMappingDialog({
     }
     if (!templateName.trim()) { setError("Give the template a name."); return; }
 
+    // FINLYNQ-195 — never persist investment column keys for a cash account
+    // (defends against a stale suggestion / re-detect leaking ticker/qty into a
+    // cash template). For investment accounts they pass through untouched.
+    const outMapping: ColumnMapping = { ...mapping };
+    if (!isInvestment) {
+      delete outMapping.ticker;
+      delete outMapping.portfolioHolding;
+      delete outMapping.quantity;
+    }
+
     await onConfirm({
-      mapping,
+      mapping: outMapping,
       defaultAccount: defaultAccount || null,
       templateName: templateName.trim(),
       skipHeaderRows: clampSkip(skipHeaderRows),
@@ -268,6 +310,10 @@ export function ColumnMappingDialog({
       account: mapping.account
         ? row[mapping.account] ?? ""
         : defaultAccount || "(default account)",
+      // FINLYNQ-195 — investment columns previewed only when mapped.
+      ticker: mapping.ticker ? row[mapping.ticker] ?? "" : "",
+      security: mapping.portfolioHolding ? row[mapping.portfolioHolding] ?? "" : "",
+      quantity: mapping.quantity ? row[mapping.quantity] ?? "" : "",
     }));
   }, [localSampleRows, mapping, defaultAccount, defaultCurrency]);
 
@@ -449,6 +495,49 @@ export function ColumnMappingDialog({
             </div>
           </div>
 
+          {/* FINLYNQ-195 — investment-account-only column mappings. Shown ONLY
+              when the import target is an investment account; a cash account
+              never renders these (and they're stripped at confirm anyway).
+              v1 captures ticker/name/qty into staging / bank_transactions —
+              it does NOT yet materialize lot-aware portfolio operations. */}
+          {isInvestment && (
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">
+                Investment columns (this is an investment account)
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Map the security ticker/symbol, name, and quantity from your
+                brokerage export. These are captured with the imported rows for
+                now; they aren&apos;t yet turned into buy/sell positions.
+              </p>
+              <div className="rounded-lg border divide-y">
+                {INVESTMENT_FIELDS.map((field) => (
+                  <div key={field} className="flex items-center gap-3 px-3 py-2">
+                    <span className="w-36 text-xs text-muted-foreground shrink-0">
+                      {INVESTMENT_FIELD_LABELS[field]}
+                    </span>
+                    <Select
+                      value={mapping[field] ?? NONE}
+                      onValueChange={(v) =>
+                        setInvestmentField(field, !v || v === NONE ? "" : v)
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue placeholder="—" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NONE}>— not mapped —</SelectItem>
+                        {localHeaders.map((h) => (
+                          <SelectItem key={h} value={h}>{h}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Default account */}
           <div className="space-y-1.5">
             <Label className="text-sm">Default Account</Label>
@@ -479,6 +568,13 @@ export function ColumnMappingDialog({
                       <th className="text-left px-2 py-1.5 font-medium">Account</th>
                       <th className="text-left px-2 py-1.5 font-medium">Payee</th>
                       <th className="text-left px-2 py-1.5 font-medium">Note</th>
+                      {isInvestment && (
+                        <>
+                          <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Ticker</th>
+                          <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Security</th>
+                          <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">Qty</th>
+                        </>
+                      )}
                       <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Currency</th>
                       <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">Amount</th>
                     </tr>
@@ -490,6 +586,13 @@ export function ColumnMappingDialog({
                         <td className="px-2 py-1">{r.account || "—"}</td>
                         <td className="px-2 py-1 truncate max-w-[200px]" title={r.payee}>{r.payee || "—"}</td>
                         <td className="px-2 py-1 truncate max-w-[160px] text-muted-foreground" title={r.note}>{r.note || "—"}</td>
+                        {isInvestment && (
+                          <>
+                            <td className="px-2 py-1 font-mono whitespace-nowrap">{r.ticker || "—"}</td>
+                            <td className="px-2 py-1 truncate max-w-[160px]" title={r.security}>{r.security || "—"}</td>
+                            <td className="px-2 py-1 text-right font-mono whitespace-nowrap">{r.quantity || "—"}</td>
+                          </>
+                        )}
                         <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">{r.currency || "—"}</td>
                         <td className="px-2 py-1 text-right font-mono whitespace-nowrap">{r.amount || "—"}</td>
                       </tr>

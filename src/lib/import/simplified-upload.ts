@@ -49,6 +49,10 @@ export interface SimplifiedRow {
   enteredCurrency?: string | null;
   enteredFxRate?: number | null;
   quantity?: number | null;
+  // FINLYNQ-195 — investment-import capture (v1). PLAINTEXT here; the
+  // bank-ledger writer encrypts at the row's tier. NULL for cash-account rows.
+  ticker?: string | null;
+  securityName?: string | null;
   importHash: string;
 }
 
@@ -140,6 +144,8 @@ export async function simplifiedUpload(
       enteredCurrency: row.enteredCurrency ?? null,
       enteredFxRate: row.enteredFxRate ?? null,
       quantity: row.quantity ?? null,
+      ticker: row.ticker ?? null,
+      securityName: row.securityName ?? null,
       payee: row.payee,
       note: row.note ?? null,
       tags: row.tags ?? null,

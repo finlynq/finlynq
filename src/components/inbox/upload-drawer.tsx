@@ -157,6 +157,7 @@ export function UploadDrawer({
   // so it can surface a reset affordance when the account is set to 'auto' —
   // otherwise the preview never reappears and there's no way back from here.
   csvMappingMode = "confirm",
+  isInvestment = false,
   initialFile = null,
   onUploaded,
 }: {
@@ -166,6 +167,11 @@ export function UploadDrawer({
   accountLabel: string;
   accountCurrency: string;
   policy: Mode;
+  /** FINLYNQ-195 — the bound account's is_investment flag. When true, the
+   *  ColumnMappingDialog offers the ticker/security-name/quantity column
+   *  mappings (captured into staging / bank_transactions). Default false keeps
+   *  the cash import flow unchanged. */
+  isInvestment?: boolean;
   /** §A (2026-06-04) — the bound account's saved OFX payee source. Seeds the
    *  "Payee from: Name / Memo" radio on the card. */
   ofxPayeeSource?: "name" | "memo";
@@ -263,9 +269,11 @@ export function UploadDrawer({
       id: accountId,
       name: accountLabel,
       currency: accountCurrency,
-      isInvestment: false,
+      // FINLYNQ-195 — reflect the real flag so investment-account uploads can
+      // offer the ticker/security-name/quantity column mappings.
+      isInvestment,
     }),
-    [accountId, accountLabel, accountCurrency],
+    [accountId, accountLabel, accountCurrency, isInvestment],
   );
 
   // Load templates + account names when the drawer opens. Account names feed
@@ -867,6 +875,9 @@ export function UploadDrawer({
         // (not a blank one); show the "Don't ask again for this account"
         // checkbox + confirm-tailored copy.
         confirmMode={mappingConfirmMode}
+        // FINLYNQ-195 — offer the ticker/security-name/quantity mappings only
+        // when the bound account is an investment account.
+        isInvestment={isInvestment}
       />
 
       {ofxPreview && (

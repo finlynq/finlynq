@@ -18,7 +18,7 @@
  * Failure handling: per-row try/catch. If decrypt-then-encrypt fails for one
  * row (corrupted ciphertext, DEK eviction race), the row stays at service-tier
  * and the next login retries. Never throws into the caller — fire-and-forget,
- * mirrors `enqueueCanonicalizePortfolioNames`.
+ * mirrors `enqueueBackfillSecurities`.
  *
  * `import_hash` is NEVER touched. CLAUDE.md load-bearing rule: hash is computed
  * from plaintext payee at ingest and must remain stable across the upgrade so
@@ -77,6 +77,9 @@ export async function upgradeStagingEncryption(
       category: schema.stagedTransactions.category,
       accountName: schema.stagedTransactions.accountName,
       note: schema.stagedTransactions.note,
+      // FINLYNQ-195 — investment-import capture columns also flip service→user.
+      ticker: schema.stagedTransactions.ticker,
+      securityName: schema.stagedTransactions.securityName,
     })
     .from(schema.stagedTransactions)
     .innerJoin(
@@ -100,11 +103,15 @@ export async function upgradeStagingEncryption(
       const categoryPt = decryptStaged(r.category);
       const acctPt = decryptStaged(r.accountName);
       const notePt = decryptStaged(r.note);
+      const tickerPt = decryptStaged(r.ticker);
+      const securityNamePt = decryptStaged(r.securityName);
 
       const payeeCt = payeePt != null ? encryptField(dek, payeePt) : null;
       const categoryCt = categoryPt != null ? encryptField(dek, categoryPt) : null;
       const acctCt = acctPt != null ? encryptField(dek, acctPt) : null;
       const noteCt = notePt != null ? encryptField(dek, notePt) : null;
+      const tickerCt = tickerPt != null ? encryptField(dek, tickerPt) : null;
+      const securityNameCt = securityNamePt != null ? encryptField(dek, securityNamePt) : null;
 
       await db
         .update(schema.stagedTransactions)
@@ -113,6 +120,8 @@ export async function upgradeStagingEncryption(
           category: categoryCt,
           accountName: acctCt,
           note: noteCt,
+          ticker: tickerCt,
+          securityName: securityNameCt,
           encryptionTier: "user",
         })
         .where(
@@ -279,6 +288,9 @@ async function upgradeBankLedgerEncryption(
       note: schema.bankTransactions.note,
       tags: schema.bankTransactions.tags,
       accountName: schema.bankTransactions.accountName,
+      // FINLYNQ-195 — investment-import capture columns flip service→user too.
+      ticker: schema.bankTransactions.ticker,
+      securityName: schema.bankTransactions.securityName,
       // FINLYNQ-132 — source_filenames is encrypted per-element at the row's
       // tier. Decrypt each service-tier element under PF_STAGING_KEY, re-encrypt
       // under the user DEK alongside the scalar fields.
@@ -301,6 +313,8 @@ async function upgradeBankLedgerEncryption(
       const notePt = decryptStaged(r.note);
       const tagsPt = decryptStaged(r.tags);
       const acctPt = decryptStaged(r.accountName);
+      const tickerPt = decryptStaged(r.ticker);
+      const securityNamePt = decryptStaged(r.securityName);
 
       // payee is NOT NULL on bank_transactions; fall back to empty string
       // if decrypt returns null (shouldn't happen, but the type is text
@@ -309,6 +323,8 @@ async function upgradeBankLedgerEncryption(
       const noteCt = notePt != null ? encryptField(dek, notePt) : null;
       const tagsCt = tagsPt != null ? encryptField(dek, tagsPt) : null;
       const acctCt = acctPt != null ? encryptField(dek, acctPt) : null;
+      const tickerCt = tickerPt != null ? encryptField(dek, tickerPt) : null;
+      const securityNameCt = securityNamePt != null ? encryptField(dek, securityNamePt) : null;
 
       // FINLYNQ-132 — re-encrypt each filename element service→user. decryptStaged
       // passes legacy plaintext through unchanged; encryptField re-wraps under
@@ -330,6 +346,8 @@ async function upgradeBankLedgerEncryption(
           note: noteCt,
           tags: tagsCt,
           accountName: acctCt,
+          ticker: tickerCt,
+          securityName: securityNameCt,
           sourceFilenames: filenamesCt,
           encryptionTier: "user",
         })

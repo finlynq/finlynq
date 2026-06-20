@@ -7,8 +7,7 @@
  * `security_id` is provably equivalent to the legacy string grouping (the
  * parity gate, scripts/verify-securities-parity.ts).
  *
- * Why per-user at login (not a pure-SQL migration), mirroring
- * stream-d-canonicalize-portfolio.ts:
+ * Why per-user at login (not a pure-SQL migration):
  *   - The cluster kind depends on the PLAINTEXT symbol (metal XAU vs currency
  *     code vs crypto vs equity) — which lives only in `symbol_ct` (AES-GCM).
  *     Pure SQL can't read it; the DEK can. The HMAC `symbol_lookup`/`name_lookup`
@@ -80,8 +79,7 @@ export async function backfillSecuritiesForUser(
     return { backfilled: false, reason: "no-rows" };
   }
 
-  // Step 3: sample-decrypt precondition (DEK-mismatch users bail silently —
-  // same defense as canonicalizePortfolioNamesIfReady).
+  // Step 3: sample-decrypt precondition (DEK-mismatch users bail silently).
   const sample = rows.find((r) => r.symbolCt) ?? rows.find((r) => r.nameCt);
   const sampleCt = sample?.symbolCt ?? sample?.nameCt ?? null;
   if (sampleCt) {

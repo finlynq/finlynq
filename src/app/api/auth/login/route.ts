@@ -48,8 +48,9 @@ import { putDEK } from "@/lib/crypto/dek-cache";
 // Stream D Phase 4 (2026-05-03): plaintext display-name columns dropped.
 // `stream-d-backfill` (encrypts plaintext into ct) and
 // `stream-d-phase3-null` (NULLs plaintext after backfill) are obsolete with
-// no plaintext source; both helpers were deleted.
-import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
+// no plaintext source; both helpers were deleted. FINLYNQ-198 (2026-06-18)
+// also retired the per-user `enqueueCanonicalizePortfolioNames` login pass —
+// display names are now managed at the `securities` level.
 import { enqueueBackfillSecurities } from "@/lib/securities/backfill";
 import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
 import { enqueueProcessPendingInbox } from "@/lib/email-import/process-pending-inbox";
@@ -262,14 +263,6 @@ export async function POST(request: NextRequest) {
     const { token, jti } = await createSessionToken(user.id, false);
     if (dek) {
       putDEK(jti, dek, SESSION_TTL_MS, user.id);
-      // Stream D Phase 4 (2026-05-03): plaintext columns are gone, so the
-      // backfill + phase-3-null helpers no longer run on login. Only the
-      // per-user lazy canonicalization remains — it now reads `name_ct` /
-      // `symbol_ct` directly and rewrites tickered / cash / currency-code
-      // holdings' names to canonical form (uppercased symbol, "Cash",
-      // "Cash <CCY>"). User-defined positions keep their free-text name.
-      // Bails silently for DEK-mismatch users — sample-decrypt precondition.
-      enqueueCanonicalizePortfolioNames(user.id, dek);
       // Securities master (Phase C, 2026-06-16): cluster existing positions
       // under `securities` rows + set security_id, using the same canonicalKey
       // partition as the read aggregators. Idempotent, fire-and-forget,

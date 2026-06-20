@@ -305,8 +305,9 @@ async function valueHoldingsAtDate(
         const cp = cryptoByUpperSymbol.get(h.symbol.toUpperCase().split("-")[0]);
         if (cp) {
           price = cp.price;
-          // crypto-service returns CAD prices
-          priceCurrency = "CAD";
+          // crypto prices are USD-based; carry the row's own currency (legacy
+          // rows may still be CAD) so the FX hop below converts correctly.
+          priceCurrency = cp.currency || "USD";
         }
       } else {
         const q = quotes.get(h.symbol);

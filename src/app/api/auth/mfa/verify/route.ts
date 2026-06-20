@@ -32,9 +32,8 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { getDEK, putDEK, deleteDEK } from "@/lib/crypto/dek-cache";
 import { decryptField } from "@/lib/crypto/envelope";
 // Stream D Phase 4 (2026-05-03): plaintext display-name columns dropped;
-// stream-d-backfill + stream-d-phase3-null helpers deleted. Canonicalize
-// remains and reads ciphertext directly.
-import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
+// stream-d-backfill + stream-d-phase3-null helpers deleted. FINLYNQ-198
+// (2026-06-18) retired the canonicalize login pass too.
 import { enqueueBackfillSecurities } from "@/lib/securities/backfill";
 import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
 import { enqueueProcessPendingInbox } from "@/lib/email-import/process-pending-inbox";
@@ -216,8 +215,6 @@ export async function POST(request: NextRequest) {
     const exp = expSec > 0 ? new Date(expSec * 1000) : new Date(Date.now() + 5 * 60_000);
     await revokeJti(pendingJti, exp);
     attemptCounter.delete(pendingJti);
-    // Stream D Phase 4: only canonicalization remains. See login route.
-    enqueueCanonicalizePortfolioNames(user.id, pendingDek);
     // Securities master (Phase C) — cluster positions under securities. See login route.
     enqueueBackfillSecurities(user.id, pendingDek);
     // Staging encryption upgrade — see login route for rationale.

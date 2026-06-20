@@ -13,13 +13,15 @@
  *   - Symbol-aware auto-detection via /api/portfolio/symbol-info (400ms
  *     debounce). Fills currency + isCrypto unless the user has touched
  *     the currency field manually (`currencyTouched` is sticky).
- *   - Canonical-row UX (issue #25): when the row is tickered / cash-as-
- *     currency / "Cash" sleeve, the Name field is disabled with a hint
- *     and the PUT payload omits `name` so the API doesn't 400.
- *   - The shared isCanonicalHolding() predicate from
- *     src/lib/schemas/holding.ts mirrors the API's check exactly. The
- *     same module owns the Zod schemas, so client validation never
- *     diverges from the server's Zod parse.
+ *   - The shared Zod schemas from src/lib/schemas/holding.ts back both the
+ *     client validation here and the server's Zod parse, so they never
+ *     diverge.
+ *
+ * FINLYNQ-198 (2026-06-18): the old "canonical row" Name lock (issue #25 —
+ * disabled Name input + "auto-managed" hint + PUT-payload `name` omission)
+ * was retired. Display names are now managed at the `securities` level
+ * (read-flip + copy-on-rename), so the Name field is always editable and
+ * the API no longer 400s on a per-position name change.
  *
  * Mode is controlled by `holdingId`:
  *   - undefined → create. POST /api/portfolio.
@@ -39,7 +41,7 @@
  * to every Phase-3 plaintext-NULL'd read path.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,7 +57,6 @@ import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import {
   holdingCreateSchema,
   holdingUpdateSchema,
-  isCanonicalHolding,
 } from "@/lib/schemas/holding";
 
 export type HoldingEditFormHolding = {
@@ -195,6 +196,16 @@ export function HoldingEditForm({
     };
   }, [holdingId, isCreateMode, initialHolding]);
 
+  // value→label map so the base-ui Select trigger shows the account name
+  // rather than the raw numeric id (FINLYNQ-197).
+  const accountLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        accounts.map((a) => [String(a.id), `${a.name} (${a.currency})`]),
+      ),
+    [accounts],
+  );
+
   const accountIdNum = form.accountId ? parseInt(form.accountId, 10) : NaN;
   const accountCurrency = (
     accounts.find((a) => a.id === accountIdNum)?.currency ?? ""
@@ -259,13 +270,6 @@ export function HoldingEditForm({
     };
   }, [form.symbol, accountCurrency, currencyTouched, hydrated]);
 
-  // Issue #25: tickered / cash-as-currency / "Cash"-sleeve rows have an
-  // auto-managed name. The PUT handler rejects name edits on these rows,
-  // so disable the input here and surface a hint instead. Reads the
-  // *next* symbol (form.symbol) so toggling between a tickered position
-  // and a free-text custom row immediately enables/disables the field.
-  const nameAutoManaged = isCanonicalHolding(form.name, form.symbol || null);
-
   // Decide whether the holding-currency input is auto-derived or user-overridden.
   const currencyAutoSource: string | null =
     !currencyTouched && symbolInfo
@@ -326,9 +330,10 @@ export function HoldingEditForm({
       } else {
         const update = holdingUpdateSchema.safeParse({
           id: holdingId,
-          // Skip the Name field entirely on canonical rows — the PUT
-          // handler would 400 on a name edit there.
-          name: nameAutoManaged ? undefined : form.name.trim() || undefined,
+          // FINLYNQ-198: the Name field is always editable now — display
+          // names are managed at the securities level, so the PUT handler
+          // no longer 400s on a per-position name edit.
+          name: form.name.trim() || undefined,
           symbol: symbolValue,
           currency: currency || undefined,
           isCrypto: form.isCrypto ? 1 : 0,
@@ -401,14 +406,8 @@ export function HoldingEditForm({
         <Input
           value={form.name}
           onChange={(e) => setForm({ ...form, name: e.target.value })}
-          disabled={!isCreateMode && nameAutoManaged}
           placeholder={isCreateMode ? "e.g. Apple Inc., Bitcoin, Cash USD" : undefined}
         />
-        {!isCreateMode && nameAutoManaged && (
-          <p className="text-[11px] text-muted-foreground">
-            Name is auto-managed for this holding type. Edit the symbol or currency to rename.
-          </p>
-        )}
         {errors.name && (
           <p className="text-[11px] text-rose-600 dark:text-rose-400">{errors.name}</p>
         )}
@@ -418,6 +417,7 @@ export function HoldingEditForm({
         <div className="space-y-1.5">
           <Label>Account</Label>
           <Select
+            items={accountLabelById}
             value={form.accountId}
             onValueChange={(v) => setForm({ ...form, accountId: v ?? "" })}
           >

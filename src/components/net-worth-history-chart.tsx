@@ -20,6 +20,7 @@ import {
   XAxis,
   YAxis,
   Tooltip,
+  ReferenceLine,
   ResponsiveContainer,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,6 +29,7 @@ import { formatCurrency } from "@/lib/currency";
 import { RebuildSnapshotsButton } from "@/components/portfolio/rebuild-snapshots-button";
 import { prepareTimeSeries } from "@/lib/chart-series";
 import { TooltipBreakdownList, type BreakdownRow } from "@/components/chart-breakdown-list";
+import { StackedAreaTooltip } from "@/components/chart-stack-tooltip";
 import { buildStackedSeries, type StackPoint } from "@/lib/chart-stack";
 import { StackedChartLegend } from "@/components/chart-stack-legend";
 import type { BreakdownMember } from "@/lib/chart-breakdown";
@@ -155,7 +157,7 @@ export function NetWorthHistoryChart({
 
   const currency = data?.displayCurrency ?? "CAD";
   const rawSeries = useMemo(() => data?.series ?? [], [data]);
-  const { data: series, domain } = useMemo(
+  const { data: series, domain, spansZero } = useMemo(
     () =>
       prepareTimeSeries(rawSeries, {
         dateKey: "date",
@@ -260,10 +262,25 @@ export function NetWorthHistoryChart({
                     tickFormatter={(v) => fmtAxis(Number(v))}
                   />
                   <Tooltip
-                    formatter={(v, n) => [formatCurrency(Number(v), currency), n]}
-                    labelFormatter={(d) => fmtFullDate(String(d))}
+                    content={
+                      // FINLYNQ-192 — unified stacked-area tooltip: one row per
+                      // account with a colored dot matching its band + legend
+                      // color, full (untruncated) names, and a date + total
+                      // heading. Replaces the recharts-default `Name : value` text.
+                      <StackedAreaTooltip
+                        currency={currency}
+                        legend={legend}
+                        formatLabel={(d) => fmtFullDate(String(d))}
+                        showTotal
+                        wide
+                      />
+                    }
                     cursor={{ stroke: "var(--color-border)", strokeDasharray: "4 4" }}
                   />
+                  {/* FINLYNQ-187 sign-split puts liability accounts below the
+                      axis, so a stacked "By account" view spans zero whenever
+                      liabilities exist — always draw a visible zero line. */}
+                  <ReferenceLine y={0} stroke="#888" />
                   {legend.map((b) => (
                     <Area
                       key={b.key}
@@ -277,7 +294,9 @@ export function NetWorthHistoryChart({
                       stroke={b.color}
                       strokeWidth={1}
                       fill={b.color}
-                      fillOpacity={0.55}
+                      // FINLYNQ-192 — raise fill opacity so adjacent bands read
+                      // as more solid/distinct (paired with the wider palette).
+                      fillOpacity={0.7}
                       dot={false}
                       isAnimationActive={false}
                     />
@@ -317,6 +336,10 @@ export function NetWorthHistoryChart({
                   }
                   cursor={{ stroke: "var(--color-border)", strokeDasharray: "4 4" }}
                 />
+                {/* FINLYNQ-192 — visible zero line when the (single-line) series
+                    crosses zero (e.g. a liability account's Balance Over Time, or
+                    a net worth that dips negative). Mirrors PerformanceChart. */}
+                {spansZero && <ReferenceLine y={0} stroke="#888" />}
                 <Area
                   type="monotone"
                   dataKey="value"

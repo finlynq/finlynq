@@ -18,7 +18,7 @@
  * the server when payee changes (load-bearing per CLAUDE.md).
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Select,
   SelectContent,
@@ -138,6 +138,23 @@ export function StagedRowEditor({
     if (s.peerStagedId && s.peerStagedId !== local.id) return false;
     return Math.abs(s.amount + local.amount) < 0.01;
   });
+
+  // value→label maps so base-ui Select triggers show names, not ids (FINLYNQ-197).
+  // target account: exclude self-account; include a "none" sentinel label.
+  const targetAccountLabelById = useMemo(() => {
+    const m: Record<string, string> = { __none__: "— none —" };
+    for (const a of accounts) {
+      if (a.id !== acct?.id) m[String(a.id)] = `${a.name} (${a.currency})`;
+    }
+    return m;
+  }, [accounts, acct]);
+  const holdingLabelById = useMemo(() => {
+    const m: Record<string, string> = { __none__: "— Cash (auto) —" };
+    for (const h of accountHoldings) {
+      m[String(h.id)] = `${h.name}${h.symbol ? ` · ${h.symbol}` : ""}`;
+    }
+    return m;
+  }, [accountHoldings]);
 
   const save = useCallback(
     async (field: string, body: Record<string, unknown>) => {
@@ -295,6 +312,7 @@ export function StagedRowEditor({
                 Or target account <Spinner shown={savingField === "targetAccountId"} />
               </Label>
               <Select
+                items={targetAccountLabelById}
                 value={local.targetAccountId != null ? String(local.targetAccountId) : "__none__"}
                 onValueChange={(v) => {
                   const next = v === "__none__" ? null : Number(v);
@@ -340,6 +358,7 @@ export function StagedRowEditor({
               Holding <Spinner shown={savingField === "portfolioHoldingId"} />
             </Label>
             <Select
+              items={holdingLabelById}
               value={
                 local.portfolioHoldingId != null
                   ? String(local.portfolioHoldingId)

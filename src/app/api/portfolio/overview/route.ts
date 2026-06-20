@@ -1,8 +1,8 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and, isNotNull, sql, ne } from "drizzle-orm";
+import { eq, and, isNotNull, sql, ne, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { fetchMultipleQuotes, aggregatePortfolioExposure, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, getAvailableEtfSymbols, autoSeedEtfIfMissing } from "@/lib/price-service";
+import { fetchMultipleQuotes, getEtfRegionBreakdown, getEtfSectorBreakdown, getEtfTopHoldings, isEtfQuoteType } from "@/lib/price-service";
 import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, convertCurrency, getDisplayCurrency, getRate } from "@/lib/fx-service";
 import { isMetalCurrency, isCryptoSymbol, isCurrencyCodeSymbol } from "@/lib/fx/supported-currencies";
@@ -44,6 +44,17 @@ export async function GET(request: NextRequest) {
   // 1. Get all holdings with account info. Stream D Phase 4: plaintext
   // name/symbol/accountName columns dropped; read ciphertext only and
   // decrypt in-memory before any name/symbol lookup.
+  //
+  // FINLYNQ-194: LEFT JOIN `securities` via `portfolio_holdings.security_id`
+  // and pull the security's own `name_ct`. This is the SINGLE source for the
+  // display name across All Holdings + Top Movers + By Account once the
+  // read-flip is on and the row is backfilled — a user rename in
+  // /settings/investments (which writes `securities.name_ct`) then propagates
+  // to every portfolio surface identically. Un-backfilled rows (security_id
+  // null) / flag-off keep `securityName = null` and fall back to the legacy
+  // canonicalKey/per-position-name path, so byHolding names + totals stay
+  // byte-identical to today.
+  const sec = alias(schema.securities, "sec");
   const rawHoldings = await db
     .select({
       id: schema.portfolioHoldings.id,
@@ -54,16 +65,24 @@ export async function GET(request: NextRequest) {
       currency: schema.portfolioHoldings.currency,
       isCrypto: schema.portfolioHoldings.isCrypto,
       securityId: schema.portfolioHoldings.securityId,
+      securityNameCt: sec.nameCt,
+      // FINLYNQ-201: the security's stored asset_type — the durable, user-
+      // settable ETF classification (user override > persisted Yahoo quoteType).
+      // The cluster_key (NOT asset_type) is the grouping key, so this is purely
+      // cosmetic and never re-clusters (canonical.ts).
+      securityAssetType: sec.assetType,
       note: schema.portfolioHoldings.note,
     })
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+    .leftJoin(sec, eq(schema.portfolioHoldings.securityId, sec.id))
     .where(eq(schema.portfolioHoldings.userId, userId));
   const holdings = decryptNamedRows(rawHoldings, dek, {
     nameCt: "name",
     symbolCt: "symbol",
     accountNameCt: "accountName",
-  }) as Array<typeof rawHoldings[number] & { name: string | null; symbol: string | null; accountName: string | null }>;
+    securityNameCt: "securityName",
+  }) as Array<typeof rawHoldings[number] & { name: string | null; symbol: string | null; accountName: string | null; securityName: string | null }>;
 
   // 2. Classify holdings.
   //
@@ -120,6 +139,12 @@ export async function GET(request: NextRequest) {
       const symU = h.symbol.toUpperCase();
       if (isMetalCurrency(symU)) currencies.add(symU);
     }
+  }
+  // Crypto prices come back USD-based (legacy rows may be CAD) — make sure each
+  // crypto price's own currency has a rate so the conversion below resolves even
+  // when no holding is natively denominated in it.
+  for (const cp of cryptoPrices) {
+    if (cp.currency) currencies.add(cp.currency.toUpperCase());
   }
   const fxRates = new Map<string, number>();
   for (const cur of currencies) {
@@ -514,18 +539,23 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // 6c. Auto-seed any ETF symbols not yet in the shared ETF database
-  for (const h of nonCryptoWithSymbol) {
-    if (h.symbol) autoSeedEtfIfMissing(h.symbol);
-  }
-
   // 7. Build enriched holdings
   type AssetType = "etf" | "stock" | "crypto" | "cash" | "metal";
 
   const enrichedHoldings = holdings.map(h => {
     const isCrypto = h.isCrypto === 1 || (h.symbol ? isCryptoSymbol(h.symbol) : false);
     const symbolIsCurrency = symbolIsCash(h.symbol);
-    const isEtf = h.symbol && !symbolIsCurrency ? (getEtfRegionBreakdown(h.symbol) !== null) : false;
+    // FINLYNQ-201: ETF-vs-stock is no longer keyed on a hardcoded list.
+    // Resolution order (durable, stable across warm/cold price_cache):
+    //   1. user override / persisted Yahoo type — `securities.asset_type === 'etf'`
+    //   2. live Yahoo `quoteType` ('ETF') on this fetch (null on a warm-cache hit)
+    //   3. fallback → stock
+    // (1) wins so a user choice + a previously-persisted Yahoo classification
+    // survive a warm cache (when the live quoteType is unavailable). The persist
+    // step below writes a fresh live 'ETF' back onto `securities.asset_type`.
+    const userOrPersistedEtf = (h.securityAssetType ?? "").toLowerCase() === "etf";
+    const liveEtf = h.symbol && !symbolIsCurrency ? isEtfQuoteType(quotes.get(h.symbol)?.quoteType) : false;
+    const isEtf = h.symbol && !symbolIsCurrency ? (userOrPersistedEtf || liveEtf) : false;
 
     // Display asset-type — metals (XAU/XAG/XPT/XPD) get their OWN "metal" type
     // (not "cash") so the badge matches the Securities tab, whose stored
@@ -560,7 +590,9 @@ export async function GET(request: NextRequest) {
         changePct = cp.changePct24h;
         marketCap = cp.marketCap;
         image = cp.image ?? null;
-        quoteCurrency = "CAD";
+        // USD-based (legacy rows may be CAD); carry the price's own currency so
+        // the fxRates conversion below lands in the display currency correctly.
+        quoteCurrency = cp.currency || "USD";
       }
     } else if (h.symbol && !symbolIsCurrency) {
       // Stocks/ETFs only â€” currency-code symbols skip Yahoo to avoid
@@ -665,6 +697,12 @@ export async function GET(request: NextRequest) {
     return {
       id: h.id,
       securityId: h.securityId ?? null,
+      // FINLYNQ-194: the decrypted `securities.name_ct` for this position's
+      // security (null when un-backfilled / no security row / no DEK). The
+      // single-source display-name resolver (`resolveSecurityName` below)
+      // prefers this over the legacy canonicalKey/per-position name when the
+      // read-flip is on.
+      securityName: h.securityName ?? null,
       accountId: h.accountId,
       accountName: h.accountName ?? "Unknown",
       name: h.name,
@@ -697,6 +735,42 @@ export async function GET(request: NextRequest) {
       daysHeld,
     };
   });
+
+  // 7b. FINLYNQ-201: persist a freshly-resolved Yahoo ETF classification onto
+  // `securities.asset_type` so the badge is DURABLE (stable across warm-cache
+  // reads, when the live quoteType is unavailable). One-time promotion only:
+  // we upgrade a security currently typed "stock" (the default for the eq:
+  // bucket) → "etf". A non-"stock" stored type (a user override, or an already-
+  // persisted "etf") is left untouched, so the USER OVERRIDE ALWAYS WINS.
+  // asset_type is cosmetic (canonical.ts) — this NEVER changes cluster_key and
+  // never re-clusters. Fire-and-forget; best-effort (no DEK needed).
+  if (dek) {
+    const promoteSecIds = new Set<number>();
+    for (const h of nonCryptoWithSymbol) {
+      if (h.securityId == null || !h.symbol) continue;
+      if ((h.securityAssetType ?? "").toLowerCase() !== "stock") continue; // override/etf → leave
+      if (isEtfQuoteType(quotes.get(h.symbol)?.quoteType)) promoteSecIds.add(h.securityId);
+    }
+    if (promoteSecIds.size > 0) {
+      const ids = [...promoteSecIds];
+      void (async () => {
+        try {
+          await db
+            .update(schema.securities)
+            .set({ assetType: "etf", updatedAt: sql`NOW()` })
+            .where(
+              and(
+                eq(schema.securities.userId, userId),
+                eq(schema.securities.assetType, "stock"),
+                inArray(schema.securities.id, ids),
+              ),
+            );
+        } catch {
+          // best-effort durable badge — never block / fail the read.
+        }
+      })();
+    }
+  }
 
   // 8. Compute summaries
   const totalValueDisplay = enrichedHoldings.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
@@ -926,9 +1000,24 @@ export async function GET(request: NextRequest) {
   // Phase D read-flip: when enabled for this user, bucket combined holdings on
   // the real `security_id` FK instead of the in-memory string. Rows still
   // missing a security_id (un-backfilled) fall back to the legacy key, so the
-  // two paths converge. Display fields (key/symbol/name/image) still come from
-  // the first member's canonicalKey, keeping the response identical.
+  // two paths converge. Display fields (key/symbol/image) still come from the
+  // first member's canonicalKey; the display NAME is resolved by
+  // `resolveSecurityName` below.
   const useSecurityGrouping = await securitiesReadEnabledForUser(userId);
+
+  // FINLYNQ-194: single source of the display NAME. When the read-flip is on
+  // AND the row is backfilled (security_id present) AND the security carries a
+  // decrypted name, use `securities.name_ct` — so a rename/add in the
+  // Securities catalog propagates to All Holdings + Top Movers identically to
+  // By Account (which already tracks it via the copy-on-rename per-position
+  // name). Otherwise return null, leaving the caller on the LEGACY
+  // canonicalKey/per-position name path — keeping flag-off / un-backfilled rows
+  // BYTE-IDENTICAL to today (names + byHolding totals; tc-3 parity invariant).
+  const resolveSecurityName = (h: typeof enrichedHoldings[number]): string | null => {
+    if (!useSecurityGrouping || h.securityId == null) return null;
+    const nm = (h.securityName ?? "").trim();
+    return nm.length > 0 ? nm : null;
+  };
 
   // Single canonical bucket key, shared by the All-Holdings rollup (byHoldingMap)
   // AND the Top Movers aggregation (FINLYNQ-190) — there is exactly ONE grouping
@@ -949,7 +1038,14 @@ export async function GET(request: NextRequest) {
   const aggregatedMovers = aggregateMovers(
     enrichedHoldings,
     moverBucketKey,
-    (h) => canonicalKey(h),
+    // FINLYNQ-194: the canonical row's display name comes from the security
+    // table when resolvable (read-flip on + backfilled), else the legacy
+    // canonicalKey name. Top Movers thus inherits the SAME single-source name
+    // as All Holdings — no name logic duplicated in top-movers.ts.
+    (h) => {
+      const ck = canonicalKey(h);
+      return { key: ck.key, symbol: ck.symbol, name: resolveSecurityName(h) ?? ck.name };
+    },
   ).sort((a, b) => {
     const diff = Math.abs(b.dayChangeDisplay) - Math.abs(a.dayChangeDisplay);
     if (diff !== 0) return diff;
@@ -980,6 +1076,10 @@ export async function GET(request: NextRequest) {
   const byHoldingMap = new Map<string, ByHoldingAccum>();
   for (const h of enrichedHoldings) {
     const ck = canonicalKey(h);
+    // FINLYNQ-194: single-source display name — the security row's name when
+    // resolvable, else the legacy canonicalKey name. `null` on flag-off /
+    // un-backfilled rows ⇒ legacy path ⇒ byte-identical to today.
+    const secName = resolveSecurityName(h);
     // Same canonical bucket key as Top Movers (moverBucketKey). `acc.key` stays
     // the legacy canonicalKey string regardless (opaque React key / display id).
     const bucketKey = moverBucketKey(h);
@@ -988,8 +1088,13 @@ export async function GET(request: NextRequest) {
       acc = {
         key: ck.key,
         symbol: ck.symbol,
-        name: ck.name,
-        description: null,
+        name: secName ?? ck.name,
+        // When the security name is the single source, seed `description` with
+        // it too: the client's `holdingDescription` reads `description` as the
+        // primary (quote-name) slot, so a USER RENAME wins over Yahoo's
+        // quoteName. On the legacy path `description` stays null and is filled
+        // from the first member's quoteName below (FINLYNQ-174, unchanged).
+        description: secName,
         assetType: h.assetType,
         totalQty: 0,
         costBasisDisplay: 0,
@@ -1007,7 +1112,9 @@ export async function GET(request: NextRequest) {
     if (h.accountId != null) acc.accountIds.add(h.accountId);
     // FINLYNQ-174: carry the first member with a real quote long name up to
     // the canonical row (all members of an `eq:`/`crypto:` key share a
-    // ticker, so any member's quoteName describes the whole row).
+    // ticker, so any member's quoteName describes the whole row). When the
+    // security name already seeded `description` (FINLYNQ-194), it stays — the
+    // user rename wins over Yahoo quoteName.
     if (acc.description == null && h.quoteName) acc.description = h.quoteName;
     if (h.quantity != null) acc.totalQty += h.quantity;
     acc.marketValueDisplay += h.marketValueDisplay ?? 0;

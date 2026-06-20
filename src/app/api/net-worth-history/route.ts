@@ -40,6 +40,7 @@ import {
   rebuildPortfolioSnapshots,
   tryBeginRebuild,
   endRebuild,
+  reportRebuildProgress,
   tryBeginCashRebuild,
   endCashRebuild,
 } from "@/lib/portfolio/snapshots/rebuild";
@@ -71,16 +72,24 @@ function kickSelfHeal(
   const from = dirtyFrom;
   void (async () => {
     try {
-      await rebuildPortfolioSnapshots(userId, from, today, dek);
+      // Thread progress into the SHARED registry so the "Rebuild investment
+      // history" button (which polls the same registry on mount) shows a real
+      // determinate "day X of Y" bar while this background self-heal runs —
+      // instead of a perma-"starting…". `tryBeginRebuild` above seeds the entry
+      // running:true, but WITHOUT an onProgress callback `totalDays`/
+      // `daysProcessed` never update, so the button froze on "starting…" the
+      // whole walk even though the rebuild was progressing fine.
+      const result = await rebuildPortfolioSnapshots(userId, from, today, dek, (done, total) =>
+        reportRebuildProgress(userId, done, total),
+      );
       if (dirtyMarkedAt) await clearDirtyIfUnchanged(userId, dirtyMarkedAt);
+      endRebuild(userId, { result });
     } catch (err) {
-
       console.warn(
         "[net-worth-history] self-heal rebuild failed:",
         err instanceof Error ? err.message : err,
       );
-    } finally {
-      endRebuild(userId);
+      endRebuild(userId, { error: err instanceof Error ? err.message : "self-heal failed" });
     }
   })();
 }

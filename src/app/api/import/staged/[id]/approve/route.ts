@@ -256,6 +256,10 @@ export async function POST(
     note: string | null;
     tags: string | null;
     accountName: string | null;
+    // FINLYNQ-195 — investment-import capture (v1), decoded plaintext for the
+    // bank-ledger upsert (which re-encrypts at the row's tier).
+    ticker: string | null;
+    securityName: string | null;
     importHash: string;
   };
   const resolved: ResolvedRow[] = [];
@@ -295,6 +299,10 @@ export async function POST(
       note,
       tags,
       accountName,
+      // FINLYNQ-195 — decode the captured TICKER + security NAME (tier-aware)
+      // so the bank-ledger upsert below re-encrypts them at the row's tier.
+      ticker: decode(r.ticker, r.encryptionTier),
+      securityName: decode(r.securityName, r.encryptionTier),
       importHash,
     });
   }
@@ -368,6 +376,10 @@ export async function POST(
         enteredAmount: r.staged.enteredAmount ?? null,
         enteredCurrency: r.staged.enteredCurrency ?? null,
         quantity: r.staged.quantity ?? null,
+        // FINLYNQ-195 — investment-import capture (v1). Re-encrypted at tier by
+        // the bank-ledger writer. NULL for cash-account rows.
+        ticker: r.ticker,
+        securityName: r.securityName,
         payee: r.payee,
         note: r.note,
         tags: r.tags,

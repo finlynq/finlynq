@@ -89,7 +89,9 @@ const SPLIT_FIELDS = ["note", "description", "tags"] as const;
 // under either the user DEK ('user' tier, v1: envelope) or PF_STAGING_KEY
 // ('service' tier, sv1: envelope from the email-webhook ingest path). The
 // export decrypts both tiers to plaintext for backup portability.
-const BANK_TX_FIELDS = ["payee", "note", "tags", "accountName"] as const;
+// FINLYNQ-195 — ticker + securityName are investment-import capture columns,
+// encrypted-in-place like payee/note/tags/accountName. Decrypt for portability.
+const BANK_TX_FIELDS = ["payee", "note", "tags", "accountName", "ticker", "securityName"] as const;
 
 /**
  * Tier-aware row decrypt for bank_transactions. `encryption_tier` column

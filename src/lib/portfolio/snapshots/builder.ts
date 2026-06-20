@@ -20,7 +20,6 @@ import { db, schema } from "@/db";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { resolveReportingCurrency } from "../../../../mcp-server/reporting-currency";
 import { getRate } from "@/lib/fx-service";
-import { computeNetContributions } from "../performance/contributions";
 
 export interface BuildDailySnapshotInput {
   userId: string;
@@ -61,15 +60,11 @@ export async function buildDailySnapshot(
     asOfDate: date,
   });
 
-  // Compute net contributions for this day across all the user's investment
-  // accounts. We bucket per-account by counting only the leg on each.
-  // For day-of granularity we treat all of date's flows as "net for day".
-  const todaysFlows = await computeNetContributions({
-    userId,
-    accountId: null,
-    fromDate: date,
-    toDate: date,
-  });
+  // Per-account net contribution for the day, bucketed from the same-day legs
+  // below (the receiving leg of each transfer pair). NOTE: a prior version also
+  // ran `computeNetContributions()` here purely "for parity / future MWRR" and
+  // then DISCARDED the result — that was one wasted DB round-trip per day, which
+  // added up across a multi-year rebuild walk, so it has been removed.
   const perAccountContribution = new Map<number, number>();
   // Map cash flows back to account_id via the source transactions.
   // computeNetContributions doesn't return accountId today (sign-only),
@@ -109,7 +104,6 @@ export async function buildDailySnapshot(
       (perAccountContribution.get(leg.accountId) ?? 0) + value,
     );
   }
-  void todaysFlows; // computed for parity / future MWRR pre-cache use
 
   // ─── FX cache for account-ccy → reporting-ccy ───
   const fxCache = new Map<string, number>();
@@ -130,59 +124,55 @@ export async function buildDailySnapshot(
     }
   };
 
-  // ─── Per-account rows ───
-  let perAccountRows = 0;
+  // ─── Build every row for the day, then write them in ONE multi-row INSERT ───
+  // Previously this issued one `db.execute(INSERT … ON CONFLICT)` PER account in
+  // a loop plus a separate aggregate INSERT — ~N+1 serial DB round-trips per day,
+  // which dominated a multi-year rebuild walk (each day idle-waiting on Postgres,
+  // not CPU- or network-bound). We now collect the per-account rows + the
+  // whole-portfolio aggregate and persist them in a SINGLE statement (1
+  // round-trip/day). Numeric results are identical — only the round-trip count
+  // changes.
   let totalMv = 0;
   let totalCb = 0;
   let totalContrib = 0;
+  const accountRows: Array<{ accountId: number; mv: number; cb: number; contribution: number }> = [];
 
   for (const [accountId, v] of perAccount) {
     const fxRate = await fx(v.currency, reportingCurrency);
     const mv = v.value * fxRate;
     const cb = v.costBasis * fxRate;
     const contribution = (perAccountContribution.get(accountId) ?? 0) * fxRate;
-    // The unique index is on (user_id, snap_date, COALESCE(account_id, -1)) —
-    // an EXPRESSION index — so a Drizzle onConflictDoUpdate targeting the bare
-    // columns (user_id, snap_date, account_id) finds no matching constraint and
-    // Postgres rejects it ("no unique or exclusion constraint matching the ON
-    // CONFLICT specification"). That threw on the first per-account row and
-    // aborted the whole snapshot build (so NO snapshots were ever written).
-    // Use raw SQL with the COALESCE conflict target, exactly like the aggregate
-    // insert below.
-    await db.execute(sql`
-      INSERT INTO portfolio_snapshots (
-        user_id, snap_date, account_id, market_value, cost_basis,
-        net_contribution, currency, gaps_filled, source
-      ) VALUES (
-        ${userId}, ${date}, ${accountId}, ${mv}, ${cb},
-        ${contribution}, ${reportingCurrency}, ${gapsFilled}, ${'cron'}
-      )
-      ON CONFLICT (user_id, snap_date, COALESCE(account_id, -1))
-      DO UPDATE SET
-        market_value = EXCLUDED.market_value,
-        cost_basis = EXCLUDED.cost_basis,
-        net_contribution = EXCLUDED.net_contribution,
-        currency = EXCLUDED.currency,
-        gaps_filled = EXCLUDED.gaps_filled
-    `);
-    perAccountRows++;
+    accountRows.push({ accountId, mv, cb, contribution });
     totalMv += mv;
     totalCb += cb;
     totalContrib += contribution;
   }
 
-  // ─── Whole-portfolio aggregate (accountId NULL) ───
-  // The unique index uses COALESCE(account_id, -1) to dedupe the
-  // aggregate row. Drizzle's onConflictDoUpdate doesn't accept
-  // COALESCE expressions natively, so write via raw SQL.
+  // `gapsFilled` is only finalized after every fx() call above, so it is a
+  // per-DAY quality flag now applied uniformly to all of the day's rows. (The
+  // aggregate row always used this final value; per-account rows previously
+  // carried whatever the flag happened to be mid-loop — an incidental artifact
+  // of insert order, not a designed per-account signal.)
+  const valueTuples = [
+    ...accountRows.map(
+      (r) =>
+        sql`(${userId}, ${date}, ${r.accountId}, ${r.mv}, ${r.cb}, ${r.contribution}, ${reportingCurrency}, ${gapsFilled}, ${'cron'})`,
+    ),
+    // Whole-portfolio aggregate (account_id NULL → COALESCE(-1) in the index).
+    sql`(${userId}, ${date}, NULL, ${totalMv}, ${totalCb}, ${totalContrib}, ${reportingCurrency}, ${gapsFilled}, ${'cron'})`,
+  ];
+
+  // The unique index is the EXPRESSION index (user_id, snap_date,
+  // COALESCE(account_id, -1)) — a Drizzle onConflictDoUpdate on the bare columns
+  // finds no matching constraint, so we keep raw SQL with the COALESCE conflict
+  // target. Per-account ids are distinct and the aggregate is NULL→-1, so no two
+  // rows in this single statement share a conflict key (which would otherwise
+  // trip "ON CONFLICT … cannot affect row a second time").
   await db.execute(sql`
     INSERT INTO portfolio_snapshots (
       user_id, snap_date, account_id, market_value, cost_basis,
       net_contribution, currency, gaps_filled, source
-    ) VALUES (
-      ${userId}, ${date}, NULL, ${totalMv}, ${totalCb},
-      ${totalContrib}, ${reportingCurrency}, ${gapsFilled}, ${'cron'}
-    )
+    ) VALUES ${sql.join(valueTuples, sql`, `)}
     ON CONFLICT (user_id, snap_date, COALESCE(account_id, -1))
     DO UPDATE SET
       market_value = EXCLUDED.market_value,
@@ -198,7 +188,7 @@ export async function buildDailySnapshot(
   return {
     userId,
     date,
-    perAccountRows,
+    perAccountRows: accountRows.length,
     aggregateRow: true,
     gapsFilled,
   };

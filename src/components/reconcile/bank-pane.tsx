@@ -50,6 +50,25 @@ export interface BankRow {
   suggestedCategoryId: number | null;
   /** Bank row's account id — used by the dialog as the default account. */
   accountId: number;
+  /** Investment-import capture (FINLYNQ-195 store / FINLYNQ-207 surface).
+   *  Plaintext ticker/symbol; null when undecryptable or not captured.
+   *  Only rendered when the pane is in investment mode. */
+  ticker?: string | null;
+  /** Plaintext security name; same rule as `ticker`. */
+  securityName?: string | null;
+  /** Share/unit count; rendered as a plain number (no currency symbol). */
+  quantity?: number | null;
+}
+
+/**
+ * Format an investment quantity as a share/unit COUNT — never currency
+ * (FINLYNQ-207 tc-4). Trims trailing zeros so `10` shows as "10" and `10.5`
+ * as "10.5"; caps at 6 dp for fractional-share brokers. `null`/undefined →
+ * the em-dash placeholder.
+ */
+function formatQuantity(q: number | null | undefined): string {
+  if (q == null || !Number.isFinite(q)) return "—";
+  return String(Number(q.toFixed(6)));
 }
 
 export function BankPane({
@@ -64,6 +83,7 @@ export function BankPane({
   selectedBankIds,
   onToggleSelect,
   onToggleSelectAll,
+  isInvestment = false,
 }: {
   rows: BankRow[];
   loading: boolean;
@@ -86,6 +106,10 @@ export function BankPane({
   onToggleSelect?: (bankId: string) => void;
   /** Toggle every visible row's checked state at once (header checkbox). */
   onToggleSelectAll?: (checked: boolean) => void;
+  /** When true, the account is an investment account — render the captured
+   *  Ticker / Security / Quantity columns (FINLYNQ-207). Default false keeps
+   *  cash reconcile views byte-identical. */
+  isInvestment?: boolean;
 }) {
   const selectionEnabled = !!onToggleSelect;
   const allChecked =
@@ -134,7 +158,12 @@ export function BankPane({
               )}
               <TableHead>Date</TableHead>
               <TableHead>Payee</TableHead>
+              {isInvestment && <TableHead>Ticker</TableHead>}
+              {isInvestment && <TableHead>Security</TableHead>}
               <TableHead>Status</TableHead>
+              {isInvestment && (
+                <TableHead className="text-right">Qty</TableHead>
+              )}
               <TableHead className="text-right">Amount</TableHead>
               <TableHead className="w-48 text-right">Actions</TableHead>
             </TableRow>
@@ -184,6 +213,20 @@ export function BankPane({
                       <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
+                  {isInvestment && (
+                    <TableCell className="font-mono text-xs uppercase">
+                      {r.ticker || (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                  )}
+                  {isInvestment && (
+                    <TableCell className="text-xs truncate max-w-[200px]">
+                      {r.securityName || (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell className="text-xs">
                     <div className="flex items-center gap-1 flex-wrap">
                       <MatchPill
@@ -200,6 +243,15 @@ export function BankPane({
                       />
                     </div>
                   </TableCell>
+                  {isInvestment && (
+                    <TableCell className="text-right font-mono text-xs tabular-nums">
+                      {r.quantity != null ? (
+                        formatQuantity(r.quantity)
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell className="text-right font-mono text-xs">
                     {formatCurrency(r.amount, r.currency || "CAD")}
                   </TableCell>

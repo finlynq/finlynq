@@ -517,6 +517,9 @@ function ImportPageInner() {
         accountLabel={safeAccountName(account)}
         accountCurrency={account.currency}
         policy={policy}
+        // FINLYNQ-195 — gate the investment column-mapping fields on the
+        // bound account's is_investment flag.
+        isInvestment={account.isInvestment ?? false}
         ofxPayeeSource={account.ofxPayeeSource === "memo" ? "memo" : "name"}
         csvMappingMode={account.csvMappingMode === "auto" ? "auto" : "confirm"}
         // FINLYNQ-188 — when set (carried from the dashboard Quick Import), the
