@@ -260,8 +260,10 @@ async function fetchCryptoRateToUsd(currency: string): Promise<number | null> {
     const id = symbolToCoinGeckoId(currency);
     if (!id) return null;
     // Cache-first: getCryptoSpotPrices reads today's price_cache before any
-    // CoinGecko call. Returns the same CAD price as getCryptoPrices did, so the
-    // (pre-existing) rate-to-usd value is unchanged — only the cache read is new.
+    // CoinGecko call. Crypto prices are now USD-based, so the coin's USD price IS
+    // its rate-to-USD (this also corrects the prior behavior, which returned a
+    // CAD price here as if it were a USD rate). A transient legacy CAD today-row
+    // self-heals on the next 30-min refresh.
     const prices = await getCryptoSpotPrices([{ coinId: id, symbol: currency }]);
     const match = prices.find((p) => p.id === id);
     return match && match.price > 0 ? match.price : null;

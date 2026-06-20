@@ -65,6 +65,7 @@ export async function GET(request: NextRequest) {
       return {
         ...h,
         price: priceData?.price ?? null,
+        priceCurrency: priceData?.currency ?? null, // USD base (legacy rows: CAD)
         change24h: priceData?.change24h ?? null,
         changePct24h: priceData?.changePct24h ?? null,
         marketCap: priceData?.marketCap ?? null,

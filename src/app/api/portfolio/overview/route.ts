@@ -140,6 +140,12 @@ export async function GET(request: NextRequest) {
       if (isMetalCurrency(symU)) currencies.add(symU);
     }
   }
+  // Crypto prices come back USD-based (legacy rows may be CAD) — make sure each
+  // crypto price's own currency has a rate so the conversion below resolves even
+  // when no holding is natively denominated in it.
+  for (const cp of cryptoPrices) {
+    if (cp.currency) currencies.add(cp.currency.toUpperCase());
+  }
   const fxRates = new Map<string, number>();
   for (const cur of currencies) {
     fxRates.set(cur, await getRate(cur, displayCurrency, todayDate, userId));
@@ -584,7 +590,9 @@ export async function GET(request: NextRequest) {
         changePct = cp.changePct24h;
         marketCap = cp.marketCap;
         image = cp.image ?? null;
-        quoteCurrency = "CAD";
+        // USD-based (legacy rows may be CAD); carry the price's own currency so
+        // the fxRates conversion below lands in the display currency correctly.
+        quoteCurrency = cp.currency || "USD";
       }
     } else if (h.symbol && !symbolIsCurrency) {
       // Stocks/ETFs only â€” currency-code symbols skip Yahoo to avoid

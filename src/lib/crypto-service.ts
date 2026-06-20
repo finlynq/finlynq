@@ -44,6 +44,14 @@ export type CryptoPrice = {
   symbol: string;
   name: string;
   price: number;
+  /**
+   * Currency `price` (and the rich fields) are denominated in. Crypto is cached
+   * and fetched in USD — the canonical anchor matching `fx_rates.rate_to_usd` —
+   * and converted to any display/account currency by the caller via the FX
+   * service. (Legacy `price_cache` rows may still be "CAD"; reads carry the
+   * row's own currency through so they convert correctly during the transition.)
+   */
+  currency: string;
   change24h: number;
   changePct24h: number;
   marketCap: number;
@@ -84,15 +92,16 @@ export async function getCryptoPrice(coinId: string): Promise<CryptoPrice | null
       id: data.id,
       symbol: (data.symbol ?? "").toUpperCase(),
       name: data.name ?? coinId,
-      price: data.market_data?.current_price?.cad ?? data.market_data?.current_price?.usd ?? 0,
+      price: data.market_data?.current_price?.usd ?? data.market_data?.current_price?.cad ?? 0,
+      currency: "USD",
       change24h: data.market_data?.price_change_24h ?? 0,
       changePct24h: data.market_data?.price_change_percentage_24h ?? 0,
-      marketCap: data.market_data?.market_cap?.cad ?? data.market_data?.market_cap?.usd ?? 0,
+      marketCap: data.market_data?.market_cap?.usd ?? data.market_data?.market_cap?.cad ?? 0,
       image: data.image?.small,
     };
 
-    // Cache the price
-    await cacheCryptoPrice(price.symbol, price.price, "CAD");
+    // Cache the price in USD (converted to any display currency via fx_rates).
+    await cacheCryptoPrice(price.symbol, price.price, "USD");
 
     return price;
   } catch {
@@ -106,7 +115,7 @@ export async function getCryptoPrices(coinIds: string[]): Promise<CryptoPrice[]>
   try {
     const ids = coinIds.join(",");
     const res = await coinGeckoFetch(
-      `/coins/markets?vs_currency=cad&ids=${ids}&order=market_cap_desc&sparkline=false&price_change_percentage=24h`
+      `/coins/markets?vs_currency=usd&ids=${ids}&order=market_cap_desc&sparkline=false&price_change_percentage=24h`
     );
     if (!res.ok) return [];
     const data = await res.json();
@@ -116,15 +125,16 @@ export async function getCryptoPrices(coinIds: string[]): Promise<CryptoPrice[]>
       symbol: ((coin.symbol as string) ?? "").toUpperCase(),
       name: (coin.name as string) ?? "",
       price: (coin.current_price as number) ?? 0,
+      currency: "USD",
       change24h: (coin.price_change_24h as number) ?? 0,
       changePct24h: (coin.price_change_percentage_24h as number) ?? 0,
       marketCap: (coin.market_cap as number) ?? 0,
       image: coin.image as string | undefined,
     }));
 
-    // Cache all prices
+    // Cache all prices in USD (converted to any display currency via fx_rates).
     for (const p of prices) {
-      await cacheCryptoPrice(p.symbol, p.price, "CAD");
+      await cacheCryptoPrice(p.symbol, p.price, "USD");
     }
 
     return prices;
@@ -135,8 +145,9 @@ export async function getCryptoPrices(coinIds: string[]): Promise<CryptoPrice[]>
 
 // Bulk cache lookup for crypto spot prices on a single date. Returns a map of
 // "CRYPTO:<SYMBOL>" -> { price, currency } for the rows that exist. Mirrors
-// price-service's readPriceCacheBulk (the stock equivalent). Crypto prices are
-// always cached in CAD (see cacheCryptoPrice / vs_currency=cad).
+// price-service's readPriceCacheBulk (the stock equivalent). Crypto is cached in
+// USD (see cacheCryptoPrice / vs_currency=usd); the row's own currency is carried
+// through so any legacy CAD rows still convert correctly during the transition.
 async function readCryptoCacheBulk(
   symbols: string[],
   date: string,
@@ -156,7 +167,7 @@ async function readCryptoCacheBulk(
       if (out.has(r.symbol)) continue;
       out.set(r.symbol, {
         price: r.price,
-        currency: r.currency ?? "CAD",
+        currency: r.currency ?? "USD",
         stale: isPriceCacheRowStale(r.date, r.fetchedAt, date),
       });
     }
@@ -230,6 +241,7 @@ export async function getCryptoSpotPrices(
       symbol: h.symbol,
       name: h.symbol,
       price: row.price,
+      currency: row.currency,
       change24h: 0,
       changePct24h: 0,
       marketCap: 0,
@@ -261,6 +273,7 @@ export async function getCryptoSpotPrices(
           symbol: m.symbol,
           name: m.symbol,
           price: stale.price,
+          currency: stale.currency,
           change24h: 0,
           changePct24h: 0,
           marketCap: 0,
@@ -307,7 +320,7 @@ async function fetchCryptoHistoryToCache(coinId: string, symbol: string, fromDat
   if (!(spanMs > 0)) return; // fromDate is today or in the future — nothing historical to fetch
   const days = Math.min(365, Math.ceil(spanMs / 86400000) + 1);
   try {
-    const res = await coinGeckoFetch(`/coins/${coinId}/market_chart?vs_currency=cad&days=${days}`);
+    const res = await coinGeckoFetch(`/coins/${coinId}/market_chart?vs_currency=usd&days=${days}`);
     if (!res.ok) return;
     const data = await res.json();
     const byDate = bucketDailyCryptoPrices((data.prices ?? []) as Array<[number, number]>, today);
@@ -324,7 +337,7 @@ async function fetchCryptoHistoryToCache(coinId: string, symbol: string, fromDat
     const have = new Set(existing.map((r) => r.date));
     const rows = dates
       .filter((d) => !have.has(d))
-      .map((date) => ({ symbol: cacheSymbol, date, price: byDate.get(date)!, currency: "CAD", previousClose: null }));
+      .map((date) => ({ symbol: cacheSymbol, date, price: byDate.get(date)!, currency: "USD", previousClose: null }));
     if (rows.length > 0) await db.insert(schema.priceCache).values(rows);
   } catch {
     // Network/parse failure → leave the cache as-is; the caller degrades to the
@@ -385,7 +398,7 @@ export async function getCryptoPricesAtDate(
   for (const [coinId, sym] of uniq) {
     const row = cacheMap.get(`CRYPTO:${sym}`);
     if (row) {
-      out.push({ id: coinId, symbol: sym, name: sym, price: row.price, change24h: 0, changePct24h: 0, marketCap: 0, image: undefined });
+      out.push({ id: coinId, symbol: sym, name: sym, price: row.price, currency: row.currency, change24h: 0, changePct24h: 0, marketCap: 0, image: undefined });
     } else {
       stillMissing.push({ coinId, symbol: sym });
     }
@@ -433,7 +446,7 @@ export async function getCryptoHistory(
 ): Promise<CryptoHistoryPoint[]> {
   try {
     const res = await coinGeckoFetch(
-      `/coins/${coinId}/market_chart?vs_currency=cad&days=${days}`
+      `/coins/${coinId}/market_chart?vs_currency=usd&days=${days}`
     );
     if (!res.ok) return [];
     const data = await res.json();
