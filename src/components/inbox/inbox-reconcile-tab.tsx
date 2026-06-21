@@ -27,6 +27,10 @@ import { Button } from "@/components/ui/button";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
 import { BankPane, type BankRow } from "@/components/reconcile/bank-pane";
 import {
+  InvestmentOpPreviewDialog,
+  type InvestmentOpPreview,
+} from "@/components/reconcile/investment-op-preview-dialog";
+import {
   TransactionsPane,
   type TxRow,
 } from "@/components/reconcile/transactions-pane";
@@ -163,8 +167,14 @@ export function InboxReconcileTab({
   const [data, setData] = useState<ReconcileData | null>(null);
   const [dataLoading, setDataLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // FINLYNQ-208 — transient success/info notice for the "Apply rules" action.
+  // FINLYNQ-208 — transient success/info notice for the per-row record action.
   const [ruleNotice, setRuleNotice] = useState<string | null>(null);
+  // FINLYNQ-208 — investment-op preview-before-record (mirrors normal
+  // reconciliation: Create shows a preview; recording waits for confirm).
+  const [opPreview, setOpPreview] = useState<
+    { bankId: string; preview: InvestmentOpPreview } | null
+  >(null);
+  const [recordingOp, setRecordingOp] = useState(false);
   const [busySuggestionKey, setBusySuggestionKey] = useState<string | null>(
     null,
   );
@@ -788,37 +798,25 @@ export function InboxReconcileTab({
       const acct = accounts.find((a) => a.id === snap.accountId);
       if (acct?.isInvestment === true) {
         // FINLYNQ-208 — if a user rule matches this row with a
-        // `record_investment_op` action, apply it: the executor records the
-        // lot-aware op + links the bank row. Otherwise fall back to the manual
-        // portfolio flow (no rule = nothing to auto-create).
+        // `record_investment_op` action, open a PREVIEW of the op before
+        // recording (mirrors normal bank reconciliation — never auto-records on
+        // Create). Confirm runs the executor via /api/reconcile/apply-rules.
+        // No matching rule → fall back to the manual portfolio flow.
         if (snap.suggestedInvestmentOp) {
           setRuleNotice(null);
           setError(null);
-          try {
-            const res = await fetch("/api/reconcile/apply-rules", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ bankRowIds: [snap.id] }),
-            });
-            const body = await res.json().catch(() => ({}));
-            if (!res.ok || !body.success) {
-              setError(body.error ?? `Failed to apply rule (HTTP ${res.status})`);
-              return;
-            }
-            const per = body.data?.perRow?.[0];
-            if (per?.matched && per.transactionId) {
-              setRuleNotice(`Recorded ${snap.suggestedInvestmentOp} from rule.`);
-              await refresh();
-            } else {
-              setError(
-                `Rule matched but did not record a transaction${
-                  per?.skipReason ? ` (${per.skipReason})` : ""
-                }.`,
-              );
-            }
-          } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
-          }
+          setOpPreview({
+            bankId: snap.id,
+            preview: {
+              op: snap.suggestedInvestmentOp,
+              ticker: snap.ticker ?? null,
+              securityName: snap.securityName ?? null,
+              quantity: snap.quantity ?? null,
+              amount: snap.amount,
+              currency: snap.currency,
+              accountName: safeAccountName(acct),
+            },
+          });
           return;
         }
         router.push(
@@ -875,6 +873,43 @@ export function InboxReconcileTab({
     },
     [data, accounts, router, refresh],
   );
+
+  // FINLYNQ-208 — confirm + record the previewed investment op. Runs the
+  // executor via the single-row apply-rules route, then refreshes.
+  const confirmRecordOp = useCallback(async () => {
+    if (!opPreview) return;
+    setRecordingOp(true);
+    setError(null);
+    setRuleNotice(null);
+    try {
+      const res = await fetch("/api/reconcile/apply-rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bankRowIds: [opPreview.bankId] }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.success) {
+        setError(body.error ?? `Failed to record op (HTTP ${res.status})`);
+        return;
+      }
+      const per = body.data?.perRow?.[0];
+      if (per?.matched && per.transactionId) {
+        setRuleNotice(`Recorded ${opPreview.preview.op} from rule.`);
+        setOpPreview(null);
+        await refresh();
+      } else {
+        setError(
+          `Rule matched but did not record a transaction${
+            per?.skipReason ? ` (${per.skipReason})` : ""
+          }.`,
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRecordingOp(false);
+    }
+  }, [opPreview, refresh]);
 
 
   return (
@@ -1033,6 +1068,16 @@ export function InboxReconcileTab({
           onCancel={() => setDeleteConfirm(null)}
         />
       )}
+
+      <InvestmentOpPreviewDialog
+        open={!!opPreview}
+        onOpenChange={(o) => {
+          if (!o) setOpPreview(null);
+        }}
+        preview={opPreview?.preview ?? null}
+        onConfirm={() => void confirmRecordOp()}
+        busy={recordingOp}
+      />
 
       <BulkLinkActionBar
         txCount={selectedTxIds.size}

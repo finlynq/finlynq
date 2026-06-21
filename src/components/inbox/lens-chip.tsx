@@ -33,10 +33,10 @@ export function LensChip({
   policy: Mode;
   onLensChange: (m: Mode) => void;
   accountId: number;
-  /** Investment accounts can only use the Manual lens — the Auto-pilot /
-   *  Approve-each commit routes refuse them server-side (they need a holding,
-   *  via the portfolio-ops flow). Suppress those options so the user never
-   *  picks a dead lens. (Consolidation Phase 6, 2026-06-04.) */
+  /** Investment accounts support Auto-pilot + Manual (FINLYNQ-208: rules now
+   *  materialize lot-aware ops via `record_investment_op`). Approve-each stays
+   *  disabled until its per-row commit flow is wired for investment (the
+   *  /approve + /categorize routes still refuse investment accounts). */
   isInvestment?: boolean;
 }) {
   const cfg = MODES[lens];
@@ -87,9 +87,10 @@ export function LensChip({
               const I = c.icon;
               const isLens = m === lens;
               const isPolicy = m === policy;
-              // Investment accounts: Auto-pilot + Approve-each are unavailable
-              // (the commit routes need a holding). Render them disabled.
-              const disabled = isInvestment && m !== "manual";
+              // Investment accounts: Auto-pilot + Manual work (rules record
+              // lot-aware ops). Approve-each stays disabled until its per-row
+              // commit flow is wired for investment.
+              const disabled = isInvestment && m === "approve";
               return (
                 <button
                   key={m}
@@ -138,7 +139,7 @@ export function LensChip({
                   </div>
                   <p className="text-xs text-muted-foreground mt-1 ml-6">
                     {disabled
-                      ? "Investment accounts review manually (commit holdings via the portfolio flow)."
+                      ? "Approve-each isn't available for investment accounts yet — use Auto-pilot or Manual."
                       : c.subLabel}
                   </p>
                 </button>
