@@ -54,14 +54,6 @@ import {
 import { computePureActionPatch } from "@/lib/rules/execute";
 import type { Condition, Action, ConditionGroup } from "@/lib/rules/schema";
 import { defaultConditionForField, defaultActionForKind } from "@/lib/rules/schema";
-import { useDevMode } from "@/hooks/use-dev-mode";
-
-/** Condition fields gated behind dev mode (FINLYNQ-208 investment rules). */
-const INVESTMENT_CONDITION_FIELDS = new Set<Condition["field"]>([
-  "ticker",
-  "security_name",
-  "quantity",
-]);
 
 export type Category = { id: number; name: string; type: string; group: string };
 export type Account = { id: number; name: string };
@@ -125,7 +117,9 @@ export const ACTION_KINDS: Array<{ value: Action["kind"]; label: string; sideEff
   { value: "set_tags", label: "Set tags" },
   { value: "rename_payee", label: "Rename payee" },
   { value: "set_entered_currency", label: "Set entered currency" },
-  { value: "set_portfolio_holding", label: "Set holding" },
+  // `set_portfolio_holding` ("Set holding") intentionally NOT offered — removed
+  // from the new-rule menu (FINLYNQ-208 feedback). The schema member + executor
+  // support stay so any pre-existing rule that uses it keeps working.
   { value: "set_account", label: "Move to account (approve-time only)", sideEffect: true },
   { value: "create_transfer", label: "Create transfer pair (approve-time only)", sideEffect: true },
   // FINLYNQ-208 — record a lot-aware investment op (buy/sell/dividend/…).
@@ -185,8 +179,6 @@ export function RuleEditorDialog({
   );
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  // FINLYNQ-208 — investment-op rules are dev-gated until validated on prod.
-  const showInvestment = useDevMode() === true;
 
   // Live preview state.
   const [samplePayee, setSamplePayee] = useState("Whole Foods");
@@ -285,7 +277,6 @@ export function RuleEditorDialog({
                 key={i}
                 cond={cond}
                 accounts={accounts}
-                showInvestment={showInvestment}
                 onChange={(patch) => updateCondition(i, patch)}
                 onRemove={() => setConditions(conditions.filter((_, j) => j !== i))}
               />
@@ -307,7 +298,6 @@ export function RuleEditorDialog({
                 categories={categories}
                 accounts={accounts}
                 holdings={holdings}
-                showInvestment={showInvestment}
                 onChange={(patch) => updateAction(i, patch)}
                 onRemove={() => setActions(actions.filter((_, j) => j !== i))}
                 onMoveUp={i > 0 ? () => moveAction(i, -1) : undefined}
@@ -345,13 +335,11 @@ export function RuleEditorDialog({
 function ConditionRow({
   cond,
   accounts,
-  showInvestment,
   onChange,
   onRemove,
 }: {
   cond: Condition;
   accounts: Account[];
-  showInvestment: boolean;
   onChange: (patch: Partial<Condition>) => void;
   onRemove: () => void;
 }) {
@@ -362,18 +350,12 @@ function ConditionRow({
     onChange(defaultConditionForField(field, accounts[0]?.id ?? 0));
   }
 
-  // Hide the investment condition fields unless dev mode is on — but always keep
-  // the currently-selected field visible (a dev-authored rule viewed elsewhere).
-  const fieldOptions = CONDITION_FIELDS.filter(
-    (f) => showInvestment || !INVESTMENT_CONDITION_FIELDS.has(f.value) || f.value === cond.field,
-  );
-
   return (
     <div className="flex items-center gap-2">
       <Select value={cond.field} onValueChange={(v) => setField((v ?? "payee") as Condition["field"])}>
         <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
         <SelectContent>
-          {fieldOptions.map((f) => <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>)}
+          {CONDITION_FIELDS.map((f) => <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>)}
         </SelectContent>
       </Select>
 
@@ -541,7 +523,6 @@ function ActionRow({
   categories,
   accounts,
   holdings,
-  showInvestment,
   onChange,
   onRemove,
   onMoveUp,
@@ -551,18 +532,12 @@ function ActionRow({
   categories: Category[];
   accounts: Account[];
   holdings: Holding[];
-  showInvestment: boolean;
   onChange: (patch: Partial<Action>) => void;
   onRemove: () => void;
   onMoveUp?: () => void;
   onMoveDown?: () => void;
 }) {
   const sortCategory = useDropdownOrder("category");
-
-  // Dev-gate the investment-op action kind (keep it visible if already selected).
-  const kindOptions = ACTION_KINDS.filter(
-    (k) => showInvestment || k.value !== "record_investment_op" || k.value === action.kind,
-  );
 
   function setKind(kind: Action["kind"]) {
     // The id arg seeds the single FK each kind needs (category / account /
@@ -591,7 +566,7 @@ function ActionRow({
       <Select value={action.kind} onValueChange={(v) => setKind((v ?? "set_category") as Action["kind"])}>
         <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
         <SelectContent>
-          {kindOptions.map((k) => <SelectItem key={k.value} value={k.value}>{k.label}</SelectItem>)}
+          {ACTION_KINDS.map((k) => <SelectItem key={k.value} value={k.value}>{k.label}</SelectItem>)}
         </SelectContent>
       </Select>
 
