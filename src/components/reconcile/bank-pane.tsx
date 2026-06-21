@@ -58,6 +58,10 @@ export interface BankRow {
   securityName?: string | null;
   /** Share/unit count; rendered as a plain number (no currency symbol). */
   quantity?: number | null;
+  /** FINLYNQ-208 — the op a matching investment rule would record
+   *  (buy/sell/dividend/…). Shown as a per-row suggestion chip; the row's
+   *  Create action applies it. null when no investment rule matches. */
+  suggestedInvestmentOp?: string | null;
 }
 
 /**
@@ -241,6 +245,14 @@ export function BankPane({
                                 : undefined
                         }
                       />
+                      {r.suggestedInvestmentOp && (
+                        <span
+                          className="rounded bg-violet-500/10 text-violet-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                          title={`A rule will record this as a ${r.suggestedInvestmentOp} when you create it`}
+                        >
+                          → {r.suggestedInvestmentOp}
+                        </span>
+                      )}
                     </div>
                   </TableCell>
                   {isInvestment && (

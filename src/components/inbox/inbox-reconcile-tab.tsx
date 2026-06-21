@@ -490,6 +490,9 @@ export function InboxReconcileTab({
         ticker: b.ticker ?? null,
         securityName: b.securityName ?? null,
         quantity: b.quantity ?? null,
+        // FINLYNQ-208 — the op a matching investment rule would record; shown
+        // as a per-row suggestion chip, applied via the row's Create action.
+        suggestedInvestmentOp: b.suggestedInvestmentOp ?? null,
       };
     });
 
@@ -873,47 +876,6 @@ export function InboxReconcileTab({
     [data, accounts, router, refresh],
   );
 
-  // FINLYNQ-208 — apply all of the user's rules to the account's bank rows on
-  // demand (web parity of the MCP apply_rules_to_bank_rows tool). Investment-op
-  // rules record lot-aware ops; category/transfer rules materialize as usual.
-  const [applyingRules, setApplyingRules] = useState(false);
-  const onApplyRules = useCallback(async () => {
-    if (!data) return;
-    const ids = Object.keys(data.bankTransactions);
-    if (ids.length === 0) {
-      setRuleNotice("No bank rows to apply rules to.");
-      return;
-    }
-    setApplyingRules(true);
-    setRuleNotice(null);
-    setError(null);
-    try {
-      const res = await fetch("/api/reconcile/apply-rules", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bankRowIds: ids }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok || !body.success) {
-        setError(body.error ?? `Failed to apply rules (HTTP ${res.status})`);
-        return;
-      }
-      const n = body.data?.materialized ?? 0;
-      const fired = body.data?.rulesFired ?? 0;
-      setRuleNotice(
-        n > 0
-          ? `Applied rules: created ${n} transaction${n === 1 ? "" : "s"}.`
-          : fired > 0
-            ? `${fired} rule match${fired === 1 ? "" : "es"} but nothing was created (already linked, duplicates, or skipped).`
-            : "No rules matched these bank rows.",
-      );
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setApplyingRules(false);
-    }
-  }, [data, refresh]);
 
   return (
     <div className="space-y-4">
@@ -985,22 +947,6 @@ export function InboxReconcileTab({
             );
           })}
         </div>
-      </div>
-
-      <div className="flex items-center gap-2 flex-wrap">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={onApplyRules}
-          disabled={applyingRules || dataLoading || !data}
-          className="h-7 px-2 text-xs"
-        >
-          {applyingRules ? "Applying rules…" : "Apply rules"}
-        </Button>
-        <span className="text-xs text-muted-foreground">
-          Run your transaction rules on these bank rows (records investment ops,
-          categories, and transfers).
-        </span>
       </div>
 
       {ruleNotice && (
