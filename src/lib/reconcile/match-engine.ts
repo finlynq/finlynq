@@ -448,9 +448,15 @@ export async function computeReconcileForAccount(
     const suggestedCategoryId = ruleMatch
       ? pickCategoryFromActions(ruleMatch.actions)
       : null;
-    const suggestedInvestmentOp = ruleMatch
-      ? pickInvestmentOpFromActions(ruleMatch.actions)?.op ?? null
-      : null;
+    // All investment-op names the matched rule would record (e.g. "buy, deposit"
+    // for a multi-op rule) so the UI chip + preview reflect every op, not just
+    // the first.
+    const invOpNames = ruleMatch
+      ? ruleMatch.actions
+          .filter((a): a is RecordInvestmentOpAction => a.kind === "record_investment_op")
+          .map((a) => a.op)
+      : [];
+    const suggestedInvestmentOp = invOpNames.length > 0 ? invOpNames.join(", ") : null;
     // A matched rule whose action set names a transfer destination routes
     // the materialize dialog into Transfer mode. Drop self-transfers (a rule
     // pointing back at the bank row's own account is a no-op pair).
@@ -596,19 +602,6 @@ function pickTransferDestFromActions(actions: Action[]): number | null {
   return null;
 }
 
-/**
- * Pick the first `record_investment_op` action from a rule's action list
- * (FINLYNQ-208), if any. Returns the full action so the executor can drive the
- * op type + variable bindings. First-wins like the sibling pickers.
- */
-function pickInvestmentOpFromActions(
-  actions: Action[],
-): RecordInvestmentOpAction | null {
-  for (const a of actions) {
-    if (a.kind === "record_investment_op") return a;
-  }
-  return null;
-}
 
 /**
  * Load the user's active transaction rules in priority-descending order,
@@ -1197,38 +1190,51 @@ export async function applyRulesToBankRows(
     // staged / uncategorized paths (FINLYNQ-208, "support multiple actions").
     const patch = computePureActionPatch(match.actions);
 
-    // FINLYNQ-208 — investment-op rule. Takes precedence over category /
-    // transfer actions: when the matched rule records a portfolio op, we run
+    // FINLYNQ-208 — investment-op rule(s). Take precedence over category /
+    // transfer actions: when the matched rule records portfolio op(s), we run
     // the sanctioned investment chokepoint (which lifts the investment-account
     // refusal because it resolves/creates the position + sleeve). Planning mode
     // (autoMaterialize=false) just reports the match. Pure modifiers
-    // (rename_payee / set_tags) ride along as overrides onto the recorded op.
-    const invOp = pickInvestmentOpFromActions(match.actions);
-    if (invOp) {
+    // (rename_payee / set_tags) ride along as overrides onto the recorded op(s).
+    //
+    // A rule may carry MULTIPLE record_investment_op actions (e.g. buy + deposit)
+    // — execute EVERY one, not just the first ("support multiple actions"). Each
+    // op materializes its own rows + links to the bank row.
+    const invOps = match.actions.filter(
+      (a): a is RecordInvestmentOpAction => a.kind === "record_investment_op",
+    );
+    if (invOps.length > 0) {
       if (!autoMaterialize) {
         perRow.push({ bankRowId: bank.id, matched: true });
         continue;
       }
       // dek is non-null here — guarded by the autoMaterialize=>dek check.
-      const result = await materializeBankRowAsPortfolioOp({
-        userId,
-        dek: dek!,
-        bankTransactionId: bank.id,
-        action: invOp,
-        overrides: { payee: patch.payee, tags: patch.tags },
-      });
-      if (result.ok) {
-        materialized += 1;
-        perRow.push({
-          bankRowId: bank.id,
-          matched: true,
-          transactionId: result.linkedTransactionId,
+      let firstTxId: number | undefined;
+      let lastFailCode: string | undefined;
+      let okCount = 0;
+      for (const invOp of invOps) {
+        const result = await materializeBankRowAsPortfolioOp({
+          userId,
+          dek: dek!,
+          bankTransactionId: bank.id,
+          action: invOp,
+          overrides: { payee: patch.payee, tags: patch.tags },
         });
+        if (result.ok) {
+          okCount += 1;
+          if (firstTxId == null) firstTxId = result.linkedTransactionId;
+        } else {
+          lastFailCode = result.code;
+        }
+      }
+      if (okCount > 0) {
+        materialized += 1;
+        perRow.push({ bankRowId: bank.id, matched: true, transactionId: firstTxId });
       } else {
         perRow.push({
           bankRowId: bank.id,
           matched: true,
-          skipReason: `investment_op_${result.code}`,
+          skipReason: `investment_op_${lastFailCode ?? "failed"}`,
         });
       }
       continue;
