@@ -1,34 +1,65 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Globe, Plus, X } from "lucide-react";
-import {
-  SUPPORTED_FIAT_CURRENCIES,
-  SUPPORTED_CRYPTO_CURRENCIES,
-  currencyLabel,
-  isSupportedCurrency,
-} from "@/lib/fx/supported-currencies";
+import { Globe, Plus, X, Check, AlertTriangle, Loader2 } from "lucide-react";
+import { currencyLabel, isSupportedCurrency } from "@/lib/fx/supported-currencies";
 
 /**
- * Active currencies — which codes appear in the app's dropdowns
- * (transaction form, account form, override form). Stored per-user in
+ * Active currencies — which codes appear in the app's dropdowns (transaction
+ * form, account form, FX-rate form). Stored per-user in
  * settings.active_currencies as a JSON array.
  *
  * Default: derived from accounts + transactions + display currency on first
  * load. Once the user explicitly saves, the saved list takes over.
+ *
+ * Adding a currency is a TYPE-TO-LOOKUP: rather than scroll a fixed list (the
+ * real supported set is ~150 currencies, far more than we could sensibly list),
+ * the user types a code and we probe the live FX layer (`/api/fx/preview`,
+ * which routes Yahoo for fiat / CoinGecko for crypto / Stooq for metals). The
+ * result tells them whether the code is **supported** (a real market rate
+ * exists) or **custom** (no rate — they'll need a manual override below),
+ * mirroring the investment-ticker lookup.
  */
+
+// A short common-currency quick-add row. Not the full supported set — that's
+// what the type-to-search box is for; these are one-tap shortcuts for the
+// majors.
+const COMMON_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "CNY", "INR"];
+
+type Lookup =
+  | { status: "idle" }
+  | { status: "invalid" }
+  | { status: "already"; code: string }
+  | { status: "loading"; code: string }
+  | { status: "supported"; code: string; source: string; rate: number }
+  | { status: "custom"; code: string }
+  | { status: "error"; code: string };
+
+function sourceLabel(source: string): string {
+  switch (source) {
+    case "yahoo": return "Yahoo Finance";
+    case "stale": return "Yahoo (cached)";
+    case "coingecko": return "CoinGecko";
+    case "stooq": return "Stooq";
+    case "override": return "your custom rate";
+    case "anchor": return "anchor currency";
+    default: return source;
+  }
+}
+
 export function ActiveCurrenciesSection() {
   const [active, setActive] = useState<string[]>([]);
   const [source, setSource] = useState<"derived" | "saved">("derived");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [picker, setPicker] = useState("");
   const [showPicker, setShowPicker] = useState(false);
-  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [lookup, setLookup] = useState<Lookup>({ status: "idle" });
+  const lookupSeq = useRef(0);
 
   async function load() {
     setLoading(true);
@@ -63,46 +94,56 @@ export function ActiveCurrenciesSection() {
       setSource("saved");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to save");
-      // Reload to get the canonical list back
-      await load();
+      await load(); // reload the canonical list back
     } finally {
       setSaving(false);
     }
   }
 
-  function toggle(code: string) {
+  function removeCode(code: string) {
+    persist(active.filter((x) => x !== code));
+  }
+
+  function addCode(code: string) {
     const c = code.trim().toUpperCase();
-    if (!c) return;
-    if (active.includes(c)) {
-      persist(active.filter((x) => x !== c));
-    } else {
-      persist([...active, c].sort());
-    }
-  }
-
-  function addCustom() {
-    const c = picker.trim().toUpperCase();
-    setError("");
-    if (!/^[A-Z]{3,4}$/.test(c)) {
-      setError("Currency code must be 3-4 letters (ISO 4217)");
-      return;
-    }
-    if (active.includes(c)) {
-      setError(`${c} is already active`);
-      return;
-    }
+    if (!c || active.includes(c)) return;
     persist([...active, c].sort());
-    setPicker("");
+    setQuery("");
+    setLookup({ status: "idle" });
   }
 
-  // Suggestions: full supported list minus already-active.
-  const remaining = [...SUPPORTED_FIAT_CURRENCIES, ...SUPPORTED_CRYPTO_CURRENCIES]
-    .filter((c) => !active.includes(c))
-    .filter((c) =>
-      !search ||
-      c.includes(search.toUpperCase()) ||
-      currencyLabel(c).toLowerCase().includes(search.toLowerCase())
-    );
+  // Debounced live lookup against the FX layer as the user types a code.
+  useEffect(() => {
+    const code = query.trim().toUpperCase();
+    if (!/^[A-Z]{3,4}$/.test(code)) {
+      setLookup(code.length === 0 ? { status: "idle" } : { status: "invalid" });
+      return;
+    }
+    if (active.includes(code)) { setLookup({ status: "already", code }); return; }
+    if (code === "USD") { setLookup({ status: "supported", code, source: "anchor", rate: 1 }); return; }
+
+    const seq = ++lookupSeq.current;
+    setLookup({ status: "loading", code });
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/fx/preview?from=${code}&to=USD`);
+        if (seq !== lookupSeq.current) return; // a newer keystroke superseded us
+        if (!res.ok) { setLookup({ status: "custom", code }); return; }
+        const data = await res.json();
+        const supported = data?.source && data.source !== "fallback" && !data.needsOverride;
+        setLookup(
+          supported
+            ? { status: "supported", code, source: data.source, rate: Number(data.rate) }
+            : { status: "custom", code }
+        );
+      } catch {
+        if (seq === lookupSeq.current) setLookup({ status: "error", code });
+      }
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [query, active]);
+
+  const commonQuickPicks = COMMON_CURRENCIES.filter((c) => !active.includes(c));
 
   return (
     <Card>
@@ -114,11 +155,10 @@ export function ActiveCurrenciesSection() {
           <div>
             <CardTitle className="text-base">Currencies you use</CardTitle>
             <CardDescription>
-              Pick which currencies appear in dropdowns across the app
-              (transaction form, account form). Anything not in this list is
-              hidden by default. {source === "derived" ? (
+              These are the only currencies offered in the app&apos;s dropdowns
+              (transaction form, account form, FX rates). {source === "derived" ? (
                 <span className="block mt-1 text-amber-600 dark:text-amber-400 text-xs">
-                  These are the currencies derived from your existing data — save the list to lock it in.
+                  This list was derived from your existing data — add or remove a currency to lock it in.
                 </span>
               ) : null}
             </CardDescription>
@@ -140,7 +180,7 @@ export function ActiveCurrenciesSection() {
               {active.map((c) => (
                 <button
                   key={c}
-                  onClick={() => toggle(c)}
+                  onClick={() => removeCode(c)}
                   disabled={saving}
                   className="group inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/40 px-3 py-1 text-xs hover:border-destructive/50 hover:bg-destructive/10 transition-colors"
                   title={`${currencyLabel(c)}${isSupportedCurrency(c) ? "" : " (custom — needs a custom rate)"}`}
@@ -156,52 +196,94 @@ export function ActiveCurrenciesSection() {
             {showPicker ? (
               <div className="rounded-md border border-border/50 p-3 space-y-3">
                 <div className="space-y-1">
-                  <label className="text-xs font-medium">Search supported currencies</label>
+                  <label className="text-xs font-medium">Add a currency</label>
+                  <p className="text-xs text-muted-foreground">
+                    Type any 3-4 letter code. We&apos;ll check whether it has a live
+                    market rate (Yahoo / CoinGecko / metals) or needs a custom rate.
+                  </p>
                   <Input
-                    placeholder="USD, Yen, gold, BTC…"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="h-9"
+                    placeholder="e.g. EUR, AED, JPY, BTC, XAU…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value.toUpperCase())}
+                    className="h-9 font-mono"
+                    maxLength={4}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (lookup.status === "supported" || lookup.status === "custom")) {
+                        addCode(lookup.code);
+                      }
+                    }}
                   />
                 </div>
-                {remaining.length > 0 ? (
-                  <div className="flex flex-wrap gap-1.5 max-h-48 overflow-auto">
-                    {remaining.slice(0, 30).map((c) => (
-                      <button
-                        key={c}
-                        onClick={() => { toggle(c); setSearch(""); }}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-border/50 bg-background px-2.5 py-1 text-xs hover:border-primary/60 hover:bg-primary/5 transition-colors"
-                      >
-                        <span className="font-mono font-semibold">{c}</span>
-                        <span className="text-muted-foreground">{currencyLabel(c)}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground">All supported currencies are already active.</p>
-                )}
 
-                <div className="border-t border-border/50 pt-3 space-y-2">
-                  <label className="text-xs font-medium block">Add a custom currency</label>
+                {/* Live lookup result */}
+                {lookup.status === "invalid" ? (
+                  <p className="text-xs text-muted-foreground">Enter a 3-4 letter currency code.</p>
+                ) : lookup.status === "already" ? (
                   <p className="text-xs text-muted-foreground">
-                    For currencies not in the supported list (e.g. XAU for gold, or a regional currency we don&apos;t auto-fetch). You&apos;ll need to add a custom exchange rate below for it to convert correctly.
+                    <span className="font-mono font-semibold">{lookup.code}</span> is already in your list.
                   </p>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      placeholder="3-4 letter code (e.g. XAU)"
-                      value={picker}
-                      onChange={(e) => setPicker(e.target.value.toUpperCase())}
-                      className="h-9 font-mono"
-                      maxLength={4}
-                    />
-                    <Button size="sm" onClick={addCustom} disabled={saving || !picker.trim()}>
-                      Add
-                    </Button>
+                ) : lookup.status === "loading" ? (
+                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking <span className="font-mono font-semibold">{lookup.code}</span>…
+                  </p>
+                ) : lookup.status === "supported" ? (
+                  <div className="flex items-center justify-between gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2">
+                    <div className="min-w-0 text-xs">
+                      <span className="inline-flex items-center gap-1.5 font-medium text-emerald-700 dark:text-emerald-400">
+                        <Check className="h-3.5 w-3.5" /> Supported
+                      </span>
+                      <span className="ml-2 font-mono font-semibold">{lookup.code}</span>
+                      <span className="ml-1 text-muted-foreground">{currencyLabel(lookup.code)}</span>
+                      <span className="block text-muted-foreground mt-0.5">
+                        {lookup.code === "USD"
+                          ? "Anchor currency."
+                          : `1 ${lookup.code} ≈ ${lookup.rate.toFixed(4)} USD · ${sourceLabel(lookup.source)}`}
+                      </span>
+                    </div>
+                    <Button size="sm" onClick={() => addCode(lookup.code)} disabled={saving}>Add</Button>
                   </div>
-                </div>
+                ) : lookup.status === "custom" ? (
+                  <div className="flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                    <div className="min-w-0 text-xs">
+                      <span className="inline-flex items-center gap-1.5 font-medium text-amber-700 dark:text-amber-400">
+                        <AlertTriangle className="h-3.5 w-3.5" /> Custom currency
+                      </span>
+                      <span className="ml-2 font-mono font-semibold">{lookup.code}</span>
+                      <span className="block text-muted-foreground mt-0.5">
+                        No market rate found. You can add it, then set a custom exchange rate below for it to convert.
+                      </span>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => addCode(lookup.code)} disabled={saving}>Add anyway</Button>
+                  </div>
+                ) : lookup.status === "error" ? (
+                  <p className="text-xs text-muted-foreground">
+                    Couldn&apos;t check <span className="font-mono font-semibold">{lookup.code}</span> right now — you can still add it as a custom currency.
+                    <Button size="sm" variant="ghost" className="ml-1 h-6 px-2 text-xs" onClick={() => addCode(lookup.code)} disabled={saving}>Add anyway</Button>
+                  </p>
+                ) : null}
+
+                {/* Common quick-picks */}
+                {commonQuickPicks.length > 0 ? (
+                  <div className="border-t border-border/50 pt-3 space-y-1.5">
+                    <label className="text-xs font-medium block">Common</label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {commonQuickPicks.map((c) => (
+                        <button
+                          key={c}
+                          onClick={() => addCode(c)}
+                          disabled={saving}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-border/50 bg-background px-2.5 py-1 text-xs hover:border-primary/60 hover:bg-primary/5 transition-colors"
+                        >
+                          <span className="font-mono font-semibold">{c}</span>
+                          <span className="text-muted-foreground">{currencyLabel(c)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="flex justify-end pt-1">
-                  <Button size="sm" variant="ghost" onClick={() => { setShowPicker(false); setSearch(""); setPicker(""); }}>
+                  <Button size="sm" variant="ghost" onClick={() => { setShowPicker(false); setQuery(""); setLookup({ status: "idle" }); }}>
                     Done
                   </Button>
                 </div>

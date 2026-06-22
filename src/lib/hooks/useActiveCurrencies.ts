@@ -1,25 +1,26 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 
 /**
  * Currency codes to offer in form dropdowns (account / transaction / goal /
- * loan / holding forms).
+ * loan / holding / FX-rate forms).
  *
- * Returns the full built-in supported-fiat list UNION the user's
- * `active_currencies` setting — so custom, metal, or regional ISO codes the
- * user added in Settings → "Currencies you use" actually appear in the
- * pickers (the gap behind issue #291, where the Add/Edit Account dropdown was
- * hardcoded to CAD/USD/EUR/GBP and ignored the setting entirely).
+ * Returns ONLY the currencies the user enabled under Settings → "Currencies you
+ * use" (`active_currencies`). The dropdowns are intentionally scoped to that
+ * curated list rather than the full ~150 currencies a price source could
+ * quote — the user manages which currencies exist (and learns which are
+ * Yahoo-supported vs custom) on the Settings page; the forms just consume the
+ * result. (#291: the Add/Edit Account dropdown was originally hardcoded to
+ * CAD/USD/EUR/GBP and ignored the setting entirely; the follow-up trimmed the
+ * other forms from the full built-in fiat list down to the active set too.)
  *
- * The result is always a SUPERSET of `SUPPORTED_FIAT_CURRENCIES`, so a cold or
- * failed fetch degrades to today's behavior rather than an empty list.
- *
- * `ensure` guarantees specific codes are present regardless of the setting —
- * pass the value a form is currently bound to (e.g. an account's existing
- * currency in edit mode) so a Combobox/Select never renders a value missing
- * from its own item list.
+ * `ensure` (string | string[]) force-includes specific codes regardless of the
+ * setting — pass the value a form is currently bound to (e.g. an account's
+ * existing currency in edit mode) so a Combobox/Select never renders a value
+ * missing from its own item list even if that currency was later deselected.
+ * It also guarantees a non-empty list during the initial fetch / on a failed
+ * fetch (the consumer's current value always shows).
  */
 export function useActiveCurrencies(ensure?: string | string[] | null): string[] {
   const [active, setActive] = useState<string[]>([]);
@@ -40,7 +41,7 @@ export function useActiveCurrencies(ensure?: string | string[] | null): string[]
         }
       })
       .catch(() => {
-        /* keep the built-in fiat list */
+        /* keep whatever we have; `ensure` still backs the current value */
       });
     return () => {
       cancelled = true;
@@ -51,5 +52,5 @@ export function useActiveCurrencies(ensure?: string | string[] | null): string[]
     .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
     .map((s) => s.trim().toUpperCase());
 
-  return Array.from(new Set([...SUPPORTED_FIAT_CURRENCIES, ...active, ...ensured])).sort();
+  return Array.from(new Set([...active, ...ensured])).sort();
 }

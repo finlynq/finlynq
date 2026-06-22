@@ -10,7 +10,6 @@ import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Plus, Trash2, RefreshCw } from "lucide-react";
 import {
-  SUPPORTED_CRYPTO_CURRENCIES,
   currencyLabel,
   isSupportedCurrency,
 } from "@/lib/fx/supported-currencies";
@@ -201,10 +200,7 @@ export function FxOverridesSection() {
                     }}
                     items={[
                       ...sortCurrency(
-                        Array.from(new Set([
-                          ...activeCurrencies,
-                          ...SUPPORTED_CRYPTO_CURRENCIES,
-                        ]))
+                        activeCurrencies
                           .filter((c) => c !== "USD")
                           .map((c): ComboboxItemShape => ({ value: c, label: `${c} — ${currencyLabel(c)}` })),
                         (c) => c.value,
