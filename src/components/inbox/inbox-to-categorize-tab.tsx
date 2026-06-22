@@ -37,6 +37,10 @@ import {
 } from "./row-card";
 import { ConfirmDeleteBankRow } from "@/components/reconcile/confirm-delete-bank-row";
 import {
+  InvestmentOpPreviewDialog,
+  type InvestmentOpPreview,
+} from "@/components/reconcile/investment-op-preview-dialog";
+import {
   TransactionDialog,
   type TransactionDialogInitialState,
   type DialogCategory,
@@ -80,6 +84,11 @@ interface BankSnapshot {
   /** Strict possible-duplicate: id of an existing unlinked ledger tx this
    *  bank row matches (exact hash / exact amount + close date). null = none. */
   duplicateOfTransactionId: number | null;
+  // FINLYNQ-208 — investment-import capture + matched investment-op suggestion.
+  ticker?: string | null;
+  securityName?: string | null;
+  quantity?: number | null;
+  suggestedInvestmentOp?: string | null;
 }
 
 interface SnapshotShape {
@@ -107,6 +116,11 @@ export function InboxToCategorizeTab({
   const [materializeBankId, setMaterializeBankId] = useState<string | null>(
     null,
   );
+  // FINLYNQ-208 — investment-op preview-before-record (Auto-pilot lens).
+  const [opPreview, setOpPreview] = useState<
+    { bankId: string; preview: InvestmentOpPreview } | null
+  >(null);
+  const [recordingOp, setRecordingOp] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<{
     bankId: string;
     date: string;
@@ -299,8 +313,28 @@ export function InboxToCategorizeTab({
       if (!snap) return;
       const acct = accounts.find((a) => a.id === snap.accountId);
       if (acct?.isInvestment === true) {
+        // FINLYNQ-208 — a matched record_investment_op rule records a lot-aware
+        // op. Open a preview-before-record (mirrors normal reconciliation); on
+        // confirm the executor runs via /api/reconcile/apply-rules. No matching
+        // rule → there's nothing to auto-create, so point at the manual flow.
+        if (snap.suggestedInvestmentOp) {
+          setError(null);
+          setOpPreview({
+            bankId: snap.id,
+            preview: {
+              op: snap.suggestedInvestmentOp,
+              ticker: snap.ticker ?? null,
+              securityName: snap.securityName ?? null,
+              quantity: snap.quantity ?? null,
+              amount: snap.amount,
+              currency: snap.currency,
+              accountName: safeAccountName(acct),
+            },
+          });
+          return;
+        }
         setError(
-          "Investment accounts aren't supported by the Auto-pilot lens yet — use the Manual lens or the portfolio operations flow.",
+          "Investment accounts: record buys/sells from the Manual lens (Reconcile) or the portfolio operations flow.",
         );
         return;
       }
@@ -323,6 +357,41 @@ export function InboxToCategorizeTab({
     },
     [snapshot, accounts],
   );
+
+  // FINLYNQ-208 — confirm + record the previewed investment op via the
+  // single-row apply-rules route, then refresh.
+  const confirmRecordOp = useCallback(async () => {
+    if (!opPreview) return;
+    setRecordingOp(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/reconcile/apply-rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bankRowIds: [opPreview.bankId] }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.success) {
+        setError(body.error ?? `Failed to record op (HTTP ${res.status})`);
+        return;
+      }
+      const per = body.data?.perRow?.[0];
+      if (per?.matched && per.transactionId) {
+        setOpPreview(null);
+        await refresh();
+      } else {
+        setError(
+          `Rule matched but did not record a transaction${
+            per?.skipReason ? ` (${per.skipReason})` : ""
+          }.`,
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRecordingOp(false);
+    }
+  }, [opPreview, refresh]);
 
   const onPrimary = useCallback(
     async (bankId: string) => {
@@ -485,6 +554,16 @@ export function InboxToCategorizeTab({
           onCancel={() => setDeleteConfirm(null)}
         />
       )}
+
+      <InvestmentOpPreviewDialog
+        open={!!opPreview}
+        onOpenChange={(o) => {
+          if (!o) setOpPreview(null);
+        }}
+        preview={opPreview?.preview ?? null}
+        onConfirm={() => void confirmRecordOp()}
+        busy={recordingOp}
+      />
 
       <TransactionDialog
         open={dialogOpen}
