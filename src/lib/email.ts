@@ -81,22 +81,67 @@ function createSmtpTransport(): EmailTransport {
   };
 }
 
+// ─── Resend Transport (HTTP API) ──────────────────────────────────────────────
+
+/**
+ * Send via the Resend HTTP API. Preferred over SMTP because RESEND_API_KEY is
+ * the email provider already configured for this deployment — no separate SMTP
+ * credentials needed. The `from` address MUST be on a Resend-verified domain
+ * (`finlynq.com` is verified, sending enabled); override the default with
+ * EMAIL_FROM. Throws on a non-2xx so callers' existing error handling applies
+ * (fire-and-forget for feedback notifications; surfaced for password reset).
+ */
+function createResendTransport(): EmailTransport {
+  return {
+    async send(message) {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: process.env.EMAIL_FROM || "Finlynq <noreply@finlynq.com>",
+          to: message.to,
+          subject: message.subject,
+          html: message.html,
+          text: message.text,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(
+          `Resend API send failed (${res.status}): ${detail.slice(0, 300)}`,
+        );
+      }
+    },
+  };
+}
+
 // ─── Transport Selection ────────────────────────────────────────────────────
 
 /**
  * Finding M-17 (2026-05-07) — never silently fall back to console-logging
  * the email body in production. The previous behavior would dump the full
- * password-reset link into stdout (and onward into log aggregation) if SMTP
- * was misconfigured. We now refuse to run without SMTP in prod and surface
- * the misconfiguration as an explicit error from `sendEmail`.
+ * password-reset link into stdout (and onward into log aggregation) if the
+ * transport was misconfigured. We refuse to run without a real transport in
+ * prod and surface the misconfiguration as an explicit error from `sendEmail`.
+ *
+ * Transport priority: Resend HTTP API (RESEND_API_KEY) → SMTP (SMTP_HOST) →
+ * console (dev only). Resend is preferred because it's the provider already
+ * provisioned for this deployment; SMTP stays supported for self-hosters who
+ * wire their own mail server.
  */
 function getTransport(): EmailTransport {
+  if (process.env.RESEND_API_KEY) {
+    return createResendTransport();
+  }
   if (process.env.SMTP_HOST) {
     return createSmtpTransport();
   }
   if (process.env.NODE_ENV === "production") {
     throw new Error(
-      "Email transport not configured: SMTP_HOST is required in production. " +
+      "Email transport not configured: set RESEND_API_KEY (preferred) or SMTP_HOST in production. " +
         "Refusing to fall back to console transport — that would log password reset tokens / verification links to stdout."
     );
   }

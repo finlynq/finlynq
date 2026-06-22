@@ -22,16 +22,24 @@ problems once DMARC is tightened to `p=reject`.
 
 ## Outbound senders inventory
 
-### Sender 1 — nodemailer / operator SMTP (primary outbound path)
+### Sender 1 — outbound transactional mail (primary outbound path)
 
 **File:** `src/lib/email.ts`
 
 The app sends transactional mail (email verification, password reset, welcome, budget alerts, admin
-feedback notifications) through a nodemailer `createTransport` wired to the `SMTP_HOST` / `SMTP_PORT` /
-`SMTP_USER` / `SMTP_PASS` environment variables. The `EMAIL_FROM` environment variable controls the
-`From:` address (default `noreply@finlynq.com`). Feedback notifications are addressed (`To:`) to the
-admin account email(s) resolved from the DB (`users.role='admin'`), with the **optional** `FEEDBACK_EMAIL`
-as an extra recipient — there is no hardcoded fallback address (see `src/lib/feedback/notify.ts`).
+feedback notifications, in-app password/email-change notifications). Transport selection in
+`getTransport()` is, in priority order: **Resend HTTP API** (when `RESEND_API_KEY` is set — the
+provisioned provider, verified sending domain `finlynq.com`), then **nodemailer SMTP** (`SMTP_HOST` /
+`SMTP_PORT` / `SMTP_USER` / `SMTP_PASS`, for self-hosters who run their own mail server), then the
+dev-only console transport. Production refuses to start a send with neither configured. The `EMAIL_FROM`
+environment variable controls the `From:` address (default `Finlynq <noreply@finlynq.com>`).
+Feedback notifications are addressed (`To:`) to the admin account email(s) resolved from the DB
+(`users.role='admin'`), with the **optional** `FEEDBACK_EMAIL` as an extra recipient — there is no
+hardcoded fallback address (see `src/lib/feedback/notify.ts`).
+
+Because Resend is the active transport, SPF/DKIM/DMARC for the `From:` domain must cover **Resend**
+(SPF `include:_spf.resend.com`, plus the Resend-issued DKIM CNAMEs) — the SMTP/SES notes below apply
+only to a self-hosted SMTP deployment.
 
 The **SMTP provider is operator-configured** — it is NOT hardcoded to a specific service. The most likely
 configuration for the hosted deployment is Amazon SES over SMTP (endpoint
