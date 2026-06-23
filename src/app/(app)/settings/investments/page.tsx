@@ -179,6 +179,10 @@ export default function InvestmentsSettingsPage() {
   const [deleteTarget, setDeleteTarget] = useState<Security | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // Ticker change (re-cluster) confirm — from the unpriceable-ticker advisory.
+  const [tickerTarget, setTickerTarget] = useState<{ security: Security; toSymbol: string } | null>(null);
+  const [tickerBusy, setTickerBusy] = useState(false);
+
   // Link dialog (Tab 2 "+ Account" / Tab 3 "+ Security").
   const [linkDialog, setLinkDialog] = useState<LinkDialogState>(null);
   const [linkValue, setLinkValue] = useState("");
@@ -468,6 +472,31 @@ export default function InvestmentsSettingsPage() {
     }
   }
 
+  // ---- Ticker change (re-cluster) from the unpriceable-ticker advisory ----
+  async function confirmTickerChange() {
+    if (!tickerTarget) return;
+    setTickerBusy(true);
+    try {
+      const res = await fetch("/api/securities", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: tickerTarget.security.id, symbol: tickerTarget.toSymbol }),
+      });
+      if (!res.ok) {
+        const msg = await parseSaveError(res, "Failed to change ticker");
+        showToast("error", msg);
+        return;
+      }
+      showToast("success", `Ticker changed to ${tickerTarget.toSymbol}`);
+      setTickerTarget(null);
+      await load();
+    } catch (e) {
+      showToast("error", e instanceof Error ? e.message : "Failed to change ticker");
+    } finally {
+      setTickerBusy(false);
+    }
+  }
+
   // ---- Delete (unused securities only) ----
   async function confirmDelete() {
     if (!deleteTarget) return;
@@ -697,15 +726,27 @@ export default function InvestmentsSettingsPage() {
                     {flagged.map((s) => {
                       const a = getTickerAdvisory(s.symbol)!;
                       return (
-                        <li key={s.id}>
-                          <span className="font-mono font-semibold">{s.symbol}</span>
+                        <li key={s.id} className="flex flex-wrap items-center gap-2">
+                          <span>
+                            <span className="font-mono font-semibold">{s.symbol}</span>
+                            {a.suggestedSymbol && (
+                              <>
+                                {" → "}
+                                <span className="font-mono font-semibold">{a.suggestedSymbol}</span>
+                              </>
+                            )}
+                            {`: ${a.message}`}
+                          </span>
                           {a.suggestedSymbol && (
-                            <>
-                              {" → rename to "}
-                              <span className="font-mono font-semibold">{a.suggestedSymbol}</span>
-                            </>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-6 shrink-0 border-amber-400 px-2 text-[11px] text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900/40"
+                              onClick={() => setTickerTarget({ security: s, toSymbol: a.suggestedSymbol! })}
+                            >
+                              Change to {a.suggestedSymbol}
+                            </Button>
                           )}
-                          {`: ${a.message}`}
                         </li>
                       );
                     })}
@@ -1233,6 +1274,22 @@ export default function InvestmentsSettingsPage() {
         busyLabel="Deleting…"
         busy={deleting}
         onConfirm={confirmDelete}
+      />
+
+      {/* ── Ticker change confirm (re-cluster) ─────────────────────────── */}
+      <ConfirmDialog
+        open={tickerTarget != null}
+        onOpenChange={(o) => { if (!o) setTickerTarget(null); }}
+        title="Change ticker"
+        description={
+          tickerTarget
+            ? `Change ${symbolLabel(tickerTarget.security)} to ${tickerTarget.toSymbol}? This re-points the holding (and its full history) to the new ticker — prices will use ${tickerTarget.toSymbol} going forward. Positions, lots, and transactions are unchanged.`
+            : ""
+        }
+        confirmLabel="Change ticker"
+        busyLabel="Changing…"
+        busy={tickerBusy}
+        onConfirm={confirmTickerChange}
       />
     </div>
   );

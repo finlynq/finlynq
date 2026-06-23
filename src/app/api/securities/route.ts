@@ -29,6 +29,7 @@ import { and, eq, sql, desc, asc } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
 import { buildNameFields, decryptName, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { resolveOrCreateSecurity, gcOrphanSecurity } from "@/lib/securities/resolve";
 
 interface SecurityAccountLink {
   accountId: number;
@@ -136,9 +137,14 @@ const patchSchema = z
     id: z.number().int().positive(),
     name: z.string().trim().min(1).max(200).optional(),
     assetType: z.enum(ASSET_TYPES).optional(),
+    // Ticker change = re-cluster (handled BEFORE name/assetType): re-points every
+    // member position at the security for the NEW symbol (creating/reusing it),
+    // then GCs the old. Its only caller is the unpriceable-ticker advisory on
+    // /settings/investments, which sends `symbol` alone.
+    symbol: z.string().trim().min(1).max(40).optional(),
   })
-  .refine((b) => b.name !== undefined || b.assetType !== undefined, {
-    message: "Provide a name and/or an assetType",
+  .refine((b) => b.name !== undefined || b.assetType !== undefined || b.symbol !== undefined, {
+    message: "Provide a name, assetType, and/or symbol",
   });
 
 /**
@@ -167,6 +173,87 @@ const patchSchema = z
 export const PATCH = apiHandler(
   { auth: "encryption", body: patchSchema, fallbackMessage: "Failed to update security" },
   async ({ userId, dek, body }) => {
+    // ── Ticker (symbol) change = RE-CLUSTER. Changing the symbol redefines the
+    // security's identity (cluster_key is symbol-derived), so we mirror the
+    // per-holding edit path (PUT /api/portfolio): find-or-create the target
+    // security for the new ticker, re-point EVERY member position's symbol +
+    // security_id at it, then GC the old security if it's now orphaned. Handled
+    // before — and exclusive of — the name/assetType path below. ──
+    if (body.symbol !== undefined) {
+      const sec = await db
+        .select({
+          id: schema.securities.id,
+          symbolCt: schema.securities.symbolCt,
+          nameCt: schema.securities.nameCt,
+          currency: schema.securities.currency,
+          isCrypto: schema.securities.isCrypto,
+          isCash: schema.securities.isCash,
+        })
+        .from(schema.securities)
+        .where(and(eq(schema.securities.id, body.id), eq(schema.securities.userId, userId)))
+        .get();
+      if (!sec) return NextResponse.json({ error: "Security not found" }, { status: 404 });
+
+      const newSymbol = body.symbol.trim();
+      const currentSymbol = decryptName(sec.symbolCt, dek!, null);
+      if ((currentSymbol ?? "").toUpperCase() === newSymbol.toUpperCase()) {
+        // No-op: already on this ticker.
+        return { id: sec.id, symbol: newSymbol, positions: 0, repointed: false };
+      }
+      const name = decryptName(sec.nameCt, dek!, null);
+
+      // Find-or-create the target security for the new ticker (reuses an existing
+      // one if the user already holds it — a legitimate merge).
+      const targetId = await resolveOrCreateSecurity(userId, dek!, {
+        symbol: newSymbol,
+        name,
+        isCryptoFlag: sec.isCrypto,
+        currency: sec.currency,
+        isCash: sec.isCash,
+      });
+
+      // Re-encrypt the new symbol ONCE; stamp it on every member position and
+      // re-point security_id at the target. Only the symbol fields change — the
+      // name (and its name_lookup) is untouched, so the per-account name_lookup
+      // partial-unique index can't trip.
+      const senc = buildNameFields(dek!, { symbol: newSymbol });
+      const newSymbolCt = (senc.symbolCt as string | null) ?? null;
+      const newSymbolLookup = (senc.symbolLookup as string | null) ?? null;
+
+      const members = await db
+        .select({ id: schema.portfolioHoldings.id })
+        .from(schema.portfolioHoldings)
+        .where(
+          and(
+            eq(schema.portfolioHoldings.securityId, sec.id),
+            eq(schema.portfolioHoldings.userId, userId),
+          ),
+        );
+      let positions = 0;
+      for (const m of members) {
+        await db
+          .update(schema.portfolioHoldings)
+          .set({
+            symbolCt: newSymbolCt,
+            symbolLookup: newSymbolLookup,
+            ...(targetId != null ? { securityId: targetId } : {}),
+          })
+          .where(
+            and(
+              eq(schema.portfolioHoldings.id, m.id),
+              eq(schema.portfolioHoldings.userId, userId),
+            ),
+          );
+        positions++;
+      }
+
+      // GC the old security if the re-point left it backing zero positions.
+      if (targetId != null && targetId !== sec.id) {
+        await gcOrphanSecurity(userId, sec.id);
+      }
+      return { id: sec.id, newSecurityId: targetId, symbol: newSymbol, positions };
+    }
+
     // Build the SET partial: asset_type and/or the re-encrypted name.
     const setFields: Record<string, unknown> = { updatedAt: sql`NOW()` };
     let nameCt: string | null = null;
