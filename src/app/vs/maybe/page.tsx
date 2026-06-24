@@ -90,7 +90,7 @@ const content: VsPageContent = {
     },
     {
       label: "Native mobile app",
-      finlynq: "React Native (Expo) app — functional, not at parity with consumer apps",
+      finlynq: "Yes, native iOS and Android apps (App Store, Google Play)",
       competitor: "No (Flutter companion code existed but never fully shipped)",
     },
     {

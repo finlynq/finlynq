@@ -50,9 +50,9 @@ const content: VsPageContent = {
         You want a polished native iOS and Android app.
       </strong>{" "}
       Monarch&apos;s mobile apps are mature with receipt scanning, push
-      notifications, and quick add. Finlynq has a React Native Expo app for
-      Dashboard, Transactions, Import, Budgets, and Settings — functional but
-      not at parity.
+      notifications, and quick add. Finlynq now ships native iOS and Android
+      apps (App Store and Google Play) for Dashboard, Transactions, Import,
+      Budgets, and Settings. They work well, but they are not yet at parity.
     </>,
     <>
       <strong className="text-foreground">
@@ -184,7 +184,7 @@ const content: VsPageContent = {
     {
       label: "Native mobile app",
       finlynq:
-        "React Native (Expo) — Dashboard, Tx, Import, Budgets, Settings",
+        "iOS and Android (App Store, Google Play), covering Dashboard, Tx, Import, Budgets, Settings; newer and still maturing",
       competitor: "iOS + Android (mature)",
     },
     {

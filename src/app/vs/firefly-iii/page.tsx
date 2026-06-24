@@ -285,7 +285,7 @@ const content: VsPageContent = {
     },
     {
       label: "Native mobile app",
-      finlynq: "No (mobile web UI only)",
+      finlynq: "Yes, native iOS and Android apps (App Store, Google Play)",
       competitor: "No (mobile web UI only)",
     },
     {

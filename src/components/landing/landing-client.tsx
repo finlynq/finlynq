@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef } from "react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
 import { LogoMark } from "@/components/logo-mark";
+import { StoreBadges } from "@/components/store-badges";
 
 const FEATURES = [
   {
@@ -77,7 +78,7 @@ const PLAN_FEATS = [
   "109 MCP tools (HTTP) · 93 (stdio) — read & write",
   "Per-user AES-256-GCM envelope encryption · operator can't decrypt",
   "In-app AI chat — no MCP client setup required",
-  "Native mobile app for iOS + Android (coming soon)",
+  "Native iOS and Android apps, available now",
   "RRSP, TFSA, RESP contribution-room tracking (CRA limits)",
   "Lot-tracked portfolio cost basis · dividends · FX-aware",
   "Cash-flow forecasting · spending anomaly detection",
@@ -90,11 +91,11 @@ const PLAN_FEATS = [
 const ROADMAP_POINTS = [
   {
     label: "Live now",
-    desc: "Encrypted finances, a built-in MCP server for any AI, multi-currency portfolios, budgets, and imports.",
+    desc: "Encrypted finances, a built-in MCP server for any AI, native iOS and Android apps, multi-currency portfolios, budgets, and imports.",
   },
   {
     label: "Building",
-    desc: "A native mobile app (Android first, then iOS) and automatic bank and brokerage connections.",
+    desc: "Automatic bank and brokerage connections, and an in-app AI assistant.",
   },
   {
     label: "Up next",
@@ -286,7 +287,7 @@ export function LandingClient() {
 
             <Link href="/blog/finlynq-mobile-app" className="hero-bar hero-bar-mobile hero-bar-link">
               <span className="tag">MOBILE</span>
-              <span>iOS &amp; Android apps coming soon <span aria-hidden="true">→</span></span>
+              <span>Now on iOS and Android <span aria-hidden="true">→</span></span>
             </Link>
 
             <h1 className="display-xl">
@@ -315,6 +316,8 @@ export function LandingClient() {
                 Self-host with Docker
               </Link>
             </div>
+
+            <StoreBadges className="mt-7" />
 
             <div className="hero-meta">
               <div className="cell">

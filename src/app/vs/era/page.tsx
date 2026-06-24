@@ -42,9 +42,9 @@ const content: VsPageContent = {
       institutions; Finlynq is currently file / email import only.
     </>,
     <>
-      You want a native iOS / Android app today. Era&apos;s Agency is a real
-      native mobile app; Finlynq has a mobile-friendly web UI but no native app
-      yet.
+      You want the most polished native mobile experience. Era&apos;s Agency is
+      a mature native app; Finlynq now ships native iOS and Android apps too
+      (App Store and Google Play), but they are newer and still maturing.
     </>,
     <>
       You want regulated investment advisory or brokerage. Era&apos;s Thesis
@@ -166,7 +166,8 @@ const content: VsPageContent = {
     },
     {
       label: "Native mobile app",
-      finlynq: "No (mobile web UI only)",
+      finlynq:
+        "Yes, native iOS and Android apps (App Store, Google Play); newer and still maturing",
       competitor: "Yes — Agency",
     },
     {
@@ -259,8 +260,9 @@ const content: VsPageContent = {
       q: "Does Finlynq have a mobile app?",
       a: (
         <>
-          Not yet. The web UI is mobile-friendly, but a native iOS / Android
-          wrapper isn&apos;t shipped. If you need native mobile, Era is ahead.
+          Yes. Finlynq has native iOS and Android apps on the App Store and
+          Google Play. They are newer than Era&apos;s Agency, so Era&apos;s
+          mobile experience is more mature today.
         </>
       ),
     },

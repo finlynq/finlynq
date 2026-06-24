@@ -33,9 +33,9 @@ type Post = {
 const POSTS: Post[] = [
   {
     slug: "finlynq-mobile-app",
-    title: "Finlynq is going mobile: Android coming soon, iOS to follow",
+    title: "Finlynq is now on iOS and Android",
     blurb:
-      "Finlynq now has a native mobile app. The Android version is in final testing on Google Play, with iOS to follow. Check balances, budgets, your portfolio, and net worth on the go, add transactions, import statements, all with the same encryption as the web app. Self-hosters can point it at their own instance.",
+      "Finlynq's native mobile app is here, available on the App Store and Google Play. Check balances, budgets, your portfolio, and net worth on the go, add transactions, import statements, all with the same encryption as the web app. Self-hosters can point it at their own instance.",
     date: "2026-06-01",
   },
   {

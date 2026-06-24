@@ -98,6 +98,12 @@ const SECTIONS: Section[] = [
         href: "/self-hosted",
         hrefLabel: "Self-hosting guide",
       },
+      {
+        title: "Native mobile apps",
+        desc: "Finlynq on your phone, now available on the App Store and Google Play. Point it at the managed cloud or your own self-hosted instance.",
+        href: "/blog/finlynq-mobile-app",
+        hrefLabel: "Read the announcement",
+      },
     ],
   },
   {
@@ -106,12 +112,6 @@ const SECTIONS: Section[] = [
     blurb: "In active development.",
     badge: "bg-amber-500/15 text-amber-500",
     items: [
-      {
-        title: "Mobile app",
-        desc: "Android first (in final testing on Google Play), with iOS to follow.",
-        href: "/blog/finlynq-mobile-app",
-        hrefLabel: "Read the announcement",
-      },
       {
         title: "In-app AI chat",
         desc: "Ask questions about your finances in plain English without setting up an external MCP client. In active development behind a feature flag.",

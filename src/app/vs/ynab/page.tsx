@@ -90,7 +90,7 @@ const content: VsPageContent = {
     },
     {
       label: "Native mobile app",
-      finlynq: "React Native (Expo) app — functional, not at parity with consumer apps",
+      finlynq: "Yes, native iOS and Android apps (App Store, Google Play); newer and still maturing",
       competitor: "Yes — iOS, Android, Apple Watch (best-in-class quick-entry)",
     },
     {

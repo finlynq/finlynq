@@ -59,7 +59,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Era?",
-    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Finlynq's specific differentiators vs Era: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for AES-256-at-rest), and a 109 HTTP / 93 stdio tool MCP surface (v3.3.0) vs Era's 27. Era has stronger US bank sync, native iOS/Android, and shared household features. Side-by-side comparison at finlynq.com/vs/era.",
+    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Finlynq's specific differentiators vs Era: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for AES-256-at-rest), and a 109 HTTP / 93 stdio tool MCP surface (v3.3.0) vs Era's 27. Era has stronger US bank sync and shared household features. Side-by-side comparison at finlynq.com/vs/era.",
   },
   {
     q: "Does Finlynq sync with my bank automatically?",
@@ -67,7 +67,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "Does Finlynq have a mobile app?",
-    a: "Almost. Finlynq has a React Native (Expo) mobile app with Dashboard, Transactions, Import, Budgets, and Settings screens that connects to your Finlynq web server (managed cloud or self-hosted). The Android app is in final testing on Google Play, with iOS to follow. It is not yet at parity with mature consumer mobile apps like Monarch's iOS/Android. Read the announcement at finlynq.com/blog/finlynq-mobile-app.",
+    a: "Yes. Finlynq has native iOS and Android apps, free on the App Store and Google Play. They cover Dashboard, Transactions, Import, Budgets, and Settings, and sign in to your Finlynq web server, whether that is the managed cloud or your own self-hosted box. They are newer than mature apps like Monarch's, so not everything has caught up yet, but they handle your everyday tracking on the go. The full story is at finlynq.com/blog/finlynq-mobile-app.",
   },
   {
     q: "What AI assistants does Finlynq work with?",
@@ -217,8 +217,7 @@ export default function AboutPage() {
             <li>
               <strong className="text-foreground">Mobile app.</strong> React
               Native (Expo) covering Dashboard, Transactions, Import, Budgets,
-              and Settings. The Android app is in final testing on Google Play,
-              with iOS to follow.{" "}
+              and Settings. Available now on the App Store and Google Play.{" "}
               <Link
                 href="/blog/finlynq-mobile-app"
                 className="underline underline-offset-2 hover:text-primary"

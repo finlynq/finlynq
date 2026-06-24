@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Metadata } from "next";
 import { AnalyticsConsent } from "@/components/analytics-consent";
+import { StoreBadges } from "@/components/store-badges";
 import {
   JsonLd,
   articleSchema,
@@ -11,23 +12,23 @@ const SLUG = "finlynq-mobile-app";
 const PUBLISHED = "2026-06-01";
 
 export const metadata: Metadata = {
-  title: "Finlynq is going mobile: Android coming soon, iOS to follow",
+  title: "Finlynq is now on iOS and Android",
   description:
-    "Finlynq now has a native mobile app. The Android version is in final testing on Google Play, with iOS to follow. Check balances, budgets, your portfolio, and net worth on the go, add transactions, import statements, all with the same encryption as the web app.",
+    "Finlynq's native mobile app is here, available on the App Store and Google Play. Check balances, budgets, your portfolio, and net worth on the go, add transactions, import statements, all with the same encryption as the web app.",
   alternates: { canonical: `/blog/${SLUG}` },
   openGraph: {
-    title: "Finlynq is going mobile: Android coming soon, iOS to follow",
+    title: "Finlynq is now on iOS and Android",
     description:
-      "A native companion app for the open-source, MCP-first personal finance app. Android in final testing now, iOS to follow.",
+      "A native companion app for the open-source, MCP-first personal finance app, now on the App Store and Google Play.",
     type: "article",
     url: `/blog/${SLUG}`,
     siteName: "Finlynq",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Finlynq is going mobile",
+    title: "Finlynq is now on iOS and Android",
     description:
-      "Android app in final testing on Google Play, iOS to follow. Same data, same encryption, now in your pocket.",
+      "On the App Store and Google Play now. Same data, same encryption, now in your pocket.",
   },
 };
 
@@ -37,9 +38,9 @@ export default function FinlynqMobileAppPage() {
       <AnalyticsConsent />
       <JsonLd
         data={articleSchema({
-          title: "Finlynq is going mobile: Android coming soon, iOS to follow",
+          title: "Finlynq is now on iOS and Android",
           description:
-            "Finlynq now has a native mobile app. The Android version is in final testing on Google Play, with iOS to follow.",
+            "Finlynq's native mobile app is available now on the App Store and Google Play.",
           path: `/blog/${SLUG}`,
           datePublished: PUBLISHED,
         })}
@@ -48,7 +49,7 @@ export default function FinlynqMobileAppPage() {
         data={breadcrumbSchema([
           { name: "Home", path: "/" },
           { name: "Blog", path: "/blog" },
-          { name: "Finlynq is going mobile", path: `/blog/${SLUG}` },
+          { name: "Finlynq is now on iOS and Android", path: `/blog/${SLUG}` },
         ])}
       />
       <div className="mx-auto max-w-3xl px-6 py-16">
@@ -60,22 +61,24 @@ export default function FinlynqMobileAppPage() {
             ← Finlynq blog
           </Link>
           <h1 className="mt-4 text-4xl font-bold tracking-tight">
-            Finlynq is going mobile: Android coming soon, iOS to follow
+            Finlynq is now on iOS and Android
           </h1>
           <p className="mt-3 text-sm text-muted-foreground">
-            A native companion app for your money · Published 2026-06-01
+            A native companion app for your money · Published 2026-06-01 ·
+            Updated 2026-06-24
           </p>
         </header>
 
         <article className="prose prose-invert max-w-none space-y-6 text-[15px] leading-relaxed">
           <p className="text-base">
             Finlynq has always been two things: a web app where you track your
-            money, and an MCP server that lets your AI assistant query and manage
-            it. There was a gap: when you were away from your desk, you had to
-            open a browser. That gap is closing. Finlynq now has a native mobile
-            app. The Android version is in final testing on Google Play right
-            now, and iOS will follow.
+            money, and an MCP server that lets your AI assistant dig into it. The
+            catch was that the moment you stepped away from your desk, you had to
+            open a browser. Not anymore. Finlynq now has a real native app, and
+            it is live today on both the App Store and Google Play.
           </p>
+
+          <StoreBadges className="not-prose" />
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
             What you can do in the app
@@ -162,12 +165,12 @@ export default function FinlynqMobileAppPage() {
           </h2>
 
           <p>
-            The Android app is built and uploaded to Google Play, currently in a
-            closed testing track while we work through Google&apos;s pre-launch
-            review and a round of real-device testing. A public release on the
-            Play Store is the next step. After that, the iOS build follows: the
-            app is written once in React Native, so the iOS version is a matter
-            of the Apple build and review process, not a rewrite.
+            Both apps are live now: iOS on the App Store, Android on Google
+            Play, built from a single React Native codebase. What comes next is
+            not more platforms, it is depth. We are closing the last gaps with
+            the web app, adding push notifications, and smoothing the rough edges
+            that only show up once people use something every day. If you hit one
+            of those, send feedback from inside the app. It comes straight to us.
           </p>
 
           <p>
@@ -184,14 +187,27 @@ export default function FinlynqMobileAppPage() {
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
-            Want to follow along
+            Get the app
           </h2>
 
           <p>
-            The fastest ways to know the moment the apps go live:
+            Download it now and sign in with your Finlynq account:
           </p>
 
+          <StoreBadges className="not-prose" />
+
           <ul className="list-disc pl-6 space-y-1.5">
+            <li>
+              New to Finlynq? The cloud app is free, and there is a public demo
+              at{" "}
+              <Link
+                href="/cloud"
+                className="underline underline-offset-2 hover:text-primary"
+              >
+                /cloud
+              </Link>
+              .
+            </li>
             <li>
               Star or watch the repo at{" "}
               <a
@@ -203,17 +219,6 @@ export default function FinlynqMobileAppPage() {
               .
             </li>
             <li>
-              Try Finlynq today on the web. The cloud app is free, and there is a
-              public demo at{" "}
-              <Link
-                href="/cloud"
-                className="underline underline-offset-2 hover:text-primary"
-              >
-                /cloud
-              </Link>
-              .
-            </li>
-            <li>
               Have a feature request for mobile? Open an issue at{" "}
               <a
                 href="https://github.com/finlynq/finlynq/issues"
@@ -221,7 +226,7 @@ export default function FinlynqMobileAppPage() {
               >
                 github.com/finlynq/finlynq/issues
               </a>
-              , or send feedback from inside the app once you are in.
+              , or send feedback from inside the app.
             </li>
           </ul>
 
