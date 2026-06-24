@@ -2,12 +2,12 @@ import Link from "next/link";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Delete your Finlynq account & data — Finlynq",
+  title: "Delete your Finlynq account & data | Finlynq",
   description:
     "How to delete your Finlynq account and associated data, what gets removed, what is briefly retained, and how to request deletion by email.",
   alternates: { canonical: "/account-deletion" },
   openGraph: {
-    title: "Delete your Finlynq account & data — Finlynq",
+    title: "Delete your Finlynq account & data | Finlynq",
     description:
       "How to delete your Finlynq account and associated data, what gets removed, what is briefly retained, and how to request deletion by email.",
     url: "/account-deletion",
@@ -37,16 +37,16 @@ export default function AccountDeletionPage() {
           <p className="text-base">
             This page explains how to delete your <strong>Finlynq</strong> account
             (the Finlynq personal-finance app, developer Finlynq) and all of the
-            data associated with it. You can do this yourself at any time — no
-            request to us is required — or you can ask us to do it for you.
+            data tied to it. You can do this yourself at any time, with no request
+            to us needed, or you can ask us to do it for you.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
-            Option 1 — Delete it yourself (recommended, immediate)
+            Option 1: delete it yourself (recommended, immediate)
           </h2>
           <p>
-            Account deletion is performed from the Finlynq web app. It applies to
-            your whole account regardless of whether you also use the Android app.
+            You delete your account from the Finlynq web app. It applies to your
+            whole account, whether or not you also use the Android app.
           </p>
           <ol className="list-decimal pl-6 space-y-1.5">
             <li>
@@ -70,7 +70,7 @@ export default function AccountDeletionPage() {
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
-            Option 2 — Ask us to delete it
+            Option 2: ask us to delete it
           </h2>
           <p>
             If you can&apos;t sign in, email{" "}
@@ -81,8 +81,8 @@ export default function AccountDeletionPage() {
               privacy@finlynq.com
             </a>{" "}
             from the email address on your account (or include your username) and
-            ask us to delete your account. We verify ownership and complete the
-            deletion within 30 days.
+            ask us to delete your account. We&apos;ll verify ownership and finish
+            the deletion within 30 days.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -93,7 +93,7 @@ export default function AccountDeletionPage() {
             <code>Settings → Data</code> (and throughout the app) you can delete
             individual accounts, transactions, budgets, investments, goals, loans,
             and uploaded files, or export everything first. These changes take
-            effect immediately.
+            effect right away.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">What gets deleted</h2>
@@ -129,7 +129,7 @@ export default function AccountDeletionPage() {
             </li>
           </ul>
           <p>
-            After these windows pass, no copy of your account data remains.
+            Once these windows pass, no copy of your account data remains.
           </p>
 
           <p className="mt-12 text-xs text-muted-foreground">

@@ -8,12 +8,12 @@ import { JsonLd, softwareApplicationSchema } from "@/components/seo/json-ld";
 // a `"use client"` file cannot export.
 export const metadata: Metadata = {
   title:
-    "Finlynq — Open-Source Personal Finance with a First-Party MCP Server",
+    "Finlynq: Open-Source Personal Finance with a First-Party MCP Server",
   description:
-    "Open-source (AGPL v3) personal finance app with a first-party MCP server. Track income, expenses, budgets, investments, loans, and goals — then query your money in plain English from Claude, Cursor, or any MCP client. Self-host with Docker or use the free cloud.",
+    "Open-source (AGPL v3) personal finance app with a first-party MCP server. Track income, expenses, budgets, investments, loans, and goals, then query your money in plain English from Claude, Cursor, or any MCP client. Self-host with Docker or use the free cloud.",
   alternates: { canonical: "/" },
   openGraph: {
-    title: "Finlynq — track your money here, analyze it anywhere",
+    title: "Finlynq: track your money here, analyze it anywhere",
     description:
       "Open-source personal finance with a first-party MCP server. Connect Claude, Cursor, or any AI assistant. Per-user envelope encryption. Self-host or free cloud.",
     url: "/",
@@ -22,7 +22,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Finlynq — track your money here, analyze it anywhere",
+    title: "Finlynq: track your money here, analyze it anywhere",
     description:
       "Open-source personal finance with a first-party MCP server. Connect any AI assistant. Self-host or free cloud.",
   },

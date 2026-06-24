@@ -24,7 +24,7 @@ function CloudAuthPageInner() {
   const redirectTo = searchParams.get("redirect") ?? "/dashboard";
   // ?demo=1 pre-fills the login form with the published demo credentials so
   // a marketing link can drop users one click away from Sign In. Reuses the
-  // normal /api/auth/login path — no auto-submit — so the user explicitly
+  // normal /api/auth/login path (no auto-submit) so the user explicitly
   // consents to the action. For zero-click full auto-login + redirect, see
   // the /try-demo route.
   const demoPrefill = searchParams.get("demo") === "1";
@@ -147,7 +147,7 @@ function CloudAuthPageInner() {
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    // Last-mile guard — the server enforces this too, but failing fast in the
+    // Last-mile guard. The server enforces this too, but failing fast in the
     // UI avoids a roundtrip and keeps the message inline.
     if (!registerEmail.trim() && !acknowledgeNoRecovery) {
       setError(
@@ -213,8 +213,8 @@ function CloudAuthPageInner() {
         </h1>
         <p className="mb-8 text-muted-foreground">
           {tab === "register"
-            ? "Sign up to track your money here and analyze it anywhere. Access your data from any device."
-            : "Sign in with your account. Access your data from any device."}
+            ? "Sign up to track your money here and analyze it anywhere. Your data follows you to any device."
+            : "Sign in to your account. Your data follows you to any device."}
         </p>
         {tab === "register" && (
           <p className="mb-8 -mt-6 text-xs text-muted-foreground/80">
@@ -258,7 +258,7 @@ function CloudAuthPageInner() {
           <>
             {demoPrefill && tab === "login" && (
               <div className="mb-6 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5 text-xs text-foreground/90">
-                Demo credentials pre-filled — click <strong>Sign In</strong> to
+                Demo credentials are pre-filled. Just click <strong>Sign In</strong> to
                 enter the public demo. Data resets nightly.
               </div>
             )}
@@ -327,8 +327,8 @@ function CloudAuthPageInner() {
                       id={usernameHelpId}
                       className="mt-1.5 text-xs text-muted-foreground/80"
                     >
-                      3–254 chars. Letters, digits, and{" "}
-                      <span className="font-mono">. @ + _ -</span>. Pick anything that hides your
+                      3 to 254 chars. Letters, digits, and{" "}
+                      <span className="font-mono">. @ + _ -</span>. Pick something that hides your
                       identity if your data ever leaks.
                     </p>
                     {availability.status === "checking" && (
@@ -378,7 +378,7 @@ function CloudAuthPageInner() {
                     className="w-full rounded-lg border border-border bg-background px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                   />
                   <p className="mt-1.5 text-xs text-muted-foreground/80">
-                    Used only for password reset. Leave blank for full zero-knowledge — but you{`’`}ll
+                    Used only for password reset. Leave it blank for full zero-knowledge, but then you{`’`}ll
                     have no way to recover a forgotten password.
                   </p>
                 </div>
@@ -410,7 +410,7 @@ function CloudAuthPageInner() {
                     className="mt-0.5 h-4 w-4 shrink-0 rounded border-border bg-background accent-primary"
                   />
                   <span>
-                    I understand. Finlynq encrypts everything with my password — there{`’`}s
+                    I understand. Finlynq encrypts everything with my password, and there{`’`}s
                     no recovery key. Forgetting it means losing all my data. Without an
                     email I also can{`’`}t reset the password at all.
                   </span>

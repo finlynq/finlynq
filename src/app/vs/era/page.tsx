@@ -2,14 +2,14 @@ import type { Metadata } from "next";
 import { VsPage, type VsPageContent } from "../_components/VsPage";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Era — open-source vs closed AI personal finance",
+  title: "Finlynq vs Era: open-source vs closed AI personal finance",
   description:
     "Finlynq vs Era: open-source AGPL v3 with self-host + 109 MCP tools + per-user envelope encryption, compared against Era's closed-source hosted SaaS with 27 MCP tools and operator-held keys. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
     canonical: "/vs/era",
   },
   openGraph: {
-    title: "Finlynq vs Era — open-source vs closed AI personal finance",
+    title: "Finlynq vs Era: open-source vs closed AI personal finance",
     description:
       "Two MCP-first personal finance apps, compared. Finlynq: AGPL v3, self-hostable, 109 MCP tools, per-user envelope encryption. Era: closed SaaS, hosted-only, 27 MCP tools, operator-held keys.",
     url: "/vs/era",
@@ -18,7 +18,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Finlynq vs Era — open-source vs closed AI personal finance",
+    title: "Finlynq vs Era: open-source vs closed AI personal finance",
     description:
       "Open-source self-hostable PFM with 109 MCP tools and per-user envelope encryption, compared with Era.",
   },
@@ -30,30 +30,31 @@ const content: VsPageContent = {
   tagline: (
     <>
       Era is a hosted, AI-first personal finance SaaS with a closed-source MCP
-      server. Finlynq is the open-source, self-hostable alternative — same
-      MCP-driven UX, your infrastructure, your encryption keys, no aggregator
-      hostage.
+      server. Finlynq is the open-source, self-hostable alternative. You get the
+      same MCP-driven feel, but on your own infrastructure, with your own
+      encryption keys, and no aggregator holding your data hostage.
     </>
   ),
   whenCompetitor: [
     <>
       You want bank sync to {`"`}just work{`"`} out of the box. Era ships with
       aggregator-grade automatic transactions across thousands of US
-      institutions; Finlynq is currently file / email import only.
+      institutions. Finlynq is file and email import only right now.
     </>,
     <>
-      You want a native iOS / Android app today. Era&apos;s Agency is a real
-      native mobile app; Finlynq has a mobile-friendly web UI but no native app
-      yet.
+      You want the most polished native mobile experience. Era&apos;s Agency is
+      a mature native app. Finlynq now ships native iOS and Android apps too (on
+      the App Store and Google Play), but they&apos;re newer and still maturing.
     </>,
     <>
       You want regulated investment advisory or brokerage. Era&apos;s Thesis
-      (private beta) is an SEC-registered investment adviser with brokerage via
-      Alpaca. Finlynq is not — and explicitly never will be.
+      (private beta) is an SEC-registered investment adviser with brokerage
+      through Alpaca. Finlynq isn&apos;t, and it never will be.
     </>,
     <>
-      You don&apos;t want to think about Postgres, Docker, encryption keys, or
-      password recovery. Era is hosted; that&apos;s the whole pitch.
+      You&apos;d rather not think about Postgres, Docker, encryption keys, or
+      password recovery. Era is hosted, and honestly that&apos;s the whole
+      pitch.
     </>,
     <>
       You want shared household finances baked in. Era&apos;s multi-user shared
@@ -63,23 +64,23 @@ const content: VsPageContent = {
   whenFinlynq: [
     <>
       <strong className="text-foreground">You want the source code.</strong>{" "}
-      Finlynq is AGPL v3, fully on GitHub. Era is closed-source, so you
-      can&apos;t audit the MCP tool implementations, the encryption story, or
-      what gets sent to your AI assistant.
+      Finlynq is AGPL v3 and it&apos;s all on GitHub. Era is closed-source, so
+      you can&apos;t audit the MCP tool implementations, the encryption story, or
+      what actually gets sent to your AI assistant.
     </>,
     <>
       <strong className="text-foreground">You want to self-host.</strong>{" "}
-      Finlynq runs on your hardware via Docker + PostgreSQL. Era cannot be
-      self-hosted at any price.
+      Finlynq runs on your own hardware with Docker and PostgreSQL. Era
+      can&apos;t be self-hosted at any price.
     </>,
     <>
       <strong className="text-foreground">
         You want per-user encryption with keys derived from your password.
       </strong>{" "}
-      Finlynq&apos;s envelope encryption (AES-256-GCM with scrypt-derived KEK)
-      means even the operator cannot read your transaction notes, payees, tags,
-      or display names. Era&apos;s {`"`}AES-256 at rest{`"`} is a blanket claim
-      about Era&apos;s infra; the operator holds the keys.
+      Finlynq&apos;s envelope encryption (AES-256-GCM with a scrypt-derived KEK)
+      means even the operator can&apos;t read your transaction notes, payees,
+      tags, or display names. Era&apos;s {`"`}AES-256 at rest{`"`} is a blanket
+      claim about Era&apos;s infra, and the operator still holds the keys.
     </>,
     <>
       <strong className="text-foreground">You want the bigger MCP surface.</strong>{" "}
@@ -117,15 +118,15 @@ const content: VsPageContent = {
       label: "First-party MCP",
       finlynq: (
         <>
-          Yes — <strong className="text-foreground">109 HTTP / 93 stdio</strong>{" "}
+          Yes, <strong className="text-foreground">109 HTTP / 93 stdio</strong>{" "}
           tools
         </>
       ),
       competitor: (
         <>
-          Yes — Era Context,{" "}
-          <strong className="text-foreground">27 tools</strong> (per Anthropic
-          directory listing, 2026-05-11)
+          Yes, Era Context,{" "}
+          <strong className="text-foreground">27 tools</strong> (per the
+          Anthropic directory listing, 2026-05-11)
         </>
       ),
     },
@@ -136,7 +137,7 @@ const content: VsPageContent = {
     },
     {
       label: "REST / HTTP API",
-      finlynq: "Yes — full surface mirrored from MCP",
+      finlynq: "Yes, the full surface is mirrored from MCP",
       competitor: "Not publicly documented outside MCP",
     },
     {
@@ -150,7 +151,7 @@ const content: VsPageContent = {
       label: "Encryption at rest",
       finlynq:
         "Per-user envelope encryption: AES-256-GCM with scrypt-derived KEK. The operator cannot decrypt user data.",
-      competitor: `"AES-256 at rest" — Era holds the keys`,
+      competitor: `"AES-256 at rest", but Era holds the keys`,
     },
     {
       label: "Multi-currency",
@@ -166,13 +167,14 @@ const content: VsPageContent = {
     },
     {
       label: "Native mobile app",
-      finlynq: "No (mobile web UI only)",
-      competitor: "Yes — Agency",
+      finlynq:
+        "Yes, native iOS and Android apps (App Store, Google Play); newer and still maturing",
+      competitor: "Yes, Agency",
     },
     {
       label: "Multi-user / household",
       finlynq: "No (single-user)",
-      competitor: "Yes — shared views",
+      competitor: "Yes, shared views",
     },
     {
       label: "Pricing",
@@ -208,8 +210,8 @@ const content: VsPageContent = {
     </>,
     <>
       <strong className="text-foreground">Import into Finlynq.</strong> Use the
-      staging-review pipeline at <code>/import/reconcile</code> — upload a CSV,
-      review and edit each row, approve. Multi-currency, transfer-pair
+      staging-review pipeline at <code>/import/reconcile</code>: upload a CSV,
+      review and edit each row, then approve. Multi-currency, transfer-pair
       detection, and dedup are all built into the staging flow.
     </>,
     <>
@@ -225,9 +227,9 @@ const content: VsPageContent = {
       q: "Why are you comparing yourself to a paid product when you're free?",
       a: (
         <>
-          Because the comparison isn&apos;t price — it&apos;s where your data
-          lives, who can read it, and what happens if the operator pivots.
-          Finlynq&apos;s argument is structural, not a discount.
+          Because the comparison isn&apos;t really about price. It&apos;s about
+          where your data lives, who can read it, and what happens if the
+          operator pivots. Finlynq&apos;s argument is structural, not a discount.
         </>
       ),
     },
@@ -235,10 +237,10 @@ const content: VsPageContent = {
       q: "Doesn't Era's bank sync just make this a non-comparison for most users?",
       a: (
         <>
-          For users who want one-click bank sync and don&apos;t care about
-          source code or self-hosting, yes — Era is the better default.
-          Finlynq&apos;s audience is users who specifically don&apos;t want a
-          third-party aggregator holding their bank credentials, even one
+          For people who want one-click bank sync and don&apos;t care about
+          source code or self-hosting, yeah, Era is the better default.
+          Finlynq&apos;s audience is the people who specifically don&apos;t want
+          a third-party aggregator holding their bank credentials, even one
           that&apos;s SOC 2 Type II.
         </>
       ),
@@ -247,11 +249,11 @@ const content: VsPageContent = {
       q: "Why does this read like a hit piece?",
       a: (
         <>
-          It isn&apos;t. Era ships real things — first-party MCP, OAuth-scoped
-          tools, native mobile, an investment-advisory product Finlynq legally
-          cannot offer. The honest difference is: Era is hosted convenience for
-          users who trust an operator with their financial life, and Finlynq is
-          the substrate for users who don&apos;t want to.
+          It isn&apos;t. Era ships real things: first-party MCP, OAuth-scoped
+          tools, native mobile, and an investment-advisory product Finlynq
+          legally can&apos;t offer. The honest difference is that Era is hosted
+          convenience for people who trust an operator with their financial
+          life, and Finlynq is the substrate for people who&apos;d rather not.
         </>
       ),
     },
@@ -259,8 +261,9 @@ const content: VsPageContent = {
       q: "Does Finlynq have a mobile app?",
       a: (
         <>
-          Not yet. The web UI is mobile-friendly, but a native iOS / Android
-          wrapper isn&apos;t shipped. If you need native mobile, Era is ahead.
+          Yes. Finlynq has native iOS and Android apps on the App Store and
+          Google Play. They are newer than Era&apos;s Agency, so Era&apos;s
+          mobile experience is more mature today.
         </>
       ),
     },
@@ -268,10 +271,11 @@ const content: VsPageContent = {
       q: "Will Finlynq ever offer regulated investment advisory like Era's Thesis?",
       a: (
         <>
-          No. Becoming an SEC-registered investment adviser is incompatible with
-          the AGPL self-hostable design — the regulator wants a single
-          accountable entity; the design wants none. Finlynq is the database;
-          the user can hire whatever advisor they want against the data.
+          No. Becoming an SEC-registered investment adviser just doesn&apos;t
+          fit the AGPL self-hostable design. The regulator wants a single
+          accountable entity, and the design wants none. Finlynq is the
+          database, and you can hire whatever advisor you want to work against
+          the data.
         </>
       ),
     },
@@ -288,12 +292,12 @@ const content: VsPageContent = {
       note: "fetched 2026-05-07",
     },
     {
-      label: "Anthropic Connectors Directory — Era listing",
+      label: "Anthropic Connectors Directory (Era listing)",
       href: "https://context.era.app",
       note: "27 tools, visible from 2026-05-11",
     },
     {
-      label: "Las Vegas Sun — Era launch coverage",
+      label: "Las Vegas Sun (Era launch coverage)",
       href: "https://lasvegassun.com/news/2026/may/06/era-becomes-the-first-personal-finance-connector-i/",
       note: "2026-05-06",
     },

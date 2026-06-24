@@ -12,9 +12,9 @@ const PUBLISHED = "2026-05-13";
 
 export const metadata: Metadata = {
   title:
-    "How Finlynq encrypts your money — envelope encryption, in plain English",
+    "How Finlynq encrypts your money: envelope encryption, in plain English",
   description:
-    "A walkthrough of Finlynq's encryption architecture: AES-256-GCM at rest, a per-user Data Encryption Key wrapped by a scrypt-derived key from your password, and the honest tradeoffs (operator can see anonymized amounts; lose your password, lose your data).",
+    "A walkthrough of Finlynq's encryption: AES-256-GCM at rest, a per-user Data Encryption Key wrapped by a scrypt-derived key from your password, and the tradeoffs I won't pretend away (the operator can see anonymized amounts; lose your password and your data is gone).",
   alternates: { canonical: `/blog/${SLUG}` },
   openGraph: {
     title: "How Finlynq encrypts your money",
@@ -70,117 +70,120 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
 
         <article className="prose prose-invert max-w-none space-y-6 text-[15px] leading-relaxed">
           <p className="text-base">
-            If your AI assistant can read your money, who else can? That is the
-            question I had to answer for myself before I felt okay handing a
-            language model the keys to my real bank data. This post is the
-            honest answer for Finlynq — what is encrypted, what is not, what
-            tradeoffs I accepted, and where you can read the code that
-            implements it.
+            If your AI assistant can read your money, who else can? I had to
+            answer that for myself before I felt okay handing a language model
+            the keys to my real bank data. So here&apos;s the honest answer for
+            Finlynq. What&apos;s encrypted, what isn&apos;t, the tradeoffs I
+            made my peace with, and where you can go read the code that does it.
           </p>
 
           <p>
-            I built Finlynq partly because I wanted a personal-finance app that
-            an AI could query without me having to email a CSV to a chatbot. The
-            unavoidable second question once you build that is: how do you keep
-            the operator (me) honest? Finlynq runs on a single VPS I own. If I
-            wanted to read your transactions, what would stop me?
+            I built Finlynq partly because I wanted a personal-finance app an AI
+            could query without me emailing a CSV to a chatbot. But the moment
+            you build that, a second question shows up and won&apos;t leave: how
+            do you keep the operator (me) honest? Finlynq runs on a single VPS I
+            own. If I wanted to read your transactions, what would actually stop
+            me?
           </p>
 
           <p>
             The answer is{" "}
             <strong>per-user envelope encryption with a key derived from your password</strong>
-            , and it has real teeth. It also has real limits. Both halves are in
-            this post.
+            . It has real teeth. It also has real limits, and I&apos;d rather
+            you hear about both from me. So both are in this post.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
-            1. The threat model — what we are and aren&apos;t protecting against
+            1. The threat model, or what we are and aren&apos;t protecting
+            against
           </h2>
 
           <p>
-            Encryption schemes only make sense relative to a threat. Here are
-            the threats Finlynq&apos;s design takes seriously:
+            Encryption only means something if you say what it&apos;s protecting
+            against. So here are the threats Finlynq&apos;s design actually takes
+            seriously:
           </p>
 
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
               <strong>Stolen database dump.</strong> Someone gets read access to
-              the Postgres database — disk image, pg_dump, or an unauthorized
-              backup copy. They should not be able to read your merchant names,
-              account names, notes, tags, or categories from that dump alone.
+              the Postgres database. A disk image, a pg_dump, an unauthorized
+              backup copy, whatever. They should not be able to read your
+              merchant names, account names, notes, tags, or categories from
+              that dump alone.
             </li>
             <li>
               <strong>Stolen database <em>and</em> server filesystem.</strong>{" "}
-              An attacker has the DB plus the server&apos;s environment
-              variables. The pepper helps (more below), but they would still
-              need to brute-force every user&apos;s password individually.
-              That&apos;s slow on purpose.
+              Now an attacker has the DB plus the server&apos;s environment
+              variables. The pepper helps here (more on that below), but they
+              would still have to brute-force every user&apos;s password one at a
+              time. That&apos;s slow on purpose.
             </li>
             <li>
               <strong>Stale backups in cloud storage.</strong> Database backups
-              are encrypted on disk with a symmetric key kept off the host, so a
-              copy floating around a backup bucket does not equal a breach.
+              are encrypted on disk with a symmetric key kept off the host. So a
+              copy floating around some backup bucket isn&apos;t a breach by
+              itself.
             </li>
             <li>
               <strong>Cross-tenant data leaks.</strong> One user&apos;s data
-              should never become readable by another user via a buggy import,
-              backup restore, or account wipe.
+              should never become readable by another user. Not through a buggy
+              import, not a backup restore, not an account wipe.
             </li>
           </ul>
 
           <p>
-            Here are the threats Finlynq does <em>not</em> claim to defend
-            against — and you should know this before you trust the system:
+            And here are the threats Finlynq does <em>not</em> claim to defend
+            against. You should know these before you trust the system:
           </p>
 
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
               <strong>A malicious or compromised operator at runtime.</strong>{" "}
-              When you are signed in, your decryption key is held in the
-              server&apos;s memory. An attacker who roots the server while you
-              are using it can read it. There is no honest way around this for
-              a web app that responds to your queries server-side; only a true
-              client-side-only design avoids it, and that comes with its own
-              set of compromises (no server-side aggregation, no MCP, no AI
-              assistant access).
+              When you&apos;re signed in, your decryption key is sitting in the
+              server&apos;s memory. An attacker who roots the box while
+              you&apos;re using it can read it. I&apos;m not going to pretend
+              there&apos;s a clean way around this for a web app that answers
+              your queries server-side. Only a true client-side-only design
+              dodges it, and that comes with its own pile of compromises (no
+              server-side aggregation, no MCP, no AI assistant access).
             </li>
             <li>
               <strong>The amounts and dates of your transactions.</strong> These
-              are stored as plain numbers and dates in the database. They must
-              be — otherwise the app could not sum your spending, compute a
-              budget, or feed an AI assistant a portfolio analysis without your
-              browser doing all the math. The operator can see anonymized
-              amounts and dates. They are useless without the labels, but they
-              are not encrypted.
+              live in the database as plain numbers and dates. They have to.
+              Otherwise the app couldn&apos;t sum your spending, build a budget,
+              or hand an AI a portfolio analysis without your browser doing all
+              the math. So the operator can see anonymized amounts and dates.
+              They&apos;re useless without the labels, but they&apos;re not
+              encrypted, and I&apos;m not going to dress that up.
             </li>
             <li>
               <strong>The structure of your data.</strong> The fact that you
               have 14 accounts, 320 transactions a month, and a 7.4% savings
-              rate is visible to the operator. Just not <em>what</em> any of
-              them are for.
+              rate is visible to the operator. Just not <em>what</em> any of it
+              is for.
             </li>
             <li>
               <strong>Side-channel inference.</strong> If your &ldquo;Account
               #3&rdquo; has a recurring $1,847.00 charge on the 15th of every
-              month and you live in a major city, a determined operator could
-              guess &ldquo;that&apos;s probably rent.&rdquo; Encryption does
-              not stop guesses. It stops <em>reading</em>.
+              month, and you live in a big city, a determined operator could
+              guess &ldquo;that&apos;s probably rent.&rdquo; Encryption
+              doesn&apos;t stop guesses. It stops <em>reading</em>.
             </li>
             <li>
               <strong>A subpoena.</strong> Operators get subpoenaed. Finlynq is
-              operated from Canada and we have a privacy policy with retention
-              rules, but a court order is a court order — what we could be
-              compelled to hand over is the encrypted data plus whatever
-              metadata the database contains. Without your password, even we
-              cannot read the labels.
+              run from Canada and we have a privacy policy with retention rules,
+              but a court order is a court order. What we could be forced to hand
+              over is the encrypted data plus whatever metadata the database
+              holds. Without your password, even we can&apos;t read the labels.
             </li>
           </ul>
 
           <p>
-            If any of the second list is a dealbreaker for you, self-hosting is
-            the right answer. Finlynq is AGPL v3 — the same code runs on your
-            laptop or homelab as on our managed cloud. The full self-hosting
-            guide is at{" "}
+            If anything in that second list is a dealbreaker for you,
+            self-hosting is the right answer. Finlynq is AGPL v3, so the exact
+            same code runs on your laptop or homelab as on our managed cloud.
+            The full self-hosting guide is at{" "}
             <Link href="/self-hosted" className="underline underline-offset-2 hover:text-primary">
               /self-hosted
             </Link>
@@ -199,21 +202,21 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
 
           <ol className="list-decimal pl-6 space-y-2">
             <li>
-              A <strong>Data Encryption Key</strong> (DEK) — 32 random bytes,
-              one per user, generated the moment you sign up. This is the key
-              that actually encrypts your fields.
+              A <strong>Data Encryption Key</strong> (DEK). 32 random bytes, one
+              per user, generated the moment you sign up. This is the key that
+              actually encrypts your fields.
             </li>
             <li>
-              A <strong>Key Encryption Key</strong> (KEK) — derived from your
-              password every time you sign in. The KEK&apos;s only job is to
-              wrap and unwrap the DEK.
+              A <strong>Key Encryption Key</strong> (KEK). Derived fresh from
+              your password every time you sign in. Its only job is to wrap and
+              unwrap the DEK.
             </li>
           </ol>
 
           <p>
-            The DEK never leaves the server, but it&apos;s only useful when
-            unwrapped, and unwrapping requires your password. Here&apos;s the
-            sequence in slightly more detail.
+            The DEK never leaves the server, but it&apos;s only useful once
+            it&apos;s unwrapped, and unwrapping it takes your password.
+            Here&apos;s the sequence in a bit more detail.
           </p>
 
           <p>
@@ -221,8 +224,8 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
           </p>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
-              Finlynq generates a fresh, random 32-byte DEK using the OS random
-              source.
+              Finlynq generates a fresh, random 32-byte DEK straight from the OS
+              random source.
             </li>
             <li>
               It also generates a 16-byte random salt and runs your password
@@ -234,19 +237,19 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
                 scrypt
               </a>{" "}
               with parameters{" "}
-              <code>N = 2<sup>16</sup>, r = 8, p = 1</code> — roughly 64 MB of
-              memory and ~80 ms of compute per derivation on modern hardware.
-              That&apos;s the KEK.
+              <code>N = 2<sup>16</sup>, r = 8, p = 1</code>. That&apos;s roughly
+              64 MB of memory and around 80 ms of compute per derivation on
+              modern hardware. The result is the KEK.
             </li>
             <li>
-              The DEK is wrapped (encrypted) with the KEK using AES-256-GCM,
-              and the wrapped DEK plus the salt are stored in your{" "}
+              The DEK gets wrapped (encrypted) with the KEK using AES-256-GCM,
+              and the wrapped DEK plus the salt go into your{" "}
               <code>users</code> row.
             </li>
             <li>
-              The raw KEK is discarded the moment the wrap finishes. The
-              database now contains a wrapped DEK and a salt — and nothing on
-              the server can unwrap that DEK without your password.
+              The raw KEK is thrown away the instant the wrap finishes. So now
+              the database holds a wrapped DEK and a salt, and nothing on the
+              server can unwrap that DEK without your password. Nothing.
             </li>
           </ul>
 
@@ -260,16 +263,15 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
               re-derive your KEK.
             </li>
             <li>
-              It uses the KEK to unwrap your DEK and caches the raw DEK in
+              It uses that KEK to unwrap your DEK and caches the raw DEK in
               memory, keyed by your session id.
             </li>
             <li>
-              The KEK is again discarded immediately. The cache holds only the
-              DEK, and only for the lifetime of your session — with a sliding
-              2-hour idle timeout. If you walk away from your laptop for the
-              afternoon, your DEK is gone from memory by the time you come
-              back, and the next request decrypts nothing until you sign in
-              again.
+              The KEK gets discarded again, right away. The cache holds only the
+              DEK, and only for the life of your session, with a sliding 2-hour
+              idle timeout. Walk away from your laptop for the afternoon and your
+              DEK is already gone from memory by the time you come back. The next
+              request decrypts nothing until you sign in again.
             </li>
           </ul>
 
@@ -281,36 +283,35 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
               For every encrypted column on every row, Finlynq runs AES-256-GCM
               with a freshly-random 12-byte IV. The output is stored as{" "}
               <code>v1:&lt;base64 iv&gt;:&lt;base64 ciphertext&gt;:&lt;base64 auth-tag&gt;</code>.
-              The{" "}
-              <code>v1:</code> prefix is a version marker so we can rotate
-              schemes later without ambiguity.
+              That{" "}
+              <code>v1:</code> prefix is just a version marker, so we can rotate
+              schemes down the road without any guesswork.
             </li>
             <li>
-              GCM is an{" "}
-              <em>authenticated</em> encryption mode — every row has a 16-byte
-              authentication tag that&apos;s checked on decrypt. If a single bit
-              of the ciphertext was tampered with, decryption fails loudly
-              instead of returning subtly wrong plaintext.
+              GCM is an <em>authenticated</em> encryption mode. Every row carries
+              a 16-byte authentication tag that gets checked on decrypt. Flip a
+              single bit of the ciphertext and decryption fails loudly, instead
+              of quietly handing back wrong plaintext.
             </li>
             <li>
-              Random IV per row means even if two transactions have the exact
-              same payee name, their ciphertexts are completely different. The
-              operator can&apos;t even tell that &ldquo;you shop at the same
-              place twice.&rdquo;
+              A random IV per row means even if two transactions have the exact
+              same payee name, their ciphertexts look nothing alike. The operator
+              can&apos;t even tell that &ldquo;you shop at the same place
+              twice.&rdquo;
             </li>
           </ul>
 
           <p>
-            One extra detail worth calling out: the password input to scrypt is
-            not the raw password. It&apos;s{" "}
+            One more detail worth calling out. The password fed into scrypt
+            isn&apos;t the raw password. It&apos;s{" "}
             <code>HMAC-SHA256(server-pepper, password)</code>, where the pepper
-            is a long random secret stored in the server&apos;s environment and
-            never in the database. The pepper exists to defend against a
-            database-only leak: even a stolen DB plus a 1080 Ti can&apos;t
-            mount an offline scrypt-cracking run without also stealing the
-            pepper out of the server&apos;s environment. The pepper is not a
-            user-facing feature — losing it is the same as losing the DB — but
-            it raises the bar against database-only theft, which is the most
+            is a long random secret that lives in the server&apos;s environment
+            and never touches the database. The whole point of the pepper is to
+            blunt a database-only leak: even a stolen DB plus a 1080 Ti
+            can&apos;t mount an offline scrypt-cracking run without also lifting
+            the pepper out of the server&apos;s environment. It&apos;s not a
+            user-facing thing, and losing it is the same as losing the DB. But it
+            raises the bar against database-only theft, which is by far the most
             common breach shape.
           </p>
 
@@ -322,8 +323,8 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
             >
               <code>pf-app/src/lib/crypto/envelope.ts</code>
             </a>
-            . It&apos;s about 280 lines including comments. AGPL v3, read it
-            yourself.
+            . It&apos;s about 280 lines, comments and all. AGPL v3, so go read it
+            yourself. Please do.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -331,12 +332,12 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
           </h2>
 
           <p>
-            Here is what the operator (me) can and cannot see when I open a
-            psql shell against the production database:
+            Here&apos;s exactly what the operator (me) can and can&apos;t see
+            when I open a psql shell against the production database:
           </p>
 
           <p>
-            <strong>I cannot decrypt:</strong>
+            <strong>What I cannot decrypt:</strong>
           </p>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>The payee on any transaction.</li>
@@ -345,63 +346,62 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
             <li>
               The display names of your accounts, categories, goals, loans,
               subscriptions, and portfolio holdings. These were the last
-              plaintext labels in the database — they were physically dropped
-              from the schema on 2026-05-03 in a project we called Stream D
-              Phase 4. The plaintext columns are gone; only the encrypted
-              versions remain.
+              plaintext labels left in the database, and they got physically
+              dropped from the schema on 2026-05-03 in a project we called
+              Stream D Phase 4. The plaintext columns are gone now. Only the
+              encrypted versions remain.
             </li>
             <li>
               The encrypted attachment of any receipt you upload to the file
               store.
             </li>
-            <li>The aliases you assigned to your accounts.</li>
+            <li>The aliases you gave your accounts.</li>
           </ul>
 
           <p>
-            <strong>I can see:</strong>
+            <strong>What I can see:</strong>
           </p>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
               The numeric amount of every transaction, and the currency code.
             </li>
             <li>
-              The transaction date and the date the row was created or last
+              The transaction date, plus the date the row was created or last
               updated.
             </li>
             <li>
-              The integer foreign keys that connect a transaction to an
+              The integer foreign keys that tie a transaction to an
               (encrypted-name) account and an (encrypted-name) category.
             </li>
             <li>
               Whether a row is a regular transaction, a transfer, an income, or
-              an expense — the one-character{" "}
+              an expense. That one-character{" "}
               <code>type</code> column (<code>E</code> / <code>I</code> /{" "}
-              <code>R</code> / <code>T</code>) is plaintext because the
+              <code>R</code> / <code>T</code>) stays plaintext, because the
               category-vs-sign invariant has to be checked server-side.
             </li>
             <li>
               How many accounts, categories, goals, and holdings you have, and
-              the structural shape of your portfolio (counts, dates, integer
-              IDs).
+              the overall shape of your portfolio (counts, dates, integer IDs).
             </li>
           </ul>
 
           <p>
-            In other words: I can see &ldquo;there&apos;s a $42.18 expense on
-            2026-04-09 in category #14, account #3.&rdquo; I cannot see what
-            category #14 is, what account #3 is, who the payee was, or what
-            note you wrote on it. The amounts and dates are visible. The labels
+            Put another way: I can see &ldquo;there&apos;s a $42.18 expense on
+            2026-04-09 in category #14, account #3.&rdquo; I can&apos;t see what
+            category #14 is, what account #3 is, who the payee was, or what note
+            you scribbled on it. The amounts and dates are visible. The labels
             are not.
           </p>
 
           <p>
             This is the honest version of the privacy claim. The landing page
             says &ldquo;Mathematically private,&rdquo; and that&apos;s true{" "}
-            <em>about the labels</em> — they really are sealed by a key derived
-            from your password. But it overstates the case if you read it as
+            <em>about the labels</em>. They really are sealed by a key derived
+            from your password. But it overstates things if you read it as
             &ldquo;the operator sees nothing.&rdquo; The operator sees plenty.
-            The operator just can&apos;t read the labels that turn those
-            numbers into meaningful information about your life.
+            The operator just can&apos;t read the labels that turn those numbers
+            into anything meaningful about your life.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -409,64 +409,63 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
           </h2>
 
           <p>
-            Three tradeoffs worth being explicit about.
+            Three tradeoffs I want to be flat-out about.
           </p>
 
           <p>
             <strong>Tradeoff 1: lose your password, lose your data.</strong>{" "}
-            Finlynq has no recovery key, no admin override, no master
-            decryption key kept on ice for emergencies. If you forget your
-            password, the &ldquo;reset&rdquo; flow does the only thing it
-            cryptographically can: it wipes all your data and provisions a
-            fresh DEK under your new password. There is no way to call support
-            and recover what was in there. This is by design — any recovery
-            mechanism would necessarily mean Finlynq holds something that can
-            decrypt your data, which is exactly what we&apos;re promising
-            isn&apos;t the case.
+            Finlynq has no recovery key, no admin override, no master decryption
+            key sitting on ice for emergencies. If you forget your password, the
+            &ldquo;reset&rdquo; flow does the only thing it cryptographically
+            can: it wipes all your data and hands you a fresh DEK under your new
+            password. There&apos;s no calling support to recover what was in
+            there. And that&apos;s on purpose. Any recovery mechanism would mean
+            Finlynq is holding something that can decrypt your data, which is the
+            exact thing we&apos;re promising isn&apos;t true.
           </p>
 
           <p>
-            This is a real cost. People do forget passwords. The mitigation is
-            simple but boring: pick a password from a password manager, write
-            it down somewhere physically secure, and export an unencrypted JSON
-            backup to your own machine periodically (Settings → Data →
-            Export). Finlynq can&apos;t save you from losing your password, but
+            This is a real cost. People forget passwords, it happens. The fix is
+            simple, if boring: pick a password from a password manager, write it
+            down somewhere physically safe, and now and then export an
+            unencrypted JSON backup to your own machine (Settings → Data →
+            Export). Finlynq can&apos;t save you from losing your password. But
             you can save yourself.
           </p>
 
           <p>
-            <strong>Tradeoff 2: amounts and dates are not encrypted.</strong>{" "}
-            Some personal-finance apps encrypt the amounts too, computing all
-            aggregations in the browser. That&apos;s a defensible design — it
-            shrinks what the operator can see — but it also makes the things
+            <strong>Tradeoff 2: amounts and dates aren&apos;t encrypted.</strong>{" "}
+            Some personal-finance apps encrypt the amounts too and do all the
+            aggregation in the browser. That&apos;s a defensible design. It does
+            shrink what the operator can see. But it also makes the things
             Finlynq cares most about (server-side MCP tools, aggregate queries
-            from an AI assistant, multi-currency conversion, the FIRE
-            calculator) either impossible or very slow. We made the call that
-            the value of an AI being able to answer &ldquo;what was my total
-            spend last month?&rdquo; server-side outweighs the marginal privacy
-            cost of the operator seeing un-labelled amounts.
+            from an AI, multi-currency conversion, the FIRE calculator) either
+            impossible or painfully slow. So I made the call: an AI being able to
+            answer &ldquo;what was my total spend last month?&rdquo; server-side
+            is worth more than the slim privacy gain of hiding un-labelled
+            amounts from the operator.
           </p>
 
           <p>
-            If you disagree with that call — and reasonable people do — the
-            answer is self-hosting. When you self-host, &ldquo;the operator
-            sees the amounts&rdquo; collapses to &ldquo;you see the
-            amounts,&rdquo; which presumably is fine.
+            If you disagree with that call, and reasonable people do, the answer
+            is self-hosting. When you self-host, &ldquo;the operator sees the
+            amounts&rdquo; quietly becomes &ldquo;you see the amounts,&rdquo;
+            which is presumably fine.
           </p>
 
           <p>
             <strong>Tradeoff 3: deploys briefly degrade the read path.</strong>{" "}
-            The DEK cache lives in process memory, so when Finlynq restarts —
-            for a deploy, a crash, a maintenance window — every signed-in user
-            momentarily has a valid session cookie but no cached DEK on the
-            server. Rather than 503ing every page until everyone re-logs in,
-            read paths handle this gracefully: encrypted fields render as a
-            placeholder, the app keeps working, and the next sign-in restores
-            normal display. Writes that need the key block until you re-sign-in,
-            because silently writing plaintext into encrypted columns would be
+            The DEK cache lives in process memory, so whenever Finlynq restarts
+            (a deploy, a crash, a maintenance window) every signed-in user
+            suddenly has a valid session cookie but no cached DEK on the server.
+            Instead of 503ing every page until everyone logs back in, the read
+            paths handle it gracefully: encrypted fields render as a placeholder,
+            the app keeps working, and your next sign-in puts everything back to
+            normal. Writes that need the key block until you re-sign-in, because
+            silently writing plaintext into encrypted columns would be a lot
             worse than blocking. There&apos;s also a deploy-generation marker
-            that proactively invalidates old sessions across a deploy boundary
-            so you get a clean re-auth instead of a degraded one.
+            that proactively kills old sessions across a deploy boundary, so you
+            get a clean re-auth instead of a half-broken one.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -475,55 +474,55 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
 
           <p>
             Finlynq&apos;s pitch is &ldquo;track your money here, analyze it
-            anywhere.&rdquo; The &ldquo;anywhere&rdquo; is the{" "}
+            anywhere.&rdquo; The &ldquo;anywhere&rdquo; part is the{" "}
             <a
               href="https://modelcontextprotocol.io"
               className="underline underline-offset-2 hover:text-primary"
             >
               Model Context Protocol
             </a>{" "}
-            server, with 109 HTTP tools (93 over stdio) that let Claude,
-            ChatGPT, Cursor, or any other MCP-compatible AI assistant query and
-            mutate your financial data on your behalf.
+            server, with 109 HTTP tools (93 over stdio) that let Claude, ChatGPT,
+            Cursor, or any other MCP-compatible AI assistant query and change
+            your financial data on your behalf.
           </p>
 
           <p>
-            The encryption model matters here because of a question every
-            cautious user asks before they connect an AI to their bank data:{" "}
-            <em>where does the data actually go, and who sees it?</em>
+            The encryption model matters here because of the one question every
+            cautious person asks before they wire an AI up to their bank data:{" "}
+            <em>where does the data actually go, and who gets to see it?</em>
           </p>
 
           <p>
-            The answer for Finlynq is layered:
+            For Finlynq, the answer comes in layers:
           </p>
 
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
               Your <strong>raw data</strong> lives in Finlynq&apos;s database,
-              with the labels encrypted at rest as described above.
+              with the labels encrypted at rest, exactly as described above.
             </li>
             <li>
               When an AI assistant calls an MCP tool, it authenticates with
               either OAuth 2.1, a Bearer API key, or stdio. The server unwraps
-              your DEK on that request, decrypts only what that tool needs to
-              return, and the tool&apos;s response goes back to the AI as
-              plaintext JSON. The AI provider (Anthropic, OpenAI, whoever) does
-              see that response — that is unavoidable if you want the AI to
-              answer questions about it.
+              your DEK for that request, decrypts only what the tool actually
+              needs to return, and the tool&apos;s response heads back to the AI
+              as plaintext JSON. The AI provider (Anthropic, OpenAI, whoever)
+              does see that response. There&apos;s no way around it if you want
+              the AI to answer questions about your data.
             </li>
             <li>
-              That MCP session is <em>scoped</em>: it gets read-only or
-              read-write tools according to the OAuth scope you granted; you
-              can revoke the grant from Settings → Connected apps at any time;
-              destructive operations require a preview-then-confirm
-              cryptographic token so the AI cannot mutate your data without
-              your explicit step.
+              That MCP session is <em>scoped</em>. It gets read-only or
+              read-write tools based on the OAuth scope you granted, you can
+              revoke the grant from Settings → Connected apps whenever you like,
+              and destructive operations need a preview-then-confirm
+              cryptographic token, so the AI can&apos;t change your data without
+              you taking an explicit step.
             </li>
             <li>
-              We do not train models on your data. The MCP server is a tool
+              We don&apos;t train models on your data. The MCP server is a tool
               gateway, not an ingest pipeline. Anything that crosses the AI
-              vendor&apos;s API is governed by{" "}
-              <em>their</em> privacy policy — refer to{" "}
+              vendor&apos;s API is governed by <em>their</em> privacy policy, so
+              check{" "}
               <a
                 href="https://www.anthropic.com/legal/privacy"
                 className="underline underline-offset-2 hover:text-primary"
@@ -537,18 +536,18 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
               >
                 OpenAI&apos;s
               </a>{" "}
-              for the details — but the connection from your data to that
-              vendor is one you explicitly authorize and can revoke.
+              for the specifics. But the link between your data and that vendor
+              is one you explicitly turn on, and can turn off.
             </li>
           </ul>
 
           <p>
-            So if you&apos;re worried about AI assistants getting access to
-            your financial life: the answer isn&apos;t &ldquo;never grant the
-            access.&rdquo; The useful answer is &ldquo;grant a scoped,
-            revocable, observable session, and use a backend that can&apos;t
-            read the data on its own.&rdquo; That second half is what the
-            encryption model buys you.
+            So if you&apos;re nervous about AI assistants reaching into your
+            financial life, the answer isn&apos;t &ldquo;never grant the
+            access.&rdquo; The useful answer is &ldquo;grant a scoped, revocable,
+            observable session, and run it on a backend that can&apos;t read the
+            data on its own.&rdquo; That second half is the part the encryption
+            model buys you.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -556,9 +555,9 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
           </h2>
 
           <p>
-            Everything in this post is described in more rigorous detail in the
-            architecture docs, and the code that implements it is published
-            under AGPL v3:
+            Everything in this post is spelled out in more rigorous detail in
+            the architecture docs, and the code behind it is published under
+            AGPL v3:
           </p>
 
           <ul className="list-disc pl-6 space-y-1.5">
@@ -569,12 +568,12 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
               >
                 <code>pf-app/docs/architecture/encryption.md</code>
               </a>{" "}
-              — the authoritative technical reference. Covers Phase 2, Phase 3,
-              and the Stream D rollout that finally encrypted display names; the
-              auth-tag failure resilience helper that prevented a class of
-              regressions; the wipe-account primitive; the backup-restore
-              foreign-key remap; the grace migration for pre-encryption
-              accounts.
+              is the authoritative technical reference. It covers Phase 2, Phase
+              3, and the Stream D rollout that finally encrypted display names,
+              plus the auth-tag failure resilience helper that headed off a whole
+              class of regressions, the wipe-account primitive, the
+              backup-restore foreign-key remap, and the grace migration for
+              pre-encryption accounts.
             </li>
             <li>
               <a
@@ -583,8 +582,8 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
               >
                 <code>pf-app/src/lib/crypto/</code>
               </a>{" "}
-              — the implementation. Roughly 1,500 lines across envelope, key
-              cache, column helpers, staging envelope, file envelope. Small
+              is the implementation. Roughly 1,500 lines across envelope, key
+              cache, column helpers, staging envelope, and file envelope. Small
               enough to read in an afternoon.
             </li>
             <li>
@@ -594,8 +593,8 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
               >
                 <code>STREAM_D.md</code>
               </a>{" "}
-              — the design doc for the display-name encryption rollout. Useful
-              if you want to understand the parallel{" "}
+              is the design doc for the display-name encryption rollout. Worth a
+              look if you want to understand the parallel{" "}
               <code>(name_ct, name_lookup)</code> column pattern that lets
               encrypted strings still support exact-match SQL queries and
               per-user unique constraints.
@@ -607,7 +606,7 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
               >
                 /privacy
               </Link>{" "}
-              — the policy version of all this, with GDPR Article 30 records,
+              is the policy version of all of this, with GDPR Article 30 records,
               retention rules, and the sub-processor list.
             </li>
             <li>
@@ -616,16 +615,16 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
                 className="underline underline-offset-2 hover:text-primary"
               >
                 /self-hosted
-              </Link>{" "}
-              — if the &ldquo;trust the operator&rdquo; layer is the part you
-              want to skip, run Finlynq on your own hardware. Same code, same
-              encryption, you&apos;re the operator.
+              </Link>
+              . If the &ldquo;trust the operator&rdquo; layer is the part
+              you&apos;d rather skip, run Finlynq on your own hardware. Same code,
+              same encryption, except now you&apos;re the operator.
             </li>
           </ul>
 
           <p>
-            And if you find something in the design or the code that&apos;s
-            wrong — or weaker than this post claims — please tell me. Email{" "}
+            And if you spot something in the design or the code that&apos;s
+            wrong, or just weaker than this post claims, please tell me. Email{" "}
             <code>privacy@finlynq.com</code>, or open an issue at{" "}
             <a
               href="https://github.com/finlynq/finlynq/issues"
@@ -633,9 +632,9 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
             >
               github.com/finlynq/finlynq/issues
             </a>
-            . An honest threat model is more useful than a confident one, and
-            the only way it stays honest is if people who know more than me
-            keep poking holes.
+            . An honest threat model beats a confident one every time, and the
+            only way it stays honest is if people who know more than I do keep
+            poking holes in it.
           </p>
 
           <p className="mt-12 text-xs text-muted-foreground">

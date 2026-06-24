@@ -7,9 +7,9 @@ import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
  * Shared layout for `/vs/<competitor>` comparison pages.
  *
  * Data-driven so each `/vs/<slug>/page.tsx` only owns its content. Pages render
- * inside a dark prose layout that mirrors `/privacy` and `/terms` — content
+ * inside a dark prose layout that mirrors `/privacy` and `/terms` (content
  * rather than the premium `fl-landing` motion system, which would distract from
- * a research-mode read.
+ * a research-mode read).
  *
  * Pattern for adding a new `/vs/<slug>`:
  *   1. Create `pf-app/src/app/vs/<slug>/page.tsx` with a default export.
@@ -111,8 +111,8 @@ export function VsPage({ content }: { content: VsPageContent }) {
             When to choose {competitorName}
           </h2>
           <p>
-            {competitorName} is the right call if any of these matter more than
-            ownership:
+            {competitorName} is probably the better pick if any of these matter
+            to you more than owning your data:
           </p>
           <ul className="list-disc pl-6 space-y-2">
             {whenCompetitor.map((bullet, i) => (
@@ -124,7 +124,7 @@ export function VsPage({ content }: { content: VsPageContent }) {
           <h2 className="text-xl font-semibold mt-12 mb-3">
             When to choose Finlynq
           </h2>
-          <p>Finlynq is the right call if any of these matter:</p>
+          <p>Finlynq is the one to pick if any of these matter to you:</p>
           <ul className="list-disc pl-6 space-y-2">
             {whenFinlynq.map((bullet, i) => (
               <li key={i}>{bullet}</li>
@@ -227,21 +227,22 @@ export function VsPage({ content }: { content: VsPageContent }) {
                 </a>
                 {source.note ? (
                   <span className="ml-1 text-muted-foreground/80">
-                    — {source.note}
+                    ({source.note})
                   </span>
                 ) : null}
               </li>
             ))}
           </ul>
 
-          {/* Soft CTA — research-mode page, one link only per the brief */}
+          {/* Soft CTA: research-mode page, one link only per the brief */}
           <div className="not-prose mt-12 rounded-2xl border border-primary/20 bg-primary/5 p-6">
             <h3 className="text-base font-semibold text-foreground">
               Try Finlynq
             </h3>
             <p className="mt-2 text-sm text-muted-foreground">
-              Free, open source, AGPL v3. Run it on our managed cloud or self-host
-              with one Docker Compose file. Same features either way.
+              Free, open source, AGPL v3. Run it on our managed cloud, or
+              self-host with one Docker Compose file. You get the same features
+              either way.
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <Link

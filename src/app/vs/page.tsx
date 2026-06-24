@@ -5,7 +5,7 @@ import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
 import { VS_SLUGS, VS_META } from "@/lib/seo/site";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs other personal finance apps — side-by-side comparisons",
+  title: "Finlynq vs other personal finance apps: side-by-side comparisons",
   description:
     "How Finlynq compares to Monarch Money, Era, Firefly III, and Alderfi: open-source AGPL v3, self-hostable, first-party MCP server, and per-user envelope encryption versus each alternative. Honest side-by-side tables, when to choose each, and migration steps.",
   alternates: { canonical: "/vs" },
@@ -52,8 +52,9 @@ export default function VsIndexPage() {
           </h1>
           <p className="mt-4 text-base leading-relaxed text-muted-foreground">
             Honest, sourced side-by-side comparisons. Finlynq is open-source
-            (AGPL v3), self-hostable, and the only personal finance manager with
-            a shipped first-party MCP server and per-user envelope encryption.
+            (AGPL v3) and self-hostable, and it&apos;s the only personal finance
+            manager we know of that ships a first-party MCP server plus per-user
+            envelope encryption.
           </p>
         </header>
 
@@ -77,8 +78,9 @@ export default function VsIndexPage() {
         <div className="mt-12 rounded-2xl border border-primary/20 bg-primary/5 p-6">
           <h3 className="text-base font-semibold text-foreground">Try Finlynq</h3>
           <p className="mt-2 text-sm text-muted-foreground">
-            Free, open source, AGPL v3. Run it on our managed cloud or self-host
-            with one Docker Compose file. Same features either way.
+            Free, open source, AGPL v3. Run it on our managed cloud, or
+            self-host with one Docker Compose file. You get the same features
+            either way.
           </p>
           <div className="mt-4 flex flex-wrap gap-3">
             <Link

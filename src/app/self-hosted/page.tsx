@@ -3,9 +3,9 @@ import Link from "next/link";
 import { AnalyticsConsent } from "@/components/analytics-consent";
 
 export const metadata: Metadata = {
-  title: "Self-host Finlynq — Docker Compose personal finance with MCP",
+  title: "Self-host Finlynq: Docker Compose personal finance with MCP",
   description:
-    "Self-host Finlynq on your own infrastructure with Docker Compose. Same code as the managed cloud — first-party MCP server, per-user envelope encryption, PostgreSQL. AGPL v3, no license fees.",
+    "Self-host Finlynq on your own infrastructure with Docker Compose. It's the same code as the managed cloud: first-party MCP server, per-user envelope encryption, PostgreSQL. AGPL v3, no license fees.",
   alternates: { canonical: "/self-hosted" },
   openGraph: {
     title: "Self-host Finlynq with Docker",
@@ -47,9 +47,9 @@ export default function SelfHostedPage() {
           Self-Hosted Setup
         </h1>
         <p className="mb-10 text-muted-foreground">
-          Run Finlynq on your own infrastructure. App + PostgreSQL run in
-          Docker, sensitive fields are encrypted at rest with a per-user
-          key derived from the account password.
+          Run Finlynq on your own infrastructure. The app and PostgreSQL both
+          run in Docker, and sensitive fields are encrypted at rest with a
+          per-user key derived from your account password.
         </p>
 
         {/* Quick Start */}
@@ -66,9 +66,9 @@ docker compose up -d`}</code>
             <code className="rounded bg-muted px-1 py-0.5 text-xs">
               http://localhost:3000
             </code>{" "}
-            and register your account. Remember to change the default
+            and register your account. One thing first: change the default
             PostgreSQL password and <code className="rounded bg-muted px-1 py-0.5 text-xs">PF_JWT_SECRET</code>
-            {" "}before exposing the container to anything but localhost.
+            {" "}before you expose the container to anything but localhost.
           </p>
         </section>
 
@@ -78,7 +78,7 @@ docker compose up -d`}</code>
             What You Get
           </h2>
           <ul className="space-y-2 text-sm text-muted-foreground">
-            <li>✓ Self-contained Docker Compose — app + PostgreSQL, nothing external</li>
+            <li>✓ Self-contained Docker Compose. Just the app and PostgreSQL, nothing external</li>
             <li>✓ Envelope encryption on transaction text fields (payees, notes, tags, holdings)</li>
             <li>✓ MCP server for plugging in AI assistants (Claude, etc.)</li>
             <li>✓ Automatic schema migrations on container start</li>
@@ -93,33 +93,33 @@ docker compose up -d`}</code>
           <ul className="space-y-1 text-sm text-muted-foreground">
             <li>
               <code className="rounded bg-muted px-1 py-0.5 text-xs">DATABASE_URL</code>{" "}
-              — PostgreSQL connection string (required)
+              is your PostgreSQL connection string (required)
             </li>
             <li>
               <code className="rounded bg-muted px-1 py-0.5 text-xs">PF_JWT_SECRET</code>{" "}
-              — JWT signing secret, at least 32 chars of entropy (required)
+              is the JWT signing secret, at least 32 chars of entropy (required)
             </li>
             <li>
               <code className="rounded bg-muted px-1 py-0.5 text-xs">PF_PEPPER</code>{" "}
-              — scrypt password peppering, at least 32 chars (required in production)
+              handles scrypt password peppering, at least 32 chars (required in production)
             </li>
             <li>
               <code className="rounded bg-muted px-1 py-0.5 text-xs">PF_STAGING_KEY</code>{" "}
-              — wraps email-staged transactions, at least 32 chars (required in production)
+              wraps email-staged transactions, at least 32 chars (required in production)
             </li>
             <li>
               <code className="rounded bg-muted px-1 py-0.5 text-xs">PORT</code>{" "}
-              — server port (default <code className="rounded bg-muted px-1 py-0.5 text-xs">3000</code>)
+              sets the server port (default <code className="rounded bg-muted px-1 py-0.5 text-xs">3000</code>)
             </li>
           </ul>
         </section>
 
         <div className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
           <strong className="text-foreground">Security note:</strong> the envelope-encryption
-          DEK is derived from your account password via scrypt. If you forget
-          it, the password-reset flow wipes your data and provisions a fresh
-          DEK — there is no backdoor. Back up your data via the Settings →
-          Privacy & Backup panel periodically.
+          DEK is derived from your account password via scrypt. Forget the
+          password and the reset flow wipes your data and provisions a fresh
+          DEK. There&apos;s no backdoor. So back up your data now and then via the
+          Settings → Privacy & Backup panel.
         </div>
       </div>
     </div>

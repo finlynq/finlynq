@@ -5,7 +5,7 @@ import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
 import { GLOSSARY } from "@/lib/seo/glossary";
 
 export const metadata: Metadata = {
-  title: "Glossary — personal finance, MCP & encryption terms | Finlynq",
+  title: "Glossary: personal finance, MCP & encryption terms | Finlynq",
   description:
     "Plain-English definitions of the concepts behind Finlynq: MCP servers, envelope encryption, zero-knowledge personal finance, self-hosting, and lot-tracked cost basis.",
   alternates: { canonical: "/glossary" },
@@ -49,7 +49,7 @@ export default function GlossaryIndexPage() {
           </div>
           <h1 className="mt-4 text-4xl font-bold tracking-tight">Glossary</h1>
           <p className="mt-4 text-base leading-relaxed text-muted-foreground">
-            Plain-English definitions of the concepts behind Finlynq — the open-
+            Plain-English definitions of the concepts behind Finlynq, the open-
             source, MCP-first, end-to-end-encrypted personal finance app.
           </p>
         </header>

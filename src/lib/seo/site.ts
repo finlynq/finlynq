@@ -12,7 +12,7 @@ export const SITE_URL =
 
 /**
  * Comparison pages under `/vs/<slug>`. Add a slug here when you ship a new
- * comparison page — it flows into the sitemap, the `/vs` index, and llms.txt.
+ * comparison page. It flows into the sitemap, the `/vs` index, and llms.txt.
  */
 export const VS_SLUGS = [
   "monarch",
@@ -41,22 +41,22 @@ export const VS_META: Record<VsSlug, { name: string; blurb: string }> = {
   era: {
     name: "Era",
     blurb:
-      "Two MCP-first personal finance apps — open-source + self-hostable vs closed hosted SaaS.",
+      "Two MCP-first personal finance apps: open-source and self-hostable vs closed hosted SaaS.",
   },
   "firefly-iii": {
     name: "Firefly III",
     blurb:
-      "Two open-source self-hostable PFMs — first-party MCP + name encryption vs mature double-entry.",
+      "Two open-source self-hostable PFMs: first-party MCP and name encryption vs mature double-entry.",
   },
   actual: {
     name: "Actual Budget",
     blurb:
-      "Two open-source PFMs — Actual's local-first budgeting vs Finlynq's investments + multi-currency + MCP.",
+      "Two open-source PFMs: Actual's local-first budgeting vs Finlynq's investments, multi-currency, and MCP.",
   },
   ghostfolio: {
     name: "Ghostfolio",
     blurb:
-      "Full personal-finance app with a first-party MCP vs a dedicated open-source portfolio tracker.",
+      "A full personal-finance app with a first-party MCP vs a dedicated open-source portfolio tracker.",
   },
   maybe: {
     name: "Maybe / Sure",
@@ -83,7 +83,7 @@ export type StaticRoute = {
 
 /**
  * Public top-level routes that live OUTSIDE the `(app)` auth group. Anything
- * requiring a Finlynq login is intentionally excluded — every URL here is
+ * requiring a Finlynq login is intentionally excluded. Every URL here is
  * reachable by an unauthenticated user or a search / LLM crawler.
  */
 export const STATIC_ROUTES: StaticRoute[] = [

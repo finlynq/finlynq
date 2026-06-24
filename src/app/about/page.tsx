@@ -10,14 +10,14 @@ import {
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "What is Finlynq? — open-source personal finance app with first-party MCP",
+  title: "What is Finlynq? Open-source personal finance app with first-party MCP",
   description:
-    "Finlynq is an open-source (AGPL v3) personal finance web app with a first-party Model Context Protocol (MCP) server. Track income, expenses, budgets, investments, loans, and goals — then query your financial data from Claude, Cursor, Windsurf, or any MCP-compatible AI assistant. Not affiliated with Finq.com (forex broker) or Finlync (B2B treasury software).",
+    "Finlynq is an open-source (AGPL v3) personal finance web app with a first-party Model Context Protocol (MCP) server. Track income, expenses, budgets, investments, loans, and goals, then query your financial data from Claude, Cursor, Windsurf, or any MCP-compatible AI assistant. Not affiliated with Finq.com (forex broker) or Finlync (B2B treasury software).",
   alternates: {
     canonical: "/about",
   },
   openGraph: {
-    title: "What is Finlynq? — open-source personal finance with first-party MCP",
+    title: "What is Finlynq? Open-source personal finance with first-party MCP",
     description:
       "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 109 MCP tools. Not affiliated with Finq.com or Finlync.",
     url: "/about",
@@ -26,7 +26,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "What is Finlynq? — open-source personal finance with first-party MCP",
+    title: "What is Finlynq? Open-source personal finance with first-party MCP",
     description:
       "Open-source self-hostable PFM with first-party MCP, per-user envelope encryption, and Canadian tax tracking.",
   },
@@ -35,55 +35,55 @@ export const metadata: Metadata = {
 const faqItems: { q: string; a: string }[] = [
   {
     q: "What is Finlynq?",
-    a: "Finlynq is an open-source (AGPL v3) personal finance web application with a built-in Model Context Protocol (MCP) server. It lets you track income, expenses, budgets, investments, loans, subscriptions, and financial goals — and query that data in natural language from any MCP-compatible AI assistant including Claude, Cursor, Windsurf, and ChatGPT custom GPTs. Finlynq runs as a managed cloud at finlynq.com or as a self-hosted Docker + PostgreSQL deployment, with the same feature set in both modes.",
+    a: "Finlynq is an open-source (AGPL v3) personal finance web application with a built-in Model Context Protocol (MCP) server. You track income, expenses, budgets, investments, loans, subscriptions, and financial goals, then ask about that data in plain language from any MCP-compatible AI assistant: Claude, Cursor, Windsurf, and ChatGPT custom GPTs all work. Run it on our managed cloud at finlynq.com, or self-host with Docker and PostgreSQL. You get the same features either way.",
   },
   {
     q: "Is Finlynq the same as Finq.com?",
-    a: "No. Finq.com is a forex / CFD trading broker that has no relationship with Finlynq. Finlynq is an open-source personal finance application focused on budgeting, expense tracking, and investment portfolio management. Finlynq is not a broker, does not execute trades, and does not hold customer funds.",
+    a: "No. Finq.com is a forex / CFD trading broker, and it has no relationship with Finlynq. Finlynq is an open-source personal finance app for budgeting, expense tracking, and investment portfolio management. It isn't a broker, doesn't execute trades, and never holds customer funds.",
   },
   {
     q: "Is Finlynq the same as Finlync?",
-    a: "No. Finlync is a corporate treasury and banking-connectivity B2B platform for enterprise finance teams. Finlynq is an open-source personal finance application for individuals and households. The two projects are unrelated; the similar names are coincidental.",
+    a: "No. Finlync is a corporate treasury and banking-connectivity B2B platform built for enterprise finance teams. Finlynq is an open-source personal finance app for individuals and households. The two projects are unrelated. The similar names are just a coincidence.",
   },
   {
     q: "Who builds Finlynq?",
-    a: "Finlynq is an independent open-source project hosted at github.com/finlynq/finlynq under the GNU AGPL v3 license. It is bootstrapped and donation-funded (GitHub Sponsors, Ko-fi) — there are no paid tiers, no advertising, and no sale of user data. The complete source code, including the encryption implementation and the MCP server, is publicly auditable.",
+    a: "Finlynq is an independent open-source project hosted at github.com/finlynq/finlynq under the GNU AGPL v3 license. It's bootstrapped and donation-funded (GitHub Sponsors, Ko-fi). No paid tiers, no advertising, and no selling your data. The complete source, including the encryption code and the MCP server, is right there for anyone to audit.",
   },
   {
     q: "How is Finlynq different from Monarch Money, YNAB, or Simplifi?",
-    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable with a first-party MCP server (109 HTTP / 93 stdio tools) and per-user envelope encryption that excludes even the operator from reading your data. Finlynq does not yet have first-party Plaid bank sync — it imports from CSV, OFX, QFX, and email today, with the SnapTrade brokerage integration on the roadmap. Side-by-side comparison at finlynq.com/vs/monarch.",
+    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable, with a first-party MCP server (109 HTTP / 93 stdio tools) and per-user envelope encryption that keeps even the operator from reading your data. The catch: Finlynq doesn't have first-party Plaid bank sync yet. For now it imports from CSV, OFX, QFX, and email, with the SnapTrade brokerage integration on the roadmap. There's a side-by-side comparison at finlynq.com/vs/monarch.",
   },
   {
     q: "How is Finlynq different from Firefly III or Actual Budget?",
-    a: "Firefly III and Actual Budget are both open-source self-hostable PFMs. Firefly III is mature double-entry accounting with PSD2 bank sync for EU/UK users; Actual Budget is local-first envelope budgeting. Finlynq's specific differentiators are: a first-party MCP server (the others rely on community wrappers or have none), per-user envelope encryption that excludes the operator, native multi-currency investment tracking with lot-tracked cost basis, and Canadian tax-account support (RRSP / TFSA / RESP). Side-by-side comparison at finlynq.com/vs/firefly-iii.",
+    a: "Firefly III and Actual Budget are both open-source self-hostable PFMs. Firefly III is mature double-entry accounting with PSD2 bank sync for EU/UK users. Actual Budget is local-first envelope budgeting. So what sets Finlynq apart? A first-party MCP server (the others rely on community wrappers or have none), per-user envelope encryption that locks out the operator, native multi-currency investment tracking with lot-tracked cost basis, and Canadian tax-account support (RRSP / TFSA / RESP). There's a side-by-side comparison at finlynq.com/vs/firefly-iii.",
   },
   {
     q: "How is Finlynq different from Era?",
-    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Finlynq's specific differentiators vs Era: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for AES-256-at-rest), and a 109 HTTP / 93 stdio tool MCP surface (v3.3.0) vs Era's 27. Era has stronger US bank sync, native iOS/Android, and shared household features. Side-by-side comparison at finlynq.com/vs/era.",
+    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Here's where Finlynq parts ways: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for its AES-256-at-rest), and a 109 HTTP / 93 stdio tool MCP surface (v3.3.0) against Era's 27. To be fair, Era has stronger US bank sync and shared household features. There's a side-by-side comparison at finlynq.com/vs/era.",
   },
   {
     q: "Does Finlynq sync with my bank automatically?",
-    a: "Not yet via Plaid or MX. Finlynq currently imports transactions from CSV, OFX, QFX, and email (with template detection and a staging-review pipeline). SnapTrade integration for brokerage accounts is on the near-term roadmap; bank-sync aggregator integration is a tracked future item.",
+    a: "Not yet, at least not through Plaid or MX. For now Finlynq imports transactions from CSV, OFX, QFX, and email, with template detection and a staging-review pipeline so you check things before they land. SnapTrade for brokerage accounts is on the near-term roadmap, and bank-sync aggregator integration is a tracked future item.",
   },
   {
     q: "Does Finlynq have a mobile app?",
-    a: "Almost. Finlynq has a React Native (Expo) mobile app with Dashboard, Transactions, Import, Budgets, and Settings screens that connects to your Finlynq web server (managed cloud or self-hosted). The Android app is in final testing on Google Play, with iOS to follow. It is not yet at parity with mature consumer mobile apps like Monarch's iOS/Android. Read the announcement at finlynq.com/blog/finlynq-mobile-app.",
+    a: "Yep. Finlynq has native iOS and Android apps, free on the App Store and Google Play. They cover Dashboard, Transactions, Import, Budgets, and Settings, and they sign in to your Finlynq web server, whether that's the managed cloud or your own self-hosted box. They're newer than mature apps like Monarch's, so not everything has caught up yet, but they handle your everyday tracking on the go just fine. The full story is at finlynq.com/blog/finlynq-mobile-app.",
   },
   {
     q: "What AI assistants does Finlynq work with?",
-    a: "Any AI assistant that supports the Model Context Protocol (MCP). Tested clients include Claude (Claude.ai web, Claude Desktop, Claude Code), Cursor, Windsurf, and custom Anthropic SDK agents. Finlynq's MCP server supports three transports: Streamable HTTP with OAuth 2.1 + Dynamic Client Registration, HTTP with Bearer API key, and stdio. Finlynq also has a built-in AI chat UI for users who don't want to set up an external MCP client.",
+    a: "Any AI assistant that speaks the Model Context Protocol (MCP). We've tested Claude (Claude.ai web, Claude Desktop, Claude Code), Cursor, Windsurf, and custom Anthropic SDK agents. Finlynq's MCP server supports three transports: Streamable HTTP with OAuth 2.1 + Dynamic Client Registration, HTTP with a Bearer API key, and stdio. And if you'd rather not set up an external MCP client at all, there's a built-in AI chat UI right in the app.",
   },
   {
     q: "Is Finlynq free?",
-    a: "Yes. The self-hosted Docker version is fully free with the same features as the managed cloud. The managed cloud at finlynq.com is also free, supported by voluntary donations via GitHub Sponsors and Ko-fi. There are no paid tiers, no feature gates, no upsells.",
+    a: "Yes. The self-hosted Docker version is completely free, with the same features as the managed cloud. The managed cloud at finlynq.com is free too, kept running by voluntary donations through GitHub Sponsors and Ko-fi. No paid tiers, no feature gates, no upsells.",
   },
   {
     q: "How does Finlynq protect my data?",
-    a: "Finlynq uses per-user envelope encryption (AES-256-GCM with a scrypt-derived KEK) on six tables containing user-named data (transaction payees, notes, tags, account names, category names, and budget names). The KEK is derived from your password and a server-side pepper, so even the operator cannot decrypt these fields without your password. Trade-off: if you lose your password without a recovery backup, the encrypted fields are unrecoverable. Full details at finlynq.com/privacy.",
+    a: "Finlynq uses per-user envelope encryption (AES-256-GCM with a scrypt-derived KEK) on six tables that hold user-named data: transaction payees, notes, tags, account names, category names, and budget names. The KEK comes from your password plus a server-side pepper, so even the operator can't decrypt those fields without your password. There's a trade-off to be honest about: lose your password without a recovery backup and the encrypted fields are gone for good. Full details at finlynq.com/privacy.",
   },
   {
     q: "Does Finlynq support Canadian tax accounts?",
-    a: "Yes. Finlynq tracks RRSP, TFSA, and RESP contribution room using CRA-published limits, with asset-location advice (bonds in RRSP, stocks in TFSA, growth assets in TFSA). FHSA and RRIF support are tracked roadmap items.",
+    a: "Yes. Finlynq tracks RRSP, TFSA, and RESP contribution room against CRA-published limits, and it offers asset-location advice (bonds in RRSP, stocks in TFSA, growth assets in TFSA). FHSA and RRIF support are on the roadmap.",
   },
 ];
 
@@ -120,8 +120,8 @@ export default function AboutPage() {
           <p className="mt-4 text-base leading-relaxed text-muted-foreground">
             Finlynq is an open-source (AGPL v3) personal finance web application
             with a first-party Model Context Protocol (MCP) server. Track your
-            money here, analyze it anywhere — from Claude, Cursor, Windsurf, or
-            any MCP-compatible AI assistant.
+            money here, analyze it anywhere: Claude, Cursor, Windsurf, or any
+            MCP-compatible AI assistant.
           </p>
           <p className="mt-3 text-xs text-muted-foreground">
             Last updated: 2026-06-11
@@ -134,9 +134,9 @@ export default function AboutPage() {
           </h2>
           <p>
             Finlynq lets you track income, expenses, budgets, investments,
-            loans, and financial goals — then query that data in natural
+            loans, and financial goals, then ask about that data in plain
             language from any AI assistant that supports MCP. Self-host with
-            Docker + PostgreSQL, or use our managed cloud at{" "}
+            Docker and PostgreSQL, or use our managed cloud at{" "}
             <code>finlynq.com</code>. Same features either way.
           </p>
           <p>
@@ -149,8 +149,8 @@ export default function AboutPage() {
             >
               github.com/finlynq/finlynq
             </a>
-            . It&apos;s bootstrapped and donation-funded — no paid tiers, no
-            advertising, no sale of user data.
+            . It&apos;s bootstrapped and donation-funded. No paid tiers, no
+            advertising, no selling your data.
           </p>
 
           <div className="not-prose my-8 rounded-2xl border border-yellow-500/30 bg-yellow-500/5 p-6">
@@ -159,16 +159,16 @@ export default function AboutPage() {
             </h3>
             <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
               <li>
-                <strong className="text-foreground">Finq.com</strong> — a forex
+                <strong className="text-foreground">Finq.com</strong>: a forex
                 and CFD trading broker. No relationship with Finlynq. Finlynq
-                is not a broker, does not execute trades, and does not hold
-                customer funds.
+                isn&apos;t a broker, doesn&apos;t execute trades, and never
+                holds customer funds.
               </li>
               <li>
-                <strong className="text-foreground">Finlync</strong> — a
+                <strong className="text-foreground">Finlync</strong>: a
                 corporate treasury and banking-connectivity B2B platform for
-                enterprise finance teams. Unrelated project; similar name is
-                coincidental.
+                enterprise finance teams. Unrelated project, and the similar
+                name is just a coincidence.
               </li>
             </ul>
           </div>
@@ -180,9 +180,9 @@ export default function AboutPage() {
             <li>
               <strong className="text-foreground">First-party MCP server.</strong>{" "}
               {MCP_TOOL_COUNTS.http} HTTP tools and {MCP_TOOL_COUNTS.stdio} stdio
-              tools at v{MCP_SERVER_VERSION} — built into the project, not a
+              tools at v{MCP_SERVER_VERSION}, built into the project, not a
               community wrapper. OAuth 2.1 + Dynamic Client Registration, Bearer
-              API keys, and stdio transports all supported.
+              API keys, and stdio transports are all supported.
             </li>
             <li>
               <strong className="text-foreground">
@@ -201,24 +201,23 @@ export default function AboutPage() {
                 Native investment tracking.
               </strong>{" "}
               Lot-tracked cost basis, dividends, multi-currency support with
-              per-currency cost-basis bucketing, historical FX lookups.
+              per-currency cost-basis bucketing, and historical FX lookups.
             </li>
             <li>
               <strong className="text-foreground">Canadian tax accounts.</strong>{" "}
-              RRSP, TFSA, and RESP contribution-room tracking with
-              CRA-published limits. Asset-location advice (bonds in RRSP,
+              RRSP, TFSA, and RESP contribution-room tracking against
+              CRA-published limits, plus asset-location advice (bonds in RRSP,
               stocks in TFSA).
             </li>
             <li>
               <strong className="text-foreground">In-app AI chat.</strong> Built
-              directly into the UI — you can use Finlynq&apos;s AI features
+              right into the UI, so you can use Finlynq&apos;s AI features
               without setting up Claude or another external MCP client.
             </li>
             <li>
               <strong className="text-foreground">Mobile app.</strong> React
               Native (Expo) covering Dashboard, Transactions, Import, Budgets,
-              and Settings. The Android app is in final testing on Google Play,
-              with iOS to follow.{" "}
+              and Settings. Available now on the App Store and Google Play.{" "}
               <Link
                 href="/blog/finlynq-mobile-app"
                 className="underline underline-offset-2 hover:text-primary"
@@ -286,7 +285,8 @@ export default function AboutPage() {
             </h3>
             <p className="mt-2 text-sm text-muted-foreground">
               Free, open source, AGPL v3. Run it on our managed cloud or
-              self-host with one Docker Compose file. Same features either way.
+              self-host with a single Docker Compose file. Same features either
+              way.
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <Link

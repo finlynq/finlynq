@@ -4,42 +4,43 @@ import Link from "next/link";
 import { useEffect, useRef } from "react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
 import { LogoMark } from "@/components/logo-mark";
+import { StoreBadges } from "@/components/store-badges";
 
 const FEATURES = [
   {
     idx: "F.01 · AI NATIVE",
     title: "Talk to your money in plain English.",
-    desc: "Connect Claude, Cursor, or any MCP client — or use the in-app AI chat with zero setup. 109 HTTP / 93 stdio tools. Ask questions, get charts and structured answers — no custom exports, no BI tool needed.",
+    desc: "Connect Claude, Cursor, or any MCP client. Or just use the in-app AI chat, no setup at all. That's 109 HTTP / 93 stdio tools. Ask a question, get charts and real answers back. No custom exports, no BI tool.",
     viz: "bars",
   },
   {
     idx: "F.02 · IMPORT",
     title: "Drop a file. Done.",
-    desc: "CSV, Excel, OFX, QFX, and PDF. Finlynq remembers every column mapping as a template — the next import is a single click.",
+    desc: "CSV, Excel, OFX, QFX, PDF. Finlynq remembers how you mapped the columns and saves it as a template, so the next import is one click.",
     viz: "import",
   },
   {
     idx: "F.03 · BUDGETS",
     title: "Envelope budgeting, rolled over.",
-    desc: "Month-by-month envelopes with rollover. Know exactly what's left in Groceries, Dining, or Travel — before you swipe.",
+    desc: "Month-by-month envelopes that roll over. Know exactly what's left in Groceries, Dining, or Travel before you swipe.",
     viz: "budgets",
   },
   {
     idx: "F.04 · PORTFOLIO",
     title: "Holdings, returns, benchmarks.",
-    desc: "Live prices, XIRR, benchmarks vs SPX/QQQ/VTI, lot-tracked cost basis with FX-aware realized gains, RRSP/TFSA/RESP contribution-room tracking. Built for people who actually track their money — not just watch it.",
+    desc: "Live prices, XIRR, benchmarks vs SPX/QQQ/VTI, lot-tracked cost basis with FX-aware realized gains, and RRSP/TFSA/RESP contribution-room tracking. Built for people who actually track their money, not just watch it.",
     viz: "portfolio",
   },
   {
     idx: "F.05 · FIRE",
     title: "Project your freedom number.",
-    desc: "Monte Carlo simulations, savings-rate scenarios, and a realistic FIRE target. See when you can stop — and what would move the date.",
+    desc: "Monte Carlo simulations, savings-rate scenarios, and a realistic FIRE target. See when you can stop, and what would actually move the date.",
     viz: "fire",
   },
   {
     idx: "F.06 · PRIVACY",
     title: "Self-host. Or don't.",
-    desc: "Run it on your Mac, your homelab, or our cloud — same features either way. Per-user envelope encryption (AES-256-GCM, scrypt-derived key). Your DEK lives only in memory while you're signed in.",
+    desc: "Run it on your Mac, your homelab, or our cloud. Same features either way. Per-user envelope encryption (AES-256-GCM, scrypt-derived key), and your DEK only lives in memory while you're signed in.",
     viz: "pips",
   },
 ] as const;
@@ -48,7 +49,7 @@ const STEPS = [
   {
     n: "01",
     title: "Import transactions.",
-    desc: "Upload CSV or OFX from any bank. Finlynq remembers your columns so every future import is one click.",
+    desc: "Upload a CSV or OFX from any bank. Finlynq remembers your columns, so every import after the first is one click.",
   },
   {
     n: "02",
@@ -58,7 +59,7 @@ const STEPS = [
   {
     n: "03",
     title: "Ask anything.",
-    desc: "\"Am I on track with my budget?\" \"What's my net worth?\" \"Any unusual charges?\" — just ask.",
+    desc: "\"Am I on track with my budget?\" \"What's my net worth?\" \"Any unusual charges?\" Just ask.",
   },
 ];
 
@@ -74,27 +75,27 @@ const MCP_TOOLS = [
 ];
 
 const PLAN_FEATS = [
-  "109 MCP tools (HTTP) · 93 (stdio) — read & write",
+  "109 MCP tools (HTTP) · 93 (stdio), read & write",
   "Per-user AES-256-GCM envelope encryption · operator can't decrypt",
-  "In-app AI chat — no MCP client setup required",
-  "Native mobile app for iOS + Android (coming soon)",
+  "In-app AI chat, no MCP client setup required",
+  "Native iOS and Android apps, available now",
   "RRSP, TFSA, RESP contribution-room tracking (CRA limits)",
   "Lot-tracked portfolio cost basis · dividends · FX-aware",
   "Cash-flow forecasting · spending anomaly detection",
   "CSV, Excel, OFX/QFX, PDF, email import",
   "Rules engine · budgets · goals · loans · subscriptions",
-  "Self-host or managed cloud · same features either way",
+  "Self-host or managed cloud, same features either way",
   "REST API + MCP (HTTP & stdio · OAuth 2.1 + DCR)",
 ];
 
 const ROADMAP_POINTS = [
   {
     label: "Live now",
-    desc: "Encrypted finances, a built-in MCP server for any AI, multi-currency portfolios, budgets, and imports.",
+    desc: "Encrypted finances, a built-in MCP server for any AI, native iOS and Android apps, multi-currency portfolios, budgets, and imports.",
   },
   {
     label: "Building",
-    desc: "A native mobile app (Android first, then iOS) and automatic bank and brokerage connections.",
+    desc: "Automatic bank and brokerage connections, and an in-app AI assistant.",
   },
   {
     label: "Up next",
@@ -107,7 +108,7 @@ const ROADMAP_POINTS = [
 ] as const;
 
 const ROADMAP_LEDE =
-  "What's live, what we're building, and what's next. Directional, not a contract: Finlynq is open source.";
+  "What's live, what we're building, and what's coming. This is a direction, not a promise. Finlynq is open source, after all.";
 
 function FeatureViz({ kind }: { kind: (typeof FEATURES)[number]["viz"] }) {
   switch (kind) {
@@ -286,7 +287,7 @@ export function LandingClient() {
 
             <Link href="/blog/finlynq-mobile-app" className="hero-bar hero-bar-mobile hero-bar-link">
               <span className="tag">MOBILE</span>
-              <span>iOS &amp; Android apps coming soon <span aria-hidden="true">→</span></span>
+              <span>Now on iOS and Android <span aria-hidden="true">→</span></span>
             </Link>
 
             <h1 className="display-xl">
@@ -296,12 +297,12 @@ export function LandingClient() {
             </h1>
 
             <p className="lede lede-mt-28">
-              Encrypted, private, and yours. Import your bank data, connect Claude or Cursor, and ask
-              questions about your finances in plain English.
+              Encrypted, private, and yours. Import your bank data, connect Claude or Cursor, and
+              ask about your finances in plain English.
             </p>
 
             <p className="lede lede-tagline">
-              Free hosted cloud, or self-host with Docker — same features either way.
+              Use our free hosted cloud, or self-host with Docker. Same features either way.
             </p>
 
             <div className="hero-cta">
@@ -315,6 +316,8 @@ export function LandingClient() {
                 Self-host with Docker
               </Link>
             </div>
+
+            <StoreBadges className="mt-7" />
 
             <div className="hero-meta">
               <div className="cell">
@@ -460,8 +463,8 @@ export function LandingClient() {
               </h2>
             </div>
             <p className="lede reveal d2">
-              A complete toolkit — budgets, portfolios, goals, loans, and AI-powered queries. No
-              dashboards required unless you want them.
+              The whole toolkit: budgets, portfolios, goals, loans, and AI-powered queries. No
+              dashboards to babysit unless you actually want them.
             </p>
           </div>
 
@@ -540,7 +543,7 @@ export function LandingClient() {
                   <div className="q-ask">How much did I spend on groceries last month?</div>
                   <div className="q-ans">
                     <div className="text">
-                      <span className="num">$312.40</span> <span className="mute">— up</span>{" "}
+                      <span className="num">$312.40</span> <span className="mute">up</span>{" "}
                       <span className="pos">8%</span> <span className="mute">vs October</span>
                     </div>
                     <svg className="sparkline" viewBox="0 0 96 28" preserveAspectRatio="none">
@@ -578,7 +581,7 @@ export function LandingClient() {
                   <div className="q-ask">What&apos;s my current net worth?</div>
                   <div className="q-ans">
                     <div className="text">
-                      <span className="num">$84,210</span> <span className="mute">— up</span>{" "}
+                      <span className="num">$84,210</span> <span className="mute">up</span>{" "}
                       <span className="pos">$1,240</span> <span className="mute">this month</span>
                     </div>
                     <svg className="sparkline" viewBox="0 0 96 28" preserveAspectRatio="none">
@@ -655,7 +658,7 @@ export function LandingClient() {
             </div>
             <p className="lede reveal d2">
               Your financial data* is encrypted with your password before it ever touches a server.
-              We designed the system so we cannot read it — not a marketing claim, a math one.
+              We built it so we can&apos;t read it. That&apos;s not a marketing claim, it&apos;s a math one.
             </p>
           </div>
 
@@ -678,7 +681,7 @@ export function LandingClient() {
             {[
               {
                 h: "AES-256 encryption.",
-                p: "The same standard used by banks and governments. All data encrypted before it touches any storage — in transit and at rest.",
+                p: "The same standard banks and governments use. Everything is encrypted before it touches storage, in transit and at rest.",
               },
               {
                 h: "Your password is the key.",
@@ -703,7 +706,7 @@ export function LandingClient() {
           </div>
 
           <p className="reveal privacy-disclaimer">
-            <span className="asterisk">*</span> Numeric amounts, dates, and unique IDs are stored unencrypted because they&apos;re required for database operations (totals, sorting, joins, indexes). Everything else &mdash; merchant names, account names, payees, notes, tags, and categories &mdash; is encrypted with a key derived only from your password. Read the{" "}
+            <span className="asterisk">*</span> Numeric amounts, dates, and unique IDs are stored unencrypted because the database needs them to work (totals, sorting, joins, indexes). Everything else (merchant names, account names, payees, notes, tags, and categories) is encrypted with a key derived only from your password. Read the{" "}
             <Link href="/blog/how-finlynq-encrypts-your-money" className="amber-link">
               plain-English writeup
             </Link>
@@ -838,7 +841,7 @@ export function LandingClient() {
             <div className="cta-facts">
               <div className="cta-fact">
                 <div className="eyebrow">LICENSED</div>
-                <div>AGPL v3 — open source forever</div>
+                <div>AGPL v3, open source forever</div>
               </div>
               <div className="cta-fact">
                 <div className="eyebrow">ENCRYPTED</div>

@@ -45,7 +45,7 @@ const toolGroups: {
     title: "Import transactions (CSV / OFX)",
     icon: Upload,
     blurb:
-      "Drop a CSV or OFX into Finlynq with the Upload button, then ask Claude to take it from there. Claude lists pending uploads, shows you a preview with duplicate detection, and only commits after you confirm.",
+      "Drop a CSV or OFX into Finlynq with the Upload button, then ask Claude to take it from there. Claude lists pending uploads, shows you a preview with duplicate detection, and only commits once you confirm.",
     example: "Preview my pending CSV import and show me the duplicates before you commit.",
     tools: ["list_pending_uploads", "preview_import", "execute_import", "cancel_import"],
   },
@@ -53,7 +53,7 @@ const toolGroups: {
     title: "Bulk cleanup",
     icon: Wand2,
     blurb:
-      "Recategorize, retag, or delete many transactions at once. Every bulk operation is two steps: a preview that returns a sample and a signed confirmation token, then an execute call that commits. Claude can't skip the confirmation — the token is scoped to the exact payload.",
+      "Recategorize, retag, or delete many transactions at once. Every bulk operation runs in two steps: a preview that returns a sample and a signed confirmation token, then an execute call that commits. Claude can't skip the confirmation, since the token is scoped to the exact payload.",
     example: "Recategorize every Starbucks transaction from the last 90 days as Coffee.",
     tools: [
       "preview_bulk_update",
@@ -113,7 +113,7 @@ const toolGroups: {
     title: "Split transactions",
     icon: Scissors,
     blurb:
-      "Split a single transaction across multiple categories — useful for $200 grocery runs that include household goods, or Costco trips that mix food and electronics.",
+      "Split a single transaction across multiple categories. Handy for $200 grocery runs that include household goods, or Costco trips that mix food and electronics.",
     example: "Split my last Costco run: $120 groceries, $60 household, $40 electronics.",
     tools: ["list_splits", "add_split", "update_split", "delete_split", "replace_splits"],
   },
@@ -137,7 +137,7 @@ const toolGroups: {
     title: "Portfolio holdings",
     icon: Briefcase,
     blurb:
-      "Manually create, rename, move, or delete portfolio positions (the import pipeline auto-creates them from CSV/ZIP, but for one-offs use these). Plus the read tools for portfolio metrics, performance, deep-dive on a single position, and rebalancing/benchmark insights. Renames cascade to all transactions automatically; deletes leave the transactions in place with the holding link cleared.",
+      "Manually create, rename, move, or delete portfolio positions (the import pipeline auto-creates them from CSV/ZIP, but for one-offs these are what you want). Plus the read tools for portfolio metrics, performance, a deep-dive on a single position, and rebalancing/benchmark insights. Renames cascade to all transactions automatically; deletes leave the transactions in place with the holding link cleared.",
     example: "Add 'VEQT.TO' as a new holding under my RRSP, then move my Apple position to my TFSA.",
     tools: [
       "add_portfolio_holding",
@@ -154,8 +154,8 @@ const toolGroups: {
     title: "Accounts and aliases",
     icon: Landmark,
     blurb:
-      "Add or update accounts, including a short alias (e.g. last 4 digits of a card, or a receipt label) so Claude can match a transaction even when the source document doesn't use the canonical name. The account parameter on every write tool fuzzy-matches your account names and exact-matches aliases — pass either.",
-    example: "When I send you receipts that say 'Visa ending 4242', file them under my Chase Sapphire account — set its alias to '4242'.",
+      "Add or update accounts, including a short alias (e.g. last 4 digits of a card, or a receipt label) so Claude can match a transaction even when the source document doesn't use the canonical name. The account parameter on every write tool fuzzy-matches your account names and exact-matches aliases, so pass either one.",
+    example: "When I send you receipts that say 'Visa ending 4242', file them under my Chase Sapphire account, and set its alias to '4242'.",
     tools: ["add_account", "update_account", "delete_account", "get_account_balances"],
   },
   {
@@ -163,14 +163,14 @@ const toolGroups: {
     icon: Lightbulb,
     blurb:
       "Before recording a transaction, ask Claude to guess the right category and tags based on your rules and history.",
-    example: "I'm about to enter a charge from 'TIM HORTONS #4412' for $7.40 — what category should it be?",
+    example: "I'm about to enter a charge from 'TIM HORTONS #4412' for $7.40. What category should it be?",
     tools: ["suggest_transaction_details"],
   },
   {
     title: "Reads & dashboards",
     icon: Bot,
     blurb:
-      "Balances, net worth, budgets, goals, spending trends, income statements, health score, spotlight alerts, weekly recap, cash flow forecast, anomalies — all the dashboards, queryable in natural language. Portfolio metrics live in the Portfolio holdings card above.",
+      "Balances, net worth, budgets, goals, spending trends, income statements, health score, spotlight alerts, weekly recap, cash flow forecast, anomalies. Every dashboard, queryable in natural language. Portfolio metrics live in the Portfolio holdings card above.",
     example: "Summarize my week: spending, net worth change, and anything unusual.",
     tools: [
       "get_account_balances",
@@ -259,7 +259,7 @@ export default function McpGuidePage() {
   const mcpUrl = `${serverUrl}/api/mcp`;
   const displayKey = apiKey ?? "YOUR_API_KEY";
 
-  // Config snippets always use a placeholder — users copy their actual key from the section above
+  // Config snippets always use a placeholder; users copy their actual key from the section above
   const httpConfig = JSON.stringify(
     {
       mcpServers: {
@@ -319,7 +319,7 @@ export default function McpGuidePage() {
             </div>
             <div>
               <h1 className="text-2xl font-bold tracking-tight text-foreground">Connect Your AI</h1>
-              <p className="text-sm text-muted-foreground">Ask Claude, ChatGPT, Cursor, Windsurf, or any MCP client about your finances</p>
+              <p className="text-sm text-muted-foreground">Ask Claude, ChatGPT, Cursor, Windsurf, or any MCP client about your finances.</p>
             </div>
           </div>
 
@@ -339,8 +339,8 @@ export default function McpGuidePage() {
             {status === "connected" && <CheckCircle2 className="h-4 w-4" />}
             {status === "disconnected" && <XCircle className="h-4 w-4" />}
             {status === "checking" && "Checking MCP server…"}
-            {status === "connected" && "MCP server is running — ready to connect"}
-            {status === "disconnected" && "MCP server not reachable — is the app running?"}
+            {status === "connected" && "MCP server is running, ready to connect"}
+            {status === "disconnected" && "MCP server not reachable. Is the app running?"}
           </div>
         </div>
 
@@ -358,7 +358,7 @@ export default function McpGuidePage() {
               <code className="flex-1 font-mono text-sm bg-background/60 border border-border rounded-lg px-3 py-2 text-foreground truncate">
                 {apiKey
                   ? (apiKeyVisible ? apiKey : `${apiKey.slice(0, 6)}${"•".repeat(20)}${apiKey.slice(-4)}`)
-                  : "Hidden — regenerate from Settings to view"}
+                  : "Hidden. Regenerate from Settings to view."}
               </code>
               <button
                 onClick={() => setApiKeyVisible(!apiKeyVisible)}
@@ -384,7 +384,7 @@ export default function McpGuidePage() {
             </div>
             {!apiKey && (
               <p className="text-xs text-muted-foreground">
-                Sign in at <a href="/cloud" className="underline underline-offset-2 hover:text-foreground">finlynq.com/cloud</a> (free), then visit <a href="/settings/account" className="underline underline-offset-2 hover:text-foreground">Settings → API Key</a> to generate one. We only store a hash — the raw key is shown to you once at creation and cannot be re-shown.
+                Sign in at <a href="/cloud" className="underline underline-offset-2 hover:text-foreground">finlynq.com/cloud</a> (free), then visit <a href="/settings/account" className="underline underline-offset-2 hover:text-foreground">Settings → API Key</a> to generate one. We only store a hash, so the raw key is shown to you once at creation and can&apos;t be shown again.
               </p>
             )}
           </div>
@@ -474,8 +474,8 @@ export default function McpGuidePage() {
                   <div>
                     <p className="font-semibold text-foreground mb-0.5">Easiest way to connect</p>
                     <p className="text-xs text-muted-foreground">
-                      No config files, no API keys to paste. Just click, log in, and authorize — done in under
-                      a minute. Works on claude.ai in any browser, and on the Claude iOS / Android app.
+                      No config files, no API keys to paste. Just click, log in, and authorize. You&apos;ll be
+                      done in under a minute. Works on claude.ai in any browser, and on the Claude iOS / Android app.
                     </p>
                   </div>
                 </div>
@@ -533,7 +533,7 @@ export default function McpGuidePage() {
                         </div>
                         <div className="flex items-center gap-3 px-3 py-2">
                           <span className="w-28 shrink-0 text-muted-foreground">Advanced</span>
-                          <span className="text-muted-foreground italic">Leave collapsed — OAuth handles auth</span>
+                          <span className="text-muted-foreground italic">Leave collapsed; OAuth handles auth</span>
                         </div>
                       </div>
                     </div>
@@ -586,7 +586,7 @@ export default function McpGuidePage() {
                 <div className="flex items-start gap-2 rounded-lg bg-amber-500/5 border border-amber-500/20 p-3">
                   <Shield className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
                   <p className="text-xs text-muted-foreground">
-                    <strong className="text-foreground">Privacy note:</strong> Claude Web uses OAuth 2.1 — your
+                    <strong className="text-foreground">Privacy note:</strong> Claude Web uses OAuth 2.1, so your
                     Finlynq passphrase and financial data are never shared with Anthropic. Only the tool
                     responses (query results) pass through Claude&apos;s servers.
                   </p>
@@ -658,7 +658,7 @@ export default function McpGuidePage() {
                         </div>
                         <div className="flex items-center gap-3 px-3 py-2">
                           <span className="w-28 shrink-0 text-muted-foreground">Authentication</span>
-                          <span className="text-muted-foreground italic">OAuth — no API key to paste</span>
+                          <span className="text-muted-foreground italic">OAuth, no API key to paste</span>
                         </div>
                       </div>
                     </div>
@@ -917,12 +917,12 @@ export default function McpGuidePage() {
           </div>
         </section>
 
-        {/* Worked examples — copy-paste prompts that trigger multi-tool flows */}
+        {/* Worked examples: copy-paste prompts that trigger multi-tool flows */}
         <section className="mb-10">
           <h2 className="mb-1 text-lg font-semibold text-foreground">Try a full flow</h2>
           <p className="mb-4 text-sm text-muted-foreground">
-            Paste any of these into Claude to see a preview / confirm / execute flow end-to-end. Claude asks
-            before it commits anything destructive.
+            Paste any of these into Claude to watch a preview / confirm / execute flow run end-to-end. Claude
+            always asks before it commits anything destructive.
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
             {workedExamples.map((ex) => (
@@ -945,7 +945,7 @@ export default function McpGuidePage() {
           </div>
         </section>
 
-        {/* What Claude can do — capability groups, not tool-by-tool */}
+        {/* What Claude can do: capability groups, not tool-by-tool */}
         <section>
           <h2 className="mb-1 text-lg font-semibold text-foreground">What Claude can do</h2>
           <p className="mb-4 text-sm text-muted-foreground">
@@ -1082,9 +1082,9 @@ export default function McpGuidePage() {
                 <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
               </summary>
               <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
-                If you&apos;re on the public demo account, portfolio data is reseeded nightly — querying
+                If you&apos;re on the public demo account, portfolio data is reseeded nightly, so querying
                 right after a deploy may return a stale cache. Open a fresh chat and re-query. On your own
-                account, ensure every transaction in an investment account is bound to a holding: Finlynq
+                account, make sure every transaction in an investment account is bound to a holding: Finlynq
                 requires <code className="bg-muted px-1 rounded text-xs">portfolio_holding_id</code> on
                 every row in an <code className="bg-muted px-1 rounded text-xs">is_investment=true</code>{" "}
                 account. Cash legs are auto-bound to a per-account Cash sleeve.
@@ -1099,7 +1099,7 @@ export default function McpGuidePage() {
               <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
                 Per-user transaction-aggregation caches are invalidated automatically on every MCP write.
                 If you ever see truly stale data in Claude.ai, sign out and back in to clear the per-user
-                cache. Long-running conversations don&apos;t hold cached results — every tool call hits the
+                cache. Long-running conversations don&apos;t hold cached results; every tool call hits the
                 live database.
               </div>
             </details>
@@ -1113,7 +1113,7 @@ export default function McpGuidePage() {
                 Set BOTH <code className="bg-muted px-1 rounded text-xs">DATABASE_URL</code> and{" "}
                 <code className="bg-muted px-1 rounded text-xs">PF_USER_ID</code> (a UUID matching a row in{" "}
                 <code className="bg-muted px-1 rounded text-xs">users.id</code>). The stdio transport has
-                no HTTP auth layer — it binds to one user at process startup. Without{" "}
+                no HTTP auth layer, so it binds to one user at process startup. Without{" "}
                 <code className="bg-muted px-1 rounded text-xs">PF_USER_ID</code> the process exits 1
                 immediately.
               </div>
@@ -1126,10 +1126,10 @@ export default function McpGuidePage() {
               </summary>
               <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
                 As of the Stream D Phase 4 rollout (2026-05-03), plaintext name columns are physically
-                dropped from those six tables — names are stored encrypted under your DEK. The stdio
+                dropped from those six tables, and names are stored encrypted under your DEK. The stdio
                 transport has no DEK, so it can&apos;t compute the encrypted-name siblings on write. Use
                 the HTTP MCP transport or the Finlynq web UI for create/update on those tables. Read tools
-                across all six tables continue to work on stdio (names render as &ldquo;—&rdquo; without a DEK).
+                across all six tables still work on stdio (names render as a blank dash without a DEK).
               </div>
             </details>
           </div>
@@ -1142,8 +1142,8 @@ export default function McpGuidePage() {
               rel="noreferrer noopener"
             >
               github.com/finlynq/finlynq/issues
-            </a>{" "}
-            — we triage daily.
+            </a>
+            . We triage daily.
           </p>
         </section>
       </div>

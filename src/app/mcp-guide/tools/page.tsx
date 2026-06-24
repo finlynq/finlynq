@@ -9,23 +9,23 @@ import {
   type ToolCategory,
 } from "./tools.generated";
 
-// Static page — generated at build time from the catalog source. No client
-// interactivity needed; rendering is pure server component so the full tool
+// Static page, generated at build time from the catalog source. No client
+// interactivity needed; rendering is a pure server component so the full tool
 // list is in the initial HTML for crawlers.
 
 export const metadata: Metadata = {
-  title: `Finlynq MCP — ${TOOL_COUNT_HTTP} tools for AI personal finance`,
+  title: `Finlynq MCP: ${TOOL_COUNT_HTTP} tools for AI personal finance`,
   description: `Complete catalog of the ${TOOL_COUNT_HTTP} HTTP MCP tools Finlynq exposes to Claude, Cursor, Windsurf, and any other MCP client. Covers reads (balances, net worth, budgets, portfolio, goals, FX, spending trends, anomalies), writes (transactions, transfers, trades, accounts, categories, rules, subscriptions, loans, goals, splits, holdings, FX overrides), preview/execute pairs for bulk operations, destructive ops with confirmation tokens, and the unified import staging pipeline.`,
   alternates: { canonical: "/mcp-guide/tools" },
   openGraph: {
-    title: `Finlynq MCP — ${TOOL_COUNT_HTTP} tools for AI personal finance`,
+    title: `Finlynq MCP: ${TOOL_COUNT_HTTP} tools for AI personal finance`,
     description: `Complete catalog of all ${TOOL_COUNT_HTTP} HTTP and ${TOOL_COUNT_STDIO} stdio MCP tools.`,
     url: "/mcp-guide/tools",
     type: "article",
   },
   twitter: {
     card: "summary",
-    title: `Finlynq MCP — ${TOOL_COUNT_HTTP} tools`,
+    title: `Finlynq MCP: ${TOOL_COUNT_HTTP} tools`,
     description: `Catalog of all ${TOOL_COUNT_HTTP} HTTP MCP tools exposed by Finlynq.`,
   },
 };
@@ -43,7 +43,7 @@ const CATEGORY_ORDER: CategoryMeta[] = [
     key: "read",
     label: "Read",
     blurb:
-      "Pure queries — balances, net worth, budgets, transactions, portfolios, goals, loans, FX rates, spending trends, recurring bills, weekly recaps. Read-only. Allowed under both mcp:read and mcp:write OAuth scopes.",
+      "Pure queries: balances, net worth, budgets, transactions, portfolios, goals, loans, FX rates, spending trends, recurring bills, weekly recaps. Read-only. Allowed under both mcp:read and mcp:write OAuth scopes.",
     icon: Eye,
     badgeClass: "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30",
   },
@@ -59,7 +59,7 @@ const CATEGORY_ORDER: CategoryMeta[] = [
     key: "preview",
     label: "Preview",
     blurb:
-      "Dry-run pair for every destructive bulk op. Returns a sample of the affected rows plus a signed confirmation token scoped to the exact payload. Read-only — nothing is written.",
+      "Dry-run pair for every destructive bulk op. Returns a sample of the affected rows plus a signed confirmation token scoped to the exact payload. Read-only, so nothing is written.",
     icon: Sparkles,
     badgeClass: "bg-indigo-500/15 text-indigo-300 ring-indigo-500/30",
   },
@@ -75,7 +75,7 @@ const CATEGORY_ORDER: CategoryMeta[] = [
     key: "write",
     label: "Write",
     blurb:
-      "Mutations — record / update transactions, transfers, trades; create or edit accounts, categories, rules, subscriptions, loans, goals, splits, holdings, snapshots, FX overrides. Requires mcp:write OAuth scope.",
+      "Mutations: record / update transactions, transfers, trades; create or edit accounts, categories, rules, subscriptions, loans, goals, splits, holdings, snapshots, FX overrides. Requires mcp:write OAuth scope.",
     icon: Pencil,
     badgeClass: "bg-amber-500/15 text-amber-300 ring-amber-500/30",
   },
@@ -130,7 +130,7 @@ export default function ToolCatalogPage() {
             Finlynq MCP tool catalog
           </h1>
           <p className="mt-3 text-base text-muted-foreground max-w-2xl leading-relaxed">
-            Every tool the Finlynq MCP server exposes — what it does, whether
+            Every tool the Finlynq MCP server exposes: what it does, whether
             it reads or writes, which OAuth scope it needs, and which transports
             (HTTP, stdio) carry it. Source-of-truth is the registration code
             in <code className="text-xs bg-muted px-1.5 py-0.5 rounded">mcp-server/register-tools-pg.ts</code>;
@@ -258,7 +258,7 @@ export default function ToolCatalogPage() {
             <code className="text-xs bg-muted px-1.5 py-0.5 rounded">bulk_record_transactions</code>
             {" "}and{" "}
             <code className="text-xs bg-muted px-1.5 py-0.5 rounded">approve_staged_rows</code>
-            {" "}with a 72-hour replay window — Claude retrying a flaky import
+            {" "}with a 72-hour replay window, so Claude retrying a flaky import
             won&apos;t double-book the rows.
           </p>
         </section>
@@ -279,7 +279,7 @@ export default function ToolCatalogPage() {
             <code className="bg-muted px-1 py-0.5 rounded">idempotentHint</code>,{" "}
             <code className="bg-muted px-1 py-0.5 rounded">openWorldHint</code>) are injected by{" "}
             <code className="bg-muted px-1 py-0.5 rounded">auto-annotations.ts</code> from name
-            prefixes — same rules drive the categorization above.
+            prefixes. The same rules drive the categorization above.
           </p>
           <p className="mt-2">
             Spotted a tool description that reads poorly?{" "}
@@ -290,8 +290,8 @@ export default function ToolCatalogPage() {
               className="underline underline-offset-2 hover:text-foreground"
             >
               Open an issue
-            </a>{" "}
-            — we triage daily.
+            </a>
+            . We triage daily.
           </p>
         </footer>
       </div>

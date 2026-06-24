@@ -262,8 +262,8 @@ html:has(.fl-landing) body {
   border-radius: 999px;
   font-weight: 500;
 }
-/* Second hero pill ("mobile coming soon") — forced onto its own line below
-   the MCP pill, sized to content, and clickable through to the blog post. */
+/* Second hero pill ("mobile apps now available") — forced onto its own line
+   below the MCP pill, sized to content, and clickable through to the blog post. */
 .fl-landing .hero-bar-mobile {
   display: flex;
   width: fit-content;

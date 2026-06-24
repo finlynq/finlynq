@@ -17,9 +17,9 @@ const instrumentSerif = Instrument_Serif({
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
-  title: "Finlynq — open-source personal finance with a first-party MCP server",
+  title: "Finlynq: open-source personal finance with a first-party MCP server",
   description:
-    "Finlynq — open-source personal finance with a first-party MCP server. Free hosted at finlynq.com/cloud, or self-host with Docker. AGPL v3.",
+    "Finlynq: open-source personal finance with a first-party MCP server. Free hosted at finlynq.com/cloud, or self-host with Docker. AGPL v3.",
   applicationName: "Finlynq",
   keywords: [
     "personal finance",
@@ -39,13 +39,13 @@ export const metadata: Metadata = {
     siteName: "Finlynq",
     locale: "en_US",
     url: "/",
-    title: "Finlynq — track your money here, analyze it anywhere",
+    title: "Finlynq: track your money here, analyze it anywhere",
     description:
       "Open-source personal finance with a first-party MCP server. Connect Claude, Cursor, or any AI assistant. Per-user envelope encryption. Self-host or free cloud.",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Finlynq — track your money here, analyze it anywhere",
+    title: "Finlynq: track your money here, analyze it anywhere",
     description:
       "Open-source personal finance with a first-party MCP server. Connect any AI assistant. Self-host or free cloud.",
   },

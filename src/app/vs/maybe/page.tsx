@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { VsPage, type VsPageContent } from "../_components/VsPage";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Maybe (and the Sure fork) — actively-built open-source PFM",
+  title: "Finlynq vs Maybe (and the Sure fork): actively-built open-source PFM",
   description:
     "Finlynq vs Maybe Finance and its community fork Sure: Maybe was a venture-funded PFM that open-sourced after shutting down; Sure is the volunteer fork. Finlynq targets the same holistic user with a modern stack, per-user envelope encryption, and a first-party MCP server neither ships. Side-by-side table, when to choose each, migration steps.",
   alternates: { canonical: "/vs/maybe" },
@@ -29,18 +29,18 @@ const content: VsPageContent = {
     "Maybe Finance was a venture-funded full personal-finance app that open-sourced after shutting down; Sure is the volunteer-run community fork that keeps it alive. Finlynq targets the same holistic user, but with a modern stack, per-user envelope encryption, and a first-party MCP server that neither Maybe nor Sure ships.",
   whenCompetitor: [
     "You want the inherited brand recognition and net-worth-first dashboard from the well-known open-sourced-after-shutdown project.",
-    "You want Plaid bank aggregation already in the codebase — Maybe was Plaid-native (plus SimpleFIN). Note: Plaid is dormant after archival, so live sync requires your own setup.",
-    "You prefer a conventional Ruby on Rails + Hotwire monolith — easy for senior Ruby contributors to work in.",
-    "You want full PFM scope (budgets, transactions, holdings, multi-currency) in one open-source app and do not need first-party AI/MCP.",
+    "You want Plaid bank aggregation already in the codebase. Maybe was Plaid-native (plus SimpleFIN), though Plaid is dormant after archival, so live sync means setting it up yourself.",
+    "You prefer a conventional Ruby on Rails + Hotwire monolith that senior Ruby contributors can drop right into.",
+    "You want full PFM scope (budgets, transactions, holdings, multi-currency) in one open-source app and don't need first-party AI or MCP.",
     "You specifically want the actively-maintained Sure fork's community momentum.",
   ],
   whenFinlynq: [
-    "You want a single-team-led project with a clear roadmap. The original Maybe is archived; Sure is volunteer-run with thinner roadmap clarity.",
-    "You want a first-party MCP server. Neither Maybe nor Sure ships one — Maybe's old in-app AI was in-process OpenAI function-calling (not MCP, not exposed to external clients). Finlynq ships first-party MCP (HTTP + stdio) with read and write tools.",
-    "You want per-user envelope encryption where the operator cannot read your data. Maybe/Sure has no app-layer column encryption.",
+    "You want a single-team-led project with a clear roadmap. The original Maybe is archived, and Sure is volunteer-run with thinner roadmap clarity.",
+    "You want a first-party MCP server. Neither Maybe nor Sure ships one. Maybe's old in-app AI was in-process OpenAI function-calling (not MCP, and not exposed to external clients). Finlynq ships first-party MCP (HTTP + stdio) with read and write tools.",
+    "You want per-user envelope encryption where the operator can't read your data. Maybe and Sure have no app-layer column encryption.",
     "You want a modern React / TypeScript stack the AI-tooling ecosystem speaks natively, rather than a Rails / Hotwire monolith.",
     "You want an official managed cloud. Sure is self-host only; Finlynq offers finlynq.com/cloud.",
-    "You want to avoid Plaid dependency risk — the same aggregator cost that helped sink the original Maybe company. Finlynq's import + connector framework is Plaid-independent.",
+    "You want to steer clear of Plaid dependency risk, the same aggregator cost that helped sink the original Maybe company. Finlynq's import and connector framework is Plaid-independent.",
   ],
   comparisonRows: [
     { label: "License", finlynq: "AGPL v3", competitor: "AGPL v3 (same as Finlynq)" },
@@ -51,9 +51,9 @@ const content: VsPageContent = {
     },
     {
       label: "First-party MCP",
-      finlynq: "Yes — 109 HTTP / 93 stdio tools",
+      finlynq: "Yes, 109 HTTP / 93 stdio tools",
       competitor:
-        "No — Maybe's in-app AI was in-process OpenAI function-calling; no documented Sure MCP",
+        "No: Maybe's in-app AI was in-process OpenAI function-calling; no documented Sure MCP",
     },
     {
       label: "MCP auth",
@@ -62,7 +62,7 @@ const content: VsPageContent = {
     },
     {
       label: "REST / HTTP API",
-      finlynq: "Yes — full surface mirrored from MCP",
+      finlynq: "Yes, full surface mirrored from MCP",
       competitor: "Partial / internal; no mature documented public REST surface",
     },
     {
@@ -86,11 +86,11 @@ const content: VsPageContent = {
       label: "Investment / portfolio",
       finlynq:
         "Lot-tracked cost basis, dividends, FX-aware aggregation; RRSP/TFSA/RESP",
-      competitor: "Yes — securities, holdings, crypto, performance (a Maybe strength)",
+      competitor: "Yes: securities, holdings, crypto, performance (a Maybe strength)",
     },
     {
       label: "Native mobile app",
-      finlynq: "React Native (Expo) app — functional, not at parity with consumer apps",
+      finlynq: "Yes, native iOS and Android apps (App Store, Google Play)",
       competitor: "No (Flutter companion code existed but never fully shipped)",
     },
     {
@@ -111,9 +111,9 @@ const content: VsPageContent = {
     },
   ],
   migrationSteps: [
-    "Export from Maybe/Sure — use the CSV export of transactions and holdings, or your database export if self-hosting.",
-    "Import into Finlynq at /import/reconcile — review and edit each row; multi-currency, transfer pairs, and dedup are handled in staging; record holdings via the portfolio flow.",
-    "Connect Claude (or any MCP client) at /mcp — paste the URL into Claude → Customize → Connectors; OAuth handles auth.",
+    "Export from Maybe or Sure. Use the CSV export of transactions and holdings, or your database export if you're self-hosting.",
+    "Import into Finlynq at /import/reconcile. Review and edit each row; multi-currency, transfer pairs, and dedup are handled in staging, and you record holdings via the portfolio flow.",
+    "Connect Claude (or any MCP client) at /mcp. Paste the URL into Claude, then Customize, then Connectors; OAuth handles auth.",
   ],
   faq: [
     {
@@ -122,19 +122,19 @@ const content: VsPageContent = {
     },
     {
       q: "Does Maybe/Sure have an MCP server?",
-      a: "No. The original Maybe had an in-app AI chat using OpenAI function-calling internally — not MCP, and not exposed to external AI clients. No documented Sure MCP exists. Finlynq ships first-party MCP.",
+      a: "No. The original Maybe had an in-app AI chat using OpenAI function-calling internally, but that's not MCP and it wasn't exposed to external AI clients. No documented Sure MCP exists. Finlynq ships first-party MCP.",
     },
     {
-      q: "Maybe has Plaid bank sync — does Finlynq?",
+      q: "Maybe has Plaid bank sync. Does Finlynq?",
       a: "Maybe was Plaid-native, but Plaid is dormant after archival and needs self-configuration. Finlynq has no first-party Plaid and uses import plus a connector framework instead (SnapTrade on the roadmap).",
     },
     {
-      q: "Both are AGPL v3 and full PFMs — what's the real difference?",
-      a: "Project health (single-team-led with a roadmap vs a volunteer fork), stack (React/TypeScript vs Rails/Hotwire), per-user envelope encryption, and a first-party MCP server with write access — none of which Maybe/Sure offers.",
+      q: "Both are AGPL v3 and full PFMs. What's the real difference?",
+      a: "Project health (single-team-led with a roadmap vs a volunteer fork), stack (React/TypeScript vs Rails/Hotwire), per-user envelope encryption, and a first-party MCP server with write access. None of which Maybe or Sure offers.",
     },
     {
       q: "Why did Maybe shut down?",
-      a: "Per its founders, a combination of bad timing, a long build before validating fit, few paying customers at launch, and painful, expensive Plaid aggregation. Finlynq's donation-funded, Plaid-independent model is a deliberate response.",
+      a: "Per its founders, a combination of bad timing, a long build before validating fit, few paying customers at launch, and painful, expensive Plaid aggregation. Finlynq's donation-funded, Plaid-independent model is a deliberate response to that.",
     },
   ],
   sources: [
@@ -149,7 +149,7 @@ const content: VsPageContent = {
       note: "active community fork, fetched 2026-05-29",
     },
     {
-      label: "Failory — why Maybe failed",
+      label: "Failory: why Maybe failed",
       href: "https://newsletter.failory.com/p/3-reasons-maybe-failed",
       note: "post-mortem: funding, Plaid cost",
     },

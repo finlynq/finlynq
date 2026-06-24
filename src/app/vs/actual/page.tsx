@@ -2,12 +2,12 @@ import type { Metadata } from "next";
 import { VsPage, type VsPageContent } from "../_components/VsPage";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Actual Budget — open-source PFM with investments & MCP",
+  title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",
   description:
     "Finlynq vs Actual Budget: two open-source self-hostable personal finance apps. Actual is best-in-class local-first envelope budgeting; Finlynq adds native investment tracking, correct multi-currency, per-user envelope encryption, and a first-party MCP server. Side-by-side table, when to choose each, and migration steps.",
   alternates: { canonical: "/vs/actual" },
   openGraph: {
-    title: "Finlynq vs Actual Budget — open-source PFM with investments & MCP",
+    title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",
     description:
       "Two open-source self-hostable PFMs. Actual: local-first envelope budgeting (MIT). Finlynq: investments + multi-currency + per-user encryption + a first-party MCP server.",
     url: "/vs/actual",
@@ -26,21 +26,21 @@ const content: VsPageContent = {
   competitorName: "Actual Budget",
   slug: "actual",
   tagline:
-    "Actual Budget is the leading open-source, local-first envelope-budgeting app — a popular YNAB replacement. Finlynq is also open-source and self-hostable, but adds native investment tracking, correct multi-currency, per-user envelope encryption, and a first-party MCP server that Actual's maintainers have declined to ship.",
+    "Actual Budget is the leading open-source, local-first envelope-budgeting app, and a popular YNAB replacement. Finlynq is also open-source and self-hostable, but it adds native investment tracking, correct multi-currency, per-user envelope encryption, and a first-party MCP server that Actual's maintainers have declined to ship.",
   whenCompetitor: [
-    "You want best-in-class envelope / zero-based budgeting UX — a keyboard-driven register, payee autocomplete, splits, and schedules. Actual nails budgeting in a way Finlynq does not aim to.",
-    "You want true local-first with opt-in end-to-end encryption — your data lives on-device and the sync server stores opaque encrypted blobs. Architecturally very private for a single user's data.",
+    "You want best-in-class envelope and zero-based budgeting UX: a keyboard-driven register, payee autocomplete, splits, and schedules. Actual nails budgeting in a way Finlynq doesn't aim to.",
+    "You want true local-first with opt-in end-to-end encryption, where your data lives on-device and the sync server only holds opaque encrypted blobs. That's architecturally very private for a single user's data.",
     "You want a permissive MIT license (proprietary forks allowed) rather than Finlynq's copyleft AGPL v3.",
     "You want built-in bank sync via GoCardless (EU/UK), SimpleFIN Bridge (US/Canada), or Pluggy.ai (Brazil). Finlynq has no first-party bank sync today.",
     "You want a desktop app and offline-first multi-device via Actual's sync engine.",
   ],
   whenFinlynq: [
-    "You want native investment / portfolio tracking — holdings, lot-tracked cost basis, dividends. Actual has none; it is a budgeting app, full stop. This is the single largest feature gap.",
-    "You want first-party multi-currency. Actual's docs state it is currency-agnostic and does not support multi-currency; the workaround is separate budgets. Finlynq locks FX at trade date.",
-    "You want a first-party MCP server. Actual has shipped none and closed AI feature requests without merging. A capable community server exists (s-stefanov/actual-mcp) but is not blessed or in-app.",
-    "You want an official managed cloud from the project. Actual offers none — you self-host or trust a third-party host. Finlynq offers finlynq.com/cloud directly.",
-    "You want per-user encryption that is on by default. Actual's E2EE is opt-in; default installs store plaintext on the sync server.",
-    "You want loans / amortization, goals, and subscription detection in the same app. Actual is budgeting-only.",
+    "You want native investment and portfolio tracking: holdings, lot-tracked cost basis, dividends. Actual has none; it's a budgeting app, full stop. This is the single largest feature gap.",
+    "You want first-party multi-currency. Actual's docs say it's currency-agnostic and doesn't support multi-currency, so the workaround is separate budgets. Finlynq locks FX at trade date.",
+    "You want a first-party MCP server. Actual has shipped none and closed AI feature requests without merging. A capable community server exists (s-stefanov/actual-mcp), but it isn't blessed or in-app.",
+    "You want an official managed cloud from the project. Actual offers none, so you self-host or trust a third-party host. Finlynq offers finlynq.com/cloud directly.",
+    "You want per-user encryption that's on by default. Actual's E2EE is opt-in, and default installs store plaintext on the sync server.",
+    "You want loans and amortization, goals, and subscription detection in the same app. Actual is budgeting-only.",
   ],
   comparisonRows: [
     { label: "License", finlynq: "AGPL v3", competitor: "MIT (more permissive)" },
@@ -51,9 +51,9 @@ const content: VsPageContent = {
     },
     {
       label: "First-party MCP",
-      finlynq: "Yes — 109 HTTP / 93 stdio tools",
+      finlynq: "Yes, 109 HTTP / 93 stdio tools",
       competitor:
-        "No — AI requests closed unmerged; community s-stefanov/actual-mcp exists",
+        "No: AI requests closed unmerged; community s-stefanov/actual-mcp exists",
     },
     {
       label: "MCP auth",
@@ -62,7 +62,7 @@ const content: VsPageContent = {
     },
     {
       label: "REST / HTTP API",
-      finlynq: "Yes — full surface mirrored from MCP",
+      finlynq: "Yes, full surface mirrored from MCP",
       competitor: "Programmatic access via the @actual-app/api Node library",
     },
     {
@@ -81,7 +81,7 @@ const content: VsPageContent = {
     {
       label: "Multi-currency",
       finlynq: "Native, per-currency cost basis, FX locked at trade date",
-      competitor: "No — currency-agnostic; single-currency budget per docs",
+      competitor: "No: currency-agnostic; single-currency budget per docs",
     },
     {
       label: "Investment / portfolio",
@@ -91,7 +91,7 @@ const content: VsPageContent = {
     },
     {
       label: "Native mobile app",
-      finlynq: "React Native (Expo) app — functional, not at parity with consumer apps",
+      finlynq: "Yes, native iOS and Android apps (App Store, Google Play)",
       competitor: "No native app; mobile-responsive web / PWA + desktop",
     },
     {
@@ -111,30 +111,30 @@ const content: VsPageContent = {
     },
   ],
   migrationSteps: [
-    "Export from Actual — use the file export, or pull data via the @actual-app/api Node library.",
-    "Import into Finlynq at /import/reconcile — review and edit each row; transfer pairs, multi-currency, and dedup are handled in staging.",
-    "Connect Claude (or any MCP client) at /mcp — paste the URL into Claude → Customize → Connectors; OAuth handles auth.",
+    "Export from Actual. Use the file export, or pull data via the @actual-app/api Node library.",
+    "Import into Finlynq at /import/reconcile. Review and edit each row; transfer pairs, multi-currency, and dedup are all handled in staging.",
+    "Connect Claude (or any MCP client) at /mcp. Paste the URL into Claude, then Customize, then Connectors; OAuth handles auth.",
   ],
   faq: [
     {
       q: "Is Actual's budgeting better than Finlynq's?",
-      a: "For pure envelope / zero-based budgeting UX, generally yes — Actual's register and shortcuts are excellent. Finlynq covers a wider surface (investments, loans, goals, multi-currency) and adds MCP.",
+      a: "For pure envelope and zero-based budgeting UX, generally yes. Actual's register and shortcuts are excellent. Finlynq covers a wider surface (investments, loans, goals, multi-currency) and adds MCP.",
     },
     {
-      q: "Actual is local-first and end-to-end encrypted — isn't that more private?",
-      a: "For a single device, Actual's opt-in E2EE is architecturally strong. But it is opt-in (the default stores plaintext on the sync server), whereas Finlynq's per-user envelope encryption is always on server-side, which is also what makes the MCP story work.",
+      q: "Actual is local-first and end-to-end encrypted. Isn't that more private?",
+      a: "For a single device, Actual's opt-in E2EE is architecturally strong. But it's opt-in (the default stores plaintext on the sync server), whereas Finlynq's per-user envelope encryption is always on server-side, which is also what makes the MCP story work.",
     },
     {
       q: "Does Actual have a first-party MCP or AI feature?",
-      a: "No. AI requests were closed unmerged and the roadmap is silent on AI. A capable community MCP exists (s-stefanov/actual-mcp), but it is third-party and not integrated into the app.",
+      a: "No. AI requests were closed unmerged and the roadmap is silent on AI. A capable community MCP exists (s-stefanov/actual-mcp), but it's third-party and not integrated into the app.",
     },
     {
       q: "Does Actual track investments?",
-      a: "No — it is budgeting only. If you want budgets and a portfolio in one app, that is a Finlynq advantage.",
+      a: "No, it's budgeting only. If you want budgets and a portfolio in one app, that's a Finlynq advantage.",
     },
     {
       q: "Can Actual do multi-currency?",
-      a: "Not natively; its docs say it is currency-agnostic. Finlynq handles per-account and per-holding currency with FX locked at trade date.",
+      a: "Not natively; its docs say it's currency-agnostic. Finlynq handles per-account and per-holding currency with FX locked at trade date.",
     },
   ],
   sources: [

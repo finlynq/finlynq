@@ -6,7 +6,7 @@ import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
 const PATH = "/roadmap";
 
 export const metadata: Metadata = {
-  title: "Roadmap — Finlynq",
+  title: "Roadmap | Finlynq",
   description:
     "What's live, what we're building, and what's next for Finlynq, the open-source personal finance app with a first-party MCP server. Directional, community-shaped, AGPL v3.",
   alternates: { canonical: PATH },
@@ -27,10 +27,10 @@ export const metadata: Metadata = {
 };
 
 const INTRO =
-  "This is what's already live, what we're building now, and what we're weighing next. It's directional, not a contract: priorities shift, and because Finlynq is open source (AGPL v3), the community can build any of it too. Want something moved up? Send feedback in the app or open a discussion on GitHub.";
+  "Here's what's already live, what we're building now, and what we're weighing next. It's directional, not a contract: priorities shift, and since Finlynq is open source (AGPL v3), the community can build any of it too. Want something moved up the list? Send feedback in the app or open a discussion on GitHub.";
 
 const CTA =
-  "Have an opinion on what's next? Send feedback from inside the app, or open a discussion on GitHub. Finlynq is AGPL v3, so issues and pull requests are welcome too.";
+  "Got an opinion on what should come next? Send feedback from inside the app, or open a discussion on GitHub. Finlynq is AGPL v3, so issues and pull requests are welcome too.";
 
 type Item = {
   title: string;
@@ -52,13 +52,13 @@ const SECTIONS: Section[] = [
   {
     key: "live",
     label: "Live now",
-    blurb: "Already shipped and in the app today.",
+    blurb: "Already shipped, and in the app today.",
     badge: "bg-emerald-500/15 text-emerald-500",
     items: [
       {
         title: "Talk to your money with any AI assistant",
         // keep in sync with src/lib/mcp/tool-counts.ts
-        desc: "A built-in MCP server (109 HTTP / 93 stdio tools) for Claude, Cursor, and more.",
+        desc: "A built-in MCP server (109 HTTP / 93 stdio tools) for Claude, Cursor, and the rest.",
         href: "/mcp-guide",
         hrefLabel: "See the MCP guide",
       },
@@ -74,11 +74,11 @@ const SECTIONS: Section[] = [
       },
       {
         title: "Multi-currency net worth",
-        desc: "Hold accounts in any currency and see one consolidated picture.",
+        desc: "Hold accounts in any currency and still see one consolidated picture.",
       },
       {
         title: "Import from anywhere",
-        desc: "CSV, Excel, PDF, OFX/QFX, and forward-by-email statements, with a reconcile step before anything lands.",
+        desc: "CSV, Excel, PDF, OFX/QFX, and forward-by-email statements. There's a reconcile step before anything lands.",
       },
       {
         title: "Budgets your way",
@@ -86,7 +86,7 @@ const SECTIONS: Section[] = [
       },
       {
         title: "Plan ahead",
-        desc: "Set savings goals and track your progress toward them.",
+        desc: "Set savings goals and watch your progress toward them.",
       },
       {
         title: "See the whole picture",
@@ -94,9 +94,15 @@ const SECTIONS: Section[] = [
       },
       {
         title: "Run it your way",
-        desc: "Free managed cloud or self-host with Docker, same features either way.",
+        desc: "Free managed cloud, or self-host with Docker. Same features either way.",
         href: "/self-hosted",
         hrefLabel: "Self-hosting guide",
+      },
+      {
+        title: "Native mobile apps",
+        desc: "Finlynq on your phone, now available on the App Store and Google Play. Point it at the managed cloud or your own self-hosted instance.",
+        href: "/blog/finlynq-mobile-app",
+        hrefLabel: "Read the announcement",
       },
     ],
   },
@@ -107,18 +113,12 @@ const SECTIONS: Section[] = [
     badge: "bg-amber-500/15 text-amber-500",
     items: [
       {
-        title: "Mobile app",
-        desc: "Android first (in final testing on Google Play), with iOS to follow.",
-        href: "/blog/finlynq-mobile-app",
-        hrefLabel: "Read the announcement",
-      },
-      {
         title: "In-app AI chat",
-        desc: "Ask questions about your finances in plain English without setting up an external MCP client. In active development behind a feature flag.",
+        desc: "Ask questions about your finances in plain English, no external MCP client required. In active development behind a feature flag.",
       },
       {
         title: "Automatic account connections",
-        desc: "Link banks and brokerages so transactions flow in automatically. Starting with US banks (SimpleFIN) and North American brokerages including Wealthsimple, Questrade, and IBKR (SnapTrade). You keep the connection and the credentials, not us.",
+        desc: "Link banks and brokerages so transactions flow in on their own. We're starting with US banks (SimpleFIN) and North American brokerages, including Wealthsimple, Questrade, and IBKR (SnapTrade). You keep the connection and the credentials, not us.",
       },
     ],
   },
@@ -134,7 +134,7 @@ const SECTIONS: Section[] = [
       },
       {
         title: "Categorization that learns",
-        desc: "Smarter auto-categorization, cleaner merchant names, faster bulk edits and splits.",
+        desc: "Smarter auto-categorization, cleaner merchant names, and faster bulk edits and splits.",
       },
       {
         title: "Budgeting and savings, deeper",
@@ -142,7 +142,7 @@ const SECTIONS: Section[] = [
       },
       {
         title: "Debt payoff and FIRE planning",
-        desc: "Avalanche and snowball debt-payoff strategies, plus FIRE projections with Monte Carlo simulations.",
+        desc: "Avalanche and snowball payoff strategies, plus FIRE projections with Monte Carlo simulations.",
       },
       {
         title: "More for investors",
@@ -178,7 +178,7 @@ const SECTIONS: Section[] = [
       },
       {
         title: "Share with the people who matter",
-        desc: "Partner and household access, advisor read-only, and a community hub.",
+        desc: "Partner and household access, read-only access for your advisor, and a community hub.",
       },
     ],
   },

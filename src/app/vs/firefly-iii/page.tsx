@@ -3,7 +3,7 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 
 export const metadata: Metadata = {
   title:
-    "Finlynq vs Firefly III — open-source personal finance with first-party MCP",
+    "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
   description:
     "Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (109 HTTP / 93 stdio tools) with per-user envelope encryption. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
@@ -11,7 +11,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title:
-      "Finlynq vs Firefly III — open-source personal finance with first-party MCP",
+      "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
     description:
       "Two AGPL v3 self-hostable PFMs, compared. Firefly III: 11-year-old double-entry, PSD2 bank sync, no first-party MCP. Finlynq: first-party MCP server with 109 HTTP / 93 stdio tools, per-user envelope encryption, native investment tracking.",
     url: "/vs/firefly-iii",
@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title:
-      "Finlynq vs Firefly III — open-source personal finance with first-party MCP",
+      "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
     description:
       "AGPL v3 self-hostable PFMs compared. Firefly III's double-entry rigor + PSD2 vs Finlynq's first-party MCP (109 HTTP / 93 stdio) and per-user envelope encryption.",
   },
@@ -32,10 +32,10 @@ const content: VsPageContent = {
   slug: "firefly-iii",
   tagline: (
     <>
-      Firefly III is the canonical open-source self-hosted PFM — eleven years
+      Firefly III is the canonical open-source self-hosted PFM: eleven years
       old, AGPL v3, 23k+ stars, 10M+ Docker pulls, and a deep double-entry
-      accounting model. Finlynq is also AGPL v3 and self-hostable, but built
-      around a first-party MCP server and per-user encryption rather than a
+      accounting model. Finlynq is also AGPL v3 and self-hostable, but it&apos;s
+      built around a first-party MCP server and per-user encryption rather than a
       strict double-entry ledger. They serve overlapping but distinct audiences.
     </>
   ),
@@ -45,7 +45,7 @@ const content: VsPageContent = {
         You want a true double-entry accounting model.
       </strong>{" "}
       Every Firefly III transaction is a transfer between two accounts (asset /
-      expense / revenue / liability) — accountant-grade rigor. Finlynq is
+      expense / revenue / liability), which is accountant-grade rigor. Finlynq is
       single-entry with derived transfer pairs (<code>link_id</code>), which is
       lighter but doesn&apos;t enforce balance.
     </>,
@@ -95,8 +95,8 @@ const content: VsPageContent = {
       Finlynq ships <strong className="text-foreground">109 HTTP and 93 stdio</strong>{" "}
       MCP tools built and maintained by the project, with OAuth 2.1 + Dynamic
       Client Registration, Bearer API keys, and stdio transports. Firefly III
-      has <strong className="text-foreground">no first-party MCP server</strong>{" "}
-      — its maintainer closed{" "}
+      has <strong className="text-foreground">no first-party MCP server</strong>:{" "}
+      its maintainer closed{" "}
       <a
         href="https://github.com/firefly-iii/firefly-iii/issues/9753"
         target="_blank"
@@ -128,7 +128,8 @@ const content: VsPageContent = {
       </strong>{" "}
       Finlynq has cost basis, dividends, FX-aware aggregation across accounts,
       and per-currency cost-basis bucketing. Firefly III has no native concept
-      of holdings, prices, or portfolio P/L — long-standing community gap.
+      of holdings, prices, or portfolio P/L, which is a long-standing community
+      gap.
     </>,
     <>
       <strong className="text-foreground">
@@ -143,8 +144,8 @@ const content: VsPageContent = {
         You want a modern App Router UI.
       </strong>{" "}
       Finlynq is Next.js 16 + Tailwind + shadcn/ui v4. Firefly III is
-      server-rendered Laravel Blade with progressively enhanced JS —
-      boring-stable but visibly older.
+      server-rendered Laravel Blade with progressively enhanced JS:
+      boring-stable, but visibly older.
     </>,
     <>
       <strong className="text-foreground">You&apos;re North American.</strong>{" "}
@@ -192,14 +193,14 @@ const content: VsPageContent = {
       label: "First-party MCP server",
       finlynq: (
         <>
-          Yes —{" "}
+          Yes,{" "}
           <strong className="text-foreground">109 HTTP / 93 stdio</strong> tools,
           v3.3.0
         </>
       ),
       competitor: (
         <>
-          No — maintainer-declined (
+          No, maintainer-declined (
           <a
             href="https://github.com/firefly-iii/firefly-iii/issues/9753"
             target="_blank"
@@ -233,8 +234,8 @@ const content: VsPageContent = {
     },
     {
       label: "REST / HTTP API",
-      finlynq: "Yes — full surface mirrored from MCP",
-      competitor: "Yes — covers almost the whole app; OAuth 2 + PAT",
+      finlynq: "Yes, full surface mirrored from MCP",
+      competitor: "Yes: covers almost the whole app; OAuth 2 + PAT",
     },
     {
       label: "Accounting model",
@@ -256,7 +257,7 @@ const content: VsPageContent = {
       finlynq:
         "Cost basis, dividends, FX-aware aggregation across accounts",
       competitor:
-        "Not natively supported — community workaround via asset accounts",
+        "Not natively supported; community workaround via asset accounts",
     },
     {
       label: "Bank sync",
@@ -269,29 +270,29 @@ const content: VsPageContent = {
       label: "Rule engine",
       finlynq: "Auto-categorize rules (match field / type / value)",
       competitor:
-        "Rule groups, triggers, actions, replay over history — deeper",
+        "Rule groups, triggers, actions, replay over history; deeper",
     },
     {
       label: "Encryption at rest",
       finlynq:
-        "Per-user envelope encryption (AES-256-GCM, scrypt-derived KEK from password) — operator cannot decrypt",
+        "Per-user envelope encryption (AES-256-GCM, scrypt-derived KEK from password); operator cannot decrypt",
       competitor:
         "Plaintext at the application layer; row encryption is the operator's responsibility",
     },
     {
       label: "Multi-user / household",
       finlynq: "No (single-user)",
-      competitor: "Yes — admin / demo / regular roles on one instance",
+      competitor: "Yes: admin / demo / regular roles on one instance",
     },
     {
       label: "Native mobile app",
-      finlynq: "No (mobile web UI only)",
+      finlynq: "Yes, native iOS and Android apps (App Store, Google Play)",
       competitor: "No (mobile web UI only)",
     },
     {
       label: "Localization",
       finlynq: "English only at launch",
-      competitor: "Widely translated — strong i18n (EU origin)",
+      competitor: "Widely translated; strong i18n (EU origin)",
     },
     {
       label: "Stack",
@@ -326,7 +327,7 @@ const content: VsPageContent = {
     <>
       <strong className="text-foreground">Import into Finlynq.</strong> Upload
       the CSV at <code>/import/reconcile</code>. The unified staging pipeline
-      lets you review, edit, and approve every row — multi-currency,
+      lets you review, edit, and approve every row; multi-currency,
       transfer-pair detection, and dedup are built in.
     </>,
     <>
@@ -350,10 +351,10 @@ const content: VsPageContent = {
       a: (
         <>
           For traditional double-entry budgeting workflows on EU/UK banking
-          infrastructure, often yes — Firefly III has eleven years of polish, a
+          infrastructure, often yes. Firefly III has eleven years of polish, a
           deep rule engine, PSD2 bank aggregation, and multi-user support.
           Finlynq is built for a different slot: AI-native users who want a
-          first-party MCP server, encryption that excludes the operator, and
+          first-party MCP server, encryption the operator can&apos;t read, and
           native investment tracking. We pick different fights.
         </>
       ),
@@ -372,7 +373,7 @@ const content: VsPageContent = {
           >
             issue #9753
           </a>
-          ). That&apos;s a legitimate product call — Firefly III&apos;s identity
+          ). That&apos;s a legitimate product call. Firefly III&apos;s identity
           is opinionated double-entry accounting, not AI. Two community wrappers
           exist that proxy the REST API; they work, but they aren&apos;t
           blessed, aren&apos;t in-UI, and they expose whatever a Firefly III
@@ -384,8 +385,8 @@ const content: VsPageContent = {
       q: "Are the community MCP wrappers for Firefly III as good as Finlynq's MCP?",
       a: (
         <>
-          They cover a useful slice — accounts, bills, categories, tags,
-          transactions, search, budgets — but they&apos;re external Node /
+          They cover a useful slice (accounts, bills, categories, tags,
+          transactions, search, budgets), but they&apos;re external Node /
           Python processes calling Firefly III&apos;s REST API with a Personal
           Access Token. There&apos;s no per-user envelope encryption, no
           confirmation-token preview/execute pattern for destructive ops, no
@@ -401,9 +402,9 @@ const content: VsPageContent = {
       q: "Does Firefly III have better bank-sync than Finlynq?",
       a: (
         <>
-          In the EU/UK — yes, materially. Firefly III&apos;s Data Importer ships
+          In the EU/UK, yes, materially. Firefly III&apos;s Data Importer ships
           GoCardless / Nordigen (free PSD2 access) and Salt Edge. In North
-          America — both projects largely rely on CSV / OFX / QFX import;
+          America, both projects largely rely on CSV / OFX / QFX import;
           neither ships Plaid out of the box. Finlynq&apos;s email-import
           staging via Resend Inbound is a different angle that some users
           prefer.
@@ -471,7 +472,7 @@ const content: VsPageContent = {
       note: "official docs, REST API + Data Importer",
     },
     {
-      label: "Firefly III #9753 — LLM integration request",
+      label: "Firefly III #9753: LLM integration request",
       href: "https://github.com/firefly-iii/firefly-iii/issues/9753",
       note: "closed without plans to ship",
     },

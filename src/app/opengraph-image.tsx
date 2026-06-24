@@ -5,7 +5,7 @@ import { ImageResponse } from "next/og";
 // PNG server-side (not subject to the page CSP). Uses the bundled default font
 // so there's no font-fetch step.
 export const alt =
-  "Finlynq — open-source personal finance with a first-party MCP server";
+  "Finlynq: open-source personal finance with a first-party MCP server";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 

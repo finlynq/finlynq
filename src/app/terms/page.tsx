@@ -2,12 +2,12 @@ import Link from "next/link";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Terms of Service — Finlynq",
+  title: "Terms of Service | Finlynq",
   description:
     "Terms governing the Finlynq managed cloud service at finlynq.com. Self-hosted use of the source code is governed by AGPL v3.",
   alternates: { canonical: "/terms" },
   openGraph: {
-    title: "Terms of Service — Finlynq",
+    title: "Terms of Service | Finlynq",
     description:
       "Terms governing the Finlynq managed cloud service. Self-hosted use is governed by AGPL v3.",
     url: "/terms",
@@ -53,8 +53,8 @@ export default function TermsPage() {
               github.com/finlynq/finlynq
             </a>
             . If you run the software on your own infrastructure, your use is
-            governed by the AGPL v3 license in the repository and these Terms
-            do not apply to that deployment.
+            governed by the AGPL v3 license in the repository, and these Terms
+            don&apos;t apply to that deployment.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -63,21 +63,21 @@ export default function TermsPage() {
           <p>
             By creating an account on the Service, accessing the Service, or
             connecting an AI assistant to your Finlynq account via our MCP
-            server, you agree to these Terms. If you do not agree, do not use
-            the Service. You may instead self-host the open-source software
-            under the AGPL v3.
+            server, you agree to these Terms. If you don&apos;t agree,
+            don&apos;t use the Service. You can instead self-host the
+            open-source software under the AGPL v3.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">2. The Service</h2>
           <p>
-            Finlynq is a personal-finance tracking application. It lets you
-            record accounts, transactions, budgets, investments, loans, and
-            goals, and query that data through a built-in UI or through an MCP
-            (Model Context Protocol) server that exposes your data to AI
-            assistants you authorize.
+            Finlynq is a personal-finance tracking app. It lets you record
+            accounts, transactions, budgets, investments, loans, and goals, and
+            query that data through a built-in UI or through an MCP (Model
+            Context Protocol) server that exposes your data to AI assistants you
+            authorize.
           </p>
           <p>
-            The Service is offered in two forms:
+            The Service comes in two forms:
           </p>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
@@ -88,17 +88,17 @@ export default function TermsPage() {
               <strong>Self-hosted:</strong> you run the source code on your own
               hardware. That use is governed by the AGPL v3 license file in the
               repository, not by these Terms. We provide the software as-is and
-              have no operational role in your self-hosted deployment.
+              play no operational role in your self-hosted deployment.
             </li>
           </ul>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">3. Eligibility</h2>
           <p>
             You must be at least 16 years old to use the Service. By creating
-            an account, you represent that you meet this minimum age and that
-            you have the legal capacity to enter into these Terms in your
-            jurisdiction. The Service is not directed at children under 16 and
-            we do not knowingly accept accounts from them.
+            an account, you confirm that you meet this minimum age and that you
+            have the legal capacity to enter into these Terms in your
+            jurisdiction. The Service isn&apos;t directed at children under 16,
+            and we don&apos;t knowingly accept accounts from them.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -106,24 +106,24 @@ export default function TermsPage() {
           </h2>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
-              You choose a username and provide a recovery email address. Your
-              password is hashed; we never see or store it in clear text.
+              You choose a username and provide a recovery email address. We
+              hash your password; we never see or store it in clear text.
             </li>
             <li>
               Your financial data is encrypted with a Data Encryption Key (DEK)
-              wrapped by a Key Encryption Key derived from your password. If
-              you forget your password, your encrypted data cannot be
-              recovered. This is by design. Export your data regularly.
+              wrapped by a Key Encryption Key derived from your password. If you
+              forget your password, your encrypted data can&apos;t be recovered.
+              That&apos;s by design, so export your data regularly.
             </li>
             <li>
-              You are responsible for keeping your credentials, MCP/API
-              tokens, and OAuth grants confidential. Notify us promptly if you
-              suspect unauthorized access.
+              It&apos;s on you to keep your credentials, MCP/API tokens, and
+              OAuth grants confidential. Let us know promptly if you suspect
+              unauthorized access.
             </li>
             <li>
-              One person per account. You may not share an account with
-              someone else or operate the account on behalf of a third party
-              without their authorization.
+              One person per account. You may not share an account with someone
+              else or operate the account on behalf of a third party without
+              their authorization.
             </li>
           </ul>
 
@@ -145,9 +145,9 @@ export default function TermsPage() {
           </p>
           <p>
             These Terms govern <em>only</em> the managed cloud service we
-            operate at <code>finlynq.com</code>. They do not modify, restrict,
-            or override the AGPL v3 rights granted by the license file in the
-            repository for users of the source code.
+            operate at <code>finlynq.com</code>. They don&apos;t modify,
+            restrict, or override the AGPL v3 rights granted by the license file
+            in the repository for users of the source code.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -168,11 +168,11 @@ export default function TermsPage() {
               Run automated scrapers or load-generators against the Service,
               or otherwise interfere with availability for other users. Normal
               programmatic use through the MCP server and the documented API
-              endpoints with your own credentials is permitted.
+              endpoints with your own credentials is fine.
             </li>
             <li>
               Resell, white-label, or sub-license access to the managed cloud
-              service. You may, of course, self-host under the AGPL v3.
+              service. You can, of course, self-host under the AGPL v3.
             </li>
             <li>
               Upload content that infringes intellectual property, is unlawful,
@@ -185,8 +185,8 @@ export default function TermsPage() {
           </ul>
           <p>
             We may suspend or terminate accounts that violate this section.
-            Egregious violations (active intrusion attempts, malware
-            distribution) may be terminated without notice.
+            We may terminate serious violations (active intrusion attempts,
+            malware distribution) without notice.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -194,9 +194,9 @@ export default function TermsPage() {
           </h2>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
-              You own the data you put into the Service. We claim no
-              ownership of your financial records, notes, attachments, or any
-              other content you upload.
+              You own the data you put into the Service. We claim no ownership
+              of your financial records, notes, attachments, or any other
+              content you upload.
             </li>
             <li>
               You can export your full account at any time as a JSON backup
@@ -211,8 +211,8 @@ export default function TermsPage() {
               backups.
             </li>
             <li>
-              We do not sell, rent, or share your data with advertisers or
-              data brokers. We do not use your financial data to train AI
+              We don&apos;t sell, rent, or share your data with advertisers or
+              data brokers. We don&apos;t use your financial data to train AI
               models. See the{" "}
               <Link
                 href="/privacy"
@@ -228,8 +228,8 @@ export default function TermsPage() {
             8. No Financial Services
           </h2>
           <p>
-            Finlynq is a personal-finance <em>tracking</em> application.
-            Finlynq is not, and does not hold itself out as:
+            Finlynq is a personal-finance <em>tracking</em> app. Finlynq
+            isn&apos;t, and doesn&apos;t hold itself out as:
           </p>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>a broker, dealer, or money transmitter;</li>
@@ -240,14 +240,14 @@ export default function TermsPage() {
             <li>a tax advisor or accountant.</li>
           </ul>
           <p>
-            The Service does not execute trades, transfer funds, hold money,
-            or initiate any transaction with your real-world financial
-            accounts. Numbers, charts, projections, and AI-generated
-            commentary in the Service are informational only and are not
-            investment, tax, legal, or financial advice. Consult a qualified
-            professional before making financial decisions. You are solely
-            responsible for the accuracy of the data you enter and for any
-            decisions you make based on what you see in the Service.
+            The Service doesn&apos;t execute trades, transfer funds, hold money,
+            or initiate any transaction with your real-world financial accounts.
+            Numbers, charts, projections, and AI-generated commentary in the
+            Service are informational only and are not investment, tax, legal, or
+            financial advice. Consult a qualified professional before making
+            financial decisions. You&apos;re solely responsible for the accuracy
+            of the data you enter and for any decisions you make based on what
+            you see in the Service.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">9. Donations</h2>
@@ -269,8 +269,8 @@ export default function TermsPage() {
             . Donations are voluntary, non-refundable except where required by
             law, and do not entitle you to any service-level guarantee, paid
             tier, additional feature, or priority support. There are no paid
-            tiers and no subscriptions. If donations do not sustain operating
-            costs, we may discontinue the managed cloud — see Section 14.
+            tiers and no subscriptions. If donations don&apos;t cover operating
+            costs, we may discontinue the managed cloud (see Section 14).
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -286,10 +286,10 @@ export default function TermsPage() {
             INTERRUPTION, OR BE FREE OF DEFECTS.
           </p>
           <p>
-            We do not offer a service-level agreement (SLA), uptime guarantee,
-            or recovery-time objective. The Service is operated on a single
-            VPS by a small team and may be unavailable for maintenance,
-            failure, or other reasons. Export your data regularly.
+            We don&apos;t offer a service-level agreement (SLA), uptime
+            guarantee, or recovery-time objective. The Service runs on a single
+            VPS, operated by a small team, and may be unavailable for
+            maintenance, failure, or other reasons. Export your data regularly.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -319,10 +319,10 @@ export default function TermsPage() {
             12. Third-Party Services
           </h2>
           <p>
-            The Service integrates with the following third parties to
-            function. We do not control their accuracy, availability, or
-            terms, and we are not responsible for outages, data errors, or
-            changes on their side:
+            The Service relies on the following third parties to function. We
+            don&apos;t control their accuracy, availability, or terms, and
+            we&apos;re not responsible for outages, data errors, or changes on
+            their side:
           </p>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
@@ -344,7 +344,7 @@ export default function TermsPage() {
               <strong>AI assistants:</strong> when you authorize Anthropic
               Claude or another AI client through the MCP server, the
               assistant&apos;s vendor sees the tool responses returned to it.
-              Their privacy policies apply to that side of the connection.
+              Their privacy policies cover that side of the connection.
             </li>
           </ul>
 
@@ -365,7 +365,7 @@ export default function TermsPage() {
           <h2 className="text-xl font-semibold mt-12 mb-3">14. Termination</h2>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
-              <strong>By you:</strong> you may stop using the Service at any
+              <strong>By you:</strong> you can stop using the Service at any
               time and delete your account from <code>Settings → Data → Delete
               account</code>.
             </li>
@@ -391,8 +391,8 @@ export default function TermsPage() {
             </li>
           </ul>
           <p>
-            Even if the managed cloud is discontinued, the source code remains
-            available under AGPL v3 and you can continue using Finlynq by
+            Even if the managed cloud is discontinued, the source code stays
+            available under AGPL v3, and you can keep using Finlynq by
             self-hosting it.
           </p>
 
@@ -402,13 +402,13 @@ export default function TermsPage() {
           <p>
             We may update these Terms when our practices change. For{" "}
             <strong>material changes</strong> (anything that meaningfully
-            reduces your rights or expands your obligations), we will give at
-            least 30 days&apos; notice via an in-app banner or an email to
-            your recovery address. Continued use of the Service after the
-            effective date constitutes acceptance. For minor changes (typo
-            fixes, clarifications, formatting), the updated Terms take effect
-            immediately on posting. The current effective date is shown at
-            the top of this page.
+            reduces your rights or expands your obligations), we&apos;ll give at
+            least 30 days&apos; notice via an in-app banner or an email to your
+            recovery address. If you keep using the Service after the effective
+            date, that counts as acceptance. For minor changes (typo fixes,
+            clarifications, formatting), the updated Terms take effect
+            immediately on posting. The current effective date is shown at the
+            top of this page.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
@@ -424,8 +424,8 @@ export default function TermsPage() {
             by your jurisdiction&apos;s consumer-protection law.
           </p>
           <p>
-            Before filing a formal claim, please contact us first using the
-            address below; we will try in good faith to resolve the dispute
+            Before filing a formal claim, please contact us first at the
+            address below. We&apos;ll try in good faith to resolve the dispute
             informally within 30 days.
           </p>
 
@@ -433,8 +433,8 @@ export default function TermsPage() {
           <p>
             Questions about these Terms:{" "}
             <code>privacy@finlynq.com</code> (the same address handles legal
-            and privacy correspondence). Source-code questions, bugs, or
-            feature requests: open an issue at{" "}
+            and privacy correspondence). For source-code questions, bugs, or
+            feature requests, open an issue at{" "}
             <a
               href="https://github.com/finlynq/finlynq/issues"
               className="underline underline-offset-2 hover:text-primary"
@@ -460,7 +460,7 @@ export default function TermsPage() {
             >
               repository
             </a>{" "}
-            for the terms governing self-hosted use of the source code.
+            for the terms that govern self-hosted use of the source code.
           </p>
         </section>
       </div>

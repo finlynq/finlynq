@@ -3,15 +3,15 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 
 export const metadata: Metadata = {
   title:
-    "Finlynq vs Alderfi — two open-source MCP-first personal finance apps",
+    "Finlynq vs Alderfi: two open-source MCP-first personal finance apps",
   description:
-    "Finlynq vs Alderfi: production-ready AGPL v3 PFM with 109 MCP tools, hosted demo, per-user envelope encryption, and multi-currency support — compared with Alderfi's pre-alpha Apache-2.0 project that ships local LLM (Llama 3 via llama.cpp). Side-by-side feature table, when to choose each, dated 2026-05-13.",
+    "Finlynq vs Alderfi: production-ready AGPL v3 PFM with 109 MCP tools, hosted demo, per-user envelope encryption, and multi-currency support, compared with Alderfi's pre-alpha Apache-2.0 project that ships local LLM (Llama 3 via llama.cpp). Side-by-side feature table, when to choose each, dated 2026-05-13.",
   alternates: {
     canonical: "/vs/alderfi",
   },
   openGraph: {
     title:
-      "Finlynq vs Alderfi — two open-source MCP-first personal finance apps",
+      "Finlynq vs Alderfi: two open-source MCP-first personal finance apps",
     description:
       "Two open-source MCP-first PFMs, honestly compared. Finlynq: AGPL v3, production, 109 MCP tools, hosted + self-host, per-user encryption. Alderfi: Apache-2.0, pre-alpha, local LLM via llama.cpp.",
     url: "/vs/alderfi",
@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title:
-      "Finlynq vs Alderfi — two open-source MCP-first personal finance apps",
+      "Finlynq vs Alderfi: two open-source MCP-first personal finance apps",
     description:
       "AGPL v3 production PFM with 109 MCP tools vs Apache-2.0 pre-alpha with local LLM. Pick the one that matches your trade-offs.",
   },
@@ -34,9 +34,9 @@ const content: VsPageContent = {
     <>
       Alderfi and Finlynq are both open-source, MCP-first personal finance
       projects. Alderfi is Apache-2.0, pre-alpha, and ships local LLM support
-      out of the box. Finlynq is AGPL v3, production, hosted-or-self-hosted,
-      with a 109 HTTP / 93 stdio tool MCP surface. This page exists so you can
-      pick the one that actually matches your trade-offs.
+      out of the box. Finlynq is AGPL v3, in production, hosted or self-hosted,
+      with a 109 HTTP / 93 stdio tool MCP surface. This page is here so you can
+      pick the one that actually fits your trade-offs.
     </>
   ),
   whenCompetitor: [
@@ -46,10 +46,10 @@ const content: VsPageContent = {
       </strong>{" "}
       Apache-2.0 has a patent grant and no copyleft, so you can wrap Alderfi in
       a closed-source product, ship a SaaS without sharing changes, or vendor
-      it into a regulated stack without AGPL §13&apos;s source-disclosure
-      trigger. Finlynq&apos;s AGPL v3 deliberately forces network forks to
-      publish their changes — that&apos;s a feature for the maintainer and a
-      friction for users who specifically want Apache.
+      it into a regulated stack without tripping AGPL §13&apos;s
+      source-disclosure trigger. Finlynq&apos;s AGPL v3 deliberately forces
+      network forks to publish their changes. That&apos;s a feature for the
+      maintainer and a friction for users who specifically want Apache.
     </>,
     <>
       <strong className="text-foreground">
@@ -57,18 +57,18 @@ const content: VsPageContent = {
       </strong>{" "}
       Alderfi documents Llama 3 8B via llama.cpp as part of its categorization
       pipeline. If your threat model is{" "}
-      {`"`}no third party — including Anthropic or OpenAI — sees my financial
+      {`"`}no third party (including Anthropic or OpenAI) sees my financial
       transactions,{`"`} Alderfi&apos;s posture matches that. Finlynq today
       assumes you connect a cloud LLM (Claude, ChatGPT, Cursor, Windsurf) over
-      MCP; we don&apos;t ship a local-LLM mode.
+      MCP, and we don&apos;t ship a local-LLM mode.
     </>,
     <>
       <strong className="text-foreground">
         You want to follow a project from day one.
       </strong>{" "}
-      Alderfi is openly pre-alpha and is being designed in public. If the
-      appeal is shaping the architecture, naming the abstractions, and being
-      one of the first contributors, an alpha project is exactly where to be.
+      Alderfi is openly pre-alpha and is being designed in public. If what you
+      want is to shape the architecture, name the abstractions, and be one of
+      the first contributors, an alpha project is exactly where to be.
     </>,
     <>
       <strong className="text-foreground">
@@ -164,7 +164,7 @@ const content: VsPageContent = {
     },
     {
       label: "Hosted demo",
-      finlynq: "Yes — demo@finlynq.com / finlynq-demo, resets nightly",
+      finlynq: "Yes, demo@finlynq.com / finlynq-demo, resets nightly",
       competitor: "No (paid hosted tier planned)",
     },
     {
@@ -176,16 +176,16 @@ const content: VsPageContent = {
       label: "First-party MCP",
       finlynq: (
         <>
-          Yes — <strong className="text-foreground">109 HTTP / 93 stdio</strong>{" "}
+          Yes, <strong className="text-foreground">109 HTTP / 93 stdio</strong>{" "}
           tools
         </>
       ),
-      competitor: "Yes — 1 mock tool today; roadmap implies more",
+      competitor: "Yes, 1 mock tool today; roadmap implies more",
     },
     {
       label: "Local LLM support",
-      finlynq: "No (cloud LLMs only — Claude, ChatGPT, Cursor, Windsurf)",
-      competitor: "Yes — Llama 3 8B via llama.cpp",
+      finlynq: "No (cloud LLMs only: Claude, ChatGPT, Cursor, Windsurf)",
+      competitor: "Yes, Llama 3 8B via llama.cpp",
     },
     {
       label: "MCP auth",
@@ -241,18 +241,18 @@ const content: VsPageContent = {
   migrationSteps: [
     <>
       <strong className="text-foreground">From Alderfi to Finlynq.</strong>{" "}
-      Alderfi&apos;s SQLite store can be dumped via standard SQL tooling. Map
+      Alderfi&apos;s SQLite store can be dumped with standard SQL tooling. Map
       transactions to CSV (date, amount, currency, payee, category, account)
-      and feed into Finlynq&apos;s staging-review at <code>/import/reconcile</code> —
-      multi-currency, transfer-pair detection, and SHA-256 dedup over plaintext
-      payee are all built in.
+      and feed them into Finlynq&apos;s staging-review at{" "}
+      <code>/import/reconcile</code>, where multi-currency, transfer-pair
+      detection, and SHA-256 dedup over plaintext payee are all built in.
     </>,
     <>
       <strong className="text-foreground">From Finlynq to Alderfi.</strong>{" "}
       Finlynq&apos;s data-export endpoint produces a JSON backup with
       transactions, accounts, categories, portfolio holdings, and goals.
       You&apos;ll need to write a small JSON-to-Alderfi-import bridge once
-      Alderfi&apos;s import surface stabilizes — neither side has a one-click
+      Alderfi&apos;s import surface stabilizes. Neither side has a one-click
       migration today.
     </>,
     <>
@@ -266,16 +266,16 @@ const content: VsPageContent = {
   ],
   faq: [
     {
-      q: "Isn't Alderfi just a 'future Finlynq' — why not wait for it?",
+      q: "Isn't Alderfi just a 'future Finlynq'? Why not wait for it?",
       a: (
         <>
           You might. The two projects make different trade-offs. Alderfi&apos;s
           commitments (Apache-2.0, local-LLM-first) are structural and unlikely
           to change. Finlynq&apos;s commitments (AGPL v3, hosted + self-host
-          parity, current 109 HTTP / 93 stdio tool surface) are also structural. If Apache-2.0
-          and local-LLM matter more than shipped surface, waiting is
-          reasonable. If you need something running today against real
-          transactions, Finlynq is the project that has it.
+          parity, the current 109 HTTP / 93 stdio tool surface) are structural
+          too. If Apache-2.0 and local-LLM matter more to you than shipped
+          surface, then waiting is reasonable. If you need something running
+          today against real transactions, Finlynq is the one that has it.
         </>
       ),
     },
@@ -286,11 +286,11 @@ const content: VsPageContent = {
           We chose AGPL deliberately. Personal finance is a category that
           historically gets enclosed (Mint → Intuit → shutdown; Hiro → OpenAI →
           shutdown). AGPL §13&apos;s {`"`}network use{`"`} clause means anyone
-          running Finlynq as a hosted service must publish their changes —
-          which keeps the open-source core honest as the project gets adopted
+          running Finlynq as a hosted service has to publish their changes,
+          which keeps the open-source core honest as the project gets picked up
           by others. Apache-2.0 doesn&apos;t do that. It&apos;s a legitimate
-          trade-off; both choices have integrity. If you specifically want a
-          permissive license so you can ship a derivative without sharing
+          trade-off, and both choices have integrity. If you specifically want a
+          permissive license so you can ship a derivative without sharing your
           changes back, Apache (Alderfi) is the better fit.
         </>
       ),
@@ -300,11 +300,11 @@ const content: VsPageContent = {
       a: (
         <>
           Not today. Finlynq&apos;s MCP server speaks Streamable HTTP and
-          stdio, and any MCP-compatible client can connect — including a local
+          stdio, and any MCP-compatible client can connect, including a local
           Ollama / llama.cpp / LM Studio runtime if it exposes MCP. But Finlynq
           doesn&apos;t ship a bundled local-LLM runtime the way Alderfi does,
           and the categorization / suggestion code paths assume an external MCP
-          client. This is a real gap for users with a {`"`}no cloud LLM{`"`}{" "}
+          client. So this is a real gap if you have a {`"`}no cloud LLM{`"`}{" "}
           threat model.
         </>
       ),
@@ -313,11 +313,11 @@ const content: VsPageContent = {
       q: "Doesn't Alderfi's 'the app is the MCP server' framing make Finlynq's architecture obsolete?",
       a: (
         <>
-          It&apos;s a cleaner pitch, but they&apos;re two ways of describing
-          similar architectures. Finlynq&apos;s MCP server is a first-class
-          module of the app (<code>pf-app/mcp-server/</code>) — not a wrapper
-          or a side-channel. The framing difference matters more for marketing
-          than for architecture.
+          It&apos;s a cleaner pitch, but they&apos;re really two ways of
+          describing similar architectures. Finlynq&apos;s MCP server is a
+          first-class module of the app (<code>pf-app/mcp-server/</code>), not a
+          wrapper or a side-channel. The framing difference matters more for
+          marketing than for architecture.
         </>
       ),
     },
