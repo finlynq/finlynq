@@ -5620,7 +5620,7 @@ export function registerPgTools(
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           transfer_tools: ["record_transfer"],
-          reconcile_tools: ["get_reconcile_suggestions", "find_duplicate_bank_rows", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
+          reconcile_tools: ["get_reconcile_suggestions", "find_duplicate_bank_rows", "delete_bank_transaction", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
           tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
         });
       }
@@ -5689,10 +5689,10 @@ export function registerPgTools(
       if (t === "reconcile") {
         return dataResponse({
           read_tools: ["get_reconcile_suggestions", "find_duplicate_bank_rows"],
-          write_tools: ["send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
+          write_tools: ["send_to_bank_ledger", "delete_bank_transaction", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
           bulk_tools: ["apply_rules_to_bank_rows"],
-          flow: "0) send_to_bank_ledger(stagedImportId) → promote a pending statement import into the BANK LEDGER ONLY (no `transactions` rows) + load its balance anchor — the normal reconcile setup when the account already has ledger transactions for the period (use approve_staged_rows only for a first import of a brand-new account). 0.5) find_duplicate_bank_rows(accountId) → list groups of duplicate bank-ledger rows (distinct ids for one event from overlapping imports); canonicalId is the oldest to keep. 1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
-          note: "All reconcile tools are HTTP-only and need an unlocked DEK. send_to_bank_ledger writes ONLY bank_transactions (never `transactions`); approve_staged_rows is the one that CREATES ledger transactions (first-import only). apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
+          flow: "0) send_to_bank_ledger(stagedImportId) → promote a pending statement import into the BANK LEDGER ONLY (no `transactions` rows) + load its balance anchor — the normal reconcile setup when the account already has ledger transactions for the period (use approve_staged_rows only for a first import of a brand-new account). 0.5) find_duplicate_bank_rows(accountId) → list groups of duplicate bank-ledger rows (distinct ids for one event from overlapping imports); canonicalId is the oldest to keep, then delete_bank_transaction(bankTransactionId) removes each extra (dryRun:true to preview the affected transactions first). 1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
+          note: "All reconcile tools are HTTP-only and need an unlocked DEK. send_to_bank_ledger writes ONLY bank_transactions (never `transactions`); approve_staged_rows is the one that CREATES ledger transactions (first-import only). delete_bank_transaction removes a bank row (cascade clears its links + nulls transactions.bank_transaction_id; the `transactions` rows survive) — dryRun first. apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
         });
       }
 
@@ -11941,6 +11941,94 @@ export function registerPgTools(
       });
 
       return dataResponse(findDuplicateBankRows(rows));
+    },
+  );
+
+  // ── delete_bank_transaction (FINLYNQ-214 / R-02) ────────────────────────────
+  // Destructive. Remove a single bank-ledger row by id (the canonical companion
+  // to find_duplicate_bank_rows: surface the dupes, then delete the extras).
+  // Cascade is wired at the DB level — transaction_bank_links.bank_transaction_id
+  // is ON DELETE CASCADE and transactions.bank_transaction_id is ON DELETE SET
+  // NULL (migrations 20260523 / 20260522), so the commit is ONE owner-scoped
+  // `DELETE FROM bank_transactions WHERE id=? AND user_id=?` and the link rows +
+  // FK nulling happen automatically — NO manual cleanup. dryRun:true computes the
+  // would-be-unlinked transaction ids with ZERO writes. invalidateUser fires
+  // ONLY after a real (non-dryRun) delete (the FK on `transactions` changed).
+  // Balance anchors (bank_daily_balances) are independent of bank rows, so
+  // deletion never orphans an anchor — no refusal needed. HTTP-only: the
+  // ownership-scoped DELETE doesn't strictly need a DEK, but reconcile tools are
+  // gated to the HTTP transport as a cohort, and a `pf_` API key (no DEK) is
+  // fine here since nothing is decrypted.
+  // destructiveHint is INFERRED from the `delete_` name prefix by
+  // withAutoAnnotations (verified in auto-annotations.ts) — no explicit
+  // annotations arg required.
+  server.tool(
+    "delete_bank_transaction",
+    "Bookkeeping only: Finlynq writes only to your own database — it never connects to a bank or brokerage and never moves real money. DELETE a single bank-ledger row (bank_transactions) by id — use this to remove duplicate bank rows surfaced by find_duplicate_bank_rows. Cascades automatically: any transaction↔bank links are removed and transactions.bank_transaction_id is cleared on affected ledger transactions (the `transactions` rows themselves are NOT deleted). Pass dryRun:true to preview the impact (the unlinkedTransactionIds) without committing. Returns { deleted, unlinkedTransactionIds, dryRun }. Owner-scoped; a non-existent or cross-user id returns a not-found error and changes nothing. Destructive — confirm with dryRun first.",
+    {
+      bankTransactionId: z
+        .string()
+        .uuid()
+        .describe("bank_transactions.id to delete (UUID)."),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe(
+          "true → return the unlinkedTransactionIds that WOULD be affected without writing anything. Default false (real delete).",
+        ),
+    },
+    async ({ bankTransactionId, dryRun }) => {
+      // Ownership check — 404-equivalent for a non-existent / cross-user id.
+      const owned = await q(
+        db,
+        sql`SELECT id FROM bank_transactions WHERE id = ${bankTransactionId} AND user_id = ${userId} LIMIT 1`,
+      );
+      if (!owned.length) return err("Not found");
+
+      // Pre-compute the transactions that will lose their bank linkage: union of
+      // the join-table links (transaction_bank_links) and the lineage FK
+      // (transactions.bank_transaction_id). A tx can appear in either or both;
+      // DISTINCT de-dupes.
+      const affected = await q(
+        db,
+        sql`
+          SELECT transaction_id FROM transaction_bank_links
+            WHERE bank_transaction_id = ${bankTransactionId} AND user_id = ${userId}
+          UNION
+          SELECT id AS transaction_id FROM transactions
+            WHERE bank_transaction_id = ${bankTransactionId} AND user_id = ${userId}
+        `,
+      );
+      const unlinkedTransactionIds = affected
+        .map((r) => Number(r.transaction_id))
+        .filter((n) => Number.isFinite(n))
+        .sort((a, b) => a - b);
+
+      if (dryRun) {
+        // Side-effect free preview — no DELETE, no invalidateUser.
+        return dataResponse({
+          deleted: false,
+          unlinkedTransactionIds,
+          dryRun: true,
+        });
+      }
+
+      // Single owner-scoped delete. DB cascade removes the link rows and nulls
+      // the transactions FK; no manual cleanup needed.
+      await db.execute(
+        sql`DELETE FROM bank_transactions WHERE id = ${bankTransactionId} AND user_id = ${userId}`,
+      );
+
+      // The lineage FK on `transactions` changed (cleared) — invalidate the
+      // per-user tx cache so reads don't serve stale linkage. Per CLAUDE.md:
+      // every MCP tx-mutating write must call invalidateUser.
+      invalidateUserTxCache(userId);
+
+      return dataResponse({
+        deleted: true,
+        unlinkedTransactionIds,
+        dryRun: false,
+      });
     },
   );
 
