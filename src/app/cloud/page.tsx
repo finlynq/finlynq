@@ -437,6 +437,7 @@ function CloudAuthPageInner() {
               Just looking?{" "}
               <Link
                 href="/try-demo?next=/dashboard"
+                prefetch={false}
                 className="font-medium text-primary underline underline-offset-2 hover:text-primary/80"
               >
                 One-click demo

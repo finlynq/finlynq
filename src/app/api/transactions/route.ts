@@ -25,6 +25,7 @@ import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { isSortableColumnId } from "@/lib/transactions/columns";
+import { expandLinkSiblings } from "@/lib/transactions/link-siblings";
 import { isTransactionSource, type TransactionSource } from "@/lib/tx-source";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
@@ -759,13 +760,10 @@ export async function DELETE(request: NextRequest) {
   // (cash sleeve sum drifts, lot bookkeeping desyncs). Compute the full
   // "delete set" up front — the target + every sibling sharing either
   // link — then run the edit-guard + delete loop over the entire set.
+  // Sibling expansion is single-sourced in `expandLinkSiblings`
+  // (FINLYNQ-222) and shared with the bank-side delete cascade.
   const target = await db
-    .select({
-      id: schema.transactions.id,
-      tradeLinkId: schema.transactions.tradeLinkId,
-      linkId: schema.transactions.linkId,
-      swapLinkId: schema.transactions.swapLinkId,
-    })
+    .select({ id: schema.transactions.id })
     .from(schema.transactions)
     .where(
       and(
@@ -777,67 +775,7 @@ export async function DELETE(request: NextRequest) {
   if (!target) {
     return NextResponse.json({ error: "Transaction not found" }, { status: 404 });
   }
-  const idSet = new Set<number>([id]);
-  if (target.tradeLinkId) {
-    const siblings = await db
-      .select({ id: schema.transactions.id })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, userId),
-          eq(schema.transactions.tradeLinkId, target.tradeLinkId),
-        ),
-      );
-    for (const r of siblings) idSet.add(r.id);
-  }
-  if (target.linkId) {
-    const siblings = await db
-      .select({ id: schema.transactions.id })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, userId),
-          eq(schema.transactions.linkId, target.linkId),
-        ),
-      );
-    for (const r of siblings) idSet.add(r.id);
-  }
-  // Phase 4 — swaps share a swap_link_id across all 4 rows (sell pair +
-  // buy pair). Deleting one row cascades to the full bundle.
-  if (target.swapLinkId) {
-    const siblings = await db
-      .select({
-        id: schema.transactions.id,
-        tradeLinkId: schema.transactions.tradeLinkId,
-      })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, userId),
-          eq(schema.transactions.swapLinkId, target.swapLinkId),
-        ),
-      );
-    for (const r of siblings) idSet.add(r.id);
-    // Each swap row carries its own tradeLinkId (the inner sell+buy pair
-    // links). Pull those siblings too so all 4 stock+cash rows land in
-    // the delete set.
-    const tradeLinks = new Set(
-      siblings.map((r) => r.tradeLinkId).filter((v): v is string => !!v),
-    );
-    for (const tl of tradeLinks) {
-      const more = await db
-        .select({ id: schema.transactions.id })
-        .from(schema.transactions)
-        .where(
-          and(
-            eq(schema.transactions.userId, userId),
-            eq(schema.transactions.tradeLinkId, tl),
-          ),
-        );
-      for (const r of more) idSet.add(r.id);
-    }
-  }
-  const allIds = Array.from(idSet);
+  const allIds = await expandLinkSiblings(userId, [id]);
 
   // Snapshot freshness — if any row in the delete set touches an investment
   // holding, capture the earliest affected date BEFORE the rows are gone so we
@@ -865,6 +803,7 @@ export async function DELETE(request: NextRequest) {
   // in place); they have to delete the sell first. We check each row in the
   // set and aggregate any blocking ids so the UI can surface a single
   // actionable list.
+  const deleteIdSet = new Set<number>(allIds);
   const blockingSet = new Set<number>();
   for (const txId of allIds) {
     const guard = await canEditPortfolioRow(userId, txId);
@@ -872,7 +811,7 @@ export async function DELETE(request: NextRequest) {
       for (const b of guard.blockingClosureTxIds) {
         // Exclude ids already in the delete set — the user is deleting
         // them, so they're not "blocking" the operation.
-        if (!idSet.has(b)) blockingSet.add(b);
+        if (!deleteIdSet.has(b)) blockingSet.add(b);
       }
     }
   }

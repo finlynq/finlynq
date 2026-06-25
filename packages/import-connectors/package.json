@@ -9,7 +9,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./wealthposition": "./src/wealthposition/index.ts",
-    "./ibkr": "./src/ibkr/index.ts"
+    "./ibkr": "./src/ibkr/index.ts",
+    "./moneypro": "./src/moneypro/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

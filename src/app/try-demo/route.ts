@@ -76,6 +76,22 @@ function isSafeNext(next: string | null | undefined): next is string {
 }
 
 export async function GET(request: NextRequest) {
+  // Drive-by-login guard (FINLYNQ-223). This GET authenticates as the demo
+  // user and sets the `pf_session` cookie as a SIDE EFFECT. Next.js prefetches
+  // in-viewport <Link>s, and browsers issue speculative prefetches/prerenders —
+  // either would silently REPLACE a logged-in visitor's real session with the
+  // demo (reproduced: an admin who merely loaded the homepage was switched to
+  // the demo user). A genuine top-level navigation sends none of these headers,
+  // so refuse to do any auth work — and set no cookie — on a prefetch.
+  const secPurpose = request.headers.get("sec-purpose") ?? "";
+  const isPrefetch =
+    request.headers.get("next-router-prefetch") === "1" ||
+    request.headers.get("purpose") === "prefetch" ||
+    secPurpose.includes("prefetch");
+  if (isPrefetch) {
+    return new NextResponse(null, { status: 204 });
+  }
+
   if (getDialect() !== "postgres") {
     return NextResponse.json(
       { error: "/try-demo is only available on the managed deployment." },

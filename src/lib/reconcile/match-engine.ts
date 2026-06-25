@@ -728,9 +728,15 @@ async function loadJoinRows(
   userId: string,
   accountId: number,
 ): Promise<JoinLoaded[]> {
-  // We only want join rows for tx+bank in this account. Filter by joining
-  // through transactions.account_id (the canonical scope). Bank rows in
-  // other accounts are out of scope for the per-account view.
+  // We only want join rows for tx+bank in THIS account. Both sides must be
+  // scoped: the transaction's account AND the bank row's account must equal
+  // `accountId`. Filtering on the tx side alone (the pre-FINLYNQ-211 bug) let
+  // a transfer leg in account A that was linked to a bank row in account B
+  // render as "linked" in A's reconcile view, even though A's own statement
+  // had nothing for it — making a half-reconciled transfer read as
+  // already-done. The same-account guard in `linkTransactionToBank` blocks new
+  // cross-account links; this bank-side join filter also hides any pre-existing
+  // cross-account links from the per-account view without a data migration.
   const rows = await db
     .select({
       transactionId: schema.transactionBankLinks.transactionId,
@@ -748,10 +754,18 @@ async function loadJoinRows(
         schema.transactionBankLinks.transactionId,
       ),
     )
+    .innerJoin(
+      schema.bankTransactions,
+      eq(
+        schema.bankTransactions.id,
+        schema.transactionBankLinks.bankTransactionId,
+      ),
+    )
     .where(
       and(
         eq(schema.transactionBankLinks.userId, userId),
         eq(schema.transactions.accountId, accountId),
+        eq(schema.bankTransactions.accountId, accountId),
       ),
     )
     .all();

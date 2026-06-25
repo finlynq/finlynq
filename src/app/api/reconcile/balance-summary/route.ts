@@ -25,20 +25,12 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { requireEncryption } from "@/lib/auth/require-encryption";
-import {
-  getLatestBankAnchor,
-  sumBankAmountsAfter,
-} from "@/lib/bank-ledger-balance";
-import { getHoldingsValueByAccount } from "@/lib/holdings-value";
+import { computeAccountBalanceSummary } from "@/lib/reconcile/balance-summary";
 
 export const dynamic = "force-dynamic";
-
-/** Float tolerance for the "balanced" check. Mirrors the threshold used
- *  by the validation helper + queries.ts account-balance code. */
-const EPSILON = 0.005;
 
 export async function GET(request: NextRequest) {
   const auth = await requireEncryption(request);
@@ -80,63 +72,16 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const latestAnchor = await getLatestBankAnchor(userId, accountId);
-
-  // Bank-side: anchor + sum-after, or null when no anchor exists.
-  // The previous fallback (Σ over all bank rows) silently rendered a
-  // misleading number that drifted further from reality with every
-  // import; nulling it out + showing "—" in the UI is the honest signal
-  // that no anchor has been loaded.
-  let bankSideLatest: number | null;
-  if (latestAnchor) {
-    const after = await sumBankAmountsAfter(
-      userId,
-      accountId,
-      latestAnchor.date,
-    );
-    bankSideLatest = latestAnchor.balance + after;
-  } else {
-    bankSideLatest = null;
-  }
-
-  // System-side: canonical account balance per CLAUDE.md
-  // "Account balance for accounts with holdings = holdings.value".
-  let systemSideLatest: number;
-  if (acct.isInvestment) {
-    const holdingsByAccount = await getHoldingsValueByAccount(userId, dek);
-    systemSideLatest = holdingsByAccount.get(acct.id)?.value ?? 0;
-  } else {
-    const sumRow = await db
-      .select({
-        balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
-      })
-      .from(schema.transactions)
-      .where(and(
-        eq(schema.transactions.userId, userId),
-        eq(schema.transactions.accountId, acct.id),
-      ))
-      .get();
-    systemSideLatest = Number(sumRow?.balance ?? 0);
-  }
-
-  const delta: number | null =
-    bankSideLatest === null ? null : systemSideLatest - bankSideLatest;
-  const status: "balanced" | "mismatch" | "no_anchor" = (() => {
-    if (!latestAnchor || delta === null) return "no_anchor";
-    if (Math.abs(delta) > EPSILON) return "mismatch";
-    return "balanced";
-  })();
+  // Shared with the MCP get_reconciliation_summary tool (FINLYNQ-215) so the
+  // header delta + the tool's balanceDelta are computed by the same code.
+  const summary = await computeAccountBalanceSummary(userId, dek, {
+    id: acct.id,
+    currency: acct.currency,
+    isInvestment: acct.isInvestment,
+  });
 
   return NextResponse.json({
     success: true,
-    data: {
-      accountId,
-      currency: acct.currency,
-      latestAnchor,
-      bankSideLatest,
-      systemSideLatest,
-      delta,
-      status,
-    },
+    data: summary,
   });
 }

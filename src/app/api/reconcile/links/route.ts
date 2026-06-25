@@ -65,6 +65,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, data: result });
   } catch (e) {
     if (e instanceof LinkError) {
+      if (e.code === "cross_account") {
+        return NextResponse.json(
+          {
+            error:
+              "Transaction and bank row belong to different accounts. A transfer leg can only be linked to a bank row in its own account.",
+          },
+          { status: 400 },
+        );
+      }
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
     throw e;

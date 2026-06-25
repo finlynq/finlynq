@@ -309,7 +309,7 @@ export function LandingClient() {
               <Link href="/cloud?tab=register" className="btn btn-primary">
                 Try the hosted cloud <span aria-hidden="true">→</span>
               </Link>
-              <Link href="/try-demo?next=/dashboard" className="btn btn-ghost">
+              <Link href="/try-demo?next=/dashboard" prefetch={false} className="btn btn-ghost">
                 Try the demo (1 click)
               </Link>
               <Link href="/self-hosted" className="btn btn-ghost">
@@ -630,7 +630,7 @@ export function LandingClient() {
                 <Link href="/cloud?tab=register" className="btn btn-primary">
                   Get started
                 </Link>
-                <Link href="/try-demo?next=/dashboard" className="btn btn-ghost">
+                <Link href="/try-demo?next=/dashboard" prefetch={false} className="btn btn-ghost">
                   Try the live demo (no signup) <span aria-hidden="true">→</span>
                 </Link>
                 <Link href="/mcp-guide" className="btn btn-ghost">
@@ -824,7 +824,7 @@ export function LandingClient() {
               <Link href="/cloud?tab=register" className="btn btn-primary">
                 Get started free <span aria-hidden="true">→</span>
               </Link>
-              <Link href="/try-demo?next=/dashboard" className="btn btn-ghost">
+              <Link href="/try-demo?next=/dashboard" prefetch={false} className="btn btn-ghost">
                 Try the live demo (no signup)
               </Link>
               <a

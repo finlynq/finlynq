@@ -16,8 +16,12 @@
  *
  * Cascade (single transaction):
  *   1. If linked primary tx(s) exist AND deleteLinkedTransactions=true:
- *      delete those `transactions` rows (transaction_bank_links cascades
- *      via the FK on the bank side in step 2).
+ *      EXPAND those ids to their full link-id sibling closure
+ *      (`expandLinkSiblings`, FINLYNQ-222) so deleting one leg of a
+ *      transfer/trade/swap takes the other leg(s) with it — never leaving
+ *      a half-pair orphan — then delete those `transactions` rows
+ *      (transaction_bank_links cascades via the FK on the bank side in
+ *      step 2). A single non-transfer tx expands to just itself.
  *   2. Delete the `bank_transactions` row. transaction_bank_links cascades.
  *
  * If deleteLinkedTransactions=false (or omitted with no primary links),
@@ -40,6 +44,7 @@ import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { invalidateUser } from "@/lib/mcp/user-tx-cache";
+import { expandLinkSiblings } from "@/lib/transactions/link-siblings";
 import { safeErrorMessage } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
@@ -134,18 +139,32 @@ export async function DELETE(
 
     const cascadeLinkedTx = deleteLinkedTransactions === true;
 
+    // FINLYNQ-222 — expand the linked transactions to their full link-id
+    // sibling closure so deleting one leg of a transfer/trade/swap takes
+    // the other leg(s) with it. Without this, the sibling leg is left
+    // orphaned (link_id set, no sibling, no bank link) — a phantom
+    // in/outflow that distorts the OTHER account's balance, violating the
+    // "Cascade delete on link_id / trade_link_id siblings" invariant the
+    // canonical DELETE /api/transactions path already honors. Reuses the
+    // shared `expandLinkSiblings` helper so both routes cascade identically.
+    // A single non-transfer tx expands to just itself (no over-deletion).
+    let deleteIds = linkedTransactionIds;
+    if (cascadeLinkedTx && linkedTransactionIds.length > 0) {
+      deleteIds = await expandLinkSiblings(userId, linkedTransactionIds);
+    }
+
     // ─── Cascade in a single transaction ────────────────────────────────
     await db.transaction(async (tx) => {
-      // 1. Optional: delete linked transactions when the caller opts in.
-      //    `transaction_bank_links` rows on the tx side cascade via FK
-      //    (ON DELETE CASCADE).
-      if (cascadeLinkedTx && linkedTransactionIds.length > 0) {
+      // 1. Optional: delete linked transactions (+ their link siblings)
+      //    when the caller opts in. `transaction_bank_links` rows on the
+      //    tx side cascade via FK (ON DELETE CASCADE).
+      if (cascadeLinkedTx && deleteIds.length > 0) {
         await tx
           .delete(schema.transactions)
           .where(
             and(
               eq(schema.transactions.userId, userId),
-              inArray(schema.transactions.id, linkedTransactionIds),
+              inArray(schema.transactions.id, deleteIds),
             ),
           );
       }
@@ -169,7 +188,7 @@ export async function DELETE(
       success: true,
       data: {
         deletedBankId: bankId,
-        deletedTransactionIds: cascadeLinkedTx ? linkedTransactionIds : [],
+        deletedTransactionIds: cascadeLinkedTx ? deleteIds : [],
       },
     });
   } catch (err) {

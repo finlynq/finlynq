@@ -7,6 +7,7 @@
  *   - 'csv_column'     — last-in-file-order row's Balance value per date
  *   - 'ofx_ledgerbal'  — OFX/QFX <LEDGERBAL><BALAMT> + <DTASOF>
  *   - 'upload_form'    — user-typed statement balance + date
+ *   - 'mcp_manual'    — Claude-authored anchor via the MCP upsert_balance_anchor tool
  * Reserved future sources: 'email', 'connector', 'backup_restore'.
  *
  * Validation algorithm (checkpoint-style — user decision 2026-05-22):
@@ -31,7 +32,8 @@
  */
 
 import { db, schema } from "@/db";
-import { and, desc, eq, gt, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, lte, sql } from "drizzle-orm";
+import { normalizeDbRows } from "@/lib/db-utils";
 
 export const ANCHOR_SOURCES = [
   "csv_column",
@@ -40,6 +42,10 @@ export const ANCHOR_SOURCES = [
   "email",
   "connector",
   "backup_restore",
+  // FINLYNQ-217 (R-03) — a Claude-authored anchor created/corrected via the
+  // MCP upsert_balance_anchor tool, outside the staged-import flow. Kept in
+  // sync with the SQL CHECK in scripts/migrations/20260625b_balance_anchor_mcp_source.sql.
+  "mcp_manual",
 ] as const;
 export type AnchorSource = (typeof ANCHOR_SOURCES)[number];
 
@@ -356,5 +362,98 @@ export async function sumAllBankAmounts(
     ))
     .all();
   return rows.reduce((acc, r) => acc + Number(r.amount ?? 0), 0);
+}
+
+/** One anchor row, with its created-at timestamp, as returned to MCP callers. */
+export interface BalanceAnchorRow {
+  date: string; // YYYY-MM-DD
+  balance: number;
+  currency: string;
+  source: string;
+  /** first_seen_at — when the anchor row was first created. */
+  firstSeenAt: Date;
+}
+
+/**
+ * List every anchor for an account ordered by date DESC, optionally bounded by
+ * an inclusive [dateMin, dateMax] window. Unlike `listBankAnchors` this also
+ * returns `firstSeenAt` (the row's created-at) so the MCP get_balance_anchors
+ * tool can surface `createdAt`. FINLYNQ-217 (R-03).
+ */
+export async function listBankAnchorsInRange(
+  userId: string,
+  accountId: number,
+  dateMin?: string | null,
+  dateMax?: string | null,
+): Promise<BalanceAnchorRow[]> {
+  const conds = [
+    eq(schema.bankDailyBalances.userId, userId),
+    eq(schema.bankDailyBalances.accountId, accountId),
+  ];
+  if (dateMin != null) conds.push(gte(schema.bankDailyBalances.date, dateMin));
+  if (dateMax != null) conds.push(lte(schema.bankDailyBalances.date, dateMax));
+  const rows = await db
+    .select({
+      date: schema.bankDailyBalances.date,
+      balance: schema.bankDailyBalances.balance,
+      currency: schema.bankDailyBalances.currency,
+      source: schema.bankDailyBalances.source,
+      firstSeenAt: schema.bankDailyBalances.firstSeenAt,
+    })
+    .from(schema.bankDailyBalances)
+    .where(and(...conds))
+    .orderBy(desc(schema.bankDailyBalances.date))
+    .all();
+  return rows.map((r) => ({
+    date: r.date,
+    balance: Number(r.balance),
+    currency: r.currency,
+    source: r.source,
+    firstSeenAt: r.firstSeenAt as Date,
+  }));
+}
+
+/**
+ * Upsert a SINGLE manual balance anchor (one (user, account, date) key) and
+ * report whether the row was inserted (true) vs updated (false). Backs the MCP
+ * upsert_balance_anchor tool (FINLYNQ-217 / R-03).
+ *
+ * Distinct from `upsertBankBalanceAnchors` (the import path): this stamps
+ * `source='mcp_manual'`, sets an EMPTY `source_filenames` (no statement file),
+ * and returns the created flag. The empty array means no filename append on
+ * conflict — a manual anchor has no source file.
+ *
+ * `created` is derived from the system column `xmax`: PostgreSQL sets xmax=0 on
+ * a freshly INSERTed tuple, so `(xmax = 0)` distinguishes the INSERT branch of
+ * ON CONFLICT from the UPDATE branch in a single round-trip (no pre-existence
+ * SELECT needed).
+ *
+ * The reconcile balance check reads the latest anchor live
+ * (`computeAccountBalanceSummary` → `getLatestBankAnchor`), so an upsert here
+ * is immediately reflected in get_reconcile_suggestions / get_reconciliation_summary.
+ */
+export async function upsertManualBankAnchor(
+  userId: string,
+  accountId: number,
+  date: string,
+  balance: number,
+  currency: string,
+): Promise<{ created: boolean }> {
+  const res = await db.execute(sql`
+    INSERT INTO bank_daily_balances
+      (user_id, account_id, date, balance, currency, source, source_filenames,
+       first_seen_at, last_seen_at)
+    VALUES
+      (${userId}, ${accountId}, ${date}, ${balance}, ${currency}, 'mcp_manual',
+       ARRAY[]::text[], NOW(), NOW())
+    ON CONFLICT (user_id, account_id, date) DO UPDATE SET
+      balance = EXCLUDED.balance,
+      currency = EXCLUDED.currency,
+      source = 'mcp_manual',
+      last_seen_at = NOW()
+    RETURNING (xmax = 0) AS inserted
+  `);
+  const rows = normalizeDbRows<{ inserted: boolean }>(res);
+  return { created: rows[0]?.inserted === true };
 }
 

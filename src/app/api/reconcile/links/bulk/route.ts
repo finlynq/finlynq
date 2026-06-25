@@ -125,8 +125,11 @@ export async function POST(request: NextRequest) {
           else created++;
         } catch (e) {
           if (e instanceof LinkError) {
-            // Race: row deleted between the ownership check and the
-            // helper call. Treat as a soft miss.
+            // Soft miss — skip this pair, keep linking the rest of the
+            // cartesian. Either a race (row deleted between the ownership
+            // check and the helper call) or a cross-account pair the
+            // FINLYNQ-211 guard rejects (a tx and bank row in different
+            // accounts must never link). Both are non-fatal for the batch.
             continue;
           }
           throw e;

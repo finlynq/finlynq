@@ -286,6 +286,7 @@ export default function RoadmapPage() {
             </Link>
             <Link
               href="/try-demo?next=/dashboard"
+              prefetch={false}
               className="underline underline-offset-2 hover:text-primary"
             >
               Try the live demo (no signup) →

@@ -42,17 +42,25 @@ import {
   Landmark,
   ToggleLeft,
   ToggleRight,
+  FileSpreadsheet,
 } from "lucide-react";
 import { TemplateManager } from "@/app/(app)/import/components/template-manager";
 import { ConnectorTab } from "@/app/(app)/import/components/connector-tab";
+import { MoneyProConnectorTab } from "@/app/(app)/import/components/moneypro-connector-tab";
 import { InvestmentStatementImporter } from "@/app/(app)/import/components/investment-statement-importer";
 import { EmailRulesManager } from "@/components/inbox/email-rules-manager";
 import { ReconcileHideAccountsCard } from "@/components/inbox/reconcile-hide-accounts-card";
 import type { ImportTemplate } from "@/lib/import-templates";
 
+type ImportProvider = "wealthposition" | "moneypro";
+
 export default function ImportSettingsPage() {
   const [accountNames, setAccountNames] = useState<string[]>([]);
   const [templates, setTemplates] = useState<ImportTemplate[]>([]);
+  // "Import from another provider" tab — which provider's flow is open.
+  const [provider, setProvider] = useState<ImportProvider | null>(null);
+  // Active tab (controlled so it's deep-linkable via ?tab=).
+  const [tab, setTab] = useState("templates");
 
   // Email state
   const [importEmail, setImportEmail] = useState<string | null>(null);
@@ -73,6 +81,20 @@ export default function ImportSettingsPage() {
     7, 30, 60, 90,
   ]);
   const [retentionLoading, setRetentionLoading] = useState(false);
+
+  // Deep-link support: /settings/import?tab=connect[&provider=moneypro].
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const t = params.get("tab");
+    if (t && ["templates", "email", "connect", "statements"].includes(t)) {
+      setTab(t);
+    }
+    const p = params.get("provider");
+    if (p === "wealthposition" || p === "moneypro") {
+      setProvider(p);
+      setTab("connect");
+    }
+  }, []);
 
   // Fetch accounts, templates, and email config on mount.
   useEffect(() => {
@@ -257,7 +279,7 @@ export default function ImportSettingsPage() {
       {/* FINLYNQ-147 — hide accounts from the /import reconcile dropdown. */}
       <ReconcileHideAccountsCard />
 
-      <Tabs defaultValue="templates">
+      <Tabs value={tab} onValueChange={(v) => setTab(v ?? "templates")}>
         <TabsList>
           <TabsTrigger value="templates">
             <BookTemplate className="h-4 w-4 mr-1.5" />
@@ -274,7 +296,7 @@ export default function ImportSettingsPage() {
           </TabsTrigger>
           <TabsTrigger value="connect">
             <LinkIcon className="h-4 w-4 mr-1.5" />
-            Connect a Service
+            Import from another provider
           </TabsTrigger>
           <TabsTrigger value="statements">
             <Landmark className="h-4 w-4 mr-1.5" />
@@ -451,10 +473,65 @@ export default function ImportSettingsPage() {
           </div>
         </TabsContent>
 
-        {/* Connect a Service */}
+        {/* Import from another provider — per-source submenu */}
         <TabsContent value="connect">
-          <div className="mt-4" id="connect">
-            <ConnectorTab />
+          <div className="mt-4 space-y-4" id="connect">
+            {provider === null ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Bring your history over from another personal-finance app.
+                  Pick a provider to start.
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => setProvider("wealthposition")}
+                    className="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-muted/40"
+                  >
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600">
+                      <LinkIcon className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium">WealthPosition</div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">
+                        Import a WealthPosition export ZIP, with optional balance
+                        reconciliation.
+                      </div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProvider("moneypro")}
+                    className="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-muted/40"
+                  >
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
+                      <FileSpreadsheet className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium">Money Pro</div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">
+                        Import a Money Pro Transactions report exported as CSV.
+                      </div>
+                    </div>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setProvider(null)}
+                >
+                  ← Back to providers
+                </Button>
+                {provider === "wealthposition" ? (
+                  <ConnectorTab />
+                ) : (
+                  <MoneyProConnectorTab />
+                )}
+              </>
+            )}
           </div>
         </TabsContent>
 

@@ -20,7 +20,13 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq, isNotNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { computeReconcileForAccount } from "./match-engine";
+import {
+  computeAccountBalanceSummary,
+  type BalanceSummaryAccount,
+} from "./balance-summary";
+import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 
 export interface ReconcileSummaryRow {
   accountId: number;
@@ -125,4 +131,134 @@ export async function getReconcileSummary(
   }
 
   return [...byAccount.values()];
+}
+
+// ─── Portfolio-wide reconcile health (FINLYNQ-215 / R-04) ─────────────────────
+//
+// A richer per-account aggregator built for the MCP `get_reconciliation_summary`
+// tool: one row per account carrying the four reconcile-state counts plus the
+// bank-vs-system balance check, so a session can read "what's up to date / what's
+// off" across every account in ONE call instead of one get_reconcile_suggestions
+// per account.
+//
+//   - linked / suggestions / bankOnly / txOnly — derived per account by REUSING
+//     `computeReconcileForAccount` (the exact engine /import + get_reconcile_
+//     suggestions use), so the counts are byte-identical to the detail view.
+//   - balanceMismatch / balanceDelta / lastAnchorDate — from the SHARED
+//     `computeAccountBalanceSummary`, the same code the /import reconcile header
+//     calls. `balanceDelta` therefore EQUALS the header's delta verbatim.
+//
+// Investment accounts are EXCLUDED when no explicit accountIds are passed
+// (investment reconcile is out of scope, doc §7). When `accountIds` IS passed,
+// the caller's selection is honoured as-is (still owner-scoped).
+
+export interface ReconciliationHealthRow {
+  accountId: number;
+  /** Encrypted at rest — left null here; resolved at the API/MCP boundary. */
+  accountName: string | null;
+  linked: number;
+  suggestions: number;
+  bankOnly: number;
+  txOnly: number;
+  /** true when the most-recent anchor disagrees with the calculated balance. */
+  balanceMismatch: boolean;
+  /** systemSideLatest − bankSideLatest (the /import header delta). null when
+   *  the account has no balance anchor yet. */
+  balanceDelta: number | null;
+  /** Date (YYYY-MM-DD) of the most-recent balance anchor, or null. */
+  lastAnchorDate: string | null;
+  /** Account currency — the unit `balanceDelta` is expressed in. */
+  currency: string;
+  /** is_investment flag, surfaced so callers can label the row. */
+  isInvestment: boolean;
+}
+
+export interface ReconciliationSummaryOptions {
+  /** Restrict to these account ids (owner-scoped). Omit → all non-investment. */
+  accountIds?: number[];
+  /** Date floor on both tx + bank dates, in days back from today. Default 90 —
+   *  mirrors get_reconcile_suggestions. */
+  lookbackDays?: number;
+}
+
+/**
+ * Portfolio-wide reconcile health, one row per in-scope account.
+ *
+ * `dek` is required to decrypt payees for the fuzzy match counts (mirrors
+ * `computeReconcileForAccount`); a null DEK degrades the counts to "no fuzzy
+ * match" rather than crashing. Account-name decryption is left to the caller.
+ */
+export async function getReconciliationSummary(
+  userId: string,
+  dek: Buffer | null,
+  opts: ReconciliationSummaryOptions = {},
+): Promise<ReconciliationHealthRow[]> {
+  const lookbackDays = opts.lookbackDays ?? 90;
+  const dateMin = new Date(Date.now() - lookbackDays * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+
+  // Resolve the in-scope accounts. Owner-scoped always. When accountIds is
+  // omitted we exclude investment accounts (doc §7); when it's passed we honour
+  // the caller's selection verbatim (still user-scoped via the WHERE).
+  const whereClauses = [eq(schema.accounts.userId, userId)];
+  if (opts.accountIds && opts.accountIds.length > 0) {
+    whereClauses.push(inArray(schema.accounts.id, opts.accountIds));
+  } else {
+    whereClauses.push(eq(schema.accounts.isInvestment, false));
+  }
+  const accountRows = await db
+    .select({
+      id: schema.accounts.id,
+      currency: schema.accounts.currency,
+      isInvestment: schema.accounts.isInvestment,
+    })
+    .from(schema.accounts)
+    .where(and(...whereClauses))
+    .all();
+
+  if (accountRows.length === 0) return [];
+
+  // Pre-fetch the holdings-value map ONCE (covers all investment accounts in
+  // scope) so each per-account balance summary doesn't recompute it.
+  const hasInvestment = accountRows.some((a) => a.isInvestment);
+  const holdingsByAccount = hasInvestment
+    ? await getHoldingsValueByAccount(userId, dek)
+    : undefined;
+
+  const out = await Promise.all(
+    accountRows.map(async (acct): Promise<ReconciliationHealthRow> => {
+      const acctForBalance: BalanceSummaryAccount = {
+        id: acct.id,
+        currency: acct.currency,
+        isInvestment: acct.isInvestment,
+      };
+      const [recon, balance] = await Promise.all([
+        computeReconcileForAccount({
+          userId,
+          dek,
+          accountId: acct.id,
+          dateMin,
+        }),
+        computeAccountBalanceSummary(userId, dek, acctForBalance, holdingsByAccount),
+      ]);
+      return {
+        accountId: acct.id,
+        accountName: null,
+        linked: recon.linked.length,
+        suggestions: recon.suggestions.length,
+        bankOnly: recon.bankOnly.length,
+        txOnly: recon.txOnly.length,
+        balanceMismatch: balance.status === "mismatch",
+        balanceDelta: balance.delta,
+        lastAnchorDate: balance.latestAnchor?.date ?? null,
+        currency: acct.currency,
+        isInvestment: acct.isInvestment,
+      };
+    }),
+  );
+
+  // Stable ordering by accountId so the result is deterministic.
+  out.sort((a, b) => a.accountId - b.accountId);
+  return out;
 }
