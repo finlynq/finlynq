@@ -43,80 +43,43 @@
  * tag for `transactions.tags`.
  */
 
-import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
-import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
-import { encryptStagingMeta } from "@/lib/crypto/staging-metadata";
 import {
   generateImportHash,
   checkDuplicates,
   checkFitIdDuplicates,
 } from "@/lib/import-hash";
 import { normalizeDate } from "@/lib/csv-parser";
-import { parseOfx } from "@/lib/ofx-parser";
-import { parseCsvWithFallback, type ParseError } from "@/lib/external-import/parsers/csv-pipeline";
 import { isSupportedCurrency } from "@/lib/fx/supported-currencies";
 import type { DateFormatOverride } from "@/lib/csv-parser";
-import { parseOfxToCanonical } from "@/lib/external-import/parsers/ofx";
-import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
-// Removed in the 2026-05-22 two-ledger refactor: probable-duplicate fuzzy
-// matching (buildDuplicateCandidatePool / detectProbableDuplicates) is no
-// longer run at file-upload time. Exact match against bank_transactions
-// is the only file-side dedup; fuzzy matching belongs on the bank-ledger
-// → transactions reconciliation surface (future).
-import type { RawTransaction } from "@/lib/import-pipeline";
 import { findUnreasonableAmountError } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
 import { simplifiedUpload } from "@/lib/import/simplified-upload";
 import { applyRulesToBankRows } from "@/lib/reconcile/match-engine";
 import { getConfirmCsvMappingDefault } from "@/app/api/settings/confirm-csv-mapping/route";
+// FINLYNQ-221 — the parse + staged-import WRITE core lives in the shared
+// stage-statement-file chokepoint (so the MCP `upload_statement` tool stages
+// via the identical pipeline). The route imports them back: `parseStatement`
+// for the parse step (it needs the parsed rows to make the confirm-gate /
+// simplified-path decision), `buildAccountLookup` for the simplified-path
+// classifier, and `writeStagedImport` for the detailed-staging INSERT tail.
+import {
+  parseStatement,
+  buildAccountLookup,
+  writeStagedImport,
+  type ParseSuccess,
+} from "@/lib/import/stage-statement-file";
 
 export const dynamic = "force-dynamic";
 
 const MAX_BODY_BYTES = 20 * 1024 * 1024; // 20 MB
 /** Hard cap so a single staging session stays cheap to classify + render. */
 const MAX_STAGING_ROWS = 10_000;
-/** 60 days — matches stage-email-import.ts (bumped 2026-05-06 alongside the
- *  login-time service→user upgrade job). */
-const STAGE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 const DEFAULT_DATE_TOLERANCE_DAYS = 3;
-
-type FileFormat = "csv" | "ofx" | "qfx";
-
-/** Parsed bank balance anchor (2026-05-24). Carried from parser → approve. */
-interface ParsedAnchor {
-  date: string;          // YYYY-MM-DD
-  balance: number;
-  currency: string;       // ISO 4217
-  source: "csv_column" | "ofx_ledgerbal";
-}
-
-interface ParseSuccess {
-  rows: RawTransaction[];
-  errors: ParseError[];
-  format: FileFormat;
-  /** OFX only — extracted from <LEDGERBAL>. */
-  statementBalance?: number | null;
-  statementBalanceDate?: string | null;
-  statementCurrency?: string | null;
-  /** 2026-05-24 — per-day bank balance anchors. CSV path: extracted from
-   *  the Balance column (one per date, last-in-file-order's value).
-   *  OFX/QFX path: single anchor synthesized from <LEDGERBAL>. */
-  anchors: ParsedAnchor[];
-  /** §A (2026-06-04) — OFX/QFX only — which field was used as the payee
-   *  ('name' | 'memo'), echoed back so the upload drawer can confirm what
-   *  was applied. Unset for CSV. */
-  payeeSource?: "name" | "memo";
-}
-
-interface ParseFailure {
-  status: number;
-  body: Record<string, unknown>;
-}
 
 /**
  * Statement summary for the upload-success drawer panel (consolidation
@@ -797,164 +760,36 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Statement-balance source priority:
-    //   OFX/QFX <LEDGERBAL>  > user-typed (CSV form field)
-    const statementBalance =
-      parseResult.statementBalance ?? userStatementBalance ?? null;
-    const statementBalanceDate =
-      parseResult.statementBalanceDate ?? statementPeriodEnd ?? null;
-    const statementCurrency =
-      parseResult.statementCurrency ?? boundAccountCurrency ?? null;
-
-    // Tx-type per row: 'I' for income (amount > 0), 'E' for expense (≤0).
-    // Transfers ('R') need both legs and explicit pairing — out of scope
-    // for the upload path (separate ticket #155).
-    const txTypeFor = (amount: number): "E" | "I" => (amount > 0 ? "I" : "E");
-
-    // FINLYNQ-58 — pre-build the per-row staged_transactions VALUES shape.
-    // Used for both the new-batch INSERT and the merge-append INSERT path,
-    // so the encryption + reconcile_state seeding logic stays in one place.
-    // `reconcile_state` is driven by the F-53E already-imported probe above;
-    // 'skipped_duplicate' is set ONLY on first INSERT (the user can later
-    // toggle back to 'unmatched' via the row PATCH — load-bearing per
-    // CLAUDE.md "Do NOT silently flip skipped_duplicate back to unmatched").
-    const buildStagedRow = (r: typeof shaped[number], stagedImportIdLocal: string) => ({
-      id: randomUUID(),
-      stagedImportId: stagedImportIdLocal,
+    // ─── Detailed-staging path (FINLYNQ-221) ─────────────────────────────
+    // The classify + dedup + already-imported probe above feeds the simplified
+    // path's simplifiedUpload(); the detailed path now delegates the whole
+    // parse → classify → dedup → INSERT write to the shared `writeStagedImport`
+    // chokepoint so the web route + the MCP `upload_statement` tool produce the
+    // identical staged_imports row. writeStagedImport re-runs the (cheap,
+    // in-memory + two dedup queries) classification from `parseResult` so the
+    // staged-write logic lives in exactly ONE place.
+    const staged = await writeStagedImport(parseResult, {
       userId,
-      date: r.date,
-      amount: r.amount,
-      // Currency priority: row-supplied > default-currency knob >
-      // bound-account currency > hard fallback. The knob only fires
-      // for rows that didn't carry a currency themselves (FINLYNQ-54).
-      currency: r.currency ?? defaultCurrency ?? boundAccountCurrency ?? "CAD",
-      // User-tier encryption: DEK is available, so wrap directly under
-      // the user's DEK (v1: envelope) rather than the staging key.
-      // Read paths (staged/[id] GET + approve) branch on
-      // `encryption_tier` and pick tryDecryptField(dek, ...) for
-      // 'user' rows. See CLAUDE.md "Staged-transactions reads MUST
-      // branch on encryption_tier per row".
-      payee: encryptField(dek, r.payee) ?? null,
-      category: encryptField(dek, r.category ?? null),
-      accountName: encryptField(dek, r.account || null),
-      note: encryptField(dek, r.note ?? null),
-      rowIndex: r.rowIndex,
-      isDuplicate: r.dedupStatus !== "new",
-      importHash: r.hash,
-      encryptionTier: "user",
-      txType: txTypeFor(r.amount),
-      quantity: r.quantity ?? null,
-      // FINLYNQ-195 — investment-import capture (v1). TICKER + security NAME are
-      // SENSITIVE free-text, so encrypt-in-place under the user's DEK (v1:
-      // envelope) exactly like payee/category/note above. Read paths branch on
-      // encryption_tier per row (staged/[id] GET). NULL for cash-account rows
-      // (mapping never sets ticker/portfolioHolding for non-investment imports).
-      // The portfolioHolding name maps to the new `securityName` column.
-      ticker: encryptField(dek, r.ticker ?? null),
-      securityName: encryptField(dek, r.portfolioHolding ?? null),
-      portfolioHoldingId: null,
-      enteredAmount: r.enteredAmount ?? null,
-      // Default-currency knob also backstops entered_currency (FINLYNQ-54)
-      // so cross-currency rows that came in without one don't get
-      // mis-interpreted as bound-account-currency at approve time.
-      enteredCurrency: r.enteredCurrency ?? defaultCurrency ?? null,
-      tags: r.tags ?? null,
-      fitId: r.fitId ?? null,
-      peerStagedId: null,
-      targetAccountId: null,
-      dedupStatus: r.dedupStatus,
-      rowStatus: "pending",
-      // FINLYNQ-58 — already-imported marker. The hash probe above checked
-      // `transactions.import_hash` for this user; hits land at
-      // 'skipped_duplicate' so approve excludes them by default and the
-      // UI badge fires.
-      reconcileState: alreadyImportedHashes.has(r.hash) ? "skipped_duplicate" : "unmatched",
-    });
-
-    // ─── Create a new staged_imports row ─────────────────────────────────
-    // Two-ledger refactor (2026-05-22) — the F-53E overlap-merge prompt
-    // was removed. Re-uploads of an identical file still produce a staged
-    // batch, but every row is auto-flagged `reconcile_state='skipped_duplicate'`
-    // via the bank-ledger probe above (the `alreadyImportedHashes` set);
-    // the user sees "X of N already in your bank ledger" and rejects the
-    // batch with one click. Row-level dedup against `bank_transactions`
-    // subsumes both the previous "merge into pending batch" and "create
-    // alongside" cases.
-    const stagedImportId = randomUUID();
-    const expiresAt = new Date(Date.now() + STAGE_TTL_MS);
-    const dupCount = shaped.filter((r) => r.dedupStatus !== "new").length;
-
-    await db.transaction(async (tx) => {
-      await tx.insert(schema.stagedImports).values({
-        id: stagedImportId,
-        userId,
-        source: "upload",
-        fromAddress: null,
-        subject: null,
-        svixId: null,
-        status: "pending",
-        totalRowCount: shaped.length,
-        duplicateCount: dupCount,
-        expiresAt,
-        statementBalance,
-        statementBalanceDate,
-        statementCurrency,
-        statementPeriodStart,
-        statementPeriodEnd,
-        boundAccountId: accountId,
-        fileFormat: parseResult.format,
-        // FINLYNQ-120 — web upload carries a session DEK, so filename lands at
-        // USER tier (v1:). fromAddress/subject/sampleRows are null on this path.
-        originalFilename: encryptStagingMeta(file.name, "user", dek),
-        encryptionTier: "user",
-        // FINLYNQ-54 parser knobs — persisted so the F-53E merge flow can
-        // read them back. Defaults match pre-FINLYNQ-54 behavior.
-        skipHeaderRows,
-        skipFooterRows,
-        dateFormatOverride,
-        defaultCurrency,
-        // FINLYNQ-58 — date_range_* drives the merge-prompt overlap check
-        // on future uploads to the same account. Mirrors statement_period_*
-        // today; column split lets divergence happen later.
-        dateRangeStart,
-        dateRangeEnd,
-        // 2026-05-24 — per-day bank balance anchors. CSV path: one per
-        // unique date with the last-in-file-order's balance. OFX path:
-        // single LEDGERBAL anchor. Null when no anchors were parsed —
-        // the upload form's typed statement_balance is a separate
-        // anchor source carried on the dedicated column above.
-        parsedAnchors: parseResult.anchors.length > 0 ? parseResult.anchors : null,
-      });
-
-      if (shaped.length > 0) {
-        const chunk = 500;
-        for (let i = 0; i < shaped.length; i += chunk) {
-          const slice = shaped.slice(i, i + chunk);
-          await tx.insert(schema.stagedTransactions).values(
-            slice.map((r) => buildStagedRow(r, stagedImportId)),
-          );
-        }
-      }
-
-      // Phase 3 of import-modes refactor (2026-05-25) — rules no longer fire
-      // at upload time. Categorization happens at /reconcile materialize
-      // time (via match-engine.ts:364 applyRules suggestion + dialog confirm).
-      // The detailed-mode /import/pending review is now parse-verification
-      // only; approve writes ONLY to bank_transactions.
+      dek,
+      accountId,
+      fileName: file.name,
+      knobs: { skipHeaderRows, skipFooterRows, dateFormatOverride, defaultCurrency },
+      boundAccountCurrency,
+      userStatementBalance,
     });
 
     return NextResponse.json({
-      stagedImportId,
-      redirectTo: `/import/pending?id=${encodeURIComponent(stagedImportId)}`,
-      format: parseResult.format,
+      stagedImportId: staged.stagedImportId,
+      redirectTo: `/import/pending?id=${encodeURIComponent(staged.stagedImportId)}`,
+      format: staged.format,
       // §A — echo the resolved OFX payee source. Undefined for CSV.
       ...(parseResult.payeeSource ? { payeeSource: parseResult.payeeSource } : {}),
       counts: {
-        new: shaped.filter((r) => r.dedupStatus === "new").length,
-        existing: shaped.filter((r) => r.dedupStatus === "existing").length,
-        probableDuplicate: shaped.filter((r) => r.dedupStatus === "probable_duplicate").length,
-        skippedDuplicate: shaped.filter((r) => alreadyImportedHashes.has(r.hash)).length,
-        errors: rowErrors.length + parseResult.errors.length,
+        new: staged.counts.new,
+        existing: staged.counts.existing,
+        probableDuplicate: staged.counts.probableDuplicate,
+        skippedDuplicate: staged.counts.skippedDuplicate,
+        errors: staged.counts.errors,
       },
       statement: buildStatementSummary(parseResult),
       tolerance,
@@ -963,263 +798,4 @@ export async function POST(request: NextRequest) {
     const message = safeErrorMessage(error, "Staging upload failed");
     return NextResponse.json({ error: message }, { status: 500 });
   }
-}
-
-// ─── helpers ──────────────────────────────────────────────────────────────
-
-async function parseStatement(
-  file: File,
-  ext: string | undefined,
-  templateId: number | null,
-  userId: string,
-  defaultAccountName: string | null,
-  knobs: {
-    skipHeaderRows: number;
-    skipFooterRows: number;
-    dateFormatOverride: DateFormatOverride | null;
-    defaultCurrency: string | null;
-  },
-  boundAccountCurrency: string | null,
-  // Statement-upload field-mapping (2026-06-04). §A payeeSource governs which
-  // OFX/QFX field becomes the payee; §B confirmAutoMapping gates the CSV
-  // auto-detect confirm flow. Defaults preserve today's behavior so the
-  // (unaffected) /api/import/preview path stays silent.
-  fieldMapping: {
-    payeeSource: "name" | "memo";
-    confirmAutoMapping: boolean;
-    confirmOfxPreview?: boolean;
-    fileName: string;
-  } = { payeeSource: "name", confirmAutoMapping: false, fileName: file.name },
-): Promise<ParseSuccess | ParseFailure> {
-  if (ext === "csv") {
-    const text = await file.text();
-    const result = await parseCsvWithFallback({
-      text,
-      userId,
-      templateId,
-      defaultAccountName,
-      skipHeaderRows: knobs.skipHeaderRows,
-      skipFooterRows: knobs.skipFooterRows,
-      dateFormatOverride: knobs.dateFormatOverride,
-      defaultCurrency: knobs.defaultCurrency,
-      anchorCurrency: boundAccountCurrency,
-      confirmAutoMapping: fieldMapping.confirmAutoMapping,
-    });
-    if (result.kind === "template-not-found") {
-      return {
-        status: 400,
-        body: { error: `Template #${result.templateId} not found` },
-      };
-    }
-    if (result.kind === "needs-mapping") {
-      return {
-        status: 422,
-        body: {
-          type: "csv-needs-mapping",
-          error:
-            "We couldn't auto-detect the columns in this CSV. Save a column mapping via the regular /import flow first, then re-upload here.",
-          headers: result.headers,
-          sampleRows: result.sampleRows,
-          suggestedMapping: result.suggestedMapping,
-          fileName: file.name,
-        },
-      };
-    }
-    if (result.kind === "auto-detected") {
-      // §B — the pipeline detected a mapping but the account is in 'confirm'
-      // mode. Surface it for review before staging (mirrors the
-      // csv-needs-mapping 422, with the detected mapping + source pre-filled).
-      return {
-        status: 422,
-        body: {
-          type: "csv-confirm-mapping",
-          error:
-            "Confirm the detected column mapping before importing this CSV.",
-          headers: result.headers,
-          sampleRows: result.sampleRows,
-          suggestedMapping: result.mapping,
-          source: result.source,
-          ...(result.templateId != null ? { templateId: result.templateId } : {}),
-          rowCount: result.rowCount,
-          fileName: file.name,
-        },
-      };
-    }
-    return {
-      rows: result.rows,
-      errors: result.errors,
-      format: "csv",
-      anchors: result.anchors.map((a) => ({
-        date: a.date,
-        balance: a.balance,
-        currency: a.currency,
-        source: "csv_column" as const,
-      })),
-    };
-  }
-
-  if (ext === "ofx" || ext === "qfx") {
-    const text = await file.text();
-    if (!defaultAccountName) {
-      return {
-        status: 400,
-        body: {
-          error:
-            "OFX/QFX statements need an explicit accountId — pick the destination Finlynq account before uploading.",
-        },
-      };
-    }
-    // Investment dispatch — the legacy parseOfx() returns 0 rows for an
-    // <INVSTMTRS> file, so we route those through the canonical investment
-    // emitter (matches /api/import/preview behavior).
-    const looksLikeInvestment = /<INVSTMTRS\b/i.test(text);
-    if (looksLikeInvestment) {
-      const isQfx = ext === "qfx";
-      // payeeSource only affects bank/CC <STMTTRN> rows — investment legs
-      // synthesize their own payees, so passing it here is a harmless no-op
-      // for the trade/income/transfer rows (kept for symmetry).
-      const canonical = isQfx
-        ? parseQfxToCanonical(text, { payeeSource: fieldMapping.payeeSource })
-        : parseOfxToCanonical(text, "ofx", { payeeSource: fieldMapping.payeeSource });
-      if (canonical.rows.length === 0) {
-        return {
-          status: 400,
-          body: {
-            error: "No transactions found in OFX/QFX investment statement.",
-          },
-        };
-      }
-      const rows: RawTransaction[] = canonical.rows.map((r) => ({
-        ...r,
-        account: defaultAccountName,
-      }));
-      // Investment statements may have multiple per-account balances;
-      // surface the first one as the headline statement balance.
-      const firstBal = canonical.balances[0];
-      const anchors: ParsedAnchor[] =
-        firstBal?.balanceAmount != null && firstBal?.balanceDate
-          ? [{
-              date: firstBal.balanceDate,
-              balance: firstBal.balanceAmount,
-              currency: boundAccountCurrency ?? "CAD",
-              source: "ofx_ledgerbal",
-            }]
-          : [];
-      return {
-        rows,
-        errors: [],
-        format: ext === "qfx" ? "qfx" : "ofx",
-        statementBalance: firstBal?.balanceAmount ?? null,
-        statementBalanceDate: firstBal?.balanceDate ?? null,
-        anchors,
-        payeeSource: fieldMapping.payeeSource,
-      };
-    }
-
-    // Legacy bank/CC OFX path — extract <LEDGERBAL> for statement balance.
-    // §A — payeeSource selects which OFX field (NAME vs MEMO) becomes the
-    // payee; `t.payee` / `t.memo` already reflect that choice in the parser.
-    const ofx = parseOfx(text, { payeeSource: fieldMapping.payeeSource });
-    if (ofx.transactions.length === 0) {
-      return {
-        status: 400,
-        body: { error: "No transactions found in OFX/QFX file" },
-      };
-    }
-    // §A (2026-06-04) — field-mapping confirm preview. When the account is in
-    // 'confirm' mode (and the upload isn't the post-confirm re-fire), return the
-    // parsed rows as a preview INSTEAD of staging. The OfxConfirmDialog shows
-    // them with a live Name/Memo payee-source toggle; on confirm the drawer
-    // re-uploads with `confirmedImport=1` + the chosen payeeSource. Mirrors the
-    // CSV csv-confirm-mapping 422. Investment statements (handled above) have no
-    // NAME/MEMO choice, so they're never gated here.
-    if (fieldMapping.confirmOfxPreview) {
-      return {
-        status: 422,
-        body: {
-          type: "ofx-confirm",
-          error: "Confirm how this statement maps before importing.",
-          format: ext === "qfx" ? "qfx" : "ofx",
-          payeeSource: fieldMapping.payeeSource,
-          account: defaultAccountName,
-          currency: ofx.currency,
-          statementBalance: ofx.balanceAmount,
-          statementBalanceDate: ofx.balanceDate,
-          rowCount: ofx.transactions.length,
-          // Raw NAME + MEMO per row so the dialog can live-swap payee/note
-          // client-side without re-uploading on every toggle.
-          rows: ofx.transactions.map((t) => ({
-            date: t.date,
-            amount: t.amount,
-            name: t.name,
-            memo: t.rawMemo,
-            type: t.type,
-            fitId: t.fitId,
-          })),
-          fileName: file.name,
-        },
-      };
-    }
-    const rows: RawTransaction[] = ofx.transactions.map((t) => ({
-      date: t.date,
-      account: defaultAccountName,
-      amount: t.amount,
-      payee: t.payee,
-      currency: ofx.currency,
-      note: t.memo || "",
-      fitId: t.fitId,
-    }));
-    const ofxAnchors: ParsedAnchor[] =
-      ofx.balanceAmount != null && ofx.balanceDate
-        ? [{
-            date: ofx.balanceDate,
-            balance: ofx.balanceAmount,
-            currency: ofx.currency,
-            source: "ofx_ledgerbal",
-          }]
-        : [];
-    return {
-      rows,
-      errors: [],
-      format: ext === "qfx" ? "qfx" : "ofx",
-      statementBalance: ofx.balanceAmount,
-      statementBalanceDate: ofx.balanceDate,
-      statementCurrency: ofx.currency,
-      anchors: ofxAnchors,
-      payeeSource: fieldMapping.payeeSource,
-    };
-  }
-
-  return {
-    status: 400,
-    body: {
-      error: `Unsupported file type "${ext ?? "unknown"}". Staging upload supports CSV, OFX, and QFX. For PDF/Excel, use the regular import flow first.`,
-    },
-  };
-}
-
-/** Build accountName → {id, currency} map for the user. Mirrors
- *  buildAccountLookup() in src/lib/reconcile.ts. */
-async function buildAccountLookup(
-  userId: string,
-  dek: Buffer,
-): Promise<Map<string, { id: number; currency: string }>> {
-  const rows = await db
-    .select()
-    .from(schema.accounts)
-    .where(eq(schema.accounts.userId, userId))
-    .all();
-  const map = new Map<string, { id: number; currency: string }>();
-  for (const a of rows) {
-    const plainName = a.nameCt ? tryDecryptField(dek, a.nameCt, "accounts.name_ct") : null;
-    const plainAlias = a.aliasCt ? tryDecryptField(dek, a.aliasCt, "accounts.alias_ct") : null;
-    if (plainName) {
-      map.set(plainName.toLowerCase().trim(), { id: a.id, currency: a.currency });
-    }
-    if (plainAlias) {
-      const key = plainAlias.toLowerCase().trim();
-      if (key && !map.has(key)) map.set(key, { id: a.id, currency: a.currency });
-    }
-  }
-  return map;
 }

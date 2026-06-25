@@ -108,6 +108,7 @@ import { previewImport as pipelinePreview, executeImport as pipelineExecute, typ
 import { generateImportHash } from "../src/lib/import-hash";
 import { upsertBankTransaction } from "../src/lib/bank-ledger";
 import { sendStagedRowsToBankLedger } from "../src/lib/import/send-to-bank-ledger";
+import { stageStatementFile } from "../src/lib/import/stage-statement-file";
 import {
   detectProbableDuplicates,
   type DuplicateCandidatePool,
@@ -5620,7 +5621,7 @@ export function registerPgTools(
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           transfer_tools: ["record_transfer"],
-          reconcile_tools: ["get_reconcile_suggestions", "find_duplicate_bank_rows", "delete_bank_transaction", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
+          reconcile_tools: ["upload_statement", "get_reconcile_suggestions", "find_duplicate_bank_rows", "delete_bank_transaction", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
           tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
         });
       }
@@ -5689,10 +5690,10 @@ export function registerPgTools(
       if (t === "reconcile") {
         return dataResponse({
           read_tools: ["get_reconcile_suggestions", "find_duplicate_bank_rows"],
-          write_tools: ["send_to_bank_ledger", "delete_bank_transaction", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
+          write_tools: ["upload_statement", "send_to_bank_ledger", "delete_bank_transaction", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
           bulk_tools: ["apply_rules_to_bank_rows"],
-          flow: "0) send_to_bank_ledger(stagedImportId) → promote a pending statement import into the BANK LEDGER ONLY (no `transactions` rows) + load its balance anchor — the normal reconcile setup when the account already has ledger transactions for the period (use approve_staged_rows only for a first import of a brand-new account). 0.5) find_duplicate_bank_rows(accountId) → list groups of duplicate bank-ledger rows (distinct ids for one event from overlapping imports); canonicalId is the oldest to keep, then delete_bank_transaction(bankTransactionId) removes each extra (dryRun:true to preview the affected transactions first). 1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
-          note: "All reconcile tools are HTTP-only and need an unlocked DEK. send_to_bank_ledger writes ONLY bank_transactions (never `transactions`); approve_staged_rows is the one that CREATES ledger transactions (first-import only). delete_bank_transaction removes a bank row (cascade clears its links + nulls transactions.bank_transaction_id; the `transactions` rows survive) — dryRun first. apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
+          flow: "-1) upload_statement(fileContent[base64], fileName, accountId) → stage a CSV/OFX/QFX statement over MCP (no browser session) — returns a real stagedImportId (NOT the mcp_uploads artifact of the legacy /api/mcp/upload path) for the steps below. 0) send_to_bank_ledger(stagedImportId) → promote a pending statement import into the BANK LEDGER ONLY (no `transactions` rows) + load its balance anchor — the normal reconcile setup when the account already has ledger transactions for the period (use approve_staged_rows only for a first import of a brand-new account). 0.5) find_duplicate_bank_rows(accountId) → list groups of duplicate bank-ledger rows (distinct ids for one event from overlapping imports); canonicalId is the oldest to keep, then delete_bank_transaction(bankTransactionId) removes each extra (dryRun:true to preview the affected transactions first). 1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
+          note: "All reconcile tools are HTTP-only and need an unlocked DEK. upload_statement decodes a base64 file (CSV/OFX/QFX, 5 MB decoded cap) and stages it → a real staged_imports.id for send_to_bank_ledger / approve_staged_rows; an unrecognised/unparseable file returns detectedFormat:'unrecognised' and creates nothing. send_to_bank_ledger writes ONLY bank_transactions (never `transactions`); approve_staged_rows is the one that CREATES ledger transactions (first-import only). delete_bank_transaction removes a bank row (cascade clears its links + nulls transactions.bank_transaction_id; the `transactions` rows survive) — dryRun first. apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
         });
       }
 
@@ -12225,6 +12226,131 @@ export function registerPgTools(
         anchorsPromoted: result.anchorsPromoted,
         batchId: result.batchId,
         balanceWarnings: result.balanceWarnings,
+        rowErrors: result.rowErrors,
+      });
+    },
+  );
+
+  // ── upload_statement (FINLYNQ-221 / R-08) ───────────────────────────────────
+  // Stage a statement file (CSV / OFX / QFX) over the authenticated MCP
+  // connection — no browser session needed. Decodes the base64 `fileContent`
+  // server-side and runs the STAGING pipeline (the path behind
+  // /api/import/staging/upload) via the shared `stageStatementFile` chokepoint,
+  // so the returned `stagedImportId` is a REAL `staged_imports.id` that
+  // send_to_bank_ledger (R-07) + approve_staged_rows consume unchanged.
+  //
+  // Critical divergence (per the ticket): the existing POST /api/mcp/upload (the
+  // tool behind preview_import/execute_import) writes the WRONG artifact — a
+  // file on disk + an `mcp_uploads` row, NOT a staged_imports row. This tool
+  // deliberately does NOT wrap it.
+  //
+  // Size cap: 5 MB on the DECODED bytes (mirrors the browser upload's MAX_BYTES).
+  // base64 inflates ~33%, so the MCP message carrying fileContent is ~6.7 MB for
+  // a 5 MB file — the effective per-message cap is documented in the tool
+  // description. HTTP-only: a DEK is required to encrypt staged rows under the
+  // user key. Re-uploading the same file creates a NEW staged import (dedup is
+  // row-level, not file-level). On parse failure / unrecognised format →
+  // descriptive error with detectedFormat:'unrecognised' and NO staged import.
+  const UPLOAD_STATEMENT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB decoded
+  server.tool(
+    "upload_statement",
+    "Bookkeeping only: Finlynq writes only to your own database — it never connects to a bank or brokerage and never moves real money. Stage a bank/brokerage statement file (CSV, OFX, or QFX) over this MCP connection (no browser session needed). Pass the file bytes base64-encoded in fileContent; the format is detected from fileName's extension. Runs the STAGING pipeline and returns { stagedImportId, rowCount, duplicateCount, newCount, dateStart, dateEnd, statementBalance, statementBalanceDate, statementCurrency, detectedFormat } — feed the stagedImportId to get_staged_import (inspect) then send_to_bank_ledger (load the bank side) or approve_staged_rows (first import of a brand-new account). Max file size 5 MB decoded (~6.7 MB base64 in the message). accountId must be one of your accounts (required for OFX/QFX). On an unsupported/unparseable file you get an error with detectedFormat:'unrecognised' and NO staged import. Re-uploading the same file creates a NEW staged import (row-level dedup flags already-known rows). Requires an unlocked DEK.",
+    {
+      fileContent: z
+        .string()
+        .min(1)
+        .describe("The statement file bytes, base64-encoded. Max 5 MB decoded."),
+      fileName: z
+        .string()
+        .min(1)
+        .describe(
+          "Original filename — its extension selects the parser (.csv / .ofx / .qfx).",
+        ),
+      accountId: z
+        .number()
+        .int()
+        .positive()
+        .describe(
+          "Finlynq account id to bind the import to (must belong to you; required for OFX/QFX).",
+        ),
+      mimeType: z
+        .string()
+        .optional()
+        .describe("Optional MIME type hint (advisory only; format is detected from fileName)."),
+    },
+    // Non-destructive write: it INSERTs a pending staged_imports row (no
+    // `transactions` write, nothing deleted). Not idempotent — re-uploading
+    // creates a new staged import by design. Annotate explicitly (the name
+    // carries no delete_/set_ token the inferencer reads).
+    {
+      title: "Upload Statement",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    async ({ fileContent, fileName, accountId }) => {
+      if (!dek) {
+        return err(
+          "upload_statement requires an unlocked DEK to encrypt the staged rows under your key. Re-login to refresh your session.",
+        );
+      }
+
+      // ─── Decode base64 → bytes (5 MB cap on the DECODED size) ──────────────
+      let bytes: Buffer;
+      try {
+        bytes = Buffer.from(fileContent, "base64");
+      } catch {
+        return err("fileContent is not valid base64.");
+      }
+      if (bytes.length === 0) {
+        return err("Decoded file is empty.");
+      }
+      if (bytes.length > UPLOAD_STATEMENT_MAX_BYTES) {
+        return err(
+          `File exceeds the ${UPLOAD_STATEMENT_MAX_BYTES} byte (5 MB) limit (decoded size ${bytes.length} bytes). Split the statement into smaller files.`,
+        );
+      }
+
+      // Construct a File from the bytes so the shared staging chokepoint parses
+      // it identically to the browser upload (it reads file.text() + the name).
+      const file = new File([new Uint8Array(bytes)], fileName, {
+        type: "application/octet-stream",
+      });
+
+      const result = await stageStatementFile({
+        userId,
+        dek,
+        file,
+        accountId,
+      });
+
+      if (!result.ok) {
+        // Parse / ownership / size failure. Surface a descriptive error +
+        // detectedFormat so the caller knows it was an unrecognised format vs a
+        // bound-account problem. No staged import was created.
+        const msg =
+          typeof result.body?.error === "string"
+            ? (result.body.error as string)
+            : "Could not stage the statement file.";
+        return err(`${msg} (detectedFormat: ${result.detectedFormat})`);
+      }
+
+      // No invalidateUser — this tool writes ONLY staged_imports /
+      // staged_transactions (a pending review batch), not `transactions`, so the
+      // per-user tx cache is untouched (mirrors send_to_bank_ledger).
+      return dataResponse({
+        stagedImportId: result.stagedImportId,
+        rowCount: result.rowCount,
+        duplicateCount: result.duplicateCount,
+        newCount: result.newCount,
+        dateStart: result.dateStart,
+        dateEnd: result.dateEnd,
+        statementBalance: result.statementBalance,
+        statementBalanceDate: result.statementBalanceDate,
+        statementCurrency: result.statementCurrency,
+        detectedFormat: result.format,
+        counts: result.counts,
         rowErrors: result.rowErrors,
       });
     },
