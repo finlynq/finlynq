@@ -59,6 +59,8 @@ export default function ImportSettingsPage() {
   const [templates, setTemplates] = useState<ImportTemplate[]>([]);
   // "Import from another provider" tab — which provider's flow is open.
   const [provider, setProvider] = useState<ImportProvider | null>(null);
+  // Active tab (controlled so it's deep-linkable via ?tab=).
+  const [tab, setTab] = useState("templates");
 
   // Email state
   const [importEmail, setImportEmail] = useState<string | null>(null);
@@ -79,6 +81,20 @@ export default function ImportSettingsPage() {
     7, 30, 60, 90,
   ]);
   const [retentionLoading, setRetentionLoading] = useState(false);
+
+  // Deep-link support: /settings/import?tab=connect[&provider=moneypro].
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const t = params.get("tab");
+    if (t && ["templates", "email", "connect", "statements"].includes(t)) {
+      setTab(t);
+    }
+    const p = params.get("provider");
+    if (p === "wealthposition" || p === "moneypro") {
+      setProvider(p);
+      setTab("connect");
+    }
+  }, []);
 
   // Fetch accounts, templates, and email config on mount.
   useEffect(() => {
@@ -263,7 +279,7 @@ export default function ImportSettingsPage() {
       {/* FINLYNQ-147 — hide accounts from the /import reconcile dropdown. */}
       <ReconcileHideAccountsCard />
 
-      <Tabs defaultValue="templates">
+      <Tabs value={tab} onValueChange={(v) => setTab(v ?? "templates")}>
         <TabsList>
           <TabsTrigger value="templates">
             <BookTemplate className="h-4 w-4 mr-1.5" />
