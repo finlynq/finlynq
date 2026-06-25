@@ -17,6 +17,18 @@ Currently ships:
   (`parseWealthPositionExport` + `transformWealthPositionExport`). Finlynq
   uses the ZIP path as primary and the API path for balance reconciliation
   only.
+- **IBKR** (Interactive Brokers) — Activity Statement parser for both the
+  Flex Query **XML** (preferred, deterministic) and the **CSV** fallback
+  (`ibkr/parse-xml.ts`, `ibkr/parse-csv.ts`, `ibkr/transform.ts`).
+- **Money Pro** (iBear) — **CSV** importer (`moneypro/`). Money Pro's export
+  is *not* a 1:1 column mapping: amounts are unsigned and the **sign comes
+  from the `Transaction Type` column** (Expense −, Income +, `Money Transfer`
+  → two `linkId`-paired legs, `Opening Balance` → a tx from the **Balance**
+  column); currency is parsed from the amount symbol (`HK$`→HKD); dates are
+  day-first with a time. Entry points: `parseMoneyProCsv(text, opts)`,
+  `moneyProRowsToRawTransactions(rows, opts)`, `isMoneyProCsv(headers)`. The
+  web orchestrator (`src/lib/external-import/moneypro-orchestrator.ts`) does
+  the account/category resolve-or-create + `executeImport`.
 
 ## Package layout
 
@@ -39,6 +51,16 @@ src/
                                    live-API ingestion; deprecated vs. ZIP)
     transform.test.ts
     zip-parser.test.ts
+    index.ts
+  ibkr/                          — Interactive Brokers Activity Statement
+    parse-xml.ts / parse-csv.ts  — Flex Query XML (preferred) + CSV fallback
+    transform.ts / orchestrator.ts / types.ts / *.test.ts / index.ts
+  moneypro/                      — Money Pro (iBear) CSV importer
+    transform.ts                 — parseMoneyProCsv / moneyProRowsToRawTransactions
+                                   / isMoneyProCsv (sign-from-Transaction-Type,
+                                   symbol→currency, day-first dates, single-row
+                                   transfers → linkId legs, Opening Balance)
+    transform.test.ts            — 14 tests against the real export fixture
     index.ts
   index.ts
 ```
