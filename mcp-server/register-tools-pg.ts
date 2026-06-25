@@ -107,6 +107,7 @@ import { parseOfx } from "../src/lib/ofx-parser";
 import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline";
 import { generateImportHash } from "../src/lib/import-hash";
 import { upsertBankTransaction } from "../src/lib/bank-ledger";
+import { sendStagedRowsToBankLedger } from "../src/lib/import/send-to-bank-ledger";
 import {
   detectProbableDuplicates,
   type DuplicateCandidatePool,
@@ -5613,7 +5614,7 @@ export function registerPgTools(
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           transfer_tools: ["record_transfer"],
-          reconcile_tools: ["get_reconcile_suggestions", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
+          reconcile_tools: ["get_reconcile_suggestions", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
           tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
         });
       }
@@ -5682,10 +5683,10 @@ export function registerPgTools(
       if (t === "reconcile") {
         return dataResponse({
           read_tools: ["get_reconcile_suggestions"],
-          write_tools: ["materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
+          write_tools: ["send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
           bulk_tools: ["apply_rules_to_bank_rows"],
-          flow: "1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
-          note: "All reconcile tools are HTTP-only and need an unlocked DEK. apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
+          flow: "0) send_to_bank_ledger(stagedImportId) → promote a pending statement import into the BANK LEDGER ONLY (no `transactions` rows) + load its balance anchor — the normal reconcile setup when the account already has ledger transactions for the period (use approve_staged_rows only for a first import of a brand-new account). 1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
+          note: "All reconcile tools are HTTP-only and need an unlocked DEK. send_to_bank_ledger writes ONLY bank_transactions (never `transactions`); approve_staged_rows is the one that CREATES ledger transactions (first-import only). apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
         });
       }
 
@@ -11012,7 +11013,7 @@ export function registerPgTools(
   // ... already metadata-only, no plaintext to redact, but flag it in code").
   server.tool(
     "approve_staged_rows",
-    "Materialize staged rows into the live transactions table. Two-step: first call returns a summary + confirmationToken (5-min TTL); second call with the token + same payload commits. Optional rowIds = subset (omit = all). Optional idempotencyKey is stored 72h to make retries safe. Calls invalidateUser after commit so the per-user tx cache reflects the new rows.",
+    "Bookkeeping only: Finlynq writes only to your own database — it never connects to a bank or brokerage and never moves real money. CREATES REAL LEDGER TRANSACTIONS from staged rows (writes into the live `transactions` table). Use this ONLY for a first-time import of a brand-new account that has no existing transactions — running it on an account that already has manual/imported transactions for the period DUPLICATES them. For the normal reconcile workflow (load the bank side without creating ledger entries) use send_to_bank_ledger instead. Two-step: first call returns a summary + confirmationToken (5-min TTL); second call with the token + same payload commits. Optional rowIds = subset (omit = all). Optional idempotencyKey is stored 72h to make retries safe. Calls invalidateUser after commit so the per-user tx cache reflects the new rows.",
     {
       stagedImportId: z.string().describe("staged_imports.id"),
       rowIds: z
@@ -11950,6 +11951,83 @@ export function registerPgTools(
         return err(result.message);
       }
       return dataResponse({ mode: "category", transactionId: result.transactionId });
+    },
+  );
+
+  // ── send_to_bank_ledger ─────────────────────────────────────────────────────
+  // FINLYNQ-220 (R-07). Promote staged rows into bank_transactions ONLY — the
+  // reconcile-only workflow. Shares the sendStagedRowsToBankLedger chokepoint
+  // with the web "Send to bank ledger" button (POST /api/import/staged/[id]/
+  // approve). NEVER writes a `transactions` row (the one bank↔tx link it can
+  // write is the legacy reconcile_state='linked' branch, which points at a
+  // PRE-EXISTING tx). No confirmation token — loading bank rows is lower-risk
+  // than creating ledger entries, and upsertBankTransaction is idempotent
+  // (ON CONFLICT bumps last_seen). Explicit non-destructive + idempotent
+  // annotations (the name carries no delete_/set_ token the inferencer reads).
+  // HTTP-only — needs the DEK to decrypt payee/note + re-encrypt at tier.
+  server.tool(
+    "send_to_bank_ledger",
+    "Bookkeeping only: Finlynq writes only to your own database — it never connects to a bank or brokerage and never moves real money. Promote staged import rows into the BANK LEDGER ONLY (bank_transactions) for reconciliation — it does NOT create any ledger transactions. Use this when the account already has manual/imported transactions covering the statement period (the normal case), so you load the bank side for reconciliation without duplicating existing ledger entries. Loads the statement balance anchor too. skipExistingMatches (default true) skips rows already in the bank ledger (dedup_status='existing'). Returns {loaded, skipped, skippedExisting, anchorLoaded, anchorDate, anchorAmount, batchId, rowErrors}. For a first-time import of a brand-new account with no transactions, use approve_staged_rows instead. Requires an unlocked DEK.",
+    {
+      stagedImportId: z.string().describe("staged_imports.id"),
+      rowIds: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Subset of staged_transactions.id to promote. Omit to promote all eligible rows.",
+        ),
+      skipExistingMatches: z
+        .boolean()
+        .optional()
+        .describe(
+          "Default true: skip staged rows already present in the bank ledger (dedup_status='existing'). Set false to load every selected row.",
+        ),
+    },
+    // Non-destructive, idempotent write — annotate explicitly (the auto-
+    // inferencer can't tell from the name). readOnlyHint:false so the
+    // directory gate accepts the write; destructiveHint:false because it only
+    // inserts/bumps bank rows; idempotentHint:true (ON CONFLICT bump).
+    {
+      title: "Send To Bank Ledger",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async ({ stagedImportId, rowIds, skipExistingMatches }) => {
+      if (!dek) {
+        return err(
+          "send_to_bank_ledger requires an unlocked DEK to decrypt staged rows and re-encrypt them under your key. Re-login to refresh your session.",
+        );
+      }
+      const result = await sendStagedRowsToBankLedger({
+        userId,
+        dek,
+        stagedImportId,
+        rowIds,
+        // MCP default: skip rows already in the bank ledger so a re-import of a
+        // mostly-known statement loads the anchor + only the genuinely new rows.
+        skipExistingMatches: skipExistingMatches ?? true,
+      });
+      if (!result.ok) {
+        // Only refusal is ownership / empty selection.
+        return err(result.message);
+      }
+      // No invalidateUser — this tool writes nothing to `transactions`, so the
+      // per-user tx cache is untouched.
+      return dataResponse({
+        loaded: result.approved,
+        skipped: result.skippedDuplicates,
+        skippedExisting: result.skippedExisting,
+        legacyLinked: result.legacyLinked,
+        anchorLoaded: result.anchorLoaded,
+        anchorDate: result.anchorDate,
+        anchorAmount: result.anchorAmount,
+        anchorsPromoted: result.anchorsPromoted,
+        batchId: result.batchId,
+        balanceWarnings: result.balanceWarnings,
+        rowErrors: result.rowErrors,
+      });
     },
   );
 
