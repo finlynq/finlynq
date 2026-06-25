@@ -154,6 +154,12 @@ import {
   LinkError,
 } from "../src/lib/reconcile/links";
 import { applyRulesToStagedBatch } from "../src/lib/rules/apply-to-staged-batch";
+// FINLYNQ-213 (R-06) — pure grouping core for the find_duplicate_bank_rows
+// read tool. The tool loads + decrypts rows; this helper groups distinct ids.
+import {
+  findDuplicateBankRows,
+  type DuplicateBankInputRow,
+} from "../src/lib/reconcile/find-duplicate-bank-rows";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -5614,7 +5620,7 @@ export function registerPgTools(
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           transfer_tools: ["record_transfer"],
-          reconcile_tools: ["get_reconcile_suggestions", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
+          reconcile_tools: ["get_reconcile_suggestions", "find_duplicate_bank_rows", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
           tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
         });
       }
@@ -5682,10 +5688,10 @@ export function registerPgTools(
 
       if (t === "reconcile") {
         return dataResponse({
-          read_tools: ["get_reconcile_suggestions"],
+          read_tools: ["get_reconcile_suggestions", "find_duplicate_bank_rows"],
           write_tools: ["send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
           bulk_tools: ["apply_rules_to_bank_rows"],
-          flow: "0) send_to_bank_ledger(stagedImportId) → promote a pending statement import into the BANK LEDGER ONLY (no `transactions` rows) + load its balance anchor — the normal reconcile setup when the account already has ledger transactions for the period (use approve_staged_rows only for a first import of a brand-new account). 1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
+          flow: "0) send_to_bank_ledger(stagedImportId) → promote a pending statement import into the BANK LEDGER ONLY (no `transactions` rows) + load its balance anchor — the normal reconcile setup when the account already has ledger transactions for the period (use approve_staged_rows only for a first import of a brand-new account). 0.5) find_duplicate_bank_rows(accountId) → list groups of duplicate bank-ledger rows (distinct ids for one event from overlapping imports); canonicalId is the oldest to keep. 1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
           note: "All reconcile tools are HTTP-only and need an unlocked DEK. send_to_bank_ledger writes ONLY bank_transactions (never `transactions`); approve_staged_rows is the one that CREATES ledger transactions (first-import only). apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
         });
       }
@@ -11830,6 +11836,111 @@ export function registerPgTools(
         dateMax: dateMax ?? null,
       });
       return dataResponse({ ...result, thresholds });
+    },
+  );
+
+  // ── find_duplicate_bank_rows (FINLYNQ-213 / R-06) ───────────────────────────
+  // Read-only. Surfaces duplicate BANK-LEDGER rows (overlapping statement
+  // imports that produced DISTINCT ids for one economic event) so Claude can
+  // pick a canonical to keep. seen_count is NOT the signal — re-importing the
+  // same row bumps seen_count on the existing row. We group DISTINCT ids that
+  // share (date, amount, payee). payee is encrypted per encryption_tier, so
+  // this is HTTP-only / DEK-required.
+  server.tool(
+    "find_duplicate_bank_rows",
+    "Bookkeeping only: Finlynq reads from your own database and never connects to a bank or brokerage or moves real money. Surface DUPLICATE bank-ledger rows for one account — distinct rows that describe the same economic event (overlapping statement imports). Returns an array of groups { canonicalId (oldest, keep this), duplicateIds[], date, amount, payee, seenCount, linkedTransactionId? }. Empty array when none. NOTE: seen_count is NOT the duplicate signal (re-importing the same row bumps it on the existing single row); grouping keys on (date, amount, payee) across DISTINCT ids. Read-only. Requires an unlocked DEK (payees are decrypted to group).",
+    {
+      accountId: z.number().int().positive().describe("accounts.id to scan for duplicate bank rows."),
+      lookbackDays: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Only consider bank rows dated within the last N days (default 180)."),
+    },
+    async ({ accountId, lookbackDays }) => {
+      if (!dek) {
+        return err(
+          "find_duplicate_bank_rows requires an unlocked DEK to decrypt payees for grouping. Re-login to refresh your session.",
+        );
+      }
+      // Cross-tenant guard — 404-equivalent without leaking existence.
+      const acct = await q(
+        db,
+        sql`SELECT id FROM accounts WHERE id = ${accountId} AND user_id = ${userId} LIMIT 1`,
+      );
+      if (!acct.length) return dataResponse([]);
+
+      const lookback = lookbackDays ?? 180;
+      const dateMin = new Date(Date.now() - lookback * 86_400_000)
+        .toISOString()
+        .slice(0, 10);
+
+      // Load the account's bank rows + their primary link (transaction_bank_links
+      // 'primary' first, else the transactions.bank_transaction_id FK). One row
+      // per bank id — DISTINCT ON keeps the primary link when present.
+      const raw = await q(
+        db,
+        sql`
+          SELECT
+            bt.id,
+            bt.date,
+            bt.amount,
+            bt.payee,
+            bt.import_hash,
+            bt.seen_count,
+            bt.first_seen_at,
+            bt.encryption_tier,
+            COALESCE(tbl.transaction_id, t.id) AS linked_tx_id
+          FROM bank_transactions bt
+          LEFT JOIN LATERAL (
+            SELECT transaction_id
+            FROM transaction_bank_links
+            WHERE bank_transaction_id = bt.id AND user_id = ${userId}
+            ORDER BY (link_type = 'primary') DESC, id ASC
+            LIMIT 1
+          ) tbl ON true
+          LEFT JOIN transactions t
+            ON t.bank_transaction_id = bt.id AND t.user_id = ${userId}
+          WHERE bt.user_id = ${userId}
+            AND bt.account_id = ${accountId}
+            AND bt.date >= ${dateMin}
+        `,
+      );
+
+      const rows: DuplicateBankInputRow[] = raw.map((r) => {
+        const tier = String(r.encryption_tier ?? "user");
+        const payeeRaw = r.payee as string | null;
+        let payeePlain: string | null = null;
+        if (payeeRaw != null && payeeRaw !== "") {
+          payeePlain =
+            tier === "user"
+              ? tryDecryptField(dek, payeeRaw, "bank_transactions.payee")
+              : (() => {
+                  try {
+                    return decryptStaged(payeeRaw);
+                  } catch {
+                    return null;
+                  }
+                })();
+        }
+        const linkedRaw = r.linked_tx_id;
+        return {
+          id: String(r.id),
+          date: String(r.date),
+          amount: Number(r.amount),
+          payeePlain,
+          importHash: String(r.import_hash ?? ""),
+          seenCount: Number(r.seen_count ?? 1),
+          firstSeenAt:
+            r.first_seen_at instanceof Date
+              ? r.first_seen_at.toISOString()
+              : String(r.first_seen_at),
+          linkedTransactionId: linkedRaw == null ? null : Number(linkedRaw),
+        };
+      });
+
+      return dataResponse(findDuplicateBankRows(rows));
     },
   );
 
