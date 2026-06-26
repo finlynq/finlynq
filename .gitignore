@@ -13,6 +13,9 @@
 # testing
 /coverage
 
+# on-disk user uploads (feedback attachments, mcp_uploads) — FINLYNQ-228
+/uploads/
+
 # next.js
 /.next/
 /out/

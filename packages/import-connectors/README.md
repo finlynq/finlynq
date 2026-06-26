@@ -29,6 +29,23 @@ Currently ships:
   `moneyProRowsToRawTransactions(rows, opts)`, `isMoneyProCsv(headers)`. The
   web orchestrator (`src/lib/external-import/moneypro-orchestrator.ts`) does
   the account/category resolve-or-create + `executeImport`.
+- **Generic CSV (full ledger)** — **mapping-driven** **CSV** importer
+  (`generic-csv/`) for any multi-account export (date / amount / account +
+  optional currency / category / note / transfer-destination columns) — the
+  shape the single-account `/import` column mapper can't take. Unlike Money
+  Pro it is **not header-locked**: `suggestGenericCsvMapping(headers)` derives a
+  logical-field → header mapping via case-insensitive **aliases** (order-
+  independent, unknown columns ignored) and `isGenericCsv(headers)` is true
+  once `date`/`amount`/`account` resolve; a file that doesn't fully auto-map is
+  not rejected (the UI's Match-columns step re-points it). Signed amounts,
+  per-row currency, single-row `account_to` transfers → `linkId` legs,
+  `(OPENING BALANCE)`/`(AUDIT)` markers, flexible dates (`parseFlexibleDate`).
+  Entry points: `parseGenericCsv(text, mapping, opts)`,
+  `genericCsvRowsToRawTransactions(rows, mapping, opts)`,
+  `suggestGenericCsvMapping(headers)`, `isGenericCsv(headers)`. The web
+  orchestrator (`src/lib/external-import/generic-csv-orchestrator.ts`) resolves
+  modal-currency accounts, refuses cross-currency transfers (v1), and runs
+  `executeImport`.
 
 ## Package layout
 
@@ -60,7 +77,14 @@ src/
                                    / isMoneyProCsv (sign-from-Transaction-Type,
                                    symbol→currency, day-first dates, single-row
                                    transfers → linkId legs, Opening Balance)
-    transform.test.ts            — 14 tests against the real export fixture
+    transform.test.ts            — tests against the real export fixture
+    index.ts
+  generic-csv/                   — Generic multi-account "full ledger" CSV
+    transform.ts                 — suggestGenericCsvMapping / isGenericCsv /
+                                   genericCsvRowsToRawTransactions / parseFlexibleDate
+                                   (mapping-driven, alias detection, signed amount,
+                                   account_to transfers → linkId legs)
+    transform.test.ts            — 18 tests (alias mapping + real export slice)
     index.ts
   index.ts
 ```

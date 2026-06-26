@@ -4,6 +4,7 @@ import { DonationBanner } from "@/components/donation-banner";
 import { AnnouncementBanner } from "@/components/announcement-banner";
 import { CurrencyProvider } from "@/components/currency-provider";
 import { DropdownOrderProvider } from "@/components/dropdown-order-provider";
+import { FontProvider } from "@/components/font-provider";
 import { ReportingRecomputeIndicator } from "@/components/reporting-recompute-indicator";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -11,6 +12,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     <UnlockGate>
       <CurrencyProvider>
         <DropdownOrderProvider>
+        <FontProvider>
         <div className="relative flex min-h-screen flex-col">
           <DonationBanner />
           <AnnouncementBanner />
@@ -28,6 +30,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             </main>
           </div>
         </div>
+        </FontProvider>
         </DropdownOrderProvider>
       </CurrencyProvider>
     </UnlockGate>

@@ -38,7 +38,7 @@ import { upsertCashSnapshotMeta } from "@/lib/portfolio/snapshots/cash-meta";
  * dated cash row otherwise sends the day-by-day walk on a multi-decade march.
  * No supported account predates this floor.
  */
-const EARLIEST_CASH_DATE = "2020-01-01";
+const EARLIEST_CASH_DATE = "2015-01-01";
 
 export interface BuildCashSnapshotsInput {
   userId: string;
@@ -100,6 +100,42 @@ async function holdingsAccountIds(userId: string): Promise<Set<number>> {
   return set;
 }
 
+/**
+ * Delete orphaned `source='cash'` snapshot rows — rows for accounts that should
+ * have NO cash snapshots because they carry no cash transactions in scope (the
+ * transactions were deleted, or the account was archived). `keepAccountIds` is
+ * the set the cash builder is about to (re)write from live deltas; ANY other
+ * account with a cash snapshot is stale.
+ *
+ * Unbounded by date: a transaction-less account has no legitimate cash snapshot
+ * on ANY day. Scoped to `accountId` for a per-account rebuild; when
+ * `keepAccountIds` is empty (no cash deltas at all) it removes every (scoped)
+ * cash snapshot the user has. The UPSERT walk can only ever (over)write accounts
+ * that HAVE deltas, so this delete is the ONLY reaper for stale cash balances —
+ * without it a fully-deleted account's balance lingers forever and keeps feeding
+ * the "Net Worth / Balance Over Time" chart's historical line.
+ */
+async function deleteOrphanCashSnapshots(
+  userId: string,
+  keepAccountIds: Set<number>,
+  accountId?: number,
+): Promise<void> {
+  const accountScope = accountId != null ? sql` AND account_id = ${accountId}` : sql``;
+  if (keepAccountIds.size === 0) {
+    await db.execute(sql`
+      DELETE FROM portfolio_snapshots
+      WHERE user_id = ${userId} AND source = 'cash' AND account_id IS NOT NULL${accountScope}
+    `);
+    return;
+  }
+  const keepList = sql.join([...keepAccountIds].map((id) => sql`${id}`), sql`, `);
+  await db.execute(sql`
+    DELETE FROM portfolio_snapshots
+    WHERE user_id = ${userId} AND source = 'cash' AND account_id IS NOT NULL${accountScope}
+      AND account_id NOT IN (${keepList})
+  `);
+}
+
 export async function buildCashSnapshots(
   input: BuildCashSnapshotsInput,
 ): Promise<BuildCashSnapshotsResult> {
@@ -133,6 +169,15 @@ export async function buildCashSnapshots(
     entry.days.push({ date: d.date, delta: Number(d.delta) });
     if (earliestDelta == null || d.date < earliestDelta) earliestDelta = d.date;
   }
+
+  // ─── Authoritative orphan cleanup ──────────────────────────────────────────
+  // Reap any `source='cash'` snapshot row for an account NOT in `byAccount`
+  // (no cash transactions in scope). Runs BEFORE the early-return so the
+  // all-deleted case (byAccount empty) is cleaned too — the UPSERT walk below
+  // only ever (re)writes accounts that HAVE deltas, so without this the stale
+  // balance lingers forever and keeps feeding the chart's historical line.
+  await deleteOrphanCashSnapshots(userId, new Set(byAccount.keys()), accountId);
+
   if (byAccount.size === 0 || earliestDelta == null) {
     return { accountsProcessed: 0, rowsWritten: 0, gapsFilled: false };
   }

@@ -31,6 +31,7 @@ import {
 import { todayISO } from "@/lib/utils/date";
 import { useEditId } from "@/lib/hooks/useEditId";
 import { usePortfolioFormData } from "@/lib/hooks/usePortfolioFormData";
+import { useSeedAccountFromParam } from "@/lib/hooks/useSeedAccountFromParam";
 
 export default function DepositForm() {
   const router = useRouter();
@@ -82,6 +83,28 @@ export default function DepositForm() {
     () => accounts.find((a) => String(a.id) === destAccountId) ?? null,
     [accounts, destAccountId],
   );
+
+  // FINLYNQ-227 — pre-select from `?account=<id>`: a normal account launches
+  // the deposit with itself as the non-investment SOURCE; an investment account
+  // launches it as the brokerage DEST (`&accountField=dest`).
+  useSeedAccountFromParam({
+    isEdit,
+    field: "source",
+    validIds: useMemo(
+      () => nonInvestmentAccounts.map((a) => a.id),
+      [nonInvestmentAccounts],
+    ),
+    setValue: setSourceAccountId,
+  });
+  useSeedAccountFromParam({
+    isEdit,
+    field: "dest",
+    validIds: useMemo(
+      () => investmentAccounts.map((a) => a.id),
+      [investmentAccounts],
+    ),
+    setValue: setDestAccountId,
+  });
 
   // Cash sleeves on the dest account that match the source account's currency.
   const eligibleSleeves = useMemo(() => {

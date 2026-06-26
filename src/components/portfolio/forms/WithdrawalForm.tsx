@@ -31,6 +31,7 @@ import {
 import { todayISO } from "@/lib/utils/date";
 import { useEditId } from "@/lib/hooks/useEditId";
 import { usePortfolioFormData } from "@/lib/hooks/usePortfolioFormData";
+import { useSeedAccountFromParam } from "@/lib/hooks/useSeedAccountFromParam";
 
 export default function WithdrawalForm() {
   const router = useRouter();
@@ -82,6 +83,28 @@ export default function WithdrawalForm() {
     () => accounts.find((a) => String(a.id) === destAccountId) ?? null,
     [accounts, destAccountId],
   );
+
+  // FINLYNQ-227 — pre-select from `?account=<id>`: an investment account
+  // launches the withdrawal with itself as the brokerage SOURCE; a normal
+  // account launches it as the non-investment DEST (`&accountField=dest`).
+  useSeedAccountFromParam({
+    isEdit,
+    field: "source",
+    validIds: useMemo(
+      () => investmentAccounts.map((a) => a.id),
+      [investmentAccounts],
+    ),
+    setValue: setSourceAccountId,
+  });
+  useSeedAccountFromParam({
+    isEdit,
+    field: "dest",
+    validIds: useMemo(
+      () => nonInvestmentAccounts.map((a) => a.id),
+      [nonInvestmentAccounts],
+    ),
+    setValue: setDestAccountId,
+  });
 
   // Cash sleeves on the source (brokerage) account in the dest account's
   // currency.

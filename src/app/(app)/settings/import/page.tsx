@@ -47,12 +47,13 @@ import {
 import { TemplateManager } from "@/app/(app)/import/components/template-manager";
 import { ConnectorTab } from "@/app/(app)/import/components/connector-tab";
 import { MoneyProConnectorTab } from "@/app/(app)/import/components/moneypro-connector-tab";
+import { GenericCsvConnectorTab } from "@/app/(app)/import/components/generic-csv-connector-tab";
 import { InvestmentStatementImporter } from "@/app/(app)/import/components/investment-statement-importer";
 import { EmailRulesManager } from "@/components/inbox/email-rules-manager";
 import { ReconcileHideAccountsCard } from "@/components/inbox/reconcile-hide-accounts-card";
 import type { ImportTemplate } from "@/lib/import-templates";
 
-type ImportProvider = "wealthposition" | "moneypro";
+type ImportProvider = "wealthposition" | "moneypro" | "generic-csv";
 
 export default function ImportSettingsPage() {
   const [accountNames, setAccountNames] = useState<string[]>([]);
@@ -90,7 +91,7 @@ export default function ImportSettingsPage() {
       setTab(t);
     }
     const p = params.get("provider");
-    if (p === "wealthposition" || p === "moneypro") {
+    if (p === "wealthposition" || p === "moneypro" || p === "generic-csv") {
       setProvider(p);
       setTab("connect");
     }
@@ -514,6 +515,22 @@ export default function ImportSettingsPage() {
                       </div>
                     </div>
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setProvider("generic-csv")}
+                    className="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-muted/40"
+                  >
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-100 text-sky-600">
+                      <FileSpreadsheet className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium">Generic CSV (full ledger)</div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">
+                        Import any multi-account CSV (date, amount, account, plus
+                        optional currency, category and transfers).
+                      </div>
+                    </div>
+                  </button>
                 </div>
               </>
             ) : (
@@ -527,8 +544,10 @@ export default function ImportSettingsPage() {
                 </Button>
                 {provider === "wealthposition" ? (
                   <ConnectorTab />
-                ) : (
+                ) : provider === "moneypro" ? (
                   <MoneyProConnectorTab />
+                ) : (
+                  <GenericCsvConnectorTab />
                 )}
               </>
             )}

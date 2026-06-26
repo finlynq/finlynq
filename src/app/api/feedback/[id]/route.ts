@@ -47,6 +47,13 @@ export async function GET(
     ...summary,
     pageUrl: fb.pageUrl,
     appVersion: fb.appVersion,
+    attachment: fb.attachmentFilename
+      ? {
+          filename: fb.attachmentFilename,
+          mime: fb.attachmentMime,
+          size: fb.attachmentSize,
+        }
+      : null,
     messages: msgs.map((m) => toFeedbackMessage(m, userId)),
   };
   return NextResponse.json(thread);

@@ -36,6 +36,7 @@ import { todayISO } from "@/lib/utils/date";
 import { useEditId } from "@/lib/hooks/useEditId";
 import { usePortfolioFormData } from "@/lib/hooks/usePortfolioFormData";
 import { useAccountHoldingSelection } from "@/lib/hooks/useAccountHoldingSelection";
+import { useSeedAccountFromParam } from "@/lib/hooks/useSeedAccountFromParam";
 
 export default function SwapForm() {
   return <SwapCreateForm />;
@@ -85,6 +86,17 @@ function SwapCreateForm() {
 
   const { investmentAccounts, selectedAccount, accountHoldings } =
     useAccountHoldingSelection(accounts, holdings, accountId);
+
+  // FINLYNQ-227 — pre-select the investment account from `?account=<id>`.
+  useSeedAccountFromParam({
+    isEdit,
+    field: "source",
+    validIds: useMemo(
+      () => investmentAccounts.map((a) => a.id),
+      [investmentAccounts],
+    ),
+    setValue: setAccountId,
+  });
 
   const sourceHolding = useMemo(
     () =>

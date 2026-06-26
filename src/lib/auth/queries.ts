@@ -422,31 +422,65 @@ export async function updateUserPlan(userId: string, plan: string, planExpiresAt
 }
 
 /**
- * Unlink a user's mcp_uploads files from disk. Runs BEFORE the wipe/delete
- * transaction — unlink is not transactional, and we'd rather leak a DB row than
- * orphan a plaintext file on disk if the transaction later fails. Swallows
- * per-file errors (file may already be gone) and a missing-table error on
- * older deploys.
+ * Unlink a user's on-disk upload files (mcp_uploads + feedback attachments)
+ * from disk. Runs BEFORE the wipe/delete transaction — unlink is not
+ * transactional, and we'd rather leak a DB row than orphan a plaintext file on
+ * disk if the transaction later fails. Swallows per-file errors (file may
+ * already be gone) and a missing-table/column error on older deploys.
  */
 async function unlinkUserUploadFiles(userId: string) {
   const s = getSchema();
+  const { unlink } = await import("fs/promises");
+  const unlinkPath = async (p: string | null) => {
+    if (!p) return;
+    try {
+      await unlink(p);
+    } catch {
+      // File may already be gone — swallow. The DB row delete cleans it up.
+    }
+  };
+
+  // mcp_uploads (encrypted import files).
   try {
     const uploadRows = await db
       .select({ storagePath: s.mcpUploads.storagePath })
       .from(s.mcpUploads)
       .where(eq(s.mcpUploads.userId, userId));
-    const { unlink } = await import("fs/promises");
-    for (const row of uploadRows) {
-      if (!row.storagePath) continue;
-      try {
-        await unlink(row.storagePath);
-      } catch {
-        // File may already be gone — swallow. The DB row delete cleans it up.
-      }
-    }
+    for (const row of uploadRows) await unlinkPath(row.storagePath);
   } catch {
     // If the mcp_uploads table is missing on this environment (older deploys),
     // the SELECT above throws — don't let that block the wipe/delete.
+  }
+
+  // FINLYNQ-226 — feedback SEED attachment files (plaintext on disk, owner's).
+  try {
+    const fbRows = await db
+      .select({ attachmentPath: s.feedback.attachmentPath })
+      .from(s.feedback)
+      .where(eq(s.feedback.userId, userId));
+    for (const row of fbRows) await unlinkPath(row.attachmentPath);
+  } catch {
+    // Missing feedback table / attachment column on older deploys — don't block.
+  }
+
+  // FINLYNQ-228 — per-message attachment files. Authorship-aware: unlink ONLY
+  // the user's OWN reply files (author_role='user'); admin-authored reply
+  // attachments are maintainer-owned and SURVIVE. Scope to this user's threads
+  // via the feedback.user_id join.
+  try {
+    const msgRows = await db
+      .select({ attachmentPath: s.feedbackMessages.attachmentPath })
+      .from(s.feedbackMessages)
+      .innerJoin(s.feedback, eq(s.feedbackMessages.feedbackId, s.feedback.id))
+      .where(
+        and(
+          eq(s.feedback.userId, userId),
+          eq(s.feedbackMessages.authorRole, "user"),
+        ),
+      );
+    for (const row of msgRows) await unlinkPath(row.attachmentPath);
+  } catch {
+    // Missing feedback_messages attachment columns on older deploys — don't block.
   }
 }
 
@@ -525,6 +559,49 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // user's session DEK after wipe, plus the staged-import plaintext buffer and
   // mcp_uploads metadata rows whose on-disk files were unlinked above.
   await tx.delete(s.mcpUploads).where(eq(s.mcpUploads.userId, userId));
+  // FINLYNQ-226/228 — feedback rows are maintainer-owned support records and are
+  // deliberately NOT deleted on wipe/delete (the maintainer keeps the bug
+  // report). But the privacy-sensitive attachments are removed: the on-disk
+  // files were already unlinked by unlinkUserUploadFiles() before this tx
+  // (authorship-aware — admin reply files SURVIVE), so here we null the
+  // now-dangling pointer columns. Text survives.
+  //   (a) the SEED attachment on the feedback row, and
+  //   (b) the user's OWN reply-message attachments (author_role='user').
+  // Admin-authored reply pointers are LEFT intact (maintainer-owned content).
+  await tx
+    .update(s.feedback)
+    .set({
+      attachmentPath: null,
+      attachmentFilename: null,
+      attachmentMime: null,
+      attachmentSize: null,
+    })
+    .where(eq(s.feedback.userId, userId));
+  const ownFeedbackIds = (
+    await tx
+      .select({ id: s.feedback.id })
+      .from(s.feedback)
+      .where(eq(s.feedback.userId, userId))
+  ).map((r) => r.id);
+  if (ownFeedbackIds.length > 0) {
+    for (let i = 0; i < ownFeedbackIds.length; i += BATCH) {
+      const batch = ownFeedbackIds.slice(i, i + BATCH);
+      await tx
+        .update(s.feedbackMessages)
+        .set({
+          attachmentPath: null,
+          attachmentFilename: null,
+          attachmentMime: null,
+          attachmentSize: null,
+        })
+        .where(
+          and(
+            inArray(s.feedbackMessages.feedbackId, batch),
+            eq(s.feedbackMessages.authorRole, "user"),
+          ),
+        );
+    }
+  }
   // Email inbox + rules (Epic B2). email_inbox FKs email_import_rules
   // (SET NULL), so delete the inbox first to keep the "email" group together.
   // Both also carry user_id ON DELETE CASCADE for the delete-account path, but

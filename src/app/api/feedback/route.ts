@@ -10,6 +10,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import fs from "fs/promises";
 import { z } from "zod";
 import { db, schema } from "@/db";
 import { desc, eq, inArray } from "drizzle-orm";
@@ -18,6 +19,7 @@ import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { notifyAdminsNewFeedback } from "@/lib/feedback/notify";
 import { buildThreadSummary } from "@/lib/feedback/thread";
+import { saveFeedbackAttachment } from "@/lib/feedback/attachment-io";
 import type { FeedbackThreadSummary } from "@shared/types";
 
 export const dynamic = "force-dynamic";
@@ -87,21 +89,62 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json();
-    const parsed = validateBody(body, bodySchema);
-    if (parsed.error) return parsed.error;
-    const d = parsed.data;
+    const contentType = request.headers.get("content-type") ?? "";
+    const isMultipart = contentType.includes("multipart/form-data");
 
-    const [row] = await db
-      .insert(schema.feedback)
-      .values({
-        userId,
-        type: d.type,
-        message: d.message,
-        pageUrl: d.pageUrl ?? null,
-        appVersion: d.appVersion ?? "web",
-      })
-      .returning({ id: schema.feedback.id });
+    // Parse the text fields the same way regardless of transport. The optional
+    // image attachment (FINLYNQ-226) is only carried on the multipart path.
+    let d: z.infer<typeof bodySchema>;
+    let fileEntry: File | null = null;
+
+    if (isMultipart) {
+      const form = (await request.formData()) as unknown as globalThis.FormData;
+      const raw = {
+        type: (form.get("type") as string | null) ?? undefined,
+        message: (form.get("message") as string | null) ?? undefined,
+        pageUrl: (form.get("pageUrl") as string | null) ?? undefined,
+        appVersion: (form.get("appVersion") as string | null) ?? undefined,
+      };
+      const parsed = validateBody(raw, bodySchema);
+      if (parsed.error) return parsed.error;
+      d = parsed.data;
+      const f = form.get("attachment");
+      if (f && f instanceof File && f.size > 0) fileEntry = f;
+    } else {
+      const body = await request.json();
+      const parsed = validateBody(body, bodySchema);
+      if (parsed.error) return parsed.error;
+      d = parsed.data;
+    }
+
+    // --- Server-side attachment guard (denylist + 5 MB cap) + on-disk write.
+    // Reject BEFORE any DB row or file is written, so a bad upload persists
+    // nothing. The file is written FIRST so we never persist a row pointing at
+    // a file that failed to write. ---
+    const saved = await saveFeedbackAttachment(userId, fileEntry);
+    if (!saved.ok) {
+      return NextResponse.json({ error: saved.error }, { status: saved.status });
+    }
+    const attachment = saved.attachment;
+
+    let row: { id: number };
+    try {
+      [row] = await db
+        .insert(schema.feedback)
+        .values({
+          userId,
+          type: d.type,
+          message: d.message,
+          pageUrl: d.pageUrl ?? null,
+          appVersion: d.appVersion ?? "web",
+          ...(attachment ?? {}),
+        })
+        .returning({ id: schema.feedback.id });
+    } catch (e) {
+      // Row insert failed — unlink the just-written file so we don't orphan it.
+      if (attachment) await fs.unlink(attachment.attachmentPath).catch(() => {});
+      throw e;
+    }
 
     // Fire-and-forget: never block the response or 500 on email failure.
     void notifyAdminsNewFeedback({

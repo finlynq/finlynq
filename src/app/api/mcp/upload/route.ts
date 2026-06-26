@@ -23,6 +23,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { db, schema } from "@/db";
 import { safeErrorMessage } from "@/lib/validate";
 import { encryptFileBytes } from "@/lib/crypto/file-envelope";
+import { getUploadsBaseDir } from "@/lib/uploads-dir";
 
 const MAX_BYTES = 5 * 1024 * 1024; // 5 MB
 const ALLOWED_FORMATS = new Set(["csv", "ofx", "qfx"]);
@@ -82,8 +83,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Storage path: uploads/mcp/<userId>/<uuid>.<ext>
-    const uploadsRoot = path.resolve(process.cwd(), "uploads", "mcp", userId);
+    // Storage path: <durable-uploads-root>/mcp/<userId>/<uuid>.<ext>. Uses the
+    // shared getUploadsBaseDir() (FINLYNQ-228) so files land OUTSIDE .next and
+    // survive a deploy (deploy.sh wipes .next). PF_UPLOADS_DIR / standalone-aware.
+    const uploadsRoot = path.join(getUploadsBaseDir(), "mcp", userId);
     await fs.mkdir(uploadsRoot, { recursive: true });
     const id = crypto.randomUUID();
     const storagePath = path.join(uploadsRoot, `${id}.${format}`);

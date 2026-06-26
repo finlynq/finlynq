@@ -10,7 +10,8 @@
     ".": "./src/index.ts",
     "./wealthposition": "./src/wealthposition/index.ts",
     "./ibkr": "./src/ibkr/index.ts",
-    "./moneypro": "./src/moneypro/index.ts"
+    "./moneypro": "./src/moneypro/index.ts",
+    "./generic-csv": "./src/generic-csv/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

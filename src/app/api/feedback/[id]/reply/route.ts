@@ -7,9 +7,15 @@
  * Inserts a feedback_messages row (author_role='user'), bumps feedback.updated_at
  * and the author's own user_last_read_at. Fires a best-effort admin email
  * notification (fire-and-forget) so the maintainer sees thread replies too.
+ *
+ * FINLYNQ-228 — accepts multipart/form-data with one optional attachment (same
+ * denylist + 5 MB cap as the initial submit). The JSON path still works for
+ * no-attachment / back-compat. The file is stored under the THREAD OWNER's
+ * uploads dir (this is the owner's own thread).
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import fs from "fs/promises";
 import { z } from "zod";
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
@@ -17,6 +23,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { toFeedbackMessage } from "@/lib/feedback/thread";
+import { saveFeedbackAttachment } from "@/lib/feedback/attachment-io";
 import { notifyAdminsFeedbackReply } from "@/lib/feedback/notify";
 
 export const dynamic = "force-dynamic";
@@ -48,8 +55,26 @@ export async function POST(
   }
 
   try {
-    const parsed = validateBody(await request.json(), bodySchema);
-    if (parsed.error) return parsed.error;
+    const contentType = request.headers.get("content-type") ?? "";
+    const isMultipart = contentType.includes("multipart/form-data");
+
+    let body: string;
+    let fileEntry: File | null = null;
+    if (isMultipart) {
+      const form = (await request.formData()) as unknown as globalThis.FormData;
+      const parsed = validateBody(
+        { body: (form.get("body") as string | null) ?? undefined },
+        bodySchema,
+      );
+      if (parsed.error) return parsed.error;
+      body = parsed.data.body;
+      const f = form.get("attachment");
+      if (f && f instanceof File && f.size > 0) fileEntry = f;
+    } else {
+      const parsed = validateBody(await request.json(), bodySchema);
+      if (parsed.error) return parsed.error;
+      body = parsed.data.body;
+    }
 
     // Ownership — 404 (not 403) on a stranger's id.
     const [fb] = await db
@@ -60,17 +85,32 @@ export async function POST(
       );
     if (!fb) return NextResponse.json({ error: "Not found." }, { status: 404 });
 
+    // Validate + write the optional attachment BEFORE the DB row, under the
+    // thread owner's (= this user's) uploads dir. A bad upload persists nothing.
+    const saved = await saveFeedbackAttachment(userId, fileEntry);
+    if (!saved.ok) {
+      return NextResponse.json({ error: saved.error }, { status: saved.status });
+    }
+    const attachment = saved.attachment;
+
     const now = new Date();
-    const [msg] = await db
-      .insert(schema.feedbackMessages)
-      .values({
-        feedbackId,
-        authorRole: "user",
-        authorId: userId,
-        body: parsed.data.body,
-        createdAt: now,
-      })
-      .returning();
+    let msg;
+    try {
+      [msg] = await db
+        .insert(schema.feedbackMessages)
+        .values({
+          feedbackId,
+          authorRole: "user",
+          authorId: userId,
+          body,
+          createdAt: now,
+          ...(attachment ?? {}),
+        })
+        .returning();
+    } catch (e) {
+      if (attachment) await fs.unlink(attachment.attachmentPath).catch(() => {});
+      throw e;
+    }
     await db
       .update(schema.feedback)
       .set({ updatedAt: now, userLastReadAt: now })
@@ -82,7 +122,7 @@ export async function POST(
       userId,
       feedbackId,
       feedbackType: fb.type,
-      body: parsed.data.body,
+      body,
     }).catch((err) => {
       console.error("[feedback-email] reply notify failed", err);
     });

@@ -50,6 +50,9 @@ export async function GET(
       pageUrl: schema.feedback.pageUrl,
       appVersion: schema.feedback.appVersion,
       adminNote: schema.feedback.adminNote,
+      attachmentFilename: schema.feedback.attachmentFilename,
+      attachmentMime: schema.feedback.attachmentMime,
+      attachmentSize: schema.feedback.attachmentSize,
       userLastReadAt: schema.feedback.userLastReadAt,
       adminLastReadAt: schema.feedback.adminLastReadAt,
       createdAt: schema.feedback.createdAt,
@@ -76,6 +79,13 @@ export async function GET(
     adminNote: fb.adminNote,
     username: fb.username,
     email: fb.email,
+    attachment: fb.attachmentFilename
+      ? {
+          filename: fb.attachmentFilename,
+          mime: fb.attachmentMime,
+          size: fb.attachmentSize,
+        }
+      : null,
     messages: msgs.map((m) => toFeedbackMessage(m, auth.context.userId)),
   };
 

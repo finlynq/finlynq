@@ -1,23 +1,55 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { ArrowLeft, Wallet, Layers, Hash, Pencil, Coins, Plus, Trash2, Inbox, FileCog } from "lucide-react";
+import {
+  ArrowLeft,
+  Wallet,
+  Layers,
+  Hash,
+  Pencil,
+  Coins,
+  Plus,
+  Trash2,
+  Inbox,
+  FileCog,
+  Receipt,
+  TrendingUp,
+  ChevronDown,
+} from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuLabel,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
+import { GroupField } from "../_components/group-field";
 import { ModePicker } from "@/components/inbox/mode-picker";
 import { ImportPrefsPicker } from "@/components/inbox/import-prefs-picker";
 import { isMode, type Mode } from "@/components/inbox/modes";
 import { NetWorthHistoryChart } from "@/components/net-worth-history-chart";
+import {
+  TransactionDialog,
+  type DialogAccount,
+  type DialogCategory,
+  type DialogHolding,
+} from "@/components/transactions/transaction-dialog";
 
 type Transaction = {
   id: number;
@@ -61,36 +93,78 @@ type AccountBalance = {
 };
 
 const ACCOUNT_TYPES = [{ value: "A", label: "Asset" }, { value: "L", label: "Liability" }];
-const ACCOUNT_GROUPS: Record<string, string[]> = {
-  A: ["Cash", "Checking", "Savings", "Investment", "Property", "Other"],
-  L: ["Credit Card", "Loan", "Mortgage", "Other"],
-};
+const ACCOUNT_TYPE_LABELS: Record<string, string> = Object.fromEntries(
+  ACCOUNT_TYPES.map((t) => [t.value, t.label]),
+);
+
+/** Edit-dialog tab ids. `#reconciliation-mode` / `#import-prefs` deep-links
+ *  map onto the reconciliation / import tabs (FINLYNQ-227). */
+type EditTab = "details" | "reconciliation" | "import" | "sleeves";
+
+/** All 8 portfolio ops for the investment-account quick-actions menu. The op
+ *  keys match the `/portfolio/new?op=<key>` route (hyphenated, NOT underscore). */
+const INVESTMENT_OPS: { op: string; label: string }[] = [
+  { op: "buy", label: "Buy" },
+  { op: "sell", label: "Sell" },
+  { op: "swap", label: "Swap" },
+  { op: "transfer", label: "In-kind transfer" },
+  { op: "deposit", label: "Deposit" },
+  { op: "withdrawal", label: "Withdrawal" },
+  { op: "income-expense", label: "Income / expense" },
+  { op: "fx-conversion", label: "FX conversion" },
+];
 
 export default function AccountDetailPage() {
   const { id } = useParams();
+  const router = useRouter();
   const [account, setAccount] = useState<Account | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [total, setTotal] = useState(0);
   const [balance, setBalance] = useState<number | null>(null);
   const [cashFlowBasis, setCashFlowBasis] = useState<number | null>(null);
   const [holdingsValue, setHoldingsValue] = useState<number | null>(null);
 
-  // Edit dialog
+  // Edit dialog (Details / Reconciliation / Import / Cash sleeves tabs).
   const [editOpen, setEditOpen] = useState(false);
-  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "CAD", note: "" });
+  const [editTab, setEditTab] = useState<EditTab>("details");
+  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "USD", note: "" });
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
+  // Keep the form's current currency present in the dropdown even if it was
+  // later deselected under Settings → Currencies you use (#291).
+  const editCurrencyOptions = useActiveCurrencies(editForm.currency);
 
-  // Cash sleeves panel — list + create + delete.
-  // Phase 2 of the portfolio-ops refactor: cash sleeves are explicit
-  // `portfolio_holdings.is_cash=TRUE` rows, one per (account, currency).
-  // Users provision them here before recording Buy/Sell/FX operations.
+  // Generic "New transaction" dialog (normal accounts only) — embeds the shared
+  // TransactionDialog seeded with this account pre-selected (FINLYNQ-227).
+  const [txDialogOpen, setTxDialogOpen] = useState(false);
+  const [dialogCategories, setDialogCategories] = useState<DialogCategory[]>([]);
+  const [dialogHoldings, setDialogHoldings] = useState<DialogHolding[]>([]);
+
+  // Cash sleeves panel — list + create + delete, surfaced inside the Edit
+  // dialog (FINLYNQ-227). Cash sleeves are explicit `portfolio_holdings.is_cash`
+  // rows, one per (account, currency); users provision them before recording
+  // Buy/Sell/FX operations.
   const [sleeves, setSleeves] = useState<CashSleeve[]>([]);
   const [sleevesLoading, setSleevesLoading] = useState(false);
   const [newSleeveOpen, setNewSleeveOpen] = useState(false);
   const [newSleeveCurrency, setNewSleeveCurrency] = useState<string>("");
   const [newSleeveSaving, setNewSleeveSaving] = useState(false);
   const [newSleeveError, setNewSleeveError] = useState("");
+  const sleeveCurrencyOptions = useActiveCurrencies(newSleeveCurrency);
+  // Sleeve-delete confirm (shared ConfirmDialog, replaces window.confirm).
+  const [deleteSleeveId, setDeleteSleeveId] = useState<number | null>(null);
+  const [deletingSleeve, setDeletingSleeve] = useState(false);
+  const [deleteSleeveError, setDeleteSleeveError] = useState("");
+
+  // Group suggestions: the user's existing group names across all accounts.
+  const existingGroups = useMemo(
+    () =>
+      Array.from(
+        new Set(accounts.map((a) => (a.group || "").trim()).filter(Boolean)),
+      ),
+    [accounts],
+  );
 
   async function refreshSleeves() {
     if (!id) return;
@@ -135,7 +209,7 @@ export default function AccountDetailPage() {
   }, [id]);
 
   function openNewSleeve() {
-    setNewSleeveCurrency(account?.currency ?? "CAD");
+    setNewSleeveCurrency(account?.currency ?? "USD");
     setNewSleeveError("");
     setNewSleeveOpen(true);
   }
@@ -167,32 +241,32 @@ export default function AccountDetailPage() {
     }
   }
 
-  async function handleDeleteSleeve(sleeveId: number) {
-    const sleeve = sleeves.find((s) => s.id === sleeveId);
-    if (!sleeve) return;
-    if (
-      !confirm(
-        `Delete the ${sleeve.currency} cash sleeve? This is only allowed when no transactions reference it.`,
-      )
-    ) {
-      return;
-    }
+  const sleeveToDelete = sleeves.find((s) => s.id === deleteSleeveId) ?? null;
+
+  async function confirmDeleteSleeve() {
+    if (deleteSleeveId == null) return;
+    setDeletingSleeve(true);
+    setDeleteSleeveError("");
     const res = await fetch(
-      `/api/portfolio/holdings/cash-sleeve?id=${sleeveId}`,
+      `/api/portfolio/holdings/cash-sleeve?id=${deleteSleeveId}`,
       { method: "DELETE" },
     );
     if (!res.ok) {
-      const data = await res.json();
-      alert(data.error ?? "Failed to delete sleeve");
+      const data = await res.json().catch(() => ({}));
+      setDeleteSleeveError(data.error ?? "Failed to delete sleeve");
+      setDeletingSleeve(false);
       return;
     }
+    setDeletingSleeve(false);
+    setDeleteSleeveId(null);
     await refreshSleeves();
   }
 
-  function openEdit() {
+  function openEdit(tab: EditTab = "details") {
     if (!account) return;
     setEditForm({ name: account.name, type: account.type, group: account.group || "", currency: account.currency, note: "" });
     setEditError("");
+    setEditTab(tab);
     setEditOpen(true);
   }
 
@@ -221,10 +295,29 @@ export default function AccountDetailPage() {
     }
   }
 
+  // Lazily fetch categories + holdings the first time the user opens the
+  // generic transaction dialog (normal accounts only).
+  function openTxDialog() {
+    setTxDialogOpen(true);
+    if (dialogCategories.length === 0) {
+      fetch("/api/categories")
+        .then((r) => (r.ok ? r.json() : []))
+        .then((c) => setDialogCategories(Array.isArray(c) ? c : []))
+        .catch(() => {});
+    }
+    if (dialogHoldings.length === 0) {
+      fetch("/api/portfolio")
+        .then((r) => (r.ok ? r.json() : []))
+        .then((h) => setDialogHoldings(Array.isArray(h) ? h : []))
+        .catch(() => {});
+    }
+  }
+
   useEffect(() => {
     fetch("/api/accounts")
       .then((r) => r.json())
-      .then((accts) => {
+      .then((accts: Account[]) => {
+        setAccounts(Array.isArray(accts) ? accts : []);
         const found = accts.find((a: Account) => a.id === Number(id));
         setAccount(found ?? null);
       });
@@ -249,6 +342,19 @@ export default function AccountDetailPage() {
       });
   }, [id]);
 
+  // Deep-link preservation (FINLYNQ-227): `/accounts/[id]#reconciliation-mode`
+  // (from the /inbox lens-chip gear) and `#import-prefs` now open the Edit
+  // dialog on the matching tab instead of scrolling to a (removed) card. Runs
+  // once the account has loaded so openEdit has data to seed the form.
+  useEffect(() => {
+    if (!account) return;
+    if (typeof window === "undefined") return;
+    const hash = window.location.hash;
+    if (hash === "#reconciliation-mode") openEdit("reconciliation");
+    else if (hash === "#import-prefs") openEdit("import");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account]);
+
   if (!account) return (
     <div className="space-y-6">
       <div className="h-4 w-32 bg-muted animate-pulse rounded" />
@@ -260,6 +366,37 @@ export default function AccountDetailPage() {
   );
 
   const displayBalance = balance ?? 0;
+  const isInvestment = account.isInvestment === true;
+
+  // Build a `/portfolio/new?op=<key>&account=<id>[&accountField=…]` href for an
+  // op launched from THIS account. The accountField tells Deposit/Withdrawal
+  // which of their two account sides this account fills.
+  function opHref(op: string): string {
+    const params = new URLSearchParams({ op, account: String(account!.id) });
+    if (isInvestment) {
+      // Investment account: it is the brokerage side. For Deposit that's the
+      // DEST; for everything else (incl. Withdrawal source) it's the default.
+      if (op === "deposit") params.set("accountField", "dest");
+    } else {
+      // Normal account: it is the cash side. Deposit source is the default;
+      // Withdrawal dest needs the override.
+      if (op === "withdrawal") params.set("accountField", "dest");
+    }
+    return `/portfolio/new?${params.toString()}`;
+  }
+
+  // Normal accounts can only deposit to / withdraw from a brokerage.
+  const normalInvestmentOps = INVESTMENT_OPS.filter(
+    (o) => o.op === "deposit" || o.op === "withdrawal",
+  );
+
+  const dialogAccount: DialogAccount = {
+    id: account.id,
+    name: account.name,
+    currency: account.currency,
+    type: account.type,
+    isInvestment: account.isInvestment,
+  };
 
   return (
     <div className="space-y-6">
@@ -267,7 +404,7 @@ export default function AccountDetailPage() {
         <ArrowLeft className="h-4 w-4" /> Back to Accounts
       </Link>
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className={`h-10 w-10 rounded-xl flex items-center justify-center text-sm font-bold ${account.type === "A" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
             {(account.name ?? "?").charAt(0)}
@@ -279,12 +416,52 @@ export default function AccountDetailPage() {
               <Badge variant={account.type === "A" ? "default" : "destructive"} className="text-[10px]">
                 {account.type === "A" ? "Asset" : "Liability"}
               </Badge>
+              {isInvestment && (
+                <Badge variant="secondary" className="text-[10px]">Investment</Badge>
+              )}
             </div>
           </div>
         </div>
-        <Button variant="outline" size="sm" onClick={openEdit}>
-          <Pencil className="h-3.5 w-3.5 mr-1.5" /> Edit
-        </Button>
+
+        {/* Quick-actions (FINLYNQ-227). Normal accounts: New transaction +
+            Deposit/Withdrawal. Investment accounts: all 8 portfolio ops, no
+            generic New transaction (per the investment-hidden-from-generic
+            -dialog invariant). */}
+        <div className="flex items-center gap-1.5">
+          {!isInvestment && (
+            <Button size="sm" onClick={openTxDialog}>
+              <Receipt className="h-3.5 w-3.5 mr-1.5" /> New transaction
+            </Button>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button variant="outline" size="sm">
+                  <TrendingUp className="h-3.5 w-3.5 mr-1.5" /> Investment transaction
+                  <ChevronDown className="h-3.5 w-3.5 ml-1.5" />
+                </Button>
+              }
+            />
+            <DropdownMenuContent align="end" className="min-w-56">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>
+                  {isInvestment ? "Portfolio operations" : "Brokerage cash move"}
+                </DropdownMenuLabel>
+                {(isInvestment ? INVESTMENT_OPS : normalInvestmentOps).map((o) => (
+                  <DropdownMenuItem
+                    key={o.op}
+                    onClick={() => router.push(opHref(o.op))}
+                  >
+                    {o.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button variant="outline" size="sm" onClick={() => openEdit("details")}>
+            <Pencil className="h-3.5 w-3.5 mr-1.5" /> Edit
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -346,130 +523,10 @@ export default function AccountDetailPage() {
           plan/net-worth-over-time.md Part A. */}
       <NetWorthHistoryChart accountId={account.id} title="Balance Over Time" />
 
-      {/* Reconciliation mode — Inbox v4 Phase 5 (2026-05-27).
-          Persists `accounts.mode` via PATCH /api/accounts/[id]/mode.
-          The /inbox lens-chip gear icon deep-links to this card. */}
-      <Card id="reconciliation-mode">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Inbox className="h-4 w-4 text-sky-600" /> Reconciliation mode
-          </CardTitle>
-          <p className="text-xs text-muted-foreground mt-1">
-            How uploads to this account flow through the pipeline. The
-            <code className="px-1 mx-0.5 rounded bg-muted text-[10px]">/inbox</code>
-            chip is a per-render lens; this picker is the persisted policy.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <ModePicker
-            accountId={account.id}
-            initialMode={isMode(account.mode) ? account.mode : "manual"}
-            onSaved={(m) => setAccount({ ...account, mode: m })}
-          />
-        </CardContent>
-      </Card>
-
-      {/* Import field-mapping preferences (2026-06-04). The canonical home for
-          resetting an account that was set to "apply automatically" back to
-          "ask me first" — once 'auto', the upload preview never reappears. */}
-      <Card id="import-prefs">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base flex items-center gap-2">
-            <FileCog className="h-4 w-4 text-violet-600" /> Import preferences
-          </CardTitle>
-          <p className="text-xs text-muted-foreground mt-1">
-            Whether CSV / OFX / QFX uploads to this account show a field-mapping
-            preview before staging, and which OFX field becomes the payee.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <ImportPrefsPicker
-            accountId={account.id}
-            initialCsvMappingMode={
-              account.csvMappingMode === "auto" ? "auto" : "confirm"
-            }
-            initialOfxPayeeSource={
-              account.ofxPayeeSource === "memo" ? "memo" : "name"
-            }
-            onSaved={(prefs) =>
-              setAccount({
-                ...account,
-                csvMappingMode: prefs.csvMappingMode,
-                ofxPayeeSource: prefs.ofxPayeeSource,
-              })
-            }
-          />
-        </CardContent>
-      </Card>
-
-      {/* Cash sleeves — Phase 2 portfolio-ops UI. Visible on every account so
-          users can also see "no sleeves" on non-investment accounts. */}
-      <Card>
-        <CardHeader className="pb-2 flex flex-row items-center justify-between">
-          <div>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Coins className="h-4 w-4 text-emerald-600" /> Cash sleeves
-            </CardTitle>
-            <p className="text-xs text-muted-foreground mt-1">
-              Per-currency cash positions inside this account. Required before
-              recording buys, sells, or FX conversions in a new currency.
-            </p>
-          </div>
-          <Button size="sm" variant="outline" onClick={openNewSleeve}>
-            <Plus className="h-3.5 w-3.5 mr-1.5" /> Add sleeve
-          </Button>
-        </CardHeader>
-        <CardContent>
-          {sleevesLoading && sleeves.length === 0 ? (
-            <div className="h-12 bg-muted animate-pulse rounded-md" />
-          ) : sleeves.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-4 text-center">
-              No cash sleeves yet. Add one to start recording trades.
-            </p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="text-xs">Currency</TableHead>
-                  <TableHead className="text-xs">Name</TableHead>
-                  <TableHead className="text-xs text-right">Transactions</TableHead>
-                  <TableHead className="text-xs text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sleeves.map((s) => (
-                  <TableRow key={s.id} className="hover:bg-muted/30">
-                    <TableCell>
-                      <Badge variant="outline" className="text-[10px] font-mono">
-                        {s.currency}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-sm">{s.name ?? `Cash ${s.currency}`}</TableCell>
-                    <TableCell className="text-right text-sm tabular-nums">
-                      {s.txCount ?? 0}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={(s.txCount ?? 0) > 0}
-                        title={
-                          (s.txCount ?? 0) > 0
-                            ? "Sleeve has transactions — delete or reassign them first"
-                            : "Delete sleeve"
-                        }
-                        onClick={() => void handleDeleteSleeve(s.id)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      {/* Reconciliation mode, Import preferences, and Cash sleeves moved into
+          the Edit dialog (FINLYNQ-227) — they declutter the main page and are
+          reachable via the Edit button (or the #reconciliation-mode /
+          #import-prefs deep-links, which open the dialog to the right tab). */}
 
       <Card>
         <CardHeader className="pb-2">
@@ -504,6 +561,30 @@ export default function AccountDetailPage() {
         </CardContent>
       </Card>
 
+      {/* Generic transaction dialog — normal accounts only, seeded with THIS
+          account pre-selected (FINLYNQ-227). */}
+      <TransactionDialog
+        open={txDialogOpen}
+        onOpenChange={setTxDialogOpen}
+        accounts={[dialogAccount]}
+        categories={dialogCategories}
+        holdings={dialogHoldings}
+        initialState={{
+          kind: "transaction-prefill",
+          values: { accountId: String(account.id), currency: account.currency },
+        }}
+        onSaved={() => {
+          setTxDialogOpen(false);
+          fetch(`/api/transactions?accountId=${id}&limit=200`)
+            .then((r) => r.json())
+            .then((d) => {
+              setTxns(d.data);
+              setTotal(d.total);
+            })
+            .catch(() => {});
+        }}
+      />
+
       {/* Create cash sleeve dialog */}
       <Dialog open={newSleeveOpen} onOpenChange={setNewSleeveOpen}>
         <DialogContent>
@@ -517,17 +598,17 @@ export default function AccountDetailPage() {
             </p>
             <div className="space-y-1.5">
               <Label>Currency</Label>
-              <Select
+              <Combobox
                 value={newSleeveCurrency}
-                onValueChange={(v) => setNewSleeveCurrency(v ?? "")}
-              >
-                <SelectTrigger><SelectValue placeholder="Pick a currency" /></SelectTrigger>
-                <SelectContent>
-                  {SUPPORTED_FIAT_CURRENCIES.map((c) => (
-                    <SelectItem key={c} value={c}>{c}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                onValueChange={(v) => setNewSleeveCurrency(v || "")}
+                items={sleeveCurrencyOptions.map(
+                  (c): ComboboxItemShape => ({ value: c, label: c }),
+                )}
+                placeholder="Pick a currency"
+                searchPlaceholder="Search…"
+                emptyMessage="No matches"
+                className="w-full"
+              />
             </div>
             {newSleeveError && (
               <p className="text-sm text-destructive">{newSleeveError}</p>
@@ -553,63 +634,229 @@ export default function AccountDetailPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Edit account dialog */}
+      {/* Cash-sleeve delete confirmation (shared ConfirmDialog). */}
+      <ConfirmDialog
+        open={deleteSleeveId != null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteSleeveId(null);
+            setDeleteSleeveError("");
+          }
+        }}
+        title="Delete cash sleeve"
+        description={
+          <>
+            Delete the {sleeveToDelete?.currency} cash sleeve? This is only
+            allowed when no transactions reference it.
+            {deleteSleeveError && (
+              <span className="mt-2 block text-destructive">{deleteSleeveError}</span>
+            )}
+          </>
+        }
+        confirmLabel="Delete sleeve"
+        busy={deletingSleeve}
+        onConfirm={() => void confirmDeleteSleeve()}
+      />
+
+      {/* Edit account dialog — Details / Reconciliation / Import / Cash sleeves
+          tabs (FINLYNQ-227). Widened with sm:max-w-* (never bare max-w-*) per
+          FINLYNQ-144; keeps the base phone gutter + internal scroll. */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>Edit Account</DialogTitle>
           </DialogHeader>
-          <form onSubmit={handleEdit} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label>Account Name</Label>
-              <Input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} autoFocus />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Type</Label>
-                <Select value={editForm.type} onValueChange={(v) => {
-                  const t = v ?? "A";
-                  setEditForm({ ...editForm, type: t, group: ACCOUNT_GROUPS[t]?.[0] ?? "" });
-                }}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {ACCOUNT_TYPES.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
-                  </SelectContent>
-                </Select>
+          <Tabs
+            value={editTab}
+            onValueChange={(v) => setEditTab((v as EditTab) ?? "details")}
+          >
+            <TabsList className="w-full">
+              <TabsTrigger value="details">Details</TabsTrigger>
+              <TabsTrigger value="reconciliation">Reconciliation</TabsTrigger>
+              <TabsTrigger value="import">Import</TabsTrigger>
+              <TabsTrigger value="sleeves">Cash sleeves</TabsTrigger>
+            </TabsList>
+
+            {/* Details */}
+            <TabsContent value="details" className="pt-4">
+              <form onSubmit={handleEdit} className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label>Account Name</Label>
+                  <Input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} autoFocus />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label>Type</Label>
+                    <Select
+                      items={ACCOUNT_TYPE_LABELS}
+                      value={editForm.type}
+                      onValueChange={(v) => setEditForm({ ...editForm, type: v ?? "A" })}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {ACCOUNT_TYPES.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="edit-detail-group">Group</Label>
+                    <GroupField
+                      inputId="edit-detail-group"
+                      type={editForm.type}
+                      value={editForm.group}
+                      existingGroups={existingGroups}
+                      onChange={(v) => setEditForm({ ...editForm, group: v })}
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Currency</Label>
+                  <Combobox
+                    value={editForm.currency}
+                    onValueChange={(v) => setEditForm({ ...editForm, currency: v || "USD" })}
+                    items={editCurrencyOptions.map(
+                      (c): ComboboxItemShape => ({ value: c, label: c }),
+                    )}
+                    placeholder="USD"
+                    searchPlaceholder="Search…"
+                    emptyMessage="No matches"
+                    className="w-full"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
+                  <Input value={editForm.note} onChange={(e) => setEditForm({ ...editForm, note: e.target.value })} />
+                </div>
+                {editError && <p className="text-sm text-destructive">{editError}</p>}
+                <div className="flex gap-2 pt-1">
+                  <Button type="button" variant="outline" className="flex-1" onClick={() => setEditOpen(false)}>Cancel</Button>
+                  <Button type="submit" className="flex-1" disabled={editSaving}>{editSaving ? "Saving…" : "Save Changes"}</Button>
+                </div>
+              </form>
+            </TabsContent>
+
+            {/* Reconciliation mode — Inbox v4 Phase 5. Persists `accounts.mode`
+                via PATCH /api/accounts/[id]/mode. The /inbox lens-chip gear
+                deep-links here via #reconciliation-mode. */}
+            <TabsContent value="reconciliation" className="pt-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <Inbox className="h-4 w-4 text-sky-600" />
+                <h3 className="text-sm font-medium">Reconciliation mode</h3>
               </div>
-              <div className="space-y-1.5">
-                <Label>Group</Label>
-                <Select value={editForm.group} onValueChange={(v) => setEditForm({ ...editForm, group: v ?? "" })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(ACCOUNT_GROUPS[editForm.type] ?? []).map((g) => <SelectItem key={g} value={g}>{g}</SelectItem>)}
-                    <SelectItem value="Other">Other</SelectItem>
-                  </SelectContent>
-                </Select>
+              <p className="text-xs text-muted-foreground">
+                How uploads to this account flow through the pipeline. The{" "}
+                <code className="px-1 mx-0.5 rounded bg-muted text-[10px]">/inbox</code>{" "}
+                chip is a per-render lens; this picker is the persisted policy.
+              </p>
+              <ModePicker
+                accountId={account.id}
+                initialMode={isMode(account.mode) ? account.mode : "manual"}
+                onSaved={(m) => setAccount({ ...account, mode: m })}
+              />
+            </TabsContent>
+
+            {/* Import field-mapping preferences (2026-06-04). The canonical home
+                for resetting an account from "apply automatically" back to
+                "ask me first". Deep-linked via #import-prefs. */}
+            <TabsContent value="import" className="pt-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <FileCog className="h-4 w-4 text-violet-600" />
+                <h3 className="text-sm font-medium">Import preferences</h3>
               </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Currency</Label>
-              <Select value={editForm.currency} onValueChange={(v) => setEditForm({ ...editForm, currency: v ?? "CAD" })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="CAD">CAD</SelectItem>
-                  <SelectItem value="USD">USD</SelectItem>
-                  <SelectItem value="EUR">EUR</SelectItem>
-                  <SelectItem value="GBP">GBP</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
-              <Input value={editForm.note} onChange={(e) => setEditForm({ ...editForm, note: e.target.value })} />
-            </div>
-            {editError && <p className="text-sm text-destructive">{editError}</p>}
-            <div className="flex gap-2 pt-1">
-              <Button type="button" variant="outline" className="flex-1" onClick={() => setEditOpen(false)}>Cancel</Button>
-              <Button type="submit" className="flex-1" disabled={editSaving}>{editSaving ? "Saving…" : "Save Changes"}</Button>
-            </div>
-          </form>
+              <p className="text-xs text-muted-foreground">
+                Whether CSV / OFX / QFX uploads to this account show a
+                field-mapping preview before staging, and which OFX field becomes
+                the payee.
+              </p>
+              <ImportPrefsPicker
+                accountId={account.id}
+                initialCsvMappingMode={
+                  account.csvMappingMode === "auto" ? "auto" : "confirm"
+                }
+                initialOfxPayeeSource={
+                  account.ofxPayeeSource === "memo" ? "memo" : "name"
+                }
+                onSaved={(prefs) =>
+                  setAccount({
+                    ...account,
+                    csvMappingMode: prefs.csvMappingMode,
+                    ofxPayeeSource: prefs.ofxPayeeSource,
+                  })
+                }
+              />
+            </TabsContent>
+
+            {/* Cash sleeves — list + add + delete-when-no-tx. */}
+            <TabsContent value="sleeves" className="pt-4 space-y-3">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Coins className="h-4 w-4 text-emerald-600" />
+                    <h3 className="text-sm font-medium">Cash sleeves</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Per-currency cash positions inside this account. Required
+                    before recording buys, sells, or FX conversions in a new
+                    currency.
+                  </p>
+                </div>
+                <Button size="sm" variant="outline" onClick={openNewSleeve}>
+                  <Plus className="h-3.5 w-3.5 mr-1.5" /> Add sleeve
+                </Button>
+              </div>
+              {sleevesLoading && sleeves.length === 0 ? (
+                <div className="h-12 bg-muted animate-pulse rounded-md" />
+              ) : sleeves.length === 0 ? (
+                <p className="text-sm text-muted-foreground py-4 text-center">
+                  No cash sleeves yet. Add one to start recording trades.
+                </p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="text-xs">Currency</TableHead>
+                      <TableHead className="text-xs">Name</TableHead>
+                      <TableHead className="text-xs text-right">Transactions</TableHead>
+                      <TableHead className="text-xs text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sleeves.map((s) => (
+                      <TableRow key={s.id} className="hover:bg-muted/30">
+                        <TableCell>
+                          <Badge variant="outline" className="text-[10px] font-mono">
+                            {s.currency}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm">{s.name ?? `Cash ${s.currency}`}</TableCell>
+                        <TableCell className="text-right text-sm tabular-nums">
+                          {s.txCount ?? 0}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={(s.txCount ?? 0) > 0}
+                            title={
+                              (s.txCount ?? 0) > 0
+                                ? "Sleeve has transactions — delete or reassign them first"
+                                : "Delete sleeve"
+                            }
+                            onClick={() => {
+                              setDeleteSleeveError("");
+                              setDeleteSleeveId(s.id);
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </TabsContent>
+          </Tabs>
         </DialogContent>
       </Dialog>
     </div>

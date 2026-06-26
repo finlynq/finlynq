@@ -38,6 +38,7 @@ import { useEditId } from "@/lib/hooks/useEditId";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { usePortfolioFormData } from "@/lib/hooks/usePortfolioFormData";
 import { useAccountHoldingSelection } from "@/lib/hooks/useAccountHoldingSelection";
+import { useSeedAccountFromParam } from "@/lib/hooks/useSeedAccountFromParam";
 
 export default function TransferForm() {
   const router = useRouter();
@@ -82,6 +83,17 @@ export default function TransferForm() {
     () => investmentAccounts.filter((a) => String(a.id) !== sourceAccountId),
     [investmentAccounts, sourceAccountId],
   );
+
+  // FINLYNQ-227 — pre-select the "from" investment account from `?account=<id>`.
+  useSeedAccountFromParam({
+    isEdit,
+    field: "source",
+    validIds: useMemo(
+      () => investmentAccounts.map((a) => a.id),
+      [investmentAccounts],
+    ),
+    setValue: setSourceAccountId,
+  });
 
   const selectedHolding = useMemo(
     () =>

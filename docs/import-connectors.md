@@ -32,7 +32,7 @@ A connector is the same shape regardless of provider — only the parse step dif
 4. **UI** — Settings → Import → **"Import from another provider"** tab: a
    per-source submenu. Each provider is a tab component (`ConnectorTab`,
    `MoneyProConnectorTab`) that drives `POST /api/import/connectors/<provider>/…`.
-   Deep-link: `/settings/import?tab=connect[&provider=moneypro|wealthposition]`.
+   Deep-link: `/settings/import?tab=connect[&provider=moneypro|wealthposition|generic-csv]`.
 
 ## Connectors that ship
 
@@ -41,6 +41,7 @@ A connector is the same shape regardless of provider — only the parse step dif
 | **WealthPosition** | ZIP export (4 CSVs) | `transformWealthPositionExport` | + live-API client for balance reconcile only. Splits via `#SPLIT#` groups. |
 | **IBKR** | Activity Statement XML / CSV | `ibkr` (`parse-xml`/`parse-csv`/`transform`) | XML preferred (deterministic). |
 | **Money Pro** | Transactions report CSV | `parseMoneyProCsv` / `moneyProRowsToRawTransactions` | See below — sign comes from a column, not the amount. |
+| **Generic CSV (full ledger)** | Any multi-account CSV | `parseGenericCsv` / `genericCsvRowsToRawTransactions` | See below — **mapping-driven** (not header-locked); for whole-portfolio exports the per-account `/import` mapper can't take. |
 
 ## Money Pro (iBear) — the non-1:1 case
 
@@ -73,6 +74,56 @@ row onto its Finlynq account name, then `executeImport`). Routes:
 **Deferred:** Balance → reconciliation anchors; the full `Transaction Type`
 vocabulary; MCP/mobile parity; the `.numbers` format (export as CSV instead —
 Money Pro produces CSV natively; `.numbers` is Apple Numbers' proprietary binary).
+
+## Generic CSV (full ledger) — the mapping-driven, format-tolerant case
+
+A **multi-account** export (one CSV carrying many accounts, transfers, and
+currencies) is the shape the per-account `/import` column mapper can't take — it
+is single-account-scoped, has no transfer concept, and assumes the account's
+currency. The connector framework is the right home, but unlike Money Pro this
+connector is **intentionally NOT keyed on exact header names** (a strict clone
+breaks the moment a column is renamed/reordered). Instead it is **mapping-driven**:
+
+- **Tolerant detection** — `suggestGenericCsvMapping(headers)` derives a best-guess
+  `GenericCsvMapping` (logical field → header) via case-insensitive **alias**
+  matching (`note`/`memo`/`description`/`payee`; `account_to`/`destination`/`to`;
+  …), order-independent, unknown columns ignored. `isGenericCsv(headers)` is true
+  when the required trio (`date`, `amount`, `account`) auto-maps. A file that
+  doesn't fully auto-map isn't rejected — the preview returns `mappingComplete:
+  false` and the UI lets the user re-point columns.
+- **Signed amount** (negative = outflow), so no Type column. `currency` is a per-row
+  ISO column (falls back to the amount symbol, then `opts.defaultCurrency`); HKD +
+  CNY can coexist in one file / one account.
+- **`account_to` present → single-row transfer** → two `linkId`-paired legs (outflow
+  on `account`, inflow on `account_to`), both in the row currency. **Cross-currency
+  transfers are refused** (v1) by the orchestrator — `refuseCrossCurrencyTransfers`
+  drops a transfer whose two legs resolve to accounts of different **modal**
+  currency and reports it as a skipped row.
+- **`(OPENING BALANCE)` category → an `Opening Balance` tx** (gated by
+  `opts.includeOpeningBalance`); **`(AUDIT)` → `Adjustment`** (markers configurable
+  via `opts.openingBalanceMarkers` / `auditMarkers`).
+- **Flexible dates** — `parseFlexibleDate` accepts ISO `YYYY-MM-DD` and slash/dot/
+  dash `D/M/Y` (or `M/D/Y` via `opts.dateOrder`), optional trailing time;
+  self-disambiguates when a component is clearly the day. `opts.decimalComma` for
+  European amounts.
+
+Orchestrator [`generic-csv-orchestrator.ts`](../src/lib/external-import/generic-csv-orchestrator.ts):
+`summarizeGenericCsv(csv, mapping, …)` (read-only preview — modal-currency account
+plans + categories + transfer count + skipped-row errors) and
+`executeGenericCsvImport(csv, mapping, …)` (resolve/create accounts per the user's
+per-account choice, create categories incl. the `Transfer` bucket, rewrite each row
+onto its Finlynq account name, then `executeImport`). Account currency is the
+account's **modal** currency across its rows (so a mostly-CNY account with a few HKD
+rows is created CNY, the off-currency rows stored via `entered_currency` + FX).
+Routes: `POST /api/import/connectors/generic-csv/{preview,execute}` — `preview`
+takes an OPTIONAL `mapping` (suggests one when absent) and always returns
+`{ headers, sampleRows, mapping, missingRequired, mappingComplete, summary }`;
+`execute` requires the (date/amount/account-complete) `mapping`. UI:
+`GenericCsvConnectorTab` (a Match-columns step + sample preview + account mapping).
+Deep-link: `/settings/import?tab=connect&provider=generic-csv`.
+
+**Deferred:** cross-currency (FX-pair) transfers; using a per-row id column as
+`fitId` for idempotent re-import; MCP/mobile parity.
 
 ## Load-bearing rules (learned the hard way)
 
