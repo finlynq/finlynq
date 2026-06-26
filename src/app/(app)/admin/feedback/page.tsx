@@ -7,7 +7,7 @@
  * server-side by requireAdmin.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,8 +19,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { MessageCircle } from "lucide-react";
+import { MessageCircle, Paperclip, X } from "lucide-react";
+import { FeedbackAttachmentView } from "@/components/feedback/attachment-view";
+import { validateFeedbackAttachment } from "@/lib/feedback/attachment";
 import type { FeedbackMessage, FeedbackThread } from "@shared/types";
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 interface FeedbackRow {
   id: number;
@@ -100,13 +108,37 @@ function AdminThreadDialog({
 }) {
   const [thread, setThread] = useState<FeedbackThread | null>(null);
   const [reply, setReply] = useState("");
+  const [replyFile, setReplyFile] = useState<File | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const clearReplyFile = () => {
+    setReplyFile(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const onPickReplyFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+    const f = e.target.files?.[0] ?? null;
+    if (!f) {
+      clearReplyFile();
+      return;
+    }
+    const check = validateFeedbackAttachment({ filename: f.name, mime: f.type, size: f.size });
+    if ("code" in check) {
+      setError(check.message);
+      clearReplyFile();
+      return;
+    }
+    setReplyFile(f);
+  };
 
   useEffect(() => {
     if (feedbackId == null) {
       setThread(null);
       setReply("");
+      setReplyFile(null);
       setError(null);
       return;
     }
@@ -139,11 +171,22 @@ function AdminThreadDialog({
     setSending(true);
     setError(null);
     try {
-      const res = await fetch(`/api/admin/feedback/${feedbackId}/reply`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body }),
-      });
+      let res: Response;
+      if (replyFile) {
+        const form = new FormData();
+        form.append("body", body);
+        form.append("attachment", replyFile);
+        res = await fetch(`/api/admin/feedback/${feedbackId}/reply`, {
+          method: "POST",
+          body: form,
+        });
+      } else {
+        res = await fetch(`/api/admin/feedback/${feedbackId}/reply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ body }),
+        });
+      }
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error || "Failed to send reply.");
@@ -160,6 +203,7 @@ function AdminThreadDialog({
           : t,
       );
       setReply("");
+      clearReplyFile();
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to send reply.");
@@ -189,40 +233,28 @@ function AdminThreadDialog({
             <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
               <Bubble side="left" label={who} at={thread.createdAt} body={thread.seed} />
               {thread.attachment && feedbackId != null && (
-                <div className="flex flex-col items-start">
-                  <a
-                    href={`/api/admin/feedback/${feedbackId}/attachment`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block max-w-[85%] overflow-hidden rounded-lg border border-border"
-                    title={thread.attachment.filename ?? "attachment"}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={`/api/admin/feedback/${feedbackId}/attachment`}
-                      alt={thread.attachment.filename ?? "feedback attachment"}
-                      className="max-h-64 w-auto object-contain"
-                    />
-                  </a>
-                  <a
-                    href={`/api/admin/feedback/${feedbackId}/attachment`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    download={thread.attachment.filename ?? undefined}
-                    className="mt-1 text-[10px] text-primary underline-offset-2 hover:underline"
-                  >
-                    {thread.attachment.filename ?? "Download attachment"}
-                  </a>
-                </div>
+                <FeedbackAttachmentView
+                  attachment={thread.attachment}
+                  url={`/api/admin/feedback/${feedbackId}/attachment`}
+                  align="left"
+                />
               )}
               {thread.messages.map((m) => (
-                <Bubble
-                  key={m.id}
-                  side={m.authorRole === "admin" ? "right" : "left"}
-                  label={m.authorRole === "admin" ? "You" : who}
-                  at={m.createdAt}
-                  body={m.body}
-                />
+                <div key={m.id} className="space-y-1">
+                  <Bubble
+                    side={m.authorRole === "admin" ? "right" : "left"}
+                    label={m.authorRole === "admin" ? "You" : who}
+                    at={m.createdAt}
+                    body={m.body}
+                  />
+                  {m.attachment && feedbackId != null && (
+                    <FeedbackAttachmentView
+                      attachment={m.attachment}
+                      url={`/api/admin/feedback/${feedbackId}/attachment?messageId=${m.id}`}
+                      align={m.authorRole === "admin" ? "right" : "left"}
+                    />
+                  )}
+                </div>
               ))}
             </div>
             <div className="space-y-2">
@@ -234,12 +266,42 @@ function AdminThreadDialog({
                 placeholder="Reply to the user…"
                 className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
               />
-              {error && <p className="text-sm text-destructive">{error}</p>}
-              <div className="flex justify-end">
-                <Button onClick={send} disabled={sending || !reply.trim()}>
+              <input
+                ref={fileRef}
+                type="file"
+                onChange={onPickReplyFile}
+                className="hidden"
+              />
+              <div className="flex items-center gap-2">
+                {replyFile ? (
+                  <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-border px-2 py-1 text-xs">
+                    <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate">{replyFile.name}</span>
+                    <span className="shrink-0 text-muted-foreground">{fmtBytes(replyFile.size)}</span>
+                    <button
+                      type="button"
+                      onClick={clearReplyFile}
+                      aria-label="Remove attachment"
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fileRef.current?.click()}
+                  >
+                    <Paperclip className="h-4 w-4" /> Attach
+                  </Button>
+                )}
+                <Button className="ml-auto" onClick={send} disabled={sending || !reply.trim()}>
                   {sending ? "Sending…" : "Send reply"}
                 </Button>
               </div>
+              {error && <p className="text-sm text-destructive">{error}</p>}
             </div>
           </>
         )}

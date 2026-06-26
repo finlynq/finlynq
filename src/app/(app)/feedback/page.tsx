@@ -7,7 +7,7 @@
  * (POST /api/feedback/[id]/read) so the "Your feedback" nav badge clears.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,12 +19,21 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { Paperclip, X } from "lucide-react";
 import { FeedbackDialog } from "@/components/feedback-dialog";
+import { FeedbackAttachmentView } from "@/components/feedback/attachment-view";
+import { validateFeedbackAttachment } from "@/lib/feedback/attachment";
 import type {
   FeedbackMessage,
   FeedbackThread,
   FeedbackThreadSummary,
 } from "@shared/types";
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 const typeColor: Record<string, string> = {
   bug: "bg-destructive/15 text-destructive",
@@ -82,13 +91,37 @@ function ThreadDialog({
 }) {
   const [thread, setThread] = useState<FeedbackThread | null>(null);
   const [reply, setReply] = useState("");
+  const [replyFile, setReplyFile] = useState<File | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const clearReplyFile = () => {
+    setReplyFile(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const onPickReplyFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+    const f = e.target.files?.[0] ?? null;
+    if (!f) {
+      clearReplyFile();
+      return;
+    }
+    const check = validateFeedbackAttachment({ filename: f.name, mime: f.type, size: f.size });
+    if ("code" in check) {
+      setError(check.message);
+      clearReplyFile();
+      return;
+    }
+    setReplyFile(f);
+  };
 
   useEffect(() => {
     if (feedbackId == null) {
       setThread(null);
       setReply("");
+      setReplyFile(null);
       setError(null);
       return;
     }
@@ -119,11 +152,22 @@ function ThreadDialog({
     setSending(true);
     setError(null);
     try {
-      const res = await fetch(`/api/feedback/${feedbackId}/reply`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body }),
-      });
+      let res: Response;
+      if (replyFile) {
+        const form = new FormData();
+        form.append("body", body);
+        form.append("attachment", replyFile);
+        res = await fetch(`/api/feedback/${feedbackId}/reply`, {
+          method: "POST",
+          body: form,
+        });
+      } else {
+        res = await fetch(`/api/feedback/${feedbackId}/reply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ body }),
+        });
+      }
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error || "Failed to send reply.");
@@ -133,6 +177,7 @@ function ThreadDialog({
         t ? { ...t, messages: [...t.messages, msg], messageCount: t.messageCount + 1 } : t,
       );
       setReply("");
+      clearReplyFile();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to send reply.");
     } finally {
@@ -159,14 +204,29 @@ function ThreadDialog({
           <>
             <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
               <Bubble side="right" label="You" at={thread.createdAt} body={thread.seed} />
-              {thread.messages.map((m) => (
-                <Bubble
-                  key={m.id}
-                  side={m.authorRole === "user" ? "right" : "left"}
-                  label={m.authorRole === "user" ? "You" : "Finlynq team"}
-                  at={m.createdAt}
-                  body={m.body}
+              {thread.attachment && feedbackId != null && (
+                <FeedbackAttachmentView
+                  attachment={thread.attachment}
+                  url={`/api/feedback/${feedbackId}/attachment`}
+                  align="right"
                 />
+              )}
+              {thread.messages.map((m) => (
+                <div key={m.id} className="space-y-1">
+                  <Bubble
+                    side={m.authorRole === "user" ? "right" : "left"}
+                    label={m.authorRole === "user" ? "You" : "Finlynq team"}
+                    at={m.createdAt}
+                    body={m.body}
+                  />
+                  {m.attachment && feedbackId != null && (
+                    <FeedbackAttachmentView
+                      attachment={m.attachment}
+                      url={`/api/feedback/${feedbackId}/attachment?messageId=${m.id}`}
+                      align={m.authorRole === "user" ? "right" : "left"}
+                    />
+                  )}
+                </div>
               ))}
             </div>
             <div className="space-y-2">
@@ -178,12 +238,46 @@ function ThreadDialog({
                 placeholder="Write a reply…"
                 className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
               />
-              {error && <p className="text-sm text-destructive">{error}</p>}
-              <div className="flex justify-end">
-                <Button onClick={send} disabled={sending || !reply.trim()}>
+              <input
+                ref={fileRef}
+                type="file"
+                onChange={onPickReplyFile}
+                className="hidden"
+              />
+              <div className="flex items-center gap-2">
+                {replyFile ? (
+                  <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-border px-2 py-1 text-xs">
+                    <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate">{replyFile.name}</span>
+                    <span className="shrink-0 text-muted-foreground">{fmtBytes(replyFile.size)}</span>
+                    <button
+                      type="button"
+                      onClick={clearReplyFile}
+                      aria-label="Remove attachment"
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fileRef.current?.click()}
+                  >
+                    <Paperclip className="h-4 w-4" /> Attach
+                  </Button>
+                )}
+                <Button
+                  className="ml-auto"
+                  onClick={send}
+                  disabled={sending || !reply.trim()}
+                >
                   {sending ? "Sending…" : "Send reply"}
                 </Button>
               </div>
+              {error && <p className="text-sm text-destructive">{error}</p>}
             </div>
           </>
         )}

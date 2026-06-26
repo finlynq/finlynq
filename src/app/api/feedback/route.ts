@@ -10,9 +10,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import path from "path";
 import fs from "fs/promises";
-import crypto from "crypto";
 import { z } from "zod";
 import { db, schema } from "@/db";
 import { desc, eq, inArray } from "drizzle-orm";
@@ -21,11 +19,7 @@ import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { notifyAdminsNewFeedback } from "@/lib/feedback/notify";
 import { buildThreadSummary } from "@/lib/feedback/thread";
-import {
-  FEEDBACK_ATTACHMENT_MAX_BYTES,
-  validateFeedbackAttachment,
-  feedbackAttachmentPath,
-} from "@/lib/feedback/attachment";
+import { saveFeedbackAttachment } from "@/lib/feedback/attachment-io";
 import type { FeedbackThreadSummary } from "@shared/types";
 
 export const dynamic = "force-dynamic";
@@ -123,54 +117,15 @@ export async function POST(request: NextRequest) {
       d = parsed.data;
     }
 
-    // --- Server-side attachment guard (allowlist + 5 MB cap). Reject BEFORE
-    // any DB row or file is written, so a bad upload persists nothing. ---
-    let bytes: Buffer | null = null;
-    let ext = "";
-    if (fileEntry) {
-      const check = validateFeedbackAttachment({
-        mime: fileEntry.type,
-        size: fileEntry.size,
-      });
-      if ("code" in check) {
-        const status = check.code === "bad_type" ? 415 : 413;
-        return NextResponse.json({ error: check.message }, { status });
-      }
-      ext = check.ext;
-      bytes = Buffer.from(await fileEntry.arrayBuffer());
-      // Re-check the realized byte length (size header can lie / stream short).
-      if (bytes.length === 0) {
-        return NextResponse.json({ error: "The file is empty." }, { status: 400 });
-      }
-      if (bytes.length > FEEDBACK_ATTACHMENT_MAX_BYTES) {
-        return NextResponse.json(
-          { error: `Image exceeds the ${Math.floor(FEEDBACK_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MB limit.` },
-          { status: 413 },
-        );
-      }
+    // --- Server-side attachment guard (denylist + 5 MB cap) + on-disk write.
+    // Reject BEFORE any DB row or file is written, so a bad upload persists
+    // nothing. The file is written FIRST so we never persist a row pointing at
+    // a file that failed to write. ---
+    const saved = await saveFeedbackAttachment(userId, fileEntry);
+    if (!saved.ok) {
+      return NextResponse.json({ error: saved.error }, { status: saved.status });
     }
-
-    // Write the plaintext file to disk FIRST so we never persist a feedback row
-    // pointing at a file that failed to write. Mirrors uploads/mcp/<userId>/...
-    let attachment: {
-      attachmentPath: string;
-      attachmentFilename: string;
-      attachmentMime: string;
-      attachmentSize: number;
-    } | null = null;
-    if (bytes && fileEntry) {
-      const id = crypto.randomUUID();
-      const { dir, file } = feedbackAttachmentPath(userId, id, ext);
-      await fs.mkdir(dir, { recursive: true });
-      // Plaintext on purpose — admin-readable, NOT the user-DEK envelope.
-      await fs.writeFile(file, bytes);
-      attachment = {
-        attachmentPath: file,
-        attachmentFilename: path.basename(fileEntry.name) || `attachment.${ext}`,
-        attachmentMime: fileEntry.type,
-        attachmentSize: bytes.length,
-      };
-    }
+    const attachment = saved.attachment;
 
     let row: { id: number };
     try {

@@ -35,6 +35,11 @@ export interface FeedbackMessageRow {
   authorId: string;
   body: string;
   createdAt: Date;
+  // FINLYNQ-228 — optional per-message attachment (nullable on older rows).
+  attachmentPath?: string | null;
+  attachmentFilename?: string | null;
+  attachmentMime?: string | null;
+  attachmentSize?: number | null;
 }
 
 const iso = (d: Date) => new Date(d).toISOString();
@@ -86,5 +91,12 @@ export function toFeedbackMessage(
     body: m.body,
     createdAt: iso(m.createdAt),
     mine: m.authorId === viewerId,
+    attachment: m.attachmentFilename
+      ? {
+          filename: m.attachmentFilename,
+          mime: m.attachmentMime ?? null,
+          size: m.attachmentSize ?? null,
+        }
+      : null,
   };
 }

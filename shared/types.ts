@@ -208,6 +208,12 @@ export interface FeedbackFormData {
 
 /** One reply in a feedback thread. The original submission is the thread SEED
  *  (FeedbackThread.seed), NOT a FeedbackMessage. */
+export interface FeedbackAttachmentMeta {
+  filename: string | null;
+  mime: string | null;
+  size: number | null;
+}
+
 export interface FeedbackMessage {
   id: number;
   feedbackId: number;
@@ -216,6 +222,9 @@ export interface FeedbackMessage {
   createdAt: string;
   /** True when the requesting side authored this message (right-aligned in UI). */
   mine?: boolean;
+  /** FINLYNQ-228 — optional per-message attachment. Bytes served by the
+   *  thread's serve route with `?messageId=<id>`. */
+  attachment?: FeedbackAttachmentMeta | null;
 }
 
 /** Row shape for a feedback thread list (GET /api/feedback, admin list). */
@@ -244,13 +253,10 @@ export interface FeedbackThread extends FeedbackThreadSummary {
   /** Submitter identity — present only on the admin route. */
   username?: string | null;
   email?: string | null;
-  /** FINLYNQ-226 — image attachment on the initial submission (admin route).
-   *  When present, the bytes are served by GET /api/admin/feedback/[id]/attachment. */
-  attachment?: {
-    filename: string | null;
-    mime: string | null;
-    size: number | null;
-  } | null;
+  /** FINLYNQ-226/228 — attachment on the initial submission (the thread seed).
+   *  Present on BOTH the admin and the user thread routes. The bytes are served
+   *  by the thread's serve route (no `messageId` = the seed). */
+  attachment?: FeedbackAttachmentMeta | null;
   /** Ordered oldest→newest; EXCLUDES the seed. */
   messages: FeedbackMessage[];
 }

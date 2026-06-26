@@ -6,9 +6,15 @@
  * soft-promotes status 'new' → 'triaged' (an admin reply implies triage; never
  * auto-resolve/demote). Audit-logged as `feedback_replied`. In-app only — the
  * user sees it via the "Your feedback" nav badge; no email is sent.
+ *
+ * FINLYNQ-228 — accepts multipart/form-data with one optional attachment (same
+ * denylist + 5 MB cap). The file is stored under the THREAD OWNER's uploads dir
+ * (so a wipe finds every thread file by owner), but author_role='admin' means a
+ * wipe LEAVES it in place (maintainer-owned). The JSON path still works.
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import fs from "fs/promises";
 import { z } from "zod";
 import { db, schema, getDialect } from "@/db";
 import { eq } from "drizzle-orm";
@@ -16,6 +22,7 @@ import { requireAdmin } from "@/lib/auth/require-admin";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { logAdminAction, clientIp } from "@/lib/admin-audit";
 import { toFeedbackMessage } from "@/lib/feedback/thread";
+import { saveFeedbackAttachment } from "@/lib/feedback/attachment-io";
 
 export const dynamic = "force-dynamic";
 
@@ -43,8 +50,26 @@ export async function POST(
   }
 
   try {
-    const parsed = validateBody(await request.json(), bodySchema);
-    if (parsed.error) return parsed.error;
+    const contentType = request.headers.get("content-type") ?? "";
+    const isMultipart = contentType.includes("multipart/form-data");
+
+    let body: string;
+    let fileEntry: File | null = null;
+    if (isMultipart) {
+      const form = (await request.formData()) as unknown as globalThis.FormData;
+      const parsed = validateBody(
+        { body: (form.get("body") as string | null) ?? undefined },
+        bodySchema,
+      );
+      if (parsed.error) return parsed.error;
+      body = parsed.data.body;
+      const f = form.get("attachment");
+      if (f && f instanceof File && f.size > 0) fileEntry = f;
+    } else {
+      const parsed = validateBody(await request.json(), bodySchema);
+      if (parsed.error) return parsed.error;
+      body = parsed.data.body;
+    }
 
     const [existing] = await db
       .select()
@@ -54,17 +79,32 @@ export async function POST(
       return NextResponse.json({ error: "Not found." }, { status: 404 });
     }
 
+    // Store the admin attachment under the THREAD OWNER's dir (keeps every
+    // thread file under one owner key) — authorship is the row's author_role.
+    const saved = await saveFeedbackAttachment(existing.userId, fileEntry);
+    if (!saved.ok) {
+      return NextResponse.json({ error: saved.error }, { status: saved.status });
+    }
+    const attachment = saved.attachment;
+
     const now = new Date();
-    const [msg] = await db
-      .insert(schema.feedbackMessages)
-      .values({
-        feedbackId,
-        authorRole: "admin",
-        authorId: adminUserId,
-        body: parsed.data.body,
-        createdAt: now,
-      })
-      .returning();
+    let msg;
+    try {
+      [msg] = await db
+        .insert(schema.feedbackMessages)
+        .values({
+          feedbackId,
+          authorRole: "admin",
+          authorId: adminUserId,
+          body,
+          createdAt: now,
+          ...(attachment ?? {}),
+        })
+        .returning();
+    } catch (e) {
+      if (attachment) await fs.unlink(attachment.attachmentPath).catch(() => {});
+      throw e;
+    }
 
     // Replying implies triage — but never demote or auto-resolve.
     const newStatus = existing.status === "new" ? "triaged" : existing.status;

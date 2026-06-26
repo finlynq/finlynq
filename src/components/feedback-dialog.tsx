@@ -20,13 +20,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import { X } from "lucide-react";
+import { X, Paperclip } from "lucide-react";
 import {
-  FEEDBACK_ATTACHMENT_ACCEPT,
   FEEDBACK_ATTACHMENT_MAX_BYTES,
+  isSafeInlineImageMime,
   validateFeedbackAttachment,
 } from "@/lib/feedback/attachment";
 import type { FeedbackType } from "@shared/types";
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 const TYPES: { value: FeedbackType; label: string }[] = [
   { value: "bug", label: "Bug" },
@@ -52,9 +58,11 @@ export function FeedbackDialog({
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Object-URL preview, revoked when the file changes / dialog unmounts.
+  const isImage = !!file && isSafeInlineImageMime(file.type);
+
+  // Object-URL preview for safe images only; revoked when file changes/unmounts.
   useEffect(() => {
-    if (!file) {
+    if (!file || !isSafeInlineImageMime(file.type)) {
       setPreviewUrl(null);
       return;
     }
@@ -85,7 +93,11 @@ export function FeedbackDialog({
       return;
     }
     // Client-side mirror of the server guard (server is the source of truth).
-    const check = validateFeedbackAttachment({ mime: f.type, size: f.size });
+    const check = validateFeedbackAttachment({
+      filename: f.name,
+      mime: f.type,
+      size: f.size,
+    });
     if ("code" in check) {
       setError(check.message);
       clearFile();
@@ -190,8 +202,8 @@ export function FeedbackDialog({
             </div>
 
             <div className="space-y-1.5">
-              <Label>Screenshot (optional)</Label>
-              {file && previewUrl ? (
+              <Label>Attachment (optional)</Label>
+              {file && isImage && previewUrl ? (
                 <div className="relative inline-block">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
@@ -211,6 +223,22 @@ export function FeedbackDialog({
                     {file.name}
                   </p>
                 </div>
+              ) : file ? (
+                <div className="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+                  <Paperclip className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1 truncate text-sm">{file.name}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {formatBytes(file.size)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={clearFile}
+                    aria-label="Remove attachment"
+                    className="shrink-0 rounded-full p-1 text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               ) : (
                 <Button
                   type="button"
@@ -218,21 +246,21 @@ export function FeedbackDialog({
                   size="sm"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  Attach an image
+                  Attach a file
                 </Button>
               )}
               <input
                 ref={fileInputRef}
                 type="file"
-                accept={FEEDBACK_ATTACHMENT_ACCEPT}
                 onChange={onPickFile}
                 className="hidden"
               />
               <p className="text-xs text-muted-foreground">
-                PNG, JPEG, WebP or GIF, up to{" "}
-                {Math.floor(FEEDBACK_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MB.
-                Double-check the image doesn&apos;t reveal account numbers,
-                balances, or other sensitive financial details before attaching.
+                Any file up to{" "}
+                {Math.floor(FEEDBACK_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MB
+                (executables, scripts, and web pages are blocked). Double-check it
+                doesn&apos;t reveal account numbers, balances, or other sensitive
+                financial details before attaching.
               </p>
             </div>
             {error && <p className="text-sm text-destructive">{error}</p>}

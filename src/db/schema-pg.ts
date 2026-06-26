@@ -554,15 +554,17 @@ export const feedback = pgTable(
     appVersion: text("app_version"), // 'web' | mobile version string
     status: text("status").notNull().default("new"), // 'new' | 'triaged' | 'resolved'
     adminNote: text("admin_note"),
-    // FINLYNQ-226 — optional single image attachment on the INITIAL submission
-    // (the immutable thread seed). Stored ON DISK at attachmentPath
-    // (uploads/feedback/<userId>/<uuid>.<ext>), PLAINTEXT like the rest of the
-    // row (the maintainer has no per-user DEK) — never the user-DEK envelope.
-    // The on-disk file is unlinked BEFORE the wipe DB transaction (mcp_uploads
-    // precedent — see unlinkUserUploadFiles in auth/queries.ts).
+    // FINLYNQ-226/228 — optional single attachment on the INITIAL submission
+    // (the immutable thread seed). Stored ON DISK under the DURABLE uploads root
+    // (getUploadsBaseDir() — <root>/uploads/feedback/<userId>/<uuid>.<ext>,
+    // OUTSIDE .next so it survives a deploy), PLAINTEXT like the rest of the row
+    // (the maintainer has no per-user DEK) — never the user-DEK envelope. v2
+    // allows any file type except dangerous (denylist). The on-disk file is
+    // unlinked BEFORE the wipe DB transaction (mcp_uploads precedent — see
+    // unlinkUserUploadFiles in auth/queries.ts).
     attachmentPath: text("attachment_path"), // absolute on-disk path
     attachmentFilename: text("attachment_filename"), // original upload filename
-    attachmentMime: text("attachment_mime"), // image/png|jpeg|webp|gif
+    attachmentMime: text("attachment_mime"), // e.g. image/png | application/pdf
     attachmentSize: integer("attachment_size"), // bytes
     // Two-sided read tracking for the reply thread. NULL = never opened.
     // unread-for-user = admin message newer than userLastReadAt;
@@ -591,6 +593,15 @@ export const feedbackMessages = pgTable(
     authorRole: text("author_role").notNull(), // 'user' | 'admin'
     authorId: text("author_id").notNull(),
     body: text("body").notNull(),
+    // FINLYNQ-228 — optional single attachment per message (user or admin
+    // reply). Same on-disk PLAINTEXT model as feedback.attachment* (the file
+    // lives under <root>/uploads/feedback/<ownerUserId>/<uuid>.<ext>). A wipe
+    // unlinks only the USER-authored message files (authorRole='user'); admin
+    // replies' attachments are maintainer-owned and survive.
+    attachmentPath: text("attachment_path"), // absolute on-disk path
+    attachmentFilename: text("attachment_filename"), // original upload filename
+    attachmentMime: text("attachment_mime"), // e.g. image/png | application/pdf
+    attachmentSize: integer("attachment_size"), // bytes
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("feedback_messages_thread_idx").on(t.feedbackId, t.createdAt)],
