@@ -249,6 +249,15 @@ export async function GET(request: NextRequest) {
     if (dek) {
       const needsInitialBackfill =
         liveInvestmentByAccount.size > 0 && snapshots.length === 0;
+      // Orphaned investment snapshots: a stored per-account row whose account no
+      // longer reports a live holdings value (its holdings/transactions were
+      // deleted). Such rows keep feeding the chart's historical line until a
+      // rebuild reaps them, so trigger the self-heal (which now deletes orphans)
+      // the moment we see one. Catches both the all-deleted and the
+      // some-accounts-emptied cases.
+      const hasInvestmentOrphans = snapshots.some(
+        (s) => !liveInvestmentByAccount.has(s.accountId),
+      );
       let dirtyFrom: string | null = null;
       let dirtyMarkedAt: string | null = null;
       try {
@@ -261,16 +270,32 @@ export async function GET(request: NextRequest) {
       } catch {
         /* dirty lookup is best-effort */
       }
-      kickSelfHeal(userId, dek, today, dirtyFrom, dirtyMarkedAt, needsInitialBackfill);
+      kickSelfHeal(
+        userId,
+        dek,
+        today,
+        dirtyFrom,
+        dirtyMarkedAt,
+        needsInitialBackfill || hasInvestmentOrphans,
+      );
     }
 
     // Cash self-heal — DEK-free, so it runs regardless of `dek`. Fires when the
     // stored cash snapshots are stale (a cash tx changed, a new day rolled over,
     // or they were never built). plan/net-worth-cash-snapshots.md Phase 4.
+    //
+    // The old `cashFp.count > 0` gate is REMOVED: when EVERY cash transaction is
+    // deleted the count drops to 0, but stale cash snapshot rows remain and keep
+    // feeding the chart. `isCashStale` already trips on a count change (old
+    // count → 0), and `hasCashOrphans` is the belt-and-braces signal for the
+    // case where the watermark already reads 0 yet orphan rows still linger. The
+    // cash self-heal now reaps orphans (see deleteOrphanCashSnapshots), so firing
+    // it at count 0 is exactly what clears them.
     try {
       const cashFp = await getCashTxFingerprint(userId);
       const cashMeta = await getCashSnapshotMeta(userId);
-      if (cashFp.count > 0 && isCashStale(cashFp, cashMeta, today)) {
+      const hasCashOrphans = cashFp.count === 0 && cashSnapshots.length > 0;
+      if (isCashStale(cashFp, cashMeta, today) || hasCashOrphans) {
         kickCashSelfHeal(userId, today);
       }
     } catch {

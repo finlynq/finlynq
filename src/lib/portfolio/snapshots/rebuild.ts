@@ -10,7 +10,7 @@
  * `dek` may be null — market value needs no decrypted names.
  */
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { buildDailySnapshot } from "@/lib/portfolio/snapshots/builder";
 import { rebuildCashSnapshots } from "@/lib/portfolio/snapshots/cash-builder";
@@ -173,6 +173,65 @@ export function dayspanInclusive(from: string, to: string): number {
   return Math.floor((b - a) / 86_400_000) + 1;
 }
 
+/**
+ * Account ids that currently hold positions: the union of the legacy
+ * `portfolio_holdings.account_id` link and the `holding_accounts` pairing —
+ * exactly the set `buildDailySnapshot` (via getHoldingsValueByAccount) can write
+ * an investment snapshot for. DEK-free (ids only). Mirrors `holdingsAccountIds`
+ * in cash-builder.ts (kept local to avoid an import cycle: cash-builder imports
+ * THIS module's in-flight guards).
+ */
+async function getHoldingAccountIds(userId: string): Promise<Set<number>> {
+  const set = new Set<number>();
+  const fromHoldings = await db
+    .selectDistinct({ accountId: schema.portfolioHoldings.accountId })
+    .from(schema.portfolioHoldings)
+    .where(
+      and(
+        eq(schema.portfolioHoldings.userId, userId),
+        isNotNull(schema.portfolioHoldings.accountId),
+      ),
+    );
+  for (const r of fromHoldings) if (r.accountId != null) set.add(Number(r.accountId));
+  const fromHa = await db
+    .selectDistinct({ accountId: schema.holdingAccounts.accountId })
+    .from(schema.holdingAccounts)
+    .where(eq(schema.holdingAccounts.userId, userId));
+  for (const r of fromHa) set.add(Number(r.accountId));
+  return set;
+}
+
+/**
+ * Delete orphaned INVESTMENT snapshot rows (`source <> 'cash'` — the builder's
+ * `'cron'` rows). `keepAccountIds` is the set of accounts that still hold
+ * positions:
+ *   - empty  → no positions anywhere; delete EVERY non-cash row INCLUDING the
+ *     whole-portfolio NULL aggregate (the portfolio is gone, so is its history).
+ *   - non-empty → delete only PER-ACCOUNT rows whose account no longer holds
+ *     positions; the NULL aggregate is preserved (the walk keeps it current).
+ * The UPSERT walk can only (over)write accounts that still have holdings, so
+ * this is the only reaper for stale investment balances left behind when an
+ * account's holdings/transactions are deleted.
+ */
+async function deleteInvestmentOrphanSnapshots(
+  userId: string,
+  keepAccountIds: Set<number>,
+): Promise<void> {
+  if (keepAccountIds.size === 0) {
+    await db.execute(sql`
+      DELETE FROM portfolio_snapshots
+      WHERE user_id = ${userId} AND source <> 'cash'
+    `);
+    return;
+  }
+  const keepList = sql.join([...keepAccountIds].map((id) => sql`${id}`), sql`, `);
+  await db.execute(sql`
+    DELETE FROM portfolio_snapshots
+    WHERE user_id = ${userId} AND source <> 'cash' AND account_id IS NOT NULL
+      AND account_id NOT IN (${keepList})
+  `);
+}
+
 export async function rebuildPortfolioSnapshots(
   userId: string,
   fromDate?: string | null,
@@ -182,14 +241,26 @@ export async function rebuildPortfolioSnapshots(
 ): Promise<RebuildResult> {
   const to = toDate ?? new Date().toISOString().slice(0, 10);
 
-  // Discover the user's earliest transaction date when no start given.
+  // Discover the rebuild start when no explicit `from` is given. Use the
+  // EARLIEST of (first transaction, first existing snapshot) so the walk +
+  // orphan cleanup below cover any stale snapshot history. This is critical when
+  // the user has DELETED transactions: MIN(transactions.date) alone would be
+  // NULL — collapsing `from` to today — and the historical stale snapshot rows
+  // would never be revisited (the chart keeps showing a phantom balance line).
   let from = fromDate ?? null;
   if (!from) {
-    const row = await db
-      .select({ minDate: sql<string>`MIN(${schema.transactions.date})` })
+    const txRow = await db
+      .select({ minDate: sql<string | null>`MIN(${schema.transactions.date})` })
       .from(schema.transactions)
       .where(eq(schema.transactions.userId, userId));
-    from = row[0]?.minDate ?? to;
+    const snapRow = await db
+      .select({ minDate: sql<string | null>`MIN(${schema.portfolioSnapshots.snapDate})` })
+      .from(schema.portfolioSnapshots)
+      .where(eq(schema.portfolioSnapshots.userId, userId));
+    const candidates = [txRow[0]?.minDate ?? null, snapRow[0]?.minDate ?? null].filter(
+      (d): d is string => typeof d === "string" && d.length > 0,
+    );
+    from = candidates.length ? candidates.sort()[0] : to;
   }
   // Hard floor: never walk before EARLIEST_REBUILD_DATE, no matter where `from`
   // came from. Guards against epoch/garbage-dated rows producing a runaway
@@ -209,22 +280,43 @@ export async function rebuildPortfolioSnapshots(
   // (FINLYNQ-205).
   onProgress?.(0, totalDays);
 
-  let day = from;
+  // Accounts that currently hold positions (union of the legacy account_id link
+  // and the holding_accounts pairing). buildDailySnapshot only ever writes
+  // per-account investment rows for these; anything else with a non-cash
+  // snapshot row is an ORPHAN (its holdings/transactions were deleted) that the
+  // idempotent UPSERT can never overwrite — see deleteInvestmentOrphanSnapshots.
+  const holdingAccountIds = await getHoldingAccountIds(userId);
+
   let daysProcessed = 0;
   let gapsFilledDays = 0;
-  // Guard against pathological input (≈30y of days).
-  const MAX_DAYS = 30 * 366;
-  let guard = 0;
-  while (day <= to && guard < MAX_DAYS) {
-    guard++;
-    const result = await buildDailySnapshot({ userId, date: day, dek: dek ?? null });
-    if (result.gapsFilled) gapsFilledDays++;
-    daysProcessed++;
-    // Emit incremental progress (status registry / future stream consumers).
-    // Pure compute is untouched — this only reports the day counters.
-    onProgress?.(daysProcessed, totalDays);
-    if (day === to) break;
-    day = addDayUTC(day);
+  if (holdingAccountIds.size === 0) {
+    // No positions remain anywhere → there is NO legitimate investment history.
+    // Skip the walk (it would only write a zero whole-portfolio aggregate per
+    // day) and purge every non-cash snapshot row (per-account AND the NULL
+    // aggregate). This is the "deleted every holding" authoritative reset.
+    await deleteInvestmentOrphanSnapshots(userId, holdingAccountIds);
+    onProgress?.(totalDays, totalDays);
+  } else {
+    let day = from;
+    // Guard against pathological input (≈30y of days).
+    const MAX_DAYS = 30 * 366;
+    let guard = 0;
+    while (day <= to && guard < MAX_DAYS) {
+      guard++;
+      const result = await buildDailySnapshot({ userId, date: day, dek: dek ?? null });
+      if (result.gapsFilled) gapsFilledDays++;
+      daysProcessed++;
+      // Emit incremental progress (status registry / future stream consumers).
+      // Pure compute is untouched — this only reports the day counters.
+      onProgress?.(daysProcessed, totalDays);
+      if (day === to) break;
+      day = addDayUTC(day);
+    }
+    // Authoritative cleanup: the walk just rebuilt every account that still has
+    // holdings; any per-account non-cash row for an account NOT in that set is a
+    // leftover the UPSERT could never overwrite. Reap it (the NULL aggregate is
+    // preserved — the walk keeps it current over [from, to]).
+    await deleteInvestmentOrphanSnapshots(userId, holdingAccountIds);
   }
 
   // Cash side (DEK-free): rebuild the per-account historical-FX cash snapshots

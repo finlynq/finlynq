@@ -165,10 +165,20 @@ function buildSnapStates(rows: AccountSnapshot[]): Map<number, SnapState> {
 }
 
 /**
- * Value of one pass (cash or investment) on `day`. On the final grid day, the
- * live override (if any accounts are present) REPLACES the whole pass total so
- * the latest point matches the dashboard hero; otherwise each account carries
- * its nearest snapshot at-or-before `day`.
+ * Value of one pass (cash or investment) on `day`. On the final grid day, when
+ * the caller PROVIDES a live map it is the AUTHORITATIVE source of truth: the
+ * pass total is the sum over the live map and any account ABSENT from it
+ * contributes 0. Otherwise each account carries its nearest snapshot
+ * at-or-before `day`.
+ *
+ * The "provided ⇒ authoritative, even when empty" rule is load-bearing. An
+ * investment account that still has stale per-account snapshot rows but NO live
+ * holdings (e.g. every transaction was deleted) must read 0 today, NOT carry
+ * its last stale snapshot forward — that mismatch is the "$0 net-worth hero but
+ * the chart's final point spikes up" bug. The live map is empty in exactly that
+ * case, so the previous `size > 0` guard SKIPPED the override and let the stale
+ * value through. The route always passes a (possibly empty) map; tests/callers
+ * that supply none (undefined) still fall back to carry-forward.
  *
  * Side effect: accumulates each account's per-day contribution into `perAccount`
  * (keyed by accountId, in displayCurrency) so the caller can build the FINLYNQ-128
@@ -182,7 +192,7 @@ function sumPassForDay(
   rateMap: Map<string, number>,
   perAccount: Map<number, number>,
 ): number {
-  if (isFinalDay && liveByAccount && liveByAccount.size > 0) {
+  if (isFinalDay && liveByAccount) {
     let sum = 0;
     for (const [accId, live] of liveByAccount) {
       const v = convertWithRateMap(live.value, live.currency, rateMap);
