@@ -9,6 +9,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 import * as schema from "../schema-pg";
+import { instrumentPool } from "@/lib/diagnostics/log";
 import type {
   DatabaseAdapter,
   DbAdapterConfig,
@@ -38,6 +39,10 @@ export class PostgresAdapter implements DatabaseAdapter {
       connectionString,
       max: poolSize ?? 10,
     });
+
+    // Observe-only timing/error capture for every query (incl. transaction
+    // clients) → diagnostics_log. Must run before drizzle wraps the pool.
+    instrumentPool(this.pool);
 
     this.db = drizzle(this.pool, { schema });
   }

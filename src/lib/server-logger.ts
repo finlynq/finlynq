@@ -94,6 +94,16 @@ export async function logServerError(
     console.warn(line);
   }
 
+  // Persist server (5xx) errors to the diagnostics_log table so /admin/diagnostics
+  // surfaces them across restarts. Best-effort, dynamic-import (server-logger is
+  // imported by the diagnostics module for scrubSensitive) and the message is
+  // already scrubbed above. 4xx client errors are noisy and skipped.
+  if (status >= 500) {
+    void import("@/lib/diagnostics/log")
+      .then((m) => m.recordApiError(method, path, status, entry.message, userId))
+      .catch(() => {});
+  }
+
   // Append to log file (best-effort, never throw)
   try {
     const logLine = JSON.stringify(entry) + "\n";

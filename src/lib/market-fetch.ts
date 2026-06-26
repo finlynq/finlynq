@@ -60,6 +60,17 @@ function record(entry: Omit<OutboundCall, "id" | "provider">): void {
   if (buf.length > LOG_CAP) buf.splice(0, buf.length - LOG_CAP);
 }
 
+/**
+ * Persist an outbound provider failure to the diagnostics_log table (best-effort,
+ * dynamic-import to avoid eagerly loading the DB-backed diagnostics module here).
+ * The in-memory ring buffer above keeps ALL calls; this persists only failures.
+ */
+function persistOutboundError(url: string, status: number, ms: number, message: string): void {
+  void import("@/lib/diagnostics/log")
+    .then((m) => m.recordOutboundError(providerOf(url), url, status, ms, message))
+    .catch(() => {});
+}
+
 /** Newest-first snapshot of the outbound log (for the admin view). */
 export function getOutboundLog(): OutboundCall[] {
   return [...logBuf()].reverse();
@@ -98,18 +109,20 @@ export async function marketFetch(
   const at = new Date(startedAt).toISOString();
   try {
     const res = await fetch(input, init);
-    record({ at, method, url, status: res.status, ok: res.ok, ms: Date.now() - startedAt });
+    const ms = Date.now() - startedAt;
+    record({ at, method, url, status: res.status, ok: res.ok, ms });
+    // Persist genuine provider failures (5xx). Routine 4xx (e.g. Yahoo 404 for a
+    // missing ticker) are expected/noisy and stay out of the diagnostics table.
+    if (res.status >= 500) {
+      void persistOutboundError(url, res.status, ms, `HTTP ${res.status}`);
+    }
     return res;
   } catch (err) {
-    record({
-      at,
-      method,
-      url,
-      status: 0,
-      ok: false,
-      ms: Date.now() - startedAt,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    const ms = Date.now() - startedAt;
+    const message = err instanceof Error ? err.message : String(err);
+    record({ at, method, url, status: 0, ok: false, ms, error: message });
+    // Network error / timeout — persist it (these are the V3AA.L / XAU stalls).
+    void persistOutboundError(url, 0, ms, message);
     throw err;
   }
 }

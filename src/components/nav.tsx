@@ -37,6 +37,7 @@ import {
   Database,
   Activity,
   Server,
+  ScrollText,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { FinlynqLogo } from "@/components/FinlynqLogo";
@@ -105,6 +106,7 @@ const toolLinks: NavItem[] = [
   { href: "/admin/price-cache", label: "Rate Cache", icon: Database, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/api-log", label: "API Log", icon: Activity, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/system", label: "Server Health", icon: Server, color: ACTIVE_ACCENT, mode: "prod" },
+  { href: "/admin/diagnostics", label: "Diagnostics", icon: ScrollText, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/announcements", label: "Announcements", icon: Megaphone, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/feedback", label: "Feedback", icon: MessageCircle, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/feedback", label: "Your feedback", icon: MessageCircle, color: ACTIVE_ACCENT, mode: "prod" },
