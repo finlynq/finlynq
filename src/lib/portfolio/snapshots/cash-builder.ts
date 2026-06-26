@@ -38,7 +38,7 @@ import { upsertCashSnapshotMeta } from "@/lib/portfolio/snapshots/cash-meta";
  * dated cash row otherwise sends the day-by-day walk on a multi-decade march.
  * No supported account predates this floor.
  */
-const EARLIEST_CASH_DATE = "2020-01-01";
+const EARLIEST_CASH_DATE = "2015-01-01";
 
 export interface BuildCashSnapshotsInput {
   userId: string;

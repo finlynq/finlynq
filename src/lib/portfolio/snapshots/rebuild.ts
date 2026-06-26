@@ -52,7 +52,7 @@ export interface RebuildProgress {
  * floor, so the start date is clamped up to it regardless of where `from` came
  * from (caller param, dirty marker, or the MIN(date) probe).
  */
-export const EARLIEST_REBUILD_DATE = "2020-01-01";
+export const EARLIEST_REBUILD_DATE = "2015-01-01";
 
 // HMR-safe per-user in-flight + progress registry. Shared by the manual rebuild
 // endpoint and the chart-load self-heal so a double-click / concurrent chart
