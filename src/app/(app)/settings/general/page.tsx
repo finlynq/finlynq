@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/dialog";
 import { Settings2, Shield, Database, Loader2 } from "lucide-react";
 import { useDisplayCurrency } from "@/components/currency-provider";
+import { useFont, FONT_OPTIONS, type FontKey } from "@/components/font-provider";
 import { SUPPORTED_FIAT_CURRENCIES, currencyLabel } from "@/lib/fx/supported-currencies";
 import { FxOverridesSection } from "@/components/fx-overrides-section";
 import { ActiveCurrenciesSection } from "@/components/active-currencies-section";
@@ -33,6 +34,7 @@ type RecomputeState = { active: boolean; target: string; done: number; total: nu
 
 export default function GeneralSettingsPage() {
   const { displayCurrency, setDisplayCurrency } = useDisplayCurrency();
+  const { font, setFont } = useFont();
   const [currencyError, setCurrencyError] = useState("");
   // Pending currency awaiting confirmation (Phase 3: switching re-derives every
   // transaction's stored reporting amount at historical rates).
@@ -121,6 +123,25 @@ export default function GeneralSettingsPage() {
                 {SUPPORTED_FIAT_CURRENCIES.map((c) => (
                   <SelectItem key={c} value={c}>
                     {c} — {currencyLabel(c)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <Label>UI Font</Label>
+              <p className="text-xs text-muted-foreground">
+                Applies to this browser only. Numeric figures always use Geist Mono.
+              </p>
+            </div>
+            <Select value={font} onValueChange={(v) => setFont(v as FontKey)}>
+              <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {FONT_OPTIONS.map((o) => (
+                  <SelectItem key={o.key} value={o.key}>
+                    {o.label}
                   </SelectItem>
                 ))}
               </SelectContent>

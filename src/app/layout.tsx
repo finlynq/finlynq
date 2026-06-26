@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
+import { Geist, Geist_Mono, Instrument_Serif, Inter, IBM_Plex_Sans, Atkinson_Hyperlegible } from "next/font/google";
 import { headers } from "next/headers";
 import { ThemeProvider } from "@/components/theme-provider";
 import { JsonLd, organizationSchema } from "@/components/seo/json-ld";
@@ -14,6 +14,23 @@ const instrumentSerif = Instrument_Serif({
   weight: "400",
   style: ["normal", "italic"],
 });
+// Alternate UI fonts (FINLYNQ-225) — loaded as CSS variables; Geist is default.
+const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
+const ibmPlexSans = IBM_Plex_Sans({
+  variable: "--font-ibm-plex-sans",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+});
+const atkinsonHyperlegible = Atkinson_Hyperlegible({
+  variable: "--font-atkinson",
+  subsets: ["latin"],
+  weight: ["400", "700"],
+});
+
+/** Inline script run before first paint to apply the stored font preference.
+ *  Mirrors next-themes FOUC pattern — nonce carried by the <script> tag.
+ *  storageKey must match FONT_STORAGE_KEY in font-provider.tsx. */
+const FONT_FOUC_SCRIPT = `(function(){try{var k=localStorage.getItem("pf-font");var v=["geist","inter","ibm-plex-sans","atkinson","system"];if(k&&v.indexOf(k)!==-1&&k!=="geist"){document.documentElement.setAttribute("data-font",k)}}catch(e){}})();`;
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -69,7 +86,19 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} antialiased noise-bg`}>
+      {/* FOUC-prevention for font preference (FINLYNQ-225).
+          Runs before paint, sets data-font on <html> from localStorage.
+          nonce required by strict-dynamic CSP (mirrors next-themes pattern). */}
+      <head>
+        <script
+          suppressHydrationWarning
+          nonce={typeof window === "undefined" ? nonce : ""}
+          dangerouslySetInnerHTML={{ __html: FONT_FOUC_SCRIPT }}
+        />
+      </head>
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} ${inter.variable} ${ibmPlexSans.variable} ${atkinsonHyperlegible.variable} antialiased noise-bg`}
+      >
         <JsonLd data={organizationSchema()} />
         <ThemeProvider
           attribute="class"
