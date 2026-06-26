@@ -14,6 +14,7 @@ import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { buildDailySnapshot } from "@/lib/portfolio/snapshots/builder";
 import { rebuildCashSnapshots } from "@/lib/portfolio/snapshots/cash-builder";
+import { withOp } from "@/lib/diagnostics/op-context";
 
 export interface RebuildResult {
   fromDate: string;
@@ -250,7 +251,22 @@ async function deleteInvestmentOrphanSnapshots(
   `);
 }
 
-export async function rebuildPortfolioSnapshots(
+export function rebuildPortfolioSnapshots(
+  userId: string,
+  fromDate?: string | null,
+  toDate?: string | null,
+  dek?: Buffer | null,
+  onProgress?: (daysProcessed: number, totalDays: number) => void,
+): Promise<RebuildResult> {
+  // Attribute the whole walk (and every query it runs) to the
+  // 'rebuild:investment' operation so the diagnostics rollup shows how much
+  // wall-clock/CPU the net-worth rebuild consumes (the #1 background consumer).
+  return withOp("rebuild:investment", () =>
+    rebuildPortfolioSnapshotsImpl(userId, fromDate, toDate, dek, onProgress),
+  );
+}
+
+async function rebuildPortfolioSnapshotsImpl(
   userId: string,
   fromDate?: string | null,
   toDate?: string | null,

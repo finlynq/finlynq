@@ -22,6 +22,8 @@ interface Row {
   kind: string;
   durationMs: number | null;
   source: string | null;
+  op: string | null;
+  env: string | null;
   detail: string | null;
   message: string | null;
   code: string | null;
@@ -29,7 +31,7 @@ interface Row {
 interface ApiResponse {
   rows: Row[];
   summary: { kind: string; total: number; last24h: number }[];
-  meta: { slowQueryMs: number; cap: number; returned: number };
+  meta: { slowQueryMs: number; cap: number; returned: number; env: string };
 }
 
 const POLL_MS = 5000;
@@ -175,11 +177,15 @@ export default function AdminDiagnosticsPage() {
         render: (r) => <span className="text-muted-foreground">{r.code ?? "—"}</span>,
       },
       {
-        key: "source",
-        header: "Source",
-        accessor: (r) => r.source ?? "",
+        key: "op",
+        header: "Operation",
+        accessor: (r) => r.op ?? r.source ?? "",
         filter: "text",
-        render: (r) => <span className="text-xs">{r.source ?? "—"}</span>,
+        render: (r) => (
+          <span className="text-xs" title={r.source ?? undefined}>
+            {r.op ?? r.source ?? "—"}
+          </span>
+        ),
       },
       {
         key: "message",
@@ -206,11 +212,17 @@ export default function AdminDiagnosticsPage() {
           <div className="flex items-center gap-2">
             <ScrollText className="h-5 w-5 text-primary" />
             <h1 className="text-2xl font-bold tracking-tight">Diagnostics log</h1>
+            {data?.meta.env && (
+              <Badge variant="outline" className="ml-1 uppercase">
+                {data.meta.env}
+              </Badge>
+            )}
           </div>
           <p className="mt-0.5 text-sm text-muted-foreground">
             Persistent log of slow queries (≥ {(data?.meta.slowQueryMs ?? 2000).toLocaleString()}ms),
-            database errors, API 5xx errors, and outbound provider failures. Survives restarts; kept
-            to the newest {(data?.meta.cap ?? 5000).toLocaleString()} rows.
+            database errors, API 5xx errors, and outbound provider failures for{" "}
+            <span className="font-medium text-foreground">this environment</span>. Survives restarts;
+            kept to the newest {(data?.meta.cap ?? 5000).toLocaleString()} rows.
           </p>
         </div>
         <div className="flex items-center gap-2">

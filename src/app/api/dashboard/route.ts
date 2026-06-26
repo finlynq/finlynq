@@ -15,8 +15,13 @@ import { logApiError } from "@/lib/validate";
 import { decryptNamedRows, decryptName } from "@/lib/crypto/encrypted-columns";
 import { safeName } from "@/lib/safe-name";
 import { rankBreakdown, type BreakdownMember } from "@/lib/chart-breakdown";
+import { withOp } from "@/lib/diagnostics/op-context";
 
-export async function GET(request: NextRequest) {
+export function GET(request: NextRequest) {
+  return withOp("GET /api/dashboard", () => handleGet(request));
+}
+
+async function handleGet(request: NextRequest) {
   // Dashboard must stay accessible even when the session has no cached DEK
   // (e.g. first request after a server restart). `getDEK` returns null in
   // that case; downstream decryption falls through to plaintext/legacy rows.

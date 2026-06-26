@@ -25,10 +25,14 @@ import { requireAdmin } from "@/lib/auth/require-admin";
 import { getSystemMetrics } from "@/lib/admin/system-metrics";
 import { getAllRebuildProgress, getCashRebuildsInFlight } from "@/lib/portfolio/snapshots/rebuild";
 import { getOutboundLog, getOutboundLogMeta } from "@/lib/market-fetch";
+import { getEnvName } from "@/lib/diagnostics/env";
 
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+function isoOf(v: unknown): string {
+  return v instanceof Date ? v.toISOString() : String(v ?? "");
 }
 
 export async function GET(request: NextRequest) {
@@ -45,8 +49,10 @@ export async function GET(request: NextRequest) {
   const system = await getSystemMetrics();
 
   // --- Live DB activity (same role sees its own app backends' query text) ---
-  const [activeRes, connRes, snapRes, topUsersRes, dirtyRes] = await Promise.all([
-    db.execute(sql`
+  // Run the active-query probe FIRST + on its own, so the parallel stats queries
+  // below aren't themselves captured as "active". Self-monitoring queries
+  // (pg_stat_activity / the diagnostics tables) are filtered out by content.
+  const activeRes = await db.execute(sql`
       SELECT pid,
              state,
              wait_event_type AS wait_event_type,
@@ -58,9 +64,15 @@ export async function GET(request: NextRequest) {
         AND pid <> pg_backend_pid()
         AND backend_type = 'client backend'
         AND state IS DISTINCT FROM 'idle'
+        AND query NOT ILIKE '%pg_stat_activity%'
+        AND query NOT ILIKE '%diagnostics_log%'
+        AND query NOT ILIKE '%op_rollup%'
+        AND query NOT ILIKE '%system_metrics_sample%'
       ORDER BY query_start ASC NULLS LAST
       LIMIT 40
-    `),
+    `);
+
+  const [connRes, snapRes, topUsersRes, dirtyRes, historyRes, topOpsRes] = await Promise.all([
     db.execute(sql`
       SELECT coalesce(state, 'unknown') AS state, count(*)::int AS c
       FROM pg_stat_activity
@@ -89,6 +101,30 @@ export async function GET(request: NextRequest) {
       ORDER BY marked_at ASC
       LIMIT 25
     `),
+    // Durable 24h CPU/load history, downsampled to 5-minute buckets (avg + peak).
+    db.execute(sql`
+      SELECT date_trunc('hour', at) + floor(extract(minute FROM at) / 5) * interval '5 minutes' AS bucket,
+             avg(cpu_pct)::real AS cpu_avg,
+             max(cpu_pct)::real AS cpu_max,
+             avg(load1)::real AS load1
+      FROM system_metrics_sample
+      WHERE at > now() - interval '24 hours'
+      GROUP BY bucket
+      ORDER BY bucket ASC
+    `),
+    // Top operations by total wall-clock over the last 24h ("where to focus").
+    db.execute(sql`
+      SELECT op,
+             sum(count)::bigint AS count,
+             sum(total_ms)::bigint AS total_ms,
+             sum(slow_count)::bigint AS slow_count,
+             sum(error_count)::bigint AS error_count
+      FROM op_rollup
+      WHERE bucket > now() - interval '24 hours'
+      GROUP BY op
+      ORDER BY total_ms DESC
+      LIMIT 30
+    `),
   ]);
 
   const activeQueries = normalizeDbRows(activeRes).map((r) => ({
@@ -116,6 +152,21 @@ export async function GET(request: NextRequest) {
     ageMs: Math.round(num(r.age_ms)),
   }));
 
+  // --- Durable 24h CPU history + top operations (Phase 2) ---
+  const history24h = normalizeDbRows(historyRes).map((r) => ({
+    at: isoOf(r.bucket),
+    cpuAvg: Math.round(num(r.cpu_avg) * 10) / 10,
+    cpuMax: Math.round(num(r.cpu_max) * 10) / 10,
+    load1: Math.round(num(r.load1) * 100) / 100,
+  }));
+  const topOps = normalizeDbRows(topOpsRes).map((r) => ({
+    op: (r.op as string) ?? "",
+    count: num(r.count),
+    totalMs: num(r.total_ms),
+    slowCount: num(r.slow_count),
+    errorCount: num(r.error_count),
+  }));
+
   // --- Snapshot rebuilds (in-flight / recent) from the registry ---
   const rebuilds = getAllRebuildProgress().map((p) => ({
     userId: p.userId,
@@ -136,7 +187,10 @@ export async function GET(request: NextRequest) {
   const apiLastAt = apiLog[0]?.at ?? null;
 
   return NextResponse.json({
+    env: getEnvName(),
     system,
+    history24h,
+    topOps,
     db: {
       activeQueries,
       connCounts,

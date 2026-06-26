@@ -35,6 +35,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import type { ZodSchema, z } from "zod";
+import { withOp } from "@/lib/diagnostics/op-context";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { apiSuccess, apiError } from "@/lib/api-response";
@@ -103,7 +104,10 @@ export function apiHandler<R, S extends ZodSchema | undefined = undefined>(
   options: ApiHandlerOptions<S>,
   handler: (ctx: ApiHandlerContext<InferBody<S>>) => HandlerReturn<R>,
 ): (request: NextRequest) => Promise<NextResponse> {
-  return async (request: NextRequest): Promise<NextResponse> => {
+  return (request: NextRequest): Promise<NextResponse> =>
+    // Tag every query/error in this request with its route, and record the
+    // request's wall-clock into the per-op rollup (diagnostics Phase 2).
+    withOp(`${request.method} ${safePathname(request)}`, async (): Promise<NextResponse> => {
     // ── 1. auth gate ──────────────────────────────────────────────────────
     let userId: string;
     let dek: Buffer | null;
@@ -176,7 +180,7 @@ export function apiHandler<R, S extends ZodSchema | undefined = undefined>(
       void logPath; // logPath retained for callers that override; logApiError uses pathname.
       return errorResponse(options.raw, message, status);
     }
-  };
+    });
 }
 
 /** Bare `{ error }` (raw/compat) vs `{ success:false, error }` (envelope). */

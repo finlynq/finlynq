@@ -38,6 +38,17 @@ export async function register() {
 
     console.log("[instrumentation] PostgreSQL adapter ready");
 
+    // Start the durable system-metrics sampler at boot so /admin/system has a
+    // continuous 24h CPU/load/mem history (not only after an admin first opens
+    // the page). In-memory + ~1/min DB persist; cleared on restart but the DB
+    // rows persist. Best-effort — never block startup.
+    try {
+      const { startSystemMetricsSampler } = await import("./src/lib/admin/system-metrics");
+      startSystemMetricsSampler();
+    } catch (err) {
+      console.error("[instrumentation] Failed to start system-metrics sampler:", err);
+    }
+
     // Kick off the MCP upload GC once the DB is ready. 30-minute interval.
     try {
       const { startUploadCleanupTimer, cleanupExpiredUploads } = await import(

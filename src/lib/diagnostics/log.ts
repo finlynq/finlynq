@@ -22,6 +22,8 @@
 
 import { sql } from "drizzle-orm";
 import { scrubSensitive } from "@/lib/server-logger";
+import { currentOp } from "./op-context";
+import { getEnvName } from "./env";
 
 function envInt(name: string, fallback: number): number {
   const n = Number(process.env[name]);
@@ -43,6 +45,7 @@ interface DiagnosticEntry {
   kind: DiagnosticKind;
   durationMs?: number | null;
   source?: string | null;
+  op?: string | null;
   detail?: string | null;
   message?: string | null;
   code?: string | null;
@@ -87,6 +90,8 @@ async function recordDiagnostic(entry: DiagnosticEntry): Promise<void> {
       kind: entry.kind,
       durationMs: entry.durationMs ?? null,
       source: trunc(entry.source ?? null, 240),
+      op: trunc(entry.op ?? null, 240),
+      env: getEnvName(),
       detail: trunc(entry.detail ?? null, DETAIL_MAX),
       message: trunc(entry.message ?? null, MESSAGE_MAX),
       code: trunc(entry.code ?? null, 64),
@@ -98,22 +103,24 @@ async function recordDiagnostic(entry: DiagnosticEntry): Promise<void> {
   }
 }
 
-export function recordSlowQuery(rawSql: string, ms: number): void {
+export function recordSlowQuery(rawSql: string, ms: number, op?: string | null): void {
   void recordDiagnostic({
     kind: "slow_query",
     durationMs: Math.round(ms),
     source: "db",
+    op: op ?? null,
     detail: scrubSensitive(normalizeSql(rawSql)),
   });
 }
 
-export function recordDbError(rawSql: string, ms: number, err: unknown): void {
+export function recordDbError(rawSql: string, ms: number, err: unknown, op?: string | null): void {
   const e = err as { message?: unknown; code?: unknown };
   const message = e?.message != null ? String(e.message) : String(err);
   void recordDiagnostic({
     kind: "db_error",
     durationMs: Math.round(ms),
     source: "db",
+    op: op ?? null,
     detail: scrubSensitive(normalizeSql(rawSql)),
     message: scrubSensitive(message),
     code: e?.code != null ? String(e.code) : null,
@@ -130,6 +137,7 @@ export function recordApiError(
   void recordDiagnostic({
     kind: "api_error",
     source: `${method} ${path}`,
+    op: `${method} ${path}`,
     // logServerError already scrubs; double-scrub is idempotent + cheap.
     message: scrubSensitive(message),
     code: String(status),
@@ -180,12 +188,16 @@ function observeQuery(orig: (...a: any[]) => any, args: any[]): any {
   const text = sqlTextOf(args);
   if (!text || text.includes("diagnostics_log")) return orig(...args);
 
+  // Attribute this query to the operation that triggered it (if any).
+  const ctx = currentOp();
+  const op = ctx?.op ?? null;
+
   const start = Date.now();
   let out: any;
   try {
     out = orig(...args);
   } catch (err) {
-    recordDbError(text, Date.now() - start, err);
+    recordDbError(text, Date.now() - start, err, op);
     throw err;
   }
   // Submittable / non-promise (Cursor, prepared statement) → return as-is.
@@ -194,11 +206,14 @@ function observeQuery(orig: (...a: any[]) => any, args: any[]): any {
   return out.then(
     (res: unknown) => {
       const ms = Date.now() - start;
-      if (ms >= SLOW_QUERY_MS) recordSlowQuery(text, ms);
+      if (ms >= SLOW_QUERY_MS) {
+        if (ctx) ctx.slowQueries += 1;
+        recordSlowQuery(text, ms, op);
+      }
       return res;
     },
     (err: unknown) => {
-      recordDbError(text, Date.now() - start, err);
+      recordDbError(text, Date.now() - start, err, op);
       throw err;
     },
   );

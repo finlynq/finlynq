@@ -30,6 +30,7 @@ import {
 import { getRate, prewarmRates } from "@/lib/fx-service";
 import { resolveReportingCurrency } from "../../../../mcp-server/reporting-currency";
 import { upsertCashSnapshotMeta } from "@/lib/portfolio/snapshots/cash-meta";
+import { withOp } from "@/lib/diagnostics/op-context";
 
 /**
  * Hard floor on how far back the walk will ever go — mirrors
@@ -306,7 +307,18 @@ export async function buildCashSnapshots(
  * (the cron's recent-window pass — see Phase 4) so a deep back-dated edit isn't
  * hidden from the full-history self-heal.
  */
-export async function rebuildCashSnapshots(opts: {
+export function rebuildCashSnapshots(opts: {
+  userId: string;
+  toDate: string;
+  fromDate?: string | null;
+  accountId?: number;
+  stampMeta?: boolean;
+}): Promise<BuildCashSnapshotsResult> {
+  // Attribute the cash rebuild + its queries to 'rebuild:cash' (diagnostics).
+  return withOp("rebuild:cash", () => rebuildCashSnapshotsImpl(opts));
+}
+
+async function rebuildCashSnapshotsImpl(opts: {
   userId: string;
   toDate: string;
   fromDate?: string | null;

@@ -47,6 +47,7 @@ import {
 import { rebuildCashSnapshots } from "@/lib/portfolio/snapshots/cash-builder";
 import { getCashSnapshotMeta, isCashStale } from "@/lib/portfolio/snapshots/cash-meta";
 import { listDirtySnapshotUsers, clearDirtyIfUnchanged } from "@/lib/portfolio/snapshots/dirty";
+import { withOp } from "@/lib/diagnostics/op-context";
 
 /**
  * DEK-bearing self-heal. Background jobs have no DEK (Stream D encrypts holding
@@ -125,7 +126,11 @@ function parsePeriod(raw: string | null): NetWorthPeriod {
   return raw === "6m" || raw === "1y" || raw === "all" ? raw : "6m";
 }
 
-export async function GET(request: NextRequest) {
+export function GET(request: NextRequest) {
+  return withOp("GET /api/net-worth-history", () => handleGet(request));
+}
+
+async function handleGet(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;

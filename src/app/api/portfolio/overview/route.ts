@@ -15,8 +15,13 @@ import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import { cashLegSkipSql, dividendAttributionHoldingIdSql } from "@/lib/portfolio/aggregation-predicates";
 import { aggregateMovers } from "@/lib/portfolio/top-movers";
 import { todayISO } from "@/lib/utils/date";
+import { withOp } from "@/lib/diagnostics/op-context";
 
-export async function GET(request: NextRequest) {
+export function GET(request: NextRequest) {
+  return withOp("GET /api/portfolio/overview", () => handleGet(request));
+}
+
+async function handleGet(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;

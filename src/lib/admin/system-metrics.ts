@@ -18,6 +18,7 @@
 
 import * as os from "node:os";
 import { statfs } from "node:fs/promises";
+import { sql } from "drizzle-orm";
 
 export interface SysSample {
   at: number; // epoch ms
@@ -74,12 +75,18 @@ interface SamplerState {
   buf: SysSample[];
   started: boolean;
   prev: Reading | null;
+  sincePersist: number; // ticks since the last DB persist (persist every 4th ≈ 60s)
+  persistCount: number; // total DB persists (drives opportunistic retention trim)
 }
+
+const PERSIST_EVERY = 4; // persist one sample to the DB per this-many 15s ticks (~60s)
+const SAMPLE_RETENTION_DAYS = 7;
+const TRIM_EVERY_PERSISTS = 120;
 
 const g = globalThis as typeof globalThis & { __pfSysMetrics?: SamplerState };
 function state(): SamplerState {
   if (!g.__pfSysMetrics) {
-    g.__pfSysMetrics = { buf: [], started: false, prev: null };
+    g.__pfSysMetrics = { buf: [], started: false, prev: null, sincePersist: 0, persistCount: 0 };
   }
   return g.__pfSysMetrics;
 }
@@ -134,8 +141,36 @@ function pushSample(s: SamplerState, sample: SysSample): void {
 
 function tick(s: SamplerState): void {
   const cur = readNow();
-  if (s.prev) pushSample(s, computeSample(s.prev, cur));
+  if (s.prev) {
+    const sample = computeSample(s.prev, cur);
+    pushSample(s, sample);
+    // Persist a durable sample roughly every minute so the 24h history survives
+    // a deploy/restart (the in-memory `buf` only spans the current process).
+    s.sincePersist += 1;
+    if (s.sincePersist >= PERSIST_EVERY) {
+      s.sincePersist = 0;
+      void persistSample(s, sample);
+    }
+  }
   s.prev = cur;
+}
+
+async function persistSample(s: SamplerState, sample: SysSample): Promise<void> {
+  try {
+    const { db } = await import("@/db");
+    await db.execute(sql`
+      INSERT INTO system_metrics_sample (cpu_pct, load1, proc_cpu_pct, mem_used_mb, mem_total_mb)
+      VALUES (${sample.cpuPct}, ${sample.load1}, ${sample.procCpuPct}, ${sample.memUsedMb}, ${sample.memTotalMb})
+    `);
+    s.persistCount += 1;
+    if (s.persistCount % TRIM_EVERY_PERSISTS === 0) {
+      await db.execute(
+        sql`DELETE FROM system_metrics_sample WHERE at < now() - (${SAMPLE_RETENTION_DAYS} || ' days')::interval`,
+      );
+    }
+  } catch {
+    // best-effort; a dropped sample just leaves a small gap in the 24h chart
+  }
 }
 
 function ensureSampler(): void {
@@ -146,6 +181,15 @@ function ensureSampler(): void {
   const timer = setInterval(() => tick(s), SAMPLE_MS);
   // Don't keep the event loop alive for a diagnostic sampler.
   if (typeof timer.unref === "function") timer.unref();
+}
+
+/**
+ * Start the background sampler at server boot (from instrumentation.ts) so the
+ * durable 24h history accumulates continuously — not only after an admin first
+ * opens /admin/system.
+ */
+export function startSystemMetricsSampler(): void {
+  ensureSampler();
 }
 
 async function readDisk(path = "/"): Promise<DiskUsage | null> {

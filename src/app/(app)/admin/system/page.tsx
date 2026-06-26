@@ -32,6 +32,7 @@ import {
   AlertTriangle,
   ExternalLink,
   History,
+  Gauge,
 } from "lucide-react";
 
 interface SysSample {
@@ -79,8 +80,24 @@ interface Rebuild {
   error: string | null;
   lastResult: { daysProcessed: number; gapsFilledDays: number } | null;
 }
+interface Hist24 {
+  at: string;
+  cpuAvg: number;
+  cpuMax: number;
+  load1: number;
+}
+interface TopOp {
+  op: string;
+  count: number;
+  totalMs: number;
+  slowCount: number;
+  errorCount: number;
+}
 interface ApiResponse {
+  env: string;
   system: SystemMetrics;
+  history24h: Hist24[];
+  topOps: TopOp[];
   db: { activeQueries: ActiveQuery[]; connCounts: { state: string; count: number }[] };
   snapshots: {
     total: number;
@@ -123,6 +140,18 @@ function fmtUptime(sec: number): string {
 function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
 }
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = s / 60;
+  if (m < 60) return `${m.toFixed(1)}m`;
+  return `${(m / 60).toFixed(1)}h`;
+}
+function hourLabel(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 /** CSP-safe inline-SVG sparkline (presentation attributes, no style=). */
 function MiniSpark({ values, max, stroke }: { values: number[]; max: number; stroke: string }) {
@@ -146,6 +175,59 @@ function MiniSpark({ values, max, stroke }: { values: number[]; max: number; str
       <polygon points={areaPts} fill={stroke} fillOpacity={0.12} />
       <polyline points={pts} fill="none" stroke={stroke} strokeWidth={1.5} />
     </svg>
+  );
+}
+
+/** Durable 24h CPU chart: avg (filled red) + peak (amber line), 0-100%. */
+function History24Chart({ points }: { points: Hist24[] }) {
+  const W = 800;
+  const H = 90;
+  if (points.length < 2) {
+    return (
+      <div className="py-6 text-center text-xs text-muted-foreground">
+        Collecting 24h history… (a durable sample is stored ~every minute)
+      </div>
+    );
+  }
+  const n = points.length;
+  const xy = (v: number, i: number) => {
+    const x = (i / (n - 1)) * W;
+    const y = H - Math.max(0, Math.min(1, v / 100)) * H;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  };
+  const avgPts = points.map((p, i) => xy(p.cpuAvg, i)).join(" ");
+  const maxPts = points.map((p, i) => xy(p.cpuMax, i)).join(" ");
+  const area = `0,${H} ${avgPts} ${W},${H}`;
+  const peak = Math.max(...points.map((p) => p.cpuMax));
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="h-24 w-full text-muted-foreground" aria-hidden>
+        {[25, 50, 75].map((gp) => (
+          <line
+            key={gp}
+            x1={0}
+            x2={W}
+            y1={H - (gp / 100) * H}
+            y2={H - (gp / 100) * H}
+            stroke="currentColor"
+            strokeOpacity={0.1}
+            strokeWidth={1}
+          />
+        ))}
+        <polygon points={area} fill="#ef4444" fillOpacity={0.1} />
+        <polyline points={maxPts} fill="none" stroke="#f59e0b" strokeWidth={1} strokeOpacity={0.7} />
+        <polyline points={avgPts} fill="none" stroke="#ef4444" strokeWidth={1.5} />
+      </svg>
+      <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
+        <span>{hourLabel(points[0].at)}</span>
+        <span className="flex items-center gap-3">
+          <span className="text-rose-500">● avg</span>
+          <span className="text-amber-500">● peak</span>
+          <span>24h peak {peak.toFixed(0)}%</span>
+        </span>
+        <span>now</span>
+      </div>
+    </div>
   );
 }
 
@@ -256,6 +338,68 @@ export default function AdminSystemPage() {
     [],
   );
 
+  const topOpColumns = useMemo<DataTableColumn<TopOp>[]>(
+    () => [
+      {
+        key: "op",
+        header: "Operation",
+        accessor: (r) => r.op,
+        filter: "text",
+        render: (r) => <span className="font-mono text-xs">{r.op}</span>,
+      },
+      {
+        key: "count",
+        header: "Calls",
+        align: "right",
+        accessor: (r) => r.count,
+        render: (r) => <span className="tabular-nums">{r.count.toLocaleString()}</span>,
+      },
+      {
+        key: "totalMs",
+        header: "Total time",
+        align: "right",
+        accessor: (r) => r.totalMs,
+        render: (r) => <span className="font-semibold tabular-nums">{fmtMs(r.totalMs)}</span>,
+      },
+      {
+        key: "avg",
+        header: "Avg",
+        align: "right",
+        accessor: (r) => (r.count ? r.totalMs / r.count : 0),
+        render: (r) => (
+          <span className="tabular-nums text-muted-foreground">
+            {fmtMs(r.count ? r.totalMs / r.count : 0)}
+          </span>
+        ),
+      },
+      {
+        key: "slowCount",
+        header: "Slow",
+        align: "right",
+        accessor: (r) => r.slowCount,
+        render: (r) =>
+          r.slowCount ? (
+            <span className="text-amber-600">{r.slowCount.toLocaleString()}</span>
+          ) : (
+            <span className="text-muted-foreground">0</span>
+          ),
+      },
+      {
+        key: "errorCount",
+        header: "Errors",
+        align: "right",
+        accessor: (r) => r.errorCount,
+        render: (r) =>
+          r.errorCount ? (
+            <span className="text-rose-600">{r.errorCount.toLocaleString()}</span>
+          ) : (
+            <span className="text-muted-foreground">0</span>
+          ),
+      },
+    ],
+    [],
+  );
+
   return (
     <div className="max-w-7xl space-y-6">
       <div className="flex items-start justify-between gap-4">
@@ -263,10 +407,17 @@ export default function AdminSystemPage() {
           <div className="flex items-center gap-2">
             <Server className="h-5 w-5 text-primary" />
             <h1 className="text-2xl font-bold tracking-tight">Server Health</h1>
+            {data?.env && (
+              <Badge variant="outline" className="ml-1 uppercase">
+                {data.env}
+              </Badge>
+            )}
           </div>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            Live CPU / memory / disk, active database queries, and snapshot-rebuild activity — the
-            things that drive server load. History is in-memory (resets on deploy).
+            Live CPU / memory / disk, active database queries, and snapshot-rebuild activity. CPU /
+            memory / disk are <span className="font-medium text-foreground">the whole VPS</span> (prod
+            and dev share this box); database queries, snapshots and rebuilds are{" "}
+            <span className="font-medium text-foreground">this environment only</span>.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -299,7 +450,10 @@ export default function AdminSystemPage() {
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Cpu className="h-4 w-4 text-primary" /> System
-                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                <Badge variant="outline" className="text-[10px] font-normal">
+                  whole VPS
+                </Badge>
+                <span className="ml-1 text-xs font-normal text-muted-foreground">
                   {sys.hostname} · {sys.cores} cores · node {sys.nodeVersion} · up{" "}
                   {fmtUptime(sys.osUptimeS)}
                 </span>
@@ -367,6 +521,43 @@ export default function AdminSystemPage() {
                   )}
                 </div>
               </div>
+
+              {/* Durable 24h CPU history (survives restarts) */}
+              <div>
+                <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <History className="h-3.5 w-3.5" /> System CPU · last 24h (whole VPS)
+                </div>
+                <History24Chart points={data?.history24h ?? []} />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Top operations (24h) — where time goes / where to focus */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Gauge className="h-4 w-4 text-primary" /> Top operations · last 24h
+                <Badge variant="outline" className="text-[10px] font-normal">
+                  this env
+                </Badge>
+                <span className="ml-1 text-xs font-normal text-muted-foreground">
+                  what consumed time — routes, rebuilds, jobs (ranked by total wall-clock)
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="overflow-x-auto p-2">
+              <DataTable<TopOp>
+                columns={topOpColumns}
+                rows={data?.topOps ?? []}
+                rowKey={(r) => r.op}
+                emptyState={
+                  <p className="py-8 text-center text-sm text-muted-foreground">
+                    {loading
+                      ? "Loading…"
+                      : "No operations recorded in the last 24h yet (rollup builds as traffic flows)."}
+                  </p>
+                }
+              />
             </CardContent>
           </Card>
 
@@ -375,6 +566,9 @@ export default function AdminSystemPage() {
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Database className="h-4 w-4 text-primary" /> Active database queries
+                <Badge variant="outline" className="text-[10px] font-normal">
+                  this env
+                </Badge>
                 <span className="ml-1 text-xs font-normal text-muted-foreground">
                   {data?.db.activeQueries.length ?? 0} active
                   {data?.db.connCounts.length
@@ -402,6 +596,9 @@ export default function AdminSystemPage() {
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-base">
                 <History className="h-4 w-4 text-primary" /> Snapshot rebuild activity
+                <Badge variant="outline" className="text-[10px] font-normal">
+                  this env
+                </Badge>
                 <span className="ml-1 text-xs font-normal text-muted-foreground">
                   {data?.snapshots.total.toLocaleString() ?? 0} rows (
                   {data?.snapshots.cash.toLocaleString() ?? 0} cash ·{" "}

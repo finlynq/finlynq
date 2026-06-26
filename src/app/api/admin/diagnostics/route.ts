@@ -17,6 +17,7 @@ import { db, getDialect } from "@/db";
 import { normalizeDbRows } from "@/lib/db-utils";
 import { requireAdmin } from "@/lib/auth/require-admin";
 import { SLOW_QUERY_MS, DIAGNOSTICS_CAP } from "@/lib/diagnostics/log";
+import { getEnvName } from "@/lib/diagnostics/env";
 
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest) {
 
   const [rowsRes, summaryRes] = await Promise.all([
     db.execute(sql`
-      SELECT id, at, kind, duration_ms, source, detail, message, code
+      SELECT id, at, kind, duration_ms, source, op, env, detail, message, code
       FROM diagnostics_log
       ${where}
       ORDER BY id DESC
@@ -71,6 +72,8 @@ export async function GET(request: NextRequest) {
     kind: (r.kind as string) ?? "",
     durationMs: r.duration_ms == null ? null : num(r.duration_ms),
     source: (r.source as string) ?? null,
+    op: (r.op as string) ?? null,
+    env: (r.env as string) ?? null,
     detail: (r.detail as string) ?? null,
     message: (r.message as string) ?? null,
     code: (r.code as string) ?? null,
@@ -85,7 +88,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     rows,
     summary,
-    meta: { slowQueryMs: SLOW_QUERY_MS, cap: DIAGNOSTICS_CAP, returned: rows.length },
+    meta: { slowQueryMs: SLOW_QUERY_MS, cap: DIAGNOSTICS_CAP, returned: rows.length, env: getEnvName() },
   });
 }
 

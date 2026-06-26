@@ -472,6 +472,10 @@ export const diagnosticsLog = pgTable(
     kind: text("kind").notNull(), // slow_query | db_error | api_error | outbound_error
     durationMs: integer("duration_ms"), // query / request duration when known
     source: text("source"), // 'db' | 'METHOD /path' | provider host
+    // FINLYNQ diagnostics Phase 2 (additive): the operation/route that triggered
+    // the row ('rebuild:investment', 'GET /api/...') + the environment (prod/dev).
+    op: text("op"),
+    env: text("env"),
     detail: text("detail"), // truncated SQL text / URL
     message: text("message"), // scrubbed error message (null for a pure slow query)
     code: text("code"), // SQLSTATE / HTTP status / provider status
@@ -481,6 +485,38 @@ export const diagnosticsLog = pgTable(
     index("diagnostics_log_at_idx").on(t.at),
     index("diagnostics_log_kind_at_idx").on(t.kind, t.at),
   ],
+);
+
+// Per-(operation, hour) timing rollup — "where is time going / where to focus".
+// Aggregated in-app and flushed every ~30s; powers the /admin/system "Top
+// operations (24h)" panel. Global/plaintext, trimmed to ~7 days by the app.
+export const opRollup = pgTable(
+  "op_rollup",
+  {
+    op: text("op").notNull(),
+    bucket: timestamp("bucket", { withTimezone: true }).notNull(), // hour-aligned
+    count: integer("count").notNull().default(0),
+    totalMs: integer("total_ms").notNull().default(0),
+    slowCount: integer("slow_count").notNull().default(0),
+    errorCount: integer("error_count").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.op, t.bucket] }), index("op_rollup_bucket_idx").on(t.bucket)],
+);
+
+// Durable CPU/load/mem samples (~1/min) so Server Health shows a real 24h chart
+// instead of a since-restart in-memory sparkline. Trimmed to ~7 days by the app.
+export const systemMetricsSample = pgTable(
+  "system_metrics_sample",
+  {
+    id: serial("id").primaryKey(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    cpuPct: doublePrecision("cpu_pct"),
+    load1: doublePrecision("load1"),
+    procCpuPct: doublePrecision("proc_cpu_pct"),
+    memUsedMb: integer("mem_used_mb"),
+    memTotalMb: integer("mem_total_mb"),
+  },
+  (t) => [index("system_metrics_sample_at_idx").on(t.at)],
 );
 
 // Canonical USD-anchored FX rate cache. Cross-rates are derived by
