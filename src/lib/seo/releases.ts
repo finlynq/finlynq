@@ -38,11 +38,57 @@ export type Release = {
 
 export const RELEASES: Release[] = [
   {
+    version: "3.3.1",
+    slug: "v3.3.1",
+    name: "Finlynq v3.3.1",
+    date: "2026-06-26",
+    current: true,
+    tagline:
+      "Finlynq v3.3.1 adds Money Pro and Generic CSV importers, transaction quick-actions on account pages, a UI font picker, file attachments on feedback, and new MCP reconciliation tools (now 117 tools).",
+    summary: [
+      "Finlynq v3.3.1 is an interim update since v3.3.0, focused on getting your data in from other apps, faster everyday actions, and more for AI assistants.",
+      "Finlynq is an open-source (AGPL v3) personal finance app with a first-party Model Context Protocol (MCP) server, so you can track your money in the app and analyze it from Claude, Cursor, Windsurf, or any MCP-compatible assistant.",
+    ],
+    sections: [
+      {
+        heading: "Import",
+        items: [
+          "A Money Pro (iBear) CSV importer for moving your history out of Money Pro.",
+          "A Generic CSV (full-ledger) importer that takes any multi-account export, including transfers, with a column-matching step so it adapts to your file.",
+          "Deep-linkable Settings to Import for jumping straight to a connector.",
+        ],
+      },
+      {
+        heading: "Accounts",
+        items: [
+          "Transaction quick-actions on the account page: add a transaction or investment transaction with the account pre-filled.",
+          "Account configuration consolidated into a tabbed Edit dialog (Details, Reconciliation, Import, Cash sleeves).",
+        ],
+      },
+      {
+        heading: "Personalization and feedback",
+        items: [
+          "A user-selectable UI font with five options; numbers stay in a monospaced font for easy scanning.",
+          "Attach a screenshot or file to feedback and replies.",
+        ],
+      },
+      {
+        heading: "AI and the MCP server",
+        items: [
+          "The MCP server now ships 117 HTTP tools, up from 109.",
+          "New reconciliation tools: upload a statement via MCP, a portfolio-wide reconciliation summary, duplicate bank-row detection and removal, bulk accept matches, read and write balance anchors, and a bank-only staged promote.",
+          "Reconciliation accuracy fixes for transfer legs and cascade deletes.",
+        ],
+      },
+    ],
+    githubUrl: "https://github.com/finlynq/finlynq/releases/tag/v3.3.1",
+  },
+  {
     version: "3.3.0",
     slug: "v3.3.0",
     name: "Finlynq v3.3.0",
     date: "2026-06-24",
-    current: true,
+    current: false,
     tagline:
       "Finlynq v3.3.0 adds a full lot-tracked investing engine, an MCP server that reconciles your bank ledger, import-by-email, multi-currency historical reporting, and an OAuth security pass. 248 improvements since v3.2.0.",
     summary: [
