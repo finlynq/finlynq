@@ -22,8 +22,8 @@ ExecStart=/usr/bin/env npx tsx scripts/seed-demo.ts
 # Same user that owns the repo files on the deploy host (DEPLOY.md
 # "Server Structure"). NOT root — root would let a compromised seed
 # script touch the rest of the system.
-User=paperclip-agent
-Group=paperclip-agent
+User=finlynq-agent
+Group=finlynq-agent
 
 # --- Hardening (M-14) ---
 # The demo reset is run nightly with no human in the loop, against a
@@ -36,7 +36,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
 NoNewPrivileges=true
-ReadWritePaths=/home/projects/pf/pf-app /home/paperclip-agent/.npm /tmp
+ReadWritePaths=/home/projects/pf/pf-app /home/finlynq-agent/.npm /tmp
 
 StandardOutput=journal
 StandardError=journal

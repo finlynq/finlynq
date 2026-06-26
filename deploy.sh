@@ -249,7 +249,7 @@ if [ "$SKIP_BUILD" = false ]; then
   # surfaced for the third time during the session-3 prod promotion). A previous
   # deploy that failed mid-flight left 132 root-owned files inside
   # .next/standalone/.next/static/ which blocked the `run_as rm -rf .next` here
-  # because paperclip-agent doesn't own them. Reclaim ownership before the rm
+  # because the service user doesn't own them. Reclaim ownership before the rm
   # so a half-failed deploy can recover on the next run instead of needing
   # manual `chown` recovery via SSH. `2>/dev/null || true` because the dir may
   # not exist on a fresh box.
@@ -294,8 +294,12 @@ if [ "$SKIP_BUILD" = false ]; then
   run_as "cp -r public .next/standalone/public"
 fi
 
-# 5. Fix ownership so the service user can read all build artifacts
-chown -R paperclip-agent:paperclip-agent .next || true
+# 5. Fix ownership so the service user can read all build artifacts.
+# Owner is derived from the checkout (REPO_OWNER, set above) so a future
+# rename of the service account needs no edit here.
+if [ -n "$REPO_OWNER" ]; then
+  chown -R "$REPO_OWNER:$REPO_OWNER" .next || true
+fi
 
 # 6. Restart the service
 # Stamp a fresh DEPLOY_GENERATION so the new process issues JWTs with a new

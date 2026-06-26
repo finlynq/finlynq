@@ -51,10 +51,13 @@ jobs:
           script: |
             set -e
             cd /home/projects/pf-dev
+            # Derive the service account from the checkout's ownership so this
+            # workflow never needs editing if the account is renamed.
+            OWNER=$(stat -c '%U' /home/projects/pf-dev/.git)
             # Switch the dev clone to the dev branch (idempotent — first run sets it up,
-            # subsequent runs are no-ops). Run as paperclip-agent so the .git tree's
+            # subsequent runs are no-ops). Run as the repo owner so the .git tree's
             # ownership stays consistent with the running service user.
-            sudo -u paperclip-agent git fetch origin dev
+            sudo -u "$OWNER" git fetch origin dev
             # Force the dev clone to EXACTLY match origin/dev, discarding any local
             # working-tree drift. The clone is a pristine mirror; the only local
             # diffs are regenerated files (package-lock.json via `npm install`, the
@@ -70,8 +73,8 @@ jobs:
             # so package-lock.json was never cleaned and `git checkout -B dev origin/dev`
             # wedged on "local changes would be overwritten" (hit 2026-06-04; earlier
             # 2026-05-21 on the FINLYNQ-84 tail-commit deploy).
-            sudo -u paperclip-agent git checkout -f -B dev origin/dev
-            sudo -u paperclip-agent git reset --hard origin/dev
+            sudo -u "$OWNER" git checkout -f -B dev origin/dev
+            sudo -u "$OWNER" git reset --hard origin/dev
             # Now run the (newly-pulled) deploy.sh — auto-detects to pf-dev service.
             # --skip-pull because we already pulled above (avoids a double git operation).
             sudo bash /home/projects/pf-dev/deploy.sh --skip-pull

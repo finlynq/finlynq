@@ -78,7 +78,7 @@
  *   3. Test pepper-version=2 on a single test account before rolling out.
  *
  * Run:
- *   sudo -u paperclip-agent DATABASE_URL=$DB \
+ *   sudo -u finlynq-agent DATABASE_URL=$DB \
  *     npx tsx /home/projects/pf/pf-app/scripts/rewrap-peppers.ts \
  *     --target=2 --revoke-sessions --stale-days=30
  *
