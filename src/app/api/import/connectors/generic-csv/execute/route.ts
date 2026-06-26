@@ -42,7 +42,10 @@ const choicesSchema = z.record(z.string(), choiceSchema);
  * use-existing / create-new), optional `defaultCurrency`,
  * `includeOpeningBalance` ("0"). Resolve-or-creates accounts + categories then
  * commits via the import pipeline (txSource 'connector'). Transfer legs become
- * link_id-paired rows; cross-currency transfers are refused.
+ * link_id-paired rows; cross-currency (FX) transfers that supply an explicit
+ * amount_received + currency_to are imported faithfully (each leg in its own
+ * currency), while ambiguous same-currency-row transfers into different-currency
+ * accounts are refused.
  */
 export async function POST(request: NextRequest) {
   const auth = await requireEncryption(request);
