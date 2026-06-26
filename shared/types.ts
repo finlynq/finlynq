@@ -244,6 +244,13 @@ export interface FeedbackThread extends FeedbackThreadSummary {
   /** Submitter identity — present only on the admin route. */
   username?: string | null;
   email?: string | null;
+  /** FINLYNQ-226 — image attachment on the initial submission (admin route).
+   *  When present, the bytes are served by GET /api/admin/feedback/[id]/attachment. */
+  attachment?: {
+    filename: string | null;
+    mime: string | null;
+    size: number | null;
+  } | null;
   /** Ordered oldest→newest; EXCLUDES the seed. */
   messages: FeedbackMessage[];
 }

@@ -554,6 +554,16 @@ export const feedback = pgTable(
     appVersion: text("app_version"), // 'web' | mobile version string
     status: text("status").notNull().default("new"), // 'new' | 'triaged' | 'resolved'
     adminNote: text("admin_note"),
+    // FINLYNQ-226 — optional single image attachment on the INITIAL submission
+    // (the immutable thread seed). Stored ON DISK at attachmentPath
+    // (uploads/feedback/<userId>/<uuid>.<ext>), PLAINTEXT like the rest of the
+    // row (the maintainer has no per-user DEK) — never the user-DEK envelope.
+    // The on-disk file is unlinked BEFORE the wipe DB transaction (mcp_uploads
+    // precedent — see unlinkUserUploadFiles in auth/queries.ts).
+    attachmentPath: text("attachment_path"), // absolute on-disk path
+    attachmentFilename: text("attachment_filename"), // original upload filename
+    attachmentMime: text("attachment_mime"), // image/png|jpeg|webp|gif
+    attachmentSize: integer("attachment_size"), // bytes
     // Two-sided read tracking for the reply thread. NULL = never opened.
     // unread-for-user = admin message newer than userLastReadAt;
     // unread-for-admin = user message newer than adminLastReadAt.

@@ -188,6 +188,33 @@ function AdminThreadDialog({
           <>
             <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
               <Bubble side="left" label={who} at={thread.createdAt} body={thread.seed} />
+              {thread.attachment && feedbackId != null && (
+                <div className="flex flex-col items-start">
+                  <a
+                    href={`/api/admin/feedback/${feedbackId}/attachment`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block max-w-[85%] overflow-hidden rounded-lg border border-border"
+                    title={thread.attachment.filename ?? "attachment"}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={`/api/admin/feedback/${feedbackId}/attachment`}
+                      alt={thread.attachment.filename ?? "feedback attachment"}
+                      className="max-h-64 w-auto object-contain"
+                    />
+                  </a>
+                  <a
+                    href={`/api/admin/feedback/${feedbackId}/attachment`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    download={thread.attachment.filename ?? undefined}
+                    className="mt-1 text-[10px] text-primary underline-offset-2 hover:underline"
+                  >
+                    {thread.attachment.filename ?? "Download attachment"}
+                  </a>
+                </div>
+              )}
               {thread.messages.map((m) => (
                 <Bubble
                   key={m.id}

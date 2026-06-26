@@ -6,7 +6,7 @@
  * from the nav (desktop sidebar + mobile panel).
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import {
   Dialog,
@@ -20,6 +20,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { X } from "lucide-react";
+import {
+  FEEDBACK_ATTACHMENT_ACCEPT,
+  FEEDBACK_ATTACHMENT_MAX_BYTES,
+  validateFeedbackAttachment,
+} from "@/lib/feedback/attachment";
 import type { FeedbackType } from "@shared/types";
 
 const TYPES: { value: FeedbackType; label: string }[] = [
@@ -39,16 +45,53 @@ export function FeedbackDialog({
   const pathname = usePathname();
   const [type, setType] = useState<FeedbackType>("bug");
   const [message, setMessage] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Object-URL preview, revoked when the file changes / dialog unmounts.
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  const clearFile = () => {
+    setFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
 
   const reset = () => {
     setType("bug");
     setMessage("");
+    clearFile();
     setDone(false);
     setError(null);
     setSubmitting(false);
+  };
+
+  const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+    const f = e.target.files?.[0] ?? null;
+    if (!f) {
+      clearFile();
+      return;
+    }
+    // Client-side mirror of the server guard (server is the source of truth).
+    const check = validateFeedbackAttachment({ mime: f.type, size: f.size });
+    if ("code" in check) {
+      setError(check.message);
+      clearFile();
+      return;
+    }
+    setFile(f);
   };
 
   const submit = async () => {
@@ -60,17 +103,29 @@ export function FeedbackDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch("/api/feedback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type, message: trimmed, pageUrl: pathname }),
-      });
+      let res: Response;
+      if (file) {
+        const form = new FormData();
+        form.append("type", type);
+        form.append("message", trimmed);
+        form.append("pageUrl", pathname);
+        form.append("attachment", file);
+        // No Content-Type header — the browser sets the multipart boundary.
+        res = await fetch("/api/feedback", { method: "POST", body: form });
+      } else {
+        res = await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type, message: trimmed, pageUrl: pathname }),
+        });
+      }
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error || "Failed to submit feedback.");
       }
       setDone(true);
       setMessage("");
+      clearFile();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to submit feedback.");
     } finally {
@@ -132,6 +187,53 @@ export function FeedbackDialog({
                 placeholder="What happened, or what would you like to see?"
                 className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
               />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Screenshot (optional)</Label>
+              {file && previewUrl ? (
+                <div className="relative inline-block">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={previewUrl}
+                    alt="Attachment preview"
+                    className="max-h-40 w-auto rounded-md border border-border object-contain"
+                  />
+                  <button
+                    type="button"
+                    onClick={clearFile}
+                    aria-label="Remove attachment"
+                    className="absolute -right-2 -top-2 rounded-full border border-border bg-background p-1 text-muted-foreground shadow-sm hover:text-foreground"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                  <p className="mt-1 truncate text-xs text-muted-foreground">
+                    {file.name}
+                  </p>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  Attach an image
+                </Button>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={FEEDBACK_ATTACHMENT_ACCEPT}
+                onChange={onPickFile}
+                className="hidden"
+              />
+              <p className="text-xs text-muted-foreground">
+                PNG, JPEG, WebP or GIF, up to{" "}
+                {Math.floor(FEEDBACK_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MB.
+                Double-check the image doesn&apos;t reveal account numbers,
+                balances, or other sensitive financial details before attaching.
+              </p>
             </div>
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
