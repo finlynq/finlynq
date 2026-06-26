@@ -133,6 +133,19 @@ export function getRebuildProgress(userId: string): RebuildProgress | null {
   return cur ? { ...cur } : null;
 }
 
+/**
+ * Cross-user snapshot of every current/last investment rebuild in the registry,
+ * newest-activity first. Read-only — backs the /admin/system "Server Health"
+ * view so an operator can see which users' snapshot rebuilds are (or just were)
+ * burning CPU. The registry is per-process + in-memory, so this only reflects
+ * the running server (cleared on restart), same as the other diagnostic buffers.
+ */
+export function getAllRebuildProgress(): Array<RebuildProgress & { userId: string }> {
+  return [...progressMap().entries()]
+    .map(([userId, p]) => ({ userId, ...p }))
+    .sort((a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt));
+}
+
 // Parallel in-flight guard for the DEK-free CASH rebuild. Separate from the
 // investment set so a long investment rebuild doesn't block a cash self-heal
 // (and vice-versa); shared by the rebuild endpoint, the cron, and the
@@ -157,6 +170,11 @@ export function endCashRebuild(userId: string): void {
 
 export function isCashRebuildInFlight(userId: string): boolean {
   return cashInFlightSet().has(userId);
+}
+
+/** Cross-user list of in-flight cash rebuilds (for the /admin/system view). */
+export function getCashRebuildsInFlight(): string[] {
+  return [...cashInFlightSet()];
 }
 
 function addDayUTC(iso: string): string {
