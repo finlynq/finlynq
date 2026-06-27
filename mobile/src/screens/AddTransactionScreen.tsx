@@ -17,6 +17,11 @@ import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { safeName } from "../lib/format";
+import {
+  parseDropdownOrder,
+  sortByUserOrder,
+  type DropdownOrder,
+} from "../lib/sort-helpers";
 import { Icon } from "../components/icon";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
 import type { Account, Category } from "../../../shared/types";
@@ -42,6 +47,7 @@ export default function AddTransactionScreen() {
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [dropdownOrder, setDropdownOrder] = useState<DropdownOrder>({ version: 1, lists: {} });
   const [hasInvestment, setHasInvestment] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -69,8 +75,11 @@ export default function AddTransactionScreen() {
       endpoints.getAccounts(),
       endpoints.getCategories(),
       endpoints.getAccountBalances(),
+      // Fetch the user's saved picker order so account + category pickers mirror
+      // web. Failure is non-fatal — degrades to the web fallback comparator.
+      endpoints.getDropdownOrder(),
     ])
-      .then(([accRes, catRes, balRes]) => {
+      .then(([accRes, catRes, balRes, orderRes]) => {
         // Investment accounts use the dedicated Portfolio flow (buys/sells/etc.)
         // — exclude them here, mirroring the web Add Transaction picker. The
         // isInvestment flag lives on the dashboard balances payload.
@@ -97,6 +106,13 @@ export default function AddTransactionScreen() {
         }
         if (catRes.success) setCategories(catRes.data);
         else logger.warn("add-tx", "categories fetch failed", { error: catRes.error });
+        if (orderRes.success) {
+          setDropdownOrder(parseDropdownOrder(orderRes.data));
+        } else {
+          logger.warn("add-tx", "dropdown-order fetch failed — using fallback sort", {
+            error: orderRes.error,
+          });
+        }
         setLoading(false);
       })
       .catch((e) => {
@@ -117,16 +133,40 @@ export default function AddTransactionScreen() {
     isTransfer && !!fromAccount && !!toAccount && fromAccount.currency !== toAccount.currency;
 
   // Picker option lists + id→label helpers for the summary fields.
-  const accountOptions: PickerOption[] = accounts.map((a) => ({
+  // Both lists are sorted to mirror the web Add Transaction dialog:
+  //   - Accounts: saved dropdown order leads, then localeCompare by name.
+  //   - Categories: saved dropdown order leads, then localeCompare by
+  //     "<group> - <name>" label (web's transaction-dialog.tsx:1238 pattern).
+  const rawAccountOptions: PickerOption[] = accounts.map((a) => ({
     id: a.id,
     label: safeName(a.name),
     sublabel: a.currency,
   }));
-  const categoryOptions: PickerOption[] = filteredCategories.map((c) => ({
+  const accountOptions: PickerOption[] = sortByUserOrder(
+    rawAccountOptions,
+    (o) => o.id,
+    dropdownOrder.lists.account,
+    (a, b) => a.label.localeCompare(b.label),
+  );
+
+  // Build a categoryId→sortKey map for the "<group> - <name>" comparator that
+  // mirrors web's transaction-dialog.tsx:1238 label pattern. Kept separate from
+  // PickerOption so we don't widen the shared interface.
+  const catSortKey = new Map<number, string>(
+    filteredCategories.map((c) => [c.id, `${c.group ?? ""} - ${safeName(c.name)}`]),
+  );
+  const rawCategoryOptions: PickerOption[] = filteredCategories.map((c) => ({
     id: c.id,
     label: safeName(c.name),
     sublabel: c.group || undefined,
   }));
+  const categoryOptions: PickerOption[] = sortByUserOrder(
+    rawCategoryOptions,
+    (o) => o.id,
+    dropdownOrder.lists.category,
+    (a, b) =>
+      (catSortKey.get(a.id) ?? a.label).localeCompare(catSortKey.get(b.id) ?? b.label),
+  );
   const accountLabel = (id: number | null) => {
     const a = accounts.find((x) => x.id === id);
     return a ? safeName(a.name) : null;

@@ -15,6 +15,12 @@ import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency, safeName } from "../lib/format";
+import {
+  parseGroupOrder,
+  orderGroups,
+  OTHER_GROUP,
+  type AccountGroupOrder,
+} from "../lib/sort-helpers";
 import { Icon } from "../components/icon";
 import type { AccountBalance } from "../../../shared/types";
 import type { AccountsStackParamList } from "../navigation/AccountsStack";
@@ -26,28 +32,47 @@ interface Section {
   data: AccountBalance[];
 }
 
-function groupAccounts(balances: AccountBalance[]): Section[] {
+/**
+ * Group account balances into SectionList sections, ordered by the user's saved
+ * group order. Mirrors web's accounts/page.tsx:401 pattern:
+ *   - Section (group) order: orderGroups(savedOrder) with "Other" always last.
+ *   - Accounts within each group: localeCompare by display name.
+ *
+ * `savedOrder` comes from GET /api/settings/account-group-order and is parsed
+ * via parseGroupOrder. A missing/failed fetch degrades to alpha sections with
+ * "Other" last (the pure orderGroups fallback).
+ */
+function groupAccounts(balances: AccountBalance[], groupOrder: AccountGroupOrder): Section[] {
   const groups = new Map<string, AccountBalance[]>();
   for (const b of balances) {
-    const key = b.accountGroup || "Other";
+    const key = b.accountGroup || OTHER_GROUP;
     const arr = groups.get(key) ?? [];
     arr.push(b);
     groups.set(key, arr);
   }
-  return Array.from(groups.entries())
-    .map(([title, data]) => ({
-      title,
-      data: data.sort((a, z) =>
-        safeName(a.accountName).localeCompare(safeName(z.accountName))
-      ),
-    }))
-    .sort((a, z) => a.title.localeCompare(z.title));
+
+  // Determine the saved order for each account type (A=Asset, L=Liability).
+  // The API groups all account types into a single list, so we merge the A + L
+  // saved orders (A leads, then L) and let orderGroups do the dedup + "Other"-last.
+  const allGroupNames = Array.from(groups.keys());
+  const savedA = groupOrder.A ?? [];
+  const savedL = groupOrder.L ?? [];
+  const mergedSavedOrder = [...savedA, ...savedL];
+  const orderedTitles = orderGroups(allGroupNames, mergedSavedOrder);
+
+  return orderedTitles.map((title) => ({
+    title,
+    data: (groups.get(title) ?? []).sort((a, z) =>
+      safeName(a.accountName).localeCompare(safeName(z.accountName))
+    ),
+  }));
 }
 
 export default function AccountsScreen({ navigation }: Props) {
   const { colors } = useTheme();
   const isFocused = useIsFocused();
   const [balances, setBalances] = useState<AccountBalance[]>([]);
+  const [groupOrder, setGroupOrder] = useState<AccountGroupOrder>({ A: [], L: [] });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,13 +81,25 @@ export default function AccountsScreen({ navigation }: Props) {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     try {
-      const res = await endpoints.getAccountBalances();
+      // Fetch balances and saved group order in parallel. Group-order failure is
+      // non-fatal — degrades to alpha sections with "Other" last.
+      const [res, orderRes] = await Promise.all([
+        endpoints.getAccountBalances(),
+        endpoints.getAccountGroupOrder(),
+      ]);
       if (res.success) {
         setBalances(res.data);
         setError(null);
       } else {
         logger.warn("accounts", "fetch failed", { error: res.error });
         setError(res.error);
+      }
+      if (orderRes.success) {
+        setGroupOrder(parseGroupOrder(orderRes.data));
+      } else {
+        logger.warn("accounts", "group-order fetch failed — using fallback sort", {
+          error: orderRes.error,
+        });
       }
     } catch (e) {
       const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
@@ -80,7 +117,7 @@ export default function AccountsScreen({ navigation }: Props) {
 
   const displayCurrency = balances[0]?.displayCurrency ?? "CAD";
   const netWorth = balances.reduce((s, b) => s + (b.convertedBalance ?? b.balance), 0);
-  const sections = groupAccounts(balances);
+  const sections = groupAccounts(balances, groupOrder);
 
   if (loading) {
     return (

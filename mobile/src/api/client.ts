@@ -796,6 +796,18 @@ export const endpoints = {
       t,
     ),
 
+  // Dropdown order — per-user saved order for account / category / holding /
+  // currency pickers. Returns bare `{ version: 1, lists: { ... } }` JSON;
+  // request() wraps into ApiResponse. Used by AddTransactionScreen to apply
+  // web-equivalent ordering to account + category pickers.
+  getDropdownOrder: () => api.get<unknown>("/api/settings/dropdown-order"),
+
+  // Account group order — per-user saved section order for the Accounts list.
+  // Returns bare `{ A: string[], L: string[] }` JSON (per account type).
+  // Used by AccountsScreen to order SectionList groups via the web-equivalent
+  // orderGroups helper ("Other" always last, saved sequence leads).
+  getAccountGroupOrder: () => api.get<unknown>("/api/settings/account-group-order"),
+
   // Destructive account actions. Both are account-session only (the backend
   // rejects API-key auth) and require the same confirmation phrase the web UI
   // sends. `wipeData` deletes all data but keeps the login (DEK re-wrapped);
