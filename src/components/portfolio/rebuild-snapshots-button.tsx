@@ -1,9 +1,17 @@
 "use client";
 
 /**
- * Rebuild investment history button — triggers a re-materialize of the user's
- * daily `portfolio_snapshots` from their first transaction to today. Used by
- * the Settings → Investments card AND the net-worth chart's empty-state.
+ * Rebuild balance history button — triggers a re-materialize of the user's
+ * daily `portfolio_snapshots` (investment AND cash legs) from their first
+ * transaction to today. Used by the Settings → Investments card AND the
+ * net-worth chart's empty-state.
+ *
+ * FINLYNQ-230 — the progress panel is phase-aware: the manual rebuild runs the
+ * investment walk then the cash walk, and a cash-only / no-holdings user (whose
+ * investment walk is skipped) now gets a determinate cash "day X of Y" bar
+ * instead of the bar jumping straight to done while the cash build ran silently.
+ * The default label is generic ("Rebuild balance history") since "investment
+ * history" is wrong for cash-only users.
  *
  * The nightly snapshot cron is forward-only, so a back-dated investment edit
  * leaves history stale until either the auto-rebuild drain cron catches up or
@@ -30,8 +38,11 @@ import { RefreshCw } from "lucide-react";
 type Variant = "default" | "outline" | "secondary" | "ghost";
 type Size = "sm" | "default" | "lg";
 
+type RebuildPhase = "investment" | "cash";
+
 interface RebuildStatus {
   running: boolean;
+  phase?: RebuildPhase;
   daysProcessed: number;
   totalDays: number;
   lastResult: { daysProcessed: number; gapsFilledDays: number } | null;
@@ -50,7 +61,7 @@ export function RebuildSnapshotsButton({
   onDone,
   variant = "outline",
   size = "sm",
-  label = "Rebuild investment history",
+  label = "Rebuild balance history",
 }: {
   onDone?: () => void;
   variant?: Variant;
@@ -60,6 +71,9 @@ export function RebuildSnapshotsButton({
   const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
   const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
+  // Which leg is live — drives the in-progress panel label ('cash' for a
+  // cash-only/no-holdings user, which has no investment walk; FINLYNQ-230).
+  const [phase, setPhase] = useState<RebuildPhase>("investment");
 
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(true);
@@ -96,6 +110,7 @@ export function RebuildSnapshotsButton({
       if (s.running) {
         wasRunning.current = true;
         setStatus("running");
+        setPhase(s.phase ?? "investment");
         setProgress({ done: s.daysProcessed ?? 0, total: s.totalDays ?? 0 });
         setMsg("");
         return true;
@@ -154,6 +169,7 @@ export function RebuildSnapshotsButton({
     setStatus("running");
     setMsg("");
     setProgress({ done: 0, total: 0 });
+    setPhase("investment");
     wasRunning.current = true;
     try {
       const res = await fetch("/api/portfolio/snapshots/rebuild", {
@@ -206,7 +222,9 @@ export function RebuildSnapshotsButton({
         >
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-indigo-700 dark:text-indigo-300">
-              Rebuilding investment history…
+              {phase === "cash"
+                ? "Rebuilding cash balances…"
+                : "Rebuilding investment history…"}
             </span>
             <span className="text-[11px] tabular-nums text-indigo-600/80 dark:text-indigo-400/80">
               {indeterminate

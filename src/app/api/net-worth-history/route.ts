@@ -105,13 +105,42 @@ function kickSelfHeal(
  */
 function kickCashSelfHeal(userId: string, today: string): void {
   if (!tryBeginCashRebuild(userId)) return; // a cash rebuild is already running
+  // Seed the SHARED progress registry (best-effort) so the "Rebuild balance
+  // history" button shows a determinate cash bar while this background heal runs
+  // — mirroring how kickSelfHeal seeds it for the investment leg (FINLYNQ-230).
+  // tryBeginRebuild returns false if an investment rebuild already owns the
+  // registry entry (it will run its own cash leg at the end), so we only own +
+  // end the registry entry when WE seeded it; the cash in-flight set above is
+  // the real concurrency guard either way.
+  const ownsRegistry = tryBeginRebuild(userId);
+  let cashDaysDone = 0;
   void (async () => {
     try {
       // Full history + stamp the watermark fresh (it captures the fingerprint
       // BEFORE building, so a mid-build write re-trips stale on the next load).
-      await rebuildCashSnapshots({ userId, fromDate: null, toDate: today, stampMeta: true });
+      await rebuildCashSnapshots({
+        userId,
+        fromDate: null,
+        toDate: today,
+        stampMeta: true,
+        onProgress: ownsRegistry
+          ? (done, total) => {
+              cashDaysDone = done;
+              reportRebuildProgress(userId, done, total, "cash");
+            }
+          : undefined,
+      });
+      if (ownsRegistry) {
+        endRebuild(userId, {
+          result: { fromDate: today, toDate: today, daysProcessed: cashDaysDone, gapsFilledDays: 0 },
+        });
+      }
     } catch (err) {
-
+      if (ownsRegistry) {
+        endRebuild(userId, {
+          error: err instanceof Error ? err.message : "cash self-heal failed",
+        });
+      }
       console.warn(
         "[net-worth-history] cash self-heal failed:",
         err instanceof Error ? err.message : err,

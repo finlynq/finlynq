@@ -33,8 +33,19 @@ export interface RebuildResult {
  * status endpoint reads this registry so both mount points can poll it and show
  * an in-flight rebuild that a reload would otherwise lose (FINLYNQ-205).
  */
+/**
+ * Which leg of the rebuild the live counters describe. A manual rebuild runs the
+ * INVESTMENT walk first, then the CASH walk, so `phase` flips part-way through;
+ * a cash-only / no-holdings rebuild (FINLYNQ-229 skips the investment walk) is
+ * `'cash'` for its whole duration. The button reads this to label the active
+ * leg and to give cash-only rebuilds the same determinate "day X of Y" bar the
+ * investment walk has had since FINLYNQ-205 (FINLYNQ-230).
+ */
+export type RebuildPhase = "investment" | "cash";
+
 export interface RebuildProgress {
   running: boolean;
+  phase: RebuildPhase;
   daysProcessed: number;
   totalDays: number;
   startedAt: number; // epoch ms
@@ -80,6 +91,7 @@ export function tryBeginRebuild(userId: string): boolean {
   if (cur?.running) return false;
   m.set(userId, {
     running: true,
+    phase: "investment",
     daysProcessed: 0,
     totalDays: 0,
     startedAt: Date.now(),
@@ -90,14 +102,22 @@ export function tryBeginRebuild(userId: string): boolean {
   return true;
 }
 
-/** Update the live day counters mid-walk. No-op if the user has no entry. */
+/**
+ * Update the live day counters mid-walk. No-op if the user has no entry.
+ * `phase` (default `'investment'`) records which leg the counters describe so a
+ * cash-only rebuild shows a determinate bar + the right label (FINLYNQ-230). The
+ * cash leg passes `'cash'`; the investment leg keeps the default, so the
+ * FINLYNQ-205 investment progress contract is unchanged for callers that omit it.
+ */
 export function reportRebuildProgress(
   userId: string,
   daysProcessed: number,
   totalDays: number,
+  phase: RebuildPhase = "investment",
 ): void {
   const cur = progressMap().get(userId);
   if (!cur) return;
+  cur.phase = phase;
   cur.daysProcessed = daysProcessed;
   cur.totalDays = totalDays;
 }
@@ -256,7 +276,7 @@ export function rebuildPortfolioSnapshots(
   fromDate?: string | null,
   toDate?: string | null,
   dek?: Buffer | null,
-  onProgress?: (daysProcessed: number, totalDays: number) => void,
+  onProgress?: (daysProcessed: number, totalDays: number, phase?: RebuildPhase) => void,
 ): Promise<RebuildResult> {
   // Attribute the whole walk (and every query it runs) to the
   // 'rebuild:investment' operation so the diagnostics rollup shows how much
@@ -271,7 +291,7 @@ async function rebuildPortfolioSnapshotsImpl(
   fromDate?: string | null,
   toDate?: string | null,
   dek?: Buffer | null,
-  onProgress?: (daysProcessed: number, totalDays: number) => void,
+  onProgress?: (daysProcessed: number, totalDays: number, phase?: RebuildPhase) => void,
 ): Promise<RebuildResult> {
   const to = toDate ?? new Date().toISOString().slice(0, 10);
 
@@ -361,7 +381,17 @@ async function rebuildPortfolioSnapshotsImpl(
   // cash failure must never fail the investment rebuild the caller awaited.
   if (tryBeginCashRebuild(userId)) {
     try {
-      await rebuildCashSnapshots({ userId, fromDate: null, toDate: to, stampMeta: true });
+      await rebuildCashSnapshots({
+        userId,
+        fromDate: null,
+        toDate: to,
+        stampMeta: true,
+        // Report the cash leg into the SAME registry the button polls, tagged
+        // phase 'cash' so the bar stays alive (and correctly labelled) through
+        // the cash walk — which for a no-holdings user is the ONLY walk and was
+        // previously silent (FINLYNQ-230). Reporting-only; cash values unchanged.
+        onProgress: (done, total) => onProgress?.(done, total, "cash"),
+      });
     } catch (err) {
 
       console.warn(

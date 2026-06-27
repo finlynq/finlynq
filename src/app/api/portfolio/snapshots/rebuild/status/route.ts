@@ -11,8 +11,10 @@
  *   - both mount points show identical progress.
  *
  * Read-only — no DEK needed (`requireAuth`, not `requireEncryption`). Returns
- * `{ running, daysProcessed, totalDays, lastResult, error }`; `running:false`
- * with no `lastResult` means "no rebuild has run this process".
+ * `{ running, phase, daysProcessed, totalDays, lastResult, error }`; `phase`
+ * ('investment'|'cash') tells the button which leg the counters describe so a
+ * cash-only rebuild gets a determinate bar + the right label (FINLYNQ-230).
+ * `running:false` with no `lastResult` means "no rebuild has run this process".
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -28,6 +30,7 @@ export async function GET(request: NextRequest) {
   if (!p) {
     return NextResponse.json({
       running: false,
+      phase: "investment",
       daysProcessed: 0,
       totalDays: 0,
       lastResult: null,
@@ -37,6 +40,7 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     running: p.running,
+    phase: p.phase,
     daysProcessed: p.daysProcessed,
     totalDays: p.totalDays,
     lastResult: p.lastResult,

@@ -55,6 +55,14 @@ export interface BuildCashSnapshotsInput {
   reportingCurrency: string;
   /** Restrict to a single cash account (per-account chart rebuild). */
   accountId?: number;
+  /**
+   * Optional per-grid-day progress reporter (`total = gridDates.length`). Used to
+   * surface cash-rebuild progress in the shared `__pfRebuildProgress` registry so
+   * a cash-only / no-holdings rebuild shows a determinate bar instead of running
+   * silently (FINLYNQ-230). Reporting-only — emitting it does NOT change any
+   * snapshot value or row written.
+   */
+  onProgress?: (daysProcessed: number, totalDays: number) => void;
 }
 
 export interface BuildCashSnapshotsResult {
@@ -247,6 +255,15 @@ export async function buildCashSnapshots(
   let accountsProcessed = 0;
   let rowsWritten = 0;
 
+  // Progress reporting (FINLYNQ-230) — reporting-only, does not touch any value
+  // written below. The denominator is grid-days × accounts so the bar advances
+  // monotonically across the whole walk; publish the total up front (mirrors the
+  // investment leg's leading emit) so the button shows a determinate "day 0 of N"
+  // immediately instead of sitting on "starting…" through the first cold-cache day.
+  const totalCashDays = gridDates.length * byAccount.size;
+  let cashDaysDone = 0;
+  input.onProgress?.(0, totalCashDays);
+
   for (const [accId, entry] of byAccount) {
     accountsProcessed++;
     entry.days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
@@ -289,6 +306,9 @@ export async function buildCashSnapshots(
           source = EXCLUDED.source
       `);
       rowsWritten++;
+      cashDaysDone++;
+      // Reporting-only: surface live progress per grid day (FINLYNQ-230).
+      input.onProgress?.(cashDaysDone, totalCashDays);
     }
   }
 
@@ -313,6 +333,8 @@ export function rebuildCashSnapshots(opts: {
   fromDate?: string | null;
   accountId?: number;
   stampMeta?: boolean;
+  /** Optional per-grid-day progress reporter (FINLYNQ-230). Reporting-only. */
+  onProgress?: (daysProcessed: number, totalDays: number) => void;
 }): Promise<BuildCashSnapshotsResult> {
   // Attribute the cash rebuild + its queries to 'rebuild:cash' (diagnostics).
   return withOp("rebuild:cash", () => rebuildCashSnapshotsImpl(opts));
@@ -324,6 +346,7 @@ async function rebuildCashSnapshotsImpl(opts: {
   fromDate?: string | null;
   accountId?: number;
   stampMeta?: boolean;
+  onProgress?: (daysProcessed: number, totalDays: number) => void;
 }): Promise<BuildCashSnapshotsResult> {
   const reportingCurrency = await resolveReportingCurrency(db, opts.userId, undefined);
   const fp = opts.stampMeta ? await getCashTxFingerprint(opts.userId) : null;
@@ -333,6 +356,7 @@ async function rebuildCashSnapshotsImpl(opts: {
     toDate: opts.toDate,
     reportingCurrency,
     accountId: opts.accountId,
+    onProgress: opts.onProgress,
   });
   if (opts.stampMeta && fp) {
     await upsertCashSnapshotMeta(opts.userId, fp, opts.toDate);
