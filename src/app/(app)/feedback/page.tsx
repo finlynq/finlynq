@@ -242,6 +242,32 @@ function ThreadDialog({
               <textarea
                 value={reply}
                 onChange={(e) => setReply(e.target.value)}
+                onPaste={(e) => {
+                  const items = Array.from(e.clipboardData?.items ?? []);
+                  const imageItem = items.find(
+                    (item) => item.kind === "file" && item.type.startsWith("image/"),
+                  );
+                  if (!imageItem) return; // non-image paste → let browser handle normally
+                  const blob = imageItem.getAsFile();
+                  if (!blob) return;
+                  const pasted = new File(
+                    [blob],
+                    `screenshot-${Date.now()}.${blob.type.split("/")[1] ?? "png"}`,
+                    { type: blob.type },
+                  );
+                  setError(null);
+                  const check = validateFeedbackAttachment({
+                    filename: pasted.name,
+                    mime: pasted.type,
+                    size: pasted.size,
+                  });
+                  if ("code" in check) {
+                    setError(check.message);
+                    clearReplyFile();
+                    return;
+                  }
+                  setReplyFile(pasted);
+                }}
                 rows={3}
                 maxLength={4000}
                 placeholder="Write a reply…"
