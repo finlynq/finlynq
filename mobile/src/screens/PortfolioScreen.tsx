@@ -254,6 +254,9 @@ export default function PortfolioScreen({ navigation }: Props) {
                         <Text style={[styles.holdingAmt, { color: colors.foreground }]}>
                           {formatCurrency(h.marketValueDisplay, currency, { decimals: 0 })}
                         </Text>
+                        <Text style={[styles.holdingGain, { color: gColor }]}>
+                          {signed(h.unrealizedGainDisplay, currency)}
+                        </Text>
                         <Text style={[styles.holdingPct, { color: gColor }]}>{pctLabel(g)}</Text>
                       </View>
                       <Icon name="chevronRight" size={16} color={colors.mutedForeground} />
@@ -346,7 +349,8 @@ const styles = StyleSheet.create({
   holdingName: { fontSize: 12, marginTop: 2 },
   holdingRight: { alignItems: "flex-end", marginRight: 6 },
   holdingAmt: { fontSize: 15, fontWeight: "700", fontVariant: ["tabular-nums"] },
-  holdingPct: { fontSize: 12, fontWeight: "600", marginTop: 2, fontVariant: ["tabular-nums"] },
+  holdingGain: { fontSize: 12, fontWeight: "600", marginTop: 2, fontVariant: ["tabular-nums"] },
+  holdingPct: { fontSize: 12, fontWeight: "600", marginTop: 1, fontVariant: ["tabular-nums"] },
   empty: { fontSize: 14, textAlign: "center", paddingVertical: 32 },
   emptyInline: { fontSize: 14, textAlign: "center", paddingVertical: 20 },
 });
