@@ -271,6 +271,59 @@ async function deleteInvestmentOrphanSnapshots(
   `);
 }
 
+/**
+ * Earliest date any investment-account holding (a security position OR a
+ * brokerage cash sleeve) had activity — i.e. the first day the whole-portfolio
+ * investment market value could be non-zero. DEK-free (a date probe, no names).
+ * `MIN(transactions.date WHERE portfolio_holding_id IS NOT NULL)` covers both
+ * security buys and cash-sleeve deposits, so it is the first day
+ * `getHoldingsValueByAccount` can return a non-zero aggregate. Null when the
+ * user has no holding-referencing transactions (no investment history at all).
+ */
+async function getFirstHoldingDate(userId: string): Promise<string | null> {
+  const row = await db
+    .select({ minDate: sql<string | null>`MIN(${schema.transactions.date})` })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        isNotNull(schema.transactions.portfolioHoldingId),
+      ),
+    );
+  return row[0]?.minDate ?? null;
+}
+
+/**
+ * Reap stale LEADING investment snapshot rows — `source <> 'cash'` rows (the
+ * builder's per-account 'cron' rows AND the whole-portfolio NULL aggregate)
+ * dated strictly BEFORE the user's first holding-acquisition date.
+ *
+ * `buildDailySnapshot` writes the whole-portfolio aggregate row for EVERY walk
+ * day, even days with zero holdings. When the walk start predates the first
+ * holding — because `MIN(first transaction, first existing snapshot)` resolves
+ * to a pure CASH tx (or a stale pre-fix snapshot row) — the walk lays down a
+ * flat run of zero-value aggregate rows from that date up to the first holding.
+ * The Portfolio Performance chart reads the aggregate row, so those zeros draw
+ * as a long leading $0 line. `deleteInvestmentOrphanSnapshots` can't see them
+ * (the accounts still hold positions; the aggregate is deliberately preserved),
+ * so this is the only reaper. Investment twin of cash-builder's
+ * `deleteLeadingCashSnapshots` (FINLYNQ-233).
+ *
+ * Owner-scoped; only LEADING rows (strictly before `firstHoldingDate`) go, so
+ * legitimate interior zero-value days (portfolio fully sold then rebought) are
+ * untouched. Nothing legitimate can exist before `firstHoldingDate` — investment
+ * value requires a holding, whose earliest transaction IS that date.
+ */
+async function deleteLeadingInvestmentSnapshots(
+  userId: string,
+  firstHoldingDate: string,
+): Promise<void> {
+  await db.execute(sql`
+    DELETE FROM portfolio_snapshots
+    WHERE user_id = ${userId} AND source <> 'cash' AND snap_date < ${firstHoldingDate}
+  `);
+}
+
 export function rebuildPortfolioSnapshots(
   userId: string,
   fromDate?: string | null,
@@ -320,6 +373,22 @@ async function rebuildPortfolioSnapshotsImpl(
   // came from. Guards against epoch/garbage-dated rows producing a runaway
   // multi-decade walk (see the constant's doc comment).
   if (from && from < EARLIEST_REBUILD_DATE) from = EARLIEST_REBUILD_DATE;
+
+  // Investment snapshots are meaningful only from the first holding-acquisition
+  // date onward — before any holding (incl. a brokerage cash sleeve) existed the
+  // whole-portfolio aggregate is genuinely $0. buildDailySnapshot writes that
+  // aggregate for EVERY walk day, so when `from` predates the first holding
+  // (because the earliest transaction — or a stale pre-fix snapshot row — is a
+  // pure CASH tx), the walk lays down a flat run of zero-value aggregate rows the
+  // Portfolio Performance chart draws as a long leading $0 line. Clamp the walk
+  // start UP to the first holding date so those rows are never written; the
+  // post-walk reap below removes any a pre-fix rebuild already left behind. The
+  // clamp is a no-op when `from` is already at/after the first holding (e.g. a
+  // recent partial-window rebuild). Null `firstHoldingDate` ⇒ no holdings ⇒ the
+  // size===0 branch below purges everything anyway.
+  const firstHoldingDate = await getFirstHoldingDate(userId);
+  if (firstHoldingDate && from < firstHoldingDate) from = firstHoldingDate;
+
   // Clamp a from-date past today to today (single-day rebuild).
   if (from > to) from = to;
 
@@ -371,6 +440,13 @@ async function rebuildPortfolioSnapshotsImpl(
     // leftover the UPSERT could never overwrite. Reap it (the NULL aggregate is
     // preserved — the walk keeps it current over [from, to]).
     await deleteInvestmentOrphanSnapshots(userId, holdingAccountIds);
+    // Reap stale LEADING zero-value investment rows (per-account + aggregate)
+    // dated before the first holding — the walk now starts AT firstHoldingDate so
+    // it no longer rewrites them, but a pre-fix rebuild may have left a flat $0
+    // run that the Performance chart draws as a leading zero line.
+    if (firstHoldingDate) {
+      await deleteLeadingInvestmentSnapshots(userId, firstHoldingDate);
+    }
   }
 
   // Cash side (DEK-free): rebuild the per-account historical-FX cash snapshots
