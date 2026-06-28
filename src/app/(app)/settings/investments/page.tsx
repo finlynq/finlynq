@@ -57,6 +57,7 @@ import { PageSkeleton } from "@/components/page-skeleton";
 import { ErrorState } from "@/components/error-state";
 import { EmptyState } from "@/components/empty-state";
 import { parseSaveError } from "@/lib/save-error";
+import { formatCurrency } from "@/lib/currency";
 import {
   Briefcase,
   Plus,
@@ -68,8 +69,10 @@ import {
   ChevronRight,
   Loader2,
   AlertTriangle,
+  DollarSign,
 } from "lucide-react";
 import { getTickerAdvisory } from "@/lib/securities/ticker-advisories";
+import { ManagePricesDialog } from "./_components/manage-prices-dialog";
 
 type SecurityAccount = {
   accountId: number;
@@ -87,6 +90,10 @@ type Security = {
   currency: string;
   isCash: boolean;
   isCrypto: boolean;
+  // Manual / custom pricing (excluded from the Yahoo/CoinGecko API; valued off
+  // the user's price marks). `latestPrice` is the newest mark for the status cell.
+  priceSource: "auto" | "manual";
+  latestPrice: { date: string; price: number } | null;
   image: string | null;
   accounts: SecurityAccount[];
 };
@@ -152,6 +159,13 @@ export default function InvestmentsSettingsPage() {
   const [addErrors, setAddErrors] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
   const [lookupLoading, setLookupLoading] = useState(false);
+  // Manual / custom pricing for the new security. `addPriceSource` defaults from
+  // the ticker lookup (found a live price → 'auto', else 'manual') unless the
+  // user toggles it. `addLookupFound` drives the status line (null = not looked
+  // up yet).
+  const [addPriceSource, setAddPriceSource] = useState<"auto" | "manual">("auto");
+  const [addLookupFound, setAddLookupFound] = useState<boolean | null>(null);
+  const priceSourceTouchedRef = useRef(false);
   // Auto-fill bookkeeping (refs avoid stale-closure reads inside the async
   // lookup): which fields the user edited by hand + a sequence guard so a slow
   // lookup for a previous ticker can't clobber a newer one.
@@ -166,12 +180,16 @@ export default function InvestmentsSettingsPage() {
   const [cashError, setCashError] = useState("");
   const [cashSubmitting, setCashSubmitting] = useState(false);
 
-  // Edit dialog (rename + FINLYNQ-201 user-settable asset type).
+  // Edit dialog (rename + FINLYNQ-201 user-settable asset type + pricing mode).
   const [renameSecurity, setRenameSecurity] = useState<Security | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [assetTypeValue, setAssetTypeValue] = useState("stock");
+  const [editPriceSource, setEditPriceSource] = useState<"auto" | "manual">("auto");
   const [renameErrors, setRenameErrors] = useState<Record<string, string>>({});
   const [renaming, setRenaming] = useState(false);
+
+  // Manage-prices dialog (manual securities).
+  const [pricesTarget, setPricesTarget] = useState<Security | null>(null);
 
   // Delete confirm (catalog cleanup, unused securities only).
   const [deleteTarget, setDeleteTarget] = useState<Security | null>(null);
@@ -300,6 +318,9 @@ export default function InvestmentsSettingsPage() {
     setAddName("");
     setAddCurrency("USD");
     setAddIsCrypto(false);
+    setAddPriceSource("auto");
+    setAddLookupFound(null);
+    priceSourceTouchedRef.current = false;
     nameTouchedRef.current = false;
     currencyTouchedRef.current = false;
     cryptoTouchedRef.current = false;
@@ -316,6 +337,7 @@ export default function InvestmentsSettingsPage() {
     const seq = ++lookupSeqRef.current;
     if (!symbol) {
       if (!nameTouchedRef.current) setAddName("");
+      setAddLookupFound(null);
       return;
     }
     setLookupLoading(true);
@@ -330,6 +352,7 @@ export default function InvestmentsSettingsPage() {
       let name: string | null = null;
       let currency: string | null = null;
       let isCrypto: boolean | undefined;
+      let found = false;
       if (res.ok) {
         const json = await res.json();
         const d = (json.data ?? json) as {
@@ -341,11 +364,16 @@ export default function InvestmentsSettingsPage() {
         name = d?.name ?? null;
         currency = d?.currency ?? null;
         isCrypto = d?.isCrypto;
+        found = d?.found === true;
       }
       if (seq !== lookupSeqRef.current) return; // superseded by a newer lookup
       if (!nameTouchedRef.current) setAddName(name ?? "");
       if (!currencyTouchedRef.current && currency) setAddCurrency(currency);
       if (!cryptoTouchedRef.current && typeof isCrypto === "boolean") setAddIsCrypto(isCrypto);
+      // A live price was found ⇒ auto-fetch; nothing found ⇒ this is a custom
+      // holding the user must price manually. The user can still override.
+      setAddLookupFound(found);
+      if (!priceSourceTouchedRef.current) setAddPriceSource(found ? "auto" : "manual");
     } catch {
       /* best-effort — manual entry */
     } finally {
@@ -406,6 +434,7 @@ export default function InvestmentsSettingsPage() {
           name: addName.trim() || undefined,
           currency,
           isCrypto: addIsCrypto,
+          priceSource: addPriceSource,
         }),
       });
       if (!res.ok) {
@@ -414,7 +443,12 @@ export default function InvestmentsSettingsPage() {
         return;
       }
       setAddOpen(false);
-      showToast("success", "Security added");
+      showToast(
+        "success",
+        addPriceSource === "manual"
+          ? "Security added — add a price under “Prices”."
+          : "Security added",
+      );
       await load();
     } catch (e) {
       setAddErrors({ symbol: e instanceof Error ? e.message : "Failed" });
@@ -428,6 +462,7 @@ export default function InvestmentsSettingsPage() {
     setRenameSecurity(s);
     setRenameValue(s.name ?? "");
     setAssetTypeValue(s.assetType || "stock");
+    setEditPriceSource(s.priceSource ?? "auto");
     setRenameErrors({});
   }
 
@@ -443,12 +478,15 @@ export default function InvestmentsSettingsPage() {
     try {
       // Send the asset type only when the user changed it (FINLYNQ-201). It's a
       // cosmetic, user-settable override — the server never re-clusters on it.
-      const body: { id: number; name: string; assetType?: string } = {
+      const body: { id: number; name: string; assetType?: string; priceSource?: "auto" | "manual" } = {
         id: renameSecurity.id,
         name,
       };
       if (assetTypeValue && assetTypeValue !== renameSecurity.assetType) {
         body.assetType = assetTypeValue;
+      }
+      if (editPriceSource !== renameSecurity.priceSource) {
+        body.priceSource = editPriceSource;
       }
       const res = await fetch("/api/securities", {
         method: "PATCH",
@@ -773,6 +811,7 @@ export default function InvestmentsSettingsPage() {
                     <TableHead>{sortHeader("description", "Description")}</TableHead>
                     <TableHead>{sortHeader("type", "Type")}</TableHead>
                     <TableHead>{sortHeader("currency", "Currency")}</TableHead>
+                    <TableHead>Pricing</TableHead>
                     <TableHead className="text-right" />
                   </TableRow>
                   <TableRow>
@@ -781,12 +820,13 @@ export default function InvestmentsSettingsPage() {
                     <TableHead className="py-1">{filterInput("type")}</TableHead>
                     <TableHead className="py-1">{filterInput("currency")}</TableHead>
                     <TableHead className="py-1" />
+                    <TableHead className="py-1" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {rows.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-8">
+                      <TableCell colSpan={6} className="text-center text-sm text-muted-foreground py-8">
                         {hasActiveFilter ? "No securities match the current filters." : "No securities."}
                       </TableCell>
                     </TableRow>
@@ -822,8 +862,38 @@ export default function InvestmentsSettingsPage() {
                             {r.currency}
                           </Badge>
                         </TableCell>
+                        <TableCell>
+                          {r.s.priceSource === "manual" ? (
+                            <div className="flex flex-col gap-0.5">
+                              <Badge
+                                variant="secondary"
+                                className="w-fit text-[10px] border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300"
+                              >
+                                Manual
+                              </Badge>
+                              {r.s.latestPrice ? (
+                                <span className="text-[11px] text-muted-foreground tabular-nums">
+                                  {formatCurrency(r.s.latestPrice.price, r.s.currency)} · {r.s.latestPrice.date}
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                                  No price yet
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <Badge variant="outline" className="text-[10px]">
+                              Auto
+                            </Badge>
+                          )}
+                        </TableCell>
                         <TableCell className="text-right">
                           <div className="inline-flex gap-1">
+                            {r.s.priceSource === "manual" && (
+                              <Button variant="ghost" size="sm" onClick={() => setPricesTarget(r.s)}>
+                                <DollarSign className="h-3.5 w-3.5 mr-1" /> Prices
+                              </Button>
+                            )}
                             <Button variant="ghost" size="sm" onClick={() => openRename(r.s)}>
                               <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
                             </Button>
@@ -1087,6 +1157,45 @@ export default function InvestmentsSettingsPage() {
                 Crypto asset
               </label>
             </div>
+            <div>
+              <Label>Pricing</Label>
+              <div className="mt-1 inline-flex rounded-lg border p-0.5">
+                {(["auto", "manual"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      setAddPriceSource(mode);
+                      priceSourceTouchedRef.current = true;
+                    }}
+                    className={cn(
+                      "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                      addPriceSource === mode
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {mode === "auto" ? "Auto-fetch" : "Manual"}
+                  </button>
+                ))}
+              </div>
+              <p
+                className={cn(
+                  "text-[11px] mt-1",
+                  addPriceSource === "manual"
+                    ? "text-amber-600 dark:text-amber-400"
+                    : "text-muted-foreground",
+                )}
+              >
+                {addPriceSource === "manual"
+                  ? "Custom holding — prices aren’t fetched. Add them under “Prices” after creating it."
+                  : addLookupFound === true
+                    ? "✓ A live price was found — it’ll update automatically."
+                    : addLookupFound === false
+                      ? "No live price was found for this ticker — switch to Manual if it can’t be priced."
+                      : "Prices are fetched automatically from the market."}
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddOpen(false)} disabled={adding}>
@@ -1224,6 +1333,36 @@ export default function InvestmentsSettingsPage() {
                 </p>
               </div>
             )}
+            {/* Pricing mode — manual securities are excluded from the market
+                price API and valued off the prices you enter. Hidden for cash
+                sleeves (always priced at 1). */}
+            {renameSecurity && !renameSecurity.isCash && (
+              <div>
+                <Label>Pricing</Label>
+                <div className="mt-1 inline-flex rounded-lg border p-0.5">
+                  {(["auto", "manual"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setEditPriceSource(mode)}
+                      className={cn(
+                        "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                        editPriceSource === mode
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {mode === "auto" ? "Auto-fetch" : "Manual"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  {editPriceSource === "manual"
+                    ? "Not fetched from the market — set prices under “Prices”."
+                    : "Prices are fetched automatically from Yahoo/CoinGecko."}
+                </p>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRenameSecurity(null)} disabled={renaming}>
@@ -1266,6 +1405,18 @@ export default function InvestmentsSettingsPage() {
         busyLabel="Changing…"
         busy={tickerBusy}
         onConfirm={confirmTickerChange}
+      />
+
+      {/* ── Manage prices (manual securities) ──────────────────────────── */}
+      <ManagePricesDialog
+        securityId={pricesTarget?.id ?? null}
+        securityLabel={pricesTarget ? symbolLabel(pricesTarget) : ""}
+        currency={pricesTarget?.currency ?? "USD"}
+        open={pricesTarget != null}
+        onOpenChange={(o) => {
+          if (!o) setPricesTarget(null);
+        }}
+        onChanged={load}
       />
     </div>
   );

@@ -20,7 +20,7 @@
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { db, schema } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
@@ -34,6 +34,11 @@ const defineSchema = z.object({
   name: z.string().trim().max(200).optional(),
   currency: currencyCode,
   isCrypto: z.boolean().optional(),
+  // Manual / custom pricing: 'manual' excludes the security from the
+  // Yahoo/CoinGecko API and values it off custom_security_prices marks. The
+  // Add-security dialog sends 'manual' when the ticker lookup found no live
+  // price. Defaults to 'auto' (the column default).
+  priceSource: z.enum(["auto", "manual"]).optional(),
 });
 
 export const POST = apiHandler(
@@ -69,7 +74,16 @@ export const POST = apiHandler(
         { status: 400 },
       );
     }
-    return { securityId };
+    // Persist the pricing mode chosen at define time (the resolver doesn't take
+    // it). Only when explicitly provided — otherwise the 'auto' column default
+    // stands, and we never clobber an existing security's mode on a no-op define.
+    if (body.priceSource !== undefined) {
+      await db
+        .update(schema.securities)
+        .set({ priceSource: body.priceSource, updatedAt: sql`NOW()` })
+        .where(and(eq(schema.securities.id, securityId), eq(schema.securities.userId, userId)));
+    }
+    return { securityId, priceSource: body.priceSource ?? "auto" };
   },
 );
 

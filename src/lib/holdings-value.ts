@@ -20,6 +20,7 @@ import { isMetalCurrency, isCryptoSymbol, isCurrencyCodeSymbol } from "@/lib/fx/
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { cashLegSkipSql } from "@/lib/portfolio/aggregation-predicates";
 import { todayISO } from "@/lib/utils/date";
+import { effectivePriceAtDate, loadCustomPriceMap } from "@/lib/securities/custom-prices";
 
 export type AccountHoldingsValue = {
   accountId: number;
@@ -72,14 +73,19 @@ async function valueHoldingsAtDate(
     .select({
       id: schema.portfolioHoldings.id,
       accountId: schema.portfolioHoldings.accountId,
+      securityId: schema.portfolioHoldings.securityId,
       nameCt: schema.portfolioHoldings.nameCt,
       symbolCt: schema.portfolioHoldings.symbolCt,
       currency: schema.portfolioHoldings.currency,
       isCrypto: schema.portfolioHoldings.isCrypto,
       accountCurrency: schema.accounts.currency,
+      // Manual-pricing flag (custom securities). NULL for un-backfilled
+      // (security_id IS NULL) positions → treated as 'auto'.
+      priceSource: schema.securities.priceSource,
     })
     .from(schema.portfolioHoldings)
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
+    .leftJoin(schema.securities, eq(schema.portfolioHoldings.securityId, schema.securities.id))
     .where(eq(schema.portfolioHoldings.userId, userId));
 
   if (rawHoldings.length === 0) return [];
@@ -213,12 +219,25 @@ async function valueHoldingsAtDate(
     costBucketsByHoldingId.set(r.portfolioHoldingId, arr);
   }
 
+  // Manually-priced securities (price_source='manual') are EXCLUDED from the
+  // external price API — they value off the user's custom_security_prices marks
+  // instead. `isManual(h)` keys on the joined flag (NULL/un-backfilled → auto).
+  const isManual = (h: { priceSource?: string | null }) => h.priceSource === "manual";
+  const manualSecurityIds = Array.from(
+    new Set(
+      holdings
+        .filter((h) => isManual(h) && h.securityId != null)
+        .map((h) => h.securityId as number),
+    ),
+  );
+  const customPriceMap = await loadCustomPriceMap(userId, manualSecurityIds);
+
   // Price lookups — exclude currency-code symbols (CAD, USD, …) since
-  // Yahoo returns unrelated stock data for those tickers. For asOfDate
-  // == today use the regular live-quote endpoint; for past dates use
-  // the historical chart endpoint.
+  // Yahoo returns unrelated stock data for those tickers, AND manual securities
+  // (priced off the marks above). For asOfDate == today use the regular
+  // live-quote endpoint; for past dates use the historical chart endpoint.
   const stockSymbols = holdings
-    .filter(h => h.symbol && !isCryptoSymbol(h.symbol) && h.isCrypto !== 1 && !isCurrencyCodeSymbol(h.symbol))
+    .filter(h => !isManual(h) && h.symbol && !isCryptoSymbol(h.symbol) && h.isCrypto !== 1 && !isCurrencyCodeSymbol(h.symbol))
     .map(h => h.symbol!);
   const quotes = stockSymbols.length > 0
     ? (isToday
@@ -236,6 +255,7 @@ async function valueHoldingsAtDate(
   const cgPairs: Array<{ coinId: string; symbol: string }> = [];
   const seenCg = new Set<string>();
   for (const h of holdings) {
+    if (isManual(h)) continue; // manual securities never hit CoinGecko
     if (h.isCrypto === 1 || isCryptoSymbol(h.symbol)) {
       const base = (h.symbol ?? "").toUpperCase().split("-")[0];
       const cg = base ? symbolToCoinGeckoId(base) : null;
@@ -278,7 +298,15 @@ async function valueHoldingsAtDate(
     let price: number | null = null;
     let priceCurrency: string = h.currency;
 
-    if (h.symbol && isCurrencyCodeSymbol(h.symbol)) {
+    if (isManual(h)) {
+      // Manually-priced security: the effective mark on-or-before asOfDate, in
+      // the security's currency. No mark yet (or before the first mark) ⇒ 0
+      // (the "Zero" fallback) — cost basis still computes below, so unrealized
+      // G/L shows the dip until the user enters a price.
+      const points = h.securityId != null ? customPriceMap.get(h.securityId) ?? [] : [];
+      price = effectivePriceAtDate(points, asOfDate) ?? 0;
+      priceCurrency = h.currency;
+    } else if (h.symbol && isCurrencyCodeSymbol(h.symbol)) {
       // Symbol IS a currency code (CAD, USD, XAU, …) — foreign-cash or
       // metal position. For fiat-cash, price=1 in the symbol's currency
       // and the FX hop later converts to the account's currency.

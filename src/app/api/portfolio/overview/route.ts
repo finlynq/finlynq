@@ -14,6 +14,7 @@ import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import { cashLegSkipSql, dividendAttributionHoldingIdSql } from "@/lib/portfolio/aggregation-predicates";
 import { aggregateMovers } from "@/lib/portfolio/top-movers";
+import { effectivePriceAtDate, loadCustomPriceMap } from "@/lib/securities/custom-prices";
 import { todayISO } from "@/lib/utils/date";
 import { round2 } from "@/lib/utils/number";
 import { withOp } from "@/lib/diagnostics/op-context";
@@ -77,6 +78,10 @@ async function handleGet(request: NextRequest) {
       // The cluster_key (NOT asset_type) is the grouping key, so this is purely
       // cosmetic and never re-clusters (canonical.ts).
       securityAssetType: sec.assetType,
+      // Manual-pricing flag (custom securities). 'manual' ⇒ priced off
+      // custom_security_prices marks, EXCLUDED from Yahoo/CoinGecko. NULL for
+      // un-backfilled (security_id IS NULL) rows → treated as 'auto'.
+      priceSource: sec.priceSource,
       note: schema.portfolioHoldings.note,
     })
     .from(schema.portfolioHoldings)
@@ -97,11 +102,26 @@ async function handleGet(request: NextRequest) {
   // a holding with symbol="CAD" was being looked up as a stock on Yahoo â€”
   // Yahoo happens to return data for some unrelated ticker named CAD,
   // surfaced as a fake "$95.88" price + Stocks badge in the UI.
+  // Manually-priced securities (price_source='manual') value off the user's
+  // custom_security_prices marks and are EXCLUDED from the external price API.
+  // Keyed on the joined flag (NULL/un-backfilled → auto).
+  const isManualHolding = (h: { priceSource?: string | null }) => h.priceSource === "manual";
+  const manualSecurityIds = Array.from(
+    new Set(
+      holdings
+        .filter((h) => isManualHolding(h) && h.securityId != null)
+        .map((h) => h.securityId as number),
+    ),
+  );
+  const customPriceMap = await loadCustomPriceMap(userId, manualSecurityIds);
+
   const cryptoHoldings = holdings.filter(h => {
+    if (isManualHolding(h)) return false; // manual securities never hit CoinGecko
     if (h.isCrypto === 1) return true;
     return h.symbol ? isCryptoSymbol(h.symbol) : false;
   });
   const nonCryptoWithSymbol = holdings.filter(h => {
+    if (isManualHolding(h)) return false; // manual securities never hit Yahoo
     if (h.isCrypto === 1) return false;
     if (!h.symbol) return false;
     if (isCryptoSymbol(h.symbol)) return false;
@@ -607,7 +627,15 @@ async function handleGet(request: NextRequest) {
     // description". Null for cash/metals/crypto/custom.
     let quoteName: string | null = null;
 
-    if (isCrypto && h.symbol) {
+    if (isManualHolding(h)) {
+      // Manually-priced security: the effective mark on-or-before today, in the
+      // security's currency. No mark yet ⇒ 0 (the "Zero" fallback). Day change
+      // stays null (no prior comparison in v1) → "--". The marketValue branch
+      // below (price !== null) FX-converts it to the display currency.
+      const points = h.securityId != null ? customPriceMap.get(h.securityId) ?? [] : [];
+      price = effectivePriceAtDate(points, todayDate) ?? 0;
+      quoteCurrency = h.currency;
+    } else if (isCrypto && h.symbol) {
       const base = String(h.symbol).toUpperCase().split("-")[0];
       const cp = cryptoPriceMap.get(base);
       if (cp) {

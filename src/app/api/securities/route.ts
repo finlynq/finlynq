@@ -30,6 +30,7 @@ import { db, schema } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
 import { buildNameFields, decryptName, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { resolveOrCreateSecurity, gcOrphanSecurity } from "@/lib/securities/resolve";
+import { loadCustomPriceMap } from "@/lib/securities/custom-prices";
 
 interface SecurityAccountLink {
   accountId: number;
@@ -54,12 +55,17 @@ export const GET = apiHandler(
         currency: schema.securities.currency,
         isCash: schema.securities.isCash,
         isCrypto: schema.securities.isCrypto,
+        priceSource: schema.securities.priceSource,
         image: schema.securities.image,
         symbolCt: schema.securities.symbolCt,
         nameCt: schema.securities.nameCt,
       })
       .from(schema.securities)
       .where(eq(schema.securities.userId, userId));
+
+    // Manual-price marks (newest per security) for the status + "latest mark"
+    // column. DEK-free; empty map when the user has none.
+    const customPriceMap = await loadCustomPriceMap(userId);
 
     const securities = decryptNamedRows(secRows, dek, {
       symbolCt: "symbol",
@@ -101,19 +107,25 @@ export const GET = apiHandler(
     }
 
     const data = securities
-      .map((s) => ({
-        id: s.id,
-        symbol: s.symbol,
-        name: s.name,
-        assetType: s.assetType,
-        currency: s.currency,
-        isCash: s.isCash,
-        isCrypto: s.isCrypto === 1,
-        image: s.image,
-        accounts: (linksBySecurity.get(s.id) ?? []).sort(
-          (a, b) => (a.accountName ?? "").localeCompare(b.accountName ?? ""),
-        ),
-      }))
+      .map((s) => {
+        const marks = customPriceMap.get(s.id) ?? [];
+        const last = marks.length > 0 ? marks[marks.length - 1] : null; // sorted asc by date
+        return {
+          id: s.id,
+          symbol: s.symbol,
+          name: s.name,
+          assetType: s.assetType,
+          currency: s.currency,
+          isCash: s.isCash,
+          isCrypto: s.isCrypto === 1,
+          priceSource: (s.priceSource as "auto" | "manual") ?? "auto",
+          latestPrice: last ? { date: last.date, price: last.price } : null,
+          image: s.image,
+          accounts: (linksBySecurity.get(s.id) ?? []).sort(
+            (a, b) => (a.accountName ?? "").localeCompare(b.accountName ?? ""),
+          ),
+        };
+      })
       .sort((a, b) => {
         // Tickered first, then by display label.
         const al = (a.symbol ?? a.name ?? "").toUpperCase();
@@ -142,10 +154,19 @@ const patchSchema = z
     // then GCs the old. Its only caller is the unpriceable-ticker advisory on
     // /settings/investments, which sends `symbol` alone.
     symbol: z.string().trim().min(1).max(40).optional(),
+    // Pricing mode toggle (manual / custom pricing). 'manual' excludes the
+    // security from the Yahoo/CoinGecko API and values it off custom_security_prices
+    // marks. Cosmetic to clustering — never re-clusters.
+    priceSource: z.enum(["auto", "manual"]).optional(),
   })
-  .refine((b) => b.name !== undefined || b.assetType !== undefined || b.symbol !== undefined, {
-    message: "Provide a name, assetType, and/or symbol",
-  });
+  .refine(
+    (b) =>
+      b.name !== undefined ||
+      b.assetType !== undefined ||
+      b.symbol !== undefined ||
+      b.priceSource !== undefined,
+    { message: "Provide a name, assetType, symbol, and/or priceSource" },
+  );
 
 /**
  * PATCH /api/securities — update a security's display name and/or asset type.
@@ -267,6 +288,7 @@ export const PATCH = apiHandler(
       setFields.nameLookup = nameLookup;
     }
     if (body.assetType !== undefined) setFields.assetType = body.assetType;
+    if (body.priceSource !== undefined) setFields.priceSource = body.priceSource;
 
     const updated = await db
       .update(schema.securities)
@@ -279,7 +301,7 @@ export const PATCH = apiHandler(
     // Only the name change propagates to member positions; asset_type lives on
     // the securities row alone (display-only, no per-position column).
     if (!renaming) {
-      return { id: body.id, assetType: body.assetType, positions: 0, skipped: 0 };
+      return { id: body.id, assetType: body.assetType, priceSource: body.priceSource, positions: 0, skipped: 0 };
     }
     // Copy the rename down onto every member position — ONE AT A TIME, not a
     // single atomic batch. A stray member (e.g. a non-cash holding mis-linked

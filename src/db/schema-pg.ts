@@ -234,6 +234,11 @@ export const securities = pgTable(
     // Display asset class: stock|etf|crypto|cash|metal|custom. Cosmetic — the
     // cluster_key (not asset_type) is the uniqueness/grouping key.
     assetType: text("asset_type").notNull(),
+    // Pricing mode: 'auto' (fetch from Yahoo/CoinGecko) | 'manual' (read from
+    // custom_security_prices; EXCLUDED from the external price API). Default
+    // 'auto'. A manual security may still carry a (non-fetchable) ticker — the
+    // flag, not symbol-less-ness, drives the exclusion. → custom_security_prices.
+    priceSource: text("price_source").notNull().default("auto"),
     // Quote/trading currency, copied from the representative position.
     currency: text("currency").notNull().default("USD"),
     isCash: boolean("is_cash").notNull().default(false),
@@ -548,6 +553,33 @@ export const fxOverrides = pgTable("fx_overrides", {
   note: text("note").notNull().default(""),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Per-user manual price marks for manually-priced securities
+// (securities.price_source = 'manual'). Each row is an effective-from price
+// point in the security's currency. The "effective price at date D" is the row
+// with the latest date <= D (forward-fill / step function); before the first
+// mark the holding values at 0. Keyed by security_id. `price` is a plain number
+// (like price_cache) — no DEK / encryption on this path. → custom-prices.ts
+export const customSecurityPrices = pgTable(
+  "custom_security_prices",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    securityId: integer("security_id")
+      .notNull()
+      .references(() => securities.id, { onDelete: "cascade" }),
+    date: text("date").notNull(),                              // YYYY-MM-DD, effective-from
+    price: doublePrecision("price").notNull(),                 // in the security's currency
+    currency: text("currency").notNull(),                      // = securities.currency
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One mark per (user, security, date). Backs the POST upsert.
+    uniqueIndex("custom_security_prices_user_sec_date_idx").on(t.userId, t.securityId, t.date),
+    index("custom_security_prices_user_sec_idx").on(t.userId, t.securityId),
+  ],
+);
 
 export const notifications = pgTable("notifications", {
   id: serial("id").primaryKey(),
