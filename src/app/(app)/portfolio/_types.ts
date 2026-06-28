@@ -116,6 +116,8 @@ export type ByHoldingRow = {
   assetType: AssetType;
   totalQty: number;
   avgCostDisplay: number | null;
+  // Current (blended) market price in display currency — market value / qty.
+  currentPriceDisplay: number | null;
   costBasisDisplay: number;
   marketValueDisplay: number;
   unrealizedGainDisplay: number;
@@ -124,6 +126,25 @@ export type ByHoldingRow = {
   dividendsDisplay: number;
   totalReturnDisplay: number;
   totalReturnPct: number | null;
+  // Day (today's) change in display currency + its % over prior-day value.
+  // dayChangeDisplay is null when no member has a live quote (renders "--").
+  dayChangeDisplay: number | null;
+  dayChangePct: number | null;
+  // Native-currency rollup. `nativeCurrency` is the shared member quote
+  // currency, or null when members span currencies (then the "Holding
+  // currency" toggle falls back to display for this row and the native
+  // figures below are null). Unrealized/return % are ratios → reuse the
+  // display-mode percentages.
+  nativeCurrency: string | null;
+  avgCostNative: number | null;
+  currentPriceNative: number | null;
+  costBasisNative: number | null;
+  marketValueNative: number | null;
+  unrealizedGainNative: number | null;
+  realizedGainNative: number | null;
+  dividendsNative: number | null;
+  totalReturnNative: number | null;
+  dayChangeNative: number | null;
   pctOfPortfolio: number | null;
   accountCount: number;
   image: string | null;

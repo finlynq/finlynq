@@ -123,6 +123,38 @@ function markQuoteMiss(symbol: string, reason: string): void {
   );
 }
 
+// ── Per-symbol earliest-available-date memo (snapshot-rebuild storm fix) ─────
+// A symbol has NO price history before its inception/listing date (AAVE-USD →
+// 2020-10-02, V3AA.L → 2021-03-23, …). A snapshot rebuild walks OLDEST-first, so
+// for every day BEFORE that date it asks for a historical price, misses the cache
+// (no row can ever exist for a pre-inception date), and re-fetches the symbol's
+// full history from the provider — which returns the SAME post-inception series
+// every time, so nothing new is saved AND the negative cache never fires (the
+// response isn't empty). The result is one wasted full-history fetch PER
+// pre-inception day, per symbol — the dominant cost of a rebuild's slow early
+// phase. This memo records the earliest date a provider actually has data for a
+// symbol (learned when a fetch returns bars that START LATER than the requested
+// period1) and short-circuits any later request for an earlier date. In-memory
+// per process (like negativeQuoteCache); a restart re-learns it with one fetch
+// per symbol. Inception dates don't move, so entries never expire.
+const earliestDataDate = new Map<string, string>(); // symbol -> "YYYY-MM-DD"
+
+/** True iff we've proven `symbol` has no provider data strictly before `date`. Exported for unit testing. */
+export function isBeforeEarliestData(symbol: string, date: string): boolean {
+  const e = earliestDataDate.get(symbol);
+  return e != null && date < e;
+}
+
+/**
+ * Record that `symbol`'s earliest available data point is `date` (no data exists
+ * before it). Keeps the EARLIEST observation so a looser later one can never
+ * wrongly mask a date we've already proven has data. Exported for unit testing.
+ */
+export function noteEarliestDataDate(symbol: string, date: string): void {
+  const cur = earliestDataDate.get(symbol);
+  if (!cur || date < cur) earliestDataDate.set(symbol, date);
+}
+
 // FINLYNQ-92 follow-up: Yahoo's chart API OMITS `meta.previousClose` whenever
 // the regular session is closed (weekends, exchange holidays, pre-/after-hours)
 // — it only returns `meta.chartPreviousClose`. For a `range=1d` request the two
@@ -469,6 +501,11 @@ export async function fetchYahooDailyCloses(
   today: string,
 ): Promise<Array<{ date: string; close: number }>> {
   if (isQuoteNegativelyCached(symbol)) return [];
+  // No provider data exists before this symbol's first bar — skip the doomed
+  // fetch that would only re-return post-inception data we already cached (the
+  // snapshot-rebuild pre-inception storm). Earlier-dated walk days short-circuit
+  // here instead of re-fetching the full history once per day.
+  if (isBeforeEarliestData(symbol, fromDate)) return [];
   try {
     const period1 = Math.floor(Date.parse(`${fromDate}T00:00:00Z`) / 1000);
     const period2 = Math.floor(Date.now() / 1000);
@@ -499,6 +536,11 @@ export async function fetchYahooDailyCloses(
       markQuoteMiss(symbol, "no historical closes");
       return [];
     }
+    // Yahoo returns bars from period1 (=fromDate) onward; a first bar LATER than
+    // fromDate proves there's no data before it (the symbol's inception). Record
+    // it so earlier-dated requests short-circuit above instead of re-fetching the
+    // same post-inception window once per pre-inception day.
+    if (out[0].date > fromDate) noteEarliestDataDate(symbol, out[0].date);
     return out;
   } catch {
     markQuoteMiss(symbol, "chart timeout/error");
@@ -544,7 +586,13 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
       next: { revalidate: 86400 },
       signal: AbortSignal.timeout(QUOTE_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // 400 "Data doesn't exist" (a window entirely before the listing date) or
+      // any HTTP error: negative-cache so the rebuild walk doesn't re-hit this
+      // symbol every pre-inception day (the V3AA.L 400-per-day case).
+      markQuoteMiss(symbol, `chart http ${res.status}`);
+      return null;
+    }
     const data = await res.json();
     const result = data.chart?.result?.[0];
     if (!result) return null;
@@ -620,6 +668,9 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
       previousClose: null,
     };
   } catch {
+    // Timeout / network error: negative-cache so a slow ticker isn't re-fetched
+    // once per day across the rebuild walk (mirrors fetchYahooDailyCloses).
+    markQuoteMiss(symbol, "chart timeout/error");
     return null;
   }
 }

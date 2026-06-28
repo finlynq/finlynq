@@ -376,6 +376,7 @@ export function TransactionTable({
                     "portfolio_income",
                     "portfolio_expense",
                     "opening_balance",
+                    "balance_adjustment",
                   ]);
                   const isCanonical =
                     !!t.kind &&
@@ -429,6 +430,7 @@ export function TransactionTable({
                     "portfolio_income",
                     "portfolio_expense",
                     "opening_balance",
+                    "balance_adjustment",
                   ]);
                   const status: "canonical" | "pending" | "none" =
                     t.kind == null

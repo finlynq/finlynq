@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
         fromDate ?? null,
         null,
         dek,
-        (done, total) => reportRebuildProgress(userId, done, total),
+        (done, total, phase) => reportRebuildProgress(userId, done, total, phase),
       );
 
       // The manual rebuild covers whatever the auto-drain would have — clear any

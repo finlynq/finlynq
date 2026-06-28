@@ -1659,6 +1659,9 @@ const PAIRLESS_CANONICAL_KINDS_FOR_CONVERT = new Set([
   "portfolio_income",
   "portfolio_expense",
   "opening_balance",
+  // FINLYNQ-206 — re-tagged former opening_balance rows are canonical/pair-less
+  // too; never offer one as an unmatched convert counterpart.
+  "balance_adjustment",
 ]);
 
 function assertCounterpartUnlinked(cp: CounterpartRowForConvert): void {

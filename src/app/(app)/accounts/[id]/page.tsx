@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
+import { todayISO } from "@/lib/utils/date";
 import {
   ArrowLeft,
   Wallet,
@@ -128,9 +129,13 @@ export default function AccountDetailPage() {
   // Edit dialog (Details / Reconciliation / Import / Cash sleeves tabs).
   const [editOpen, setEditOpen] = useState(false);
   const [editTab, setEditTab] = useState<EditTab>("details");
-  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "USD", note: "" });
+  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "USD", note: "", openingBalanceAmount: "", openingBalanceDate: "" });
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
+  // FINLYNQ-206 — the opening balance currently backing this (cash) account,
+  // loaded from its single kind='opening_balance' transaction. null = none yet.
+  // Used to detect a real change before issuing the opening-balance PUT.
+  const [obOriginal, setObOriginal] = useState<{ amount: number; date: string } | null>(null);
   // Keep the form's current currency present in the dropdown even if it was
   // later deselected under Settings → Currencies you use (#291).
   const editCurrencyOptions = useActiveCurrencies(editForm.currency);
@@ -262,23 +267,77 @@ export default function AccountDetailPage() {
     await refreshSleeves();
   }
 
+  // Re-fetch the computed balance + recent transactions (the opening balance
+  // feeds both). Mirrors the initial load effect.
+  function refreshBalanceAndTxns() {
+    fetch("/api/dashboard")
+      .then((r) => r.json())
+      .then((d) => {
+        const b = d.balances?.find((x: AccountBalance) => x.accountId === Number(id));
+        setBalance(b?.balance ?? 0);
+        setCashFlowBasis(b?.cashFlowBasis ?? null);
+        setHoldingsValue(b?.holdingsValue ?? null);
+      })
+      .catch(() => {});
+    fetch(`/api/transactions?accountId=${id}&limit=200`)
+      .then((r) => r.json())
+      .then((d) => {
+        setTxns(d.data);
+        setTotal(d.total);
+      })
+      .catch(() => {});
+  }
+
   function openEdit(tab: EditTab = "details") {
     if (!account) return;
-    setEditForm({ name: account.name, type: account.type, group: account.group || "", currency: account.currency, note: "" });
+    setEditForm({ name: account.name, type: account.type, group: account.group || "", currency: account.currency, note: "", openingBalanceAmount: "", openingBalanceDate: "" });
+    setObOriginal(null);
     setEditError("");
     setEditTab(tab);
     setEditOpen(true);
+    // FINLYNQ-206 — seed the opening-balance field from its backing
+    // transaction (cash accounts only; the field is hidden for investment).
+    if (account.isInvestment !== true) {
+      fetch(`/api/accounts/${account.id}/opening-balance`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => {
+          const ob: { amount: number; date: string } | null = j?.data ?? null;
+          setObOriginal(ob ? { amount: ob.amount, date: ob.date } : null);
+          setEditForm((f) => ({
+            ...f,
+            openingBalanceAmount: ob ? String(ob.amount) : "",
+            openingBalanceDate: ob ? ob.date : todayISO(),
+          }));
+        })
+        .catch(() => {});
+    }
   }
 
   async function handleEdit(e: React.FormEvent) {
     e.preventDefault();
+    const isInvestmentAccount = account?.isInvestment === true;
+
+    // Opening balance (cash accounts only). Validate before any write so a
+    // bad value doesn't half-save.
+    const amtStr = editForm.openingBalanceAmount.trim();
+    const newAmount: number | null = amtStr === "" ? null : Number(amtStr);
+    if (!isInvestmentAccount && amtStr !== "" && !Number.isFinite(newAmount as number)) {
+      setEditError("Opening balance must be a number");
+      return;
+    }
+    const newDate = editForm.openingBalanceDate || todayISO();
+
     setEditSaving(true);
     setEditError("");
     try {
+      // `editForm` carries the opening-balance fields too; strip them from the
+      // account PUT (the /api/accounts route doesn't know them).
+      const { openingBalanceAmount: _a, openingBalanceDate: _d, ...accountFields } = editForm;
+      void _a; void _d;
       const res = await fetch("/api/accounts", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: Number(id), ...editForm }),
+        body: JSON.stringify({ id: Number(id), ...accountFields }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -287,7 +346,33 @@ export default function AccountDetailPage() {
       }
       const updated = await res.json();
       setAccount(updated);
+
+      // Persist the opening balance only when it actually changed. A
+      // null amount with no existing row is a no-op (no row created).
+      const prevAmount = obOriginal?.amount ?? null;
+      const obChanged =
+        newAmount !== prevAmount ||
+        (obOriginal != null && newDate !== obOriginal.date);
+      if (
+        !isInvestmentAccount &&
+        obChanged &&
+        !(newAmount == null && obOriginal == null)
+      ) {
+        const obRes = await fetch(`/api/accounts/${id}/opening-balance`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ amount: newAmount, date: newDate }),
+        });
+        if (!obRes.ok) {
+          const d = await obRes.json().catch(() => ({}));
+          setEditError(d.error ?? "Account saved, but the opening balance failed to update");
+          refreshBalanceAndTxns();
+          return;
+        }
+      }
+
       setEditOpen(false);
+      refreshBalanceAndTxns();
     } catch {
       setEditError("Failed to update account");
     } finally {
@@ -727,6 +812,45 @@ export default function AccountDetailPage() {
                   <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
                   <Input value={editForm.note} onChange={(e) => setEditForm({ ...editForm, note: e.target.value })} />
                 </div>
+
+                {/* Opening balance (FINLYNQ-206) — cash accounts only. Backed
+                    by ONE kind='opening_balance' transaction; clearing zeroes
+                    it (never deletes). Hidden for investment accounts (their
+                    balance comes from holdings; out of v1 scope). */}
+                {!isInvestment && (
+                  <div className="space-y-2 rounded-lg border border-border/60 p-3">
+                    <Label>Opening balance <span className="text-muted-foreground text-xs">(optional)</span></Label>
+                    <p className="text-xs text-muted-foreground">
+                      A single starting-balance entry for this account. Set the
+                      date to when the account opened so Balance Over Time and
+                      Net Worth history start from the right point. Clearing the
+                      amount zeroes the entry — it is not deleted.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="ob-amount">Amount</Label>
+                        <Input
+                          id="ob-amount"
+                          type="number"
+                          step="0.01"
+                          value={editForm.openingBalanceAmount}
+                          onChange={(e) => setEditForm({ ...editForm, openingBalanceAmount: e.target.value })}
+                          placeholder="0.00"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="ob-date">Date</Label>
+                        <Input
+                          id="ob-date"
+                          type="date"
+                          value={editForm.openingBalanceDate}
+                          onChange={(e) => setEditForm({ ...editForm, openingBalanceDate: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {editError && <p className="text-sm text-destructive">{editError}</p>}
                 <div className="flex gap-2 pt-1">
                   <Button type="button" variant="outline" className="flex-1" onClick={() => setEditOpen(false)}>Cancel</Button>

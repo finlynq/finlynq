@@ -233,8 +233,8 @@ export function NetWorthHistoryChart({
           <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
             <p className="text-sm text-muted-foreground max-w-sm">
               No history to chart yet. Add accounts and transactions to see your
-              {accountId != null ? " balance" : " net worth"} over time. If you have
-              investments but the line is flat, rebuild your investment history.
+              {accountId != null ? " balance" : " net worth"} over time. If the
+              chart looks stale or flat, rebuild your balance history.
             </p>
             <RebuildSnapshotsButton onDone={load} />
           </div>

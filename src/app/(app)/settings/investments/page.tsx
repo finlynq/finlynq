@@ -53,7 +53,6 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { RebuildSnapshotsButton } from "@/components/portfolio/rebuild-snapshots-button";
 import { PageSkeleton } from "@/components/page-skeleton";
 import { ErrorState } from "@/components/error-state";
 import { EmptyState } from "@/components/empty-state";
@@ -63,7 +62,6 @@ import {
   Plus,
   Pencil,
   Trash2,
-  History,
   ArrowUpDown,
   ChevronUp,
   ChevronDown,
@@ -1017,28 +1015,6 @@ export default function InvestmentsSettingsPage() {
           )}
         </TabsContent>
       </Tabs>
-
-      {/* Rebuild investment history (page-level utility). */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600">
-              <History className="h-5 w-5" />
-            </div>
-            <div>
-              <CardTitle className="text-base">Rebuild investment history</CardTitle>
-              <CardDescription>
-                Recompute daily portfolio value snapshots from your first transaction
-                to today. Run this if the &ldquo;Net Worth Over Time&rdquo; chart looks
-                stale after a back-dated trade edit.
-              </CardDescription>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <RebuildSnapshotsButton />
-        </CardContent>
-      </Card>
 
       {/* ── Add security dialog (bare catalog entry) ───────────────────── */}
       <Dialog open={addOpen} onOpenChange={(o) => { if (!o) setAddOpen(false); }}>

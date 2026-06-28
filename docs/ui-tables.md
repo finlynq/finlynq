@@ -61,7 +61,7 @@ moved onto `DataTable`.
 |---|---|---|
 | Securities catalog (Securities tab) | `src/app/(app)/settings/investments/page.tsx` | Per-column header filters (text/select) + 4-key 2-state click-to-sort. The filter/sort reference. |
 | Admin users | `src/app/(app)/admin/page.tsx` | Sortable with `aria-sort`, 8-column 2-state. |
-| Portfolio All-Holdings | `src/app/(app)/portfolio/_components/holdings-table.tsx` | `sortField`/`sortDir` 2-state + type filter + hide-empty; top rows have an expand region (the expand region itself stays custom — see below). |
+| Portfolio All-Holdings | `src/app/(app)/portfolio/_components/holdings-table.tsx` | `sortField`/`sortDir` 2-state + type filter + hide-empty; every column is sortable (name, totalQty, avgCost, price, marketValueDisplay, totalCost, dayChangeDisplay, dayChangePct, unrealizedGainDisplay, unrealizedGainPct, realizedGain, accounts — FINLYNQ-245); Day G/L and Unrealized G/L are split into separate $ and % columns (13 columns total); top rows have an expand region (the expand region itself stays custom — see below). |
 | Subscriptions | `src/app/(app)/subscriptions/page.tsx` | Has its own sort state. Evaluate during Phase 3. |
 
 ### Central-path candidate — flat, no sort yet

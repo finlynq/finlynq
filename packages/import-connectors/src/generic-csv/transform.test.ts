@@ -152,6 +152,77 @@ describe("parseGenericCsv (real export slice)", () => {
   });
 });
 
+// A slice carrying the cross-currency transfer columns: a same-currency
+// transfer (amount_received / currency_to empty) and a true FX transfer
+// (HKD out → GBP in with an explicit received amount).
+const FX_CSV = `date,amount,currency,account,note,category,account_to,amount_received,currency_to
+2024-03-26,-5000.00,HKD,BankAccount_01,Transaction #0005,,HSBC_One_HKD,,
+2024-03-27,-5000.00,HKD,HSBC_One_HKD,Transaction #0007,,HSBC_One_GBP,502.18,GBP
+2024-03-27,-1.00,GBP,HSBC_One_GBP,Travel #0008,Travel: General,,,
+`;
+
+const FX_MAPPING: GenericCsvMapping = {
+  date: "date",
+  amount: "amount",
+  currency: "currency",
+  account: "account",
+  note: "note",
+  category: "category",
+  accountTo: "account_to",
+  amountTo: "amount_received",
+  currencyTo: "currency_to",
+};
+
+describe("cross-currency (FX) transfers", () => {
+  it("auto-maps amount_received / currency_to via aliases", () => {
+    const headers = genericCsvHeaders(FX_CSV);
+    const { mapping, missingRequired } = suggestGenericCsvMapping(headers);
+    expect(missingRequired).toEqual([]);
+    expect(mapping.amountTo).toBe("amount_received");
+    expect(mapping.currencyTo).toBe("currency_to");
+  });
+
+  it("records each FX leg in its own currency (HKD out, GBP in)", () => {
+    const { transactions, errors } = parseGenericCsv(FX_CSV, FX_MAPPING);
+    expect(errors).toEqual([]);
+    const legs = transactions.filter((t) => t.payee.startsWith("Transfer") && t.note === "Transaction #0007");
+    expect(legs.length).toBe(2);
+    const out = legs.find((l) => l.amount < 0)!;
+    const inn = legs.find((l) => l.amount > 0)!;
+    expect(out).toMatchObject({ account: "HSBC_One_HKD", amount: -5000, currency: "HKD" });
+    expect(inn).toMatchObject({ account: "HSBC_One_GBP", amount: 502.18, currency: "GBP" });
+    expect(out.linkId).toBe(inn.linkId);
+  });
+
+  it("still mirrors the source amount for a same-currency transfer (no received amount)", () => {
+    const { transactions } = parseGenericCsv(FX_CSV, FX_MAPPING);
+    const legs = transactions.filter((t) => t.note === "Transaction #0005");
+    expect(legs.length).toBe(2);
+    const inn = legs.find((l) => l.amount > 0)!;
+    expect(inn).toMatchObject({ account: "HSBC_One_HKD", amount: 5000, currency: "HKD" });
+  });
+
+  it("rejects an FX transfer whose received amount is out of range", () => {
+    const rows = [
+      {
+        date: "2024-03-27",
+        amount: "-5000.00",
+        currency: "HKD",
+        account: "A",
+        note: "x",
+        category: "",
+        account_to: "B",
+        amount_received: "5000000000000", // 5e12 — past the 1e12 sanity bound
+        currency_to: "GBP",
+      },
+    ];
+    const { transactions, errors } = genericCsvRowsToRawTransactions(rows, FX_MAPPING);
+    expect(transactions).toEqual([]);
+    expect(errors.length).toBe(1);
+    expect(errors[0].reason).toMatch(/received amount out of range/i);
+  });
+});
+
 describe("options", () => {
   it("skips opening balances when includeOpeningBalance is false", () => {
     const { transactions } = parseGenericCsv(REAL_CSV, FULL_MAPPING, {

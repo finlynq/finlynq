@@ -18,9 +18,13 @@
 //     then `defaultCurrency`). HKD + CNY can coexist in one file / one account.
 //   * `account_to` present on a row makes it a SINGLE-ROW TRANSFER: we emit two
 //     RawTransactions sharing a `linkId` (outflow on `account`, inflow on
-//     `account_to`). Both legs carry the row currency — cross-currency transfers
-//     are detected and refused by the ORCHESTRATOR (it knows account
-//     currencies), not here.
+//     `account_to`). A same-currency transfer mirrors the source magnitude onto
+//     the inflow leg in the row currency. A CROSS-CURRENCY (FX) transfer that
+//     supplies `amountTo` + `currencyTo` records the inflow leg FAITHFULLY in
+//     its own currency (e.g. -5000 HKD out, +502.18 GBP in) — each leg then
+//     matches its own account's currency, so the orchestrator no longer has to
+//     refuse it. Same-currency-row transfers into different-currency accounts
+//     (no received amount) are still refused by the ORCHESTRATOR.
 //   * `(OPENING BALANCE)` category → an "Opening Balance" transaction (gated by
 //     `includeOpeningBalance`). `(AUDIT)` category → an "Adjustment" transaction.
 //   * Dates accept ISO `YYYY-MM-DD` and slash/dot/dash `D/M/Y` (or `M/D/Y` via
@@ -42,6 +46,14 @@ export interface GenericCsvMapping {
   note?: string;
   category?: string;
   accountTo?: string;
+  /** Cross-currency (FX) transfers only — the amount CREDITED to `accountTo`,
+   *  in `currencyTo`. When present (alongside `accountTo`), the inflow leg is
+   *  recorded with this magnitude in `currencyTo` rather than mirroring the
+   *  source amount. Absent → same-currency transfer (inflow mirrors source). */
+  amountTo?: string;
+  /** ISO currency of `amountTo`. Pairs with `amountTo`; both are needed to
+   *  treat a transfer as cross-currency. */
+  currencyTo?: string;
 }
 
 export const GENERIC_CSV_FIELDS = [
@@ -52,6 +64,8 @@ export const GENERIC_CSV_FIELDS = [
   "note",
   "category",
   "accountTo",
+  "amountTo",
+  "currencyTo",
 ] as const;
 
 export type GenericCsvField = (typeof GENERIC_CSV_FIELDS)[number];
@@ -76,6 +90,23 @@ const FIELD_ALIASES: Record<GenericCsvField, string[]> = {
     "transfer to",
     "destination",
     "to",
+  ],
+  amountTo: [
+    "amount received",
+    "amount to",
+    "received amount",
+    "amount (to)",
+    "amount credited",
+    "credit amount",
+    "destination amount",
+  ],
+  currencyTo: [
+    "currency to",
+    "currency received",
+    "received currency",
+    "currency (to)",
+    "to currency",
+    "destination currency",
   ],
 };
 
@@ -301,13 +332,35 @@ export function genericCsvRowsToRawTransactions(
     const categoryRaw = cell(row, mapping.category);
     const accountTo = cell(row, mapping.accountTo);
 
-    // 1) Transfer — single row carrying both legs.
+    // 1) Transfer — single row carrying both legs (shared linkId).
     if (accountTo) {
       const mag = Math.abs(signed);
       if (!isReasonableAmount(mag)) {
         fail(`Transfer amount out of range ("${amountStr}").`);
         return;
       }
+
+      // Cross-currency (FX) transfer: an explicit received amount + currency
+      // records the destination leg FAITHFULLY in its own currency, instead of
+      // mirroring the source magnitude. Needs BOTH amountTo + currencyTo;
+      // otherwise it stays a same-currency transfer (inflow mirrors source).
+      let inflowAmount = mag;
+      let inflowCurrency = currency;
+      const amountToStr = cell(row, mapping.amountTo);
+      const currencyToCell = cell(row, mapping.currencyTo);
+      if (amountToStr || currencyToCell) {
+        const recvMag = Math.abs(parseSignedMoney(amountToStr, decimalComma));
+        const recvCurrency = currencyToCell.toUpperCase();
+        if (amountToStr && !isReasonableAmount(recvMag)) {
+          fail(`Transfer received amount out of range ("${amountToStr}").`);
+          return;
+        }
+        if (isReasonableAmount(recvMag) && recvCurrency) {
+          inflowAmount = recvMag;
+          inflowCurrency = recvCurrency;
+        }
+      }
+
       const linkId = `generic-transfer-${rowNum}`;
       transactions.push({
         date,
@@ -323,10 +376,10 @@ export function genericCsvRowsToRawTransactions(
       transactions.push({
         date,
         account: accountTo,
-        amount: mag,
+        amount: inflowAmount,
         payee: `Transfer from ${account}`,
         category: "Transfer",
-        currency,
+        currency: inflowCurrency,
         note: noteVal,
         tags,
         linkId,

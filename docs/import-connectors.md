@@ -29,10 +29,11 @@ A connector is the same shape regardless of provider — only the parse step dif
    the orchestrator's job), dedups on `import_hash` / `fitId`, converts entered→
    account currency, writes the bank-ledger row + lineage, and runs lot hooks.
    Pass `txSource: 'connector'` so connector lineage stays distinct from uploads.
-4. **UI** — Settings → Import → **"Import from another provider"** tab: a
+4. **UI** — Settings → Import → **"Migrate from another app"** tab: a
    per-source submenu. Each provider is a tab component (`ConnectorTab`,
    `MoneyProConnectorTab`) that drives `POST /api/import/connectors/<provider>/…`.
-   Deep-link: `/settings/import?tab=connect[&provider=moneypro|wealthposition|generic-csv]`.
+   Deep-link: `/settings/import?tab=migrate[&provider=moneypro|wealthposition|generic-csv]`
+   (legacy `tab=connect` still accepted).
 
 ## Connectors that ship
 
@@ -95,10 +96,17 @@ breaks the moment a column is renamed/reordered). Instead it is **mapping-driven
   ISO column (falls back to the amount symbol, then `opts.defaultCurrency`); HKD +
   CNY can coexist in one file / one account.
 - **`account_to` present → single-row transfer** → two `linkId`-paired legs (outflow
-  on `account`, inflow on `account_to`), both in the row currency. **Cross-currency
-  transfers are refused** (v1) by the orchestrator — `refuseCrossCurrencyTransfers`
-  drops a transfer whose two legs resolve to accounts of different **modal**
-  currency and reports it as a skipped row.
+  on `account`, inflow on `account_to`). A **same-currency** transfer mirrors the
+  source magnitude onto the inflow leg in the row currency. A **cross-currency (FX)
+  transfer** that also supplies **`amount_received` + `currency_to`** (mapped to
+  `amountTo`/`currencyTo`) records the inflow leg FAITHFULLY in its own currency
+  (e.g. `-5000 HKD` out, `+502.18 GBP` in) — each leg then matches its own account's
+  currency, so the import pipeline stores it natively (or via locked-at-entry FX if
+  the chosen account currency differs). The orchestrator's `refuseCrossCurrencyTransfers`
+  now refuses only the AMBIGUOUS case: a same-currency-row transfer (no received
+  amount) whose two legs resolve to accounts of different **modal** currency — it's
+  dropped + reported as a skipped row with a hint to add the received-amount columns.
+  Transfers whose legs carry different currencies (explicit FX) are kept.
 - **`(OPENING BALANCE)` category → an `Opening Balance` tx** (gated by
   `opts.includeOpeningBalance`); **`(AUDIT)` → `Adjustment`** (markers configurable
   via `opts.openingBalanceMarkers` / `auditMarkers`).
@@ -119,11 +127,14 @@ Routes: `POST /api/import/connectors/generic-csv/{preview,execute}` — `preview
 takes an OPTIONAL `mapping` (suggests one when absent) and always returns
 `{ headers, sampleRows, mapping, missingRequired, mappingComplete, summary }`;
 `execute` requires the (date/amount/account-complete) `mapping`. UI:
-`GenericCsvConnectorTab` (a Match-columns step + sample preview + account mapping).
-Deep-link: `/settings/import?tab=connect&provider=generic-csv`.
+`GenericCsvConnectorTab` (a Match-columns step — incl. the optional `amount received`
+/ `currency received` FX-transfer columns — + sample preview + account mapping),
+under the **"Migrate from another app"** tab. Deep-link:
+`/settings/import?tab=migrate&provider=generic-csv` (legacy `tab=connect` still
+accepted).
 
-**Deferred:** cross-currency (FX-pair) transfers; using a per-row id column as
-`fitId` for idempotent re-import; MCP/mobile parity.
+**Deferred:** using a per-row id column as `fitId` for idempotent re-import;
+MCP/mobile parity.
 
 ## Load-bearing rules (learned the hard way)
 

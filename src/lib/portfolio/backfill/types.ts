@@ -273,6 +273,13 @@ export const PORTFOLIO_OP_KINDS = new Set([
  * `opening_balance` is in this set: carried-in standalone positions have
  * no cash leg by design (the user transferred the position from another
  * platform; no money moved in Finlynq).
+ *
+ * `balance_adjustment` is in this set too (FINLYNQ-206): it is a pair-less
+ * standalone balance entry. The 20260627 migration re-tags the legacy
+ * multi-row investment `opening_balance` rows to `balance_adjustment` so the
+ * one-opening-balance-per-account unique index can build — those rows must
+ * stay canonical to the planner/coverage (no cash leg to pair), exactly like
+ * `opening_balance`, or they'd be re-proposed as orphan_stock_leg.
  */
 export const PAIRLESS_CANONICAL_KINDS = new Set([
   "dividend",
@@ -280,6 +287,7 @@ export const PAIRLESS_CANONICAL_KINDS = new Set([
   "portfolio_income",
   "portfolio_expense",
   "opening_balance",
+  "balance_adjustment",
 ]);
 
 /**

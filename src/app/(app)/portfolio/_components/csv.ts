@@ -43,8 +43,12 @@ export function exportStocksToCSV(stocks: AggregatedStock[], etfTotalValueDispla
   downloadCSV(csv, `etf-stock-exposure-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
+// CSV is always emitted in the display currency (a single-currency export),
+// regardless of the table's "Holding currency" toggle. Column order mirrors the
+// All Holdings table left→right: Avg Cost, Current Price, Cost Basis, Mkt Value,
+// Day G/L, then the gain columns.
 export function exportByHoldingToCSV(rows: ByHoldingRow[], displayCurrency: string) {
-  const header = ["#", "Holding", "Description", "Symbol", "Type", "Total Qty", `Avg Cost ${displayCurrency}`, `Cost Basis ${displayCurrency}`, `Mkt Value ${displayCurrency}`, "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "Accounts", "Weight %"];
+  const header = ["#", "Holding", "Description", "Symbol", "Type", "Total Qty", `Avg Cost ${displayCurrency}`, `Current Price ${displayCurrency}`, `Cost Basis ${displayCurrency}`, `Mkt Value ${displayCurrency}`, `Day G/L ${displayCurrency}`, "Day %", "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "Accounts", "Weight %"];
   const out = rows.map((r, i) => [
     i + 1,
     `"${r.name}"`,
@@ -54,8 +58,11 @@ export function exportByHoldingToCSV(rows: ByHoldingRow[], displayCurrency: stri
     r.assetType,
     r.totalQty,
     r.avgCostDisplay?.toFixed(4) ?? "",
+    r.currentPriceDisplay?.toFixed(4) ?? "",
     r.costBasisDisplay.toFixed(2),
     r.marketValueDisplay.toFixed(2),
+    r.dayChangeDisplay?.toFixed(2) ?? "",
+    r.dayChangePct?.toFixed(2) ?? "",
     r.unrealizedGainDisplay.toFixed(2),
     r.unrealizedGainPct?.toFixed(2) ?? "",
     r.realizedGainDisplay.toFixed(2),
@@ -66,11 +73,17 @@ export function exportByHoldingToCSV(rows: ByHoldingRow[], displayCurrency: stri
     r.pctOfPortfolio?.toFixed(2) ?? "",
   ]);
   const totalMV = rows.reduce((s, r) => s + r.marketValueDisplay, 0);
+  const totalDay = rows.reduce((s, r) => s + (r.dayChangeDisplay ?? 0), 0);
   const totalUnreal = rows.reduce((s, r) => s + r.unrealizedGainDisplay, 0);
-  // 17 columns: #, Holding, Description, Symbol, Type, Total Qty, Avg Cost,
-  // Cost Basis, Mkt Value(8), Unrealized G/L(9), Unrealized %, Realized G/L,
-  // Dividends, Total Return, Total Return %, Accounts, Weight %(16).
-  out.push(["", "TOTAL", "", "", "", "", "", "", totalMV.toFixed(2), totalUnreal.toFixed(2), "", "", "", "", "", "", "100.00"] as unknown as string[]);
+  // 20 columns. Build the TOTAL row positionally so the indices can't drift:
+  // [1]=label, [9]=Mkt Value, [10]=Day G/L, [12]=Unrealized G/L, [19]=Weight %.
+  const total = Array<string>(header.length).fill("");
+  total[1] = "TOTAL";
+  total[9] = totalMV.toFixed(2);
+  total[10] = totalDay.toFixed(2);
+  total[12] = totalUnreal.toFixed(2);
+  total[19] = "100.00";
+  out.push(total as unknown as string[]);
   const csv = [header.join(","), ...out.map(r => (r as (string | number | null)[]).join(","))].join("\n");
   downloadCSV(csv, `portfolio-by-holding-${new Date().toISOString().slice(0, 10)}.csv`);
 }

@@ -95,6 +95,7 @@ function ThreadDialog({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
   const clearReplyFile = () => {
     setReplyFile(null);
@@ -145,6 +146,13 @@ function ThreadDialog({
       cancelled = true;
     };
   }, [feedbackId]);
+
+  // Scroll to the bottom of the thread whenever it loads or a new message arrives.
+  useEffect(() => {
+    if (thread) {
+      bottomRef.current?.scrollIntoView({ block: "end", behavior: "instant" });
+    }
+  }, [thread]);
 
   const send = async () => {
     const body = reply.trim();
@@ -228,11 +236,38 @@ function ThreadDialog({
                   )}
                 </div>
               ))}
+              <div ref={bottomRef} />
             </div>
             <div className="space-y-2">
               <textarea
                 value={reply}
                 onChange={(e) => setReply(e.target.value)}
+                onPaste={(e) => {
+                  const items = Array.from(e.clipboardData?.items ?? []);
+                  const imageItem = items.find(
+                    (item) => item.kind === "file" && item.type.startsWith("image/"),
+                  );
+                  if (!imageItem) return; // non-image paste → let browser handle normally
+                  const blob = imageItem.getAsFile();
+                  if (!blob) return;
+                  const pasted = new File(
+                    [blob],
+                    `screenshot-${Date.now()}.${blob.type.split("/")[1] ?? "png"}`,
+                    { type: blob.type },
+                  );
+                  setError(null);
+                  const check = validateFeedbackAttachment({
+                    filename: pasted.name,
+                    mime: pasted.type,
+                    size: pasted.size,
+                  });
+                  if ("code" in check) {
+                    setError(check.message);
+                    clearReplyFile();
+                    return;
+                  }
+                  setReplyFile(pasted);
+                }}
                 rows={3}
                 maxLength={4000}
                 placeholder="Write a reply…"

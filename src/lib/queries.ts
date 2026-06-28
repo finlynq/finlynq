@@ -391,6 +391,13 @@ export async function createTransaction(userId: string, data: {
   // cost-basis aggregators can pair the cash + stock legs. Distinct from the
   // transfer-pair `link_id`.
   tradeLinkId?: string | null;
+  // Phase-2 canonicalization discriminator. REST create/update intentionally
+  // keep `kind` off their boundary (it's reserved for portfolio-ops helpers
+  // in operations.ts); the only non-portfolio writer that sets it through this
+  // helper is the opening-balance path (FINLYNQ-206), which stamps
+  // `kind='opening_balance'`. Validated by the transactions_kind_check DB
+  // constraint. Defaults to NULL when omitted.
+  kind?: string | null;
   // Audit-source attribution (issue #28). Defaults to 'manual' when the
   // caller doesn't pass one — the UI POST handler relies on the default,
   // every other writer (import/MCP/connector/sample-data/restore) sets

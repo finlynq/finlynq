@@ -21,10 +21,15 @@ import { Combobox } from "@/components/ui/combobox";
 import {
   AlertCircle,
   CheckCircle2,
+  Clipboard,
+  ClipboardCheck,
+  Download,
   FileSpreadsheet,
   Loader2,
   Upload,
 } from "lucide-react";
+import { exportCsv } from "@/lib/csv-export";
+import { todayISO } from "@/lib/utils/date";
 
 interface AccountPlan {
   sourceName: string;
@@ -59,9 +64,33 @@ type Choice =
  * Collapsible, scrollable list of import issue messages. Each message is
  * self-describing (skipped rows vs. "imported anyway" warnings), so the list
  * is the "report" users asked for instead of a bare count.
+ *
+ * When expanded, a Download (.csv) and Copy-to-clipboard control let users
+ * save the full warning list for offline tracking (FINLYNQ-237).
  */
 function IssueDetails({ title, items }: { title: string; items: string[] }) {
+  const [copied, setCopied] = useState(false);
+
   if (items.length === 0) return null;
+
+  function handleDownload() {
+    exportCsv(
+      items.map((text) => ({ text })),
+      [{ header: "Warning", accessor: (r: { text: string }) => r.text }],
+      `import-warnings-${todayISO()}.csv`,
+    );
+  }
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(items.join("\n"));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard unavailable — silently ignore
+    }
+  }
+
   return (
     <details className="rounded-md border border-amber-500/30 bg-amber-500/5 text-xs">
       <summary className="flex cursor-pointer select-none items-center gap-1.5 px-3 py-2 font-medium text-amber-700 dark:text-amber-400">
@@ -73,6 +102,29 @@ function IssueDetails({ title, items }: { title: string; items: string[] }) {
           <li key={i}>{msg}</li>
         ))}
       </ul>
+      <div className="flex items-center gap-2 border-t border-amber-500/20 px-3 py-1.5">
+        <button
+          type="button"
+          onClick={handleDownload}
+          className="flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400 hover:underline"
+        >
+          <Download className="h-3 w-3" />
+          Download .csv
+        </button>
+        <span className="text-amber-500/40">·</span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400 hover:underline"
+        >
+          {copied ? (
+            <ClipboardCheck className="h-3 w-3" />
+          ) : (
+            <Clipboard className="h-3 w-3" />
+          )}
+          {copied ? "Copied!" : "Copy to clipboard"}
+        </button>
+      </div>
     </details>
   );
 }

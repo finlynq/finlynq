@@ -19,7 +19,7 @@ import { LotInspectorDialog } from "@/components/portfolio/lot-inspector-dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { formatCurrency } from "@/lib/currency";
+import { formatCurrencyAdaptive, magnitudeDecimals } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { exportByHoldingToCSV } from "./csv";
 import { holdingDescription } from "./holding-description";
@@ -31,7 +31,19 @@ import {
   type OverviewData,
 } from "../_types";
 
-type SortField = "name" | "marketValueDisplay" | "unrealizedGainPct";
+type SortField =
+  | "name"
+  | "totalQty"
+  | "avgCost"
+  | "price"
+  | "marketValueDisplay"
+  | "totalCost"
+  | "dayChangeDisplay"
+  | "dayChangePct"
+  | "unrealizedGainDisplay"
+  | "unrealizedGainPct"
+  | "realizedGain"
+  | "accounts";
 
 // Hoisted to module scope so it isn't re-created on every HoldingsTable render
 // (react-hooks/static-components, FINLYNQ-119). The active sort state is passed
@@ -62,6 +74,8 @@ export function HoldingsTable({
   setFilter,
   hideEmpty,
   setHideEmpty,
+  showNative,
+  setShowNative,
   sortField,
   sortDir,
   handleSort,
@@ -77,6 +91,11 @@ export function HoldingsTable({
   setFilter: (f: FilterType) => void;
   hideEmpty: boolean;
   setHideEmpty: (v: boolean) => void;
+  // When true, each row renders in its holding's own (native) currency instead
+  // of the display/reporting currency. Falls back to display per-row when the
+  // row spans multiple currencies (nativeCurrency === null).
+  showNative: boolean;
+  setShowNative: (v: boolean) => void;
   sortField: SortField;
   sortDir: "asc" | "desc";
   handleSort: (field: SortField) => void;
@@ -132,6 +151,15 @@ export function HoldingsTable({
               {hideEmpty ? "Hiding empty" : "Showing all"}
             </Button>
             <Button
+              variant={showNative ? "default" : "outline"}
+              size="sm"
+              className="text-xs gap-1.5 h-7"
+              onClick={() => setShowNative(!showNative)}
+              title={`Show each holding in its own currency instead of your display currency (${data.displayCurrency ?? displayCurrency})`}
+            >
+              {showNative ? "Holding currency" : `In ${data.displayCurrency ?? displayCurrency}`}
+            </Button>
+            <Button
               variant="outline"
               size="sm"
               className="text-xs gap-1.5 h-7"
@@ -148,20 +176,43 @@ export function HoldingsTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="cursor-pointer select-none w-8" />
-                <TableHead className="cursor-pointer select-none" onClick={() => handleSort("name")}>
+                <TableHead className="w-8" />
+                <TableHead className="cursor-pointer select-none" aria-sort={sortField === "name" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("name")}>
                   Holding <SortIcon field="name" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
-                <TableHead className="text-right">Total Qty</TableHead>
-                <TableHead className="text-right">Avg Cost</TableHead>
-                <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("marketValueDisplay")}>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "totalQty" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("totalQty")}>
+                  Total Qty <SortIcon field="totalQty" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "avgCost" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("avgCost")}>
+                  Avg Cost <SortIcon field="avgCost" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "price" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("price")}>
+                  Price <SortIcon field="price" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "marketValueDisplay" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("marketValueDisplay")}>
                   Mkt Value <SortIcon field="marketValueDisplay" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
-                <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("unrealizedGainPct")}>
-                  Unrealized G/L <SortIcon field="unrealizedGainPct" sortField={sortField} sortDir={sortDir} />
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "totalCost" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("totalCost")}>
+                  Total Cost <SortIcon field="totalCost" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
-                <TableHead className="text-right">Realized G/L</TableHead>
-                <TableHead className="text-right">Accounts</TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "dayChangeDisplay" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("dayChangeDisplay")}>
+                  Day G/L $ <SortIcon field="dayChangeDisplay" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "dayChangePct" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("dayChangePct")}>
+                  Day % <SortIcon field="dayChangePct" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "unrealizedGainDisplay" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("unrealizedGainDisplay")}>
+                  Unreal G/L $ <SortIcon field="unrealizedGainDisplay" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "unrealizedGainPct" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("unrealizedGainPct")}>
+                  Unreal % <SortIcon field="unrealizedGainPct" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "realizedGain" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("realizedGain")}>
+                  Realized G/L <SortIcon field="realizedGain" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "accounts" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("accounts")}>
+                  Accounts <SortIcon field="accounts" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -173,6 +224,22 @@ export function HoldingsTable({
                 // equities), so prefer the quote long name; null-safe fallback.
                 const description = holdingDescription({ quoteName: r.description, name: r.name, symbol: r.symbol });
                 const reportCcy = data.displayCurrency ?? displayCurrency;
+                // Currency mode for this row. Native is only honored when the row
+                // resolved to a single quote currency; otherwise fall back to
+                // display so a multi-currency rollup is never mislabeled.
+                const useNative = showNative && r.nativeCurrency != null;
+                const ccy = useNative ? (r.nativeCurrency as string) : reportCcy;
+                const pickN = (nat: number | null, disp: number | null) =>
+                  useNative && nat != null ? nat : disp;
+                const avgCost = pickN(r.avgCostNative, r.avgCostDisplay);
+                const price = pickN(r.currentPriceNative, r.currentPriceDisplay);
+                const mktVal = pickN(r.marketValueNative, r.marketValueDisplay) ?? 0;
+                const totalCost = pickN(r.costBasisNative, r.costBasisDisplay) ?? 0;
+                const unreal = pickN(r.unrealizedGainNative, r.unrealizedGainDisplay) ?? 0;
+                const realized = pickN(r.realizedGainNative, r.realizedGainDisplay) ?? 0;
+                const dayAmt = pickN(r.dayChangeNative, r.dayChangeDisplay);
+                const divs = pickN(r.dividendsNative, r.dividendsDisplay) ?? 0;
+                const totalReturn = pickN(r.totalReturnNative, r.totalReturnDisplay) ?? 0;
                 const memberHoldings = holdingsByCanonicalKey.get(r.key) ?? [];
                 // Aggregate-level first-purchase / days-held are derived
                 // from the per-account members so they reflect the
@@ -237,31 +304,55 @@ export function HoldingsTable({
                       </TableCell>
                       <TableCell className={`text-right font-mono text-sm ${r.totalQty < 0 ? "text-rose-600 dark:text-rose-400" : ""}`}>
                         {r.totalQty !== 0
-                          ? r.totalQty.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: r.totalQty % 1 === 0 ? 0 : 4 })
+                          ? r.totalQty.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: magnitudeDecimals(r.totalQty) })
                           : <span className="text-muted-foreground text-xs">--</span>}
                       </TableCell>
                       <TableCell className="text-right font-mono text-sm">
-                        {r.avgCostDisplay != null ? formatCurrency(r.avgCostDisplay, reportCcy) : <span className="text-muted-foreground text-xs">--</span>}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-sm font-medium">
-                        {r.marketValueDisplay !== 0 ? formatCurrency(r.marketValueDisplay, reportCcy) : <span className="text-muted-foreground text-xs">--</span>}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div>
-                          <p className={`text-sm font-mono font-medium ${r.unrealizedGainDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                            {r.unrealizedGainDisplay >= 0 ? "+" : ""}{formatCurrency(r.unrealizedGainDisplay, reportCcy)}
-                          </p>
-                          {r.unrealizedGainPct != null && (
-                            <p className={`text-xs font-mono ${r.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                              {r.unrealizedGainPct >= 0 ? "+" : ""}{r.unrealizedGainPct.toFixed(2)}%
-                            </p>
-                          )}
-                        </div>
+                        {avgCost != null ? formatCurrencyAdaptive(avgCost, ccy) : <span className="text-muted-foreground text-xs">--</span>}
                       </TableCell>
                       <TableCell className="text-right font-mono text-sm">
-                        {r.realizedGainDisplay !== 0 ? (
-                          <span className={`${r.realizedGainDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                            {r.realizedGainDisplay >= 0 ? "+" : ""}{formatCurrency(r.realizedGainDisplay, reportCcy)}
+                        {price != null ? formatCurrencyAdaptive(price, ccy) : <span className="text-muted-foreground text-xs">--</span>}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-sm font-medium">
+                        {mktVal !== 0 ? formatCurrencyAdaptive(mktVal, ccy) : <span className="text-muted-foreground text-xs">--</span>}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-sm">
+                        {totalCost !== 0 ? formatCurrencyAdaptive(totalCost, ccy) : <span className="text-muted-foreground text-xs">--</span>}
+                      </TableCell>
+                      {/* Day G/L $ — split from % (FINLYNQ-245) */}
+                      <TableCell className="text-right font-mono text-sm">
+                        {dayAmt != null ? (
+                          <span className={`${dayAmt >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                            {dayAmt >= 0 ? "+" : ""}{formatCurrencyAdaptive(dayAmt, ccy)}
+                          </span>
+                        ) : <span className="text-muted-foreground text-xs">--</span>}
+                      </TableCell>
+                      {/* Day % — separate sortable column (FINLYNQ-245) */}
+                      <TableCell className="text-right font-mono text-sm">
+                        {r.dayChangePct != null ? (
+                          <span className={`${r.dayChangePct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                            {r.dayChangePct >= 0 ? "+" : ""}{r.dayChangePct.toFixed(2)}%
+                          </span>
+                        ) : <span className="text-muted-foreground text-xs">--</span>}
+                      </TableCell>
+                      {/* Unrealized G/L $ — split from % (FINLYNQ-245) */}
+                      <TableCell className="text-right font-mono text-sm">
+                        <span className={`font-medium ${unreal >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                          {unreal >= 0 ? "+" : ""}{formatCurrencyAdaptive(unreal, ccy)}
+                        </span>
+                      </TableCell>
+                      {/* Unrealized % — separate sortable column (FINLYNQ-245) */}
+                      <TableCell className="text-right font-mono text-sm">
+                        {r.unrealizedGainPct != null ? (
+                          <span className={`font-medium ${r.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                            {r.unrealizedGainPct >= 0 ? "+" : ""}{r.unrealizedGainPct.toFixed(2)}%
+                          </span>
+                        ) : <span className="text-muted-foreground text-xs">--</span>}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-sm">
+                        {realized !== 0 ? (
+                          <span className={`${realized >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                            {realized >= 0 ? "+" : ""}{formatCurrencyAdaptive(realized, ccy)}
                           </span>
                         ) : <span className="text-muted-foreground text-xs">--</span>}
                       </TableCell>
@@ -274,7 +365,7 @@ export function HoldingsTable({
                     {isExpanded && (
                       <TableRow key={`${r.key}-detail`} className="bg-muted/10 border-0">
                         <TableCell />
-                        <TableCell colSpan={7} className="py-3">
+                        <TableCell colSpan={12} className="py-3">
                           {/* Aggregate-level info grid (shared across the
                               accounts inside this canonical position). */}
                           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-xs">
@@ -292,18 +383,18 @@ export function HoldingsTable({
                             </div>
                             <div>
                               <p className="text-muted-foreground">Cost Basis</p>
-                              <p className="font-medium font-mono">{r.costBasisDisplay !== 0 ? formatCurrency(r.costBasisDisplay, reportCcy) : "--"}</p>
+                              <p className="font-medium font-mono">{totalCost !== 0 ? formatCurrencyAdaptive(totalCost, ccy) : "--"}</p>
                             </div>
                             <div>
                               <p className="text-muted-foreground">Dividends</p>
                               <p className="font-medium font-mono text-emerald-600 dark:text-emerald-400">
-                                {r.dividendsDisplay > 0 ? `+${formatCurrency(r.dividendsDisplay, reportCcy)}` : "--"}
+                                {divs > 0 ? `+${formatCurrencyAdaptive(divs, ccy)}` : "--"}
                               </p>
                             </div>
                             <div>
                               <p className="text-muted-foreground">Total Return</p>
-                              <p className={`font-medium font-mono ${r.totalReturnDisplay >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                                {r.totalReturnDisplay !== 0 ? `${r.totalReturnDisplay >= 0 ? "+" : ""}${formatCurrency(r.totalReturnDisplay, reportCcy)}` : "--"}
+                              <p className={`font-medium font-mono ${totalReturn >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                                {totalReturn !== 0 ? `${totalReturn >= 0 ? "+" : ""}${formatCurrencyAdaptive(totalReturn, ccy)}` : "--"}
                                 {r.totalReturnPct != null && (
                                   <span className="ml-1 text-[10px]">({r.totalReturnPct >= 0 ? "+" : ""}{r.totalReturnPct.toFixed(1)}%)</span>
                                 )}
@@ -349,7 +440,7 @@ export function HoldingsTable({
                                         </TableCell>
                                         <TableCell className={`text-right font-mono text-xs ${hasMetrics && h.quantity != null && h.quantity < 0 ? "text-rose-600 dark:text-rose-400" : ""}`}>
                                           {hasMetrics && h.quantity != null
-                                            ? h.quantity.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: h.quantity % 1 === 0 ? 0 : 4 })
+                                            ? h.quantity.toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: magnitudeDecimals(h.quantity) })
                                             : <span className="text-muted-foreground">--</span>}
                                           {hasMetrics && h.quantity != null && h.quantity < 0 && (
                                             <span className="ml-1 text-[9px] uppercase tracking-wider text-rose-500" title="Short position">short</span>
@@ -357,25 +448,25 @@ export function HoldingsTable({
                                         </TableCell>
                                         <TableCell className="text-right font-mono text-xs">
                                           {hasMetrics && h.avgCostPerShare != null
-                                            ? formatCurrency(h.avgCostPerShare, nativeCcy)
+                                            ? formatCurrencyAdaptive(h.avgCostPerShare, nativeCcy)
                                             : <span className="text-muted-foreground">--</span>}
                                         </TableCell>
                                         <TableCell className="text-right font-mono text-xs font-medium">
-                                          {hasMetrics && h.marketValueDisplay != null
-                                            ? formatCurrency(h.marketValueDisplay, reportCcy)
+                                          {hasMetrics && (showNative ? h.marketValue : h.marketValueDisplay) != null
+                                            ? formatCurrencyAdaptive((showNative ? h.marketValue : h.marketValueDisplay) as number, showNative ? nativeCcy : reportCcy)
                                             : <span className="text-muted-foreground">--</span>}
                                         </TableCell>
                                         <TableCell className="text-right text-xs">
                                           {hasMetrics && h.unrealizedGain != null ? (
                                             <span className={`font-mono ${h.unrealizedGain >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                                              {h.unrealizedGain >= 0 ? "+" : ""}{formatCurrency(h.unrealizedGain, nativeCcy)}
+                                              {h.unrealizedGain >= 0 ? "+" : ""}{formatCurrencyAdaptive(h.unrealizedGain, nativeCcy)}
                                             </span>
                                           ) : <span className="text-muted-foreground">--</span>}
                                         </TableCell>
                                         <TableCell className="text-right text-xs">
                                           {h.realizedGain != null && h.realizedGain !== 0 ? (
                                             <span className={`font-mono ${h.realizedGain >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                                              {h.realizedGain >= 0 ? "+" : ""}{formatCurrency(h.realizedGain, nativeCcy)}
+                                              {h.realizedGain >= 0 ? "+" : ""}{formatCurrencyAdaptive(h.realizedGain, nativeCcy)}
                                             </span>
                                           ) : <span className="text-muted-foreground">--</span>}
                                         </TableCell>
@@ -440,7 +531,7 @@ export function HoldingsTable({
               })}
               {filteredHoldings.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={13} className="text-center text-muted-foreground py-8">
                     No {filter === "all" ? "" : ASSET_TYPE_CONFIG[filter]?.label} holdings found.
                     {hideEmpty && data.holdings.length > 0 && (
                       <span className="block mt-1 text-xs">

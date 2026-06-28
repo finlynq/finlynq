@@ -43,7 +43,7 @@ export default function PortfolioPage() {
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");
   const { benchmarks, benchmarkLoading } = useBenchmarks(benchmarkPeriod, !!devMode);
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
-  const [sortField, setSortField] = useState<"name" | "marketValueDisplay" | "unrealizedGainPct">("marketValueDisplay");
+  const [sortField, setSortField] = useState<"name" | "totalQty" | "avgCost" | "price" | "marketValueDisplay" | "totalCost" | "dayChangeDisplay" | "dayChangePct" | "unrealizedGainDisplay" | "unrealizedGainPct" | "realizedGain" | "accounts">("marketValueDisplay");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   // Tracks expanded rows by canonical-holding key (string) — issue #25
   // restructure. Was Set<number> (portfolio_holdings.id) before the
@@ -52,10 +52,12 @@ export default function PortfolioPage() {
   const [etfXrayTab, setEtfXrayTab] = useState<EtfXrayTab>("stocks");
   const [stocksPage, setStocksPage] = useState(1);
   const STOCKS_PER_PAGE = 25;
-  // (Removed showInReporting toggle 2026-05-01: the All Holdings table
-  // now renders byHolding rows that are already in display currency, so
-  // the toggle had no effect. Per-account members in the expanded section
-  // still show native currency for clarity.)
+  // Show the All Holdings table in each holding's own (native) currency
+  // instead of the display/reporting currency. Re-introduced after the API
+  // started returning per-row native-currency rollups on `byHolding`; rows
+  // that span multiple currencies fall back to display currency per-row.
+  // Component-state only (resets on reload).
+  const [showNative, setShowNative] = useState(false);
   // Hide entries with no current position. For table rows: quantity is null
   // or 0 (matches the row's own `hasMetrics` rule below — these are the
   // rows that already render as "--" across Qty/Avg/Mkt Value). For chart
@@ -78,8 +80,17 @@ export default function PortfolioPage() {
       let cmp = 0;
       switch (sortField) {
         case "name": cmp = (a.name ?? "").localeCompare(b.name ?? ""); break;
+        case "totalQty": cmp = (a.totalQty ?? 0) - (b.totalQty ?? 0); break;
+        case "avgCost": cmp = (a.avgCostDisplay ?? 0) - (b.avgCostDisplay ?? 0); break;
+        case "price": cmp = (a.currentPriceDisplay ?? 0) - (b.currentPriceDisplay ?? 0); break;
         case "marketValueDisplay": cmp = (a.marketValueDisplay ?? 0) - (b.marketValueDisplay ?? 0); break;
+        case "totalCost": cmp = (a.costBasisDisplay ?? 0) - (b.costBasisDisplay ?? 0); break;
+        case "dayChangeDisplay": cmp = (a.dayChangeDisplay ?? 0) - (b.dayChangeDisplay ?? 0); break;
+        case "dayChangePct": cmp = (a.dayChangePct ?? 0) - (b.dayChangePct ?? 0); break;
+        case "unrealizedGainDisplay": cmp = (a.unrealizedGainDisplay ?? 0) - (b.unrealizedGainDisplay ?? 0); break;
         case "unrealizedGainPct": cmp = (a.unrealizedGainPct ?? 0) - (b.unrealizedGainPct ?? 0); break;
+        case "realizedGain": cmp = (a.realizedGainDisplay ?? 0) - (b.realizedGainDisplay ?? 0); break;
+        case "accounts": cmp = (a.accountCount ?? 0) - (b.accountCount ?? 0); break;
       }
       return sortDir === "desc" ? -cmp : cmp;
     });
@@ -123,7 +134,7 @@ export default function PortfolioPage() {
     });
   };
 
-  const handleSort = (field: typeof sortField) => {
+  const handleSort = (field: "name" | "totalQty" | "avgCost" | "price" | "marketValueDisplay" | "totalCost" | "dayChangeDisplay" | "dayChangePct" | "unrealizedGainDisplay" | "unrealizedGainPct" | "realizedGain" | "accounts") => {
     if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
     else { setSortField(field); setSortDir("asc"); }
   };
@@ -472,6 +483,8 @@ export default function PortfolioPage() {
         setFilter={setFilter}
         hideEmpty={hideEmpty}
         setHideEmpty={setHideEmpty}
+        showNative={showNative}
+        setShowNative={setShowNative}
         sortField={sortField}
         sortDir={sortDir}
         handleSort={handleSort}

@@ -55,7 +55,7 @@ const navGroups: { label: string; items: NavItem[] }[] = [
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, color: ACTIVE_ACCENT, mode: "prod" },
       { href: "/whats-new", label: "What's New", icon: Megaphone, color: ACTIVE_ACCENT, mode: "prod" },
-      { href: "/mcp-guide", label: "MCP Guide", icon: Bot, color: ACTIVE_ACCENT, mode: "prod" },
+      { href: "/connect", label: "MCP Guide", icon: Bot, color: ACTIVE_ACCENT, mode: "prod" },
       { href: "/chat", label: "AI Chat", icon: MessageSquare, color: ACTIVE_ACCENT, mode: "dev" },
     ],
   },

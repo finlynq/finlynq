@@ -10,9 +10,12 @@
  *
  *   1. Group rows by source account → a per-account "plan" (modal currency,
  *      count, and whether it matches an existing Finlynq account by name).
- *   2. Refuse cross-currency transfers (v1) — a transfer whose two legs resolve
- *      to accounts with different currencies is dropped + reported, since the
- *      single source amount can't faithfully represent both sides.
+ *   2. Refuse AMBIGUOUS cross-currency transfers — a same-currency-row transfer
+ *      whose two legs resolve to accounts with different currencies is dropped +
+ *      reported, since one source amount can't faithfully represent both sides.
+ *      A transfer that supplies an explicit received amount + currency
+ *      (`amountTo`/`currencyTo`) records each leg in its own currency and is
+ *      KEPT — its legs already carry different currencies.
  *   3. On execute: resolve-or-create accounts + categories (encrypted names via
  *      `buildNameFields`), rewrite each row's `account` to the chosen Finlynq
  *      account name, then hand off to `executeImport` (txSource 'connector').
@@ -145,11 +148,18 @@ function buildAccountPlans(
 }
 
 /**
- * Drop transfer legs whose two accounts resolve to different currencies (v1 is
- * same-currency only). Returns the kept rows plus a synthetic error per refused
- * transfer. A transfer leg is identified by a shared `linkId`; the two legs
- * carry the same row currency, so the mismatch only surfaces against each
- * account's MODAL currency (computed from the whole file).
+ * Refuse only AMBIGUOUS cross-currency transfers. A transfer leg is identified
+ * by a shared `linkId`. Two cases:
+ *
+ *   - The two legs carry DIFFERENT row currencies → an explicit FX transfer
+ *     (the source amount + the received `amountTo`/`currencyTo`). Each leg
+ *     already records its own side faithfully in its own currency, so it's KEPT
+ *     regardless of the legs' account currencies.
+ *   - The two legs carry the SAME row currency but resolve to accounts of
+ *     different MODAL currency → ambiguous (no faithful received amount to set
+ *     the other side) → dropped + reported as a skipped row.
+ *
+ * Returns the kept rows plus a synthetic error per refused transfer.
  */
 function refuseCrossCurrencyTransfers(
   rows: RawTransaction[],
@@ -158,19 +168,26 @@ function refuseCrossCurrencyTransfers(
   const planCurrency = new Map<string, string>();
   for (const p of plans) planCurrency.set(p.sourceName.toLowerCase().trim(), p.currency);
 
-  // linkId → the accounts of its legs.
+  // linkId → its legs' accounts + the per-leg row currencies.
   const legAccounts = new Map<string, string[]>();
+  const legCurrencies = new Map<string, Set<string>>();
   for (const r of rows) {
     if (!r.linkId) continue;
     const list = legAccounts.get(r.linkId) ?? [];
     list.push(r.account);
     legAccounts.set(r.linkId, list);
+    const curs = legCurrencies.get(r.linkId) ?? new Set<string>();
+    curs.add((r.currency ?? "USD").toUpperCase());
+    legCurrencies.set(r.linkId, curs);
   }
 
   const badLinks = new Set<string>();
   const errors: Array<{ row: number; reason: string }> = [];
   let synthRow = 100000; // distinct from transform row numbers
   for (const [linkId, accts] of legAccounts) {
+    // Different leg currencies = explicit FX transfer with a received amount —
+    // each side is faithful, keep it.
+    if ((legCurrencies.get(linkId)?.size ?? 1) > 1) continue;
     const currencies = new Set(
       accts.map((a) => planCurrency.get(a.toLowerCase().trim()) ?? "USD"),
     );
@@ -180,7 +197,7 @@ function refuseCrossCurrencyTransfers(
         row: synthRow++,
         reason: `Cross-currency transfer ${accts.join(" → ")} (${[...currencies].join(
           " / ",
-        )}) skipped — only same-currency transfers are supported.`,
+        )}) skipped — add an "amount received" + "currency received" column to import it faithfully.`,
       });
     }
   }

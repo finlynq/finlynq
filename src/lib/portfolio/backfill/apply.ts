@@ -823,6 +823,8 @@ const PAIRLESS_DB_KINDS_FOR_OVERRIDE = new Set([
   "portfolio_income",
   "portfolio_expense",
   "opening_balance",
+  // FINLYNQ-206 — re-tagged former opening_balance rows are pair-less canonical.
+  "balance_adjustment",
 ]);
 
 /** Replay applyLotEffectsForTx on a set of tx ids (post-commit). Mirrors the

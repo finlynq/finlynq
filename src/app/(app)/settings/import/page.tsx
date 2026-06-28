@@ -43,14 +43,16 @@ import {
   ToggleLeft,
   ToggleRight,
   FileSpreadsheet,
+  EyeOff,
+  ChevronRight,
 } from "lucide-react";
+import Link from "next/link";
 import { TemplateManager } from "@/app/(app)/import/components/template-manager";
 import { ConnectorTab } from "@/app/(app)/import/components/connector-tab";
 import { MoneyProConnectorTab } from "@/app/(app)/import/components/moneypro-connector-tab";
 import { GenericCsvConnectorTab } from "@/app/(app)/import/components/generic-csv-connector-tab";
 import { InvestmentStatementImporter } from "@/app/(app)/import/components/investment-statement-importer";
 import { EmailRulesManager } from "@/components/inbox/email-rules-manager";
-import { ReconcileHideAccountsCard } from "@/components/inbox/reconcile-hide-accounts-card";
 import type { ImportTemplate } from "@/lib/import-templates";
 
 type ImportProvider = "wealthposition" | "moneypro" | "generic-csv";
@@ -58,7 +60,7 @@ type ImportProvider = "wealthposition" | "moneypro" | "generic-csv";
 export default function ImportSettingsPage() {
   const [accountNames, setAccountNames] = useState<string[]>([]);
   const [templates, setTemplates] = useState<ImportTemplate[]>([]);
-  // "Import from another provider" tab — which provider's flow is open.
+  // "Migrate from another app" tab — which provider's flow is open.
   const [provider, setProvider] = useState<ImportProvider | null>(null);
   // Active tab (controlled so it's deep-linkable via ?tab=).
   const [tab, setTab] = useState("templates");
@@ -74,6 +76,9 @@ export default function ImportSettingsPage() {
   const [confirmCsvMapping, setConfirmCsvMapping] = useState(true);
   const [confirmCsvLoading, setConfirmCsvLoading] = useState(false);
 
+  // FINLYNQ-241 — count of hidden accounts, shown on the entry-point card.
+  const [hiddenAccountCount, setHiddenAccountCount] = useState<number | null>(null);
+
   // FINLYNQ-138 — per-user imported-email retention window (days). Governs how
   // long raw forwarded emails (email_inbox) are kept before the cleanup sweep
   // hard-deletes them. Bounded {7,30,60,90}; default 60.
@@ -83,17 +88,19 @@ export default function ImportSettingsPage() {
   ]);
   const [retentionLoading, setRetentionLoading] = useState(false);
 
-  // Deep-link support: /settings/import?tab=connect[&provider=moneypro].
+  // Deep-link support: /settings/import?tab=migrate[&provider=moneypro].
+  // `connect` is the legacy value for the provider-migration tab — accepted as
+  // an alias so old links/bookmarks keep working.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const t = params.get("tab");
-    if (t && ["templates", "email", "connect", "statements"].includes(t)) {
-      setTab(t);
+    if (t && ["templates", "email", "migrate", "connect", "statements"].includes(t)) {
+      setTab(t === "connect" ? "migrate" : t);
     }
     const p = params.get("provider");
     if (p === "wealthposition" || p === "moneypro" || p === "generic-csv") {
       setProvider(p);
-      setTab("connect");
+      setTab("migrate");
     }
   }, []);
 
@@ -136,6 +143,16 @@ export default function ImportSettingsPage() {
           setRetentionDays(data.retentionDays);
         }
         if (Array.isArray(data.options)) setRetentionOptions(data.options);
+      })
+      .catch(() => {});
+
+    // FINLYNQ-241 — load the hidden-account count for the entry-point card.
+    fetch("/api/settings/reconcile-hidden-accounts")
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.accountIds)) {
+          setHiddenAccountCount(data.accountIds.length);
+        }
       })
       .catch(() => {});
   }, []);
@@ -214,8 +231,8 @@ export default function ImportSettingsPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Import</h1>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Manage CSV templates, connected services, and your email-import
-          address. To upload a file, use the{" "}
+          Manage CSV templates and your email-import address, or migrate your
+          full history from another app. To upload a bank statement, use the{" "}
           <a href="/import" className="underline hover:text-foreground">
             Import page
           </a>
@@ -277,8 +294,42 @@ export default function ImportSettingsPage() {
         </CardContent>
       </Card>
 
-      {/* FINLYNQ-147 — hide accounts from the /import reconcile dropdown. */}
-      <ReconcileHideAccountsCard />
+      {/* FINLYNQ-147 / FINLYNQ-241 — hide accounts from the /import reconcile
+          dropdown. The full list lives on a subpage to keep this page compact. */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-600">
+              <EyeOff className="h-5 w-5" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Reconcile dropdown visibility</CardTitle>
+              <CardDescription>
+                Choose which accounts appear in the account picker on the{" "}
+                <Link href="/import" className="underline hover:text-foreground">
+                  Import
+                </Link>{" "}
+                page. Hidden accounts stay fully accessible via direct links.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Link
+            href="/settings/import/reconcile-visibility"
+            className="inline-flex items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <EyeOff className="h-4 w-4 text-muted-foreground" />
+            Manage account visibility
+            {hiddenAccountCount !== null && hiddenAccountCount > 0 && (
+              <span className="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                {hiddenAccountCount} hidden
+              </span>
+            )}
+            <ChevronRight className="h-4 w-4 text-muted-foreground ml-auto" />
+          </Link>
+        </CardContent>
+      </Card>
 
       <Tabs value={tab} onValueChange={(v) => setTab(v ?? "templates")}>
         <TabsList>
@@ -295,9 +346,9 @@ export default function ImportSettingsPage() {
             <Mail className="h-4 w-4 mr-1.5" />
             Email Import
           </TabsTrigger>
-          <TabsTrigger value="connect">
+          <TabsTrigger value="migrate">
             <LinkIcon className="h-4 w-4 mr-1.5" />
-            Import from another provider
+            Migrate from another app
           </TabsTrigger>
           <TabsTrigger value="statements">
             <Landmark className="h-4 w-4 mr-1.5" />
@@ -474,14 +525,19 @@ export default function ImportSettingsPage() {
           </div>
         </TabsContent>
 
-        {/* Import from another provider — per-source submenu */}
-        <TabsContent value="connect">
-          <div className="mt-4 space-y-4" id="connect">
+        {/* Migrate from another app — per-source submenu */}
+        <TabsContent value="migrate">
+          <div className="mt-4 space-y-4" id="migrate">
             {provider === null ? (
               <>
                 <p className="text-sm text-muted-foreground">
-                  Bring your history over from another personal-finance app.
-                  Pick a provider to start.
+                  Migrate your full history from another personal-finance app.
+                  This is a one-time bulk move of your whole ledger — to import a
+                  bank statement instead, use the{" "}
+                  <a href="/import" className="underline hover:text-foreground">
+                    Import page
+                  </a>
+                  . Pick an app to start.
                 </p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <button

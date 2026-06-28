@@ -52,6 +52,33 @@ export function formatCurrency(
   }
 }
 
+/**
+ * Returns the appropriate number of decimal places for a magnitude-adaptive
+ * display of a numeric value (currency amount or quantity):
+ *   |value| > 10        → 0 decimals  (large amounts — no fractional noise)
+ *   0.1 ≤ |value| ≤ 10 → 2 decimals  (mid-range — standard precision)
+ *   |value| < 0.1       → 3 decimals  (small values — need extra precision)
+ *
+ * Used by `formatCurrencyAdaptive` and the quantity formatter in the
+ * All Holdings table (FINLYNQ-244). CSV exports stay at full precision.
+ */
+export function magnitudeDecimals(value: number): 0 | 2 | 3 {
+  const abs = Math.abs(value);
+  if (abs > 10) return 0;
+  if (abs >= 0.1) return 2;
+  return 3;
+}
+
+/**
+ * Format a currency amount with magnitude-adaptive decimal places.
+ * Wraps `formatCurrency` — chooses decimals via `magnitudeDecimals(value)`.
+ * Keep CSV exports and other precision-sensitive surfaces on `formatCurrency`
+ * directly (do NOT route those through this helper).
+ */
+export function formatCurrencyAdaptive(value: number, currency: string): string {
+  return formatCurrency(value, currency, { decimals: magnitudeDecimals(value) });
+}
+
 export function formatNumber(amount: number): string {
   return new Intl.NumberFormat("en-CA", {
     minimumFractionDigits: 2,
