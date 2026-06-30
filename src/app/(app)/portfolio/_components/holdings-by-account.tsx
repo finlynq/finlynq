@@ -55,16 +55,11 @@ export function HoldingsByAccount({
           // *Display fields the API already emits in displayCurrency.
           const acctMktValue = items.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
           const acctUnrealized = items.reduce((s, h) => s + (h.unrealizedGainDisplay ?? 0), 0);
-          // Realized + dividends are emitted in each holding's quote ccy,
-          // not display ccy — fold via marketValue/marketValueDisplay
-          // ratio (the same "implied FX" the per-row toolbar mode uses).
-          const acctRealized = items.reduce((s, h) => {
-            if (h.realizedGain == null) return s;
-            const conv = (h.marketValue && h.marketValueDisplay && h.marketValue !== 0)
-              ? h.marketValueDisplay / h.marketValue
-              : 1;
-            return s + h.realizedGain * conv;
-          }, 0);
+          // Realized gain is emitted by the API in displayCurrency as
+          // `realizedGainDisplay` (historical-per-closure FX when the lots
+          // read-flip is on — matching the realized-gains report). Sum it
+          // directly instead of re-folding native via an implied current-rate.
+          const acctRealized = items.reduce((s, h) => s + (h.realizedGainDisplay ?? 0), 0);
 
           return (
             <div key={accountName} className="border rounded-lg overflow-hidden">

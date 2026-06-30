@@ -95,6 +95,10 @@ export type EnrichedHolding = {
   unrealizedGainPct: number | null;
   unrealizedGainDisplay: number | null;
   realizedGain: number | null;
+  /** Realized gain in displayCurrency. Historical-per-closure FX when the
+   *  lots read-flip is on (matches the realized-gains report); else current
+   *  rate. Sum this for display totals — never re-convert `realizedGain`. */
+  realizedGainDisplay: number | null;
   dividendsReceived: number | null;
   totalReturn: number | null;
   totalReturnDisplay: number | null;

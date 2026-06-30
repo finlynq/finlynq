@@ -17,6 +17,7 @@ import { aggregateMovers } from "@/lib/portfolio/top-movers";
 import { effectivePriceAtDate, loadCustomPriceMap } from "@/lib/securities/custom-prices";
 import { todayISO } from "@/lib/utils/date";
 import { isLotsEnabledForUser, loadMetricsForUser } from "@/lib/portfolio/lots/read";
+import { listRealizedGainClosures, augmentWithBaseCurrency } from "@/lib/portfolio/realized-gains";
 import { round2 } from "@/lib/utils/number";
 import { withOp } from "@/lib/diagnostics/op-context";
 
@@ -591,7 +592,15 @@ async function handleGet(request: NextRequest) {
   // price map and keep the overview's own market-value / day-change machinery;
   // unrealized re-derives downstream from marketValue − totalCostBasis. Only
   // flag-on users pay the extra lot/closure queries (default OFF).
-  if (await isLotsEnabledForUser(userId)) {
+  const lotsEnabled = await isLotsEnabledForUser(userId);
+  // realizedDisplayByHolding: per-holding realized gain in the DISPLAY currency,
+  // computed via the SAME historical-per-closure FX the realized-gains report
+  // uses (listRealizedGainClosures + augmentWithBaseCurrency). Realized gain is
+  // a FLOW figure → it must convert at the rate on each closure's date, NOT a
+  // single current rate. Referencing the report's own functions keeps the All
+  // Holdings page and the report byte-identical (one update updates both).
+  let realizedDisplayByHolding: Map<number, number> | null = null;
+  if (lotsEnabled) {
     const lotMetrics = await loadMetricsForUser({
       userId,
       dek,
@@ -604,6 +613,18 @@ async function handleGet(request: NextRequest) {
       m.totalCostBasis = lm.qty > 1e-9 ? lm.costBasis : null;
       m.avgCostPerShare = lm.qty > 1e-9 ? lm.costBasis / lm.qty : null;
       m.realizedGain = lm.realizedGainAllTime;
+    }
+    const rgBase = await augmentWithBaseCurrency(
+      await listRealizedGainClosures(userId, dek, {}),
+      userId,
+      displayCurrency,
+    );
+    realizedDisplayByHolding = new Map();
+    for (const row of rgBase.rows) {
+      realizedDisplayByHolding.set(
+        row.holdingId,
+        (realizedDisplayByHolding.get(row.holdingId) ?? 0) + (row.realizedGainInBase ?? 0),
+      );
     }
   }
 
@@ -782,14 +803,34 @@ async function handleGet(request: NextRequest) {
       unrealizedGainPct = totalCostBasis > 0 ? (unrealizedGain / totalCostBasis) * 100 : null;
     }
 
-    // CAD-converted unrealized for summaries
+    // CAD-converted unrealized for summaries (point-in-time → current rate, correct).
     const unrealizedGainDisplay = unrealizedGain !== null ? convertCurrency(unrealizedGain, fxRate) : null;
+
+    // Realized gain in display currency. Realized is a FLOW figure: when the
+    // lot read-flip is on, use the historical-per-closure FX value from the
+    // realized-gains report's pipeline (realizedDisplayByHolding) so the All
+    // Holdings page matches the report exactly. Legacy (flag off) keeps the
+    // current-rate conversion. Falls back to current-rate if a flag-on holding
+    // somehow has no closures in the report (defensive).
+    const realizedGainDisplay =
+      lotsEnabled && realizedDisplayByHolding
+        ? realizedDisplayByHolding.get(h.id) ??
+          (realizedGain !== null ? convertCurrency(realizedGain, fxRate) : null)
+        : realizedGain !== null
+          ? convertCurrency(realizedGain, fxRate)
+          : null;
 
     // Total return: unrealized + realized + dividends
     const totalReturn = unrealizedGain !== null || realizedGain !== null || dividendsReceived !== null
       ? ((unrealizedGain ?? 0) + (realizedGain ?? 0) + (dividendsReceived ?? 0))
       : null;
-    const totalReturnDisplay = totalReturn !== null ? convertCurrency(totalReturn, fxRate) : null;
+    // Compose from the display parts so the realized portion uses the same
+    // historical FX as realizedGainDisplay (not a single current rate on the
+    // native sum). Dividends stay current-rate (out of scope here).
+    const totalReturnDisplay = totalReturn !== null
+      ? (unrealizedGainDisplay ?? 0) + (realizedGainDisplay ?? 0) +
+        (dividendsReceived !== null ? convertCurrency(dividendsReceived, fxRate) : 0)
+      : null;
     const totalReturnPct = totalReturn !== null && lifetimeCostBasis !== null && lifetimeCostBasis > 0
       ? (totalReturn / lifetimeCostBasis) * 100
       : null;
@@ -841,6 +882,7 @@ async function handleGet(request: NextRequest) {
       unrealizedGainPct,
       unrealizedGainDisplay,
       realizedGain,
+      realizedGainDisplay,
       dividendsReceived,
       totalReturn,
       totalReturnDisplay,
@@ -915,11 +957,13 @@ async function handleGet(request: NextRequest) {
   const totalUnrealizedGainPct = totalCostBasisDisplay > 0
     ? (totalUnrealizedGainDisplay / totalCostBasisDisplay) * 100
     : 0;
-  const totalRealizedGainDisplay = holdingsWithMetrics.reduce((s, h) => {
-    if (h.realizedGain === null) return s;
-    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
-    return s + convertCurrency(h.realizedGain, fxRate);
-  }, 0);
+  // Sum the per-holding realizedGainDisplay (historical-FX when lots-enabled —
+  // see realizedDisplayByHolding) rather than re-converting native at the
+  // current rate, so the summary matches the realized-gains report.
+  const totalRealizedGainDisplay = holdingsWithMetrics.reduce(
+    (s, h) => s + (h.realizedGainDisplay ?? 0),
+    0,
+  );
   const totalDividendsDisplay = holdingsWithMetrics.reduce((s, h) => {
     if (h.dividendsReceived === null) return s;
     const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
@@ -1273,7 +1317,9 @@ async function handleGet(request: NextRequest) {
     const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
     if (h.totalCostBasis != null) acc.costBasisDisplay += h.totalCostBasis * fxRate;
     if (h.lifetimeCostBasis != null) acc.lifetimeCostBasisDisplay += h.lifetimeCostBasis * fxRate;
-    if (h.realizedGain != null) acc.realizedGainDisplay += h.realizedGain * fxRate;
+    // realizedGainDisplay is the historical-per-closure-FX value (lots read-flip)
+    // — sum it directly, don't re-convert native at the current rate.
+    acc.realizedGainDisplay += h.realizedGainDisplay ?? 0;
     if (h.dividendsReceived != null) acc.dividendsDisplay += h.dividendsReceived * fxRate;
 
     // Day change — sum the per-member display contribution (already FX-converted
