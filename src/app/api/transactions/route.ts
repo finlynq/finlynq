@@ -20,7 +20,7 @@ import {
 import { canEditPortfolioRow } from "@/lib/portfolio/operations";
 import type { TxRowForLots } from "@/lib/portfolio/lots/types";
 import { db, schema } from "@/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { markCashSnapshotsDirty } from "@/lib/portfolio/snapshots/cash-dirty";
 import { z } from "zod";
@@ -106,27 +106,36 @@ export async function GET(request: NextRequest) {
   let portfolioHoldingId = portfolioHoldingIdParam
     ? parseInt(portfolioHoldingIdParam)
     : undefined;
-  // Resolve name → id via the user's name_lookup HMAC. Returns empty when
-  // no holding matches that name (deleted, never existed) — short-circuits
-  // before the SQL roundtrip.
+  // Resolve `portfolioHolding` → holding-id set via the user's lookup HMAC.
+  // Drill-through "View transactions" links from /portfolio pass the holding's
+  // DISPLAY value, which is the NAME for cash/custom rows but the SYMBOL for
+  // metals/securities (e.g. gold shows "XAU" though it's named "Gold"). Match
+  // name_lookup OR symbol_lookup so the symbol-display case isn't a silent miss,
+  // and collect EVERY matching position (a holding spread across accounts)
+  // rather than limit(1) so the aggregate drill shows all accounts. The HMAC is
+  // the same function for both columns (`symbol_lookup = nameLookup(dek, symbol)`),
+  // so one `lookup` value compares against both. An empty result → match nothing
+  // (combined below), never a silent drop to the full list.
+  let portfolioHoldingNameIds: number[] | undefined;
   if (
     portfolioHoldingNameParam &&
-    (portfolioHoldingId == null || !Number.isFinite(portfolioHoldingId)) &&
-    dek
+    (portfolioHoldingId == null || !Number.isFinite(portfolioHoldingId))
   ) {
-    const lookup = nameLookup(dek, portfolioHoldingNameParam);
-    const matched = await db
-      .select({ id: schema.portfolioHoldings.id })
-      .from(schema.portfolioHoldings)
-      .where(and(
-        eq(schema.portfolioHoldings.userId, userId),
-        eq(schema.portfolioHoldings.nameLookup, lookup),
-      ))
-      .limit(1);
-    if (matched[0]) {
-      portfolioHoldingId = matched[0].id;
+    if (dek) {
+      const lookup = nameLookup(dek, portfolioHoldingNameParam);
+      const matched = await db
+        .select({ id: schema.portfolioHoldings.id })
+        .from(schema.portfolioHoldings)
+        .where(and(
+          eq(schema.portfolioHoldings.userId, userId),
+          or(
+            eq(schema.portfolioHoldings.nameLookup, lookup),
+            eq(schema.portfolioHoldings.symbolLookup, lookup),
+          ),
+        ));
+      portfolioHoldingNameIds = matched.map((m) => m.id);
     } else {
-      return NextResponse.json([]);
+      portfolioHoldingNameIds = [];
     }
   }
   // Tag is an in-memory exact-match filter on the comma-split list. The
@@ -224,6 +233,19 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // Combine the holding-id constraints (the Ticker column filter + the
+  // name/symbol drill) into ONE id set pushed into SQL. Both present →
+  // intersection (AND, e.g. ticker-filtering inside a drilled holding); either
+  // alone → that set; neither → undefined (no holding-id constraint). An empty
+  // resulting set means "matched no holding" → `1 = 0` in the query.
+  const holdingIdSets = [portfolioTickerHoldingIds, portfolioHoldingNameIds].filter(
+    (s): s is number[] => s !== undefined,
+  );
+  const portfolioHoldingIds: number[] | undefined =
+    holdingIdSets.length === 0
+      ? undefined
+      : holdingIdSets.reduce((acc, s) => acc.filter((id) => s.includes(id)));
+
   // FINLYNQ-177 — single-transaction id deep link. Owner-scoped SQL pushdown
   // (combined with the user_id predicate in buildTxFilterConditions). A present
   // but non-positive / non-numeric `id` param can never match a real serial id,
@@ -253,7 +275,7 @@ export async function GET(request: NextRequest) {
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
     categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
     portfolioHoldingId: Number.isFinite(portfolioHoldingId) ? portfolioHoldingId : undefined,
-    portfolioHoldingIds: portfolioTickerHoldingIds,
+    portfolioHoldingIds,
     accountIds: parseIdList("accountIds"),
     categoryIds: parseIdList("categoryIds"),
     amountMin: parseNum("amountMin"),
