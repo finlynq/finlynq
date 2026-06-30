@@ -16,6 +16,7 @@ import { cashLegSkipSql, dividendAttributionHoldingIdSql } from "@/lib/portfolio
 import { aggregateMovers } from "@/lib/portfolio/top-movers";
 import { effectivePriceAtDate, loadCustomPriceMap } from "@/lib/securities/custom-prices";
 import { todayISO } from "@/lib/utils/date";
+import { isLotsEnabledForUser, loadMetricsForUser } from "@/lib/portfolio/lots/read";
 import { round2 } from "@/lib/utils/number";
 import { withOp } from "@/lib/diagnostics/op-context";
 
@@ -578,6 +579,31 @@ async function handleGet(request: NextRequest) {
     metrics.dividendsReceived = await dividendsForHolding(h.id, targetCcy);
     if (fkBuckets || metrics.dividendsReceived !== 0) {
       metricsByHoldingId.set(h.id, metrics);
+    }
+  }
+
+  // 6b. Lots read-flip (per-user `portfolio_lots_status.enabled`). When ON,
+  // source remaining cost basis + realized gain from the lot engine (FIFO /
+  // specific-lot, so manual lot edits + rebuilds are reflected) instead of the
+  // legacy average-cost math in toMetrics above — making the All Holdings page
+  // agree with the realized-gains report + Lot Inspector. Cost basis + realized
+  // are price-independent (lots' costPerShare + closures), so we pass an EMPTY
+  // price map and keep the overview's own market-value / day-change machinery;
+  // unrealized re-derives downstream from marketValue − totalCostBasis. Only
+  // flag-on users pay the extra lot/closure queries (default OFF).
+  if (await isLotsEnabledForUser(userId)) {
+    const lotMetrics = await loadMetricsForUser({
+      userId,
+      dek,
+      asOfDate: todayDate,
+      prices: new Map(),
+    });
+    for (const lm of lotMetrics) {
+      const m = metricsByHoldingId.get(lm.holdingId);
+      if (!m) continue;
+      m.totalCostBasis = lm.qty > 1e-9 ? lm.costBasis : null;
+      m.avgCostPerShare = lm.qty > 1e-9 ? lm.costBasis / lm.qty : null;
+      m.realizedGain = lm.realizedGainAllTime;
     }
   }
 
