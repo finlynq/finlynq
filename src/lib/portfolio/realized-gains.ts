@@ -251,7 +251,17 @@ export async function augmentWithBaseCurrency(
       fxBaseOpen > 0 ? (row.costPerShare * fxRowOpen) / fxBaseOpen : 0;
     const proceedsInBase =
       fxBaseClose > 0 ? (row.proceedsPerShare * fxRowClose) / fxBaseClose : 0;
-    const gainInBase = (proceedsInBase - costInBase) * row.qtyClosed;
+    // Short closes invert the realized-gain sign: the stored native gain is
+    // (cost − proceeds) × qty (profit when you buy back BELOW the short-sale
+    // price — see write-hooks.ts short_close). The base-currency view must
+    // honor the same direction or it flips a short loss into a phantom gain.
+    // Long closes + fx_conversion keep the (proceeds − cost) convention
+    // (fx_conversion deliberately derives its FX gain from cost=proceeds=1 —
+    // see fx-conversion.ts).
+    const gainInBase =
+      row.closeKind === "short_close"
+        ? (costInBase - proceedsInBase) * row.qtyClosed
+        : (proceedsInBase - costInBase) * row.qtyClosed;
     row.realizedGainInBase = gainInBase;
     row.baseCurrency = baseCurrency;
     totalInBase += gainInBase;
