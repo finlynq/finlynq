@@ -56,6 +56,12 @@ import {
   planLotReassignment,
   type DependentCloseInput,
 } from "./replan";
+import {
+  planHoldingAllocation,
+  SHORT_LOT_ID,
+  type AllocPlan,
+  type AllocSpec,
+} from "./allocate";
 import type {
   CashLegHint,
   HoldingLot,
@@ -1501,6 +1507,185 @@ export async function reassignClosureLots(
       holdingCurrency,
     });
 
+    return { ok: true, preview };
+  } finally {
+    __setLotWriteHookStrictMode(prevStrict);
+  }
+}
+
+// ─── applyHoldingAllocation — FINLYNQ whole-ticker allocation editor ──────
+//
+// The atomic, holding-wide successor to reassignClosureLots. Instead of
+// re-pointing ONE sell, it takes a spec for EVERY editable sell on a
+// (security/holding, account) and re-allocates them all in one strict pass:
+//
+//   dryRun=true  — validate the spec through the pure planHoldingAllocation
+//                  and return the preview (closures + opened shorts +
+//                  restated realized gain). Writes NOTHING.
+//   dryRun=false — STRICT, all-or-nothing. Reverse EVERY editable sell
+//                  (restoring the long lots they consumed + dropping the
+//                  shorts they opened), then re-close each in CHRONOLOGICAL
+//                  order via closeLotsForSellHook's perLotQty path. Strict
+//                  mode is forced ON so any failure throws and 500s — same
+//                  non-DB-transactional risk profile as reassignClosureLots
+//                  (validated-before-write; the only failure after a clean
+//                  plan is a DB error, recoverable by re-running / rebuild).
+//
+// Editable sells = close-txs that have ≥1 `sell` closure on this holding.
+// "Needed" per sell = |tx.quantity| (so an original oversell's short is part
+// of the picture). `available` per long lot = qtyOriginal − Σ(non-sell
+// closures) — exactly the post-reversal qty_remaining. A spec entry with
+// lotId <= 0 (SHORT_LOT_ID) opens a short for its qty (the matrix's short
+// remainder), routed to the engine's overflow branch.
+//
+// NEVER touches a `transactions` row. Position qty stays live SUM(quantity).
+
+export interface AllocApplyResult {
+  preview: AllocPlan;
+}
+
+export type AllocApplyError =
+  | { ok: false; code: "holding_not_found" }
+  | { ok: false; code: "no_editable_sells" }
+  | { ok: false; code: "unknown_close_tx"; closeTxId: number }
+  | { ok: false; code: "incomplete_spec"; missing: number[] }
+  | { ok: false; code: "plan_invalid"; preview: AllocPlan };
+
+export type AllocApplyOutcome =
+  | ({ ok: true } & AllocApplyResult)
+  | AllocApplyError;
+
+const ALLOC_EPS = 1e-6;
+
+export async function applyHoldingAllocation(
+  userId: string,
+  args: { holdingId: number; accountId: number; spec: AllocSpec },
+  opts: { dryRun: boolean; dek?: Buffer | null },
+): Promise<AllocApplyOutcome> {
+  const { holdingId, accountId, spec } = args;
+
+  // 1. Lots for this (holding, account).
+  const allLots = (await loadLotsForHoldings(userId, [holdingId])).filter(
+    (l) => l.accountId === accountId,
+  );
+  if (allLots.length === 0) return { ok: false, code: "holding_not_found" };
+  const longLots = allLots.filter((l) => l.side === "long");
+  const lotIds = allLots.map((l) => l.id);
+
+  // 2. Closures for those lots; split sell vs non-sell.
+  const closureRows = await db
+    .select()
+    .from(schema.holdingLotClosures)
+    .where(
+      and(
+        eq(schema.holdingLotClosures.userId, userId),
+        inArray(schema.holdingLotClosures.lotId, lotIds),
+      ),
+    );
+  const nonSellConsumed = new Map<number, number>();
+  const sellByTx = new Map<
+    number,
+    { closeDate: string; proceedsPerShare: number; currency: string; closedQty: number }
+  >();
+  for (const c of closureRows) {
+    if (c.closeKind === "sell") {
+      const cur = sellByTx.get(c.closeTxId) ?? {
+        closeDate: c.closeDate,
+        proceedsPerShare: Number(c.proceedsPerShare),
+        currency: c.currency,
+        closedQty: 0,
+      };
+      cur.closedQty += Number(c.qtyClosed);
+      sellByTx.set(c.closeTxId, cur);
+    } else {
+      nonSellConsumed.set(
+        c.lotId,
+        (nonSellConsumed.get(c.lotId) ?? 0) + Number(c.qtyClosed),
+      );
+    }
+  }
+  const editableTxIds = [...sellByTx.keys()];
+  if (editableTxIds.length === 0) return { ok: false, code: "no_editable_sells" };
+
+  // 3. Load the sell tx rows for the authoritative needed qty (|quantity|).
+  const sellTxRows = await db
+    .select(LOT_TX_SELECT)
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        eq(schema.transactions.portfolioHoldingId, holdingId),
+        inArray(schema.transactions.id, editableTxIds),
+      ),
+    );
+  const sellTxById = new Map(sellTxRows.map((r) => [r.id as number, txRowToLots(r)]));
+
+  // 4. Spec must cover exactly the editable sells (whole-ticker, atomic).
+  for (const key of Object.keys(spec)) {
+    const id = Number(key);
+    if (!sellByTx.has(id)) return { ok: false, code: "unknown_close_tx", closeTxId: id };
+  }
+  const missing = editableTxIds.filter(
+    (id) => !Object.prototype.hasOwnProperty.call(spec, String(id)),
+  );
+  if (missing.length > 0) return { ok: false, code: "incomplete_spec", missing };
+
+  // 5. Build the pure planner input + validate.
+  const planLots = longLots.map((l) => ({
+    id: l.id,
+    openDate: l.openDate,
+    available: Number(l.qtyOriginal) - (nonSellConsumed.get(l.id) ?? 0),
+    costPerShare: l.costPerShare,
+    currency: l.currency,
+  }));
+  const planSells = editableTxIds.map((id) => {
+    const meta = sellByTx.get(id)!;
+    const tx = sellTxById.get(id);
+    const needed = tx?.quantity != null ? Math.abs(tx.quantity) : meta.closedQty;
+    const pps =
+      meta.proceedsPerShare > 0
+        ? meta.proceedsPerShare
+        : tx && needed > ALLOC_EPS
+          ? Math.abs(tx.enteredAmount ?? tx.amount) / needed
+          : 0;
+    return {
+      closeTxId: id,
+      closeDate: meta.closeDate,
+      proceedsPerShare: pps,
+      qty: needed,
+      currency: meta.currency,
+    };
+  });
+
+  const preview = planHoldingAllocation({ lots: planLots, sells: planSells, spec });
+  if (!preview.ok) return { ok: false, code: "plan_invalid", preview };
+  if (opts.dryRun) return { ok: true, preview };
+
+  // 6. Commit — reverse every editable sell, then re-close chronologically.
+  const ctx = await buildLotContext(userId, opts.dek ?? null);
+  const holdingCurrency =
+    ctx.holdingCurrencyById.get(holdingId) ??
+    sellTxById.get(editableTxIds[0])?.currency ??
+    "USD";
+  const prevStrict = strictMode;
+  __setLotWriteHookStrictMode(true);
+  try {
+    for (const id of editableTxIds) {
+      await reverseLotsForDeleteHook(userId, id);
+    }
+    const ordered = [...editableTxIds].sort((a, b) => {
+      const da = sellByTx.get(a)!.closeDate;
+      const dbb = sellByTx.get(b)!.closeDate;
+      return da.localeCompare(dbb) || a - b;
+    });
+    for (const id of ordered) {
+      const tx = sellTxById.get(id);
+      if (!tx) continue;
+      const perLotQty = (spec[id] ?? [])
+        .filter((e) => e.qty > ALLOC_EPS)
+        .map((e) => ({ lotId: e.lotId <= SHORT_LOT_ID ? -1 : e.lotId, qty: e.qty }));
+      await closeLotsForSellHook(tx, { perLotQty, holdingCurrency });
+    }
     return { ok: true, preview };
   } finally {
     __setLotWriteHookStrictMode(prevStrict);

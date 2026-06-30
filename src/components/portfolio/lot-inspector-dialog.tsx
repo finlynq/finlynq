@@ -28,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { LotAllocationMatrix } from "@/components/portfolio/lot-allocation-matrix";
 import { formatCurrency } from "@/lib/currency";
 
 interface LotRow {
@@ -114,6 +115,8 @@ export function LotInspectorDialog({
   const [rebuildBusy, setRebuildBusy] = useState(false);
   const [rebuildError, setRebuildError] = useState<string | null>(null);
   const [rebuildResult, setRebuildResult] = useState<RebuildResult | null>(null);
+  // Whole-ticker allocation matrix (FINLYNQ — "Edit all allocations").
+  const [showMatrix, setShowMatrix] = useState(false);
 
   useEffect(() => {
     if (!open || holdingId == null) return;
@@ -154,6 +157,7 @@ export function LotInspectorDialog({
     setRebuildError(null);
     setRebuildResult(null);
     setRebuildConfirmOpen(false);
+    setShowMatrix(false);
   }, [open, holdingId, accountId]);
 
   const closuresByLot = new Map<number, ClosureRow[]>();
@@ -306,7 +310,7 @@ export function LotInspectorDialog({
   return (
     <>
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className={showMatrix ? "sm:max-w-4xl" : "sm:max-w-2xl"}>
         <DialogHeader>
           <DialogTitle className="text-base">
             Lot inspector
@@ -325,26 +329,46 @@ export function LotInspectorDialog({
           </p>
         )}
 
+        {/* Whole-ticker allocation matrix ("Edit all allocations") */}
+        {!loading && !error && editTxId == null && showMatrix && holdingId != null && accountId != null && (
+          <LotAllocationMatrix
+            holdingId={holdingId}
+            accountId={accountId}
+            lots={lots}
+            closures={closures}
+            onCancel={() => setShowMatrix(false)}
+            onApplied={() => {
+              setShowMatrix(false);
+              setReloadKey((k) => k + 1);
+            }}
+          />
+        )}
+
         {/* Rebuild this ticker + out-of-order warning banner (lot-list view only) */}
-        {!loading && !error && editTxId == null && lots.length > 0 && (
+        {!loading && !error && editTxId == null && !showMatrix && lots.length > 0 && (
           <div className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs text-muted-foreground">
                 Rebuild replays this ticker&apos;s transactions in date order to
                 fix lots. It changes lots only, never your transactions.
               </p>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setRebuildResult(null);
-                  setRebuildError(null);
-                  setRebuildConfirmOpen(true);
-                }}
-                disabled={rebuildBusy}
-              >
-                {rebuildBusy ? "Rebuilding…" : "Rebuild lots for this ticker"}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => setShowMatrix(true)}>
+                  Edit all allocations
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setRebuildResult(null);
+                    setRebuildError(null);
+                    setRebuildConfirmOpen(true);
+                  }}
+                  disabled={rebuildBusy}
+                >
+                  {rebuildBusy ? "Rebuilding…" : "Rebuild lots"}
+                </Button>
+              </div>
             </div>
             {hasTemporalWarning && (
               <div className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
@@ -484,7 +508,7 @@ export function LotInspectorDialog({
           </div>
         )}
 
-        {!loading && !error && editTxId == null && lots.length > 0 && (
+        {!loading && !error && editTxId == null && !showMatrix && lots.length > 0 && (
           <div className="space-y-3 max-h-[60vh] overflow-y-auto">
             {lots.map((lot) => {
               const lotClosures = closuresByLot.get(lot.id) ?? [];
