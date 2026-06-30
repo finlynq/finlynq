@@ -176,10 +176,53 @@ export async function GET(request: NextRequest) {
   const filterPortfolio = params.get("filter_portfolio") ?? undefined;
   const filterPortfolioTicker = params.get("filter_portfolioTicker") ?? undefined;
   const filterTags = params.get("filter_tags") ?? undefined;
+  // NOTE: `filterPortfolioTicker` is deliberately NOT in this set. Unlike the
+  // other encrypted-substring filters (which scan decrypted text post-fetch),
+  // the ticker filter is resolved to a holding-id set below and pushed into SQL,
+  // so it must NOT trigger the capped 1000-row post-decrypt window — that cap
+  // hid XAU/metal rows older than the 1000 most-recent across "All accounts".
   const hasEncryptedSubstringFilter = !!(
     filterPayee || filterNote || filterAccountName || filterAccountAlias ||
-    filterPortfolio || filterPortfolioTicker || filterTags
+    filterPortfolio || filterTags
   );
+
+  // Resolve the ticker substring against the user's (small) holdings/securities
+  // symbol set. Symbols are Stream-D encrypted, so SQL can't LIKE on them — but
+  // there are only tens of holdings per user, so decrypt them here, substring-
+  // match the needle (case-insensitive, matching the post-decrypt semantics the
+  // ticker column always had), and push the matching `portfolio_holding_id` set
+  // into the SQL WHERE. When the filter is present we ALWAYS bind a result set
+  // (possibly empty = "no holding matched") so the filter is never silently
+  // dropped — including the no-DEK case, which can't decrypt any symbol.
+  let portfolioTickerHoldingIds: number[] | undefined;
+  if (filterPortfolioTicker) {
+    if (dek) {
+      const needle = filterPortfolioTicker.toLowerCase();
+      const holdingRows = await db
+        .select({
+          id: schema.portfolioHoldings.id,
+          symbolCt: schema.portfolioHoldings.symbolCt,
+          securitySymbolCt: schema.securities.symbolCt,
+        })
+        .from(schema.portfolioHoldings)
+        .leftJoin(schema.securities, eq(schema.portfolioHoldings.securityId, schema.securities.id))
+        .where(eq(schema.portfolioHoldings.userId, userId));
+      const ids: number[] = [];
+      for (const h of holdingRows) {
+        const sym = decryptName(h.symbolCt, dek, null);
+        const secSym = decryptName(h.securitySymbolCt, dek, null);
+        if (
+          (sym && sym.toLowerCase().includes(needle)) ||
+          (secSym && secSym.toLowerCase().includes(needle))
+        ) {
+          ids.push(h.id);
+        }
+      }
+      portfolioTickerHoldingIds = ids;
+    } else {
+      portfolioTickerHoldingIds = [];
+    }
+  }
 
   // FINLYNQ-177 — single-transaction id deep link. Owner-scoped SQL pushdown
   // (combined with the user_id predicate in buildTxFilterConditions). A present
@@ -210,6 +253,7 @@ export async function GET(request: NextRequest) {
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
     categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
     portfolioHoldingId: Number.isFinite(portfolioHoldingId) ? portfolioHoldingId : undefined,
+    portfolioHoldingIds: portfolioTickerHoldingIds,
     accountIds: parseIdList("accountIds"),
     categoryIds: parseIdList("categoryIds"),
     amountMin: parseNum("amountMin"),
@@ -341,11 +385,9 @@ export async function GET(request: NextRequest) {
       matchSubstring((r as { portfolioHolding?: string | null }).portfolioHolding, filterPortfolio),
     );
   }
-  if (filterPortfolioTicker) {
-    decrypted = decrypted.filter((r) =>
-      matchSubstring((r as { portfolioHoldingSymbol?: string | null }).portfolioHoldingSymbol, filterPortfolioTicker),
-    );
-  }
+  // NOTE: the ticker filter (`filterPortfolioTicker`) is applied SQL-side via
+  // `portfolioHoldingIds` (resolved above), not here — so it scales past the
+  // 1000-row post-decrypt window. No in-memory ticker pass needed.
   if (filterTags) {
     decrypted = decrypted.filter((r) => matchSubstring(r.tags, filterTags));
   }

@@ -166,6 +166,14 @@ export type TxSortFilter = {
   // per chip.
   accountIds?: number[];
   categoryIds?: number[];
+  // Ticker (portfolio symbol) substring filter, resolved to holding ids at
+  // the route boundary. Symbols are Stream-D encrypted so SQL can't LIKE on
+  // them; the route decrypts the user's (small) holdings/securities symbol set,
+  // substring-matches the needle, and pushes the matching `portfolio_holding_id`
+  // set down here. This keeps the ticker filter SQL-side (scales to any ledger
+  // size) instead of an in-memory pass over a capped 1000-row window. An EMPTY
+  // array means "the needle matched no holding" → match nothing.
+  portfolioHoldingIds?: number[];
   // Numeric range pushdown for amount / quantity columns. Both are signed
   // doubles; passing min and max simulates BETWEEN. Equality uses both
   // bounds set to the same value.
@@ -213,6 +221,16 @@ function buildTxFilterConditions(userId: string, filters?: TxSortFilter) {
   }
   if (filters?.categoryIds && filters.categoryIds.length > 0) {
     conditions.push(inArray(transactions.categoryId, filters.categoryIds));
+  }
+  // Ticker filter resolved to holding ids (see TxSortFilter doc). An empty
+  // array is a real "no holding matched the ticker" signal — match nothing
+  // rather than dropping the filter and rendering the full list.
+  if (filters?.portfolioHoldingIds) {
+    if (filters.portfolioHoldingIds.length === 0) {
+      conditions.push(sql`1 = 0`);
+    } else {
+      conditions.push(inArray(transactions.portfolioHoldingId, filters.portfolioHoldingIds));
+    }
   }
   if (filters?.amountEq != null) {
     conditions.push(eq(transactions.amount, filters.amountEq));
