@@ -52,6 +52,7 @@ import {
   generateImportHash,
   checkDuplicates,
   checkFitIdDuplicates,
+  checkFitIdDuplicatesForAccount,
 } from "@/lib/import-hash";
 import { normalizeDate } from "@/lib/csv-parser";
 import { parseOfx } from "@/lib/ofx-parser";
@@ -522,7 +523,13 @@ export async function writeStagedImport(
   // ─── File → bank_transactions dedup (exact-only) ─────────────────────────
   const fitIds = shaped.filter((r) => r.fitId).map((r) => r.fitId!);
   const hashes = shaped.filter((r) => r.accountId !== null).map((r) => r.hash);
-  const existingFitIds = await checkFitIdDuplicates(fitIds, userId);
+  // Bank transaction ids are unique only WITHIN an account (SimpleFIN reuses the
+  // posted-epoch as the id, so accounts collide) — scope the fitId check to the
+  // bound account when there is one; fall back to user-scope for unbound CSVs.
+  const existingFitIds =
+    accountId !== null
+      ? await checkFitIdDuplicatesForAccount(fitIds, userId, accountId)
+      : await checkFitIdDuplicates(fitIds, userId);
   const existingHashes = await checkDuplicates(hashes, userId);
 
   for (const r of shaped) {

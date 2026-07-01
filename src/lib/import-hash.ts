@@ -85,6 +85,46 @@ export async function checkFitIdDuplicates(fitIds: string[], userId: string): Pr
   return existing;
 }
 
+/**
+ * Account-scoped variant of {@link checkFitIdDuplicates}. A bank transaction id
+ * (OFX FITID, SimpleFIN transaction id) is unique only WITHIN an account — some
+ * providers (e.g. SimpleFIN's demo bridge) reuse the posted-epoch as the id, so
+ * two accounts routinely share ids. A user-scoped check would wrongly flag
+ * account B's rows as duplicates of account A's. Use this for any account-bound
+ * import (OFX/QFX, connectors); fall back to the user-scoped version only when
+ * there's no bound account.
+ */
+export async function checkFitIdDuplicatesForAccount(
+  fitIds: string[],
+  userId: string,
+  accountId: number,
+): Promise<Set<string>> {
+  if (fitIds.length === 0) return new Set();
+
+  const existing = new Set<string>();
+  const batchSize = 900;
+
+  for (let i = 0; i < fitIds.length; i += batchSize) {
+    const batch = fitIds.slice(i, i + batchSize);
+    const rows = await db
+      .select({ fitId: schema.bankTransactions.fitId })
+      .from(schema.bankTransactions)
+      .where(
+        and(
+          eq(schema.bankTransactions.userId, userId),
+          eq(schema.bankTransactions.accountId, accountId),
+          inArray(schema.bankTransactions.fitId, batch),
+        ),
+      )
+      .all();
+    for (const row of rows) {
+      if (row.fitId) existing.add(row.fitId);
+    }
+  }
+
+  return existing;
+}
+
 /** Metadata about an existing transaction that an incoming row matched. */
 export interface ExactDuplicateMatchInfo {
   /**
