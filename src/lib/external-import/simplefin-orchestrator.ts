@@ -21,11 +21,16 @@
  */
 
 import { db, schema } from "@/db";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { buildNameFields } from "@/lib/crypto/encrypted-columns";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { createAccount } from "@/lib/queries";
 import { writeStagedImport, type ParseSuccess } from "@/lib/import/stage-statement-file";
+import {
+  advanceStagedImportByMode,
+  type AccountMode,
+  type AdvanceStage,
+} from "@/lib/import/advance-by-mode";
 import {
   saveConnectorCredentials,
   loadConnectorCredentials,
@@ -39,6 +44,10 @@ const CONNECTOR_ID = "simplefin";
 const ACCOUNT_MAP_ID = "simplefin:accounts";
 /** How far back to pull on each sync. SimpleFIN keeps ~90 days. */
 const SYNC_LOOKBACK_DAYS = 90;
+/** Min gap between login-triggered auto-syncs per user. */
+const AUTO_SYNC_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000;
+/** Plaintext settings key holding the last auto-sync timestamp (ISO). */
+const AUTOSYNC_AT_KEY = "connector:simplefin:autosync_at";
 
 export class SimplefinNotConnectedError extends Error {
   constructor() {
@@ -93,6 +102,12 @@ export interface SimplefinStagedResult {
   rowCount: number;
   newCount: number;
   duplicateCount: number;
+  /** The bound account's mode that drove how far this import auto-advanced. */
+  mode: AccountMode;
+  /** Furthest stage reached: pending (manual) | loaded (approve) | recorded (auto). */
+  stage: AdvanceStage;
+  /** Rows recorded as transactions (auto only). */
+  recorded: number;
 }
 
 export interface SimplefinSyncResult {
@@ -122,6 +137,7 @@ interface AccountInfo {
   id: number;
   name: string;
   currency: string;
+  mode: AccountMode;
 }
 
 // ─── Connect ──────────────────────────────────────────────────────────────
@@ -221,6 +237,7 @@ async function loadAccountsFull(
       id: schema.accounts.id,
       nameCt: schema.accounts.nameCt,
       currency: schema.accounts.currency,
+      mode: schema.accounts.mode,
     })
     .from(schema.accounts)
     .where(eq(schema.accounts.userId, userId))
@@ -230,7 +247,12 @@ async function loadAccountsFull(
   for (const a of rows) {
     const name = a.nameCt ? tryDecryptField(dek, a.nameCt, "accounts.name_ct") : null;
     if (!name) continue;
-    byId.set(a.id, { id: a.id, name, currency: a.currency });
+    byId.set(a.id, {
+      id: a.id,
+      name,
+      currency: a.currency,
+      mode: (a.mode as AccountMode) ?? "manual",
+    });
     const key = name.toLowerCase().trim();
     if (key && !byName.has(key)) byName.set(key, a.id);
   }
@@ -265,11 +287,16 @@ export async function syncSimpleFin(
     // ── Resolve the target Finlynq account ──
     let finAccountId: number | undefined;
     let finAccountName: string | undefined;
+    // Drives how far the staged import auto-advances (see advanceStagedImportByMode).
+    // Newly-created accounts default to 'manual'; a linked/mapped account keeps its mode.
+    let finAccountMode: AccountMode = "manual";
 
     const mappedId = accountMap[acct.externalId] ? Number(accountMap[acct.externalId]) : null;
     if (mappedId && byId.has(mappedId)) {
-      finAccountId = mappedId;
-      finAccountName = byId.get(mappedId)!.name;
+      const info = byId.get(mappedId)!;
+      finAccountId = info.id;
+      finAccountName = info.name;
+      finAccountMode = info.mode;
     } else {
       const choice = choices[acct.externalId];
       if (choice?.mode === "existing") {
@@ -277,6 +304,7 @@ export async function syncSimpleFin(
         if (info) {
           finAccountId = info.id;
           finAccountName = info.name;
+          finAccountMode = info.mode;
         }
       } else if (choice?.mode === "create") {
         const enc = buildNameFields(dek, { name: acct.name });
@@ -289,6 +317,7 @@ export async function syncSimpleFin(
         } as Parameters<typeof createAccount>[1]);
         finAccountId = created.id;
         finAccountName = acct.name;
+        finAccountMode = "manual";
         accountsCreated += 1;
       }
     }
@@ -345,6 +374,17 @@ export async function syncSimpleFin(
       fuzzyDedupWindowDays: 3,
     });
 
+    // Advance by the account's mode — the SAME shared step the manual
+    // statement upload uses: manual → stays in /import/pending; approve →
+    // auto-loads to bank ledger; auto → loads + fires rules → transactions.
+    const advance = await advanceStagedImportByMode({
+      userId,
+      dek,
+      stagedImportId: result.stagedImportId,
+      accountId: finAccountId,
+      mode: finAccountMode,
+    });
+
     staged.push({
       stagedImportId: result.stagedImportId,
       accountId: finAccountId,
@@ -352,6 +392,9 @@ export async function syncSimpleFin(
       rowCount: result.rowCount,
       newCount: result.newCount,
       duplicateCount: result.duplicateCount,
+      mode: advance.mode,
+      stage: advance.stage,
+      recorded: advance.recorded,
     });
   }
 
@@ -393,4 +436,66 @@ export async function getSimpleFinStatus(userId: string): Promise<SimplefinStatu
 export async function disconnectSimpleFin(userId: string): Promise<void> {
   await deleteConnectorCredentials(userId, CONNECTOR_ID);
   await deleteConnectorCredentials(userId, ACCOUNT_MAP_ID);
+}
+
+// ─── Login-triggered auto-sync (~12h throttle) ──────────────────────────────
+
+/** Read the last auto-sync timestamp (ms epoch), or 0 if never. Plaintext. */
+async function getAutoSyncAt(userId: string): Promise<number> {
+  const row = await db
+    .select({ value: schema.settings.value })
+    .from(schema.settings)
+    .where(and(eq(schema.settings.key, AUTOSYNC_AT_KEY), eq(schema.settings.userId, userId)))
+    .get();
+  if (!row?.value) return 0;
+  const t = Date.parse(row.value);
+  return Number.isNaN(t) ? 0 : t;
+}
+
+/** Upsert the last auto-sync timestamp (plaintext ISO). */
+async function setAutoSyncAt(userId: string, iso: string): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO settings (key, user_id, value)
+    VALUES (${AUTOSYNC_AT_KEY}, ${userId}, ${iso})
+    ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
+  `);
+}
+
+/**
+ * Sync SimpleFIN in the background iff connected AND the last auto-sync was more
+ * than ~12h ago. Only touches ALREADY-MAPPED accounts (empty choices), each
+ * advancing per its own mode via the shared pipeline. Returns null when skipped.
+ * The timestamp is stamped BEFORE the sync so a slow/failing run doesn't let the
+ * next login re-fire immediately.
+ */
+export async function maybeAutoSyncSimpleFin(
+  userId: string,
+  dek: Buffer,
+): Promise<SimplefinSyncResult | null> {
+  if (!(await hasConnectorCredentials(userId, CONNECTOR_ID))) return null;
+  const last = await getAutoSyncAt(userId);
+  if (Date.now() - last < AUTO_SYNC_MIN_INTERVAL_MS) return null;
+  await setAutoSyncAt(userId, new Date().toISOString());
+  return syncSimpleFin(userId, dek, {});
+}
+
+/**
+ * Fire-and-forget wrapper for the login hook. Web + mobile share ONE login
+ * endpoint (`POST /api/auth/login`), so wiring this beside the other login-time
+ * DEK-bearing jobs covers both clients. Never throws; logs on error.
+ */
+export function enqueueAutoSyncSimpleFin(userId: string, dek: Buffer): void {
+  void (async () => {
+    try {
+      const res = await maybeAutoSyncSimpleFin(userId, dek);
+      if (res && res.staged.length > 0) {
+        const recorded = res.staged.reduce((n, s) => n + s.recorded, 0);
+        console.log(
+          `[simplefin-autosync] user=${userId} accounts=${res.staged.length} recorded=${recorded}`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[simplefin-autosync] user=${userId} failed:`, err);
+    }
+  })();
 }

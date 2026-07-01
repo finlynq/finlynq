@@ -58,8 +58,7 @@ import { isSupportedCurrency } from "@/lib/fx/supported-currencies";
 import type { DateFormatOverride } from "@/lib/csv-parser";
 import { findUnreasonableAmountError } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
-import { simplifiedUpload } from "@/lib/import/simplified-upload";
-import { applyRulesToBankRows } from "@/lib/reconcile/match-engine";
+import { advanceStagedImportByMode } from "@/lib/import/advance-by-mode";
 import { getConfirmCsvMappingDefault } from "@/app/api/settings/confirm-csv-mapping/route";
 // FINLYNQ-221 — the parse + staged-import WRITE core lives in the shared
 // stage-statement-file chokepoint (so the MCP `upload_statement` tool stages
@@ -594,180 +593,18 @@ export async function POST(request: NextRequest) {
     // The detailed path below remains the default and handles every case
     // where the account is Manual and the template is Detailed (or no
     // template is selected).
-    let useSimplifiedPath = false;
-    if (boundAccountMode === "approve" || boundAccountMode === "auto") {
-      // Account-policy override: Approve-each + Auto-pilot accounts always
-      // use the simplified path regardless of the per-template import_mode
-      // setting. Inbox v4 Phase 3 covers Approve-each; Phase 4 extends to
-      // Auto-pilot — both lenses skip the staged-review gate, but the
-      // post-bank-write step differs (Auto-pilot fires rules; Approve-each
-      // just waits for a click).
-      if (accountId === null) {
-        // boundAccountMode is only set when accountId is non-null, so this
-        // is unreachable — kept as a defensive guard so the TS narrowing
-        // below stays unambiguous.
-        return NextResponse.json(
-          { error: "Auto-pilot / Approve-each accounts require accountId." },
-          { status: 400 },
-        );
-      }
-      useSimplifiedPath = true;
-    } else if (templateId !== null) {
-      const tplRow = await db
-        .select({ importMode: schema.importTemplates.importMode })
-        .from(schema.importTemplates)
-        .where(and(
-          eq(schema.importTemplates.id, templateId),
-          eq(schema.importTemplates.userId, userId),
-        ))
-        .get();
-      if (tplRow?.importMode === "simplified") {
-        if (accountId === null) {
-          return NextResponse.json(
-            {
-              error:
-                "Simplified mode requires a bound account. Pick an account when uploading, or switch the template to Detailed.",
-            },
-            { status: 400 },
-          );
-        }
-        useSimplifiedPath = true;
-      }
-    }
-
-    if (useSimplifiedPath && accountId !== null) {
-      try {
-        const result = await simplifiedUpload({
-          userId,
-          dek,
-          accountId,
-          templateId,
-          rows: shaped.map((r) => ({
-            rowIndex: r.rowIndex,
-            date: r.date,
-            amount: r.amount,
-            currency: r.currency ?? defaultCurrency ?? boundAccountCurrency ?? "CAD",
-            payee: r.payee,
-            note: r.note ?? null,
-            tags: r.tags ?? null,
-            accountName: r.account || null,
-            fitId: r.fitId ?? null,
-            enteredAmount: r.enteredAmount ?? null,
-            enteredCurrency: r.enteredCurrency ?? defaultCurrency ?? null,
-            enteredFxRate: null,
-            quantity: r.quantity ?? null,
-            // FINLYNQ-195 — investment-import capture. PLAINTEXT here; the
-            // bank-ledger writer encrypts at the row's tier (like payee).
-            ticker: r.ticker ?? null,
-            securityName: r.portfolioHolding ?? null,
-            importHash: r.hash,
-          })),
-          anchors: parseResult.anchors,
-          filename: file.name,
-          source: "upload",
-        });
-
-        // ─── Inbox v4 Phase 4 (2026-05-27) — Auto-pilot rule firing ─────
-        //
-        // For Auto-pilot accounts, fire user-configured transaction-rules
-        // against the bank rows we just upserted. Rule-matched rows are
-        // materialized to `transactions` with `source='auto_rule'` inside
-        // the helper; unmatched rows stay in `bank_transactions` and show
-        // up in /inbox's "To categorize" tab.
-        //
-        // Idempotent: re-running on the same batch (re-upload of the same
-        // file) silently skips rows whose `transaction_bank_links` row
-        // already exists, so the helper never duplicates ledger entries.
-        //
-        // Fired AFTER simplifiedUpload returns rather than threaded into
-        // its transaction because: (1) the helper opens its own
-        // per-bank-row tx so a single bad row doesn't roll back the
-        // entire batch ingest; (2) simplifiedUpload doesn't return the
-        // inserted ids today and threading them out would couple the two
-        // module surfaces unnecessarily. Bank-row ids are looked up by
-        // `upload_batch_id` instead — cheap single-account-scoped SELECT.
-        let autoRuleStats: {
-          matched: number;
-          unmatched: number;
-          possibleDuplicates: number;
-          total: number;
-        } | null = null;
-        if (boundAccountMode === "auto") {
-          const insertedBankRows = await db
-            .select({ id: schema.bankTransactions.id })
-            .from(schema.bankTransactions)
-            .where(
-              and(
-                eq(schema.bankTransactions.userId, userId),
-                eq(schema.bankTransactions.uploadBatchId, result.batchId),
-              ),
-            )
-            .all();
-          const bankRowIds = insertedBankRows.map((r) => r.id);
-          if (bankRowIds.length > 0) {
-            const ruleResult = await applyRulesToBankRows(
-              userId,
-              bankRowIds,
-              dek,
-              { autoMaterialize: true },
-            );
-            autoRuleStats = {
-              matched: ruleResult.materialized,
-              unmatched:
-                bankRowIds.length -
-                ruleResult.materialized -
-                ruleResult.possibleDuplicates,
-              possibleDuplicates: ruleResult.possibleDuplicates,
-              total: bankRowIds.length,
-            };
-          } else {
-            autoRuleStats = {
-              matched: 0,
-              unmatched: 0,
-              possibleDuplicates: 0,
-              total: 0,
-            };
-          }
-        }
-
-        return NextResponse.json({
-          mode: result.mode,
-          batchId: result.batchId,
-          redirectTo: result.redirectTo,
-          format: parseResult.format,
-          // §A — echo the resolved OFX payee source so the drawer can confirm
-          // which field populated the payee. Undefined for CSV.
-          ...(parseResult.payeeSource ? { payeeSource: parseResult.payeeSource } : {}),
-          counts: {
-            created: result.created,
-            skippedDuplicates: result.skippedDuplicates,
-            anchorsUpserted: result.anchorsUpserted,
-            // Phase 4 — populated only on Auto-pilot accounts. Surfaces
-            // the rule-fire results so the UploadDrawer's after-toast can
-            // say "5 of 12 rows auto-categorized."
-            ...(autoRuleStats ? { autoRule: autoRuleStats } : {}),
-          },
-          statement: buildStatementSummary(parseResult),
-          rowErrors,
-        });
-      } catch (err) {
-
-        console.error("[upload] simplifiedUpload failed", { userId, templateId, err });
-        return NextResponse.json(
-          { error: safeErrorMessage(err, "Simplified upload failed") },
-          { status: 500 },
-        );
-      }
-    }
-
-    // ─── Detailed-staging path (FINLYNQ-221) ─────────────────────────────
-    // The classify + dedup + already-imported probe above feeds the simplified
-    // path's simplifiedUpload(); the detailed path now delegates the whole
-    // parse → classify → dedup → INSERT write to the shared `writeStagedImport`
-    // chokepoint so the web route + the MCP `upload_statement` tool produce the
-    // identical staged_imports row. writeStagedImport re-runs the (cheap,
-    // in-memory + two dedup queries) classification from `parseResult` so the
-    // staged-write logic lives in exactly ONE place.
+    // ─── Unified pipeline (2026-06-30) ───────────────────────────────────
+    // ONE path for every account mode: stage the parsed rows into
+    // `staged_imports` (writeStagedImport), then advance as far as the bound
+    // account's mode dictates via the shared `advanceStagedImportByMode` (the
+    // SAME step the SimpleFIN connector uses):
+    //   manual  → stays in /import/pending for review
+    //   approve → auto-loads to bank_transactions (awaits an /inbox click)
+    //   auto    → auto-loads + fires rules → transactions
+    // Every row always passes through the staged stage first, so it's visible
+    // at each stage and flipping an account's mode only changes how far NEW
+    // imports auto-advance. Replaces the former simplified-vs-detailed branch +
+    // simplifiedUpload (which skipped the staged stage for approve/auto).
     const staged = await writeStagedImport(parseResult, {
       userId,
       dek,
@@ -778,9 +615,25 @@ export async function POST(request: NextRequest) {
       userStatementBalance,
     });
 
+    // approve/auto need a bound account; boundAccountMode is null when
+    // accountId is null (cross-account CSV) → the import stays in pending.
+    const advance =
+      accountId !== null
+        ? await advanceStagedImportByMode({
+            userId,
+            dek,
+            stagedImportId: staged.stagedImportId,
+            accountId,
+            mode: boundAccountMode ?? undefined,
+          })
+        : null;
+
+    const reachedLedger = advance != null && advance.stage !== "pending";
     return NextResponse.json({
       stagedImportId: staged.stagedImportId,
-      redirectTo: `/import/pending?id=${encodeURIComponent(staged.stagedImportId)}`,
+      redirectTo: reachedLedger
+        ? `/reconcile?account=${accountId}`
+        : `/import/pending?id=${encodeURIComponent(staged.stagedImportId)}`,
       format: staged.format,
       // §A — echo the resolved OFX payee source. Undefined for CSV.
       ...(parseResult.payeeSource ? { payeeSource: parseResult.payeeSource } : {}),
@@ -790,9 +643,27 @@ export async function POST(request: NextRequest) {
         probableDuplicate: staged.counts.probableDuplicate,
         skippedDuplicate: staged.counts.skippedDuplicate,
         errors: staged.counts.errors,
+        // Auto-pilot only — feeds the drawer's after-toast
+        // ("5 of 12 rows auto-categorized").
+        ...(advance && advance.mode === "auto"
+          ? {
+              autoRule: {
+                matched: advance.recorded,
+                unmatched: Math.max(
+                  0,
+                  advance.promoted - advance.recorded - advance.possibleDuplicates,
+                ),
+                possibleDuplicates: advance.possibleDuplicates,
+                total: advance.promoted,
+              },
+            }
+          : {}),
       },
       statement: buildStatementSummary(parseResult),
       tolerance,
+      rowErrors,
+      // Furthest stage the rows reached: pending | loaded | recorded.
+      ...(advance ? { advanced: { mode: advance.mode, stage: advance.stage } } : {}),
     });
   } catch (error) {
     const message = safeErrorMessage(error, "Staging upload failed");
