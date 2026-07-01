@@ -159,11 +159,12 @@ two deliberate ways.
   `defaultCurrency`). **Skips `pending: true` rows** by default; drops out-of-range
   amounts (`isReasonableAmount`) into `errors` instead of throwing.
 
-**Divergence 1 — staging + approve, NOT `executeImport` or a direct bank-ledger
-write.** A bank feed must never create `transactions` rows (that would double-count
-the user's own manual entries), and it wants a review gate. So the orchestrator
+**Divergence 1 — the unified staged pipeline, NOT `executeImport`.** A bank feed wants a
+review gate and must not blindly duplicate the user's manual entries, so it goes through
+the same staged pipeline a statement upload uses (advancing per account mode — see
+below) rather than `executeImport`. The orchestrator
 [`simplefin-orchestrator.ts`](../src/lib/external-import/simplefin-orchestrator.ts)
-routes rows through the **existing `/import/pending` staging flow**: it stages each
+routes rows through the **`/import/pending` staging flow**: it stages each
 account's rows into its own account-bound `staged_imports` row (`source='connector'`)
 via the shared `writeStagedImport` chokepoint
 ([`stage-statement-file.ts`](../src/lib/import/stage-statement-file.ts), extended with
