@@ -168,25 +168,6 @@ async function fetchAndTransform(userId: string, dek: Buffer) {
   const client = new simplefin.SimpleFINClient(creds.accessUrl);
   const startDate = Math.floor(Date.now() / 1000) - SYNC_LOOKBACK_DAYS * 24 * 60 * 60;
   const resp = await client.fetchAccounts({ startDate });
-  // TEMP DIAGNOSTIC (SimpleFIN pending-flag audit) — privacy-safe: logs counts +
-  // the distinct `pending` field values only, no payees/amounts. Remove once the
-  // pending-import question is answered.
-  try {
-    for (const a of (resp?.accounts ?? []) as Array<{
-      name?: string;
-      transactions?: Array<{ pending?: unknown; posted?: number }>;
-    }>) {
-      const txns = a.transactions ?? [];
-      const flagged = txns.filter((t) => t.pending === true).length;
-      const pendingValues = [...new Set(txns.map((t) => `${typeof t.pending}:${String(t.pending)}`))].join(" | ");
-      const missingPosted = txns.filter((t) => !(typeof t.posted === "number" && t.posted > 0)).length;
-      console.log(
-        `[simplefin-pending-audit] user=${userId} acct="${a.name ?? "?"}" total=${txns.length} flaggedPending=${flagged} missingPosted=${missingPosted} pendingValues=[${pendingValues}]`,
-      );
-    }
-  } catch {
-    /* diagnostic only — never affects the sync */
-  }
   return simplefin.simplefinToRawTransactions(resp);
 }
 
