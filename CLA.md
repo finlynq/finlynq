@@ -8,11 +8,15 @@ your rights to use your own contributions for any other purpose.
 **Plain-English summary (not a substitute for the terms below):** you keep the
 copyright to your contribution. You give the Project Owner permission to use
 it, including the permission needed to offer Finlynq under other license terms
-(for example, to operate and fund the managed finlynq.com service). The open-
-source project itself remains AGPL-3.0.
+(for example, to operate and fund the managed finlynq.com service), and to pass
+that permission on to a future company or acquirer that takes over the Project.
+The open-source project itself remains AGPL-3.0.
 
-"**Project Owner**" means the owner of the `finlynq` GitHub organization and
-operator of the Finlynq project.
+"**Project Owner**" means the owner and operator of the Finlynq project —
+currently the owner of the `finlynq` GitHub organization — together with any
+successor or assignee to whom this agreement and the rights granted under it are
+transferred pursuant to Section 6 (for example, a company later formed to
+operate Finlynq, or an acquirer of the Project).
 
 "**Contribution**" means any original work of authorship, including any
 modifications or additions to an existing work, that you intentionally submit
@@ -73,6 +77,17 @@ Contribution.
 You agree to notify the Project Owner of any facts or circumstances of which
 you become aware that would make these representations inaccurate in any
 respect.
+
+## 6. Assignment
+
+The Project Owner may assign or transfer this agreement, together with all
+rights and licenses you grant under it, to a successor in interest — including
+in connection with incorporating the Project, a merger, acquisition,
+reorganization, change of control, or sale of all or substantially all of the
+assets relating to the Project. The rights and licenses you grant are binding
+upon your heirs, successors, and assigns, and inure to the benefit of the
+Project Owner and its successors and assigns. No such assignment or transfer
+enlarges the rights you have granted under this agreement.
 
 ---
 
