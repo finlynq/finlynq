@@ -309,13 +309,18 @@ export async function syncSimpleFin(
 
     // ── Stage this account's rows (bound account, source='connector') ──
     const rows = acct.rows.map((r) => ({ ...r, account: finAccountName! }));
+    // SimpleFIN reports the account's current balance + balance-date. Carry it
+    // as the statement balance so approve seeds a `bank_daily_balances` anchor
+    // (source 'upload_form') — this drives the reconcile balance check + the
+    // "Calculated / Loaded" columns. Balance-vs-90-day-window divergence is
+    // warn-but-allow, never blocking.
     const parseResult: ParseSuccess = {
       rows,
       errors: [],
       // format is a placeholder — fileFormatOverride sets the displayed tag.
       format: "csv",
-      statementBalance: null,
-      statementBalanceDate: null,
+      statementBalance: acct.balance,
+      statementBalanceDate: acct.balanceDate,
       statementCurrency: acct.currency,
       anchors: [],
     };
