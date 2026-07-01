@@ -30,12 +30,12 @@
  */
 
 import { db, schema } from "@/db";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { buildNameFields } from "@/lib/crypto/encrypted-columns";
 import { createAccount } from "@/lib/queries";
 import { upsertBankTransaction } from "@/lib/bank-ledger";
 import { encryptStagingMeta } from "@/lib/crypto/staging-metadata";
-import { generateImportHash, checkFitIdDuplicates } from "@/lib/import-hash";
+import { generateImportHash } from "@/lib/import-hash";
 import {
   saveConnectorCredentials,
   loadConnectorCredentials,
@@ -94,6 +94,37 @@ export async function connectSimpleFin(
   const accessUrl = await simplefin.exchangeSetupToken(setupToken);
   await saveConnectorCredentials(userId, CONNECTOR_ID, dek, { accessUrl });
   return { connected: true };
+}
+
+/**
+ * Which of `fitIds` already exist on THIS account's bank ledger. Account-scoped
+ * (SimpleFIN ids are per-account, not per-user). Batched to stay under the
+ * bound-parameter limit.
+ */
+async function existingFitIdsForAccount(
+  userId: string,
+  accountId: number,
+  fitIds: string[],
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const batchSize = 900;
+  for (let i = 0; i < fitIds.length; i += batchSize) {
+    const batch = fitIds.slice(i, i + batchSize);
+    if (batch.length === 0) continue;
+    const rows = await db
+      .select({ fitId: schema.bankTransactions.fitId })
+      .from(schema.bankTransactions)
+      .where(
+        and(
+          eq(schema.bankTransactions.userId, userId),
+          eq(schema.bankTransactions.accountId, accountId),
+          inArray(schema.bankTransactions.fitId, batch),
+        ),
+      )
+      .all();
+    for (const r of rows) if (r.fitId) out.add(r.fitId);
+  }
+  return out;
 }
 
 /**
@@ -156,11 +187,17 @@ export async function syncSimpleFin(
 
     if (acct.rows.length === 0) continue;
 
-    // ── fitId-first dedup: drop rows already in the bank ledger ──
+    // ── fitId-first dedup: drop rows already in this ACCOUNT's bank ledger ──
+    // SimpleFIN transaction ids are unique only WITHIN an account (the demo
+    // bridge even uses the posted-epoch as the id), so the check MUST be
+    // account-scoped — a user-scoped check drops account B's rows that happen
+    // to share an id with account A. import_hash's ON CONFLICT is already
+    // account-scoped (it hashes the accountId); this pre-check catches the case
+    // where a bank restates a posted row (id stable, amount/desc changed).
     const fitIds = acct.rows
       .map((r) => r.fitId)
       .filter((f): f is string => !!f);
-    const existingFitIds = await checkFitIdDuplicates(fitIds, userId);
+    const existingFitIds = await existingFitIdsForAccount(userId, finAccountId, fitIds);
     const toWrite = acct.rows.filter((r) => !(r.fitId && existingFitIds.has(r.fitId)));
     duplicates += acct.rows.length - toWrite.length;
     if (toWrite.length === 0) continue;
