@@ -4,12 +4,12 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 export const metadata: Metadata = {
   title: "Finlynq vs Maybe (and the Sure fork): actively-built open-source PFM",
   description:
-    "Finlynq vs Maybe Finance and its community fork Sure: Maybe was a venture-funded PFM that open-sourced after shutting down; Sure is the volunteer fork. Finlynq targets the same holistic user with a modern stack, per-user envelope encryption, and a first-party MCP server neither ships. Side-by-side table, when to choose each, migration steps.",
+    "Finlynq vs Maybe Finance and its community fork Sure: Maybe was a venture-funded PFM that open-sourced after shutting down; Sure is the volunteer fork. Finlynq targets the same holistic user with a modern stack, per-user envelope encryption, direct bank connections (auto-sync, Plaid-independent), and a first-party MCP server neither ships. Side-by-side table, when to choose each, migration steps.",
   alternates: { canonical: "/vs/maybe" },
   openGraph: {
     title: "Finlynq vs Maybe (and the Sure fork)",
     description:
-      "Maybe open-sourced after shutting down; Sure is the volunteer fork. Finlynq: modern stack, per-user encryption, first-party MCP.",
+      "Maybe open-sourced after shutting down; Sure is the volunteer fork. Finlynq: modern stack, per-user encryption, direct bank connections (Plaid-independent), first-party MCP.",
     url: "/vs/maybe",
     siteName: "Finlynq",
     type: "article",
@@ -18,7 +18,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Finlynq vs Maybe / Sure",
     description:
-      "Actively-developed, encrypted, MCP-first Finlynq compared with Maybe Finance and the Sure community fork.",
+      "Actively-developed, encrypted, MCP-first Finlynq with direct bank connections (Plaid-independent), compared with Maybe Finance and the Sure community fork.",
   },
 };
 
@@ -40,7 +40,7 @@ const content: VsPageContent = {
     "You want per-user envelope encryption where the operator can't read your data. Maybe and Sure have no app-layer column encryption.",
     "You want a modern React / TypeScript stack the AI-tooling ecosystem speaks natively, rather than a Rails / Hotwire monolith.",
     "You want an official managed cloud. Sure is self-host only; Finlynq offers finlynq.com/cloud.",
-    "You want to steer clear of Plaid dependency risk, the same aggregator cost that helped sink the original Maybe company. Finlynq's import and connector framework is Plaid-independent.",
+    "You want to steer clear of Plaid dependency risk, the same aggregator cost that helped sink the original Maybe company. Finlynq offers direct bank connections (auto-sync) that don't rely on Plaid, alongside file / email / CSV / OFX import and a connector framework.",
   ],
   comparisonRows: [
     { label: "License", finlynq: "AGPL v3", competitor: "AGPL v3 (same as Finlynq)" },
@@ -68,7 +68,7 @@ const content: VsPageContent = {
     {
       label: "Bank sync",
       finlynq:
-        "File / email import + connector framework. No first-party Plaid today.",
+        "Direct bank connections (auto-sync, Plaid-independent), plus file / CSV / OFX import and a connector framework.",
       competitor: "Plaid + SimpleFIN in code; Plaid dormant post-archival (self-config required)",
     },
     {
@@ -126,7 +126,7 @@ const content: VsPageContent = {
     },
     {
       q: "Maybe has Plaid bank sync. Does Finlynq?",
-      a: "Maybe was Plaid-native, but Plaid is dormant after archival and needs self-configuration. Finlynq has no first-party Plaid and uses import plus a connector framework instead (SnapTrade on the roadmap).",
+      a: "Finlynq now offers direct bank connections (auto-sync) that don't depend on Plaid, alongside file / email / CSV / OFX import and a connector framework. Connecting a bank keeps your credentials with a third-party aggregator, never on Finlynq's servers, and manual import is always available. Maybe was Plaid-native, but Plaid is dormant after archival and needs self-configuration. (SnapTrade brokerage sync is on the roadmap.)",
     },
     {
       q: "Both are AGPL v3 and full PFMs. What's the real difference?",
@@ -159,7 +159,7 @@ const content: VsPageContent = {
       note: "AGPL v3 source",
     },
   ],
-  lastUpdated: "2026-05-29",
+  lastUpdated: "2026-07-01",
 };
 
 export default function VsMaybePage() {

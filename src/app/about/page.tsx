@@ -51,7 +51,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Monarch Money, YNAB, or Simplifi?",
-    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable, with a first-party MCP server (109 HTTP / 93 stdio tools) and per-user envelope encryption that keeps even the operator from reading your data. The catch: Finlynq doesn't have first-party Plaid bank sync yet. For now it imports from CSV, OFX, QFX, and email, with the SnapTrade brokerage integration on the roadmap. There's a side-by-side comparison at finlynq.com/vs/monarch.",
+    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable, with a first-party MCP server (109 HTTP / 93 stdio tools) and per-user envelope encryption that keeps even the operator from reading your data. Finlynq now connects directly to your bank so transactions flow in automatically, and also imports from CSV, OFX, QFX, and email, with brokerage connections (SnapTrade) on the roadmap. Monarch's Plaid-based coverage spans more institutions today. There's a side-by-side comparison at finlynq.com/vs/monarch.",
   },
   {
     q: "How is Finlynq different from Firefly III or Actual Budget?",
@@ -59,15 +59,15 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Era?",
-    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Here's where Finlynq parts ways: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for its AES-256-at-rest), and a 109 HTTP / 93 stdio tool MCP surface (v3.3.0) against Era's 27. To be fair, Era has stronger US bank sync and shared household features. There's a side-by-side comparison at finlynq.com/vs/era.",
+    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Here's where Finlynq parts ways: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for its AES-256-at-rest), and a 109 HTTP / 93 stdio tool MCP surface (v3.3.0) against Era's 27. To be fair, Era has broader, more established bank coverage and shared household features. There's a side-by-side comparison at finlynq.com/vs/era.",
   },
   {
     q: "Does Finlynq sync with my bank automatically?",
-    a: "Not yet, at least not through Plaid or MX. For now Finlynq imports transactions from CSV, OFX, QFX, and email, with template detection and a staging-review pipeline so you check things before they land. SnapTrade for brokerage accounts is on the near-term roadmap, and bank-sync aggregator integration is a tracked future item.",
+    a: "Yes. Finlynq can connect directly to your bank so transactions flow in on their own, with template detection and a staging-review pipeline so you check things before they land. Your bank login never touches Finlynq's servers: the connection is authorized through a third-party aggregator that holds the credentials, not us. You can also still import from CSV, OFX, QFX, PDF, and email. Brokerage connections (SnapTrade) for investment accounts are on the near-term roadmap.",
   },
   {
     q: "Does Finlynq have a mobile app?",
-    a: "Yep. Finlynq has native iOS and Android apps, free on the App Store and Google Play. They cover Dashboard, Transactions, Import, Budgets, and Settings, and they sign in to your Finlynq web server, whether that's the managed cloud or your own self-hosted box. They're newer than mature apps like Monarch's, so not everything has caught up yet, but they handle your everyday tracking on the go just fine. The full story is at finlynq.com/blog/finlynq-mobile-app.",
+    a: "Yep. Finlynq has native iOS and Android apps, free on the App Store and Google Play. They cover Dashboard, Transactions, Import, Budgets, and Settings, and they sign in to your Finlynq web server, whether that's the managed cloud or your own self-hosted box. They handle your everyday tracking on the go, and sync with the same encrypted account as the web app. The full story is at finlynq.com/blog/finlynq-mobile-app.",
   },
   {
     q: "What AI assistants does Finlynq work with?",
@@ -124,7 +124,7 @@ export default function AboutPage() {
             MCP-compatible AI assistant.
           </p>
           <p className="mt-3 text-xs text-muted-foreground">
-            Last updated: 2026-06-11
+            Last updated: 2026-07-01
           </p>
         </header>
 
@@ -208,6 +208,15 @@ export default function AboutPage() {
               RRSP, TFSA, and RESP contribution-room tracking against
               CRA-published limits, plus asset-location advice (bonds in RRSP,
               stocks in TFSA).
+            </li>
+            <li>
+              <strong className="text-foreground">
+                Direct bank connections.
+              </strong>{" "}
+              Link your bank and transactions flow in automatically, with a
+              reconcile step before anything lands. Your bank login stays with
+              the aggregator, never Finlynq&apos;s servers. CSV, OFX, QFX, PDF,
+              and email import all still work too.
             </li>
             <li>
               <strong className="text-foreground">In-app AI chat.</strong> Built

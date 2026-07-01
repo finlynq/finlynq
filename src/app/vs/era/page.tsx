@@ -37,14 +37,15 @@ const content: VsPageContent = {
   ),
   whenCompetitor: [
     <>
-      You want bank sync to {`"`}just work{`"`} out of the box. Era ships with
+      You want the broadest bank coverage out of the box. Era ships
       aggregator-grade automatic transactions across thousands of US
-      institutions. Finlynq is file and email import only right now.
+      institutions. Finlynq now connects directly to your bank too, but
+      Era&apos;s institution coverage is wider today.
     </>,
     <>
       You want the most polished native mobile experience. Era&apos;s Agency is
-      a mature native app. Finlynq now ships native iOS and Android apps too (on
-      the App Store and Google Play), but they&apos;re newer and still maturing.
+      a mature native app. Finlynq ships native iOS and Android apps too, on the
+      App Store and Google Play.
     </>,
     <>
       You want regulated investment advisory or brokerage. Era&apos;s Thesis
@@ -143,7 +144,7 @@ const content: VsPageContent = {
     {
       label: "Bank sync",
       finlynq:
-        "File / email import + connector framework. No first-party Plaid integration today.",
+        "Direct bank connections (auto-sync), plus file / email import and a connector framework. Narrower institution coverage than Plaid-based sync.",
       competitor:
         "Aggregator-based auto-sync (partner not publicly named); credential storage delegated to a SOC 2 Type II aggregator",
     },
@@ -167,8 +168,7 @@ const content: VsPageContent = {
     },
     {
       label: "Native mobile app",
-      finlynq:
-        "Yes, native iOS and Android apps (App Store, Google Play); newer and still maturing",
+      finlynq: "Yes, native iOS and Android apps (App Store, Google Play)",
       competitor: "Yes, Agency",
     },
     {
@@ -237,11 +237,11 @@ const content: VsPageContent = {
       q: "Doesn't Era's bank sync just make this a non-comparison for most users?",
       a: (
         <>
-          For people who want one-click bank sync and don&apos;t care about
-          source code or self-hosting, yeah, Era is the better default.
-          Finlynq&apos;s audience is the people who specifically don&apos;t want
-          a third-party aggregator holding their bank credentials, even one
-          that&apos;s SOC 2 Type II.
+          Less so now. Finlynq added direct bank connections, so you can get
+          one-click auto-sync too. Era&apos;s institution coverage is still
+          broader, but Finlynq gives you the choice: connect a bank, or stay
+          fully manual with CSV / OFX / email import, and either way your bank
+          login stays with the aggregator, never Finlynq&apos;s servers.
         </>
       ),
     },
@@ -262,8 +262,9 @@ const content: VsPageContent = {
       a: (
         <>
           Yes. Finlynq has native iOS and Android apps on the App Store and
-          Google Play. They are newer than Era&apos;s Agency, so Era&apos;s
-          mobile experience is more mature today.
+          Google Play, covering Dashboard, Transactions, Import, Budgets, and
+          Settings for everyday tracking on the go. They sign in to the same
+          encrypted account as the web app.
         </>
       ),
     },
@@ -312,7 +313,7 @@ const content: VsPageContent = {
       note: "connect Claude, Cursor, Windsurf and more",
     },
   ],
-  lastUpdated: "2026-05-13",
+  lastUpdated: "2026-07-01",
 };
 
 export default function VsEraPage() {

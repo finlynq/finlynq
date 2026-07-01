@@ -15,8 +15,8 @@ const FEATURES = [
   },
   {
     idx: "F.02 · IMPORT",
-    title: "Drop a file. Done.",
-    desc: "CSV, Excel, OFX, QFX, PDF. Finlynq remembers how you mapped the columns and saves it as a template, so the next import is one click.",
+    title: "Connect a bank, or drop a file.",
+    desc: "Link your bank so transactions flow in automatically, or import CSV, Excel, OFX, QFX, and PDF. Finlynq remembers how you mapped the columns and saves it as a template, so the next import is one click.",
     viz: "import",
   },
   {
@@ -48,8 +48,8 @@ const FEATURES = [
 const STEPS = [
   {
     n: "01",
-    title: "Import transactions.",
-    desc: "Upload a CSV or OFX from any bank. Finlynq remembers your columns, so every import after the first is one click.",
+    title: "Bring in your transactions.",
+    desc: "Connect your bank so transactions flow in automatically, or upload a CSV or OFX. Finlynq remembers your columns, so every import after the first is one click.",
   },
   {
     n: "02",
@@ -79,10 +79,10 @@ const PLAN_FEATS = [
   "Per-user AES-256-GCM envelope encryption · operator can't decrypt",
   "In-app AI chat, no MCP client setup required",
   "Native iOS and Android apps, available now",
+  "Direct bank connections, plus CSV, Excel, OFX/QFX, PDF, email import",
   "RRSP, TFSA, RESP contribution-room tracking (CRA limits)",
   "Lot-tracked portfolio cost basis · dividends · FX-aware",
   "Cash-flow forecasting · spending anomaly detection",
-  "CSV, Excel, OFX/QFX, PDF, email import",
   "Rules engine · budgets · goals · loans · subscriptions",
   "Self-host or managed cloud, same features either way",
   "REST API + MCP (HTTP & stdio · OAuth 2.1 + DCR)",
@@ -91,11 +91,11 @@ const PLAN_FEATS = [
 const ROADMAP_POINTS = [
   {
     label: "Live now",
-    desc: "Encrypted finances, a built-in MCP server for any AI, native iOS and Android apps, multi-currency portfolios, budgets, and imports.",
+    desc: "Encrypted finances, a built-in MCP server for any AI, native iOS and Android apps, direct bank connections, multi-currency portfolios, budgets, and imports.",
   },
   {
     label: "Building",
-    desc: "Automatic bank and brokerage connections, and an in-app AI assistant.",
+    desc: "Automatic brokerage connections, and an in-app AI assistant.",
   },
   {
     label: "Up next",
@@ -297,7 +297,7 @@ export function LandingClient() {
             </h1>
 
             <p className="lede lede-mt-28">
-              Encrypted, private, and yours. Import your bank data, connect Claude or Cursor, and
+              Encrypted, private, and yours. Connect your bank, add Claude or Cursor, and
               ask about your finances in plain English.
             </p>
 

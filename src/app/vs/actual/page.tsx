@@ -4,12 +4,12 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 export const metadata: Metadata = {
   title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",
   description:
-    "Finlynq vs Actual Budget: two open-source self-hostable personal finance apps. Actual is best-in-class local-first envelope budgeting; Finlynq adds native investment tracking, correct multi-currency, per-user envelope encryption, and a first-party MCP server. Side-by-side table, when to choose each, and migration steps.",
+    "Finlynq vs Actual Budget: two open-source self-hostable personal finance apps. Actual is best-in-class local-first envelope budgeting; Finlynq adds native investment tracking, correct multi-currency, direct bank connections, per-user envelope encryption, and a first-party MCP server. Side-by-side table, when to choose each, and migration steps.",
   alternates: { canonical: "/vs/actual" },
   openGraph: {
     title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",
     description:
-      "Two open-source self-hostable PFMs. Actual: local-first envelope budgeting (MIT). Finlynq: investments + multi-currency + per-user encryption + a first-party MCP server.",
+      "Two open-source self-hostable PFMs. Actual: local-first envelope budgeting (MIT). Finlynq: investments + multi-currency + direct bank connections + per-user encryption + a first-party MCP server.",
     url: "/vs/actual",
     siteName: "Finlynq",
     type: "article",
@@ -18,7 +18,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Finlynq vs Actual Budget",
     description:
-      "Open-source PFMs compared. Actual's local-first budgeting vs Finlynq's investments, multi-currency, and first-party MCP.",
+      "Open-source PFMs compared. Actual's local-first budgeting vs Finlynq's investments, multi-currency, direct bank connections, and first-party MCP.",
   },
 };
 
@@ -31,7 +31,7 @@ const content: VsPageContent = {
     "You want best-in-class envelope and zero-based budgeting UX: a keyboard-driven register, payee autocomplete, splits, and schedules. Actual nails budgeting in a way Finlynq doesn't aim to.",
     "You want true local-first with opt-in end-to-end encryption, where your data lives on-device and the sync server only holds opaque encrypted blobs. That's architecturally very private for a single user's data.",
     "You want a permissive MIT license (proprietary forks allowed) rather than Finlynq's copyleft AGPL v3.",
-    "You want built-in bank sync via GoCardless (EU/UK), SimpleFIN Bridge (US/Canada), or Pluggy.ai (Brazil). Finlynq has no first-party bank sync today.",
+    "You want the broadest aggregator-based bank sync via GoCardless (EU/UK), SimpleFIN Bridge (US/Canada), or Pluggy.ai (Brazil). Finlynq now offers direct bank connections too, but its institution coverage is narrower.",
     "You want a desktop app and offline-first multi-device via Actual's sync engine.",
   ],
   whenFinlynq: [
@@ -68,7 +68,7 @@ const content: VsPageContent = {
     {
       label: "Bank sync",
       finlynq:
-        "File / email import + connector framework. No first-party Plaid today.",
+        "Direct bank connections (auto-sync), plus file / CSV / OFX import and a connector framework. Narrower institution coverage than aggregator-based sync.",
       competitor:
         "GoCardless (EU/UK, no new accounts since 2025) + SimpleFIN (US/Canada) + Pluggy.ai (Brazil); CSV/QIF/OFX import",
     },
@@ -159,7 +159,7 @@ const content: VsPageContent = {
       note: "AGPL v3 source",
     },
   ],
-  lastUpdated: "2026-05-29",
+  lastUpdated: "2026-07-01",
 };
 
 export default function VsActualPage() {

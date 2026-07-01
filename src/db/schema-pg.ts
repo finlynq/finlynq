@@ -1328,6 +1328,33 @@ export const bankTransactions = pgTable("bank_transactions", {
   }),
 });
 
+// ─── simplefin_pending_transactions — refreshed snapshot of PENDING feed rows ──
+//
+// Holds / not-yet-posted charges from the SimpleFIN feed are NOT imported into
+// the ledger (they're volatile — a hold clears and is re-sent as a distinct
+// posted transaction). We snapshot them here instead, REFRESHED per-account on
+// every sync (delete + re-insert), so a future report / notification can surface
+// "you have N pending charges". payee/description are DEK-encrypted at rest (v1:
+// envelope) like bank_transactions.payee; amount/date/currency/fit_id plaintext.
+export const simplefinPendingTransactions = pgTable("simplefin_pending_transactions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").references(() => accounts.id, {
+    onDelete: "cascade",
+  }),
+  externalAccountId: text("external_account_id").notNull(),
+  fitId: text("fit_id").notNull(),
+  date: text("date").notNull().default(""),
+  amount: doublePrecision("amount").notNull(),
+  currency: text("currency").notNull(),
+  payee: text("payee"),
+  description: text("description"),
+  encryptionTier: text("encryption_tier").notNull().default("user"),
+  syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ─── transaction_bank_links — many-to-many between transactions and bank_transactions
 //
 // 2026-05-23. The 2026-05-22 two-ledger refactor added a 1:1 lineage FK

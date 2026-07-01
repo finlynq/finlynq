@@ -37,6 +37,7 @@ import {
   hasConnectorCredentials,
   deleteConnectorCredentials,
 } from "./credentials";
+import { replacePendingTransactions } from "./simplefin-pending";
 import { simplefin } from "@finlynq/import-connectors";
 
 const CONNECTOR_ID = "simplefin";
@@ -348,6 +349,18 @@ export async function syncSimpleFin(
       accountMap[acct.externalId] = String(finAccountId);
       mapDirty = true;
     }
+
+    // Refresh this account's pending-transaction snapshot (holds aren't imported
+    // — they're volatile — but we keep a live snapshot for reports/notifications).
+    // Runs BEFORE the no-posted-rows skip so an account with only pending charges
+    // is still snapshotted, and always replaces the prior snapshot (delete+insert).
+    await replacePendingTransactions(
+      userId,
+      dek,
+      finAccountId,
+      acct.externalId,
+      acct.pending,
+    );
 
     if (acct.rows.length === 0) continue;
 

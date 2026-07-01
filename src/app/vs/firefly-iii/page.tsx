@@ -5,7 +5,7 @@ export const metadata: Metadata = {
   title:
     "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
   description:
-    "Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (109 HTTP / 93 stdio tools) with per-user envelope encryption. Side-by-side feature table, when to choose each, and migration steps.",
+    "Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (109 HTTP / 93 stdio tools) with per-user envelope encryption, direct bank connections, and native iOS + Android apps. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
     canonical: "/vs/firefly-iii",
   },
@@ -13,7 +13,7 @@ export const metadata: Metadata = {
     title:
       "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
     description:
-      "Two AGPL v3 self-hostable PFMs, compared. Firefly III: 11-year-old double-entry, PSD2 bank sync, no first-party MCP. Finlynq: first-party MCP server with 109 HTTP / 93 stdio tools, per-user envelope encryption, native investment tracking.",
+      "Two AGPL v3 self-hostable PFMs, compared. Firefly III: 11-year-old double-entry, PSD2 bank sync, no first-party MCP. Finlynq: first-party MCP server with 109 HTTP / 93 stdio tools, per-user envelope encryption, native investment tracking, direct bank connections, and native iOS + Android apps.",
     url: "/vs/firefly-iii",
     siteName: "Finlynq",
     type: "article",
@@ -23,7 +23,7 @@ export const metadata: Metadata = {
     title:
       "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
     description:
-      "AGPL v3 self-hostable PFMs compared. Firefly III's double-entry rigor + PSD2 vs Finlynq's first-party MCP (109 HTTP / 93 stdio) and per-user envelope encryption.",
+      "AGPL v3 self-hostable PFMs compared. Firefly III's double-entry rigor + PSD2 vs Finlynq's first-party MCP (109 HTTP / 93 stdio), per-user envelope encryption, direct bank connections, and native iOS + Android apps.",
   },
 };
 
@@ -62,8 +62,9 @@ const content: VsPageContent = {
         You&apos;re in the EU/UK and want first-party PSD2 bank aggregation.
       </strong>{" "}
       Firefly III&apos;s Data Importer ships GoCardless / Nordigen (free PSD2
-      access) and Salt Edge integrations. Finlynq has no first-party Plaid or
-      PSD2 aggregator integration today.
+      access) and Salt Edge integrations. Finlynq now offers direct bank
+      connections (auto-sync) too, but its institution coverage is narrower than
+      PSD2-based sync across the EU/UK.
     </>,
     <>
       <strong className="text-foreground">
@@ -150,8 +151,10 @@ const content: VsPageContent = {
     <>
       <strong className="text-foreground">You&apos;re North American.</strong>{" "}
       Firefly III&apos;s bank-aggregation story is EU-PSD2 centric; NA users
-      almost always CSV import. Finlynq&apos;s connector framework + email-import
-      staging is more flexible for NA institutions today.
+      almost always CSV import. Finlynq offers direct bank connections
+      (auto-sync) alongside its connector framework + file / email import, which
+      is more flexible for NA institutions today. In the EU/UK, Firefly III&apos;s
+      PSD2 coverage is still broader.
     </>,
   ],
   comparisonRows: [
@@ -262,7 +265,7 @@ const content: VsPageContent = {
     {
       label: "Bank sync",
       finlynq:
-        "File / email import + connector framework. No first-party Plaid / PSD2 yet.",
+        "Direct bank connections (auto-sync), plus file / CSV / OFX / QFX import and a connector framework. Narrower institution coverage than PSD2-based sync.",
       competitor:
         "Data Importer: CSV, OFX, camt.053, GoCardless / Nordigen (PSD2 EU), Salt Edge, Spectre",
     },
@@ -402,12 +405,14 @@ const content: VsPageContent = {
       q: "Does Firefly III have better bank-sync than Finlynq?",
       a: (
         <>
-          In the EU/UK, yes, materially. Firefly III&apos;s Data Importer ships
-          GoCardless / Nordigen (free PSD2 access) and Salt Edge. In North
-          America, both projects largely rely on CSV / OFX / QFX import;
-          neither ships Plaid out of the box. Finlynq&apos;s email-import
-          staging via Resend Inbound is a different angle that some users
-          prefer.
+          In the EU/UK, Firefly III&apos;s PSD2 coverage is still broader:
+          its Data Importer ships GoCardless / Nordigen (free PSD2 access) and
+          Salt Edge. Finlynq now offers direct bank connections (auto-sync) of
+          its own, in addition to file / CSV / OFX / QFX and email import, so
+          transactions can flow in automatically, but its institution coverage
+          is narrower than PSD2-based sync. Connecting a bank keeps your
+          credentials with a third-party aggregator, never Finlynq&apos;s
+          servers, and manual import is always available.
         </>
       ),
     },
@@ -449,8 +454,9 @@ const content: VsPageContent = {
           Yes, plenty of people do. Firefly III is a great primary ledger;
           Finlynq can be a parallel system for users who want an MCP-driven
           copy of their data in a Postgres they control, with envelope
-          encryption and native investment tracking. Until Finlynq adds
-          bank-sync parity, this is a reasonable hybrid.
+          encryption and native investment tracking. Finlynq now has direct
+          bank connections of its own, though Firefly III&apos;s PSD2 coverage is
+          broader in the EU/UK, so this remains a reasonable hybrid.
         </>
       ),
     },
@@ -497,7 +503,7 @@ const content: VsPageContent = {
       note: "current tool counts + connect-to-Claude instructions",
     },
   ],
-  lastUpdated: "2026-05-13",
+  lastUpdated: "2026-07-01",
 };
 
 export default function VsFireflyIiiPage() {

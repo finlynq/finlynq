@@ -35,7 +35,11 @@ export class SimpleFinSetupTokenError extends Error {
 /** Injectable for tests. Defaults to the global fetch. */
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>;
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+// A real SimpleFIN `/accounts` pull aggregates from the user's banks (MX behind
+// the scenes) and can take well over 30s when it triggers a fresh refresh —
+// especially across several linked accounts. A subsequent call returns the
+// cached result quickly. 120s tolerates the cold pull; the caller can retry.
+const DEFAULT_TIMEOUT_MS = 120_000;
 
 /**
  * Exchange a one-time SimpleFIN setup token for a long-lived access URL.
@@ -133,15 +137,28 @@ export class SimpleFINClient {
     const qs = params.toString();
     const url = `${this.baseUrl}/accounts${qs ? `?${qs}` : ""}`;
 
-    const res = await withTimeout(
-      (signal) =>
-        this.fetchImpl(url, {
-          method: "GET",
-          headers: { Authorization: this.authHeader, Accept: "application/json" },
-          signal,
-        }),
-      this.timeoutMs,
-    );
+    let res: Response;
+    try {
+      res = await withTimeout(
+        (signal) =>
+          this.fetchImpl(url, {
+            method: "GET",
+            headers: { Authorization: this.authHeader, Accept: "application/json" },
+            signal,
+          }),
+        this.timeoutMs,
+      );
+    } catch (err) {
+      // The timeout aborts the fetch → AbortError. Surface a clear, retryable
+      // message rather than a raw abort (the aggregator is often mid-refresh).
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new SimpleFinApiError(
+          "SimpleFIN took too long to respond — your bank may be mid-sync. Try again in a moment.",
+          504,
+        );
+      }
+      throw err;
+    }
 
     if (!res.ok) {
       const text = (await res.text().catch(() => "")).slice(0, 200);

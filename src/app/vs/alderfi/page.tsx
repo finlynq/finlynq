@@ -123,11 +123,14 @@ const content: VsPageContent = {
       <strong className="text-foreground">
         You need real-world import paths.
       </strong>{" "}
-      Finlynq&apos;s unified staging-review pipeline ingests CSV, Excel, PDF,
-      OFX/QFX, and email-via-Resend-Inbound into the same{" "}
+      Finlynq now supports direct bank connections that auto-sync transactions
+      in, on top of its unified staging-review pipeline that ingests CSV, Excel,
+      PDF, OFX/QFX, and email-via-Resend-Inbound into the same{" "}
       <code>staged_imports</code> table, with per-row editing, transfer-pair
       linking, dedup via SHA-256 over plaintext payee, and a statement-balance
-      reconciliation callout. Alderfi documents CSV + SimpleFIN today.
+      reconciliation callout. When you connect a bank, your credentials stay with
+      a third-party aggregator and never touch Finlynq&apos;s servers, and manual
+      import is always available. Alderfi documents CSV + SimpleFIN today.
     </>,
     <>
       <strong className="text-foreground">You need multi-currency.</strong>{" "}
@@ -201,7 +204,7 @@ const content: VsPageContent = {
     {
       label: "Bank sync / import",
       finlynq:
-        "CSV / Excel / PDF / OFX / QFX / email-via-Resend; staging-review pipeline; connector framework",
+        "Direct bank connections (auto-sync); CSV / Excel / PDF / OFX / QFX / email-via-Resend; staging-review pipeline; connector framework",
       competitor: "CSV + SimpleFIN documented; Plaid planned for paid tier",
     },
     {
@@ -357,7 +360,7 @@ const content: VsPageContent = {
       note: "connect Claude, Cursor, Windsurf and more",
     },
   ],
-  lastUpdated: "2026-05-13",
+  lastUpdated: "2026-07-01",
 };
 
 export default function VsAlderfiPage() {

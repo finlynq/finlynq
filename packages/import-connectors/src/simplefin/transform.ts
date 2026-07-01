@@ -54,6 +54,25 @@ export interface SimpleFinAccountsResponse {
   accounts: SimpleFinAccount[];
 }
 
+/**
+ * A transaction detected as PENDING (not-yet-posted) — surfaced separately so
+ * callers can snapshot it (report / notification) rather than import it. These
+ * are volatile: a hold clears and is re-sent as a distinct posted transaction.
+ */
+export interface SimplefinPendingRow {
+  /** SimpleFIN transaction id. */
+  fitId: string;
+  /** YYYY-MM-DD (posted/transacted), or "" when the feed gives no usable date. */
+  date: string;
+  /** Signed amount (outflow negative). */
+  amount: number;
+  currency: string;
+  /** Clean merchant (payee ?? description). */
+  payee: string;
+  /** Raw description (carries the "Pending" status marker). */
+  description: string;
+}
+
 /** One SimpleFIN account plus its transformed Finlynq rows. */
 export interface SimplefinAccountRows {
   /** SimpleFIN account id — stable identity key for the persisted mapping. */
@@ -66,7 +85,10 @@ export interface SimplefinAccountRows {
   balance: number | null;
   /** YYYY-MM-DD of the balance, or null. */
   balanceDate: string | null;
+  /** Posted transactions to import. */
   rows: RawTransaction[];
+  /** Pending transactions (excluded from `rows`) — for the snapshot table. */
+  pending: SimplefinPendingRow[];
 }
 
 export interface SimplefinTransformResult {
@@ -102,6 +124,25 @@ function parseAmount(raw: string | number): number {
 }
 
 /**
+ * True when a transaction is pending / not-yet-posted.
+ *
+ * The SimpleFIN standard puts this in the `pending` boolean — but some
+ * aggregators (notably RBC via MX) NEVER set that field and instead encode the
+ * status as a word in the `description`: `"<MERCHANT> Pending <category> …"` for
+ * a hold vs `"<MERCHANT> Approved <category> …"` once it posts. A gas-station
+ * auth ("PETRO-CANADA 35197 Pending …", -$250) that later clears is dropped by
+ * the bank and re-sent as the real "Approved" charge (a distinct id/amount), so
+ * skipping the "Pending" row keeps the ledger clean while the posted charge
+ * still imports normally. We therefore treat a standalone "Pending" status token
+ * in the description as pending too. (A posted transaction's description carries
+ * "Approved", never "Pending", so this doesn't drop real rows.)
+ */
+export function isPendingTransaction(tx: SimpleFinTransaction): boolean {
+  if (tx.pending === true) return true;
+  return /\bpending\b/i.test(tx.description ?? "");
+}
+
+/**
  * Flatten a SimpleFIN `/accounts` response into per-account RawTransaction[].
  * Pending rows are skipped by default; malformed rows (bad amount/date) are
  * dropped and reported in `errors` rather than throwing.
@@ -121,10 +162,22 @@ export function simplefinToRawTransactions(
     const currency = normalizeCurrency(acct.currency, defaultCurrency);
     const name = (acct.name || acct.org?.name || acct.id || "Account").trim();
     const rows: RawTransaction[] = [];
+    const pending: SimplefinPendingRow[] = [];
 
     for (const tx of acct.transactions ?? []) {
-      if (tx.pending && !includePending) {
+      if (isPendingTransaction(tx) && !includePending) {
         skippedPending += 1;
+        const pAmount = parseAmount(tx.amount);
+        if (isReasonableAmount(pAmount)) {
+          pending.push({
+            fitId: tx.id,
+            date: epochToISODate(tx.posted || tx.transacted_at || 0),
+            amount: pAmount,
+            currency,
+            payee: (tx.payee || tx.description || "").trim(),
+            description: (tx.description || "").trim(),
+          });
+        }
         continue;
       }
       const amount = parseAmount(tx.amount);
@@ -174,6 +227,7 @@ export function simplefinToRawTransactions(
       balance,
       balanceDate,
       rows,
+      pending,
     });
   }
 

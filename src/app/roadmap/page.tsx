@@ -77,6 +77,10 @@ const SECTIONS: Section[] = [
         desc: "Hold accounts in any currency and still see one consolidated picture.",
       },
       {
+        title: "Connect your bank",
+        desc: "Link a bank account and transactions flow in automatically, with a reconcile step before anything lands. You keep the connection and the credentials, not us.",
+      },
+      {
         title: "Import from anywhere",
         desc: "CSV, Excel, PDF, OFX/QFX, and forward-by-email statements. There's a reconcile step before anything lands.",
       },
@@ -117,8 +121,8 @@ const SECTIONS: Section[] = [
         desc: "Ask questions about your finances in plain English, no external MCP client required. In active development behind a feature flag.",
       },
       {
-        title: "Automatic account connections",
-        desc: "Link banks and brokerages so transactions flow in on their own. We're starting with US banks (SimpleFIN) and North American brokerages, including Wealthsimple, Questrade, and IBKR (SnapTrade). You keep the connection and the credentials, not us.",
+        title: "Automatic brokerage connections",
+        desc: "Link brokerages so trades and holdings sync on their own. We're starting with North American brokerages, including Wealthsimple, Questrade, and IBKR (SnapTrade). You keep the connection and the credentials, not us.",
       },
     ],
   },

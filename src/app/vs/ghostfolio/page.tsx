@@ -30,7 +30,7 @@ const content: VsPageContent = {
   whenCompetitor: [
     "You want a dedicated, polished investment tracker: time-weighted and money-weighted return, dividends, and allocation by asset, country, sector, and industry. Its portfolio analytics are the most mature in this set.",
     "You want a mature dual-host model today: free self-host plus a Ghostfolio Premium managed cloud (~$15/yr) with professionally sourced data feeds.",
-    "You want a PWA plus an official Android wrapper right now. Finlynq's mobile apps are newer and less mature.",
+    "You want a PWA plus an official Android wrapper right now. Finlynq also ships native iOS and Android apps.",
     "You want broad self-host distribution, with community templates for CasaOS, Home Assistant, Unraid, and Umbrel, plus a very high release cadence.",
     "You only track investments and don't need budgets, transactions, loans, or subscriptions.",
   ],
@@ -39,7 +39,7 @@ const content: VsPageContent = {
     "You want a first-party MCP server. Ghostfolio ships none; it proposed a read-only Claude Agent SDK chat (not MCP) that was unshipped at the time of writing. A small third-party community wrapper exists, but it's not official.",
     "You want AI write access, not just read. Ghostfolio's proposed assistant is read-only; Finlynq's MCP supports write tools with a confirmation-token preview/execute pattern.",
     "You want per-user envelope encryption of names. Ghostfolio stores account, symbol, and comment names without per-user encryption.",
-    "You want any bank or transaction import at all. Ghostfolio has no bank aggregation, just manual entry or CSV/JSON activities import.",
+    "You want any bank or transaction import at all. Finlynq supports direct bank connections that auto-sync transactions, plus file/email/CSV/OFX/QFX/PDF import; Ghostfolio has no bank aggregation, just manual entry or CSV/JSON activities import.",
     "You want trade-date-locked multi-currency cost basis. Ghostfolio re-converts at the current spot rate, a documented cost-basis-drift issue.",
   ],
   comparisonRows: [
@@ -68,7 +68,7 @@ const content: VsPageContent = {
     {
       label: "Bank sync",
       finlynq:
-        "File / email import + connector framework. No first-party Plaid today.",
+        "Direct bank connections (auto-sync), plus file / CSV / OFX / QFX import and a connector framework.",
       competitor: "None: manual + CSV/JSON activities import only",
     },
     {
@@ -126,7 +126,7 @@ const content: VsPageContent = {
     },
     {
       q: "Can Ghostfolio sync my bank?",
-      a: "No, it has no bank aggregation. It's manual entry or CSV/JSON activities import. Finlynq imports CSV/OFX/QFX/PDF/email.",
+      a: "No, it has no bank aggregation. It's manual entry or CSV/JSON activities import. Finlynq supports direct bank connections that auto-sync transactions (your credentials stay with a third-party aggregator, never Finlynq's servers), and manual CSV/OFX/QFX/PDF/email import is always available.",
     },
     {
       q: "Is Ghostfolio's multi-currency accurate?",
@@ -159,7 +159,7 @@ const content: VsPageContent = {
       note: "AGPL v3 source",
     },
   ],
-  lastUpdated: "2026-05-29",
+  lastUpdated: "2026-07-01",
 };
 
 export default function VsGhostfolioPage() {

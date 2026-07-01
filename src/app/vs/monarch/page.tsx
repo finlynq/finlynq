@@ -4,14 +4,14 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 export const metadata: Metadata = {
   title: "Finlynq vs Monarch Money: open-source AI-native alternative",
   description:
-    "Finlynq vs Monarch Money: open-source AGPL v3 with self-host + 109 MCP tools + per-user envelope encryption + Canadian tax accounts, compared against Monarch's closed-source hosted SaaS with full Plaid bank sync and household budgeting. Side-by-side feature table, when to choose each, and migration steps.",
+    "Finlynq vs Monarch Money: open-source AGPL v3 with self-host + 109 MCP tools + per-user envelope encryption + Canadian tax accounts + direct bank connections (auto-sync) plus file/CSV/OFX import, compared against Monarch's closed-source hosted SaaS with full Plaid bank sync and household budgeting. Side-by-side feature table, when to choose each, and migration steps.",
   alternates: {
     canonical: "/vs/monarch",
   },
   openGraph: {
     title: "Finlynq vs Monarch Money: open-source AI-native alternative",
     description:
-      "Two AI-native PFMs, compared. Monarch: closed-source SaaS, $99/yr, Plaid bank sync, household plan. Finlynq: AGPL v3, self-hostable, 109 MCP tools, per-user envelope encryption, RRSP/TFSA tracking.",
+      "Two AI-native PFMs, compared. Monarch: closed-source SaaS, $99/yr, Plaid bank sync, household plan. Finlynq: AGPL v3, self-hostable, 109 MCP tools, per-user envelope encryption, direct bank connections (auto-sync) plus file/CSV/OFX import, RRSP/TFSA tracking.",
     url: "/vs/monarch",
     siteName: "Finlynq",
     type: "article",
@@ -42,17 +42,19 @@ const content: VsPageContent = {
         You want zero-config bank sync across thousands of US institutions.
       </strong>{" "}
       Monarch&apos;s Plaid + MX + Finicity aggregator coverage is the category
-      benchmark; Finlynq is file / email / CSV / OFX import today, with SnapTrade
-      brokerage integration on the roadmap.
+      benchmark. Finlynq now supports direct bank connections (auto-sync) in
+      addition to file / email / CSV / OFX import, but with narrower institution
+      coverage than Plaid, and with SnapTrade brokerage integration on the
+      roadmap.
     </>,
     <>
       <strong className="text-foreground">
         You want a polished native iOS and Android app.
       </strong>{" "}
       Monarch&apos;s mobile apps are mature with receipt scanning, push
-      notifications, and quick add. Finlynq now ships native iOS and Android
+      notifications, and quick add. Finlynq ships native iOS and Android
       apps (App Store and Google Play) for Dashboard, Transactions, Import,
-      Budgets, and Settings. They work well, but they are not yet at parity.
+      Budgets, and Settings.
     </>,
     <>
       <strong className="text-foreground">
@@ -174,18 +176,19 @@ const content: VsPageContent = {
     {
       label: "Bank sync (US)",
       finlynq:
-        "File / email / CSV / OFX import + connector framework. No first-party Plaid today.",
+        "Direct bank connections (auto-sync), plus file / CSV / OFX import. Narrower institution coverage than Plaid.",
       competitor: "Plaid + MX + Finicity, full aggregator coverage",
     },
     {
       label: "Bank sync (Canada)",
-      finlynq: "Same as US: file/email import; SnapTrade brokerage on roadmap",
+      finlynq:
+        "Direct bank connections (auto-sync), plus file / CSV / OFX import. Narrower institution coverage than Plaid; SnapTrade brokerage on roadmap.",
       competitor: "Limited; Plaid Canada coverage is partial",
     },
     {
       label: "Native mobile app",
       finlynq:
-        "iOS and Android (App Store, Google Play), covering Dashboard, Tx, Import, Budgets, Settings; newer and still maturing",
+        "Yes, native iOS and Android apps (App Store, Google Play)",
       competitor: "iOS + Android (mature)",
     },
     {
@@ -287,15 +290,19 @@ const content: VsPageContent = {
   ],
   faq: [
     {
-      q: "Isn't Monarch obviously better? It has bank sync, native mobile, and household features Finlynq doesn't.",
+      q: "Isn't Monarch obviously better? It has broader bank sync and household features Finlynq doesn't.",
       a: (
         <>
-          If your top priorities are auto-sync, mobile polish, and shared
-          household budgeting on US banks, then yeah, Monarch is the better
-          default. Finlynq&apos;s audience is the people who specifically want
-          open source, self-hosting, per-user encryption that excludes the
-          operator, and a deeper MCP surface, and who are happy to trade Plaid
-          convenience for those properties.
+          Finlynq now has direct bank connections with auto-sync (plus native
+          mobile apps), but Monarch&apos;s Plaid-based coverage is still broader
+          across US institutions, and its two-person household plan has no
+          Finlynq equivalent yet. If those are your top priorities, Monarch is
+          the better default. Finlynq&apos;s audience is the people who
+          specifically want open source, self-hosting, per-user encryption that
+          excludes the operator, and a deeper MCP surface. Either way, when you
+          connect a bank the login and credentials stay with a third-party
+          aggregator, never Finlynq&apos;s servers, and manual import is always
+          available.
         </>
       ),
     },
@@ -352,10 +359,10 @@ const content: VsPageContent = {
       q: "Can I run both?",
       a: (
         <>
-          Yes, plenty of people do: Monarch for bank sync and household,
-          Finlynq as a parallel system with encryption and MCP. Export from
-          Monarch to CSV, then import into Finlynq for the data you want under
-          your own control.
+          Yes, plenty of people do: Monarch for its broader bank sync and
+          household features, Finlynq as a parallel system with encryption and
+          MCP. Export from Monarch to CSV, then import into Finlynq for the data
+          you want under your own control.
         </>
       ),
     },
@@ -382,7 +389,7 @@ const content: VsPageContent = {
       note: "current tool counts + connect-to-Claude instructions",
     },
   ],
-  lastUpdated: "2026-05-27",
+  lastUpdated: "2026-07-01",
 };
 
 export default function VsMonarchPage() {

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   simplefinToRawTransactions,
   epochToISODate,
+  isPendingTransaction,
   type SimpleFinAccountsResponse,
 } from "./transform";
 
@@ -135,6 +136,50 @@ describe("simplefinToRawTransactions", () => {
     const ids = withPending.accounts[0].rows.map((r) => r.fitId);
     expect(ids).toContain("TX-pending");
     expect(withPending.skippedPending).toBe(0);
+  });
+});
+
+describe("isPendingTransaction (description-encoded status)", () => {
+  const mk = (over: Partial<{ pending: boolean; description: string }>) => ({
+    id: "x",
+    posted: 1704153600,
+    amount: "-1",
+    description: over.description ?? "",
+    ...(over.pending !== undefined ? { pending: over.pending } : {}),
+  });
+
+  it("flags the SimpleFIN boolean", () => {
+    expect(isPendingTransaction(mk({ pending: true }))).toBe(true);
+    expect(isPendingTransaction(mk({ pending: false, description: "COFFEE Approved" }))).toBe(false);
+  });
+
+  it("flags a 'Pending' status token in the description (RBC/MX)", () => {
+    expect(
+      isPendingTransaction(mk({ description: "PETRO-CANADA 35197 Pending          Gas          Purchase" })),
+    ).toBe(true);
+    expect(
+      isPendingTransaction(mk({ description: "PETRO-CANADA 35197 Approved          Gas          Purchase" })),
+    ).toBe(false);
+  });
+
+  it("drops the description-pending hold but keeps the posted charge in the flow", () => {
+    const resp: SimpleFinAccountsResponse = {
+      accounts: [
+        {
+          id: "cc",
+          name: "Visa",
+          currency: "CAD",
+          transactions: [
+            { id: "hold", posted: 1782302400, amount: "-250.00", description: "PETRO-CANADA 35197 Pending          Gas          Purchase" },
+            { id: "real", posted: 1782302400, amount: "-69.08", description: "PETRO-CANADA 35197 Approved          Gas          Purchase" },
+          ],
+        },
+      ],
+    };
+    const out = simplefinToRawTransactions(resp);
+    const ids = out.accounts[0].rows.map((r) => r.fitId);
+    expect(ids).toEqual(["real"]); // hold skipped, real charge kept
+    expect(out.skippedPending).toBe(1);
   });
 });
 

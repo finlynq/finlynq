@@ -70,9 +70,11 @@ export default function PrivacyPage() {
             </li>
           </ul>
           <p>
-            We don&apos;t collect bank credentials. Finlynq has no Plaid, MX,
-            Yodlee, or Finicity integration. Your bank login never touches our
-            servers. You import data via CSV / OFX / QFX / PDF / email.
+            We don&apos;t collect or store your bank credentials. When you
+            connect a bank directly, the connection is authorized through a
+            third-party aggregator that holds the credentials, not us: your bank
+            username and password never touch Finlynq&apos;s servers. You can
+            also import data manually via CSV / OFX / QFX / PDF / email.
           </p>
 
           <h2 className="text-xl font-semibold mt-12 mb-3">
