@@ -323,7 +323,17 @@ export async function sendStagedRowsToBankLedger(
   }
 
   // ─── Create the upload-batch row up front ────────────────────────────────
-  const sourceLabel = staged.source === "email" ? "email" : "upload";
+  // Connector-staged imports (SimpleFIN etc.) keep 'connector' attribution end
+  // to end; email/upload keep their labels. All three satisfy the
+  // bank_upload_batches.source CHECK.
+  const sourceLabel =
+    staged.source === "connector"
+      ? "connector"
+      : staged.source === "email"
+        ? "email"
+        : "upload";
+  const bankRowSource: "import" | "connector" =
+    staged.source === "connector" ? "connector" : "import";
   const [batchRow] = await db
     .insert(schema.bankUploadBatches)
     .values({
@@ -371,7 +381,7 @@ export async function sendStagedRowsToBankLedger(
         note: r.note,
         tags: r.tags,
         accountName: r.accountName,
-        source: "import",
+        source: bankRowSource,
         filename: plainFilename,
         originalStagedImportId: staged.id,
         uploadBatchId: batchRow.id,

@@ -43,6 +43,7 @@ A connector is the same shape regardless of provider — only the parse step dif
 | **IBKR** | Activity Statement XML / CSV | `ibkr` (`parse-xml`/`parse-csv`/`transform`) | XML preferred (deterministic). |
 | **Money Pro** | Transactions report CSV | `parseMoneyProCsv` / `moneyProRowsToRawTransactions` | See below — sign comes from a column, not the amount. |
 | **Generic CSV (full ledger)** | Any multi-account CSV | `parseGenericCsv` / `genericCsvRowsToRawTransactions` | See below — **mapping-driven** (not header-locked); for whole-portfolio exports the per-account `/import` mapper can't take. |
+| **SimpleFIN** | Live bank feed (JSON) | `exchangeSetupToken` / `SimpleFINClient` / `simplefinToRawTransactions` | See below — the ONLY **live feed** (not a file); on-demand sync, bank-ledger-only. |
 
 ## Money Pro (iBear) — the non-1:1 case
 
@@ -135,6 +136,94 @@ accepted).
 
 **Deferred:** using a per-row id column as `fitId` for idempotent re-import;
 MCP/mobile parity.
+
+## SimpleFIN — the live bank feed (not a file)
+
+SimpleFIN ([simplefin.org](https://www.simplefin.org)) is an open JSON-over-HTTP
+bank-feed protocol: the user pays SimpleFIN directly ($15/yr), links their banks,
+and pastes a one-time **setup token**. This is the FIRST connector that is a **live
+feed** rather than a file import — so it diverges from the four-layer file shape in
+two deliberate ways.
+
+**Layer 1 — pure package** [`packages/import-connectors/src/simplefin/`](../packages/import-connectors/src/simplefin/):
+- `client.ts` — `exchangeSetupToken(setupToken)`: the setup token is base64 of a
+  one-time *claim URL*; decode + `POST` (empty body) → the response body IS the
+  **access URL** (embeds HTTP Basic creds in its userinfo). `SimpleFINClient(accessUrl)`
+  splits the userinfo into an `Authorization: Basic` header (never sends creds in the
+  URL) and `fetchAccounts({ startDate })` GETs `{base}/accounts?start-date=<epoch>`.
+- `transform.ts` — `simplefinToRawTransactions(resp)` flattens the response into
+  **per-account** `RawTransaction[]` (`SimplefinAccountRows[]`): `date` from `posted`
+  epoch (→ `YYYY-MM-DD`), signed `amount` (SimpleFIN outflow negative — matches
+  Finlynq), `payee` = `payee ?? description` kept **plaintext** (`import_hash`),
+  `fitId` = transaction id, currency normalized (URL/non-fiat currencies fall back to
+  `defaultCurrency`). **Skips `pending: true` rows** by default; drops out-of-range
+  amounts (`isReasonableAmount`) into `errors` instead of throwing.
+
+**Divergence 1 — staging + approve, NOT `executeImport` or a direct bank-ledger
+write.** A bank feed must never create `transactions` rows (that would double-count
+the user's own manual entries), and it wants a review gate. So the orchestrator
+[`simplefin-orchestrator.ts`](../src/lib/external-import/simplefin-orchestrator.ts)
+routes rows through the **existing `/import/pending` staging flow**: it stages each
+account's rows into its own account-bound `staged_imports` row (`source='connector'`)
+via the shared `writeStagedImport` chokepoint
+([`stage-statement-file.ts`](../src/lib/import/stage-statement-file.ts), extended with
+an optional `source` + `fileFormatOverride`). `writeStagedImport` handles the
+fitId/import_hash dedup against `bank_transactions` and user-tier (`v1:`) encryption.
+The user reviews + approves at `/import/pending`; **approve →
+`sendStagedRowsToBankLedger`** (bank-only promote), which now **propagates
+`source='connector'`** onto `bank_transactions` + `bank_upload_batches` (was hardcoded
+`import`/`upload`). The promoted rows surface on the `/import` **reconciliation** page.
+
+**Divergence 2 — EXPLICIT create-or-link account mapping.** SimpleFIN accounts are new
+to Finlynq, and auto-creating silently is wrong when the user already tracks that
+account. `previewSimpleFin` classifies each detected account as **`mapped`** (already
+linked, from the persisted id map), **`suggested`** (an existing Finlynq account with a
+matching name — pre-fills Link), or **`new`**; the UI asks the user to **Create a new
+account or Link to an existing one** for each new account. `syncSimpleFin(choices)`
+resolves those (create → `buildNameFields`/`createAccount` `type:'A'`; link → the
+chosen id), and persists the SimpleFIN account-id → Finlynq account-id map in a second
+encrypted credential slot (`connector:simplefin:accounts`) so re-syncs never re-prompt
+(mapped-but-deleted falls back).
+
+**Mode-driven advance.** After staging each account, `syncSimpleFin` runs the shared
+`advanceStagedImportByMode` (the SAME step the statement upload uses), so each account
+advances per its own mode: manual → stays in `/import/pending`; approve → loads to
+`bank_transactions`; auto → loads + fires rules → `transactions`. Per-account
+try/catch isolation keeps one bad account from failing the whole sync.
+
+**On-demand + login auto-sync (no cron).** The access URL is stored encrypted under the
+user's DEK ([`credentials.ts`](../src/lib/external-import/credentials.ts), slot
+`connector:simplefin`); the DEK lives only in the in-memory session cache, so a
+session-less cron can't pull without an operator-decryptable credential. So sync fires
+(a) on user click, and (b) at LOGIN — `enqueueAutoSyncSimpleFin` runs fire-and-forget in
+`POST /api/auth/login` (covers web + mobile — one shared endpoint), ~12h-throttled via a
+`connector:simplefin:autosync_at` timestamp, syncing only already-mapped accounts. A
+true background 24h feed (server master / 2nd wrapper key) stays deferred.
+
+Routes: `POST /api/settings/bank-feeds/simplefin/connect` (exchange + save),
+`POST …/preview` (detect accounts + mapping status), `POST …/sync` (body `{choices}` →
+stage) — all `requireEncryption`; `GET …/status` + `DELETE …/disconnect`
+(`requireAuth`). UI:
+[`/settings/bank-feeds`](../src/app/(app)/settings/bank-feeds/page.tsx) — paste token →
+connect → **"Sync now" (detect) → per-account Create/Link → "Import to review"** → link
+to `/import/pending`; Disconnect behind `ConfirmDialog`.
+
+**Dedup, balances, mcc.** Dedup is **account-scoped** — `writeStagedImport` uses
+`checkFitIdDuplicatesForAccount` for account-bound imports (SimpleFIN reuses the
+posted-epoch as the tx id, so accounts collide; OFX/QFX benefit too). Beyond exact
+fitId/hash, the feed **auto-skips duplicates you already have**: an opt-in
+`fuzzyDedupWindowDays` (connector-only, ±3d) marks a row `skipped_duplicate` when the
+bound account already has a transaction/bank row with the same amount within the
+window — even under a different payee — re-derived every sync (no stored state), and a
+false positive can still be force-loaded. SimpleFIN's account **balance** rides through
+as the staged `statementBalance` → approve seeds a `bank_daily_balances` anchor
+(populates the reconcile Calculated/Loaded columns; window-vs-all-time divergence is
+warn-but-allow). The transform maps **`mcc`** (merchant category code) to a `mcc:<code>`
+tag so rules can match it. The pending-imports list labels `connector` imports by
+`originalFilename` ("SimpleFIN — <account>"), not the email subject/from.
+
+**Deferred:** background scheduled pulls; asset-vs-liability inference (v1 defaults every
+account to Asset); investment/holdings (SimpleFIN is banking-only); MCP/mobile parity.
 
 ## Load-bearing rules (learned the hard way)
 

@@ -20,7 +20,7 @@ import {
 import { canEditPortfolioRow } from "@/lib/portfolio/operations";
 import type { TxRowForLots } from "@/lib/portfolio/lots/types";
 import { db, schema } from "@/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { markCashSnapshotsDirty } from "@/lib/portfolio/snapshots/cash-dirty";
 import { z } from "zod";
@@ -106,27 +106,36 @@ export async function GET(request: NextRequest) {
   let portfolioHoldingId = portfolioHoldingIdParam
     ? parseInt(portfolioHoldingIdParam)
     : undefined;
-  // Resolve name → id via the user's name_lookup HMAC. Returns empty when
-  // no holding matches that name (deleted, never existed) — short-circuits
-  // before the SQL roundtrip.
+  // Resolve `portfolioHolding` → holding-id set via the user's lookup HMAC.
+  // Drill-through "View transactions" links from /portfolio pass the holding's
+  // DISPLAY value, which is the NAME for cash/custom rows but the SYMBOL for
+  // metals/securities (e.g. gold shows "XAU" though it's named "Gold"). Match
+  // name_lookup OR symbol_lookup so the symbol-display case isn't a silent miss,
+  // and collect EVERY matching position (a holding spread across accounts)
+  // rather than limit(1) so the aggregate drill shows all accounts. The HMAC is
+  // the same function for both columns (`symbol_lookup = nameLookup(dek, symbol)`),
+  // so one `lookup` value compares against both. An empty result → match nothing
+  // (combined below), never a silent drop to the full list.
+  let portfolioHoldingNameIds: number[] | undefined;
   if (
     portfolioHoldingNameParam &&
-    (portfolioHoldingId == null || !Number.isFinite(portfolioHoldingId)) &&
-    dek
+    (portfolioHoldingId == null || !Number.isFinite(portfolioHoldingId))
   ) {
-    const lookup = nameLookup(dek, portfolioHoldingNameParam);
-    const matched = await db
-      .select({ id: schema.portfolioHoldings.id })
-      .from(schema.portfolioHoldings)
-      .where(and(
-        eq(schema.portfolioHoldings.userId, userId),
-        eq(schema.portfolioHoldings.nameLookup, lookup),
-      ))
-      .limit(1);
-    if (matched[0]) {
-      portfolioHoldingId = matched[0].id;
+    if (dek) {
+      const lookup = nameLookup(dek, portfolioHoldingNameParam);
+      const matched = await db
+        .select({ id: schema.portfolioHoldings.id })
+        .from(schema.portfolioHoldings)
+        .where(and(
+          eq(schema.portfolioHoldings.userId, userId),
+          or(
+            eq(schema.portfolioHoldings.nameLookup, lookup),
+            eq(schema.portfolioHoldings.symbolLookup, lookup),
+          ),
+        ));
+      portfolioHoldingNameIds = matched.map((m) => m.id);
     } else {
-      return NextResponse.json([]);
+      portfolioHoldingNameIds = [];
     }
   }
   // Tag is an in-memory exact-match filter on the comma-split list. The
@@ -176,10 +185,66 @@ export async function GET(request: NextRequest) {
   const filterPortfolio = params.get("filter_portfolio") ?? undefined;
   const filterPortfolioTicker = params.get("filter_portfolioTicker") ?? undefined;
   const filterTags = params.get("filter_tags") ?? undefined;
+  // NOTE: `filterPortfolioTicker` is deliberately NOT in this set. Unlike the
+  // other encrypted-substring filters (which scan decrypted text post-fetch),
+  // the ticker filter is resolved to a holding-id set below and pushed into SQL,
+  // so it must NOT trigger the capped 1000-row post-decrypt window — that cap
+  // hid XAU/metal rows older than the 1000 most-recent across "All accounts".
   const hasEncryptedSubstringFilter = !!(
     filterPayee || filterNote || filterAccountName || filterAccountAlias ||
-    filterPortfolio || filterPortfolioTicker || filterTags
+    filterPortfolio || filterTags
   );
+
+  // Resolve the ticker substring against the user's (small) holdings/securities
+  // symbol set. Symbols are Stream-D encrypted, so SQL can't LIKE on them — but
+  // there are only tens of holdings per user, so decrypt them here, substring-
+  // match the needle (case-insensitive, matching the post-decrypt semantics the
+  // ticker column always had), and push the matching `portfolio_holding_id` set
+  // into the SQL WHERE. When the filter is present we ALWAYS bind a result set
+  // (possibly empty = "no holding matched") so the filter is never silently
+  // dropped — including the no-DEK case, which can't decrypt any symbol.
+  let portfolioTickerHoldingIds: number[] | undefined;
+  if (filterPortfolioTicker) {
+    if (dek) {
+      const needle = filterPortfolioTicker.toLowerCase();
+      const holdingRows = await db
+        .select({
+          id: schema.portfolioHoldings.id,
+          symbolCt: schema.portfolioHoldings.symbolCt,
+          securitySymbolCt: schema.securities.symbolCt,
+        })
+        .from(schema.portfolioHoldings)
+        .leftJoin(schema.securities, eq(schema.portfolioHoldings.securityId, schema.securities.id))
+        .where(eq(schema.portfolioHoldings.userId, userId));
+      const ids: number[] = [];
+      for (const h of holdingRows) {
+        const sym = decryptName(h.symbolCt, dek, null);
+        const secSym = decryptName(h.securitySymbolCt, dek, null);
+        if (
+          (sym && sym.toLowerCase().includes(needle)) ||
+          (secSym && secSym.toLowerCase().includes(needle))
+        ) {
+          ids.push(h.id);
+        }
+      }
+      portfolioTickerHoldingIds = ids;
+    } else {
+      portfolioTickerHoldingIds = [];
+    }
+  }
+
+  // Combine the holding-id constraints (the Ticker column filter + the
+  // name/symbol drill) into ONE id set pushed into SQL. Both present →
+  // intersection (AND, e.g. ticker-filtering inside a drilled holding); either
+  // alone → that set; neither → undefined (no holding-id constraint). An empty
+  // resulting set means "matched no holding" → `1 = 0` in the query.
+  const holdingIdSets = [portfolioTickerHoldingIds, portfolioHoldingNameIds].filter(
+    (s): s is number[] => s !== undefined,
+  );
+  const portfolioHoldingIds: number[] | undefined =
+    holdingIdSets.length === 0
+      ? undefined
+      : holdingIdSets.reduce((acc, s) => acc.filter((id) => s.includes(id)));
 
   // FINLYNQ-177 — single-transaction id deep link. Owner-scoped SQL pushdown
   // (combined with the user_id predicate in buildTxFilterConditions). A present
@@ -210,6 +275,7 @@ export async function GET(request: NextRequest) {
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
     categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
     portfolioHoldingId: Number.isFinite(portfolioHoldingId) ? portfolioHoldingId : undefined,
+    portfolioHoldingIds,
     accountIds: parseIdList("accountIds"),
     categoryIds: parseIdList("categoryIds"),
     amountMin: parseNum("amountMin"),
@@ -341,11 +407,9 @@ export async function GET(request: NextRequest) {
       matchSubstring((r as { portfolioHolding?: string | null }).portfolioHolding, filterPortfolio),
     );
   }
-  if (filterPortfolioTicker) {
-    decrypted = decrypted.filter((r) =>
-      matchSubstring((r as { portfolioHoldingSymbol?: string | null }).portfolioHoldingSymbol, filterPortfolioTicker),
-    );
-  }
+  // NOTE: the ticker filter (`filterPortfolioTicker`) is applied SQL-side via
+  // `portfolioHoldingIds` (resolved above), not here — so it scales past the
+  // 1000-row post-decrypt window. No in-memory ticker pass needed.
   if (filterTags) {
     decrypted = decrypted.filter((r) => matchSubstring(r.tags, filterTags));
   }

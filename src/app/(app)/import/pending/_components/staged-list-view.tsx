@@ -12,7 +12,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  ArrowLeft, Inbox, Mail, Upload, Clock, RefreshCw, Hourglass, CheckCircle2,
+  ArrowLeft, Inbox, Mail, Upload, Clock, RefreshCw, Hourglass, CheckCircle2, Landmark,
 } from "lucide-react";
 import { RecentUploadsPanel } from "@/components/reconcile/recent-uploads-panel";
 import { daysUntil, type StagedRow } from "../_types";
@@ -206,18 +206,21 @@ export function StagedListView({
       {list && list.length > 0 && (
         <div className="space-y-3">
           {list.map((row) => {
-            const isUpload = row.source === "upload";
-            const Icon = isUpload ? Upload : Mail;
-            const headline = isUpload
-              ? row.originalFilename || "Uploaded file"
-              : row.subject || "(no subject)";
-            const subline = isUpload
-              ? `${(row.fileFormat ?? "file").toUpperCase()} upload · ${new Date(
-                  row.receivedAt,
-                ).toLocaleString()}`
-              : `from ${row.fromAddress || "(unknown)"} · received ${new Date(
-                  row.receivedAt,
-                ).toLocaleString()}`;
+            // 'connector' (live bank feed, e.g. SimpleFIN) is labeled by its
+            // originalFilename ("SimpleFIN — <account>") like an upload — NOT the
+            // email subject/from (which are null for a feed → "(no subject)").
+            const isEmail = row.source === "email";
+            const isConnector = row.source === "connector";
+            const Icon = isConnector ? Landmark : isEmail ? Mail : Upload;
+            const receivedStr = new Date(row.receivedAt).toLocaleString();
+            const headline = isEmail
+              ? row.subject || "(no subject)"
+              : row.originalFilename || (isConnector ? "Bank feed" : "Uploaded file");
+            const subline = isEmail
+              ? `from ${row.fromAddress || "(unknown)"} · received ${receivedStr}`
+              : isConnector
+                ? `Bank feed · synced ${receivedStr}`
+                : `${(row.fileFormat ?? "file").toUpperCase()} upload · ${receivedStr}`;
             return (
               <Card
                 key={row.id}

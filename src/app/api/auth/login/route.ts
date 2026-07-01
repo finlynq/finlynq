@@ -55,6 +55,7 @@ import { enqueueBackfillSecurities } from "@/lib/securities/backfill";
 import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
 import { enqueueProcessPendingInbox } from "@/lib/email-import/process-pending-inbox";
 import { enqueueUpgradeUserFieldEncryption } from "@/lib/crypto/upgrade-user-fields";
+import { enqueueAutoSyncSimpleFin } from "@/lib/external-import/simplefin-orchestrator";
 
 // Accept either {identifier, password} (preferred) OR {email, password}
 // (legacy clients). Both shapes normalise to an `identifier` string.
@@ -281,6 +282,10 @@ export async function POST(request: NextRequest) {
       // auto-record any body emails that match a user's email-import rule.
       // Idempotent, fire-and-forget, DEK-bearing.
       enqueueProcessPendingInbox(user.id, dek);
+      // SimpleFIN bank-feed auto-sync (~12h throttle): if connected, pull fresh
+      // transactions for mapped accounts, each advancing per its own mode.
+      // Fire-and-forget, DEK-bearing — covers web + mobile (shared endpoint).
+      enqueueAutoSyncSimpleFin(user.id, dek);
     }
 
     const response = NextResponse.json({ success: true });

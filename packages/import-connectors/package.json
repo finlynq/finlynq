@@ -11,7 +11,8 @@
     "./wealthposition": "./src/wealthposition/index.ts",
     "./ibkr": "./src/ibkr/index.ts",
     "./moneypro": "./src/moneypro/index.ts",
-    "./generic-csv": "./src/generic-csv/index.ts"
+    "./generic-csv": "./src/generic-csv/index.ts",
+    "./simplefin": "./src/simplefin/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

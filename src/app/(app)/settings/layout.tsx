@@ -27,6 +27,7 @@ import {
   Zap,
   Link2,
   Upload,
+  Landmark,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -42,6 +43,8 @@ const NAV_ITEMS: NavItem[] = [
   // sub-page with a multi-condition + multi-action editor.
   { href: "/settings/rules", label: "Rules", icon: Zap },
   { href: "/settings/import", label: "Import", icon: Upload },
+  // SimpleFIN bank feed — automated transaction pull (on-demand sync).
+  { href: "/settings/bank-feeds", label: "Bank feeds", icon: Landmark },
   { href: "/settings/reconciliation", label: "Reconciliation", icon: Link2 },
   // Securities master (Tier 2) is folded into this page — one filterable row
   // per security; /settings/securities + /settings/holding-accounts redirect here.
