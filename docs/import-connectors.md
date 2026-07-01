@@ -185,11 +185,20 @@ chosen id), and persists the SimpleFIN account-id → Finlynq account-id map in 
 encrypted credential slot (`connector:simplefin:accounts`) so re-syncs never re-prompt
 (mapped-but-deleted falls back).
 
-**On-demand only.** The access URL is stored encrypted under the user's DEK
-([`credentials.ts`](../src/lib/external-import/credentials.ts), slot
+**Mode-driven advance.** After staging each account, `syncSimpleFin` runs the shared
+`advanceStagedImportByMode` (the SAME step the statement upload uses), so each account
+advances per its own mode: manual → stays in `/import/pending`; approve → loads to
+`bank_transactions`; auto → loads + fires rules → `transactions`. Per-account
+try/catch isolation keeps one bad account from failing the whole sync.
+
+**On-demand + login auto-sync (no cron).** The access URL is stored encrypted under the
+user's DEK ([`credentials.ts`](../src/lib/external-import/credentials.ts), slot
 `connector:simplefin`); the DEK lives only in the in-memory session cache, so a
-session-less cron can't pull. Sync fires on user click while logged in. Background
-auto-feed (a server-side master/second-wrapper key) is deferred.
+session-less cron can't pull without an operator-decryptable credential. So sync fires
+(a) on user click, and (b) at LOGIN — `enqueueAutoSyncSimpleFin` runs fire-and-forget in
+`POST /api/auth/login` (covers web + mobile — one shared endpoint), ~12h-throttled via a
+`connector:simplefin:autosync_at` timestamp, syncing only already-mapped accounts. A
+true background 24h feed (server master / 2nd wrapper key) stays deferred.
 
 Routes: `POST /api/settings/bank-feeds/simplefin/connect` (exchange + save),
 `POST …/preview` (detect accounts + mapping status), `POST …/sync` (body `{choices}` →
