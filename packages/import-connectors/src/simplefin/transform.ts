@@ -26,6 +26,8 @@ export interface SimpleFinTransaction {
   pending?: boolean;
   /** Epoch seconds — when the purchase happened (may precede `posted`). */
   transacted_at?: number;
+  /** Merchant Category Code (ISO 18245), e.g. "5812" (restaurants). */
+  mcc?: string;
 }
 
 export interface SimpleFinOrg {
@@ -140,6 +142,10 @@ export function simplefinToRawTransactions(
       const payee = (tx.payee || tx.description || "").trim();
       const memo = (tx.memo || "").trim();
       const note = memo && memo !== payee ? memo : undefined;
+      // Merchant category code → a `mcc:<code>` tag so auto-categorization rules
+      // can match on it (e.g. "tags contains mcc:5812" → Dining).
+      const mcc = (tx.mcc || "").trim();
+      const tags = mcc ? `mcc:${mcc}` : undefined;
 
       rows.push({
         date,
@@ -148,6 +154,7 @@ export function simplefinToRawTransactions(
         payee,
         currency,
         note,
+        tags,
         fitId: tx.id,
       });
     }

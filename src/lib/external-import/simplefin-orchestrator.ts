@@ -338,6 +338,11 @@ export async function syncSimpleFin(
       boundAccountCurrency: acct.currency,
       source: "connector",
       fileFormatOverride: "simplefin",
+      // Auto-skip a pulled row when this account already has a transaction /
+      // bank row with the same amount within ±3 days (even under a different
+      // payee) — re-derived every sync so matches stay skipped without stored
+      // state. A false match can still be force-loaded at /import/pending.
+      fuzzyDedupWindowDays: 3,
     });
 
     staged.push({

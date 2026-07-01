@@ -27,6 +27,7 @@ const RESPONSE: SimpleFinAccountsResponse = {
           description: "COFFEE SHOP",
           payee: "Blue Bottle",
           memo: "card ending 1234",
+          mcc: "5812",
         },
         {
           id: "TX-2",
@@ -108,6 +109,13 @@ describe("simplefinToRawTransactions", () => {
   it("carries the account currency onto each row", () => {
     const tx1 = result.accounts[0].rows.find((r) => r.fitId === "TX-1")!;
     expect(tx1.currency).toBe("USD");
+  });
+
+  it("maps mcc to a rule-matchable tag", () => {
+    const tx1 = result.accounts[0].rows.find((r) => r.fitId === "TX-1")!;
+    expect(tx1.tags).toBe("mcc:5812");
+    const tx2 = result.accounts[0].rows.find((r) => r.fitId === "TX-2")!;
+    expect(tx2.tags).toBeUndefined(); // no mcc → no tag
   });
 
   it("falls back to defaultCurrency for non-ISO (URL) currencies", () => {

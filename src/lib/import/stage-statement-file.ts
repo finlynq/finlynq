@@ -44,7 +44,7 @@
 
 import { randomUUID } from "crypto";
 import { db, schema } from "@/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
 import { encryptStagingMeta } from "@/lib/crypto/staging-metadata";
@@ -67,6 +67,18 @@ import { findUnreasonableAmountError } from "@/lib/import-pipeline";
 
 /** 60 days — matches the route + stage-email-import.ts. */
 const STAGE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
+
+/** "YYYY-MM-DD" → whole-day epoch number (UTC), or null if unparseable. */
+function isoToEpochDay(iso: string): number | null {
+  const t = Date.parse(`${iso}T00:00:00Z`);
+  return Number.isNaN(t) ? null : Math.floor(t / 86_400_000);
+}
+
+/** Shift a "YYYY-MM-DD" by ±days, returning "YYYY-MM-DD". */
+function shiftIsoDate(iso: string, deltaDays: number): string {
+  const t = Date.parse(`${iso}T00:00:00Z`);
+  return new Date(t + deltaDays * 86_400_000).toISOString().slice(0, 10);
+}
 /** Hard cap so a single staging session stays cheap to classify + render. */
 const MAX_STAGING_ROWS = 10_000;
 
@@ -402,6 +414,15 @@ export interface WriteStagedImportContext {
   /** Override staged_imports.fileFormat (default parseResult.format). Connectors
    *  pass a provider tag (e.g. "simplefin") so the pending list labels them. */
   fileFormatOverride?: string | null;
+  /**
+   * When set (live bank feeds), a still-`new` row is additionally marked
+   * `existing` (skipped by default) if the bound account already has a
+   * transaction OR bank-ledger row with the same amount within ±this many days
+   * — even under a different payee. This is the feed "auto-skip duplicates I
+   * already have" pass; it's re-derived every sync (no stored state), and a
+   * false match can still be force-loaded. Off (undefined) for file uploads.
+   */
+  fuzzyDedupWindowDays?: number;
 }
 
 /**
@@ -512,6 +533,68 @@ export async function writeStagedImport(
     }
   }
 
+  // ─── Feed fuzzy dedup (opt-in via fuzzyDedupWindowDays) ───────────────────
+  // A live feed often restates a transaction the user already has under a
+  // DIFFERENT payee ("Interest Income" vs "Deposit interest"), which exact
+  // hash/fitId can't connect. Mark a still-'new' row 'existing' (skipped) when
+  // the bound account already has a ledger transaction OR bank-ledger row with
+  // the SAME amount within ±window days. Re-derived every sync → a match stays
+  // skipped with no stored state; a false positive can still be force-loaded.
+  const fuzzySkip = new Set<number>();
+  if (ctx.fuzzyDedupWindowDays != null && accountId !== null) {
+    const windowDays = ctx.fuzzyDedupWindowDays;
+    const candidates = shaped.filter(
+      (r) => r.dedupStatus === "new" && r.accountId === accountId,
+    );
+    if (candidates.length > 0) {
+      const sortedDates = candidates.map((r) => r.date).sort();
+      const lo = shiftIsoDate(sortedDates[0], -windowDays);
+      const hi = shiftIsoDate(sortedDates[sortedDates.length - 1], windowDays);
+      const [txRows, bankRows] = await Promise.all([
+        db
+          .select({ date: schema.transactions.date, amount: schema.transactions.amount })
+          .from(schema.transactions)
+          .where(and(
+            eq(schema.transactions.userId, userId),
+            eq(schema.transactions.accountId, accountId),
+            gte(schema.transactions.date, lo),
+            lte(schema.transactions.date, hi),
+          ))
+          .all(),
+        db
+          .select({ date: schema.bankTransactions.date, amount: schema.bankTransactions.amount })
+          .from(schema.bankTransactions)
+          .where(and(
+            eq(schema.bankTransactions.userId, userId),
+            eq(schema.bankTransactions.accountId, accountId),
+            gte(schema.bankTransactions.date, lo),
+            lte(schema.bankTransactions.date, hi),
+          ))
+          .all(),
+      ]);
+      // amount(cents) → sorted epoch-day list of existing rows.
+      const byAmount = new Map<string, number[]>();
+      for (const e of [...txRows, ...bankRows]) {
+        const day = isoToEpochDay(e.date);
+        if (day == null) continue;
+        const key = e.amount.toFixed(2);
+        const arr = byAmount.get(key);
+        if (arr) arr.push(day);
+        else byAmount.set(key, [day]);
+      }
+      for (const r of candidates) {
+        const days = byAmount.get(r.amount.toFixed(2));
+        if (!days) continue;
+        const rd = isoToEpochDay(r.date);
+        if (rd == null) continue;
+        if (days.some((d) => Math.abs(d - rd) <= windowDays)) {
+          r.dedupStatus = "existing";
+          fuzzySkip.add(r.rowIndex);
+        }
+      }
+    }
+  }
+
   // Period-bounds for staged_imports — derived from the parsed rows.
   const allDates = shaped.map((r) => r.date).sort();
   const statementPeriodStart = allDates[0] ?? null;
@@ -588,9 +671,10 @@ export async function writeStagedImport(
     targetAccountId: null,
     dedupStatus: r.dedupStatus,
     rowStatus: "pending",
-    reconcileState: alreadyImportedHashes.has(r.hash)
-      ? "skipped_duplicate"
-      : "unmatched",
+    reconcileState:
+      alreadyImportedHashes.has(r.hash) || fuzzySkip.has(r.rowIndex)
+        ? "skipped_duplicate"
+        : "unmatched",
   });
 
   await db.transaction(async (tx) => {
