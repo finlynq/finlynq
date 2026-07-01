@@ -610,6 +610,9 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   await tx.delete(s.emailImportRules).where(eq(s.emailImportRules.userId, userId));
   await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
   await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
+  await tx
+    .delete(s.simplefinPendingTransactions)
+    .where(eq(s.simplefinPendingTransactions.userId, userId));
   await tx.delete(s.passwordResetTokens).where(eq(s.passwordResetTokens.userId, userId));
   await tx.delete(s.oauthAccessTokens).where(eq(s.oauthAccessTokens.userId, userId));
   await tx.delete(s.oauthAuthorizationCodes).where(eq(s.oauthAuthorizationCodes.userId, userId));
