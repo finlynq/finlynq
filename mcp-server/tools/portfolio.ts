@@ -2139,11 +2139,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   // ── get_investment_insights ────────────────────────────────────────────────
   server.tool(
     "get_investment_insights",
-    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, largest positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`. `mode: 'benchmark'` compares book-value growth vs a reference index. All monetary aggregates are converted to reportingCurrency (defaults to user's display currency) so cross-currency portfolios aggregate sensibly.",
+    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, largest positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`; each target's `holding` string is matched against a holding's NAME or SYMBOL (case-insensitive substring, same as get_portfolio_analysis), and positions sharing a symbol across accounts are aggregated into one current position. Targets matching no holding are listed in the response `warnings` array (rather than silently returning currentPct 0). `mode: 'benchmark'` compares book-value growth vs a reference index. All monetary aggregates are converted to reportingCurrency (defaults to user's display currency) so cross-currency portfolios aggregate sensibly.",
     {
       mode: z.enum(["patterns", "rebalancing", "benchmark"]).optional().describe("Analytics mode (default: patterns)"),
       targets: z.array(z.object({
-        holding: z.string().describe("Holding name or symbol"),
+        holding: z.string().describe("Holding name or symbol (case-insensitive substring match against the position's name + symbol; ticker symbols like VTI or VUN.TO work). Unmatched entries surface in the response `warnings` array."),
         target_pct: z.number().describe("Target allocation percentage (0-100)"),
       })).optional().describe("Required when mode='rebalancing'. Target allocations (should sum to ~100)."),
       benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional().describe("Benchmark for mode='benchmark' (default SP500)"),
@@ -2206,13 +2206,14 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // Convert each holding's value from its ACCOUNT currency to the
         // reporting currency before aggregating — otherwise mixing CAD + USD
         // produces nonsense percentages.
-        const holdings: Array<{ name: string; book_value: number; book_value_native: number; currency: string }> = [];
+        const holdings: Array<{ name: string; symbol: string | null; book_value: number; book_value_native: number; currency: string }> = [];
         for (const h of holdingValues) {
           const nativeValue = basis === "market" ? Number(h.value) : Number(h.costBasis);
           const ccy = String(h.currency || reporting).toUpperCase();
           const fx = await fxFor(ccy);
           holdings.push({
             name: h.name ?? "(unnamed holding)",
+            symbol: h.symbol ?? null,
             book_value: nativeValue * fx,
             book_value_native: nativeValue,
             currency: ccy,
@@ -2222,10 +2223,19 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         const totalBV = holdings.reduce((s, h) => s + Number(h.book_value), 0);
         if (totalBV === 0) return err("No portfolio holdings found");
 
-        // Sum across same-name holdings (post-#86 they are separate rows).
-        const currentAlloc = new Map<string, { name: string; value: number; pct: number; currency: string; valueNative: number }>();
+        // FINLYNQ-252: aggregate by SYMBOL across accounts (fall back to name
+        // for symbol-less rows like cash/custom). A ticker held in multiple
+        // accounts (e.g. VUN.TO in TFSA + RRSP) sums into ONE current position
+        // for rebalancing. Post-#86 those are separate holding rows. We keep
+        // BOTH `name` and `symbol` on each bucket so a target string can be
+        // matched against a `name + symbol` haystack, mirroring
+        // get_portfolio_analysis's name+symbol match semantics (the schema doc
+        // says `holding: Holding name or symbol`, but the prior code keyed the
+        // map by name only, so ticker targets silently missed).
+        const currentAlloc = new Map<string, { name: string; symbol: string | null; value: number; pct: number; currency: string; valueNative: number }>();
         for (const h of holdings) {
-          const key = String(h.name).toLowerCase();
+          const symLower = (h.symbol ?? "").trim().toLowerCase();
+          const key = symLower || String(h.name).toLowerCase();
           const prev = currentAlloc.get(key);
           if (prev) {
             prev.value += Number(h.book_value);
@@ -2233,6 +2243,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           } else {
             currentAlloc.set(key, {
               name: h.name,
+              symbol: h.symbol ?? null,
               value: Number(h.book_value),
               pct: 0, // recomputed below from the summed value
               currency: h.currency,
@@ -2250,10 +2261,25 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // "BUY $X / BUY $Y" advice with no signal that the other 58 holdings
         // exist and remain at their current weight.
         const matchedAllocKeys = new Set<string>();
+        // FINLYNQ-252: surface targets that match NO holding. A zero-match
+        // target was previously indistinguishable from a genuinely-new
+        // position (currentPct 0 => confident full-amount BUY). Mirrors the
+        // `warnings` array get_portfolio_analysis returns for unmatched filters.
+        const warnings: string[] = [];
         const suggestions = targets.map(t => {
-          const lo = t.holding.toLowerCase();
-          const matched = [...currentAlloc.entries()].find(([k]) => k.includes(lo) || lo.includes(k));
+          const lo = t.holding.trim().toLowerCase();
+          // Match a target against a `name + symbol` haystack per bucket, the
+          // same name-OR-symbol semantic as get_portfolio_analysis: a
+          // case-insensitive substring of the combined name + symbol (so "VTI"
+          // matches symbol "VTI", "VUN.TO" matches symbol "VUN.TO", and "Gold"
+          // matches name "Gold"). The aggregation already keyed on symbol, so
+          // a ticker held across accounts is a single bucket here.
+          const matched = lo.length === 0 ? undefined : [...currentAlloc.entries()].find(([, v]) => {
+            const haystack = `${String(v.name ?? "").toLowerCase()} ${String(v.symbol ?? "").toLowerCase()}`;
+            return haystack.includes(lo);
+          });
           if (matched) matchedAllocKeys.add(matched[0]);
+          else warnings.push(`Target '${t.holding}' matched no holding; treated as a new position (currentPct 0).`);
           const current = matched?.[1];
           const currentPct = current?.pct ?? 0;
           const currentValue = current?.value ?? 0;
@@ -2309,6 +2335,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
               : "All holdings were matched by a target.",
           },
           suggestions,
+          // FINLYNQ-252: any target that matched no holding is listed here
+          // (empty array when all targets matched). A caller can then tell an
+          // intentional new-position target apart from a mistyped ticker.
+          warnings,
           note: basis === "market"
             ? "Values are current market value of active positions (cash sleeves valued at current cash balance). Percentages and BUY/SELL amounts reflect what you actually hold now."
             : "No live prices were available, so values are the remaining cost basis of active positions (cash sleeves at current cash balance), NOT lifetime contributions. Provide price data (or use an OAuth/built-in-chat session) for market-based rebalancing.",
