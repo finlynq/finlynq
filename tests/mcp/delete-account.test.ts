@@ -342,13 +342,15 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     // handler. Locks against an accidental future removal.
     const fs = await import("node:fs/promises");
     const path = await import("node:path");
-    const file = path.join(__dirname, "../../mcp-server/register-tools-pg.ts");
+    // FINLYNQ-109: the delete_account handler moved out of the former
+    // register-tools-pg.ts monolith into the per-group accounts module.
+    const file = path.join(__dirname, "../../mcp-server/tools/accounts.ts");
     const src = await fs.readFile(file, "utf8");
     const idx = src.indexOf('"delete_account"');
     expect(idx).toBeGreaterThan(0);
     // Slice from the tool definition to the next tool boundary; assert
     // the cache-invalidation call is in there.
-    const sliceEnd = src.indexOf("// ── update_goal", idx);
+    const sliceEnd = src.indexOf("// ── set_account_mode", idx);
     expect(sliceEnd).toBeGreaterThan(idx);
     const handler = src.slice(idx, sliceEnd);
     expect(handler).toMatch(/invalidateUserTxCache\(userId\)/);
