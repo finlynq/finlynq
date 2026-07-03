@@ -345,9 +345,19 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
       const ids = rows.map((r) => r.accountId);
       const nameById = new Map<number, string | null>();
       if (ids.length > 0) {
+        // Drizzle's `sql` tag interpolates a JS array as separate scalar
+        // params (`($2, $3)`), so `ANY(${ids})` rendered as `ANY(($2, $3))` —
+        // Postgres parsed that as a ROW literal and rejected the row→array
+        // cast (FINLYNQ-250, same class of bug as the get_goals fix above in
+        // reads.ts). Use `ARRAY[...]::int[]` with `sql.join` so the cast
+        // wraps a real array constructor.
+        const idsExpr = sql.join(
+          ids.map((id) => sql`${id}`),
+          sql`, `,
+        );
         const rawAccounts = await q(
           db,
-          sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId} AND id = ANY(${ids})`,
+          sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId} AND id = ANY(ARRAY[${idsExpr}]::int[])`,
         );
         const decrypted = decryptNameish(rawAccounts, dek);
         for (const a of decrypted) {
