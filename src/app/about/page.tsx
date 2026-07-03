@@ -18,8 +18,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title: "What is Finlynq? Open-source personal finance with first-party MCP",
-    description:
-      "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 109 MCP tools. Not affiliated with Finq.com or Finlync.",
+    description: `Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, ${MCP_TOOL_COUNTS.http} MCP tools. Not affiliated with Finq.com or Finlync.`,
     url: "/about",
     siteName: "Finlynq",
     type: "article",
@@ -51,7 +50,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Monarch Money, YNAB, or Simplifi?",
-    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable, with a first-party MCP server (109 HTTP / 93 stdio tools) and per-user envelope encryption that keeps even the operator from reading your data. Finlynq now connects directly to your bank so transactions flow in automatically, and also imports from CSV, OFX, QFX, and email, with brokerage connections (SnapTrade) on the roadmap. Monarch's Plaid-based coverage spans more institutions today. There's a side-by-side comparison at finlynq.com/vs/monarch.",
+    a: `Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable, with a first-party MCP server (${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools) and per-user envelope encryption that keeps even the operator from reading your data. Finlynq now connects directly to your bank so transactions flow in automatically, and also imports from CSV, OFX, QFX, and email, with brokerage connections (SnapTrade) on the roadmap. Monarch's Plaid-based coverage spans more institutions today. There's a side-by-side comparison at finlynq.com/vs/monarch.`,
   },
   {
     q: "How is Finlynq different from Firefly III or Actual Budget?",
@@ -59,7 +58,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Era?",
-    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Here's where Finlynq parts ways: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for its AES-256-at-rest), and a 109 HTTP / 93 stdio tool MCP surface (v3.3.0) against Era's 27. To be fair, Era has broader, more established bank coverage and shared household features. There's a side-by-side comparison at finlynq.com/vs/era.",
+    a: `Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Here's where Finlynq parts ways: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for its AES-256-at-rest), and a ${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tool MCP surface (v${MCP_SERVER_VERSION}) against Era's 27. To be fair, Era has broader, more established bank coverage and shared household features. There's a side-by-side comparison at finlynq.com/vs/era.`,
   },
   {
     q: "Does Finlynq sync with my bank automatically?",

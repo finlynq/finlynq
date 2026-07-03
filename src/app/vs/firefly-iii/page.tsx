@@ -1,19 +1,18 @@
 import type { Metadata } from "next";
 import { VsPage, type VsPageContent } from "../_components/VsPage";
+import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title:
     "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
-  description:
-    "Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (109 HTTP / 93 stdio tools) with per-user envelope encryption, direct bank connections, and native iOS + Android apps. Side-by-side feature table, when to choose each, and migration steps.",
+  description: `Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools) with per-user envelope encryption, direct bank connections, and native iOS + Android apps. Side-by-side feature table, when to choose each, and migration steps.`,
   alternates: {
     canonical: "/vs/firefly-iii",
   },
   openGraph: {
     title:
       "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
-    description:
-      "Two AGPL v3 self-hostable PFMs, compared. Firefly III: 11-year-old double-entry, PSD2 bank sync, no first-party MCP. Finlynq: first-party MCP server with 109 HTTP / 93 stdio tools, per-user envelope encryption, native investment tracking, direct bank connections, and native iOS + Android apps.",
+    description: `Two AGPL v3 self-hostable PFMs, compared. Firefly III: 11-year-old double-entry, PSD2 bank sync, no first-party MCP. Finlynq: first-party MCP server with ${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools, per-user envelope encryption, native investment tracking, direct bank connections, and native iOS + Android apps.`,
     url: "/vs/firefly-iii",
     siteName: "Finlynq",
     type: "article",
@@ -22,8 +21,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title:
       "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
-    description:
-      "AGPL v3 self-hostable PFMs compared. Firefly III's double-entry rigor + PSD2 vs Finlynq's first-party MCP (109 HTTP / 93 stdio), per-user envelope encryption, direct bank connections, and native iOS + Android apps.",
+    description: `AGPL v3 self-hostable PFMs compared. Firefly III's double-entry rigor + PSD2 vs Finlynq's first-party MCP (${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio), per-user envelope encryption, direct bank connections, and native iOS + Android apps.`,
   },
 };
 
@@ -93,7 +91,7 @@ const content: VsPageContent = {
       <strong className="text-foreground">
         You want a first-party MCP server.
       </strong>{" "}
-      Finlynq ships <strong className="text-foreground">109 HTTP and 93 stdio</strong>{" "}
+      Finlynq ships <strong className="text-foreground">{MCP_TOOL_COUNTS.http} HTTP and {MCP_TOOL_COUNTS.stdio} stdio</strong>{" "}
       MCP tools built and maintained by the project, with OAuth 2.1 + Dynamic
       Client Registration, Bearer API keys, and stdio transports. Firefly III
       has <strong className="text-foreground">no first-party MCP server</strong>:{" "}
@@ -197,8 +195,8 @@ const content: VsPageContent = {
       finlynq: (
         <>
           Yes,{" "}
-          <strong className="text-foreground">109 HTTP / 93 stdio</strong> tools,
-          v3.3.0
+          <strong className="text-foreground">{MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio</strong> tools,
+          v{MCP_SERVER_VERSION}
         </>
       ),
       competitor: (
@@ -394,7 +392,7 @@ const content: VsPageContent = {
           Access Token. There&apos;s no per-user envelope encryption, no
           confirmation-token preview/execute pattern for destructive ops, no
           OAuth 2.1 + DCR, and no first-party support. Finlynq&apos;s MCP is
-          part of the project (109 HTTP / 93 stdio tools at v3.3.0, the canonical{" "}
+          part of the project ({MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tools at v{MCP_SERVER_VERSION}, the canonical{" "}
           <code>{`{ success: true, data: <T> }`}</code> envelope, tool
           annotations for the Anthropic Connectors Directory, per-user
           encryption all the way through).

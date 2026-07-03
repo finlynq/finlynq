@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { VsPage, type VsPageContent } from "../_components/VsPage";
+import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title: "Finlynq vs YNAB: open-source alternative with investments & MCP",
@@ -51,7 +52,7 @@ const content: VsPageContent = {
     },
     {
       label: "First-party MCP",
-      finlynq: "Yes, 109 HTTP / 93 stdio tools",
+      finlynq: `Yes, ${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools`,
       competitor:
         "No, but a public REST API has spawned community MCPs (calebl/ynab-mcp-server and others)",
     },

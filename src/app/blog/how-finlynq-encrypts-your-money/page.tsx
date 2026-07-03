@@ -6,6 +6,7 @@ import {
   articleSchema,
   breadcrumbSchema,
 } from "@/components/seo/json-ld";
+import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 const SLUG = "how-finlynq-encrypts-your-money";
 const PUBLISHED = "2026-05-13";
@@ -481,7 +482,7 @@ export default function HowFinlynqEncryptsYourMoneyPage() {
             >
               Model Context Protocol
             </a>{" "}
-            server, with 109 HTTP tools (93 over stdio) that let Claude, ChatGPT,
+            server, with {MCP_TOOL_COUNTS.http} HTTP tools ({MCP_TOOL_COUNTS.stdio} over stdio) that let Claude, ChatGPT,
             Cursor, or any other MCP-compatible AI assistant query and change
             your financial data on your behalf.
           </p>

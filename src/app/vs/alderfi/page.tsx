@@ -1,19 +1,18 @@
 import type { Metadata } from "next";
 import { VsPage, type VsPageContent } from "../_components/VsPage";
+import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title:
     "Finlynq vs Alderfi: two open-source MCP-first personal finance apps",
-  description:
-    "Finlynq vs Alderfi: production-ready AGPL v3 PFM with 109 MCP tools, hosted demo, per-user envelope encryption, and multi-currency support, compared with Alderfi's pre-alpha Apache-2.0 project that ships local LLM (Llama 3 via llama.cpp). Side-by-side feature table, when to choose each, dated 2026-05-13.",
+  description: `Finlynq vs Alderfi: production-ready AGPL v3 PFM with ${MCP_TOOL_COUNTS.http} MCP tools, hosted demo, per-user envelope encryption, and multi-currency support, compared with Alderfi's pre-alpha Apache-2.0 project that ships local LLM (Llama 3 via llama.cpp). Side-by-side feature table, when to choose each, dated 2026-05-13.`,
   alternates: {
     canonical: "/vs/alderfi",
   },
   openGraph: {
     title:
       "Finlynq vs Alderfi: two open-source MCP-first personal finance apps",
-    description:
-      "Two open-source MCP-first PFMs, honestly compared. Finlynq: AGPL v3, production, 109 MCP tools, hosted + self-host, per-user encryption. Alderfi: Apache-2.0, pre-alpha, local LLM via llama.cpp.",
+    description: `Two open-source MCP-first PFMs, honestly compared. Finlynq: AGPL v3, production, ${MCP_TOOL_COUNTS.http} MCP tools, hosted + self-host, per-user encryption. Alderfi: Apache-2.0, pre-alpha, local LLM via llama.cpp.`,
     url: "/vs/alderfi",
     siteName: "Finlynq",
     type: "article",
@@ -22,8 +21,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title:
       "Finlynq vs Alderfi: two open-source MCP-first personal finance apps",
-    description:
-      "AGPL v3 production PFM with 109 MCP tools vs Apache-2.0 pre-alpha with local LLM. Pick the one that matches your trade-offs.",
+    description: `AGPL v3 production PFM with ${MCP_TOOL_COUNTS.http} MCP tools vs Apache-2.0 pre-alpha with local LLM. Pick the one that matches your trade-offs.`,
   },
 };
 
@@ -35,7 +33,7 @@ const content: VsPageContent = {
       Alderfi and Finlynq are both open-source, MCP-first personal finance
       projects. Alderfi is Apache-2.0, pre-alpha, and ships local LLM support
       out of the box. Finlynq is AGPL v3, in production, hosted or self-hosted,
-      with a 109 HTTP / 93 stdio tool MCP surface. This page is here so you can
+      with a {MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tool MCP surface. This page is here so you can
       pick the one that actually fits your trade-offs.
     </>
   ),
@@ -102,7 +100,7 @@ const content: VsPageContent = {
       <strong className="text-foreground">
         You want a large, audited MCP tool surface today.
       </strong>{" "}
-      Finlynq exposes <strong className="text-foreground">109 HTTP / 93 stdio</strong>{" "}
+      Finlynq exposes <strong className="text-foreground">{MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio</strong>{" "}
       tools across accounts, transactions, budgets, categories, rules, portfolio
       (cost basis, dividends, FX-aware aggregation), goals, loans,
       subscriptions, recurring transactions, FX with overrides, spending
@@ -179,7 +177,7 @@ const content: VsPageContent = {
       label: "First-party MCP",
       finlynq: (
         <>
-          Yes, <strong className="text-foreground">109 HTTP / 93 stdio</strong>{" "}
+          Yes, <strong className="text-foreground">{MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio</strong>{" "}
           tools
         </>
       ),
@@ -275,7 +273,7 @@ const content: VsPageContent = {
           You might. The two projects make different trade-offs. Alderfi&apos;s
           commitments (Apache-2.0, local-LLM-first) are structural and unlikely
           to change. Finlynq&apos;s commitments (AGPL v3, hosted + self-host
-          parity, the current 109 HTTP / 93 stdio tool surface) are structural
+          parity, the current {MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tool surface) are structural
           too. If Apache-2.0 and local-LLM matter more to you than shipped
           surface, then waiting is reasonable. If you need something running
           today against real transactions, Finlynq is the one that has it.

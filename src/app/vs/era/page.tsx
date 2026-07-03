@@ -1,17 +1,16 @@
 import type { Metadata } from "next";
 import { VsPage, type VsPageContent } from "../_components/VsPage";
+import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title: "Finlynq vs Era: open-source vs closed AI personal finance",
-  description:
-    "Finlynq vs Era: open-source AGPL v3 with self-host + 109 MCP tools + per-user envelope encryption, compared against Era's closed-source hosted SaaS with 27 MCP tools and operator-held keys. Side-by-side feature table, when to choose each, and migration steps.",
+  description: `Finlynq vs Era: open-source AGPL v3 with self-host + ${MCP_TOOL_COUNTS.http} MCP tools + per-user envelope encryption, compared against Era's closed-source hosted SaaS with 27 MCP tools and operator-held keys. Side-by-side feature table, when to choose each, and migration steps.`,
   alternates: {
     canonical: "/vs/era",
   },
   openGraph: {
     title: "Finlynq vs Era: open-source vs closed AI personal finance",
-    description:
-      "Two MCP-first personal finance apps, compared. Finlynq: AGPL v3, self-hostable, 109 MCP tools, per-user envelope encryption. Era: closed SaaS, hosted-only, 27 MCP tools, operator-held keys.",
+    description: `Two MCP-first personal finance apps, compared. Finlynq: AGPL v3, self-hostable, ${MCP_TOOL_COUNTS.http} MCP tools, per-user envelope encryption. Era: closed SaaS, hosted-only, 27 MCP tools, operator-held keys.`,
     url: "/vs/era",
     siteName: "Finlynq",
     type: "article",
@@ -19,8 +18,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "Finlynq vs Era: open-source vs closed AI personal finance",
-    description:
-      "Open-source self-hostable PFM with 109 MCP tools and per-user envelope encryption, compared with Era.",
+    description: `Open-source self-hostable PFM with ${MCP_TOOL_COUNTS.http} MCP tools and per-user envelope encryption, compared with Era.`,
   },
 };
 
@@ -85,7 +83,7 @@ const content: VsPageContent = {
     </>,
     <>
       <strong className="text-foreground">You want the bigger MCP surface.</strong>{" "}
-      Finlynq exposes 109 HTTP tools and 93 stdio tools across budgets,
+      Finlynq exposes {MCP_TOOL_COUNTS.http} HTTP tools and {MCP_TOOL_COUNTS.stdio} stdio tools across budgets,
       transactions, portfolios, goals, loans, subscriptions, and rules.
       Era&apos;s public Context surface is 27 tools spanning accounts,
       connections, insights, billing, and a handful of other domains.
@@ -119,7 +117,7 @@ const content: VsPageContent = {
       label: "First-party MCP",
       finlynq: (
         <>
-          Yes, <strong className="text-foreground">109 HTTP / 93 stdio</strong>{" "}
+          Yes, <strong className="text-foreground">{MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio</strong>{" "}
           tools
         </>
       ),

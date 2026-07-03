@@ -1,17 +1,16 @@
 import type { Metadata } from "next";
 import { VsPage, type VsPageContent } from "../_components/VsPage";
+import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title: "Finlynq vs Monarch Money: open-source AI-native alternative",
-  description:
-    "Finlynq vs Monarch Money: open-source AGPL v3 with self-host + 109 MCP tools + per-user envelope encryption + Canadian tax accounts + direct bank connections (auto-sync) plus file/CSV/OFX import, compared against Monarch's closed-source hosted SaaS with full Plaid bank sync and household budgeting. Side-by-side feature table, when to choose each, and migration steps.",
+  description: `Finlynq vs Monarch Money: open-source AGPL v3 with self-host + ${MCP_TOOL_COUNTS.http} MCP tools + per-user envelope encryption + Canadian tax accounts + direct bank connections (auto-sync) plus file/CSV/OFX import, compared against Monarch's closed-source hosted SaaS with full Plaid bank sync and household budgeting. Side-by-side feature table, when to choose each, and migration steps.`,
   alternates: {
     canonical: "/vs/monarch",
   },
   openGraph: {
     title: "Finlynq vs Monarch Money: open-source AI-native alternative",
-    description:
-      "Two AI-native PFMs, compared. Monarch: closed-source SaaS, $99/yr, Plaid bank sync, household plan. Finlynq: AGPL v3, self-hostable, 109 MCP tools, per-user envelope encryption, direct bank connections (auto-sync) plus file/CSV/OFX import, RRSP/TFSA tracking.",
+    description: `Two AI-native PFMs, compared. Monarch: closed-source SaaS, $99/yr, Plaid bank sync, household plan. Finlynq: AGPL v3, self-hostable, ${MCP_TOOL_COUNTS.http} MCP tools, per-user envelope encryption, direct bank connections (auto-sync) plus file/CSV/OFX import, RRSP/TFSA tracking.`,
     url: "/vs/monarch",
     siteName: "Finlynq",
     type: "article",
@@ -19,8 +18,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "Finlynq vs Monarch Money: open-source AI-native alternative",
-    description:
-      "Open-source self-hostable PFM with 109 MCP tools and per-user envelope encryption, compared with Monarch Money's closed SaaS.",
+    description: `Open-source self-hostable PFM with ${MCP_TOOL_COUNTS.http} MCP tools and per-user envelope encryption, compared with Monarch Money's closed SaaS.`,
   },
 };
 
@@ -105,7 +103,7 @@ const content: VsPageContent = {
     </>,
     <>
       <strong className="text-foreground">
-        You want a first-party MCP server with 109 HTTP / 93 stdio tools.
+        You want a first-party MCP server with {MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tools.
       </strong>{" "}
       Finlynq ships MCP as a core feature, not a bolt-on: OAuth 2.1 + DCR,
       Bearer API keys, stdio, all the transports. Monarch did add an MCP server
@@ -157,8 +155,8 @@ const content: VsPageContent = {
       finlynq: (
         <>
           Yes,{" "}
-          <strong className="text-foreground">109 HTTP / 93 stdio</strong> tools,
-          v3.3.0
+          <strong className="text-foreground">{MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio</strong> tools,
+          v{MCP_SERVER_VERSION}
         </>
       ),
       competitor: "Yes, Monarch MCP server (added 2026, smaller surface)",
@@ -311,7 +309,7 @@ const content: VsPageContent = {
       a: (
         <>
           It narrows the gap, but it doesn&apos;t close it. Finlynq&apos;s MCP is
-          109 HTTP / 93 stdio tools at v3.3.0, built from day one as a
+          {MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tools at v{MCP_SERVER_VERSION}, built from day one as a
           first-party surface with OAuth 2.1 + DCR, stdio transport, and
           per-user encryption. Monarch&apos;s MCP is a 2026 addition layered on
           top of a closed-source SaaS. It&apos;s useful, but the underlying data

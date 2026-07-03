@@ -23,6 +23,98 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 
+// FINLYNQ-258: user-facing surfaces that render a STATIC (non-interpolated)
+// "<n> HTTP" / "<n> stdio" tool-count literal. Every surface here is
+// asserted against the single source of truth (src/lib/mcp/tool-counts.ts)
+// below, and the build FAILS on any mismatch — this is what makes drift
+// (e.g. the roadmap page + the DevManager description going stale while
+// README stayed correct, FINLYNQ-258) impossible to ship silently again.
+//
+// A page that IMPORTS MCP_TOOL_COUNTS and interpolates it (e.g. `about`,
+// `roadmap`, `mcp-guide/layout`, `landing-client`, the `/vs/*` pages, the
+// HTTP + stdio MCP server `description`s) needs NO entry here — there is
+// nothing to drift, since it re-renders the constant on every build.
+// This list covers surfaces that (by nature) can't import the TS constant,
+// most notably README.md (read by GitHub/npm, not compiled).
+//
+// Do NOT add src/lib/seo/releases.ts here — its tool-count mentions are
+// a historical changelog record of what shipped in a PAST release (e.g.
+// "now ships 117 HTTP tools, up from 109") and must stay static literals.
+const STATIC_COUNT_SURFACES = [join(REPO_ROOT, "README.md")];
+
+/**
+ * Reads MCP_TOOL_COUNTS out of src/lib/mcp/tool-counts.ts via a small regex
+ * parse (kept dependency-free, mirroring this script's existing philosophy —
+ * see the tool-registration regex above). The file is plain TS with `as
+ * const` object literals, so a targeted regex is more robust here than a
+ * full TS-aware import (this .mjs runs standalone via `node`, pre-build).
+ */
+function loadToolCounts() {
+  const src = readFileSync(
+    join(REPO_ROOT, "src", "lib", "mcp", "tool-counts.ts"),
+    "utf8"
+  );
+  const m = src.match(
+    /MCP_TOOL_COUNTS\s*=\s*\{\s*http:\s*(\d+)\s*,\s*stdio:\s*(\d+)\s*\}/
+  );
+  if (!m) {
+    throw new Error(
+      "generate-mcp-tool-catalog: could not parse MCP_TOOL_COUNTS out of " +
+        "src/lib/mcp/tool-counts.ts — did its literal shape change?"
+    );
+  }
+  return { http: Number(m[1]), stdio: Number(m[2]) };
+}
+
+/**
+ * Scans each surface in STATIC_COUNT_SURFACES for "<n> HTTP" / "<n> stdio"
+ * tool-count mentions and asserts every one equals the source of truth.
+ * Exits the process (fails the build) on the first mismatch — that's the
+ * FINLYNQ-258 acceptance bar: a deliberate edit that desyncs a rendered
+ * count must fail `npm run build`.
+ */
+function assertNoCountDrift(counts) {
+  const httpRe = /(\d+)\s*HTTP\b/g;
+  const stdioRe = /(\d+)\s*stdio\b/g;
+  const problems = [];
+
+  for (const file of STATIC_COUNT_SURFACES) {
+    let text;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue; // surface not present in this checkout — nothing to assert
+    }
+    for (const [re, kind, expected] of [
+      [httpRe, "HTTP", counts.http],
+      [stdioRe, "stdio", counts.stdio],
+    ]) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text))) {
+        const found = Number(m[1]);
+        if (found !== expected) {
+          problems.push(
+            `${file}: found "${found} ${kind}" but MCP_TOOL_COUNTS.${kind.toLowerCase()} is ${expected}`
+          );
+        }
+      }
+    }
+  }
+
+  if (problems.length > 0) {
+    console.error(
+      "generate-mcp-tool-catalog: MCP tool-count DRIFT detected — a rendered " +
+        "count no longer matches src/lib/mcp/tool-counts.ts (FINLYNQ-258).\n" +
+        problems.map((p) => `  - ${p}`).join("\n") +
+        "\n\nFix: update the stale surface to the current count (or, " +
+        "preferably, import MCP_TOOL_COUNTS and interpolate it so it can " +
+        "never drift again)."
+    );
+    process.exit(1);
+  }
+}
+
 // FINLYNQ-109: the HTTP tool registrations were decomposed out of the former
 // register-tools-pg.ts monolith into per-group modules under mcp-server/tools/.
 // List them in composer-registration order (register-tools-pg.ts) so the
@@ -191,6 +283,12 @@ function isDeprecated(desc) {
 }
 
 function main() {
+  // FINLYNQ-258: assert every static (non-interpolated) tool-count surface
+  // agrees with the single source of truth BEFORE doing anything else — a
+  // drifted count is a docs/marketing bug, not a catalog-generation one, so
+  // fail fast rather than bury it after the (unrelated) catalog write.
+  assertNoCountDrift(loadToolCounts());
+
   const httpTools = [];
   for (const f of HTTP_GROUP_FILES) {
     const src = readFileSync(f, "utf8");
@@ -268,8 +366,30 @@ function main() {
   const stdioOnlyCount = [...stdioNames].filter(
     (n) => !enriched.some((t) => t.name === n)
   ).length;
-  lines.push(`export const TOOL_COUNT_STDIO = ${stdioCount + stdioOnlyCount} as const;`);
+  const totalStdio = stdioCount + stdioOnlyCount;
+  lines.push(`export const TOOL_COUNT_STDIO = ${totalStdio} as const;`);
   lines.push("");
+
+  // FINLYNQ-258: the DERIVED counts (parsed straight off the tool
+  // registration files) are the strongest drift signal there is — if these
+  // disagree with the manually-maintained MCP_TOOL_COUNTS, every prose
+  // surface that reads MCP_TOOL_COUNTS is *also* about to go stale the
+  // moment someone reads the catalog page instead. Fail the build here too.
+  const sourceCounts = loadToolCounts();
+  if (
+    enriched.length !== sourceCounts.http ||
+    totalStdio !== sourceCounts.stdio
+  ) {
+    console.error(
+      "generate-mcp-tool-catalog: MCP tool-count DRIFT detected — the " +
+        `DERIVED counts (parsed from mcp-server/tools/*.ts: ${enriched.length} HTTP / ` +
+        `${totalStdio} stdio) don't match src/lib/mcp/tool-counts.ts ` +
+        `(MCP_TOOL_COUNTS: ${sourceCounts.http} HTTP / ${sourceCounts.stdio} stdio) ` +
+        "(FINLYNQ-258).\n\nFix: update MCP_TOOL_COUNTS in src/lib/mcp/tool-counts.ts " +
+        "to match the current registered tool count."
+    );
+    process.exit(1);
+  }
   lines.push("export const TOOLS: ReadonlyArray<CatalogTool> = [");
   for (const t of enriched) {
     lines.push("  {");
