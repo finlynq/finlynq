@@ -782,7 +782,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_subscription_summary ───────────────────────────────────────────────
   server.tool(
     "get_subscription_summary",
-    "Get all tracked subscriptions with total monthly cost and upcoming renewals. Each subscription's amount is in its own currency; totals are converted to reportingCurrency (defaults to user's display currency).",
+    "Get all tracked subscriptions with total monthly cost and upcoming renewals. Each subscription's amount is in its own currency; totals are converted to reportingCurrency (defaults to user's display currency). Intended split: use this for AGGREGATE cost + upcoming-renewal roll-ups; use list_subscriptions for the raw editable row set, and get_recurring_transactions for transactions the engine DETECTED as recurring (not user-tracked subscriptions).",
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Used for the unified total monthly/annual cost."),
     },
@@ -869,7 +869,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_recurring_transactions ─────────────────────────────────────────────
   server.tool(
     "get_recurring_transactions",
-    `Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly. Issue #210 — sign convention: \`avgAmount\` is always POSITIVE; the \`direction\` field carries the inflow/outflow semantic. Matches the storage convention used by \`subscriptions.amount\` / \`add_subscription\` / \`list_subscriptions\`. (Pre-issue-#210 callers that read raw \`avgAmount\` to decide sign should switch to \`direction\`.) Issue #235 — also surfaces \`daysSinceLast\`, \`expectedCadenceDays\`, and \`flagged\` per row (flagged when \`daysSinceLast > expectedCadenceDays * ${STALENESS_THRESHOLD_MULTIPLIER}\`) so callers can spot stale recurrences.`,
+    `Get detected recurring transactions (subscriptions, bills, salary). Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency recurring payments aggregate sensibly. Issue #210 — sign convention: \`avgAmount\` is always POSITIVE; the \`direction\` field carries the inflow/outflow semantic. Matches the storage convention used by \`subscriptions.amount\` / \`add_subscription\` / \`list_subscriptions\`. (Pre-issue-#210 callers that read raw \`avgAmount\` to decide sign should switch to \`direction\`.) Issue #235 — also surfaces \`daysSinceLast\`, \`expectedCadenceDays\`, and \`flagged\` per row (flagged when \`daysSinceLast > expectedCadenceDays * ${STALENESS_THRESHOLD_MULTIPLIER}\`) so callers can spot stale recurrences. Intended split: this DETECTS recurrence from transaction history (bills/salary/subscriptions the user has NOT explicitly tracked); use list_subscriptions / get_subscription_summary for the user's explicitly-tracked subscription records.`,
     {
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
     },

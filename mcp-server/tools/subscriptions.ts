@@ -51,7 +51,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
   // account, for editing flows.
   server.tool(
     "list_subscriptions",
-    "List all subscriptions with full detail (status, next billing, category, account, notes). Issue #210 — `amount` is always positive (the storage convention); a subscription is by definition an outflow.",
+    "List all subscriptions with full detail (status, next billing, category, account, notes). Issue #210 — `amount` is always positive (the storage convention); a subscription is by definition an outflow. Intended split: use this for the raw editable row set; use get_subscription_summary for aggregate monthly/annual cost + upcoming renewals, and get_recurring_transactions for engine-DETECTED recurrences that are not tracked subscriptions.",
     { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
     async ({ status }) => {
       // Stream D Phase 4: s.name + c.name + a.name dropped — read *_ct only.

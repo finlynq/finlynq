@@ -65,6 +65,16 @@ without splitting the codebase or gating features. Full text: [CLA.md](CLA.md).
 - Documentation and getting-started guides
 - Bug fixes and performance improvements
 
+## MCP Tool Deprecation Policy
+
+When an MCP tool is superseded, we retire it in three steps so agents and connectors are never broken abruptly:
+
+1. **Hide from listing immediately** — the tool is removed from `tools/list` (agents stop discovering it), but the server keeps handling calls to it.
+2. **Handle for one minor version** — a call to the hidden tool still returns a valid result plus a `deprecation` warning field pointing at the replacement, for exactly one minor version.
+3. **Remove** — after that grace window the tool is deleted; calls then return a hard error.
+
+Prefer clear, replacement-free names over versioned suffixes (no `_v2`). When two tools overlap, add a one-sentence "intended split" note to each description rather than leaving them ambiguous. Any change to the registered tool set must update `src/lib/mcp/tool-counts.ts` (`MCP_TOOL_COUNTS`) in lockstep — `npm run build` fails on a tool-count drift.
+
 ## Code Conventions
 
 - TypeScript throughout — avoid `any`
