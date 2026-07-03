@@ -58,3 +58,25 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finlynq_ci
           NEXTAUTH_SECRET: ci-secret-placeholder
           NEXTAUTH_URL: http://localhost:3000
+
+      - name: Create test database
+        # The real-Postgres aggregator harness (tests/helpers/portfolio-fixtures.ts)
+        # refuses any DATABASE_URL whose DB name lacks `_test`. Those suites are
+        # currently quarantined (see vitest.config.ts), but provisioning the DB now
+        # means un-quarantining one only needs a drizzle-kit schema push, not new CI.
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -tc \
+            "SELECT 1 FROM pg_database WHERE datname='finlynq_test'" | grep -q 1 \
+            || PGPASSWORD=postgres createdb -h localhost -U postgres finlynq_test
+
+      - name: Run tests
+        # FINLYNQ-257 — `vitest run` gates the suite. The currently-red files are
+        # quarantined in vitest.config.ts (QUARANTINE array); CI fails on any
+        # non-quarantined regression. Burn the quarantine down over time.
+        run: npx vitest run
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finlynq_test
+          PF_PEPPER: ci-test-pepper-000000000000000000000000000000
+          PF_STAGING_KEY: ci-test-staging-0000000000000000000000000000
+          PF_JWT_SECRET: ci-test-jwt-00000000000000000000000000000000
