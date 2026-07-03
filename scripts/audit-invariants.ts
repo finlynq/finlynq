@@ -104,6 +104,22 @@
  *                                  upload filenames (bank name / account
  *                                  fragments / statement period) never land
  *                                  plaintext (FINLYNQ-132).
+ *  14. api-handler-adoption       — every `route.ts` under src/app/api/ that
+ *                                  exports an HTTP method handler must
+ *                                  reference `apiHandler` (FINLYNQ-107),
+ *                                  UNLESS it is on the permanent exemption
+ *                                  glob list (auth/oauth/admin/credential
+ *                                  routes deliberately styled like the auth
+ *                                  boundary) or in the snapshot baseline of
+ *                                  pre-existing hand-rolled routes. Guards
+ *                                  against the "next hand-rolled route slips
+ *                                  in with a missed requireAuth / inconsistent
+ *                                  error shape" gap (FINLYNQ-261). This is a
+ *                                  DIFFERENT shape of check from 1-13 above
+ *                                  (file-existence + exemption/baseline
+ *                                  lookup, not a write-site regex) — see
+ *                                  checkApiHandlerAdoption() below, driven by
+ *                                  scripts/api-handler-baseline.ts.
  *
  * Output:
  *   ALL INVARIANTS PASS                  (exit 0)
@@ -119,6 +135,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  API_HANDLER_EXEMPT_GLOBS,
+  API_HANDLER_BASELINE,
+} from "./api-handler-baseline";
 
 const REPO = path.resolve(__dirname, "..");
 const EXCLUDE_PREFIXES = [
@@ -747,6 +767,84 @@ function checkInvariant(inv: InvariantConfig): {
   return { ok: failures.length === 0, passed, failures };
 }
 
+/**
+ * Invariant #14 — api-handler-adoption (FINLYNQ-261).
+ *
+ * Unlike invariants 1-13 (a write-site regex + a same-file required-helper
+ * regex), this check operates at the file level: every `route.ts` under
+ * `src/app/api/` that exports an HTTP method handler must reference
+ * `apiHandler`, UNLESS its relative path is covered by
+ * `API_HANDLER_EXEMPT_GLOBS` (permanent) or listed verbatim in
+ * `API_HANDLER_BASELINE` (snapshot of pre-existing hand-rolled routes — see
+ * scripts/api-handler-baseline.ts for the regeneration recipe and the
+ * "never add a NEW route to the baseline" policy).
+ *
+ * A route.ts with no recognizable HTTP-method export (e.g. a pure
+ * `export { GET } from "..."` re-export shim) is skipped — there is no
+ * handler body here to guard; the re-exported target file is audited on its
+ * own path.
+ */
+const HTTP_METHOD_EXPORT_RE =
+  /export\s+(?:async\s+)?function\s+(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b|export\s+const\s+(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/;
+
+interface ApiHandlerFailure {
+  file: string;
+}
+
+function checkApiHandlerAdoption(): {
+  ok: boolean;
+  passed: number;
+  exempt: number;
+  baselined: number;
+  failures: ApiHandlerFailure[];
+} {
+  const apiDir = path.join(REPO, "src/app/api");
+  const files: string[] = [];
+  walkDir(apiDir, files);
+
+  const baselineSet = new Set(API_HANDLER_BASELINE.map((p) => p.replace(/\\/g, "/")));
+
+  let passed = 0;
+  let exempt = 0;
+  let baselined = 0;
+  const failures: ApiHandlerFailure[] = [];
+
+  for (const f of files) {
+    if (path.basename(f) !== "route.ts") continue;
+    const rel = path.relative(REPO, f).replace(/\\/g, "/");
+
+    let src: string;
+    try {
+      src = fs.readFileSync(f, "utf8");
+    } catch {
+      continue;
+    }
+
+    // No HTTP-method export in this file (e.g. a bare re-export shim) —
+    // nothing to guard here.
+    if (!HTTP_METHOD_EXPORT_RE.test(src)) continue;
+
+    if (/\bapiHandler\b/.test(src)) {
+      passed++;
+      continue;
+    }
+
+    if (API_HANDLER_EXEMPT_GLOBS.some((glob) => rel.startsWith(glob))) {
+      exempt++;
+      continue;
+    }
+
+    if (baselineSet.has(rel)) {
+      baselined++;
+      continue;
+    }
+
+    failures.push({ file: rel });
+  }
+
+  return { ok: failures.length === 0, passed, exempt, baselined, failures };
+}
+
 function main(): number {
   let anyFail = false;
   console.log("Auditing load-bearing invariants under", REPO);
@@ -768,6 +866,34 @@ function main(): number {
       }
     }
   }
+
+  // Invariant #14 — api-handler-adoption (file-level check, not a
+  // write-site regex; see checkApiHandlerAdoption() above).
+  {
+    const { ok, passed, exempt, baselined, failures } = checkApiHandlerAdoption();
+    if (ok) {
+      console.log(
+        `[PASS] api-handler-adoption: ${passed} route(s) using apiHandler, ${exempt} exempt, ${baselined} baselined`,
+      );
+    } else {
+      anyFail = true;
+      console.log(
+        `[FAIL] api-handler-adoption: ${failures.length} new route(s) without apiHandler (${passed} OK, ${exempt} exempt, ${baselined} baselined)`,
+      );
+      for (const f of failures) {
+        console.log(
+          `       FAIL: ${f.file}:1 api-handler-adoption missing apiHandler`,
+        );
+        console.log(
+          `         > New API routes must use apiHandler (src/lib/api-handler.ts, FINLYNQ-107). ` +
+            `If this route is a deliberately hand-rolled auth/admin route, add it to API_HANDLER_EXEMPT_GLOBS ` +
+            `in scripts/api-handler-baseline.ts with a documented reason — do NOT add it to API_HANDLER_BASELINE ` +
+            `(that list is a shrinking snapshot of pre-existing routes, never a place for new ones).`,
+        );
+      }
+    }
+  }
+
   console.log("");
   if (anyFail) {
     console.log(
