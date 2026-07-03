@@ -24,6 +24,7 @@ import {
   type PgToolContext,
 } from "./_shared";
 import { aggregateHoldings } from "../../src/lib/portfolio/aggregate-holdings";
+import { getHoldingsValueByHolding } from "../../src/lib/holdings-value";
 import {
   sql,
 } from "drizzle-orm";
@@ -2174,28 +2175,46 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
 
       if (m === "rebalancing") {
         if (!targets?.length) return err("targets is required when mode='rebalancing'");
-        // Issue #236: drop the `buysOnly: true` SQL pre-filter — it silently
-        // dropped WP-imported buys (`amt>0+qty>0`). `accumulate()` already
-        // populates `buy_amount` only for `qty > 0` rows, so the buy-bucket
-        // semantic is preserved.
-        const aggs = await aggregateHoldings(db, userId, dek);
-        // Convert each holding's book_value to reporting currency before
-        // building the allocation map — otherwise mixing CAD + USD book
-        // values produces nonsense percentages.
-        // Issue #86: aggregator now returns one row per holding_id, so two
-        // holdings sharing a display name (TFSA + RRSP) come through as
-        // separate rows. Sum book_value across same-name rows when building
-        // the rebalancing allocation map (rebalancing targets are
-        // user-supplied by name; a target name maps to the union of all
-        // holdings with that name).
+        // FINLYNQ-251: value ACTIVE positions, NOT lifetime book cost.
+        // The prior code summed `aggregateHoldings().buy_amount` — the LIFETIME
+        // total of every buy ever, which for a cash sleeve is all the money
+        // that ever flowed THROUGH it (long since reinvested). That inflated
+        // `totalPortfolioValue` to lifetime contributions (~$622K) and showed
+        // cash sleeves at their lifetime flow-through, producing SELL
+        // suggestions for cash that doesn't exist.
+        //
+        // Reuse the canonical valuation path (`getHoldingsValueByHolding`, the
+        // "account with holdings = holdings.value" basis shared with
+        // /api/portfolio/overview + net-worth): one row per active holding with
+        // `value` = current MARKET value and `costBasis` = remaining (active)
+        // cost basis, both in the ACCOUNT currency. A cash sleeve's `value` is
+        // its CURRENT cash quantity (qty × 1); a sold-out position nets to qty
+        // 0 → value 0. We prefer market value when prices are available and
+        // fall back to active cost basis otherwise. FINLYNQ-151 DEK-gating: a
+        // pf_ API key (no DEK) can't decrypt symbols to price them, so market
+        // pricing needs the DEK — the fallback keeps it usable regardless.
+        const holdingValues = await getHoldingsValueByHolding(userId, dek);
+        // Detect whether ANY position carries a non-zero market value. When
+        // nothing priced (no DEK / all unpriced), fall back to the active cost
+        // basis so the rebalancer still produces meaningful percentages.
+        const anyMarketValue = holdingValues.some((h) => Number(h.value) !== 0);
+        const basis: "market" | "active-cost" = anyMarketValue ? "market" : "active-cost";
+        // Issue #86: two holdings sharing a display name (TFSA + RRSP) come
+        // through as separate rows. Sum across same-name rows when building the
+        // rebalancing allocation map (rebalancing targets are user-supplied by
+        // name; a target name maps to the union of all holdings with that name).
+        // Convert each holding's value from its ACCOUNT currency to the
+        // reporting currency before aggregating — otherwise mixing CAD + USD
+        // produces nonsense percentages.
         const holdings: Array<{ name: string; book_value: number; book_value_native: number; currency: string }> = [];
-        for (const a of aggs) {
-          const ccy = holdingCurrencyByName.get(String(a.name)) ?? reporting;
+        for (const h of holdingValues) {
+          const nativeValue = basis === "market" ? Number(h.value) : Number(h.costBasis);
+          const ccy = String(h.currency || reporting).toUpperCase();
           const fx = await fxFor(ccy);
           holdings.push({
-            name: a.name,
-            book_value: a.buy_amount * fx,
-            book_value_native: a.buy_amount,
+            name: h.name ?? "(unnamed holding)",
+            book_value: nativeValue * fx,
+            book_value_native: nativeValue,
             currency: ccy,
           });
         }
@@ -2273,20 +2292,26 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "rebalancing",
           reportingCurrency: reporting,
-          // Issue #209 — `totalPortfolioValue` is the whole-portfolio book
-          // value sum across ALL holdings, never a top-N slice.
+          // FINLYNQ-251: 'market' when live prices were available, else
+          // 'active-cost' (remaining cost basis of active positions). NEVER
+          // lifetime book cost — cash sleeves are valued at current quantity.
+          valuationBasis: basis,
+          // Issue #209 — `totalPortfolioValue` is the whole-portfolio value
+          // sum across ALL active holdings, never a top-N slice.
           totalPortfolioValue: Math.round(totalBV * 100) / 100,
           totalPortfolioValueReporting: tagAmount(totalBV, reporting, "reporting"),
           targetedPortfolioValueReporting: tagAmount(targetedTotal, reporting, "reporting"),
           untargetedHoldings: {
             count: untargetedCount,
-            totalBookValueReporting: tagAmount(untargetedTotal, reporting, "reporting"),
+            totalValueReporting: tagAmount(untargetedTotal, reporting, "reporting"),
             note: untargetedCount > 0
               ? "These holdings are not covered by `targets`; they remain at their current weight in the suggestions below."
               : "All holdings were matched by a target.",
           },
           suggestions,
-          note: "Values based on book cost, not market price. Get current prices for accurate rebalancing.",
+          note: basis === "market"
+            ? "Values are current market value of active positions (cash sleeves valued at current cash balance). Percentages and BUY/SELL amounts reflect what you actually hold now."
+            : "No live prices were available, so values are the remaining cost basis of active positions (cash sleeves at current cash balance), NOT lifetime contributions. Provide price data (or use an OAuth/built-in-chat session) for market-based rebalancing.",
         });
       }
 
