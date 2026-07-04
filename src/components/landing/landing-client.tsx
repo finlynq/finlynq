@@ -5,12 +5,13 @@ import { useEffect, useRef } from "react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
 import { LogoMark } from "@/components/logo-mark";
 import { StoreBadges } from "@/components/store-badges";
+import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 const FEATURES = [
   {
     idx: "F.01 · AI NATIVE",
     title: "Talk to your money in plain English.",
-    desc: "Connect Claude, Cursor, or any MCP client. Or just use the in-app AI chat, no setup at all. That's 109 HTTP / 93 stdio tools. Ask a question, get charts and real answers back. No custom exports, no BI tool.",
+    desc: `Connect Claude, Cursor, or any MCP client. Or just use the in-app AI chat, no setup at all. That's ${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools. Ask a question, get charts and real answers back. No custom exports, no BI tool.`,
     viz: "bars",
   },
   {
@@ -75,7 +76,7 @@ const MCP_TOOLS = [
 ];
 
 const PLAN_FEATS = [
-  "109 MCP tools (HTTP) · 93 (stdio), read & write",
+  `${MCP_TOOL_COUNTS.http} MCP tools (HTTP) · ${MCP_TOOL_COUNTS.stdio} (stdio), read & write`,
   "Per-user AES-256-GCM envelope encryption · operator can't decrypt",
   "In-app AI chat, no MCP client setup required",
   "Native iOS and Android apps, available now",
@@ -282,7 +283,7 @@ export function LandingClient() {
           <div className="hero-copy reveal">
             <div className="hero-bar">
               <span className="tag">MCP</span>
-              <span>109 HTTP / 93 stdio tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
+              <span>{MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
             </div>
 
             <Link href="/blog/finlynq-mobile-app" className="hero-bar hero-bar-mobile hero-bar-link">
@@ -321,7 +322,7 @@ export function LandingClient() {
 
             <div className="hero-meta">
               <div className="cell">
-                <div className="v num">109</div>
+                <div className="v num">{MCP_TOOL_COUNTS.http}</div>
                 <div className="k">MCP tools (HTTP)</div>
               </div>
               <div className="cell">
@@ -523,7 +524,7 @@ export function LandingClient() {
               </h2>
             </div>
             <p className="lede reveal d2">
-              A built-in MCP server exposes 109 HTTP financial tools (93 over stdio) to any compatible client over OAuth 2.1 + DCR. No custom
+              A built-in MCP server exposes {MCP_TOOL_COUNTS.http} HTTP financial tools ({MCP_TOOL_COUNTS.stdio} over stdio) to any compatible client over OAuth 2.1 + DCR. No custom
               code, no brittle exports, no exporting to a spreadsheet then copying into a prompt.
             </p>
           </div>

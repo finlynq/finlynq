@@ -8,6 +8,7 @@ import {
 } from "recharts";
 import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/lib/currency";
+import { formatCompactNumber } from "@/lib/utils/number";
 import { ChartTooltip } from "./chart-tooltip";
 import { buildStackedSeries, type StackPoint } from "@/lib/chart-stack";
 import { StackedChartLegend } from "@/components/chart-stack-legend";
@@ -73,7 +74,7 @@ function StackedSideChart({
             tickLine={false}
             axisLine={false}
             tick={{ fill: "var(--color-muted-foreground)" }}
-            tickFormatter={(v) => `${(Number(v) / 1000).toFixed(0)}k`}
+            tickFormatter={(v) => formatCompactNumber(Number(v))}
           />
           <Tooltip
             formatter={(v, n) => [formatCurrency(Number(v), currency), n]}
@@ -182,7 +183,7 @@ export function IncomeExpenseChart({
                     tickLine={false}
                     axisLine={false}
                     tick={{ fill: "var(--color-muted-foreground)" }}
-                    tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
+                    tickFormatter={(v) => formatCompactNumber(Number(v))}
                   />
                   <Tooltip content={<ChartTooltip currency={currency} />} cursor={{ stroke: "var(--color-border)", strokeDasharray: "4 4" }} />
                   <Area

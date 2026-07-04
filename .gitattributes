@@ -17,3 +17,28 @@ CHANGELOG.md merge=union
 # deploy.sh to CRLF, the +x bit drops, and the deploy fails on Linux as soon
 # as the file is pushed. Pin the line ending explicitly.
 *.sh text eol=lf
+
+# FINLYNQ-259 — repo-wide line-ending hygiene. The Windows dev workstation's
+# core.autocrlf=true (default) plus a mix of contributor editors left several
+# tracked files with CRLF or even doubled-CR (\r\r\n — a stray CR left over
+# from a prior bad conversion) line endings, notably under mcp-server/ and
+# instrumentation.ts. Force every text file to a normalized LF in the repo
+# (git still checks out CRLF locally when core.autocrlf=true, since eol=lf
+# only pins the repo-stored blob, not the working-tree checkout policy).
+* text=auto eol=lf
+
+# Explicitly mark known binaries so `text=auto` never attempts to touch them
+# (a mis-detected binary would corrupt the file on normalize/checkout).
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.zip binary
+*.gz binary

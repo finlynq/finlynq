@@ -26,6 +26,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/lib/currency";
+import { formatCompactNumber } from "@/lib/utils/number";
 import { RebuildSnapshotsButton } from "@/components/portfolio/rebuild-snapshots-button";
 import { prepareTimeSeries } from "@/lib/chart-series";
 import { TooltipBreakdownList, type BreakdownRow } from "@/components/chart-breakdown-list";
@@ -59,12 +60,6 @@ const PERIODS: { key: Period; label: string }[] = [
   { key: "1y", label: "1Y" },
   { key: "all", label: "ALL" },
 ];
-
-function fmtAxis(v: number): string {
-  const abs = Math.abs(v);
-  if (abs >= 1000) return `${(v / 1000).toFixed(abs >= 10000 ? 0 : 1)}k`;
-  return `${Math.round(v)}`;
-}
 
 function fmtTick(d: string, period: Period): string {
   const dt = new Date(`${d}T00:00:00Z`);
@@ -259,7 +254,7 @@ export function NetWorthHistoryChart({
                     axisLine={false}
                     width={48}
                     tick={{ fill: "var(--color-muted-foreground)" }}
-                    tickFormatter={(v) => fmtAxis(Number(v))}
+                    tickFormatter={(v) => formatCompactNumber(Number(v))}
                   />
                   <Tooltip
                     content={
@@ -327,7 +322,7 @@ export function NetWorthHistoryChart({
                   axisLine={false}
                   width={48}
                   tick={{ fill: "var(--color-muted-foreground)" }}
-                  tickFormatter={(v) => fmtAxis(Number(v))}
+                  tickFormatter={(v) => formatCompactNumber(Number(v))}
                   domain={domain}
                 />
                 <Tooltip

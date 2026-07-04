@@ -14,6 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { formatCurrency } from "@/lib/currency";
+import { formatCompactNumber } from "@/lib/utils/number";
 import { exportCsv } from "@/lib/csv-export";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { CHART_COLORS } from "@/lib/chart-colors";
@@ -604,7 +605,7 @@ export default function ReportsPage() {
                   <YAxis
                     className="text-xs fill-muted-foreground"
                     tick={{ fontSize: 11 }}
-                    tickFormatter={(v) => formatCurrency(Number(v), displayCurrency)}
+                    tickFormatter={(v) => formatCompactNumber(Number(v))}
                     width={90}
                   />
                   <Tooltip
@@ -706,7 +707,7 @@ export default function ReportsPage() {
                           <YAxis
                             className="text-xs fill-muted-foreground"
                             tick={{ fontSize: 11 }}
-                            tickFormatter={(v) => formatCurrency(Number(v), displayCurrency)}
+                            tickFormatter={(v) => formatCompactNumber(Number(v))}
                             width={90}
                           />
                           <Tooltip

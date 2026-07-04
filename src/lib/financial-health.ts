@@ -203,6 +203,16 @@ export async function calculateFinancialHealth(
   // ── 2. Debt-to-Income (trailing 12 months) ─────────────────────────────
   // Issue #235: annualizing 3-month income distorts in months with skewed
   // payment timing. Compute trailing-12m on both sides directly.
+  //
+  // FINLYNQ-255: the debt-service NUMERATOR is genuine debt service only —
+  // outflows INTO a liability account (`a.type='L' AND amount<0`) that are
+  // NOT part of a linked pair. Transfer legs (`link_id`), portfolio/trade legs
+  // (`trade_link_id`) and swap legs (`swap_link_id`) all carry a link id and
+  // are EXCLUDED: a credit-card PAYMENT is a cash→cc transfer (link_id set),
+  // not debt service — the underlying purchases already register as spending
+  // elsewhere. Counting those gross double-counted, inflating DTI past 100%.
+  // (A robust anomaly backstop below also excludes the whole component when the
+  // numerator still exceeds ~1.2× outstanding liabilities.)
   const incomeDebt12m = asRows(await db.execute(sql`
     SELECT c.type AS cat_type,
            COALESCE(t.currency, a.currency) AS currency,
@@ -212,7 +222,10 @@ export async function calculateFinancialHealth(
     LEFT JOIN categories c ON t.category_id = c.id
     LEFT JOIN accounts a ON a.id = t.account_id
     WHERE t.user_id = ${userId} AND t.date >= ${twelveStart}
-      AND (c.type = 'I' OR (a.type = 'L' AND t.amount < 0))
+      AND (c.type = 'I' OR (
+        a.type = 'L' AND t.amount < 0
+        AND t.link_id IS NULL AND t.trade_link_id IS NULL AND t.swap_link_id IS NULL
+      ))
     GROUP BY c.type, COALESCE(t.currency, a.currency), a.type
   `)) as Array<{ cat_type: string | null; currency: string | null; account_type: string | null; total: number | string }>;
 
@@ -265,6 +278,17 @@ export async function calculateFinancialHealth(
       }
     }
   }
+
+  // FINLYNQ-255: anomaly backstop. Even after excluding transfer legs from the
+  // numerator, a data anomaly (mis-signed rows, a refinance/lump event, legacy
+  // pre-link_id transfers) can leave 12m debt payments exceeding what could be
+  // real debt service — you cannot service materially more than your entire
+  // outstanding debt in a year. When the numerator exceeds ~1.2× starting
+  // liabilities, EXCLUDE the whole DTI component via the existing renormalizing
+  // `excludedComponents` mechanism rather than scoring it a misleading 0.
+  const DTI_ANOMALY_MULTIPLE = 1.2;
+  const dtiAnomaly =
+    totalLiabilities > 0 && debtPayments12m > totalLiabilities * DTI_ANOMALY_MULTIPLE;
 
   const avgMonthlyExpenses = totalExpenses / 3;
   const emergencyScore =
@@ -388,8 +412,11 @@ export async function calculateFinancialHealth(
       name: "Debt-to-Income",
       scoreRaw: dtiScore,
       weightCanonical: HEALTH_WEIGHTS.dti,
-      detail: dtiDetail,
-      excluded: false,
+      detail: dtiAnomaly
+        ? `Debt payments (${Math.round(debtPayments12m)}) exceed ${DTI_ANOMALY_MULTIPLE}× liabilities (${Math.round(totalLiabilities)}) — likely a data anomaly`
+        : dtiDetail,
+      excluded: dtiAnomaly,
+      excludeReason: dtiAnomaly ? "debt_payments_exceed_liabilities" : undefined,
     },
     {
       name: "Emergency Fund",

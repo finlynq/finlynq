@@ -1,13 +1,12 @@
 import type { Metadata } from "next";
+import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 // `mcp-guide/page.tsx` is a client component (interactive setup tabs), so its
 // metadata lives here in a server layout, the same pattern as `/cloud`.
 export const metadata: Metadata = {
   title:
     "Finlynq MCP guide: connect Claude, Cursor & Windsurf to your finances",
-  // keep in sync with src/lib/mcp/tool-counts.ts
-  description:
-    "Connect Finlynq's first-party MCP server to Claude, Cursor, Windsurf, or any MCP client. OAuth 2.1 + Dynamic Client Registration, Bearer API key, or stdio. 109 HTTP / 93 stdio tools over your own financial data.",
+  description: `Connect Finlynq's first-party MCP server to Claude, Cursor, Windsurf, or any MCP client. OAuth 2.1 + Dynamic Client Registration, Bearer API key, or stdio. ${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools over your own financial data.`,
   alternates: { canonical: "/mcp-guide" },
   openGraph: {
     title: "Finlynq MCP guide: connect any AI assistant to your finances",

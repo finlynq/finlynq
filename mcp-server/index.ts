@@ -6,6 +6,7 @@ import { registerCoreTools } from "./register-core-tools.js";
 import { registerV2Tools } from "./tools-v2.js";
 import { registerImportTemplateTools } from "./tools-import-templates.js";
 import { withAutoAnnotations } from "./auto-annotations.js";
+import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION, MCP_SERVER_INSTRUCTIONS } from "../src/lib/mcp/tool-counts.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -52,12 +53,16 @@ const db = createPgCompat(pool);
 const server = withAutoAnnotations(new McpServer({
   name: "finlynq",
   title: "Finlynq",
-  version: "3.3.0",
+  version: MCP_SERVER_VERSION,
   websiteUrl: "https://finlynq.com",
-  description: "Track your money here, analyze it anywhere. Open-source personal-finance TRACKER (bookkeeping only; never connects to a bank or brokerage or moves real money) with 93 MCP tools.",
+  description: `Track your money here, analyze it anywhere. Open-source personal-finance TRACKER (bookkeeping only; never connects to a bank or brokerage or moves real money) with ${MCP_TOOL_COUNTS.stdio} MCP tools.`,
   icons: [
     { src: "https://finlynq.com/favicon.svg", mimeType: "image/svg+xml", sizes: ["any"] },
   ],
+}, {
+  // FINLYNQ-266 — the bookkeeping-only trust posture is sent ONCE per session
+  // here instead of opening every write-tool description.
+  instructions: MCP_SERVER_INSTRUCTIONS,
 }));
 
 registerCoreTools(server, db, { userId });

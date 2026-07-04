@@ -38,6 +38,54 @@ export const CASH_LEG_KINDS = ["buy_cash_leg", "sell_cash_leg"] as const;
 export type CashLegKind = (typeof CASH_LEG_KINDS)[number];
 
 /**
+ * Internal-swap `kind` discriminators — legs that move money/value AROUND
+ * WITHIN the user's own portfolio, never in or out of it, and therefore are
+ * NOT external contributions for TWRR / MWRR purposes (FINLYNQ-254).
+ *
+ * Two families qualify:
+ *   1. FX-conversion legs (`fx_from` / `fx_to` / `fx_fee`) — a currency swap
+ *      inside ONE investment account. The two legs are `link_id`-paired but
+ *      carry DIFFERENT currencies (e.g. −5000 CAD out, +3600 USD in), so they
+ *      do NOT arithmetically net to zero — counting them as contributions
+ *      stamps a phantom (currency-residual) net-contribution on the day even
+ *      though no cash entered or left the portfolio. Always internal at any
+ *      scope (both legs are on the same account).
+ *   2. In-kind transfer legs (`in_kind_transfer_in` / `in_kind_transfer_out`)
+ *      — a security moved between two of the user's OWN accounts. In the
+ *      whole-portfolio AGGREGATE this is purely internal (value stays in the
+ *      portfolio); different-currency legs or a leg whose account holds no
+ *      value that day leave an un-netted residual that inflates the aggregate
+ *      Dietz return.
+ *
+ * The `buy_cash_leg` / `sell_cash_leg` internal swaps are handled separately by
+ * `isCashLegRow` (they were already excluded from contributions before this).
+ *
+ * Genuine EXTERNAL contributions — `brokerage_deposit_*` / `brokerage_withdrawal_*`
+ * (cash crossing the portfolio boundary from/to a non-investment account) — are
+ * deliberately NOT in this set; they must still count.
+ */
+export const INTERNAL_SWAP_KINDS = [
+  "fx_from",
+  "fx_to",
+  "fx_fee",
+  "in_kind_transfer_in",
+  "in_kind_transfer_out",
+] as const;
+export type InternalSwapKind = (typeof INTERNAL_SWAP_KINDS)[number];
+
+const INTERNAL_SWAP_KIND_SET: ReadonlySet<string> = new Set(INTERNAL_SWAP_KINDS);
+
+/**
+ * Pure-JS predicate: is this transfer leg an INTERNAL swap (FX conversion or
+ * in-kind transfer) that must be excluded from net-contribution / Dietz-flow
+ * tallies? Single source of truth for the FINLYNQ-254 contribution-stamping
+ * fix, consumed by the snapshot builder AND `computeNetContributions`.
+ */
+export function isInternalSwapKind(kind?: string | null): boolean {
+  return kind != null && INTERNAL_SWAP_KIND_SET.has(kind);
+}
+
+/**
  * Pure-JS form of the #128 paired cash-leg skip. Returns `true` when the row is
  * a paired cash leg that must be excluded from buy/sell cost-basis tallies.
  *

@@ -22,11 +22,25 @@ import { Badge } from "@/components/ui/badge";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { parseSaveError } from "@/lib/save-error";
 import { cn } from "@/lib/utils";
-import { Landmark, Loader2, RefreshCw, CheckCircle2, ExternalLink, Link2, Plus } from "lucide-react";
+import { formatCurrency } from "@/lib/currency";
+import { safeName } from "@/lib/safe-name";
+import { Landmark, Loader2, RefreshCw, CheckCircle2, ExternalLink, Link2, Plus, Clock } from "lucide-react";
 
 interface SimplefinStatus {
   connected: boolean;
   lastSyncAt: string | null;
+}
+
+interface PendingCharge {
+  accountId: number | null;
+  accountName: string;
+  fitId: string;
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string | null;
+  description: string | null;
+  syncedAt: string;
 }
 
 type AccountStatus = "mapped" | "suggested" | "new";
@@ -101,6 +115,26 @@ export default function BankFeedsSettingsPage() {
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
 
+  const [pending, setPending] = useState<PendingCharge[]>([]);
+  const [pendingLoading, setPendingLoading] = useState(true);
+
+  const loadPending = useCallback(async () => {
+    setPendingLoading(true);
+    try {
+      const res = await fetch("/api/settings/bank-feeds/simplefin/pending");
+      if (!res.ok) {
+        setPending([]);
+        return;
+      }
+      const json = (await res.json()) as { data?: { pending?: PendingCharge[] } };
+      setPending(json.data?.pending ?? []);
+    } catch {
+      setPending([]);
+    } finally {
+      setPendingLoading(false);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError("");
@@ -122,7 +156,8 @@ export default function BankFeedsSettingsPage() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadPending();
+  }, [load, loadPending]);
 
   async function handleConnect() {
     if (!token.trim()) return;
@@ -193,7 +228,7 @@ export default function BankFeedsSettingsPage() {
       }
       setStageResult(await res.json());
       setPreview(null);
-      await load();
+      await Promise.all([load(), loadPending()]);
     } catch {
       setStageError("Import failed");
     } finally {
@@ -481,6 +516,58 @@ export default function BankFeedsSettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* ── Pending charges (holds / not-yet-posted) ── */}
+      {status?.connected && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                <Clock className="h-5 w-5" />
+              </div>
+              <div className="min-w-0">
+                <CardTitle className="text-base">Pending charges</CardTitle>
+                <CardDescription>
+                  Holds and not-yet-posted charges from your bank. These are volatile (a hold
+                  clears and re-posts as a distinct charge) so they are NOT added to your ledger —
+                  shown here for visibility only.
+                </CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+
+          <CardContent>
+            {pendingLoading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+              </div>
+            ) : pending.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No pending charges.</p>
+            ) : (
+              <div className="rounded-xl border divide-y">
+                {pending.map((p) => (
+                  <div
+                    key={`${p.accountId ?? "x"}-${p.fitId}`}
+                    className="flex items-center justify-between gap-3 px-4 py-3"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {safeName(p.payee, "charge", 0)}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {p.date} · {p.accountName}
+                      </p>
+                    </div>
+                    <span className="text-sm font-medium tabular-nums shrink-0">
+                      {formatCurrency(p.amount, p.currency)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <ConfirmDialog
         open={confirmDisconnect}

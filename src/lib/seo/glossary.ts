@@ -10,6 +10,8 @@
  * llms-full.txt automatically.
  */
 
+import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
+
 export type GlossaryBlock =
   | { type: "p"; text: string }
   | { type: "h2"; text: string }
@@ -51,8 +53,7 @@ export const GLOSSARY: GlossaryEntry[] = [
       },
       {
         type: "p",
-        // keep in sync with src/lib/mcp/tool-counts.ts
-        text: "Finlynq ships a first-party MCP server, not a community wrapper, exposing 109 HTTP tools and 93 stdio tools across budgets, transactions, portfolios, goals, loans, subscriptions, and rules. It supports three transports:",
+        text: `Finlynq ships a first-party MCP server, not a community wrapper, exposing ${MCP_TOOL_COUNTS.http} HTTP tools and ${MCP_TOOL_COUNTS.stdio} stdio tools across budgets, transactions, portfolios, goals, loans, subscriptions, and rules. It supports three transports:`,
       },
       {
         type: "ul",

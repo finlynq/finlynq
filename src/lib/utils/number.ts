@@ -33,3 +33,24 @@ export const MAX_REASONABLE_AMOUNT = 1e12;
  */
 export const isReasonableAmount = (n: number): boolean =>
   Number.isFinite(n) && Math.abs(n) <= MAX_REASONABLE_AMOUNT;
+
+/**
+ * Compact chart-axis abbreviation — the SINGLE source of truth for
+ * "k"/"m" Y-axis tick formatting (FINLYNQ-247). Deliberately bare (NO
+ * currency symbol — currency belongs on a chart-level label/subtitle, not
+ * every tick) so it composes with any chart regardless of currency.
+ *
+ * Rules (mirrors the pre-existing `net-worth-history-chart.tsx` `fmtAxis`):
+ *   - |n| >= 1e6 → "<n/1e6 to 1 decimal>m"  (e.g. 1_240_000 → "1.2m")
+ *   - |n| >= 1e4 → "<n/1e3 to 0 decimals>k" (e.g. 572345 → "572k")
+ *   - |n| >= 1e3 → "<n/1e3 to 1 decimal>k"  (e.g. 1500 → "1.5k")
+ *   - else       → the rounded value as a plain string (e.g. 850 → "850")
+ * Negative-safe (sign carried through, magnitude rules applied to |n|) and
+ * 0-safe ("0").
+ */
+export function formatCompactNumber(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1e6) return `${(value / 1e6).toFixed(1)}m`;
+  if (abs >= 1000) return `${(value / 1000).toFixed(abs >= 10000 ? 0 : 1)}k`;
+  return `${Math.round(value)}`;
+}

@@ -231,10 +231,23 @@ gas-station hold (−$250 "Pending") is skipped while the real posted charge (�
 "Approved", a distinct id) still imports. Detected-pending rows aren't just dropped — the
 transform surfaces them (`SimplefinAccountRows.pending`) and the sync snapshots them into
 `simplefin_pending_transactions`, **refreshed per-account every sync** (delete + re-insert
-via `replacePendingTransactions`) so it always reflects the current pending set — for a
-future report / notification. payee/description are DEK-encrypted; the rest is plaintext.
+via `replacePendingTransactions`) so it always reflects the current pending set.
+payee/description are DEK-encrypted; the rest is plaintext.
 
-**Deferred:** background scheduled pulls; asset-vs-liability inference (v1 defaults every
+**Pending-charges read surface (FINLYNQ-249, Part 1).** The snapshot is surfaced as a
+**"Pending charges" card** on `/settings/bank-feeds` (shown only when SimpleFIN is
+connected) listing each current pending row — decrypted payee, amount, date, account —
+with an explicit "No pending charges." empty state. Backed by owner-scoped
+`GET /api/settings/bank-feeds/simplefin/pending` (`apiHandler({ auth: "encryption" })` →
+423 without a DEK, never ciphertext; enveloped `{ pending: [...] }`), which calls
+`listPendingTransactions(userId, dek)` in `simplefin-pending.ts` — a LEFT JOIN to
+`accounts` for the name, `WHERE user_id = <caller>`, ordered `date DESC`, with tier-aware
+`payee`/`description` decrypt (`'user'` → `tryDecryptField`, `'service'` → `decryptStaged`,
+null on failure). **Part 2 (new-hold / cleared-hold notification) is deferred** — no
+notification/email code path exists yet.
+
+**Deferred:** the pending-charges **notification** (Part 2 — channel + trigger open);
+background scheduled pulls; asset-vs-liability inference (v1 defaults every
 account to Asset); investment/holdings (SimpleFIN is banking-only); MCP/mobile parity.
 
 ## Load-bearing rules (learned the hard way)

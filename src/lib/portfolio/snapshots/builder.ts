@@ -20,6 +20,7 @@ import { db, schema } from "@/db";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { resolveReportingCurrency } from "../../../../mcp-server/reporting-currency";
 import { getRate } from "@/lib/fx-service";
+import { isInternalSwapKind } from "../aggregation-predicates";
 
 export interface BuildDailySnapshotInput {
   userId: string;
@@ -93,6 +94,14 @@ export async function buildDailySnapshot(
     // Use `kind` discriminator for Phase 2+ rows; legacy `(amount=0 OR
     // quantity=0)` predicate covers pre-migration rows.
     if (leg.kind === "buy_cash_leg" || leg.kind === "sell_cash_leg") continue;
+    // FINLYNQ-254: FX-conversion legs (fx_from/fx_to/fx_fee — a currency swap
+    // inside ONE account) and in-kind transfer legs (a security moved between
+    // the user's OWN accounts) are INTERNAL swaps, not external contributions.
+    // Counting them stamped a phantom net_contribution (an FX residual, or one
+    // orphaned leg of an inter-account move) onto the day, which fed the
+    // Modified-Dietz chaining as a spurious flow and inflated TWRR. Skip them
+    // so a transfer at unchanged prices reads as ~0% for the day.
+    if (isInternalSwapKind(leg.kind)) continue;
     if (leg.tradeLinkId != null && (leg.amount === 0 || leg.quantity === 0)) continue;
     const value = Number(leg.enteredAmount ?? leg.amount ?? 0);
     if (value === 0) continue;

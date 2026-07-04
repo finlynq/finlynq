@@ -23,6 +23,7 @@ import { DEFAULT_SCOPE, parseScope, isToolAllowedForScope } from "@/lib/oauth-sc
 import { checkRateLimit } from "@/lib/rate-limit";
 import { registerPgTools } from "../../../../mcp-server/register-tools-pg";
 import { withAutoAnnotations } from "../../../../mcp-server/auto-annotations";
+import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION, MCP_SERVER_INSTRUCTIONS } from "@/lib/mcp/tool-counts";
 
 // Origin allowlist - defense-in-depth against DNS rebinding and cross-site
 // cookie attacks against the session-cookie auth path. Bearer-token requests
@@ -167,12 +168,16 @@ export async function POST(request: NextRequest) {
   const server = withAutoAnnotations(new McpServer({
     name: "finlynq",
     title: "Finlynq",
-    version: "3.3.0",
+    version: MCP_SERVER_VERSION,
     websiteUrl: "https://finlynq.com",
-    description: "Track your money here, analyze it anywhere. Open-source personal finance TRACKER with 109 MCP tools. Bookkeeping only: tools read and write entries in your own database and never connect to a bank or brokerage or move real money.",
+    description: `Track your money here, analyze it anywhere. Open-source personal finance TRACKER with ${MCP_TOOL_COUNTS.http} MCP tools. Bookkeeping only: tools read and write entries in your own database and never connect to a bank or brokerage or move real money.`,
     icons: [
       { src: "https://finlynq.com/favicon.svg", mimeType: "image/svg+xml", sizes: ["any"] },
     ],
+  }, {
+    // FINLYNQ-266 — the bookkeeping-only trust posture is sent ONCE per session
+    // here instead of opening every write-tool description.
+    instructions: MCP_SERVER_INSTRUCTIONS,
   }));
 
   const scopeString = "scope" in auth.context ? auth.context.scope : DEFAULT_SCOPE;

@@ -28,6 +28,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
+import { formatCompactNumber } from "@/lib/utils/number";
 import { prepareTimeSeries } from "@/lib/chart-series";
 import {
   buildStackedSeries,
@@ -246,7 +247,7 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                     <YAxis
                       tick={{ fontSize: 11 }}
-                      tickFormatter={(v) => formatCurrency(Number(v), stackCurrency)}
+                      tickFormatter={(v) => formatCompactNumber(Number(v))}
                     />
                     <Tooltip
                       content={
@@ -276,7 +277,7 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                     <YAxis
                       tick={{ fontSize: 11 }}
-                      tickFormatter={(v) => formatCurrency(Number(v), data.currency)}
+                      tickFormatter={(v) => formatCompactNumber(Number(v))}
                       domain={domain}
                     />
                     <Tooltip

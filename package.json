@@ -19,6 +19,7 @@
     "db:push": "drizzle-kit push --config=drizzle-pg.config.ts",
     "seed:demo": "npx tsx scripts/seed-demo.ts",
     "audit:invariants": "npx tsx scripts/audit-invariants.ts",
+    "lint:tool-descriptions": "npx tsx scripts/lint-tool-descriptions.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -38,9 +39,9 @@
     "jose": "^6.2.2",
     "jszip": "^3.10.1",
     "lucide-react": "^0.577.0",
-    "next": "16.2.5",
+    "next": "16.2.10",
     "next-themes": "^0.4.6",
-    "nodemailer": "^8.0.7",
+    "nodemailer": "^9.0.3",
     "otpauth": "^9.5.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.20.0",
@@ -75,6 +76,10 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.2"
+  },
+  "overrides": {
+    "hono": "^4.12.27",
+    "tmp": "^0.2.7"
   },
   "description": "Open-source personal finance app with native MCP server",
   "homepage": "https://finlynq.com",

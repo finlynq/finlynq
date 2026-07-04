@@ -787,7 +787,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Bookkeeping only: writes an entry to the user's own Finlynq ledger (Finlynq never connects to a bank or moves real money). Record a transaction. Stream D Phase 4 (stdio): pass `account_id` (numeric) — `account` (name) is refused because stdio has no DEK to resolve names. `category` (name) is also refused; pass `category_id` instead, or omit for auto-detection. For cross-currency entries pass enteredAmount + enteredCurrency. Pass `dryRun: true` to validate + resolve without writing.",
+    "Record a single transaction (stdio). Stream D Phase 4: pass `account_id` (numeric) — `account` (name) is refused because stdio has no DEK to resolve names. `category` (name) is also refused; pass `category_id` instead, or omit for auto-detection. For cross-currency entries pass enteredAmount + enteredCurrency. Pass `dryRun: true` to validate + resolve without writing.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income)."),
       payee: z.string().describe("Payee or merchant name"),
@@ -928,7 +928,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Bookkeeping only: writes entries to the user's own Finlynq ledger; no real money moves. Record multiple transactions at once. Stream D Phase 4: stdio cannot resolve account/category names without a DEK and the helper SELECTs that fuzzy-match names hit dropped plaintext columns — refused entirely. Use HTTP MCP at /mcp (full feature set) or the web UI.",
+    "Record multiple transactions at once (stdio — REFUSED). Stream D Phase 4: stdio cannot resolve account/category names without a DEK and the helper SELECTs that fuzzy-match names hit dropped plaintext columns. Use HTTP MCP at /mcp (full feature set) or the web UI.",
     {
       account_id: z.number().int().optional(),
       dryRun: z.boolean().optional(),
@@ -1122,7 +1122,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // inner prepare() calls each acquire their own pool client.
   server.tool(
     "record_transfer",
-    "Bookkeeping only: records a transfer entry between two of the user's own tracked accounts in Finlynq; it never initiates a real bank or wire transfer or moves any actual money. Record a transfer between two of the user's accounts. Stream D Phase 4 (stdio): pass `from_account_id` and `to_account_id` (numeric) — the `fromAccount`/`toAccount`/`holding`/`destHolding` name fields are refused because stdio cannot resolve names. For investment buys/sells/transfers use the portfolio_* tools on HTTP MCP. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount.",
+    "Record a transfer between two of the user's accounts (stdio). Stream D Phase 4: pass `from_account_id` and `to_account_id` (numeric) — the `fromAccount`/`toAccount`/`holding`/`destHolding` name fields are refused because stdio cannot resolve names. For investment buys/sells/transfers use the portfolio_* tools on HTTP MCP. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount.",
     {
       fromAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `from_account_id` instead."),
       toAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `to_account_id` instead."),

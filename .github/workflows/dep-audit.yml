@@ -1,0 +1,41 @@
+name: Dependency Audit
+
+# FINLYNQ-256 — recurring guard so production-dependency advisories never
+# accumulate silently again. Runs the same `npm audit --omit=dev` check that
+# gates this repo's "security-first" positioning, and FAILS on any high (or
+# worse) advisory in production dependencies.
+#
+# Triggers:
+#   - schedule: monthly (1st of the month, 06:00 UTC)
+#   - workflow_dispatch: manual run so the first run is immediately visible
+on:
+  schedule:
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: npm audit (production deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies (fail on high)
+        # `--omit=dev` scopes the audit to what actually ships. `--audit-level=high`
+        # exits non-zero only on high/critical advisories, matching the acceptance
+        # bar (0 high). Moderate/low advisories are surfaced in the log below but
+        # do not fail the run (many require breaking major downgrades to clear).
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Full advisory report (informational)
+        if: always()
+        run: npm audit --omit=dev || true

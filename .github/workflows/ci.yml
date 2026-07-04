@@ -52,9 +52,49 @@ jobs:
         # FINLYNQ-112 — promoted from advisory to blocking (passes 11/11 on HEAD).
         run: npm run audit:invariants
 
+      - name: Lint MCP tool descriptions
+        # FINLYNQ-266 — enumerate the registered HTTP tool surface and fail on
+        # duplicate first-60-char openings, first sentences >120 chars, or
+        # descriptions >900 chars. Keeps the verb-first style guide enforced so
+        # truncating clients never render two tools as the same string.
+        run: npm run lint:tool-descriptions
+
       - name: Build
         run: npm run build
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finlynq_ci
           NEXTAUTH_SECRET: ci-secret-placeholder
           NEXTAUTH_URL: http://localhost:3000
+
+      - name: Create test database
+        # The real-Postgres aggregator harness (tests/helpers/portfolio-fixtures.ts)
+        # refuses any DATABASE_URL whose DB name lacks `_test`. Those suites are
+        # currently quarantined (see vitest.config.ts), but provisioning the DB now
+        # means un-quarantining one only needs a drizzle-kit schema push, not new CI.
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -tc \
+            "SELECT 1 FROM pg_database WHERE datname='finlynq_test'" | grep -q 1 \
+            || PGPASSWORD=postgres createdb -h localhost -U postgres finlynq_test
+
+      - name: Apply schema to finlynq_test
+        # FINLYNQ-260 follow-up — `createdb` above only provisions an empty
+        # database. The real-Postgres aggregator harness
+        # (tests/helpers/portfolio-fixtures.ts) TRUNCATEs/seeds tables that
+        # don't exist without a schema push, which fails any un-quarantined
+        # DB-backed test (e.g. tests/mcp/readonly-contract.test.ts). Push the
+        # Drizzle schema before vitest runs.
+        run: npx drizzle-kit push --config=drizzle-pg.config.ts --force
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finlynq_test
+
+      - name: Run tests
+        # FINLYNQ-257 — `vitest run` gates the suite. The currently-red files are
+        # quarantined in vitest.config.ts (QUARANTINE array); CI fails on any
+        # non-quarantined regression. Burn the quarantine down over time.
+        run: npx vitest run
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finlynq_test
+          PF_PEPPER: ci-test-pepper-000000000000000000000000000000
+          PF_STAGING_KEY: ci-test-staging-0000000000000000000000000000
+          PF_JWT_SECRET: ci-test-jwt-00000000000000000000000000000000

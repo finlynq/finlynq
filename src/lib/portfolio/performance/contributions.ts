@@ -24,6 +24,7 @@
 import { and, eq, gte, isNotNull, lte, ne, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import type { CashFlow } from "./mwrr";
+import { isInternalSwapKind } from "../aggregation-predicates";
 
 export interface NetContributionsInput {
   userId: string;
@@ -74,6 +75,11 @@ export async function computeNetContributions(
     // are internal account swaps, not contributions. Use `kind` for
     // Phase 2+; the legacy predicate covers pre-migration rows.
     if (r.kind === "buy_cash_leg" || r.kind === "sell_cash_leg") continue;
+    // FINLYNQ-254: FX-conversion + in-kind transfer legs are internal swaps
+    // (money/value moving WITHIN the portfolio), not deposits/withdrawals —
+    // exclude them from the XIRR cash-flow stream so MWRR sees only genuine
+    // external contributions, mirroring the snapshot builder's net_contribution.
+    if (isInternalSwapKind(r.kind)) continue;
     if (r.tradeLinkId != null && (r.amount === 0 || r.quantity === 0)) continue;
     // The leg ON the investment account: amount > 0 = transfer-in
     // (contribution); amount < 0 = transfer-out (withdrawal). Negate

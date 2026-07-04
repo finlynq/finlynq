@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { AnalyticsConsent } from "@/components/analytics-consent";
 import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
+import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 const PATH = "/roadmap";
 
@@ -57,8 +58,7 @@ const SECTIONS: Section[] = [
     items: [
       {
         title: "Talk to your money with any AI assistant",
-        // keep in sync with src/lib/mcp/tool-counts.ts
-        desc: "A built-in MCP server (109 HTTP / 93 stdio tools) for Claude, Cursor, and the rest.",
+        desc: `A built-in MCP server (${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools) for Claude, Cursor, and the rest.`,
         href: "/mcp-guide",
         hrefLabel: "See the MCP guide",
       },
