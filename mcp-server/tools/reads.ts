@@ -1561,7 +1561,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
     "finlynq_help",
     "Discover available Finlynq tools, schema, and usage examples. Finlynq is a personal-finance TRACKING app: every write tool records a bookkeeping entry in the user's own database and never connects to a bank or brokerage or moves real money. Full docs: https://finlynq.com/mcp-guide",
     {
-      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile", "modes"]).optional().describe("Help topic (default: tools). `modes` documents every multi-mode tool's modes with an example each."),
+      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile", "modes", "safety"]).optional().describe("Help topic (default: tools). `modes` documents every multi-mode tool's modes with an example each; `safety` documents the destructive-tool two-step (confirmation tokens) + echo guards."),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
     },
     async ({ topic, tool_name }) => {
@@ -1617,7 +1617,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           transfer_tools: ["record_transfer"],
           reconcile_tools: ["upload_statement", "get_reconcile_suggestions", "get_reconciliation_summary", "find_duplicate_bank_rows", "get_balance_anchors", "upsert_balance_anchor", "delete_bank_transaction", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "accept_reconcile_suggestions", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
-          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools, or topic='modes' for the mode/lifecycle map of every multi-mode tool (get_investment_insights, get_net_worth, get_spending_trends, staged-import lifecycle).",
+          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools, topic='modes' for the mode/lifecycle map of every multi-mode tool (get_investment_insights, get_net_worth, get_spending_trends, staged-import lifecycle), or topic='safety' for the destructive-tool two-step (confirmation tokens) + delete_transaction/delete_split echo guards.",
         });
       }
 
@@ -1631,6 +1631,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
           categories: ["create_category(name, type)", "delete_category(id, confirmation_token) — preview via preview_delete_category", "create_rule(match_payee, assign_category)"],
           note: "All name inputs use fuzzy matching — partial names work. Each account can also have an `alias` (e.g. last 4 digits of a card); account lookups exact-match on alias in addition to fuzzy-matching on name, so you can pass either. Set category via update_transaction(id, category=...).",
+          deletes: "SAFETY (v3.4): delete_transfer / delete_account (non-empty or force) / delete_portfolio_holding (with tx or lots) are TWO-STEP — a bare call returns { preview, summary, confirmationToken } and deletes NOTHING; re-call with the token to commit. delete_transaction / delete_split accept an OPTIONAL `expected` echo (payee/amount) that refuses a mismatch. See topic='safety' for the full contract.",
         });
       }
 
@@ -1730,6 +1731,25 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
             decision_rule: "Account already has ledger tx for the period → send_to_bank_ledger. Brand-new account, first import → approve_staged_rows. Unsure → default send_to_bank_ledger.",
           },
           tip: "These are the genuinely multi-mode tools. For a specific tool's full parameter docs use tool_name='<name>'; for the reconcile cohort use topic='reconcile'.",
+        });
+      }
+
+      if (t === "safety") {
+        // FINLYNQ-264 — destructive-tool safety contract (v3.4).
+        return dataResponse({
+          summary: "Destructive tools are gated so a hallucinated id can't wipe data in one shot. Two mechanisms: (A) a preview→confirmation-token two-step for irreversible / multi-row deletes, and (B) an optional `expected` row-content echo for high-frequency single-row deletes.",
+          token_two_step: {
+            tools: ["delete_transfer", "delete_account (non-empty OR force=true)", "delete_portfolio_holding (with linked transactions OR lots)", "reject_staged_import", "delete_category (via preview_delete_category)", "execute_bulk_delete / execute_bulk_update / execute_bulk_categorize", "apply_rules_to_bank_rows"],
+            how: "Call WITHOUT confirmation_token → the tool returns { preview: true, summary, confirmationToken } and writes NOTHING (the summary echoes the blast radius: both legs / cascade counts / tx+lot counts). Re-call the SAME arguments PLUS confirmation_token=<that token> to commit.",
+            token: "Single-use, 5-minute TTL, bound to your user + the operation + the resolved row id(s). A token minted for one row can't commit a delete of another (payload-mismatch) and can't be replayed (returns 'invalid: replay'). If it expires or you get 'Confirmation token invalid: …', just re-call without the token to refresh.",
+            clean_case: "A CLEAN entity skips the gate and deletes directly: delete_account on an empty account (0 transactions), delete_portfolio_holding on a holding with no transactions AND no lots.",
+          },
+          echo_guard: {
+            tools: ["delete_transaction", "delete_split"],
+            how: "OPTIONAL: pass `expected` with what you believe the row holds — delete_transaction({ id, expected: { payee, amount } }) / delete_split({ split_id, expected: { amount } }). A mismatch (payee case-insensitive, amount ±0.01) REFUSES the delete. Omitting `expected` still deletes (back-compat), but passing it guards against a mis-copied id. RECOMMENDED whenever you have the payee/amount.",
+          },
+          dry_run_variant: "delete_bank_transaction uses its own two-step: pass dryRun:true to get the would-be-unlinked transaction ids with ZERO writes, then call again with dryRun:false to commit.",
+          config_deletes: "delete_loan / delete_subscription / delete_fx_override / delete_rule / delete_budget / delete_goal are direct (single low-risk, user-recreatable config rows) but carry destructiveHint:true so a host can prompt.",
         });
       }
 

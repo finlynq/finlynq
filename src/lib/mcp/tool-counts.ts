@@ -1,7 +1,14 @@
 // Single source of truth for advertised MCP tool counts + server version.
 // Update here when tools are added; referenced by marketing/docs copy.
 export const MCP_TOOL_COUNTS = { http: 117, stdio: 93 } as const;
-export const MCP_SERVER_VERSION = "3.3.0" as const;
+// 3.4.0 (FINLYNQ-264): destructive-tool safety pass — tier-1 deletes
+// (delete_transfer / delete_account / delete_portfolio_holding) now require a
+// preview→confirmation-token two-step, tier-2 single-row deletes accept an
+// optional `expected` echo, and every tool carries readOnly/destructive/
+// idempotent annotations verified by a registry assertion. Additive params
+// only (no tools added/renamed); the v4.0 cut (sibling A's `manage_*` folds)
+// lands separately.
+export const MCP_SERVER_VERSION = "3.4.0" as const;
 
 // Server-level trust posture, sent ONCE per session via the MCP `instructions`
 // field (FINLYNQ-266). This replaces the "Bookkeeping only:" disclaimer that
