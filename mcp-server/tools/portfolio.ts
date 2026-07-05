@@ -479,7 +479,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "portfolio_record_entry",
-    "Record a portfolio ledger entry: `entry_type` selects buy / sell / swap / transfer / income_expense / fx_conversion / deposit / withdrawal. Writes the canonical, sign-correct legs (stock +, cash −, sum 0) via the lot-aware operations engine — cash sleeves must already exist. CREATE-ONLY (edit on the web). For a net-worth snapshot use add_snapshot; for share moves between accounts use entry_type:transfer.",
+    "Record a lot-aware portfolio ledger entry; `entry_type` selects the operation. Values: buy, sell, swap, transfer, income_expense, fx_conversion, deposit, withdrawal. Writes the canonical, sign-correct legs (stock +, cash −, sum 0) via the operations engine — cash sleeves must already exist. CREATE-ONLY (edit on the web). For a net-worth snapshot use add_snapshot.",
     z.discriminatedUnion("entry_type", [
       z.object({
         entry_type: z.literal("buy"),

@@ -6,6 +6,32 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+- **feat(mcp): MCP server v4.0.0 — surface consolidation cut + migration table (FINLYNQ-263 phase 6, 2026-07-05).** `MCP_SERVER_VERSION` → **4.0.0** (the about / vs-* / mcp-guide pages + both transports' advertised `version` follow the single-sourced constant). Regenerated `finlynq_help` (`tools` / `write` / `portfolio` / `examples` topics now reference the consolidated names). The 117 → **76** advertised HTTP tools (default-profile `tools/list` = **51**) are the sum of phases 1–5. **All retired names remain HIDDEN, CALLABLE back-compat aliases through v4.1** (removed then). Response shapes are byte-identical — only the input envelope gained an `op`/`entry_type` discriminator.
+
+  **Migration table (old tool → new tool + discriminator):**
+
+  | Old tool(s) | New tool | Discriminator value |
+  |---|---|---|
+  | `record_transaction`, `bulk_record_transactions` | `manage_transactions` | `op:"record"` (single row, or `transactions[]` for bulk) |
+  | `update_transaction` | `manage_transactions` | `op:"update"` |
+  | `delete_transaction` | `manage_transactions` | `op:"delete"` |
+  | `record_transfer` | `manage_transfers` | `op:"record"` |
+  | `update_transfer` | `manage_transfers` | `op:"update"` |
+  | `delete_transfer` | `manage_transfers` | `op:"delete"` |
+  | `list_splits` / `add_split` / `update_split` / `delete_split` / `replace_splits` | `manage_splits` | `op:"list"|"add"|"update"|"delete"|"replace"` |
+  | `set_budget` / `delete_budget` | `manage_budgets` | `op:"set"|"delete"` |
+  | `add_account` / `update_account` / `delete_account` / `set_account_mode` | `manage_accounts` | `op:"add"|"update"|"delete"|"set_mode"` |
+  | `add_goal` / `update_goal` / `delete_goal` / `get_goals` | `manage_goals` | `op:"add"|"update"|"delete"|"list"` |
+  | `create_category` / `preview_delete_category` / `delete_category` | `manage_categories` | `op:"create"|"delete"` (delete: omit token to preview, pass token to commit) |
+  | `create_rule` / `update_rule` / `delete_rule` / `list_rules` / `reorder_rules` | `manage_rules` | `op:"create"|"update"|"delete"|"list"|"reorder"` |
+  | `add_subscription` / `bulk_add_subscriptions` / `update_subscription` / `delete_subscription` / `list_subscriptions` / `get_subscription_summary` | `manage_subscriptions` | `op:"add"` (single or `items[]`) `|"update"|"delete"|"list"` (`list{include_summary:true}` = old summary) |
+  | `add_loan` / `update_loan` / `delete_loan` / `list_loans` | `manage_loans` | `op:"add"|"update"|"delete"|"list"` |
+  | `set_fx_override` / `delete_fx_override` / `list_fx_overrides` | `manage_fx_overrides` | `op:"set"|"delete"|"list"` |
+  | `add_portfolio_holding` / `update_portfolio_holding` / `delete_portfolio_holding` | `manage_holdings` | `op:"add"|"update"|"delete"` |
+  | `portfolio_buy`/`sell`/`swap`/`transfer`/`income_expense`/`fx_conversion`/`deposit`/`withdrawal` | `portfolio_record_entry` | `entry_type:"buy"|"sell"|"swap"|"transfer"|"income_expense"|"fx_conversion"|"deposit"|"withdrawal"` |
+
+  **Kept 1:1** (heavy reads / distinct capability): every `get_*`/`search_*`/`analyze_*`/`trace_*` read, `finlynq_help`, `convert_amount`, `get_fx_rate`, `test_rule`, `apply_rules_to_uncategorized`, `suggest_transaction_details`, `detect_subscriptions`, `get_loan_amortization`, `get_debt_payoff_plan`, `add_snapshot`, the `preview_bulk_*`/`execute_bulk_*` pipeline, and the 25 import/reconcile tools (now toolset-gated). **stdio surface unchanged** (93 tools) — the consolidation is HTTP-only (separate legacy stack; convergence deferred to FINLYNQ-110). The Anthropic Connectors Directory listing should be re-reviewed for the new default-profile count.
+
 - **feat(mcp): session-scoped toolsets go live — import-pipeline hidden by default (FINLYNQ-263 phase 5, 2026-07-05).** The MCP session default profile is now **analytics + ledger-write**; the 25 statement-import + bank-reconcile tools (the `import-pipeline` toolset) are gated OFF by default and neither listed NOR callable unless the connection opts in — the (a)+(b) hybrid (owner decision #2): (a) an OAuth token carrying the new **`mcp:import`** scope, OR (b) a per-user connection setting (`mcp_import_toolset_enabled` in the `settings` table, `getImportToolsetEnabled`) that opts EVERY transport in (OAuth, Bearer `pf_` key, stdio, session cookie). The MCP route resolves `enabledToolsetsForRequest(scope, {importSettingEnabled})` and composes the toolset gate with the existing OAuth read/write scope filter at registration, so out-of-toolset tools are fully absent from the session. **Default-profile `tools/list` = 51 tools (≤ 60, tc-1)**; full registry stays 76. `DEFAULT_SCOPE` unchanged (import OFF for back-compat tokens). A registry test asserts the default profile ≤ 60 with zero import-pipeline leakage. (The Settings → Integrations UI toggle for (b) is a deferred follow-up; the setting is functional via the helper today.) No tool count changed — this is a runtime-visibility flip.
 
 - **feat(mcp): consolidate the 8 portfolio_* writers into `portfolio_record_entry` (FINLYNQ-263 phase 4, 2026-07-05).** The 8 lot-aware portfolio write tools (`portfolio_buy`/`sell`/`swap`/`transfer`/`income_expense`/`fx_conversion`/`deposit`/`withdrawal`) fold into ONE `portfolio_record_entry` tool with an **`entry_type`** discriminator (owner decision #5 — the one domain-appropriate exception to the `op` standard). Handler bodies lifted VERBATIM; **audit invariant #8 preserved** — each entry_type still calls its sanctioned `operations.ts` helper (`recordBuy`/`recordSell`/…), NEVER a raw INSERT, so the cash-leg sign convention (stock +, cash −, sum 0), DEK-gating, lot hooks, `holding_accounts` dual-write, `invalidateUser`, and `markSnapshotsDirty` are byte-identical. `add_snapshot` stays STANDALONE (it writes `portfolio_snapshots`, not a ledger entry). All 8 old names stay HIDDEN callable aliases. Advertised HTTP surface: **83 → 76** (`MCP_TOOL_COUNTS.http` + README). Contract test extended (asserts the `entry_type` oneOf + a bad entry_type is rejected at schema validation). `MCP_SERVER_VERSION` stays 3.4.0 until the phase-6 v4.0 cut.

@@ -8,14 +8,16 @@
 // transfers: 92 → 83. Phase 4 folded the 8 portfolio_* writers into
 // portfolio_record_entry (entry_type union; add_snapshot stays standalone): 83 → 76.
 export const MCP_TOOL_COUNTS = { http: 76, stdio: 93 } as const;
-// 3.4.0 (FINLYNQ-264): destructive-tool safety pass — tier-1 deletes
-// (delete_transfer / delete_account / delete_portfolio_holding) now require a
-// preview→confirmation-token two-step, tier-2 single-row deletes accept an
-// optional `expected` echo, and every tool carries readOnly/destructive/
-// idempotent annotations verified by a registry assertion. Additive params
-// only (no tools added/renamed); the v4.0 cut (sibling A's `manage_*` folds)
-// lands separately.
-export const MCP_SERVER_VERSION = "3.4.0" as const;
+// 4.0.0 (FINLYNQ-263): MCP surface v4 — CRUD consolidation + session-scoped
+// toolsets. The 117 per-verb HTTP tools collapse into discriminated-union
+// `manage_*` tools (op discriminator) + `portfolio_record_entry` (entry_type),
+// dropping the ADVERTISED surface to 76 (default-profile tools/list = 51, ≤ 60);
+// the 25 import/reconcile tools are toolset-gated OFF by default. Every retired
+// name (`add_goal`, `record_transaction`, `portfolio_buy`, …) stays a HIDDEN
+// back-compat alias — callable but not advertised — for one minor version
+// (removed in v4.1). Response shapes are byte-identical (only the input envelope
+// gained a discriminator). See CHANGELOG for the full old→new migration table.
+export const MCP_SERVER_VERSION = "4.0.0" as const;
 
 // Server-level trust posture, sent ONCE per session via the MCP `instructions`
 // field (FINLYNQ-266). This replaces the "Bookkeeping only:" disclaimer that

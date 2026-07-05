@@ -1451,27 +1451,27 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
 
       if (t === "tools") {
         return dataResponse({
-          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast", "preview_delete_category"],
-          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
+          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_categories", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
+          write_tools: ["manage_transactions (op: record | update | delete; record takes one row OR transactions[])", "manage_transfers (op: record | update | delete)", "manage_splits (op: list | add | update | delete | replace)", "manage_budgets (op: set | delete)", "manage_accounts (op: add | update | delete | set_mode)", "manage_goals (op: add | update | delete | list)", "manage_categories (op: create | delete)", "manage_rules (op: create | update | delete | list | reorder)", "manage_subscriptions (op: add | update | delete | list)", "manage_loans (op: add | update | delete | list)", "manage_fx_overrides (op: set | delete | list)", "add_snapshot", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
-          portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
-          transfer_tools: ["record_transfer"],
+          portfolio_write_tools: ["portfolio_record_entry (entry_type: buy | sell | swap | transfer | income_expense | fx_conversion | deposit | withdrawal)", "manage_holdings (op: add | update | delete)"],
           reconcile_tools: ["upload_statement", "get_reconcile_suggestions", "get_reconciliation_summary", "find_duplicate_bank_rows", "get_balance_anchors", "upsert_balance_anchor", "delete_bank_transaction", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "accept_reconcile_suggestions", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
-          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools, topic='modes' for the mode/lifecycle map of every multi-mode tool (get_investment_insights, get_net_worth, get_spending_trends, staged-import lifecycle), or topic='safety' for the destructive-tool two-step (confirmation tokens) + delete_transaction/delete_split echo guards.",
+          note_v4: "MCP surface v4 (v4.0.0): per-verb CRUD tools were consolidated into discriminated-union tools — `manage_*` use an `op` field, `portfolio_record_entry` uses `entry_type`. The old names (record_transaction, add_goal, portfolio_buy, …) still work as hidden aliases through v4.1. Reconcile/import tools are hidden from the default session unless the connection has the `mcp:import` scope or setting.",
+          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='manage_transactions' for detailed usage of any tool. INVESTMENT accounts CANNOT use manage_transactions/manage_transfers for trades — use portfolio_record_entry (entry_type buy/sell/swap/transfer/deposit/withdrawal/income_expense/fx_conversion). manage_transfers is the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools, topic='modes' for the mode/lifecycle map of every multi-mode tool, or topic='safety' for the destructive-tool two-step (confirmation tokens) + delete-echo guards.",
         });
       }
 
       if (t === "write") {
         return dataResponse({
-          primary_add: "record_transaction — account required, fuzzy matching on account/category names",
-          bulk_add: "bulk_record_transactions — array of transactions (account required per item)",
-          edits: ["update_transaction(id, ...fields)", "delete_transaction(id)"],
-          budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
-          accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
-          goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
-          categories: ["create_category(name, type)", "delete_category(id, confirmation_token) — preview via preview_delete_category", "create_rule(match_payee, assign_category)"],
-          note: "All name inputs use fuzzy matching — partial names work. Each account can also have an `alias` (e.g. last 4 digits of a card); account lookups exact-match on alias in addition to fuzzy-matching on name, so you can pass either. Set category via update_transaction(id, category=...).",
-          deletes: "SAFETY (v3.4): delete_transfer / delete_account (non-empty or force) / delete_portfolio_holding (with tx or lots) are TWO-STEP — a bare call returns { preview, summary, confirmationToken } and deletes NOTHING; re-call with the token to commit. delete_transaction / delete_split accept an OPTIONAL `expected` echo (payee/amount) that refuses a mismatch. See topic='safety' for the full contract.",
+          primary_add: "manage_transactions(op='record', amount, payee, account) — one row; account required, fuzzy matching on account/category names",
+          bulk_add: "manage_transactions(op='record', transactions=[{amount, payee, date, account}, ...]) — array; account required per item",
+          edits: ["manage_transactions(op='update', id, ...fields)", "manage_transactions(op='delete', id)"],
+          budget: ["manage_budgets(op='set', category, month, amount)", "manage_budgets(op='delete', category, month)"],
+          accounts: ["manage_accounts(op='add', name, type)", "manage_accounts(op='update', account, ...)", "manage_accounts(op='delete', account)", "manage_accounts(op='set_mode', accountId, mode)"],
+          goals: ["manage_goals(op='add', name, type, target_amount)", "manage_goals(op='update', goal, ...)", "manage_goals(op='delete', goal)", "manage_goals(op='list')"],
+          categories: ["manage_categories(op='create', name, type)", "manage_categories(op='delete', id, confirmation_token) — omit the token to preview FK counts + get one", "manage_rules(op='create', match_payee, assign_category)"],
+          note: "MCP surface v4: CRUD tools consolidated into `manage_*` (op discriminator). All name inputs use fuzzy matching — partial names work. Each account can also have an `alias`; account lookups exact-match on alias in addition to fuzzy-matching on name. Set category via manage_transactions(op='update', id, category=...). Old names (record_transaction, add_goal, …) still work as hidden aliases through v4.1.",
+          deletes: "SAFETY (v4.0): manage_transfers(op='delete') / manage_accounts(op='delete', non-empty or force) / manage_holdings(op='delete', with tx or lots) are TWO-STEP — a bare call returns { preview, summary, confirmationToken } and deletes NOTHING; re-call with the token to commit. manage_transactions(op='delete') / manage_splits(op='delete') accept an OPTIONAL `expected` echo (payee/amount) that refuses a mismatch. See topic='safety' for the full contract.",
         });
       }
 
@@ -1494,20 +1494,20 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       if (t === "examples") {
         return dataResponse({
           examples: [
-            { task: "Log a coffee purchase", call: 'record_transaction(amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
-            { task: "Log salary deposit", call: 'record_transaction(amount=3500, payee="Employer", account="RBC Chequing", category="Salary")' },
-            { task: "Import bank statement rows", call: "bulk_record_transactions([{amount, payee, date, account}, ...])" },
-            { task: "Set grocery budget", call: 'set_budget(category="Groceries", month="2026-04", amount=600)' },
-            { task: "Fix wrong category", call: 'update_transaction(id=42, category="Restaurants")' },
+            { task: "Log a coffee purchase", call: 'manage_transactions(op="record", amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
+            { task: "Log salary deposit", call: 'manage_transactions(op="record", amount=3500, payee="Employer", account="RBC Chequing", category="Salary")' },
+            { task: "Import bank statement rows", call: 'manage_transactions(op="record", transactions=[{amount, payee, date, account}, ...])' },
+            { task: "Set grocery budget", call: 'manage_budgets(op="set", category="Groceries", month="2026-04", amount=600)' },
+            { task: "Fix wrong category", call: 'manage_transactions(op="update", id=42, category="Restaurants")' },
             { task: "Auto-categorize backlog", call: "apply_rules_to_uncategorized(dry_run=true)" },
-            { task: "Create savings goal", call: 'add_goal(name="Emergency Fund", type="emergency_fund", target_amount=10000)' },
+            { task: "Create savings goal", call: 'manage_goals(op="add", name="Emergency Fund", type="emergency_fund", target_amount=10000)' },
             { task: "Analyze investments", call: "get_portfolio_analysis()" },
             { task: "Rebalance vs targets", call: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}])' },
             { task: "Net worth trend", call: "get_net_worth(months=12)" },
-            { task: "Buy 10 AAPL for $1500 in a USD brokerage", call: 'portfolio_buy(account="Questrade USD", holding="AAPL", qty=10, totalCost=1500)' },
-            { task: "Sell 5 AAPL for $800 (FIFO)", call: 'portfolio_sell(account="Questrade USD", holding="AAPL", qty=5, totalProceeds=800)' },
-            { task: "Record a $42 dividend", call: 'portfolio_income_expense(account="Questrade USD", currency="USD", amount=42, incomeType="dividend")' },
-            { task: "Fund a brokerage from chequing", call: 'portfolio_deposit(sourceAccount="RBC Chequing", destAccount="Questrade USD", amount=2000)' },
+            { task: "Buy 10 AAPL for $1500 in a USD brokerage", call: 'portfolio_record_entry(entry_type="buy", account="Questrade USD", holding="AAPL", qty=10, totalCost=1500)' },
+            { task: "Sell 5 AAPL for $800 (FIFO)", call: 'portfolio_record_entry(entry_type="sell", account="Questrade USD", holding="AAPL", qty=5, totalProceeds=800)' },
+            { task: "Record a $42 dividend", call: 'portfolio_record_entry(entry_type="income_expense", account="Questrade USD", currency="USD", amount=42, incomeType="dividend")' },
+            { task: "Fund a brokerage from chequing", call: 'portfolio_record_entry(entry_type="deposit", sourceAccount="RBC Chequing", destAccount="Questrade USD", amount=2000)' },
           ],
         });
       }
@@ -1515,9 +1515,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       if (t === "portfolio") {
         return dataResponse({
           read_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
-          write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
+          write_tools: ["portfolio_record_entry (entry_type: buy | sell | swap | transfer | income_expense | fx_conversion | deposit | withdrawal)", "manage_holdings (op: add | update | delete)"],
           modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
-          note_on_writes: "Investment activity MUST go through the portfolio_* write tools (record_transaction / bulk_record_transactions reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — add_portfolio_holding a 'Cash' holding for that currency first if missing.",
+          note_on_writes: "Investment activity MUST go through portfolio_record_entry (manage_transactions/manage_transfers reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — manage_holdings(op='add') a 'Cash' holding for that currency first if missing. (The old portfolio_buy/sell/… names still work as hidden aliases through v4.1.)",
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "All portfolio read tools return a disclaimer field. Not financial advice.",
         });
