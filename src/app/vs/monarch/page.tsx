@@ -4,7 +4,7 @@ import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title: "Finlynq vs Monarch Money: open-source AI-native alternative",
-  description: `Finlynq vs Monarch Money: open-source AGPL v3 with self-host + ${MCP_TOOL_COUNTS.http} MCP tools + per-user envelope encryption + Canadian tax accounts + direct bank connections (auto-sync) plus file/CSV/OFX import, compared against Monarch's closed-source hosted SaaS with full Plaid bank sync and household budgeting. Side-by-side feature table, when to choose each, and migration steps.`,
+  description: `Finlynq vs Monarch Money: open-source AGPL v3 with envelope encryption and a first-party MCP server (${MCP_TOOL_COUNTS.http} tools), vs Monarch's closed hosted SaaS.`,
   alternates: {
     canonical: "/vs/monarch",
   },

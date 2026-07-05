@@ -5,7 +5,7 @@ import { AnalyticsConsent } from "@/components/analytics-consent";
 export const metadata: Metadata = {
   title: "Self-host Finlynq: Docker Compose personal finance with MCP",
   description:
-    "Self-host Finlynq on your own infrastructure with Docker Compose. It's the same code as the managed cloud: first-party MCP server, per-user envelope encryption, PostgreSQL. AGPL v3, no license fees.",
+    "Self-host Finlynq with Docker Compose. Same code as the managed cloud: first-party MCP server, envelope encryption, PostgreSQL. AGPL v3, no license fees.",
   alternates: { canonical: "/self-hosted" },
   openGraph: {
     title: "Self-host Finlynq with Docker",

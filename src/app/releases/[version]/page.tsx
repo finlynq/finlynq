@@ -9,6 +9,7 @@ import {
   breadcrumbSchema,
 } from "@/components/seo/json-ld";
 import { RELEASE_SLUGS, getRelease } from "@/lib/seo/releases";
+import { metaDescription } from "@/lib/seo/site";
 
 export function generateStaticParams() {
   return RELEASE_SLUGS.map((version) => ({ version }));
@@ -25,7 +26,7 @@ export async function generateMetadata({
   const title = `${release.name} release notes`;
   return {
     title: `${title} · Finlynq`,
-    description: release.tagline,
+    description: metaDescription(release.tagline),
     alternates: { canonical: `/releases/${release.slug}` },
     openGraph: {
       title,

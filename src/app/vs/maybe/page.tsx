@@ -5,7 +5,7 @@ import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title: "Finlynq vs Maybe (and the Sure fork): actively-built open-source PFM",
   description:
-    "Finlynq vs Maybe Finance and its community fork Sure: Maybe was a venture-funded PFM that open-sourced after shutting down; Sure is the volunteer fork. Finlynq targets the same holistic user with a modern stack, per-user envelope encryption, direct bank connections (auto-sync, Plaid-independent), and a first-party MCP server neither ships. Side-by-side table, when to choose each, migration steps.",
+    "Finlynq vs Maybe Finance and its Sure fork: a modern open-source PFM with envelope encryption and a first-party MCP server neither ships.",
   alternates: { canonical: "/vs/maybe" },
   openGraph: {
     title: "Finlynq vs Maybe (and the Sure fork)",

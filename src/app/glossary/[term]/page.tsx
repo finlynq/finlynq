@@ -8,6 +8,7 @@ import {
   breadcrumbSchema,
 } from "@/components/seo/json-ld";
 import { GLOSSARY_SLUGS, getGlossaryEntry } from "@/lib/seo/glossary";
+import { metaDescription } from "@/lib/seo/site";
 
 export function generateStaticParams() {
   return GLOSSARY_SLUGS.map((term) => ({ term }));
@@ -23,7 +24,7 @@ export async function generateMetadata({
   if (!entry) return {};
   return {
     title: `${entry.term} | Finlynq glossary`,
-    description: entry.description,
+    description: metaDescription(entry.description),
     alternates: { canonical: `/glossary/${entry.slug}` },
     openGraph: {
       title: entry.term,

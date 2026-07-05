@@ -4,7 +4,7 @@ import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title: "Finlynq vs Era: open-source vs closed AI personal finance",
-  description: `Finlynq vs Era: open-source AGPL v3 with self-host + ${MCP_TOOL_COUNTS.http} MCP tools + per-user envelope encryption, compared against Era's closed-source hosted SaaS with 27 MCP tools and operator-held keys. Side-by-side feature table, when to choose each, and migration steps.`,
+  description: `Finlynq vs Era: open-source AGPL v3, self-hostable, with ${MCP_TOOL_COUNTS.http} MCP tools and envelope encryption, vs Era's closed hosted SaaS with operator-held keys.`,
   alternates: {
     canonical: "/vs/era",
   },

@@ -5,7 +5,7 @@ import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title:
     "Finlynq vs Alderfi: two open-source MCP-first personal finance apps",
-  description: `Finlynq vs Alderfi: production-ready AGPL v3 PFM with ${MCP_TOOL_COUNTS.http} MCP tools, hosted demo, per-user envelope encryption, and multi-currency support, compared with Alderfi's pre-alpha Apache-2.0 project that ships local LLM (Llama 3 via llama.cpp). Side-by-side feature table, when to choose each, dated 2026-05-13.`,
+  description: `Finlynq vs Alderfi: a production-ready AGPL v3 PFM with ${MCP_TOOL_COUNTS.http} MCP tools and envelope encryption, vs Alderfi's pre-alpha Apache-2.0 project with a local LLM.`,
   alternates: {
     canonical: "/vs/alderfi",
   },

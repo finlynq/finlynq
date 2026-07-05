@@ -11,6 +11,21 @@ export const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ?? "https://finlynq.com";
 
 /**
+ * Clamp a string to a search-engine-friendly `<meta name="description">`
+ * length. Bing/Google truncate past ~160 chars and flag over-long descriptions,
+ * so content-derived descriptions (glossary answers, release taglines) are run
+ * through this before being used as the primary `description`. Truncates on a
+ * word boundary and appends an ellipsis; leaves short strings untouched.
+ */
+export function metaDescription(text: string, max = 157): string {
+  const s = text.replace(/\s+/g, " ").trim();
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max - 1);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > 60 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+/**
  * Comparison pages under `/vs/<slug>`. Add a slug here when you ship a new
  * comparison page. It flows into the sitemap, the `/vs` index, and llms.txt.
  */

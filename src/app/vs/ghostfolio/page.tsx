@@ -5,7 +5,7 @@ import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title: "Finlynq vs Ghostfolio: full PFM + first-party MCP vs portfolio tracker",
   description:
-    "Finlynq vs Ghostfolio: both open-source AGPL v3 and self-hostable. Ghostfolio is a best-in-class investment tracker, but it's investments-only; Finlynq covers the full personal-finance surface (budgets, transactions, loans, goals) and ships a first-party MCP server with read and write tools. Side-by-side table, when to choose each, migration steps.",
+    "Finlynq vs Ghostfolio: both open-source AGPL v3. Ghostfolio is investments-only; Finlynq covers the full PFM surface with a first-party MCP server.",
   alternates: { canonical: "/vs/ghostfolio" },
   openGraph: {
     title: "Finlynq vs Ghostfolio: full PFM + first-party MCP vs portfolio tracker",

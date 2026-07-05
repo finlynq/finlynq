@@ -5,7 +5,7 @@ import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title:
     "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
-  description: `Finlynq vs Firefly III: two AGPL v3 self-hostable personal finance apps. Firefly III is mature double-entry accounting with PSD2 bank sync; Finlynq is UI + first-party MCP (${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools) with per-user envelope encryption, direct bank connections, and native iOS + Android apps. Side-by-side feature table, when to choose each, and migration steps.`,
+  description: `Finlynq vs Firefly III: two AGPL v3 PFMs. Firefly is double-entry accounting; Finlynq adds a first-party MCP server (${MCP_TOOL_COUNTS.http} tools) and envelope encryption.`,
   alternates: {
     canonical: "/vs/firefly-iii",
   },

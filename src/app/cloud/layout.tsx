@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 export const metadata: Metadata = {
   title: "Finlynq cloud: free managed personal finance with MCP",
   description:
-    "Log in or register for Finlynq's free managed cloud. There's no infrastructure to manage. It's the same code as the self-hosted edition, with a first-party MCP server and per-user envelope encryption.",
+    "Log in or register for Finlynq's free managed cloud. Same code as the self-hosted edition, with a first-party MCP server and per-user envelope encryption.",
   alternates: { canonical: "/cloud" },
   openGraph: {
     title: "Finlynq cloud: free managed personal finance",

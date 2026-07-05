@@ -5,7 +5,7 @@ import { AnalyticsConsent } from "@/components/analytics-consent";
 export const metadata: Metadata = {
   title: "Blog · Finlynq",
   description:
-    "Long-form writing about the Finlynq personal-finance app: encryption architecture, MCP design, AI in personal finance, and what it's like running an open-source app.",
+    "Long-form writing about the Finlynq personal-finance app: encryption architecture, MCP design, AI in finance, and running an open-source app.",
   alternates: { canonical: "/blog" },
   openGraph: {
     title: "Finlynq blog",

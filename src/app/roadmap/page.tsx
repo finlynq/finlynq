@@ -9,7 +9,7 @@ const PATH = "/roadmap";
 export const metadata: Metadata = {
   title: "Roadmap | Finlynq",
   description:
-    "What's live, what we're building, and what's next for Finlynq, the open-source personal finance app with a first-party MCP server. Directional, community-shaped, AGPL v3.",
+    "What's live, what we're building, and what's next for Finlynq, the open-source personal finance app with a first-party MCP server. Community-shaped, AGPL v3.",
   alternates: { canonical: PATH },
   openGraph: {
     title: "Finlynq roadmap",

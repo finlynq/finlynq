@@ -6,7 +6,7 @@ import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title:
     "Finlynq MCP guide: connect Claude, Cursor & Windsurf to your finances",
-  description: `Connect Finlynq's first-party MCP server to Claude, Cursor, Windsurf, or any MCP client. OAuth 2.1 + Dynamic Client Registration, Bearer API key, or stdio. ${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools over your own financial data.`,
+  description: `Connect Finlynq's first-party MCP server to Claude, Cursor, or any MCP client via OAuth 2.1, Bearer key, or stdio. ${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools.`,
   alternates: { canonical: "/mcp-guide" },
   openGraph: {
     title: "Finlynq MCP guide: connect any AI assistant to your finances",

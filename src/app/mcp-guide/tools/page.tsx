@@ -15,7 +15,7 @@ import {
 
 export const metadata: Metadata = {
   title: `Finlynq MCP: ${TOOL_COUNT_HTTP} tools for AI personal finance`,
-  description: `Complete catalog of the ${TOOL_COUNT_HTTP} HTTP MCP tools Finlynq exposes to Claude, Cursor, Windsurf, and any other MCP client. Covers reads (balances, net worth, budgets, portfolio, goals, FX, spending trends, anomalies), writes (transactions, transfers, trades, accounts, categories, rules, subscriptions, loans, goals, splits, holdings, FX overrides), preview/execute pairs for bulk operations, destructive ops with confirmation tokens, and the unified import staging pipeline.`,
+  description: `Complete catalog of the ${TOOL_COUNT_HTTP} HTTP MCP tools Finlynq exposes to Claude, Cursor, and any MCP client: reads, writes, bulk preview/execute pairs, and imports.`,
   alternates: { canonical: "/mcp-guide/tools" },
   openGraph: {
     title: `Finlynq MCP: ${TOOL_COUNT_HTTP} tools for AI personal finance`,

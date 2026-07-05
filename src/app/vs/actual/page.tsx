@@ -5,7 +5,7 @@ import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",
   description:
-    "Finlynq vs Actual Budget: two open-source self-hostable personal finance apps. Actual is best-in-class local-first envelope budgeting; Finlynq adds native investment tracking, correct multi-currency, direct bank connections, per-user envelope encryption, and a first-party MCP server. Side-by-side table, when to choose each, and migration steps.",
+    "Finlynq vs Actual Budget: two open-source self-hostable PFMs. Actual is local-first envelope budgeting; Finlynq adds investments and a first-party MCP server.",
   alternates: { canonical: "/vs/actual" },
   openGraph: {
     title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",

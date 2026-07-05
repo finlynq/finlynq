@@ -7,7 +7,7 @@ import { GLOSSARY } from "@/lib/seo/glossary";
 export const metadata: Metadata = {
   title: "Glossary: personal finance, MCP & encryption terms | Finlynq",
   description:
-    "Plain-English definitions of the concepts behind Finlynq: MCP servers, envelope encryption, zero-knowledge personal finance, self-hosting, and lot-tracked cost basis.",
+    "Plain-English definitions of the concepts behind Finlynq: MCP servers, envelope encryption, zero-knowledge finance, self-hosting, and lot-tracked cost basis.",
   alternates: { canonical: "/glossary" },
   openGraph: {
     title: "Finlynq glossary",

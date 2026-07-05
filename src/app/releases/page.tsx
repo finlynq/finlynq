@@ -7,7 +7,7 @@ import { RELEASES_BY_DATE } from "@/lib/seo/releases";
 export const metadata: Metadata = {
   title: "Releases · Finlynq",
   description:
-    "Release notes and changelog for Finlynq, the open-source personal finance app with a first-party MCP server. What's new in each version, from investing and import to the MCP server and security.",
+    "Release notes and changelog for Finlynq, the open-source personal finance app with a first-party MCP server. What's new in each version.",
   alternates: { canonical: "/releases" },
   openGraph: {
     title: "Finlynq releases",

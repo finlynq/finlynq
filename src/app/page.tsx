@@ -10,7 +10,7 @@ export const metadata: Metadata = {
   title:
     "Finlynq: Open-Source Personal Finance with a First-Party MCP Server",
   description:
-    "Open-source (AGPL v3) personal finance app with a first-party MCP server. Track income, expenses, budgets, investments, loans, and goals, then query your money in plain English from Claude, Cursor, or any MCP client. Self-host with Docker or use the free cloud.",
+    "Open-source (AGPL v3) personal finance with a first-party MCP server. Track your money, then query it in plain English from Claude or any MCP client.",
   alternates: { canonical: "/" },
   openGraph: {
     title: "Finlynq: track your money here, analyze it anywhere",

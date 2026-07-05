@@ -14,7 +14,7 @@ const PUBLISHED = "2026-06-01";
 export const metadata: Metadata = {
   title: "Finlynq is now on iOS and Android",
   description:
-    "Finlynq's native mobile app is here, available on the App Store and Google Play. Check balances, budgets, your portfolio, and net worth on the go, add transactions, import statements, all with the same encryption as the web app.",
+    "Finlynq's native mobile app is on the App Store and Google Play. Check balances, budgets, portfolio, and net worth, add transactions, and import on the go.",
   alternates: { canonical: `/blog/${SLUG}` },
   openGraph: {
     title: "Finlynq is now on iOS and Android",

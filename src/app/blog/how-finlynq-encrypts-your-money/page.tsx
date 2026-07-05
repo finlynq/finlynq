@@ -15,7 +15,7 @@ export const metadata: Metadata = {
   title:
     "How Finlynq encrypts your money: envelope encryption, in plain English",
   description:
-    "A walkthrough of Finlynq's encryption: AES-256-GCM at rest, a per-user Data Encryption Key wrapped by a scrypt-derived key from your password, and the tradeoffs I won't pretend away (the operator can see anonymized amounts; lose your password and your data is gone).",
+    "A walkthrough of Finlynq's encryption: AES-256-GCM at rest, a per-user key wrapped by a scrypt key from your password, and the tradeoffs I won't hide.",
   alternates: { canonical: `/blog/${SLUG}` },
   openGraph: {
     title: "How Finlynq encrypts your money",

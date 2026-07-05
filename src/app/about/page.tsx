@@ -12,7 +12,7 @@ import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title: "What is Finlynq? Open-source personal finance app with first-party MCP",
   description:
-    "Finlynq is an open-source (AGPL v3) personal finance web app with a first-party Model Context Protocol (MCP) server. Track income, expenses, budgets, investments, loans, and goals, then query your financial data from Claude, Cursor, Windsurf, or any MCP-compatible AI assistant. Not affiliated with Finq.com (forex broker) or Finlync (B2B treasury software).",
+    "Finlynq is an open-source (AGPL v3) personal finance app with a first-party MCP server. Query your money from Claude, Cursor, or any MCP AI assistant.",
   alternates: {
     canonical: "/about",
   },

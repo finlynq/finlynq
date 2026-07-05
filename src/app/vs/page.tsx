@@ -7,7 +7,7 @@ import { VS_SLUGS, VS_META } from "@/lib/seo/site";
 export const metadata: Metadata = {
   title: "Finlynq vs other personal finance apps: side-by-side comparisons",
   description:
-    "How Finlynq compares to Monarch Money, Era, Firefly III, and Alderfi: open-source AGPL v3, self-hostable, first-party MCP server, and per-user envelope encryption versus each alternative. Honest side-by-side tables, when to choose each, and migration steps.",
+    "How Finlynq compares to Monarch, Era, Firefly III, YNAB, and more: open-source AGPL v3, self-hostable, with a first-party MCP server and envelope encryption.",
   alternates: { canonical: "/vs" },
   openGraph: {
     title: "Finlynq vs other personal finance apps",
