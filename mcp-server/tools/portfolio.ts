@@ -1337,6 +1337,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           from,
           to: asOfDate,
           currency: (rowsRaw as Array<{ currency?: string }>)[0]?.currency ?? "USD",
+          // FINLYNQ-268: the TWRR/MWRR series is market-based (reads
+          // portfolio_snapshots.market_value). `asOf` = the latest snapshot
+          // date actually read (may lag today if the cron hasn't run).
+          basis: "market",
+          asOf: series.length > 0 ? series[series.length - 1].date : asOfDate,
           series,
           twrr: {
             period: twrr.periodReturn,
@@ -1512,6 +1517,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           note: "Account scope did not resolve — no holdings returned. See `warnings` for details.",
           totalHoldings: 0,
           reportingCurrency: reporting,
+          // FINLYNQ-268: this tool's money summary is lifetime cost basis (Σ
+          // every buy) + realized/dividend flows — NOT market value (see the
+          // note; per-holding market value is not surfaced here).
+          basis: "lifetime_cost",
           warnings: accountWarnings,
           summary: {
             lifetimeCostBasisReporting: tagAmount(0, reporting, "reporting"),
@@ -1810,6 +1819,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         note: "Per-holding marketValue and unrealizedGain require live prices and are not surfaced here — use the portfolio page for full per-holding metrics. (Account-LEVEL market value IS available via get_account_balances / get_net_worth on OAuth/built-in-chat connections.) Results are per-holdingId — two holdings sharing a name across accounts return as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear in `holdings[]` with `status: 'cash_only'` and `totalReturnPct: null`.",
         totalHoldings: results.length,
         reportingCurrency: reporting,
+        // FINLYNQ-268: the money summary is lifetime cost basis (Σ every buy) +
+        // realized/dividend flows — per-holding market value is intentionally
+        // NOT surfaced here (see `note`); label the basis truthfully.
+        basis: "lifetime_cost",
         warnings,
         rowWarnings,
         // Issue #209 — only `*Reporting` siblings remain. These are the
@@ -2037,6 +2050,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         period: period ?? "all",
         since,
         reportingCurrency: reporting,
+        // FINLYNQ-268 (decision 3): per-holding avg-cost of ACTIVE positions —
+        // labelled active_cost. Lifetime totals belong only to insights'
+        // labelled `totalInvested`, not here.
+        basis: "active_cost",
         warnings: summaryWarnings,
         rowWarnings: perfRowWarnings,
         // Issue #209 — only `*Reporting` siblings remain. Cash-sleeve
@@ -2357,6 +2374,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         holding: holdingName,
         currency: holdingCurrency,
         reportingCurrency: reporting,
+        // FINLYNQ-268: the primary position figure is `currentCostBasis`
+        // (remaining qty × avg cost = ACTIVE cost basis); `lifetimeCostBasis`
+        // is surfaced separately. Per-holding market value is not computed
+        // here (see `note`), so the basis is active_cost, not market.
+        basis: "active_cost",
         // Position — Issue #208 round at the response boundary.
         currentShares: Math.round(remainingQty * 10000) / 10000,
         avgCostPerShare: avgCost ? roundMoney(avgCost, holdingCurrency) : null,

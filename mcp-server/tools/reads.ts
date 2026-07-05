@@ -894,7 +894,11 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         dek: null,
         reportingCurrency: reporting,
       });
-      return dataResponse(payload);
+      // FINLYNQ-268: the score's money totals (netWorthToday, liquidAssets) are
+      // computed with dek:null, so investment accounts are valued at ledger
+      // (net contributions), never market — label the basis truthfully. The
+      // component RATIOS are currency-independent; `basis` scopes the totals.
+      return dataResponse({ ...payload, basis: "ledger" });
     }
   );
 

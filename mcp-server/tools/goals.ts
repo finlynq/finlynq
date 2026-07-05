@@ -38,6 +38,7 @@ import {
   ymdDate,
 } from "../lib/date-validators";
 import { computeGoalProgress } from "../../src/lib/goals-progress";
+import { todayISO } from "../../src/lib/utils/date";
 import { registerManageTool, registerAlias } from "./_consolidate";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
@@ -242,6 +243,26 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
       entry.names.push(acctName ?? "");
       linksByGoal.set(goalId, entry);
     }
+    // FINLYNQ-268: per-goal valuation basis. A goal contributes MARKET value
+    // for its investment-linked accounts (needs a DEK) and LEDGER (net
+    // contributions) for cash accounts — so the honest per-goal `basis` is
+    // 'market' iff the goal links ≥1 investment account AND a DEK is present,
+    // else 'ledger'. This LABELS `computeGoalProgress`'s existing mix without
+    // changing its math (values byte-identical).
+    const allLinkedAccountIds = Array.from(
+      new Set([...linksByGoal.values()].flatMap((l) => l.ids)),
+    );
+    const investmentAccountIds = new Set<number>();
+    if (allLinkedAccountIds.length > 0) {
+      const invExpr = sql.join(allLinkedAccountIds.map((id) => sql`${id}`), sql`, `);
+      const invRows = await q(db, sql`
+        SELECT id FROM accounts
+        WHERE user_id = ${userId} AND is_investment = TRUE
+          AND id = ANY(ARRAY[${invExpr}]::int[])
+      `);
+      for (const r of invRows) investmentAccountIds.add(Number(r.id));
+    }
+
     // Issue #233 — surface progress numbers via the shared helper so MCP
     // HTTP and REST `/api/goals` can't drift. Pure aggregation; no name
     // decryption involved.
@@ -260,11 +281,18 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
       const { name_ct, ...rest } = r;
       const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [] };
       const progress = progressByGoal.get(Number(r.id));
+      // FINLYNQ-268: 'market' when the goal links an investment account AND a
+      // DEK is present (else that account's holdings can't be priced), else
+      // 'ledger' (net contributions).
+      const hasInvestment = links.ids.some((id) => investmentAccountIds.has(id));
+      const basis: "market" | "ledger" = hasInvestment && dek != null ? "market" : "ledger";
       return {
         ...rest,
         name: name_ct && dek ? decryptField(dek, name_ct) : null,
         accountIds: links.ids,
         accounts: links.names,
+        basis,
+        ...(basis === "market" ? { asOf: todayISO() } : {}),
         currentAmount: progress?.currentAmount ?? 0,
         progress: progress?.progress ?? 0,
         percentComplete: progress?.progress ?? 0,
