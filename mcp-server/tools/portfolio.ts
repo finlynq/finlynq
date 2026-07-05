@@ -2571,11 +2571,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   // ── get_investment_insights ────────────────────────────────────────────────
   server.tool(
     "get_investment_insights",
-    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, largest positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`; each target's `holding` string is matched against a holding's NAME or SYMBOL (case-insensitive substring, same as get_portfolio_analysis), and positions sharing a symbol across accounts are aggregated into one current position. Targets matching no holding are listed in the response `warnings` array (rather than silently returning currentPct 0). `mode: 'benchmark'` compares book-value growth vs a reference index. All monetary aggregates are converted to reportingCurrency (defaults to user's display currency) so cross-currency portfolios aggregate sensibly.",
+    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, largest positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`; each target's `holding` string is matched against a holding's NAME or SYMBOL (case-insensitive substring, same as get_portfolio_analysis), and positions sharing a symbol across accounts are aggregated into one current position. Targets matching no holding — OR ambiguously matching 2+ holdings — are listed in the response `warnings` array (rather than silently returning currentPct 0 or picking one). `mode: 'benchmark'` compares book-value growth vs a reference index. All monetary aggregates are converted to reportingCurrency (defaults to user's display currency) so cross-currency portfolios aggregate sensibly.",
     {
       mode: z.enum(["patterns", "rebalancing", "benchmark"]).optional().describe("Analytics mode (default: patterns)"),
       targets: z.array(z.object({
-        holding: z.string().describe("Holding name or symbol (case-insensitive substring match against the position's name + symbol; ticker symbols like VTI or VUN.TO work). Unmatched entries surface in the response `warnings` array."),
+        holding: z.string().describe("Holding name or symbol (matched against the position's name + symbol via the shared resolver — exact/startsWith/token-substring; ticker symbols like VTI or VUN.TO work). Unmatched OR 2+-match (ambiguous) entries surface in the response `warnings` array."),
         target_pct: z.number().describe("Target allocation percentage (0-100)"),
       })).optional().describe("Required when mode='rebalancing'. Target allocations (should sum to ~100)."),
       benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional().describe("Benchmark for mode='benchmark' (default SP500)"),
@@ -2693,26 +2693,40 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // "BUY $X / BUY $Y" advice with no signal that the other 58 holdings
         // exist and remain at their current weight.
         const matchedAllocKeys = new Set<string>();
-        // FINLYNQ-252: surface targets that match NO holding. A zero-match
-        // target was previously indistinguishable from a genuinely-new
-        // position (currentPct 0 => confident full-amount BUY). Mirrors the
-        // `warnings` array get_portfolio_analysis returns for unmatched filters.
+        // FINLYNQ-267 (rebases FINLYNQ-252): resolve each target against the
+        // symbol-aggregated buckets via the SHARED `resolveEntity` (entity
+        // "holding" → name-OR-symbol match, ambiguous-aware) + `collectWarnings`
+        // — replacing the inline substring `find` + `warnings.push` point-fix.
+        // A zero-match target still surfaces in `warnings` (byte-compatible
+        // wording), a target matching 2+ buckets now surfaces `ambiguous`
+        // per-entry (the case 252 couldn't express), and the resolver's
+        // length-≥3 token gate (#123) applies. `untargetedHoldings` (issue #209)
+        // is UNCHANGED — it's driven by `matchedAllocKeys` below.
+        //
+        // Build an options list from the buckets: the map key is the stable
+        // synthetic id (a string, but `resolveEntity` compares ids loosely via
+        // Number()). We track the key on each option so a resolved id maps back.
+        const bucketList = [...currentAlloc.entries()];
+        // resolveEntity works on numeric ids; index the buckets so each has one.
+        const bucketOptions: Row[] = bucketList.map(([, v], i) => ({
+          id: i,
+          name: v.name,
+          symbol: v.symbol,
+        }));
         const warnings: string[] = [];
         const suggestions = targets.map(t => {
-          const lo = t.holding.trim().toLowerCase();
-          // Match a target against a `name + symbol` haystack per bucket, the
-          // same name-OR-symbol semantic as get_portfolio_analysis: a
-          // case-insensitive substring of the combined name + symbol (so "VTI"
-          // matches symbol "VTI", "VUN.TO" matches symbol "VUN.TO", and "Gold"
-          // matches name "Gold"). The aggregation already keyed on symbol, so
-          // a ticker held across accounts is a single bucket here.
-          const matched = lo.length === 0 ? undefined : [...currentAlloc.entries()].find(([, v]) => {
-            const haystack = `${String(v.name ?? "").toLowerCase()} ${String(v.symbol ?? "").toLowerCase()}`;
-            return haystack.includes(lo);
-          });
-          if (matched) matchedAllocKeys.add(matched[0]);
-          else warnings.push(`Target '${t.holding}' matched no holding; treated as a new position (currentPct 0).`);
-          const current = matched?.[1];
+          const env = resolveEntity({ entity: "holding", name: t.holding, options: bucketOptions });
+          let current: { name: string; symbol: string | null; value: number; pct: number; currency: string; valueNative: number } | undefined;
+          if (env.status === "resolved") {
+            const [key, bucket] = bucketList[env.id];
+            matchedAllocKeys.add(key);
+            current = bucket;
+          } else if (env.status === "ambiguous") {
+            const list = env.candidates.map(c => (c.symbol ? `"${c.name}" (${c.symbol})` : `"${c.name}"`)).join(", ");
+            warnings.push(`Target '${t.holding}' is ambiguous — matches ${env.candidates.length} holdings: ${list}. Refine the target to a single holding.`);
+          } else {
+            warnings.push(`Target '${t.holding}' matched no holding; treated as a new position (currentPct 0).`);
+          }
           const currentPct = current?.pct ?? 0;
           const currentValue = current?.value ?? 0;
           const targetValue = (t.target_pct / 100) * totalBV;

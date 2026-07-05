@@ -11,7 +11,7 @@ import {
   text,
   err,
   suggestionList,
-  fuzzyFind,
+  resolveEntity,
   decryptNameish,
   type Row,
   type PgToolContext,
@@ -57,12 +57,20 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
       if (!dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4). Pass `id` instead.");
       const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
       const allCats = decryptNameish(rawCats, dek);
-      const found = fuzzyFind(name!, allCats);
-      if (!found) {
+      // FINLYNQ-267: resolve via the shared envelope — a mistyped/unmatched name
+      // is REFUSED and a 2+ match returns an ambiguous list (was `fuzzyFind`
+      // silent-first). `id` above is the FK fast-path.
+      const env = resolveEntity({ entity: "category", name, options: allCats });
+      if (env.status === "ambiguous") {
+        const list = env.candidates.map((c) => `"${c.name}" (id=${c.id})`).join(", ");
+        return err(`Category is ambiguous — ${env.candidates.length} matches: ${list}. Pass id to disambiguate.`);
+      }
+      if (env.status === "not_found") {
         return err(`Category "${name}" not found. Did you mean: ${suggestionList(name!, allCats)}?`);
       }
-      cat = found;
+      cat = allCats.find((c) => Number(c.id) === env.id) ?? null;
     }
+    if (!cat) return err(`Category "${name}" not found.`);
     const catId = Number(cat.id);
     const catName = String(cat.name ?? `#${catId}`);
 

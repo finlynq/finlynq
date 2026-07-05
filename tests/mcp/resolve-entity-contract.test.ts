@@ -387,3 +387,30 @@ describe("FINLYNQ-267 tc-1 — delete_account name resolution (Phase 3, ambiguou
     expect(queries.filter((q) => /DELETE FROM accounts/i.test(q))).toHaveLength(0);
   });
 });
+
+// ── Phase 4 — preview_delete_category name path onto the envelope ─────────────
+
+describe("FINLYNQ-267 tc-1 — preview_delete_category name (Phase 4)", () => {
+  it("(a) mistyped name → not-found (no token minted)", async () => {
+    const dek = randomBytes(32);
+    const { db } = makeFixtureDb((t) =>
+      /FROM categories WHERE user_id/i.test(t) ? [fakeCatRow(1, "Groceries", dek)] : [],
+    );
+    const tool = getTool("preview_delete_category", db, dek);
+    const res = await tool.handler({ name: "_NOPE_" }, {});
+    expect(envelopeText(res)).toMatch(/not found|no confident/i);
+    expect(envelopeText(res)).not.toMatch(/confirmationToken/i);
+  });
+
+  it("(b) name matching 2+ rows → ambiguous (was fuzzy silent-first)", async () => {
+    const dek = randomBytes(32);
+    const { db } = makeFixtureDb((t) =>
+      /FROM categories WHERE user_id/i.test(t)
+        ? [fakeCatRow(1, "Travel", dek), fakeCatRow(2, "Travel Insurance", dek)]
+        : [],
+    );
+    const tool = getTool("preview_delete_category", db, dek);
+    const res = await tool.handler({ name: "Trave" }, {});
+    expect(envelopeText(res)).toMatch(/ambiguous/i);
+  });
+});
