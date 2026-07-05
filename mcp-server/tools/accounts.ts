@@ -18,8 +18,8 @@ import {
   err,
   dataResponse,
   suggestionList,
-  fuzzyFind,
   resolveAccountStrict,
+  resolveEntity,
   decryptNameish,
   supportedCurrencyEnum,
   type Row,
@@ -227,7 +227,9 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
       if (!rows.length) throw new PreviewAbortError(`Account #${accountId} not found.`);
       acct = decryptNameish(rows, dek)[0];
     }
-    // Resolve via name (fuzzy). Refuses without a DEK.
+    // Resolve via name. Refuses without a DEK. FINLYNQ-267: via the shared
+    // envelope — a mistyped/unmatched name is REFUSED and a 2+ match ABORTS
+    // with an ambiguous list (was `fuzzyFind` silent-first — the #230 class).
     let resolvedByName: Row | null = null;
     if (account != null && account !== "") {
       if (!dek) {
@@ -237,10 +239,15 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
         SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
       `);
       const allAccounts = decryptNameish(rawAccounts, dek);
-      resolvedByName = fuzzyFind(account, allAccounts);
-      if (!resolvedByName) {
+      const env = resolveEntity({ entity: "account", name: account, options: allAccounts });
+      if (env.status === "ambiguous") {
+        const list = env.candidates.map((c) => `"${c.name}" (id=${c.id})`).join(", ");
+        throw new PreviewAbortError(`Account is ambiguous — ${env.candidates.length} matches: ${list}. Pass accountId to disambiguate.`);
+      }
+      if (env.status === "not_found") {
         throw new PreviewAbortError(`Account "${account}" not found. Did you mean: ${suggestionList(account, allAccounts)}?`);
       }
+      resolvedByName = allAccounts.find((a) => Number(a.id) === env.id) ?? null;
     }
     // Both supplied — fail loud on mismatch.
     if (acct && resolvedByName) {

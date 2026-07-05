@@ -11,7 +11,6 @@ import {
   text,
   err,
   suggestionList,
-  fuzzyFind,
   resolveAccountStrict,
   resolveCategoryStrict,
   resolveEntity,
@@ -210,6 +209,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     account?: string;
     account_id?: number;
     category?: string;
+    category_id?: number;
     note?: string;
     tags?: string;
     portfolioHoldingId?: number;
@@ -221,7 +221,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     dryRun?: boolean;
   };
   async function opTxRecord(argsObj: RecordTxArgs): Promise<ToolResult> {
-      const { amount, payee, date, account, account_id, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, tradeLinkId, dryRun } = argsObj;
+      const { amount, payee, date, account, account_id, category, category_id, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, tradeLinkId, dryRun } = argsObj;
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
@@ -285,16 +285,16 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       if (isInvestment) {
         return err(`Account "${acct.name}" is an investment account — record_transaction can't write to it. Use portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion instead.`);
       }
+      // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
+      // shared envelope (mistyped → refuse, 2+ → ambiguous — was `fuzzyFind`
+      // silent-first). Neither given ⇒ auto-categorize from the payee.
       let catId: number | null = null;
-      if (category) {
+      if (category_id != null || category) {
         const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
-        const cat = fuzzyFind(category, allCats);
-        if (!cat) {
-          // Issue #211 Bug e: top-N suggestions only.
-          return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
-        }
-        catId = Number(cat.id);
+        const out = resolveOrReport("category", resolveEntity({ entity: "category", id: category_id, name: category, options: allCats }));
+        if ("report" in out) return out.report;
+        catId = out.id;
       } else {
         catId = await autoCategory(db, userId, payee, dek, isInvestment, !dryRun);
       }
@@ -1132,6 +1132,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     amount?: number;
     payee?: string;
     category?: string;
+    category_id?: number;
     note?: string;
     tags?: string;
     portfolioHoldingId?: number | null;
@@ -1141,7 +1142,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     enteredCurrency?: string;
   };
   async function opTxUpdate(argsObj: UpdateTxArgs): Promise<ToolResult> {
-      const { id, date, amount, payee, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency } = argsObj;
+      const { id, date, amount, payee, category, category_id, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency } = argsObj;
       const existing = await q(db, sql`
         SELECT t.id, t.account_id, t.category_id, t.date, t.amount, a.currency AS account_currency
           FROM transactions t
@@ -1163,25 +1164,19 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       // matches the FIRST row regardless of input — the silent-failure mode
       // captured in issue #60. Strict resolver also gates substring matches
       // on token overlap so "Cr" never resolves to "Credit Interest".
+      // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
+      // shared envelope (mistyped → refuse, 2+ → ambiguous; the #60 token gate
+      // is preserved by DEFAULT_STRICT.category).
       let catId: number | undefined;
       let resolvedCategory: { id: number; name: string } | null = null;
-      if (category !== undefined) {
+      if (category_id != null || category !== undefined) {
         const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
-        const resolved = resolveCategoryStrict(category, allCats);
-        if (!resolved.ok) {
-          // Issue #211 Bug e: top-N suggestions only.
-          const suggestions = suggestionList(category, allCats);
-          if (resolved.reason === "ambiguous") {
-            return err(`Ambiguous: "${category}" matches ${resolved.candidates.length} categories. Did you mean: ${suggestions}?`);
-          }
-          if (resolved.reason === "low_confidence") {
-            return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-call with the exact name to confirm.`);
-          }
-          return err(`Category "${category}" not found. Did you mean: ${suggestions}?`);
-        }
-        catId = Number(resolved.category.id);
-        resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
+        const out = resolveOrReport("category", resolveEntity({ entity: "category", id: category_id, name: category, options: allCats }));
+        if ("report" in out) return out.report;
+        catId = out.id;
+        const row = allCats.find((c) => Number(c.id) === out.id);
+        resolvedCategory = { id: out.id, name: String(row?.name ?? "") };
       }
 
       // Resolve the holding FK from either input form, then run the existing
@@ -1417,7 +1412,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id`."),
         account_id: z.number().int().optional().describe("Account FK (accounts.id). Exact routing. As a SINGLE-record field OR the top-level bulk fallback applied to every row that omits its own account."),
         date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
-        category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
+        category: z.string().optional().describe("Category name (auto-detected from payee if omitted; mistyped/unmatched is REFUSED, 2+ → ambiguous). PREFER `category_id`."),
+        category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name. Single record."),
         note: z.string().optional().describe("Optional note"),
         tags: z.string().optional().describe("Comma-separated tags"),
         portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this transaction to a position."),
@@ -1452,7 +1448,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         date: ymdDate.optional(),
         amount: z.number().optional().describe("New amount in account currency. Doesn't touch the entered_* side."),
         payee: z.string().optional(),
-        category: z.string().optional().describe("Category name (fuzzy matched)"),
+        category: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED, 2+ → ambiguous). PREFER `category_id`."),
+        category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
         note: z.string().optional(),
         tags: z.string().optional(),
         portfolioHoldingId: z.number().int().nullable().optional().describe("FK to portfolio_holdings.id (or null to clear)."),
@@ -1516,7 +1513,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
       account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known — e.g. resolved from a prior `get_account_balances` or `search_transactions` call. If both this and `account` are passed, this wins."),
       date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
-      category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
+      category: z.string().optional().describe("Category name (auto-detected from payee if omitted; mistyped/unmatched is REFUSED, 2+ → ambiguous). PREFER `category_id`."),
+      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
       note: z.string().optional().describe("Optional note"),
       tags: z.string().optional().describe("Comma-separated tags"),
       portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this transaction to a position. Get the id from get_portfolio_analysis (each holding now exposes `id`) or from add_portfolio_holding. Must belong to the user; rejected otherwise."),
@@ -1565,7 +1563,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       date: ymdDate.optional(),
       amount: z.number().optional().describe("New amount in account currency. Doesn't touch the entered_* side."),
       payee: z.string().optional(),
-      category: z.string().optional().describe("Category name (fuzzy matched)"),
+      category: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED, 2+ → ambiguous). PREFER `category_id`."),
+      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
       note: z.string().optional(),
       tags: z.string().optional(),
       portfolioHoldingId: z.number().int().nullable().optional().describe("FK to portfolio_holdings.id (or null to clear). Get the id from get_portfolio_analysis (each holding exposes `id`) or analyze_holding (`holdingId`). Holding must belong to the user."),

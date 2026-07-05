@@ -368,3 +368,22 @@ describe("FINLYNQ-267 tc-1 — delete_portfolio_holding (Phase 2, ambiguous flip
     expect(envelopeText(res)).not.toMatch(/ambiguous/i);
   });
 });
+
+// ── Phase 3 — normalize already-strict + fuzzy writes onto the envelope ───────
+// NOTE: record_transaction / update_transaction category paths were migrated in
+// Phase 3 too, but their handlers call adapter-bound helpers (isInvestmentAccount)
+// that need the real DB — they can't run against this DB-free mock harness, so
+// they're exercised by the full-suite integration tests rather than tc-1 here.
+
+describe("FINLYNQ-267 tc-1 — delete_account name resolution (Phase 3, ambiguous-aware)", () => {
+  it("(b) account name matching 2+ rows → ambiguous (no DELETE) — was fuzzy silent-first", async () => {
+    const dek = randomBytes(32);
+    const { db, queries } = makeFixtureDb((t) =>
+      /FROM accounts WHERE user_id/i.test(t) ? ambiguousAccounts(dek) : [],
+    );
+    const tool = getTool("delete_account", db, dek);
+    const res = await tool.handler({ account: "Savin" }, {});
+    expect(envelopeText(res)).toMatch(/ambiguous/i);
+    expect(queries.filter((q) => /DELETE FROM accounts/i.test(q))).toHaveLength(0);
+  });
+});
