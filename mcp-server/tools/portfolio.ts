@@ -86,6 +86,7 @@ import {
 import {
   ymdDate,
 } from "../lib/date-validators";
+import { registerManageTool, registerAlias } from "./_consolidate";
 
 export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek, encNote } = ctx;
@@ -531,19 +532,17 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   );
 
 
-  // ── add_portfolio_holding ──────────────────────────────────────────────────
-  server.tool(
-    "add_portfolio_holding",
-    "Create a portfolio holding (a single position like 'VEQT.TO' inside a brokerage account). The import pipeline auto-creates these from CSV/ZIP uploads; this tool is for manually adding a position the user wants to track without an import.",
-    {
-      name: z.string().min(1).max(200).describe("Display name of the holding (e.g. 'Vanguard All-Equity ETF')"),
-      account: z.string().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required because uniqueness is scoped per (account, name)."),
-      symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
-      isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
-      note: z.string().max(500).optional(),
-    },
-    async ({ name, account, symbol, currency, isCrypto, note }) => {
+  // ── op: add — lifted VERBATIM from add_portfolio_holding ───────────────────
+  type ToolResult = { content: Array<{ type: "text"; text: string }> };
+  async function opHoldingAdd(args: {
+    name: string;
+    account: string;
+    symbol?: string;
+    currency?: string;
+    isCrypto?: boolean;
+    note?: string;
+  }): Promise<ToolResult> {
+      const { name, account, symbol, currency, isCrypto, note } = args;
       const rawAccounts = await q(db, sql`
         SELECT id, currency, name_ct, alias_ct FROM accounts
         WHERE user_id = ${userId} AND archived = false
@@ -644,24 +643,19 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         }
         throw e;
       }
-    }
-  );
+  }
 
-
-  // ── update_portfolio_holding ───────────────────────────────────────────────
-  server.tool(
-    "update_portfolio_holding",
-    "Update a portfolio holding's name, symbol, currency, isCrypto, or note. Renames cascade to all transactions automatically because the portfolio aggregators (issue #86) group by FK holdingId, not by display name — two holdings sharing a name across accounts stay distinct rows in get_portfolio_analysis output. NOTE: the legacy `account` parameter is REFUSED (issue #99) — moving a holding to a different account would leave stale `holding_accounts` rows and orphaned account attribution on every historical transaction. To actually move shares between accounts, use record_transfer (in-kind); to re-attribute existing transactions, update them individually.",
-    {
-      holding: z.string().describe("Current holding name OR symbol (fuzzy matched against decrypted name and symbol)"),
-      name: z.string().min(1).max(200).optional().describe("New name"),
-      symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
-      account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) to move shares between accounts; update individual transactions to re-attribute history."),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
-      isCrypto: z.boolean().optional(),
-      note: z.string().max(500).optional(),
-    },
-    async ({ holding, name, symbol, account, currency, isCrypto, note }) => {
+  // ── op: update — lifted VERBATIM from update_portfolio_holding ─────────────
+  async function opHoldingUpdate(args: {
+    holding: string;
+    name?: string;
+    symbol?: string;
+    account?: string;
+    currency?: string;
+    isCrypto?: boolean;
+    note?: string;
+  }): Promise<ToolResult> {
+      const { holding, name, symbol, account, currency, isCrypto, note } = args;
       // Issue #99: refuse account-move. Updating only portfolio_holdings.account_id
       // (the prior behavior) leaves a stale (holding, old_account) row in
       // holding_accounts (issue #25's JOIN grain) AND broken account
@@ -764,8 +758,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         }
         throw e;
       }
-    }
-  );
+  }
 
 
   // ── delete_portfolio_holding ───────────────────────────────────────────────
@@ -814,14 +807,9 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     return { h, txCount, lotCount };
   }
 
-  server.tool(
-    "delete_portfolio_holding",
-    "Delete a portfolio holding. Transactions referencing it survive (the FK is set to NULL — they fall back to orphan aggregation), but its cost-basis LOTS cascade-delete. Two-step (destructive) when the holding has linked transactions OR lots: the first call returns a preview (name + tx/lot counts) + a confirmationToken (single-use, 5-min TTL) and deletes NOTHING; call again with the token to commit. A clean/empty holding deletes directly.",
-    {
-      holding: z.string().describe("Holding name OR symbol (fuzzy matched)"),
-      confirmation_token: z.string().optional().describe("Omit to preview; pass the preview's token to commit when the holding has transactions/lots. Single-use, 5-min TTL. Not needed for a clean/empty holding."),
-    },
-    withConfirmation<DeleteHoldingArgs>(userId, {
+  // Built ONCE (withConfirmation preview↔commit); reused by the manage_holdings
+  // op=delete dispatcher AND the delete_portfolio_holding alias.
+  const deleteHoldingHandler = withConfirmation<DeleteHoldingArgs>(userId, {
       operation: "delete_portfolio_holding",
       tokenPayload: (a) => ({ holdingId: a.__h ? Number(a.__h.id) : null }),
       required: async (a) => {
@@ -857,7 +845,89 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           },
         });
       },
-    }),
+    });
+
+  // ── manage_holdings (consolidated) + hidden back-compat aliases ────────────
+  registerManageTool(
+    server,
+    "manage_holdings",
+    "Manage portfolio holdings (positions inside a brokerage account): `op` selects add / update / delete. add: create a position (name + account; optional symbol/currency/isCrypto). update: change name/symbol/currency/isCrypto/note (fuzzy `holding`; moving accounts is REFUSED — use portfolio_transfer). delete: TWO-STEP when the holding has transactions/lots (preview counts + token, then commit); a clean holding deletes directly. qty/cost come from transactions, NOT this tool.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("add"),
+        name: z.string().min(1).max(200).describe("Display name of the holding (e.g. 'Vanguard All-Equity ETF')"),
+        account: z.string().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required because uniqueness is scoped per (account, name)."),
+        symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
+        isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
+        note: z.string().max(500).optional(),
+      }),
+      z.object({
+        op: z.literal("update"),
+        holding: z.string().describe("Current holding name OR symbol (fuzzy matched against decrypted name and symbol)"),
+        name: z.string().min(1).max(200).optional().describe("New name"),
+        symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
+        account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use portfolio_transfer (in-kind) to move shares between accounts."),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
+        isCrypto: z.boolean().optional(),
+        note: z.string().max(500).optional(),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        holding: z.string().describe("Holding name OR symbol (fuzzy matched)"),
+        confirmation_token: z.string().optional().describe("Omit to preview; pass the preview's token to commit when the holding has transactions/lots. Single-use, 5-min TTL. Not needed for a clean/empty holding."),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "add":
+          return opHoldingAdd(input);
+        case "update":
+          return opHoldingUpdate(input);
+        case "delete":
+          return deleteHoldingHandler(input);
+      }
+    },
+  );
+
+  registerAlias(
+    server,
+    "add_portfolio_holding",
+    "Create a portfolio holding (a single position like 'VEQT.TO' inside a brokerage account). The import pipeline auto-creates these from CSV/ZIP uploads; this tool is for manually adding a position the user wants to track without an import.",
+    {
+      name: z.string().min(1).max(200).describe("Display name of the holding (e.g. 'Vanguard All-Equity ETF')"),
+      account: z.string().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required because uniqueness is scoped per (account, name)."),
+      symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
+      isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
+      note: z.string().max(500).optional(),
+    },
+    async (args) => opHoldingAdd(args),
+  );
+  registerAlias(
+    server,
+    "update_portfolio_holding",
+    "Update a portfolio holding's name, symbol, currency, isCrypto, or note. Renames cascade to all transactions automatically because the portfolio aggregators (issue #86) group by FK holdingId, not by display name — two holdings sharing a name across accounts stay distinct rows in get_portfolio_analysis output. NOTE: the legacy `account` parameter is REFUSED (issue #99) — moving a holding to a different account would leave stale `holding_accounts` rows and orphaned account attribution on every historical transaction. To actually move shares between accounts, use record_transfer (in-kind); to re-attribute existing transactions, update them individually.",
+    {
+      holding: z.string().describe("Current holding name OR symbol (fuzzy matched against decrypted name and symbol)"),
+      name: z.string().min(1).max(200).optional().describe("New name"),
+      symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
+      account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) to move shares between accounts; update individual transactions to re-attribute history."),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
+      isCrypto: z.boolean().optional(),
+      note: z.string().max(500).optional(),
+    },
+    async (args) => opHoldingUpdate(args),
+  );
+  registerAlias(
+    server,
+    "delete_portfolio_holding",
+    "Delete a portfolio holding. Transactions referencing it survive (the FK is set to NULL — they fall back to orphan aggregation), but its cost-basis LOTS cascade-delete. Two-step (destructive) when the holding has linked transactions OR lots: the first call returns a preview (name + tx/lot counts) + a confirmationToken (single-use, 5-min TTL) and deletes NOTHING; call again with the token to commit. A clean/empty holding deletes directly.",
+    {
+      holding: z.string().describe("Holding name OR symbol (fuzzy matched)"),
+      confirmation_token: z.string().optional().describe("Omit to preview; pass the preview's token to commit when the holding has transactions/lots. Single-use, 5-min TTL. Not needed for a clean/empty holding."),
+    },
+    async (args) => deleteHoldingHandler(args),
   );
 
 

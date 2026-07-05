@@ -55,9 +55,6 @@ import {
   applyInvestmentMarketOverlay,
 } from "../investment-balance-overlay";
 import {
-  computeGoalProgress,
-} from "../../src/lib/goals-progress";
-import {
   ymdDate,
   ymPeriod,
 } from "../lib/date-validators";
@@ -710,76 +707,6 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       });
     }
   );
-
-
-  // ── get_goals ─────────────────────────────────────────────────────────────
-  server.tool("get_goals", "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking. Numeric progress fields (issue #233): `currentAmount` (in goal currency, summed across linked accounts using market value for investment accounts and SUM(amount) for cash accounts, FX-converted into goal currency), `progress` and `percentComplete` (0..100, 1dp), `remaining`, `monthlyNeeded` (when a deadline is set).", {}, async () => {
-    const goalsRaw = await q(db, sql`
-      SELECT g.id, g.name_ct, g.type, g.target_amount, g.currency, g.deadline, g.status, g.priority
-      FROM goals g
-      WHERE g.user_id = ${userId}
-      ORDER BY g.priority
-    `);
-    if (!goalsRaw.length) return dataResponse([]);
-    const goalIds = goalsRaw.map((g) => Number(g.id));
-    // Pull every (goal_id, account_id, account_name_ct) link in one query.
-    // Note: Drizzle's `sql` tag interpolates a JS array as separate scalar
-    // params (`($2, $3)`), so the previous `ANY(${goalIds}::int[])` shape
-    // rendered as `ANY(($2, $3)::int[])` — Postgres parsed `($2, $3)` as a
-    // ROW literal and rejected the row→array cast (PR #142 follow-up). Use
-    // `ARRAY[...]::int[]` with `sql.join` so the cast wraps a real array
-    // constructor.
-    const goalIdsExpr = sql.join(goalIds.map((id) => sql`${id}`), sql`, `);
-    const linksRaw = await q(db, sql`
-      SELECT ga.goal_id, ga.account_id, a.name_ct AS account_name_ct
-      FROM goal_accounts ga
-      LEFT JOIN accounts a ON ga.account_id = a.id
-      WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(ARRAY[${goalIdsExpr}]::int[])
-    `);
-    const linksByGoal = new Map<number, { ids: number[]; names: string[] }>();
-    for (const l of linksRaw) {
-      const goalId = Number(l.goal_id);
-      const accountId = Number(l.account_id);
-      const acctName = l.account_name_ct && dek ? decryptField(dek, l.account_name_ct) : null;
-      const entry = linksByGoal.get(goalId) ?? { ids: [], names: [] };
-      entry.ids.push(accountId);
-      entry.names.push(acctName ?? "");
-      linksByGoal.set(goalId, entry);
-    }
-    // Issue #233 — surface progress numbers via the shared helper so MCP
-    // HTTP and REST `/api/goals` can't drift. Pure aggregation; no name
-    // decryption involved.
-    const progressByGoal = await computeGoalProgress(
-      userId,
-      dek,
-      goalsRaw.map((r) => ({
-        id: Number(r.id),
-        currency: (r.currency as string | null) ?? null,
-        targetAmount: Number(r.target_amount ?? 0),
-        deadline: (r.deadline as string | null) ?? null,
-        accountIds: linksByGoal.get(Number(r.id))?.ids ?? [],
-      })),
-    );
-    const rows = goalsRaw.map((r) => {
-      const { name_ct, ...rest } = r;
-      const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [] };
-      const progress = progressByGoal.get(Number(r.id));
-      return {
-        ...rest,
-        name: name_ct && dek ? decryptField(dek, name_ct) : null,
-        accountIds: links.ids,
-        accounts: links.names,
-        currentAmount: progress?.currentAmount ?? 0,
-        progress: progress?.progress ?? 0,
-        // Alias matches the docstring's "with progress" promise; some
-        // existing consumers expect a literal `percentComplete` field.
-        percentComplete: progress?.progress ?? 0,
-        remaining: progress?.remaining ?? Number(r.target_amount ?? 0),
-        monthlyNeeded: progress?.monthlyNeeded ?? 0,
-      };
-    });
-    return dataResponse(rows);
-  });
 
 
   // ── get_categories ─────────────────────────────────────────────────────────

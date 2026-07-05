@@ -72,9 +72,21 @@ const EXTERNAL_WORLD_TOOLS = new Set(["get_fx_rate", "convert_amount"]);
  * escape hatch), so they are intentionally NOT listed here.
  */
 export const TOOL_ANNOTATION_OVERRIDES: Record<string, ToolAnnotations> = {
-  // (No name-escaping destructive tools exist on the surface today — the
-  // `manage_*{op:"delete"}` union tools land with sibling A and will register
-  // their entries here so the annotation assertion still flags them destructive.)
+  // FINLYNQ-263 (child A) — consolidated `manage_*` union tools that carry a
+  // destructive `op:"delete"` branch but whose NAME escapes the `delete_`/
+  // `reject_`/`_delete` inference. Marked destructive so the annotation gate +
+  // client hints stay accurate. (`idempotentHint` follows the delete/set
+  // semantics; a name-escaping create+delete union is NOT idempotent, so leave
+  // it false unless every op is set/delete.)
+  // Phase 1 (goals / accounts / budgets / fx-overrides / categories / holdings):
+  manage_goals: { destructiveHint: true },
+  manage_fx_overrides: { destructiveHint: true },
+  manage_categories: { destructiveHint: true },
+  manage_accounts: { destructiveHint: true },
+  manage_budgets: { destructiveHint: true },
+  manage_holdings: { destructiveHint: true },
+  // Later phases add manage_rules / manage_subscriptions / manage_loans /
+  // manage_transactions / manage_transfers / manage_splits when they register.
 };
 
 export function inferAnnotations(name: string): ToolAnnotations {

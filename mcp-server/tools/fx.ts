@@ -31,6 +31,9 @@ import {
 import {
   ymdDate,
 } from "../lib/date-validators";
+import { registerManageTool, registerAlias } from "./_consolidate";
+
+type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
 export function registerFxTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, encNote, decNote } = ctx;
@@ -91,26 +94,119 @@ export function registerFxTools(server: McpServer, ctx: PgToolContext) {
   );
 
 
-  // ── list_fx_overrides ─────────────────────────────────────────────────────
-  server.tool(
+  // ── manage_fx_overrides op handlers (lifted VERBATIM) ──────────────────────
+  async function opList(): Promise<ToolResult> {
+    const rows = await q(db, sql`
+      SELECT id, currency, date_from, date_to, rate_to_usd, note, created_at
+      FROM fx_overrides WHERE user_id = ${userId}
+      ORDER BY currency, date_from DESC
+    `);
+    // Free-text note is user-DEK encrypted at rest (2026-06-01).
+    const decrypted = rows.map((r) => ({ ...r, note: decNote(r.note as string | null) }));
+    return text({ success: true, data: decrypted });
+  }
+
+  async function opSet(args: {
+    from: string;
+    to: string;
+    date: string;
+    rate: number;
+    dateTo?: string;
+    note?: string;
+  }): Promise<ToolResult> {
+    const { from, to, date, rate, dateTo, note } = args;
+    // Issue #206 — validate currencies + dates at the MCP boundary so a
+    // future-dated or unknown-currency override can't poison the cache
+    // via findNearestCached's nearest-row lookup.
+    let fromU: string;
+    let toU: string;
+    let dateFrom: string;
+    let dateToFinal: string;
+    try {
+      fromU = validateCurrencyCode(from);
+      toU = validateCurrencyCode(to);
+      dateFrom = validateFxDate(date);
+      dateToFinal = validateFxDate(dateTo ?? date);
+    } catch (e) {
+      return err(e instanceof Error ? e.message : String(e));
+    }
+    if (dateToFinal < dateFrom) {
+      return err(`dateTo (${dateToFinal}) must be on or after date (${dateFrom}).`);
+    }
+    let currency: string;
+    let rateToUsd: number;
+    if (fromU === "USD") {
+      currency = toU;
+      rateToUsd = 1 / rate;
+    } else if (toU === "USD") {
+      currency = fromU;
+      rateToUsd = rate;
+    } else {
+      return err(
+        `Cross-pair overrides aren't supported directly. Anchor against USD: pin ${fromU}→USD and ${toU}→USD separately. Triangulation will compute ${fromU}→${toU} from those.`
+      );
+    }
+    const result = await q(db, sql`
+      INSERT INTO fx_overrides (user_id, currency, date_from, date_to, rate_to_usd, note)
+      VALUES (${userId}, ${currency}, ${dateFrom}, ${dateToFinal}, ${rateToUsd}, ${encNote(note)})
+      RETURNING id
+    `);
+    return text({ success: true, data: { id: Number(result[0]?.id), currency, dateFrom, dateTo: dateToFinal, rateToUsd, action: "created" } });
+  }
+
+  async function opDelete(args: { id: number }): Promise<ToolResult> {
+    const { id } = args;
+    const existing = await q(db, sql`SELECT id, currency, date_from, date_to FROM fx_overrides WHERE id = ${id} AND user_id = ${userId}`);
+    if (!existing.length) return err(`FX override #${id} not found`);
+    await db.execute(sql`DELETE FROM fx_overrides WHERE id = ${id} AND user_id = ${userId}`);
+    const r = existing[0];
+    return text({ success: true, data: { id, message: `Deleted FX override for ${r.currency} (${r.date_from}${r.date_to ? `..${r.date_to}` : "+"})` } });
+  }
+
+  registerManageTool(
+    server,
+    "manage_fx_overrides",
+    "Manage manual FX rate overrides: `op` selects set / delete / list. set: pin a rate (1 `from` = `rate` `to` on `date`; one side MUST be USD). delete: remove an override by `id`. list: all overrides (rate_to_usd per currency + date range). For a one-off rate/conversion use get_fx_rate / convert_amount instead.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("set"),
+        from: z.string().describe("Source currency (e.g. USD)"),
+        to: z.string().describe("Target currency (e.g. CAD)"),
+        date: ymdDate.describe("YYYY-MM-DD"),
+        rate: z.number().positive().describe("Exchange rate — 1 {from} = rate {to}"),
+        dateTo: ymdDate.optional().describe("Optional end date YYYY-MM-DD; defaults to a single-day override"),
+        note: z.string().optional().describe("Optional note (e.g. 'bank rate at Wise on this day')"),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        id: z.number().describe("fx_overrides row id"),
+      }),
+      z.object({
+        op: z.literal("list").describe("List all FX overrides."),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "set":
+          return opSet(input);
+        case "delete":
+          return opDelete(input);
+        case "list":
+          return opList();
+      }
+    },
+  );
+
+  // ── hidden back-compat aliases (removed in v4.1) ─────────────────────────────
+  registerAlias(
+    server,
     "list_fx_overrides",
     "List the user's manual FX rate overrides. Each override pins rate_to_usd for a currency over a date range; lookup uses the most-specific match.",
     {},
-    async () => {
-      const rows = await q(db, sql`
-        SELECT id, currency, date_from, date_to, rate_to_usd, note, created_at
-        FROM fx_overrides WHERE user_id = ${userId}
-        ORDER BY currency, date_from DESC
-      `);
-      // Free-text note is user-DEK encrypted at rest (2026-06-01).
-      const decrypted = rows.map((r) => ({ ...r, note: decNote(r.note as string | null) }));
-      return text({ success: true, data: decrypted });
-    }
+    async () => opList(),
   );
-
-
-  // ── set_fx_override ───────────────────────────────────────────────────────
-  server.tool(
+  registerAlias(
+    server,
     "set_fx_override",
     "Pin a manual FX rate. Accepts the user-friendly pair shape (1 `from` = `rate` `to` on `date`) and stores it as a rate_to_usd entry under fx_overrides. One side of the pair MUST be USD; cross-pair overrides should be entered as two USD-anchored rows.",
     {
@@ -121,60 +217,14 @@ export function registerFxTools(server: McpServer, ctx: PgToolContext) {
       dateTo: ymdDate.optional().describe("Optional end date YYYY-MM-DD; defaults to a single-day override"),
       note: z.string().optional().describe("Optional note (e.g. 'bank rate at Wise on this day')"),
     },
-    async ({ from, to, date, rate, dateTo, note }) => {
-      // Issue #206 — validate currencies + dates at the MCP boundary so a
-      // future-dated or unknown-currency override can't poison the cache
-      // via findNearestCached's nearest-row lookup.
-      let fromU: string;
-      let toU: string;
-      let dateFrom: string;
-      let dateToFinal: string;
-      try {
-        fromU = validateCurrencyCode(from);
-        toU = validateCurrencyCode(to);
-        dateFrom = validateFxDate(date);
-        dateToFinal = validateFxDate(dateTo ?? date);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
-      if (dateToFinal < dateFrom) {
-        return err(`dateTo (${dateToFinal}) must be on or after date (${dateFrom}).`);
-      }
-      let currency: string;
-      let rateToUsd: number;
-      if (fromU === "USD") {
-        currency = toU;
-        rateToUsd = 1 / rate;
-      } else if (toU === "USD") {
-        currency = fromU;
-        rateToUsd = rate;
-      } else {
-        return err(
-          `Cross-pair overrides aren't supported directly. Anchor against USD: pin ${fromU}→USD and ${toU}→USD separately. Triangulation will compute ${fromU}→${toU} from those.`
-        );
-      }
-      const result = await q(db, sql`
-        INSERT INTO fx_overrides (user_id, currency, date_from, date_to, rate_to_usd, note)
-        VALUES (${userId}, ${currency}, ${dateFrom}, ${dateToFinal}, ${rateToUsd}, ${encNote(note)})
-        RETURNING id
-      `);
-      return text({ success: true, data: { id: Number(result[0]?.id), currency, dateFrom, dateTo: dateToFinal, rateToUsd, action: "created" } });
-    }
+    async (args) => opSet(args),
   );
-
-
-  // ── delete_fx_override ────────────────────────────────────────────────────
-  server.tool(
+  registerAlias(
+    server,
     "delete_fx_override",
     "Delete a manual FX rate override by id",
     { id: z.number().describe("fx_overrides row id") },
-    async ({ id }) => {
-      const existing = await q(db, sql`SELECT id, currency, date_from, date_to FROM fx_overrides WHERE id = ${id} AND user_id = ${userId}`);
-      if (!existing.length) return err(`FX override #${id} not found`);
-      await db.execute(sql`DELETE FROM fx_overrides WHERE id = ${id} AND user_id = ${userId}`);
-      const r = existing[0];
-      return text({ success: true, data: { id, message: `Deleted FX override for ${r.currency} (${r.date_from}${r.date_to ? `..${r.date_to}` : "+"})` } });
-    }
+    async (args) => opDelete(args),
   );
 
 

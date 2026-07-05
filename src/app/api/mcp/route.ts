@@ -21,9 +21,12 @@ import { accountStrategy } from "@/lib/auth/require-auth";
 import { validateOauthToken, getIssuer } from "@/lib/oauth";
 import { DEFAULT_SCOPE, parseScope, isToolAllowedForScope } from "@/lib/oauth-scopes";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { registerPgTools } from "../../../../mcp-server/register-tools-pg";
 import { withAutoAnnotations } from "../../../../mcp-server/auto-annotations";
+import { buildFilteredToolsList } from "../../../../mcp-server/tools/_consolidate";
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION, MCP_SERVER_INSTRUCTIONS } from "@/lib/mcp/tool-counts";
+import { isToolInEnabledToolsets, type Toolset } from "@/lib/mcp/toolsets";
 
 // Origin allowlist - defense-in-depth against DNS rebinding and cross-site
 // cookie attacks against the session-cookie auth path. Bearer-token requests
@@ -196,6 +199,38 @@ export async function POST(request: NextRequest) {
   const dek = "dek" in auth.context ? auth.context.dek : null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registerPgTools(server, db as any, auth.context.userId, dek);
+
+  // FINLYNQ-263 — post-process `tools/list`: hide back-compat aliases (callable
+  // but not advertised, decision #1), substitute the pre-computed `oneOf` JSON
+  // schema for consolidated `manage_*` tools (the SDK renders a union input as
+  // an empty object otherwise), and gate by session toolset. Phase 1 keeps ALL
+  // toolsets enabled (analytics + ledger-write + import-pipeline); Phase 5 flips
+  // the default to hide import-pipeline unless the `mcp:import` scope / setting
+  // opts in. `enabledSets` is where that flip lands.
+  const enabledSets = new Set<Toolset>(["analytics", "ledger-write", "import-pipeline"]);
+  const toolFilter = (name: string) => isToolInEnabledToolsets(name, enabledSets);
+  {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inner = server.server as any;
+    // The SDK registered its ListTools handler when the first tool was added;
+    // wrap it so we post-process the rendered list.
+    const originalListHandler = inner._requestHandlers.get(
+      ListToolsRequestSchema.shape.method.value,
+    ) as ((req: unknown, extra: unknown) => Promise<{ tools: unknown[] }>) | undefined;
+    if (originalListHandler) {
+      inner._requestHandlers.set(
+        ListToolsRequestSchema.shape.method.value,
+        async (req: unknown, extra: unknown) => {
+          const rendered = await originalListHandler(req, extra);
+          return {
+            ...rendered,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            tools: buildFilteredToolsList(rendered.tools as any, toolFilter),
+          };
+        },
+      );
+    }
+  }
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

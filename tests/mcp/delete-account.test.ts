@@ -359,11 +359,14 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     // register-tools-pg.ts monolith into the per-group accounts module.
     const file = path.join(__dirname, "../../mcp-server/tools/accounts.ts");
     const src = await fs.readFile(file, "utf8");
-    const idx = src.indexOf('"delete_account"');
+    // FINLYNQ-263: delete_account was folded into `manage_accounts{op:"delete"}`;
+    // the destructive commit lives in the reusable `deleteAccountHandler`
+    // (withConfirmation) built between the delete-op comment and the set_mode op.
+    const idx = src.indexOf("const deleteAccountHandler = withConfirmation");
     expect(idx).toBeGreaterThan(0);
-    // Slice from the tool definition to the next tool boundary; assert
-    // the cache-invalidation call is in there.
-    const sliceEnd = src.indexOf("// ── set_account_mode", idx);
+    // Slice from the handler build to the next op boundary; assert the
+    // cache-invalidation call is in there.
+    const sliceEnd = src.indexOf("// ── op: set_mode", idx);
     expect(sliceEnd).toBeGreaterThan(idx);
     const handler = src.slice(idx, sliceEnd);
     expect(handler).toMatch(/invalidateUserTxCache\(userId\)/);

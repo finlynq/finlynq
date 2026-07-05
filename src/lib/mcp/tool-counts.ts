@@ -1,6 +1,10 @@
 // Single source of truth for advertised MCP tool counts + server version.
 // Update here when tools are added; referenced by marketing/docs copy.
-export const MCP_TOOL_COUNTS = { http: 117, stdio: 93 } as const;
+// NOTE (FINLYNQ-263): `http` counts the ADVERTISED surface only — the v4.0
+// consolidation registers hidden back-compat aliases (callable, but excluded
+// from tools/list), which do NOT count here. Phase 1 folded 6 CRUD families
+// (goals/accounts/budgets/fx-overrides/categories/holdings): 117 → 104.
+export const MCP_TOOL_COUNTS = { http: 104, stdio: 93 } as const;
 // 3.4.0 (FINLYNQ-264): destructive-tool safety pass — tier-1 deletes
 // (delete_transfer / delete_account / delete_portfolio_holding) now require a
 // preview→confirmation-token two-step, tier-2 single-row deletes accept an

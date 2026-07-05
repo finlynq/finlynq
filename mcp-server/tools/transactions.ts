@@ -97,13 +97,86 @@ import {
 import {
   type TxRowForLots,
 } from "../../src/lib/portfolio/lots/types";
+import { registerManageTool, registerAlias } from "./_consolidate";
 
 export function registerTransactionsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
 
+  type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
-  // ── set_budget ─────────────────────────────────────────────────────────────
-  server.tool(
+  // ── manage_budgets op handlers (lifted VERBATIM) ───────────────────────────
+  async function opBudgetSet(args: { category: string; month: string; amount: number }): Promise<ToolResult> {
+    const { category, month, amount } = args;
+    // Stream D Phase 4 — match by name_lookup HMAC.
+    if (!dek) return err("Cannot resolve category name without an unlocked DEK (Stream D Phase 4).");
+    const catLookup = nameLookup(dek, category);
+    const catRows = await q(db, sql`SELECT id FROM categories WHERE user_id = ${userId} AND name_lookup = ${catLookup}`);
+    if (!catRows.length) return err(`Category "${category}" not found`);
+    const cat = catRows[0] as { id: number };
+
+    const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
+    if (existing.length) {
+      await db.execute(sql`UPDATE budgets SET amount = ${amount} WHERE id = ${existing[0].id}`);
+    } else {
+      await db.execute(sql`INSERT INTO budgets (user_id, category_id, month, amount) VALUES (${userId}, ${cat.id}, ${month}, ${amount})`);
+    }
+    return text({ success: true, data: { message: `Budget set: ${category} = $${amount} for ${month}` } });
+  }
+
+  async function opBudgetDelete(args: { category: string; month: string }): Promise<ToolResult> {
+    const { category, month } = args;
+    // Issue #211 (Bug a): the SELECT only returns `name_ct` (encrypted)
+    // after Stream D Phase 4. Without `decryptNameish`, `fuzzyFind` runs
+    // against ciphertext and never matches — so `cat` was always null
+    // and `delete_budget` was a tool outage for every caller.
+    if (!dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4).");
+    const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+    const allCats = decryptNameish(rawCats, dek);
+    const cat = fuzzyFind(category, allCats);
+    if (!cat) {
+      return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
+    }
+
+    const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
+    if (!existing.length) return err(`No budget found for "${cat.name}" in ${month}`);
+
+    await db.execute(sql`DELETE FROM budgets WHERE id = ${existing[0].id} AND user_id = ${userId}`);
+    // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
+    // any future budget-aware tx surface.
+    invalidateUserTxCache(userId);
+    return text({ success: true, data: { message: `Budget deleted: ${cat.name} for ${month}` } });
+  }
+
+  registerManageTool(
+    server,
+    "manage_budgets",
+    "Manage per-category monthly budgets: `op` selects set / delete. set: create or update a budget (`category`, `month` YYYY-MM, `amount` > 0). delete: remove a budget for a category/month. Use get_budget_summary to READ budget vs actuals.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("set"),
+        category: z.string().describe("Category name"),
+        month: ymPeriod.describe("Month (YYYY-MM)"),
+        amount: z.number().positive().describe("Budget amount (must be > 0)"),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        category: z.string().describe("Category name"),
+        month: ymPeriod.describe("Month (YYYY-MM)"),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "set":
+          return opBudgetSet(input);
+        case "delete":
+          return opBudgetDelete(input);
+      }
+    },
+  );
+
+  // ── hidden back-compat aliases (removed in v4.1) ─────────────────────────────
+  registerAlias(
+    server,
     "set_budget",
     "Set or update a budget for a category in a specific month",
     {
@@ -111,22 +184,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       month: ymPeriod.describe("Month (YYYY-MM)"),
       amount: z.number().positive().describe("Budget amount (must be > 0)"),
     },
-    async ({ category, month, amount }) => {
-      // Stream D Phase 4 — match by name_lookup HMAC.
-      if (!dek) return err("Cannot resolve category name without an unlocked DEK (Stream D Phase 4).");
-      const catLookup = nameLookup(dek, category);
-      const catRows = await q(db, sql`SELECT id FROM categories WHERE user_id = ${userId} AND name_lookup = ${catLookup}`);
-      if (!catRows.length) return err(`Category "${category}" not found`);
-      const cat = catRows[0] as { id: number };
-
-      const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
-      if (existing.length) {
-        await db.execute(sql`UPDATE budgets SET amount = ${amount} WHERE id = ${existing[0].id}`);
-      } else {
-        await db.execute(sql`INSERT INTO budgets (user_id, category_id, month, amount) VALUES (${userId}, ${cat.id}, ${month}, ${amount})`);
-      }
-      return text({ success: true, data: { message: `Budget set: ${category} = $${amount} for ${month}` } });
-    }
+    async (args) => opBudgetSet(args),
   );
 
 
@@ -1696,36 +1754,16 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
   );
 
 
-  // ── delete_budget ──────────────────────────────────────────────────────────
-  server.tool(
+  // ── delete_budget (hidden alias → manage_budgets op=delete) ────────────────
+  registerAlias(
+    server,
     "delete_budget",
     "Delete a budget entry for a category/month",
     {
       category: z.string().describe("Category name"),
       month: ymPeriod.describe("Month (YYYY-MM)"),
     },
-    async ({ category, month }) => {
-      // Issue #211 (Bug a): the SELECT only returns `name_ct` (encrypted)
-      // after Stream D Phase 4. Without `decryptNameish`, `fuzzyFind` runs
-      // against ciphertext and never matches — so `cat` was always null
-      // and `delete_budget` was a tool outage for every caller.
-      if (!dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4).");
-      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
-      const allCats = decryptNameish(rawCats, dek);
-      const cat = fuzzyFind(category, allCats);
-      if (!cat) {
-        return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
-      }
-
-      const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
-      if (!existing.length) return err(`No budget found for "${cat.name}" in ${month}`);
-
-      await db.execute(sql`DELETE FROM budgets WHERE id = ${existing[0].id} AND user_id = ${userId}`);
-      // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
-      // any future budget-aware tx surface.
-      invalidateUserTxCache(userId);
-      return text({ success: true, data: { message: `Budget deleted: ${cat.name} for ${month}` } });
-    }
+    async (args) => opBudgetDelete(args),
   );
 
 
