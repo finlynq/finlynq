@@ -45,10 +45,14 @@ const DB_URL = process.env.DATABASE_URL || process.env.PF_DATABASE_URL || "";
 const HAS_TEST_DB = /\/[^/]*_test([?#]|$)/.test(DB_URL);
 
 // ─── Read-only surface (single source of truth) ──────────────────────────────
-// Empirically 50 on `dev` HEAD (2026-07-03) — 117 total tools, 50 read-only per
-// `inferAnnotations(name).readOnlyHint`. Bump this when a read tool is added
-// AND add its contract-table entry below; the count assert is the tripwire.
-const EXPECTED_READONLY_COUNT = 50;
+// Empirically 51 on `dev` HEAD — read-only per `inferAnnotations(name).readOnlyHint`.
+// FINLYNQ-265 renamed get_portfolio_performance_v2 → get_portfolio_returns and
+// kept the old name a HIDDEN alias; both stay REGISTERED (this enumerates the
+// registered surface, not the advertised tools/list), so the read-only registered
+// count went 50 → 51. get_loans is likewise a registered-but-hidden alias (still
+// counted here). Bump this when a read tool is added AND add its contract-table
+// entry below; the count assert is the tripwire.
+const EXPECTED_READONLY_COUNT = 51;
 
 /**
  * A single MCP `content` response. Every handler returns `{ content: [{ type,
@@ -136,6 +140,8 @@ const CONTRACT: Record<string, Entry> = {
   // ── Portfolio ──
   get_portfolio_analysis: { assert: (d) => expect(isObj(d)).toBe(true) },
   get_portfolio_performance: { assert: (d) => expect(isObj(d)).toBe(true) },
+  // FINLYNQ-265: renamed from get_portfolio_performance_v2 (which stays a hidden alias).
+  get_portfolio_returns: { assert: (d) => expect(isObj(d)).toBe(true) },
   get_portfolio_performance_v2: { assert: (d) => expect(isObj(d)).toBe(true) },
   get_investment_insights: { assert: (d) => expect(isObj(d)).toBe(true) },
   get_dividend_income: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },

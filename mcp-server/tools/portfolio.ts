@@ -1206,19 +1206,19 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   );
 
 
-  // ── get_portfolio_performance_v2 ───────────────────────────────────────────
-  // Phase 3 of plan/portfolio-lots-and-performance.md — TWRR + MWRR + daily
-  // value series from portfolio_snapshots. Distinct from get_portfolio_performance
-  // (which is the avg-cost legacy aggregate); v2 reads pre-built snapshots
-  // populated by the nightly cron + backfill script.
-  server.tool(
-    "get_portfolio_performance_v2",
-    "Compute a portfolio time-series return series. Returns daily market_value + cost_basis, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Distinct capability from get_portfolio_performance (which is per-holding average-cost realized P&L), NOT a newer version of it. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
-    {
-      period: z.enum(["1m", "3m", "6m", "ytd", "1y", "all"]).optional().describe("Lookback period; defaults to '1y'"),
-      accountId: z.number().int().optional().describe("Scope to one accounts.id; omit for whole-portfolio aggregate"),
-    },
-    async ({ period, accountId }) => {
+  // ── get_portfolio_returns (was get_portfolio_performance_v2) ────────────────
+  // FINLYNQ-265: renamed get_portfolio_performance_v2 → get_portfolio_returns
+  // (the tool computes TWRR/MWRR returns; the "_v2" suffix implied a newer
+  // version of get_portfolio_performance, which is a DISTINCT avg-cost tool).
+  // The old name stays a hidden back-compat alias (registered below) for one
+  // minor version. Phase 3 of plan/portfolio-lots-and-performance.md — TWRR +
+  // MWRR + daily value series from portfolio_snapshots populated by the nightly
+  // cron + backfill script.
+  const portfolioReturnsSchema = {
+    period: z.enum(["1m", "3m", "6m", "ytd", "1y", "all"]).optional().describe("Lookback period; defaults to '1y'"),
+    accountId: z.number().int().optional().describe("Scope to one accounts.id; omit for whole-portfolio aggregate"),
+  };
+  const portfolioReturnsHandler = async ({ period, accountId }: { period?: "1m" | "3m" | "6m" | "ytd" | "1y" | "all"; accountId?: number }) => {
       const PERIOD_DAYS: Record<string, number | null> = {
         "1m": 30, "3m": 90, "6m": 180, ytd: -1, "1y": 365, all: null,
       };
@@ -1341,7 +1341,22 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
             : null,
         },
       });
-    },
+  };
+  server.tool(
+    "get_portfolio_returns",
+    "Compute a portfolio time-series return series. Returns daily market_value + cost_basis, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Distinct capability from get_portfolio_performance (which is per-holding average-cost realized P&L), NOT a newer version of it. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
+    portfolioReturnsSchema,
+    portfolioReturnsHandler,
+  );
+  // FINLYNQ-265: hidden back-compat alias for the pre-rename name. Callable but
+  // excluded from tools/list (via ALIAS_NAMES); forwards to the same handler +
+  // byte-identical response. Removed in a future minor version.
+  registerAlias(
+    server,
+    "get_portfolio_performance_v2",
+    "Deprecated alias of get_portfolio_returns (renamed FINLYNQ-265). Forwards verbatim to that tool's TWRR/MWRR time-series computation; prefer get_portfolio_returns in new calls.",
+    portfolioReturnsSchema,
+    portfolioReturnsHandler,
   );
 
 
@@ -1804,7 +1819,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   // ── get_portfolio_performance ──────────────────────────────────────────────
   server.tool(
     "get_portfolio_performance",
-    "Portfolio performance with avg-cost method: realized P&L, dividends, total return, days held per holding. Returns one row per `holdingId` (two holdings sharing a display name come through as separate rows). Per-row amounts stay in each holding's own (account) currency; the response includes the resolved reportingCurrency for context.",
+    "Per-holding average-cost performance aggregates: realized P&L, dividends, total return, and days held. Returns one row per `holdingId` (two holdings sharing a display name come through as separate rows). For a TWRR/MWRR time-series over a period, use get_portfolio_returns instead. Per-row amounts stay in each holding's own (account) currency; the response includes the resolved reportingCurrency for context.",
     {
       period: z.enum(["1m", "3m", "6m", "1y", "all"]).optional().describe("Lookback period (default: all)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Returned in the response as context for cross-currency holdings."),

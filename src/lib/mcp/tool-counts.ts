@@ -7,7 +7,10 @@
 // folded rules/subscriptions/loans: 104 → 92. Phase 3 folded splits/transactions/
 // transfers: 92 → 83. Phase 4 folded the 8 portfolio_* writers into
 // portfolio_record_entry (entry_type union; add_snapshot stays standalone): 83 → 76.
-export const MCP_TOOL_COUNTS = { http: 76, stdio: 93 } as const;
+// FINLYNQ-265 (child C): get_loans retired from the advertised list (hidden alias
+// of list_loans, still callable): 76 → 75. get_portfolio_performance_v2 → renamed
+// get_portfolio_returns (old name a hidden alias) is net-0 advertised.
+export const MCP_TOOL_COUNTS = { http: 75, stdio: 93 } as const;
 // 4.0.0 (FINLYNQ-263): MCP surface v4 — CRUD consolidation + session-scoped
 // toolsets. The 117 per-verb HTTP tools collapse into discriminated-union
 // `manage_*` tools (op discriminator) + `portfolio_record_entry` (entry_type),

@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   q,
   err,
+  text,
   dataResponse,
   decryptNameish,
   PORTFOLIO_DISCLAIMER,
@@ -66,6 +67,9 @@ import {
 } from "../../src/lib/recurring-detection";
 import {
 } from "../../src/lib/loan-calculator";
+import {
+  registerAlias,
+} from "./_consolidate";
 
 export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
@@ -727,24 +731,37 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   });
 
 
-  // ── get_loans ─────────────────────────────────────────────────────────────
-  // Issue #237 — DEPRECATED in favor of `list_loans`. The two tools return
-  // the same logical resource; `list_loans` has been the canonical surface
-  // since v3 envelope unification. Plan removal in v3.2.0.
-  server.tool("get_loans", "[DEPRECATED — use list_loans] Get all loans with amortization summary. Returned in the unified `{ success: true, data: [...] }` envelope as of v3.1.0.", {}, async () => {
-    const raw = await q(db, sql`
-      SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
-             payment_amount, payment_frequency, extra_payment, residual_value
-      FROM loans
-      WHERE user_id = ${userId}
-    `);
-    const rows = decryptNameish(raw, dek).map((r) => {
-      const { name_ct, ...rest } = r;
-      void name_ct;
-      return rest;
-    });
-    return dataResponse(rows);
-  });
+  // ── get_loans (DEPRECATED — hidden alias of list_loans) ────────────────────
+  // FINLYNQ-265: get_loans is retired in favor of `list_loans` (the two return
+  // the same logical resource). Per the deprecation policy (CONTRIBUTING.md):
+  // HIDDEN from tools/list immediately (registered via registerAlias → excluded
+  // from the advertised surface), still HANDLED for one minor version returning
+  // its result PLUS a `deprecation` warning field, then removed (410) after.
+  // Callers should migrate to `list_loans`.
+  registerAlias(
+    server,
+    "get_loans",
+    "Deprecated — use list_loans. Get all loans with amortization summary in the unified `{ success, data }` envelope. Hidden from tools/list; still handled with a `deprecation` warning for one minor version, then removed.",
+    {},
+    async () => {
+      const raw = await q(db, sql`
+        SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
+               payment_amount, payment_frequency, extra_payment, residual_value
+        FROM loans
+        WHERE user_id = ${userId}
+      `);
+      const rows = decryptNameish(raw, dek).map((r) => {
+        const { name_ct, ...rest } = r;
+        void name_ct;
+        return rest;
+      });
+      return text({
+        success: true,
+        data: rows,
+        deprecation: "get_loans is deprecated; use list_loans. It is hidden from tools/list and will be removed in a future release.",
+      });
+    },
+  );
 
 
   // ── get_recurring_transactions ─────────────────────────────────────────────
