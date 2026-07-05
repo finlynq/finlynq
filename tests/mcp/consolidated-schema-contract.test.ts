@@ -89,6 +89,24 @@ const CASES: Array<{
     missingField: { op: "add", name: "VEQT" }, // missing account
     good: { op: "delete", holding: "VEQT" },
   },
+  {
+    name: "manage_rules",
+    badOp: { op: "apply", id: 1 },
+    missingField: { op: "create", assign_category: "Food" }, // missing match_payee
+    good: { op: "list" },
+  },
+  {
+    name: "manage_subscriptions",
+    badOp: { op: "detect" },
+    missingField: { op: "update" }, // missing id
+    good: { op: "list", include_summary: true },
+  },
+  {
+    name: "manage_loans",
+    badOp: { op: "amortize", id: 1 },
+    missingField: { op: "add", name: "Mortgage" }, // missing type/principal/rate/start_date
+    good: { op: "delete", id: 1 },
+  },
 ];
 
 describe("consolidated manage_* schema contracts (FINLYNQ-263 tc-2)", () => {

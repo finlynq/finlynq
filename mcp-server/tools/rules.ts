@@ -32,12 +32,19 @@ import {
 import {
   invalidateUser as invalidateUserTxCache,
 } from "../../src/lib/mcp/user-tx-cache";
+import { registerManageTool, registerAlias } from "./_consolidate";
+
+type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
 export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
 
+  // FINLYNQ-263 phase 2 — create/update/delete/list/reorder_rule folded into
+  // manage_rules (op discriminator). Bodies lifted VERBATIM; old names stay
+  // hidden aliases. test_rule / apply_rules_to_uncategorized /
+  // suggest_transaction_details stay 1:1.
 
-  // ── create_rule ────────────────────────────────────────────────────────────
+  // ── op: create — lifted VERBATIM from create_rule ──────────────────────────
   //
   // FINLYNQ-84: rules are JSONB conditions+actions. The legacy MCP shorthand
   // (match_payee + assign_category + rename_to? + assign_tags? + priority?)
@@ -48,17 +55,14 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
   // the categories lookup — without it every row's name is undefined and
   // fuzzyFind's last reverse-includes step collapses to lo.includes("")
   // returning the first row.
-  server.tool(
-    "create_rule",
-    "Create an auto-categorization rule for future imports. Legacy shorthand (match_payee + assign_category) is synthesized into a v2 rule (FINLYNQ-84).",
-    {
-      match_payee: z.string().describe("Payee pattern to match (substring, case-insensitive; legacy `%` wildcards are stripped)"),
-      assign_category: z.string().describe("Category name to assign (fuzzy matched)"),
-      rename_to: z.string().optional().describe("Optionally rename matched payee to this"),
-      assign_tags: z.string().optional().describe("Tags to assign (comma-separated)"),
-      priority: z.number().optional().describe("Rule priority (higher = checked first, default 0)"),
-    },
-    async ({ match_payee, assign_category, rename_to, assign_tags, priority }) => {
+  async function opCreate(args: {
+    match_payee: string;
+    assign_category: string;
+    rename_to?: string;
+    assign_tags?: string;
+    priority?: number;
+  }): Promise<ToolResult> {
+      const { match_payee, assign_category, rename_to, assign_tags, priority } = args;
       const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
       const allCats = decryptNameish(rawCats, dek);
       const cat = fuzzyFind(assign_category, allCats);
@@ -102,8 +106,7 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
           message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}`,
         },
       });
-    }
-  );
+  }
 
 
   // ── apply_rules_to_uncategorized ───────────────────────────────────────────
@@ -292,15 +295,11 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
   );
 
 
-  // ── list_rules ────────────────────────────────────────────────────────────
+  // ── op: list — lifted VERBATIM from list_rules ─────────────────────────────
   // FINLYNQ-84: returns JSONB conditions + actions. Category/account/holding
   // names referenced inside actions are decrypted in a single batch + attached
   // as actionFKNames map for human-readable rendering.
-  server.tool(
-    "list_rules",
-    "List all auto-categorization rules. Returns JSONB conditions + actions (FINLYNQ-84 v2 shape) plus decrypted FK names for human-readable rendering.",
-    {},
-    async () => {
+  async function opList(): Promise<ToolResult> {
       const rawRows = await q(db, sql`
         SELECT id, name, conditions, actions, is_active, priority, created_at, updated_at
         FROM transaction_rules
@@ -372,8 +371,7 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
         };
       });
       return text({ success: true, data: rows });
-    }
-  );
+  }
 
 
   // ── update_rule ───────────────────────────────────────────────────────────
@@ -385,22 +383,20 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
   // always optional updates. The legacy fields (match_field/match_type/
   // match_value/assign_category) are now ignored on the SQL side — they
   // only feed the legacy-synthesis path.
-  server.tool(
-    "update_rule",
-    "Update an existing transaction rule. Accepts legacy shorthand (match_payee + assign_category) OR the v2 shape (conditions + actions, FINLYNQ-84).",
-    {
-      id: z.number().describe("Rule id"),
-      name: z.string().optional(),
-      match_payee: z.string().optional().describe("Legacy alias: sets a single payee/contains condition + set_category action"),
-      assign_category: z.string().optional().describe("Legacy: category name (fuzzy matched)"),
-      assign_tags: z.string().optional().describe("Legacy: tags assigned by the rule"),
-      rename_to: z.string().optional().describe("Legacy: payee rename target"),
-      conditions: z.unknown().optional().describe("v2: full ConditionGroup JSON. Replaces conditions entirely."),
-      actions: z.unknown().optional().describe("v2: full Action[] JSON. Replaces actions entirely."),
-      is_active: z.boolean().optional(),
-      priority: z.number().optional(),
-    },
-    async ({ id, name, match_payee, assign_category, assign_tags, rename_to, conditions, actions, is_active, priority }) => {
+  // ── op: update — lifted VERBATIM from update_rule ──────────────────────────
+  async function opUpdate(args: {
+    id: number;
+    name?: string;
+    match_payee?: string;
+    assign_category?: string;
+    assign_tags?: string;
+    rename_to?: string;
+    conditions?: unknown;
+    actions?: unknown;
+    is_active?: boolean;
+    priority?: number;
+  }): Promise<ToolResult> {
+      const { id, name, match_payee, assign_category, assign_tags, rename_to, conditions, actions, is_active, priority } = args;
       const existing = await q(db, sql`SELECT id FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Rule #${id} not found`);
 
@@ -464,22 +460,17 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
 
       await db.execute(sql`UPDATE transaction_rules SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
       return text({ success: true, data: { id, message: `Rule #${id} updated (${updates.length - 1} field(s))` } });
-    }
-  );
+  }
 
 
-  // ── delete_rule ───────────────────────────────────────────────────────────
-  server.tool(
-    "delete_rule",
-    "Delete a transaction rule by id",
-    { id: z.number().describe("Rule id") },
-    async ({ id }) => {
+  // ── op: delete — lifted VERBATIM from delete_rule ──────────────────────────
+  async function opDelete(args: { id: number }): Promise<ToolResult> {
+      const { id } = args;
       const existing = await q(db, sql`SELECT id, name FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Rule #${id} not found`);
       await db.execute(sql`DELETE FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
       return text({ success: true, data: { id, message: `Rule "${existing[0].name}" deleted` } });
-    }
-  );
+  }
 
 
   // ── test_rule ─────────────────────────────────────────────────────────────
@@ -578,14 +569,9 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
   );
 
 
-  // ── reorder_rules ─────────────────────────────────────────────────────────
-  server.tool(
-    "reorder_rules",
-    "Reorder rules by assigning new priorities. The first id in `ordered_ids` gets the highest priority.",
-    {
-      ordered_ids: z.array(z.number()).min(1).describe("Rule ids in desired execution order (first = highest priority)"),
-    },
-    async ({ ordered_ids }) => {
+  // ── op: reorder — lifted VERBATIM from reorder_rules ───────────────────────
+  async function opReorder(args: { ordered_ids: number[] }): Promise<ToolResult> {
+      const { ordered_ids } = args;
       // Verify ownership of every id before writing anything.
       // Defense-in-depth (low finding, SECURITY_REVIEW 2026-05-06): use a
       // parameterized `ANY(ARRAY[…]::int[])` builder rather than concatenating
@@ -606,7 +592,116 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
         await db.execute(sql`UPDATE transaction_rules SET priority = ${priority} WHERE id = ${ordered_ids[i]} AND user_id = ${userId}`);
       }
       return text({ success: true, data: { reordered: ordered_ids.length, order: ordered_ids } });
-    }
+  }
+
+  // ── consolidated tool: manage_rules + hidden back-compat aliases ───────────
+  registerManageTool(
+    server,
+    "manage_rules",
+    "Manage auto-categorize rules: `op` selects create / update / delete / list / reorder. create: a rule from legacy shorthand (match_payee + assign_category). update: legacy shorthand OR the v2 conditions+actions shape by id. delete: remove a rule by id. list: all rules (v2 JSONB + decrypted FK names). reorder: assign priorities from an ordered id list. To DRY-RUN a pattern use test_rule; to APPLY rules to existing rows use apply_rules_to_uncategorized.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("create"),
+        match_payee: z.string().describe("Payee pattern to match (substring, case-insensitive; legacy `%` wildcards are stripped)"),
+        assign_category: z.string().describe("Category name to assign (fuzzy matched)"),
+        rename_to: z.string().optional().describe("Optionally rename matched payee to this"),
+        assign_tags: z.string().optional().describe("Tags to assign (comma-separated)"),
+        priority: z.number().optional().describe("Rule priority (higher = checked first, default 0)"),
+      }),
+      z.object({
+        op: z.literal("update"),
+        id: z.number().describe("Rule id"),
+        name: z.string().optional(),
+        match_payee: z.string().optional().describe("Legacy alias: sets a single payee/contains condition + set_category action"),
+        assign_category: z.string().optional().describe("Legacy: category name (fuzzy matched)"),
+        assign_tags: z.string().optional().describe("Legacy: tags assigned by the rule"),
+        rename_to: z.string().optional().describe("Legacy: payee rename target"),
+        conditions: z.unknown().optional().describe("v2: full ConditionGroup JSON. Replaces conditions entirely."),
+        actions: z.unknown().optional().describe("v2: full Action[] JSON. Replaces actions entirely."),
+        is_active: z.boolean().optional(),
+        priority: z.number().optional(),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        id: z.number().describe("Rule id"),
+      }),
+      z.object({
+        op: z.literal("list").describe("List all rules."),
+      }),
+      z.object({
+        op: z.literal("reorder"),
+        ordered_ids: z.array(z.number()).min(1).describe("Rule ids in desired execution order (first = highest priority)"),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "create":
+          return opCreate(input);
+        case "update":
+          return opUpdate(input);
+        case "delete":
+          return opDelete(input);
+        case "list":
+          return opList();
+        case "reorder":
+          return opReorder(input);
+      }
+    },
+  );
+
+  registerAlias(
+    server,
+    "create_rule",
+    "Create an auto-categorization rule for future imports. Legacy shorthand (match_payee + assign_category) is synthesized into a v2 rule (FINLYNQ-84).",
+    {
+      match_payee: z.string().describe("Payee pattern to match (substring, case-insensitive; legacy `%` wildcards are stripped)"),
+      assign_category: z.string().describe("Category name to assign (fuzzy matched)"),
+      rename_to: z.string().optional().describe("Optionally rename matched payee to this"),
+      assign_tags: z.string().optional().describe("Tags to assign (comma-separated)"),
+      priority: z.number().optional().describe("Rule priority (higher = checked first, default 0)"),
+    },
+    async (args) => opCreate(args),
+  );
+  registerAlias(
+    server,
+    "list_rules",
+    "List all auto-categorization rules. Returns JSONB conditions + actions (FINLYNQ-84 v2 shape) plus decrypted FK names for human-readable rendering.",
+    {},
+    async () => opList(),
+  );
+  registerAlias(
+    server,
+    "update_rule",
+    "Update an existing transaction rule. Accepts legacy shorthand (match_payee + assign_category) OR the v2 shape (conditions + actions, FINLYNQ-84).",
+    {
+      id: z.number().describe("Rule id"),
+      name: z.string().optional(),
+      match_payee: z.string().optional().describe("Legacy alias: sets a single payee/contains condition + set_category action"),
+      assign_category: z.string().optional().describe("Legacy: category name (fuzzy matched)"),
+      assign_tags: z.string().optional().describe("Legacy: tags assigned by the rule"),
+      rename_to: z.string().optional().describe("Legacy: payee rename target"),
+      conditions: z.unknown().optional().describe("v2: full ConditionGroup JSON. Replaces conditions entirely."),
+      actions: z.unknown().optional().describe("v2: full Action[] JSON. Replaces actions entirely."),
+      is_active: z.boolean().optional(),
+      priority: z.number().optional(),
+    },
+    async (args) => opUpdate(args),
+  );
+  registerAlias(
+    server,
+    "delete_rule",
+    "Delete a transaction rule by id",
+    { id: z.number().describe("Rule id") },
+    async (args) => opDelete(args),
+  );
+  registerAlias(
+    server,
+    "reorder_rules",
+    "Reorder rules by assigning new priorities. The first id in `ordered_ids` gets the highest priority.",
+    {
+      ordered_ids: z.array(z.number()).min(1).describe("Rule ids in desired execution order (first = highest priority)"),
+    },
+    async (args) => opReorder(args),
   );
 
 

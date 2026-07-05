@@ -10,9 +10,11 @@ import {
   q,
   text,
   err,
+  dataResponse,
   fuzzyFind,
   decryptNameish,
   supportedCurrencyEnum,
+  type Row,
   type PgToolContext,
 } from "./_shared";
 import {
@@ -29,8 +31,6 @@ import {
   nameLookup,
 } from "../../src/lib/crypto/encrypted-columns";
 import {
-} from "../../src/lib/fx/supported-currencies";
-import {
   getUserTransactions,
 } from "../../src/lib/mcp/user-tx-cache";
 import {
@@ -40,20 +40,26 @@ import {
 import {
   ymdDate,
 } from "../lib/date-validators";
+import { resolveReportingCurrency } from "../reporting-currency";
+import { getRate } from "../../src/lib/fx-service";
+import { tagAmount } from "../currency-tagging";
+import { registerManageTool, registerAlias } from "./_consolidate";
+
+type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
 export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek, encNote, decNote } = ctx;
 
 
-  // ── list_subscriptions ────────────────────────────────────────────────────
-  // Distinct from get_subscription_summary (which aggregates monthly cost +
-  // upcoming renewals). This returns the raw row set with status + category +
-  // account, for editing flows.
-  server.tool(
-    "list_subscriptions",
-    "List all subscriptions with full detail (status, next billing, category, account, notes). Issue #210 — `amount` is always positive (the storage convention); a subscription is by definition an outflow. Intended split: use this for the raw editable row set; use get_subscription_summary for aggregate monthly/annual cost + upcoming renewals, and get_recurring_transactions for engine-DETECTED recurrences that are not tracked subscriptions.",
-    { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
-    async ({ status }) => {
+  // FINLYNQ-263 phase 2 — list/add/bulk_add/update/delete_subscription folded
+  // into manage_subscriptions (op discriminator; add accepts single or items[];
+  // list accepts include_summary, absorbing get_subscription_summary from
+  // reads.ts). Bodies lifted VERBATIM; old names stay hidden aliases.
+  // detect_subscriptions stays 1:1.
+
+  // ── op: list — lifted VERBATIM from list_subscriptions ─────────────────────
+  async function opList(args: { status?: "active" | "paused" | "cancelled" | "all" }): Promise<ToolResult> {
+      const { status } = args;
       // Stream D Phase 4: s.name + c.name + a.name dropped — read *_ct only.
       const raw = await q(db, sql`
         SELECT s.id, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
@@ -87,25 +93,20 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : null,
       }));
       return text({ success: true, data: rows });
-    }
-  );
+  }
 
-
-  // ── add_subscription ──────────────────────────────────────────────────────
-  server.tool(
-    "add_subscription",
-    "Create a new subscription. Issue #210 — `amount` MUST be positive (the storage convention). A subscription is by definition an outflow; the sign is implicit, not in the value.",
-    {
-      name: z.string().describe("Subscription name (unique per user)"),
-      amount: z.number().positive().describe("Amount per billing cycle (must be > 0)"),
-      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
-      next_billing_date: ymdDate.describe("Next billing date (YYYY-MM-DD)"),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
-      category: z.string().optional().describe("Category name (fuzzy matched)"),
-      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
-      notes: z.string().optional(),
-    },
-    async ({ name, amount, cadence, next_billing_date, currency, category, account, notes }) => {
+  // ── op: add (single) — lifted VERBATIM from add_subscription ───────────────
+  async function opAddSingle(args: {
+    name: string;
+    amount: number;
+    cadence: "weekly" | "monthly" | "quarterly" | "annual" | "yearly";
+    next_billing_date: string;
+    currency?: string;
+    category?: string;
+    account?: string;
+    notes?: string;
+  }): Promise<ToolResult> {
+      const { name, amount, cadence, next_billing_date, currency, category, account, notes } = args;
       // Stream D Phase 4: subscriptions.name plaintext column dropped — uniqueness
       // gate now relies on name_lookup HMAC. No DEK ⇒ no lookup ⇒ refuse cleanly.
       if (!dek) return err("Cannot create subscription without an unlocked DEK (Stream D Phase 4).");
@@ -142,28 +143,23 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         RETURNING id
       `);
       return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${currency ?? "CAD"} ${amount} ${cadence}, next ${next_billing_date}` } });
-    }
-  );
+  }
 
-
-  // ── update_subscription ───────────────────────────────────────────────────
-  server.tool(
-    "update_subscription",
-    "Update any field of an existing subscription",
-    {
-      id: z.number().describe("Subscription id"),
-      name: z.string().optional(),
-      amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0)"),
-      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
-      next_billing_date: ymdDate.optional().describe("YYYY-MM-DD"),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
-      category: z.string().optional().describe("Category name (fuzzy). Empty string clears."),
-      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
-      status: z.enum(["active", "paused", "cancelled"]).optional(),
-      cancel_reminder_date: ymdDate.optional().describe("YYYY-MM-DD"),
-      notes: z.string().optional(),
-    },
-    async ({ id, name, amount, cadence, next_billing_date, currency, category, account, status, cancel_reminder_date, notes }) => {
+  // ── op: update — lifted VERBATIM from update_subscription ──────────────────
+  async function opUpdate(args: {
+    id: number;
+    name?: string;
+    amount?: number;
+    cadence?: "weekly" | "monthly" | "quarterly" | "annual" | "yearly";
+    next_billing_date?: string;
+    currency?: string;
+    category?: string;
+    account?: string;
+    status?: "active" | "paused" | "cancelled";
+    cancel_reminder_date?: string;
+    notes?: string;
+  }): Promise<ToolResult> {
+      const { id, name, amount, cadence, next_billing_date, currency, category, account, status, cancel_reminder_date, notes } = args;
       const existing = await q(db, sql`SELECT id FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Subscription #${id} not found`);
 
@@ -212,25 +208,115 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
 
       await db.execute(sql`UPDATE subscriptions SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
       return text({ success: true, data: { id, message: `Subscription #${id} updated (${updates.length} field(s))` } });
-    }
-  );
+  }
 
-
-  // ── delete_subscription ───────────────────────────────────────────────────
-  server.tool(
-    "delete_subscription",
-    "Permanently delete a subscription by id",
-    { id: z.number().describe("Subscription id") },
-    async ({ id }) => {
+  // ── op: delete — lifted VERBATIM from delete_subscription ──────────────────
+  async function opDelete(args: { id: number }): Promise<ToolResult> {
+      const { id } = args;
       const existing = await q(db, sql`SELECT id, name_ct FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Subscription #${id} not found`);
       // Stream D Phase 4: name plaintext dropped — decrypt name_ct via DEK.
       const decryptedName = existing[0].name_ct && dek ? decryptField(dek, String(existing[0].name_ct)) : null;
       await db.execute(sql`DELETE FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
       return text({ success: true, data: { id, message: `Subscription "${decryptedName ?? `#${id}`}" deleted` } });
-    }
-  );
+  }
 
+  // ── opSummary — lifted VERBATIM from get_subscription_summary (was reads.ts) ─
+  async function opSummary(args: { reportingCurrency?: string }): Promise<ToolResult> {
+      const { reportingCurrency } = args;
+      const rawSubs = await q(db, sql`
+        SELECT s.id, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
+               c.name_ct AS category_name_ct
+        FROM subscriptions s
+        LEFT JOIN categories c ON s.category_id = c.id
+        WHERE s.user_id = ${userId}
+        ORDER BY s.status
+      `);
+      // Issue #207 — explicit whitelist so *_ct ciphertexts never escape via
+      // the downstream `taggedSubs` spread. Building a clean shape here means
+      // `taggedSubs.map(s => ({ ...s, ... }))` below carries no ciphertext.
+      const subs: Row[] = rawSubs.map((r) => ({
+        id: r.id,
+        amount: r.amount,
+        currency: r.currency,
+        frequency: r.frequency,
+        next_date: r.next_date,
+        status: r.status,
+        category_id: r.category_id,
+        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
+        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
+      }));
+
+      const active = subs.filter(s => s.status === "active");
+      const freqMult: Record<string, number> = { weekly: 4.33, monthly: 1, quarterly: 1/3, annual: 1/12, yearly: 1/12 };
+
+      const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
+      const today = new Date().toISOString().split("T")[0];
+      const fxByCcy = new Map<string, number>();
+      for (const ccy of new Set(active.map(s => String(s.currency ?? reporting)))) {
+        fxByCcy.set(ccy, await getRate(ccy, reporting, today, userId));
+      }
+
+      let totalMonthlyCostReporting = 0;
+      const taggedSubs = subs.map(s => {
+        const ccy = String(s.currency ?? reporting);
+        const fx = fxByCcy.get(ccy) ?? 1;
+        return {
+          ...s,
+          amountTagged: tagAmount(Number(s.amount), ccy, "account"),
+          amountReporting: tagAmount(Number(s.amount) * fx, reporting, "reporting"),
+        };
+      });
+      for (const s of active) {
+        const ccy = String(s.currency ?? reporting);
+        const fx = fxByCcy.get(ccy) ?? 1;
+        totalMonthlyCostReporting += Number(s.amount) * fx * (freqMult[s.frequency] ?? 1);
+      }
+
+      const thirtyDays = new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0];
+      const upcoming = active
+        .filter(s => s.next_date && s.next_date >= today && s.next_date <= thirtyDays)
+        .map(s => {
+          const ccy = String(s.currency ?? reporting);
+          const fx = fxByCcy.get(ccy) ?? 1;
+          return {
+            name: s.name,
+            amount: s.amount,
+            date: s.next_date,
+            currency: s.currency,
+            amountTagged: tagAmount(Number(s.amount), ccy, "account"),
+            amountReporting: tagAmount(Number(s.amount) * fx, reporting, "reporting"),
+          };
+        })
+        .sort((a, b) => String(a.date ?? "").localeCompare(String(b.date ?? "")));
+
+      return dataResponse({
+        reportingCurrency: reporting,
+        totalMonthlyCost: tagAmount(totalMonthlyCostReporting, reporting, "reporting"),
+        totalAnnualCost: tagAmount(totalMonthlyCostReporting * 12, reporting, "reporting"),
+        activeCount: active.length,
+        totalCount: subs.length,
+        upcomingRenewals: upcoming,
+        subscriptions: taggedSubs,
+      });
+  }
+
+  // ── op: list with optional summary ─────────────────────────────────────────
+  // list_subscriptions alias → opList (byte-identical). manage_subscriptions
+  // op:list with include_summary:true also runs opSummary and merges it under a
+  // `summary` key; without it, returns the plain list unchanged.
+  async function opListWithOptionalSummary(args: {
+    status?: "active" | "paused" | "cancelled" | "all";
+    include_summary?: boolean;
+    reportingCurrency?: string;
+  }): Promise<ToolResult> {
+    const listRes = await opList({ status: args.status });
+    if (args.include_summary !== true) return listRes;
+    const summaryRes = await opSummary({ reportingCurrency: args.reportingCurrency });
+    const listPayload = JSON.parse(listRes.content[0].text);
+    const summaryPayload = JSON.parse(summaryRes.content[0].text);
+    return text({ ...listPayload, summary: summaryPayload.data });
+  }
 
   // ─── Part 2 tail — detect_subscriptions + bulk_add_subscriptions ───────────
 
@@ -356,21 +442,18 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
   );
 
 
-  // ── bulk_add_subscriptions ─────────────────────────────────────────────────
-  server.tool(
-    "bulk_add_subscriptions",
-    "Commit a set of detected subscriptions. Pass the candidates returned by detect_subscriptions (payee + amount + cadence), plus the confirmationToken.",
-    {
-      candidates: z.array(z.object({
-        payee: z.string(),
-        amount: z.number(),
-        cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
-        next_billing_date: ymdDate.optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
-        category_id: z.number().optional(),
-      })).min(1),
-      confirmation_token: z.string(),
-    },
-    async ({ candidates, confirmation_token }) => {
+  // ── op: add (bulk) — lifted VERBATIM from bulk_add_subscriptions ───────────
+  async function opBulkAdd(args: {
+    candidates: Array<{
+      payee: string;
+      amount: number;
+      cadence: "weekly" | "monthly" | "quarterly" | "annual";
+      next_billing_date?: string;
+      category_id?: number;
+    }>;
+    confirmation_token: string;
+  }): Promise<ToolResult> {
+      const { candidates, confirmation_token } = args;
       // The token is signed over {payee, amount, cadence} only — additional
       // fields (next_billing_date, category_id) don't change the approval.
       const approvable = candidates.map((c) => ({
@@ -411,6 +494,158 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         created++;
       }
       return text({ success: true, data: { created, skipped, message: `Created ${created} subscription(s); skipped ${skipped.length} existing` } });
-    }
+  }
+
+  // ── consolidated tool: manage_subscriptions + hidden back-compat aliases ────
+  registerManageTool(
+    server,
+    "manage_subscriptions",
+    "Manage subscriptions: `op` selects add / update / delete / list. add: one (name/amount/cadence/next_billing_date) or many (pass `items[]` + the `confirmation_token` from detect_subscriptions). update: change any field by id. delete: remove by id. list: raw editable rows (filter by `status`); `include_summary:true` also adds cost/renewal totals under a `summary` key.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("add"),
+        // Single-add fields (used when `items` is omitted):
+        name: z.string().optional().describe("Subscription name (unique per user). For a single add."),
+        amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0). For a single add."),
+        cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional().describe("Billing frequency. For a single add."),
+        next_billing_date: ymdDate.optional().describe("Next billing date (YYYY-MM-DD). For a single add."),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
+        category: z.string().optional().describe("Category name (fuzzy matched). Single add."),
+        account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Single add."),
+        notes: z.string().optional(),
+        // Bulk-add fields (used when `items` is present):
+        items: z.array(z.object({
+          payee: z.string(),
+          amount: z.number(),
+          cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
+          next_billing_date: ymdDate.optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
+          category_id: z.number().optional(),
+        })).min(1).optional().describe("Bulk add — the candidates returned by detect_subscriptions. Requires `confirmation_token`."),
+        confirmation_token: z.string().optional().describe("Token from detect_subscriptions — required when `items` is passed."),
+      }),
+      z.object({
+        op: z.literal("update"),
+        id: z.number().describe("Subscription id"),
+        name: z.string().optional(),
+        amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0)"),
+        cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
+        next_billing_date: ymdDate.optional().describe("YYYY-MM-DD"),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
+        category: z.string().optional().describe("Category name (fuzzy). Empty string clears."),
+        account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
+        status: z.enum(["active", "paused", "cancelled"]).optional(),
+        cancel_reminder_date: ymdDate.optional().describe("YYYY-MM-DD"),
+        notes: z.string().optional(),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        id: z.number().describe("Subscription id"),
+      }),
+      z.object({
+        op: z.literal("list"),
+        status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)"),
+        include_summary: z.boolean().optional().describe("When true, ALSO return aggregate monthly/annual cost + upcoming renewals under a `summary` key."),
+        reportingCurrency: z.string().optional().describe("ISO code for the summary totals; defaults to user's display currency. Only used with include_summary."),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "add":
+          if (input.items !== undefined) {
+            return opBulkAdd({ candidates: input.items, confirmation_token: input.confirmation_token ?? "" });
+          }
+          return opAddSingle({
+            name: input.name ?? "",
+            amount: input.amount ?? 0,
+            cadence: input.cadence ?? "monthly",
+            next_billing_date: input.next_billing_date ?? new Date().toISOString().split("T")[0],
+            currency: input.currency,
+            category: input.category,
+            account: input.account,
+            notes: input.notes,
+          });
+        case "update":
+          return opUpdate(input);
+        case "delete":
+          return opDelete(input);
+        case "list":
+          return opListWithOptionalSummary(input);
+      }
+    },
+  );
+
+  registerAlias(
+    server,
+    "list_subscriptions",
+    "List all subscriptions with full detail (status, next billing, category, account, notes). Issue #210 — `amount` is always positive (the storage convention); a subscription is by definition an outflow. Intended split: use this for the raw editable row set; use get_subscription_summary for aggregate monthly/annual cost + upcoming renewals, and get_recurring_transactions for engine-DETECTED recurrences that are not tracked subscriptions.",
+    { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
+    async (args) => opList(args),
+  );
+  registerAlias(
+    server,
+    "add_subscription",
+    "Create a new subscription. Issue #210 — `amount` MUST be positive (the storage convention). A subscription is by definition an outflow; the sign is implicit, not in the value.",
+    {
+      name: z.string().describe("Subscription name (unique per user)"),
+      amount: z.number().positive().describe("Amount per billing cycle (must be > 0)"),
+      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
+      next_billing_date: ymdDate.describe("Next billing date (YYYY-MM-DD)"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
+      category: z.string().optional().describe("Category name (fuzzy matched)"),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias)"),
+      notes: z.string().optional(),
+    },
+    async (args) => opAddSingle(args),
+  );
+  registerAlias(
+    server,
+    "bulk_add_subscriptions",
+    "Commit a set of detected subscriptions. Pass the candidates returned by detect_subscriptions (payee + amount + cadence), plus the confirmationToken.",
+    {
+      candidates: z.array(z.object({
+        payee: z.string(),
+        amount: z.number(),
+        cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
+        next_billing_date: ymdDate.optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
+        category_id: z.number().optional(),
+      })).min(1),
+      confirmation_token: z.string(),
+    },
+    async (args) => opBulkAdd(args),
+  );
+  registerAlias(
+    server,
+    "update_subscription",
+    "Update any field of an existing subscription",
+    {
+      id: z.number().describe("Subscription id"),
+      name: z.string().optional(),
+      amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0)"),
+      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
+      next_billing_date: ymdDate.optional().describe("YYYY-MM-DD"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
+      category: z.string().optional().describe("Category name (fuzzy). Empty string clears."),
+      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears."),
+      status: z.enum(["active", "paused", "cancelled"]).optional(),
+      cancel_reminder_date: ymdDate.optional().describe("YYYY-MM-DD"),
+      notes: z.string().optional(),
+    },
+    async (args) => opUpdate(args),
+  );
+  registerAlias(
+    server,
+    "delete_subscription",
+    "Permanently delete a subscription by id",
+    { id: z.number().describe("Subscription id") },
+    async (args) => opDelete(args),
+  );
+  registerAlias(
+    server,
+    "get_subscription_summary",
+    "Get all tracked subscriptions with total monthly cost and upcoming renewals. Each subscription's amount is in its own currency; totals are converted to reportingCurrency (defaults to user's display currency). Intended split: use this for AGGREGATE cost + upcoming-renewal roll-ups; use list_subscriptions for the raw editable row set, and get_recurring_transactions for transactions the engine DETECTED as recurring (not user-tracked subscriptions).",
+    {
+      reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Used for the unified total monthly/annual cost."),
+    },
+    async (args) => opSummary(args),
   );
 }
