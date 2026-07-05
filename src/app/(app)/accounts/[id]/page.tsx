@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { mutate as globalMutate } from "swr";
 import Link from "next/link";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { formatCurrency, formatDate } from "@/lib/currency";
+import { formatCurrency } from "@/lib/currency";
 import {
   ArrowLeft,
   Wallet,
@@ -47,18 +48,7 @@ import {
   type DialogCategory,
   type DialogHolding,
 } from "@/components/transactions/transaction-dialog";
-
-type Transaction = {
-  id: number;
-  date: string;
-  accountName: string;
-  categoryName: string;
-  categoryType: string;
-  currency: string;
-  amount: number;
-  payee: string;
-  note: string;
-};
+import { TransactionsWorkspace } from "../../transactions/_components/transactions-workspace";
 
 type Account = {
   id: number;
@@ -114,7 +104,9 @@ export default function AccountDetailPage() {
   const router = useRouter();
   const [account, setAccount] = useState<Account | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [txns, setTxns] = useState<Transaction[]>([]);
+  // Transaction COUNT for the stat card. The list itself is rendered by the
+  // embedded <TransactionsWorkspace> below (its own SWR fetch); this page only
+  // needs the total for the header tile.
   const [total, setTotal] = useState(0);
   const [balance, setBalance] = useState<number | null>(null);
   const [cashFlowBasis, setCashFlowBasis] = useState<number | null>(null);
@@ -253,8 +245,9 @@ export default function AccountDetailPage() {
     await refreshSleeves();
   }
 
-  // Re-fetch the computed balance + recent transactions (the opening balance
-  // feeds both). Mirrors the initial load effect.
+  // Re-fetch the computed balance + transaction count (the opening balance
+  // feeds both). Mirrors the initial load effect. Passed as the workspace's
+  // `onDataChange` so the header tiles stay in sync after a bulk/inline edit.
   function refreshBalanceAndTxns() {
     fetch("/api/dashboard")
       .then((r) => r.json())
@@ -265,12 +258,9 @@ export default function AccountDetailPage() {
         setHoldingsValue(b?.holdingsValue ?? null);
       })
       .catch(() => {});
-    fetch(`/api/transactions?accountId=${id}&limit=200`)
+    fetch(`/api/transactions?accountId=${id}&limit=1`)
       .then((r) => r.json())
-      .then((d) => {
-        setTxns(d.data);
-        setTotal(d.total);
-      })
+      .then((d) => setTotal(d.total))
       .catch(() => {});
   }
 
@@ -333,12 +323,9 @@ export default function AccountDetailPage() {
         setHoldingsValue(acctBalance?.holdingsValue ?? null);
       });
 
-    fetch(`/api/transactions?accountId=${id}&limit=200`)
+    fetch(`/api/transactions?accountId=${id}&limit=1`)
       .then((r) => r.json())
-      .then((d) => {
-        setTxns(d.data);
-        setTotal(d.total);
-      });
+      .then((d) => setTotal(d.total));
   }, [id]);
 
   // Deep-link preservation (FINLYNQ-227): `/accounts/[id]#reconciliation-mode`
@@ -527,38 +514,20 @@ export default function AccountDetailPage() {
           reachable via the Edit button (or the #reconciliation-mode /
           #import-prefs deep-links, which open the dialog to the right tab). */}
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Recent Transactions</CardTitle>
-          <p className="text-xs text-muted-foreground">Last {txns.length} transactions</p>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="text-xs">Date</TableHead>
-                <TableHead className="text-xs">Category</TableHead>
-                <TableHead className="text-xs">Payee</TableHead>
-                <TableHead className="text-xs">Note</TableHead>
-                <TableHead className="text-xs text-right">Amount</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {txns.map((t) => (
-                <TableRow key={t.id} className="hover:bg-muted/30">
-                  <TableCell className="text-sm">{formatDate(t.date)}</TableCell>
-                  <TableCell className="text-sm">{t.categoryName ?? "-"}</TableCell>
-                  <TableCell className="text-sm">{t.payee || "-"}</TableCell>
-                  <TableCell className="text-sm text-muted-foreground max-w-40 truncate">{t.note || "-"}</TableCell>
-                  <TableCell className={`text-right font-mono text-sm font-semibold ${t.amount >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
-                    {formatCurrency(t.amount, t.currency)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+      {/* Transactions — the FULL transactions surface (multi-select bulk
+          update/delete, filters, per-column customize, sort, CSV export)
+          reused verbatim from the /transactions page (DRY), scoped to this
+          account. `lockedAccountId` forces + hides the account filter and
+          disables URL sync; the other filter options stay available.
+          `onDataChange` keeps the header tiles (balance + tx count) in sync
+          after a bulk/inline edit. Wrapped in Suspense for its useSearchParams. */}
+      <Suspense fallback={<div className="h-40 bg-muted animate-pulse rounded-xl" />}>
+        <TransactionsWorkspace
+          lockedAccountId={account.id}
+          showHeader={false}
+          onDataChange={refreshBalanceAndTxns}
+        />
+      </Suspense>
 
       {/* Generic transaction dialog — normal accounts only, seeded with THIS
           account pre-selected (FINLYNQ-227). */}
@@ -574,13 +543,12 @@ export default function AccountDetailPage() {
         }}
         onSaved={() => {
           setTxDialogOpen(false);
-          fetch(`/api/transactions?accountId=${id}&limit=200`)
-            .then((r) => r.json())
-            .then((d) => {
-              setTxns(d.data);
-              setTotal(d.total);
-            })
-            .catch(() => {});
+          // Refresh the header tiles (balance + count) and revalidate the
+          // embedded workspace's SWR list so the new row shows immediately.
+          refreshBalanceAndTxns();
+          void globalMutate(
+            (key) => typeof key === "string" && key.startsWith("/api/transactions"),
+          );
         }}
       />
 
