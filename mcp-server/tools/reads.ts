@@ -1474,7 +1474,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
     "finlynq_help",
     "Discover available Finlynq tools, schema, and usage examples. Finlynq is a personal-finance TRACKING app: every write tool records a bookkeeping entry in the user's own database and never connects to a bank or brokerage or moves real money. Full docs: https://finlynq.com/mcp-guide",
     {
-      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile", "modes", "safety"]).optional().describe("Help topic (default: tools). `modes` documents every multi-mode tool's modes with an example each; `safety` documents the destructive-tool two-step (confirmation tokens) + echo guards."),
+      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile", "modes", "safety", "valuation"]).optional().describe("Help topic (default: tools). `modes` documents every multi-mode tool's modes with an example each; `safety` documents the destructive-tool two-step (confirmation tokens) + echo guards; `valuation` documents the uniform `basis` field on every money-bearing response + each tool's default basis."),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
     },
     async ({ topic, tool_name }) => {
@@ -1663,6 +1663,46 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           },
           dry_run_variant: "delete_bank_transaction uses its own two-step: pass dryRun:true to get the would-be-unlinked transaction ids with ZERO writes, then call again with dryRun:false to commit.",
           config_deletes: "delete_loan / delete_subscription / delete_fx_override / delete_rule / delete_budget / delete_goal are direct (single low-risk, user-recreatable config rows) but carry destructiveHint:true so a host can prompt.",
+        });
+      }
+
+      if (t === "valuation") {
+        // FINLYNQ-268 — the uniform `basis` field on every money-bearing response.
+        return dataResponse({
+          summary: "Every money-bearing MCP response carries an explicit `basis` so you never have to reverse-engineer WHICH valuation a figure is from its magnitude. Two axes: POSITION (point-in-time portfolio/account value) and FLOW (cash movements over a period).",
+          position_axis: {
+            values: {
+              market: "current/at-date market value (holdings priced live). Carries an `asOf` date. Requires an unlocked DEK — a pf_ API key falls back to active_cost + a warning.",
+              active_cost: "remaining cost basis of ACTIVE positions (price-independent; always available).",
+              ledger: "net contribution — COALESCE(SUM(transactions.amount)). The market-vs-ledger fallback for balance tools without a DEK.",
+              lifetime_cost: "Σ every buy ever (aggregateHoldings().buy_amount). A 'how much did I invest' figure — NEVER used for weights.",
+            },
+            rule: "Weights (rebalancing / diversification / concentration) are ALWAYS computed on market-else-active_cost, NEVER lifetime_cost (the weightBasis guard enforces this).",
+            asOf: "Present IFF basis === 'market'. Equals today (or the latest snapshot date for snapshot-backed tools like get_portfolio_returns).",
+          },
+          flow_axis: {
+            values: {
+              realized: "lot-level realized gains (FIFO closures, historical-FX converted). get_realized_gains only.",
+              cash_flow: "SUM(transactions.amount) cash figures (spending, income, dividends, budgets, subscriptions, forecasts).",
+            },
+          },
+          defaults: {
+            // tool → default basis → override param
+            get_net_worth: { basis: "market else ledger (current) / ledger (trend)", override: "basis ('market' | 'ledger')" },
+            get_account_balances: { basis: "per-row market (DEK) else ledger", override: "basis ('market' | 'ledger')" },
+            get_goals: { basis: "per-goal market (investment-linked + DEK) else ledger", override: "none" },
+            get_financial_health_score: { basis: "ledger (money totals; ratios currency-independent)", override: "none" },
+            get_portfolio_analysis: { basis: "lifetime_cost", override: "none" },
+            get_portfolio_performance: { basis: "active_cost", override: "none" },
+            get_portfolio_returns: { basis: "market (+ asOf = latest snapshot date)", override: "none" },
+            analyze_holding: { basis: "active_cost", override: "none" },
+            get_investment_insights: { basis: "market else active_cost (patterns/rebalancing) / lifetime_cost (benchmark totalInvested)", override: "none" },
+            get_realized_gains: { basis: "realized", override: "none" },
+            get_dividend_income: { basis: "cash_flow", override: "none" },
+            "get_spending_trends / get_income_statement / get_spending_anomalies / get_weekly_recap / get_cash_flow_forecast / get_spotlight_items / get_budget_summary / get_subscription_summary": { basis: "cash_flow", override: "none" },
+          },
+          not_labelled: "Loans (get_loans / get_loan_amortization / get_debt_payoff_plan) report scheduled/ledger loan balances, not portfolio valuation — no `basis`. Per-row listings (get_categories, search_transactions), quantity-only tools (trace_holding_quantity), and reconcile data carry no `basis` either.",
+          deprecated_aliases: "The pre-F divergent labels are kept as deprecated aliases through v4.1: get_account_balances.balanceBasis, get_investment_insights.valuationBasis / diversificationValuationBasis. Read the new uniform `basis` field.",
         });
       }
 
