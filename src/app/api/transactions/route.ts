@@ -9,6 +9,7 @@ import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
 import { todayISO } from "@/lib/utils/date";
+import { isPgErrorCode } from "@/lib/db-utils";
 import { InvestmentHoldingRequiredError } from "@/lib/investment-account";
 import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 import {
@@ -650,7 +651,7 @@ export async function POST(request: NextRequest) {
     // Postgres FK violation — typically a stale categoryId / accountId /
     // portfolioHoldingId from a stale UI form. Map to 400 with a friendly
     // pointer instead of leaking the SQL error as a 500.
-    if (typeof error === "object" && error !== null && (error as { code?: string }).code === "23503") {
+    if (isPgErrorCode(error, "23503")) {
       return NextResponse.json(
         { error: "Pick a valid account, category, and portfolio holding — one of them no longer exists.", code: "fk_violation" },
         { status: 400 },
@@ -840,7 +841,7 @@ export async function PUT(request: NextRequest) {
     if (error instanceof OwnershipError) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
-    if (typeof error === "object" && error !== null && (error as { code?: string }).code === "23503") {
+    if (isPgErrorCode(error, "23503")) {
       return NextResponse.json(
         { error: "Pick a valid account, category, and portfolio holding — one of them no longer exists.", code: "fk_violation" },
         { status: 400 },

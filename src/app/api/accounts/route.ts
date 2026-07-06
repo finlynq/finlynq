@@ -5,6 +5,7 @@ import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { backfillInvestmentAccount } from "@/lib/investment-account";
+import { isPgErrorCode } from "@/lib/db-utils";
 
 const postSchema = z.object({
   name: z.string(),
@@ -135,7 +136,7 @@ export async function DELETE(request: NextRequest) {
   } catch (error: unknown) {
     // PG foreign_key_violation — account still referenced by transactions,
     // splits, holdings, loans, goals, snapshots, subscriptions, or recurring.
-    if (typeof error === "object" && error !== null && (error as { code?: string }).code === "23503") {
+    if (isPgErrorCode(error, "23503")) {
       return NextResponse.json(
         { error: "This account still has transactions or other records linked to it. Archive it instead, or remove the related records first." },
         { status: 409 },
