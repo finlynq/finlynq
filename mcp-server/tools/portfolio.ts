@@ -24,7 +24,7 @@ import {
   type PgToolContext,
 } from "./_shared";
 import { aggregateHoldings } from "../../src/lib/portfolio/aggregate-holdings";
-import { getHoldingsValueByHolding } from "../../src/lib/holdings-value";
+import { valuePortfolio, weightBasis } from "../../src/lib/portfolio/valuation";
 import { withConfirmation, PreviewAbortError } from "./_confirm";
 import {
   sql,
@@ -2647,12 +2647,15 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // fall back to active cost basis otherwise. FINLYNQ-151 DEK-gating: a
         // pf_ API key (no DEK) can't decrypt symbols to price them, so market
         // pricing needs the DEK — the fallback keeps it usable regardless.
-        const holdingValues = await getHoldingsValueByHolding(userId, dek);
-        // Detect whether ANY position carries a non-zero market value. When
-        // nothing priced (no DEK / all unpriced), fall back to the active cost
-        // basis so the rebalancer still produces meaningful percentages.
-        const anyMarketValue = holdingValues.some((h) => Number(h.value) !== 0);
-        const basis: "market" | "active-cost" = anyMarketValue ? "market" : "active-cost";
+        // FINLYNQ-268 phase 3: rebase onto the SHARED valuation layer.
+        // `valuePortfolio({ basis: 'market' })` returns per-holding rows on
+        // market value, or DOWNGRADES to active_cost (+ a warning) when nothing
+        // priced / no DEK — so the inline "anyMarketValue → market|active-cost"
+        // point-fix is gone. `weightBasis` is the tc-2 guard: it returns
+        // market-else-active_cost and can NEVER be lifetime_cost.
+        const valuation = await valuePortfolio(userId, dek, { basis: "market" });
+        const basis = weightBasis(valuation); // 'market' | 'active_cost'
+        const holdingValues = valuation.byHolding;
         // Issue #86: two holdings sharing a display name (TFSA + RRSP) come
         // through as separate rows. Sum across same-name rows when building the
         // rebalancing allocation map (rebalancing targets are user-supplied by
@@ -2662,7 +2665,9 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // produces nonsense percentages.
         const holdings: Array<{ name: string; symbol: string | null; book_value: number; book_value_native: number; currency: string }> = [];
         for (const h of holdingValues) {
-          const nativeValue = basis === "market" ? Number(h.value) : Number(h.costBasis);
+          // The layer already selected the right per-holding value (market or
+          // active cost) for the resolved basis — no per-row market/cost pick.
+          const nativeValue = Number(h.value);
           const ccy = String(h.currency || reporting).toUpperCase();
           const fx = await fxFor(ccy);
           holdings.push({
@@ -2786,10 +2791,14 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "rebalancing",
           reportingCurrency: reporting,
-          // FINLYNQ-251: 'market' when live prices were available, else
-          // 'active-cost' (remaining cost basis of active positions). NEVER
-          // lifetime book cost — cash sleeves are valued at current quantity.
+          // FINLYNQ-268 phase 3: uniform `basis` ('market' | 'active_cost')
+          // from the shared `weightBasis` guard — NEVER lifetime_cost (cash
+          // sleeves are valued at current quantity). `valuationBasis` is kept as
+          // a deprecated alias through v4.1 (dual-emit, decision 2); FINLYNQ-251
+          // normalized 'active-cost' → 'active_cost'.
+          basis,
           valuationBasis: basis,
+          ...(valuation.warnings?.length ? { valuationWarnings: valuation.warnings } : {}),
           // Issue #209 — `totalPortfolioValue` is the whole-portfolio value
           // sum across ALL active holdings, never a top-N slice.
           totalPortfolioValue: Math.round(totalBV * 100) / 100,
@@ -2862,6 +2871,9 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "benchmark",
           reportingCurrency: reporting,
+          // FINLYNQ-268: the benchmark compares INVESTED dollars (lifetime book
+          // cost), not market value — labelled lifetime_cost.
+          basis: "lifetime_cost",
           note: "Comparison uses book cost (not market value) and historical average returns. This is illustrative only.",
           yourPortfolio: {
             totalInvested: Math.round(totalInvested * 100) / 100,
@@ -2977,23 +2989,23 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       // investor should read "concentrated in cash" off flow-through). Cash is
       // held wealth but not an investment position, so it's dropped from the
       // diversification-of-investments weighting.
-      const cashSleeveIdRows = await q(db, sql`
-        SELECT id FROM portfolio_holdings
-        WHERE user_id = ${userId} AND is_cash = TRUE
-      `);
-      const cashSleeveIds = new Set(cashSleeveIdRows.map((r) => Number(r.id)));
-      const holdingValues = await getHoldingsValueByHolding(userId, dek);
-      // Prefer market value; fall back to active cost basis when nothing priced
-      // (no DEK / all unpriced) so the score stays meaningful either way.
-      const anyMarketValue = holdingValues.some((h) => !cashSleeveIds.has(Number(h.holdingId)) && Number(h.value) !== 0);
-      const activeBasis: "market" | "active-cost" = anyMarketValue ? "market" : "active-cost";
+      // FINLYNQ-268 phase 3: rebase onto the SHARED valuation layer. The
+      // cash-sleeve exclusion now rides the layer's per-holding `isCash` flag
+      // (single source — was an inline `SELECT id ... WHERE is_cash=TRUE`), and
+      // `weightBasis` is the tc-2 guard (market-else-active_cost, NEVER
+      // lifetime_cost). `valuePortfolio` already downgrades market → active_cost
+      // (+ a warning) when nothing priced / no DEK, so the inline
+      // "anyMarketValue → market|active-cost" pick is gone.
+      const diversificationValuation = await valuePortfolio(userId, dek, { basis: "market" });
+      const activeBasis = weightBasis(diversificationValuation); // 'market' | 'active_cost'
+      const holdingValues = diversificationValuation.byHolding;
       // Sum active value across same-name rows (VUN.TO across TFSA + RRSP is one
       // line), FX-converting each holding's ACCOUNT currency to the reporting
-      // currency first. Cash sleeves are excluded from this set.
+      // currency first. Cash sleeves are excluded from this set (via isCash).
       const activeByName = new Map<string, { name: string; value: number; value_native: number; currency: string }>();
       for (const h of holdingValues) {
-        if (cashSleeveIds.has(Number(h.holdingId))) continue;
-        const nativeValue = activeBasis === "market" ? Number(h.value) : Number(h.costBasis);
+        if (h.isCash) continue;
+        const nativeValue = Number(h.value); // layer already picked market/active
         if (!(nativeValue > 0)) continue; // sold-out / zero-value positions don't weigh
         const ccy = String(h.currency || reporting).toUpperCase();
         const fx = await fxFor(ccy);
@@ -3037,6 +3049,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           totalPositions: positions.length,
           totalInvested: Math.round(totalInvested * 100) / 100,
           totalInvestedReporting: tagAmount(totalInvested, reporting, "reporting"),
+          // FINLYNQ-268: `totalInvested` is deliberately LIFETIME book cost
+          // (Σ every buy ever) — a "how much did I put in" figure — distinct
+          // from the market/active_cost weighting basis below.
+          totalInvestedBasis: "lifetime_cost",
           avgMonthlyContribution: Math.round(avgMonthlyContrib * 100) / 100,
           avgMonthlyContributionReporting: tagAmount(avgMonthlyContrib, reporting, "reporting"),
           // Issue #209 — explicit population window so callers can reconcile
@@ -3053,10 +3069,14 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           // ACTIVE, cash-excluded positions (see topPositions). `totalInvested`
           // above stays LIFETIME contributions.
           concentration: `Top 3 active positions = ${Math.round(top3Pct * 1000) / 10}% of active holdings`,
-          // 'market' when live prices were available for the active set, else
-          // 'active-cost' (remaining cost basis of active positions). NEVER
-          // lifetime book cost, and cash sleeves are excluded.
+          // FINLYNQ-268 phase 3: uniform `basis` ('market' | 'active_cost')
+          // from the shared `weightBasis` guard — NEVER lifetime book cost, cash
+          // sleeves excluded (via the layer's isCash flag).
+          // `diversificationValuationBasis` kept as a deprecated alias through
+          // v4.1 (dual-emit, decision 2; 'active-cost' → 'active_cost').
+          basis: activeBasis,
           diversificationValuationBasis: activeBasis,
+          ...(diversificationValuation.warnings?.length ? { valuationWarnings: diversificationValuation.warnings } : {}),
         },
         // FINLYNQ-253: topPositions are the top-5 ACTIVE positions (cash
         // sleeves excluded), valued at market (or active cost basis when no
