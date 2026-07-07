@@ -184,7 +184,15 @@ export async function GET(request: NextRequest) {
   if (rebuildUserIds.length > 0) {
     const nameRows = normalizeDbRows(
       await db.execute(
-        sql`SELECT id, username FROM users WHERE id = ANY(${rebuildUserIds}::text[])`,
+        // Drizzle expands a bare JS array into a comma-separated bind list
+        // (`$1, $2`), which parses as a ROW — `ANY((…)::text[])` then throws
+        // "cannot cast type record to text[]" (or "malformed array literal" for a
+        // single id). Build an explicit ARRAY[...] so it binds as one text[]
+        // (FINLYNQ-250, same class of bug as the reconcile.ts fix).
+        sql`SELECT id, username FROM users WHERE id = ANY(ARRAY[${sql.join(
+          rebuildUserIds.map((id) => sql`${id}`),
+          sql`, `,
+        )}]::text[])`,
       ),
     );
     for (const r of nameRows) {
