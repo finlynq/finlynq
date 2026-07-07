@@ -1687,6 +1687,20 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
               cash_flow: "SUM(transactions.amount) cash figures (spending, income, dividends, budgets, subscriptions, forecasts).",
             },
           },
+          fx_conversion_axis: {
+            summary: "FINLYNQ-276: a realized-gain figure converted into the reporting/display currency carries an explicit `fxConversion` label because there are TWO defensible methods that can differ substantially (44% apart in a demo case) — never assume one is broken when they disagree.",
+            values: {
+              historical_per_lot: "proceeds @ close-date FX − cost @ open-date FX (per-lot HISTORICAL FX). Includes the FX gain on the capital and matches ACB tax treatment — this is the TAX-RELEVANT figure in the reporting currency. Emitted by get_realized_gains (`realizedGainInBase`) and analyze_holding (`realizedGainReportingHistoricalFx`).",
+              spot_at_query: "native realized gain × TODAY's spot rate. A convenience conversion, NOT tax-basis. Emitted by get_portfolio_analysis / get_portfolio_performance / analyze_holding (`realizedGainReporting`).",
+            },
+            tools: {
+              get_realized_gains: "historical_per_lot",
+              analyze_holding: "spot_at_query (realizedGainReporting) + historical_per_lot (realizedGainReportingHistoricalFx)",
+              get_portfolio_analysis: "spot_at_query",
+              get_portfolio_performance: "spot_at_query",
+            },
+            rule: "For TAX-basis CAD (or any display-currency) realized gains, use get_realized_gains — or analyze_holding's `realizedGainReportingHistoricalFx`. The `realizedGainReporting` spot figures are convenience conversions only.",
+          },
           defaults: {
             // tool → default basis → override param
             get_net_worth: { basis: "market else ledger (current) / ledger (trend)", override: "basis ('market' | 'ledger')" },

@@ -1409,7 +1409,16 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       // a point-in-time position valuation, so they carry the flow-axis basis
       // `realized` (lot-level FIFO closures, historical-FX converted via
       // augmentWithBaseCurrency). Labelling only — the math is byte-identical.
-      return text({ success: true, data: { ...augmented, basis: "realized" as const } });
+      // FINLYNQ-276: also label the FX-conversion method. This tool converts
+      // `realizedGainInBase` at per-lot HISTORICAL FX (proceeds @ close-date rate
+      // − cost @ open-date rate), which includes the FX gain on the capital and
+      // is the tax-relevant figure in the display currency — distinct from the
+      // `spot_at_query` method used by get_portfolio_analysis / _performance /
+      // analyze_holding (110 USD × today's spot). See finlynq_help topic=valuation.
+      return text({
+        success: true,
+        data: { ...augmented, basis: "realized" as const, fxConversion: "historical_per_lot" as const },
+      });
     },
   );
 
@@ -1830,6 +1839,13 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // realized/dividend flows — per-holding market value is intentionally
         // NOT surfaced here (see `note`); label the basis truthfully.
         basis: "lifetime_cost",
+        // FINLYNQ-276: label the FX-conversion method for the realizedGain/
+        // dividend *Reporting figures. This tool converts native → reporting at
+        // TODAY's spot rate (`realizedGain × fxFor(ccy)`), NOT per-lot historical
+        // FX — so its CAD realized gain can diverge from get_realized_gains
+        // (which uses historical per-lot FX and is the tax-relevant figure).
+        fxConversion: "spot_at_query" as const,
+        fxConversionNote: "*Reporting figures convert native → reportingCurrency at today's spot rate. For TAX-basis realized gains in the reporting currency (per-lot historical FX), use get_realized_gains.",
         warnings,
         rowWarnings,
         // Issue #209 — only `*Reporting` siblings remain. These are the
@@ -2061,6 +2077,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // labelled active_cost. Lifetime totals belong only to insights'
         // labelled `totalInvested`, not here.
         basis: "active_cost",
+        // FINLYNQ-276: *Reporting figures use TODAY's spot rate, not per-lot
+        // historical FX — label it + point at get_realized_gains for tax basis.
+        fxConversion: "spot_at_query" as const,
+        fxConversionNote: "*Reporting figures convert native → reportingCurrency at today's spot rate. For TAX-basis realized gains in the reporting currency (per-lot historical FX), use get_realized_gains.",
         warnings: summaryWarnings,
         rowWarnings: perfRowWarnings,
         // Issue #209 — only `*Reporting` siblings remain. Cash-sleeve
@@ -2369,6 +2389,37 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
 
       const fxToReporting = await getRate(holdingCurrency, reporting, todayStr, userId);
 
+      // FINLYNQ-276: realizedGainReporting below uses TODAY's spot rate
+      // (`realizedGain × fxToReporting`), which diverges from the tax-relevant
+      // per-lot HISTORICAL-FX figure get_realized_gains reports. Surface the
+      // historical figure here too, computed via the SAME functions the
+      // realized-gains report uses (listRealizedGainClosures +
+      // augmentWithBaseCurrency — DEK-only, byte-identical to that tool), so the
+      // deep-dive tool carries the tax-correct number. Best-effort: null when the
+      // holding has no lot closures (or the DEK is locked / lots un-backfilled).
+      let realizedGainReportingHistoricalFx: ReturnType<typeof tagAmount> | null = null;
+      if (resolvedHoldingId != null) {
+        try {
+          const { listRealizedGainClosures, augmentWithBaseCurrency } = await import(
+            "../../src/lib/portfolio/realized-gains"
+          );
+          const closures = await listRealizedGainClosures(userId, dek, {
+            holdingId: resolvedHoldingId,
+          });
+          if (closures.rows.length > 0) {
+            const augmented = await augmentWithBaseCurrency(closures, userId, reporting);
+            const histTotal = augmented.rows.reduce(
+              (s, r) => s + (r.realizedGainInBase ?? 0),
+              0,
+            );
+            realizedGainReportingHistoricalFx = tagAmount(histTotal, reporting, "reporting");
+          }
+        } catch {
+          // Non-fatal — leave the historical figure null and keep the pointer.
+          realizedGainReportingHistoricalFx = null;
+        }
+      }
+
       return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
         note: "Per-holding unrealizedGain requires live prices and is not surfaced here. (Account-level market value IS available via get_account_balances / get_net_worth on OAuth/built-in-chat connections.)",
@@ -2386,6 +2437,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // is surfaced separately. Per-holding market value is not computed
         // here (see `note`), so the basis is active_cost, not market.
         basis: "active_cost",
+        // FINLYNQ-276: `realizedGainReporting` uses TODAY's spot rate; the
+        // tax-relevant `realizedGainReportingHistoricalFx` (per-lot historical
+        // FX, matches get_realized_gains) is surfaced alongside it.
+        fxConversion: "spot_at_query" as const,
+        fxConversionNote: "realizedGainReporting uses today's spot rate. realizedGainReportingHistoricalFx (below) uses per-lot historical FX — the tax-relevant figure, byte-identical to get_realized_gains.",
         // Position — Issue #208 round at the response boundary.
         currentShares: Math.round(remainingQty * 10000) / 10000,
         avgCostPerShare: avgCost ? roundMoney(avgCost, holdingCurrency) : null,
@@ -2399,6 +2455,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         realizedGain: roundMoney(realizedGain, holdingCurrency),
         realizedGainTagged: tagAmount(realizedGain, holdingCurrency, "account"),
         realizedGainReporting: tagAmount(realizedGain * fxToReporting, reporting, "reporting"),
+        // FINLYNQ-276: tax-relevant realized gain in the reporting currency, at
+        // per-lot HISTORICAL FX (matches get_realized_gains). Null when the
+        // holding has no lot closures / DEK locked / lots un-backfilled.
+        realizedGainReportingHistoricalFx,
         realizedGainPct: buyAmt > 0 ? Math.round((realizedGain / buyAmt) * 10000) / 100 : null,
         dividendsReceived: roundMoney(divAmt, holdingCurrency),
         dividendsReceivedTagged: tagAmount(divAmt, holdingCurrency, "account"),
