@@ -202,6 +202,16 @@ export interface PerHoldingMetrics {
   accountId: number;
   qty: number;
   costBasis: number;
+  /**
+   * FINLYNQ-279: remaining cost basis in the REPORTING currency, valued at
+   * the historical FX rate on each open lot's `open_date` (Σ qtyRemaining ×
+   * costPerShare × histRate(lotCcy → reportingCcy, openDate)). This is the
+   * FX-inclusive cost basis: unrealized in the reporting currency =
+   * marketValueDisplay − costBasisReporting captures the FX gain/loss on the
+   * cost, which `costBasis × currentRate` drops. Equals `costBasis` when the
+   * caller passes no `reportingCurrency` (same-currency → byte-identical).
+   */
+  costBasisReporting: number;
   unrealizedGain: number;
   marketValue: number;
   realizedGainYtd: number;

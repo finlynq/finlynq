@@ -76,6 +76,14 @@ export interface LoadMetricsForUserOpts {
    * calls. Keyed by holdingId; price + currency.
    */
   prices: PriceMap;
+  /**
+   * FINLYNQ-279: when set, each open lot's cost basis is ALSO valued in this
+   * currency at the historical rate on the lot's open date, returned as
+   * `PerHoldingMetrics.costBasisReporting`. The overview passes the user's
+   * display currency so the FX-on-cost gain is captured. Omit → costBasisReporting
+   * equals the native costBasis (byte-identical no-op).
+   */
+  reportingCurrency?: string;
 }
 
 /**
@@ -90,7 +98,7 @@ export interface LoadMetricsForUserOpts {
 export async function loadMetricsForUser(
   opts: LoadMetricsForUserOpts,
 ): Promise<PerHoldingMetrics[]> {
-  const { userId, dek, asOfDate, prices } = opts;
+  const { userId, dek, asOfDate, prices, reportingCurrency } = opts;
   const isToday = asOfDate >= todayISO();
 
   // ─── Lots ─────────────────────────────────────────────────────────────
@@ -261,6 +269,40 @@ export async function loadMetricsForUser(
     return amount;
   };
 
+  // ─── FINLYNQ-279: historical reporting-currency rates ─────────────────
+  // One rate per (lotCcy → reportingCcy, openDate) across the open lots, so
+  // the metrics layer can value each open lot's cost basis at the rate on its
+  // OWN open date (FX-on-cost). Only foreign-currency lots need a lookup;
+  // same-currency lots resolve to 1 without a call. Rates hit price_cache /
+  // fx_rates (warm on prod) and are deduped so a busy account is a handful of
+  // lookups, not one per lot.
+  const histFxMap = new Map<string, number>();
+  let fxAtDate:
+    | ((amount: number, from: string, to: string, date: string) => number)
+    | undefined;
+  if (reportingCurrency) {
+    const histPairs = new Set<string>();
+    for (const l of lots) {
+      if (l.status !== "open" || l.qtyRemaining <= 0) continue;
+      if (l.openDate > asOfDate) continue;
+      if (!l.currency || l.currency === reportingCurrency) continue;
+      histPairs.add(`${l.currency}>${reportingCurrency}>${l.openDate}`);
+    }
+    for (const key of histPairs) {
+      const [from, to, date] = key.split(">");
+      try {
+        histFxMap.set(key, (await getRate(from, to, date, userId)) || 1);
+      } catch {
+        histFxMap.set(key, 1);
+      }
+    }
+    fxAtDate = (amount, from, to, date) => {
+      if (from === to) return amount;
+      const r = histFxMap.get(`${from}>${to}>${date}`);
+      return r != null ? amount * r : amount;
+    };
+  }
+
   return computeHoldingMetricsFromLots({
     lots,
     closures,
@@ -269,5 +311,7 @@ export async function loadMetricsForUser(
     fx,
     asOfDate,
     holdingCurrencies,
+    reportingCurrency,
+    fxAtDate,
   });
 }

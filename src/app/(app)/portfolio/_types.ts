@@ -88,6 +88,14 @@ export type EnrichedHolding = {
   quantity: number | null;
   avgCostPerShare: number | null;
   totalCostBasis: number | null;
+  /**
+   * FINLYNQ-279: remaining cost basis already in the DISPLAY currency —
+   * historical FX (per open lot's open date) for a lots-enabled non-cash
+   * holding, else current-rate conversion of totalCostBasis. The byHolding
+   * rollup + summary sum this so the reporting-currency Unrealized G/L includes
+   * the FX gain/loss on cost. Server always sets it (null only when no basis).
+   */
+  costBasisDisplay: number | null;
   lifetimeCostBasis: number | null;
   marketValue: number | null;
   marketValueDisplay: number | null;

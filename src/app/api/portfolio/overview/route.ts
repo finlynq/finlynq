@@ -600,12 +600,20 @@ async function handleGet(request: NextRequest) {
   // single current rate. Referencing the report's own functions keeps the All
   // Holdings page and the report byte-identical (one update updates both).
   let realizedDisplayByHolding: Map<number, number> | null = null;
+  // FINLYNQ-279: per-holding remaining cost basis in the DISPLAY currency,
+  // valued at the historical FX rate on each open lot's open date (FX-on-cost).
+  // The overview uses this for `unrealizedGainDisplay = marketValueDisplay −
+  // costBasisReporting` so a foreign-currency holding's reporting-currency
+  // unrealized includes the FX gain/loss on the cost basis (the old
+  // `nativeUnrealized × currentRate` dropped it). Empty when lots are disabled.
+  const reportingCostBasisByHolding = new Map<number, number>();
   if (lotsEnabled) {
     const lotMetrics = await loadMetricsForUser({
       userId,
       dek,
       asOfDate: todayDate,
       prices: new Map(),
+      reportingCurrency: displayCurrency,
     });
     for (const lm of lotMetrics) {
       const m = metricsByHoldingId.get(lm.holdingId);
@@ -613,6 +621,7 @@ async function handleGet(request: NextRequest) {
       m.totalCostBasis = lm.qty > 1e-9 ? lm.costBasis : null;
       m.avgCostPerShare = lm.qty > 1e-9 ? lm.costBasis / lm.qty : null;
       m.realizedGain = lm.realizedGainAllTime;
+      if (lm.qty > 1e-9) reportingCostBasisByHolding.set(lm.holdingId, lm.costBasisReporting);
     }
     const rgBase = await augmentWithBaseCurrency(
       await listRealizedGainClosures(userId, dek, {}),
@@ -811,7 +820,10 @@ async function handleGet(request: NextRequest) {
       }
     }
 
-    // Compute unrealized gain using remaining cost basis
+    // Compute unrealized gain using remaining cost basis. NATIVE unrealized
+    // (marketValue − totalCostBasis, in the holding's own currency) is unchanged
+    // — it powers the By-Account native column and is 0 for a same-currency cash
+    // sleeve.
     const fxRate = fxRates.get(quoteCurrency ?? h.currency) ?? 1;
     let unrealizedGain: number | null = null;
     let unrealizedGainPct: number | null = null;
@@ -820,8 +832,32 @@ async function handleGet(request: NextRequest) {
       unrealizedGainPct = totalCostBasis > 0 ? (unrealizedGain / totalCostBasis) * 100 : null;
     }
 
-    // CAD-converted unrealized for summaries (point-in-time → current rate, correct).
-    const unrealizedGainDisplay = unrealizedGain !== null ? convertCurrency(unrealizedGain, fxRate) : null;
+    // FINLYNQ-279: cost basis in the DISPLAY currency. For a lots-enabled
+    // NON-cash holding, use the historical-FX reporting cost basis (each open lot
+    // valued at the rate on its own open date) so a foreign holding's display
+    // unrealized includes the FX gain/loss on the cost. Cash stays on the
+    // current-rate path — its native cost basis is already pegged to balance
+    // (FINLYNQ-277 → reads 0) and its lots aren't reconciled until FINLYNQ-278.
+    // Legacy / flag-off / no-lot holdings fall back to current-rate conversion,
+    // which for a same-currency holding equals the native cost basis → the whole
+    // display unrealized stays byte-identical to before.
+    const costBasisDisplay: number | null =
+      totalCostBasis === null
+        ? null
+        : lotsEnabled && assetType !== "cash" && reportingCostBasisByHolding.has(h.id)
+          ? reportingCostBasisByHolding.get(h.id)!
+          : convertCurrency(totalCostBasis, fxRate);
+
+    // Display-currency unrealized = marketValueDisplay − costBasisDisplay. For a
+    // same-currency holding this equals convertCurrency(nativeUnrealized, 1) =
+    // nativeUnrealized (byte-identical); for a foreign holding it adds the FX gain
+    // on the cost basis that the old current-rate conversion dropped.
+    const unrealizedGainDisplay =
+      unrealizedGain !== null && marketValueDisplay !== null && costBasisDisplay !== null
+        ? marketValueDisplay - costBasisDisplay
+        : unrealizedGain !== null
+          ? convertCurrency(unrealizedGain, fxRate)
+          : null;
 
     // Realized gain in display currency. Realized is a FLOW figure: when the
     // lot read-flip is on, use the historical-per-closure FX value from the
@@ -892,6 +928,12 @@ async function handleGet(request: NextRequest) {
       quantity,
       avgCostPerShare,
       totalCostBasis,
+      // FINLYNQ-279: remaining cost basis already in the DISPLAY currency
+      // (historical FX for lots-enabled non-cash; current-rate otherwise). The
+      // byHolding rollup + summary sum THIS instead of re-converting native at
+      // the current rate, so the aggregate reporting-currency cost basis carries
+      // the FX-on-cost consistently with the per-row display unrealized.
+      costBasisDisplay,
       lifetimeCostBasis,
       marketValue,
       marketValueDisplay,
@@ -965,11 +1007,11 @@ async function handleGet(request: NextRequest) {
 
   // Investment P&L summaries
   const holdingsWithMetrics = enrichedHoldings.filter(h => h.quantity !== null && h.quantity !== 0);
-  const totalCostBasisDisplay = holdingsWithMetrics.reduce((s, h) => {
-    if (h.totalCostBasis === null) return s;
-    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
-    return s + convertCurrency(h.totalCostBasis, fxRate);
-  }, 0);
+  // FINLYNQ-279: sum the per-holding costBasisDisplay (already display currency,
+  // historical FX for lots-enabled non-cash) so the summary Cost Basis + the
+  // derived Unrealized % reconcile with the FX-inclusive per-row display
+  // unrealized instead of re-converting native at the current rate.
+  const totalCostBasisDisplay = holdingsWithMetrics.reduce((s, h) => s + (h.costBasisDisplay ?? 0), 0);
   const totalUnrealizedGainDisplay = holdingsWithMetrics.reduce((s, h) => s + (h.unrealizedGainDisplay ?? 0), 0);
   const totalUnrealizedGainPct = totalCostBasisDisplay > 0
     ? (totalUnrealizedGainDisplay / totalCostBasisDisplay) * 100
@@ -1332,7 +1374,12 @@ async function handleGet(request: NextRequest) {
     // the holding's quote currency. Reuse the same fxRates map the per-row
     // path uses so the rollup matches summary totals to within rounding.
     const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
-    if (h.totalCostBasis != null) acc.costBasisDisplay += h.totalCostBasis * fxRate;
+    // FINLYNQ-279: the per-row costBasisDisplay is already in display currency
+    // (historical FX for lots-enabled non-cash), so sum it directly instead of
+    // re-converting native at the current rate — this is what makes the rollup's
+    // unrealized % (unrealizedGainDisplay / costBasisDisplay) reconcile with the
+    // FX-inclusive per-row display unrealized.
+    if (h.costBasisDisplay != null) acc.costBasisDisplay += h.costBasisDisplay;
     if (h.lifetimeCostBasis != null) acc.lifetimeCostBasisDisplay += h.lifetimeCostBasis * fxRate;
     // realizedGainDisplay is the historical-per-closure-FX value (lots read-flip)
     // — sum it directly, don't re-convert native at the current rate.
