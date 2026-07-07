@@ -398,7 +398,9 @@ describe("FINLYNQ-267 tc-1 — preview_delete_category name (Phase 4)", () => {
     );
     const tool = getTool("preview_delete_category", db, dek);
     const res = await tool.handler({ name: "_NOPE_" }, {});
-    expect(envelopeText(res)).toMatch(/not found|no confident/i);
+    // FINLYNQ-273 — category refusal now uses the unified `matched no <entity>`
+    // wording (was the bespoke `"X" not found. Did you mean:`).
+    expect(envelopeText(res)).toMatch(/matched no category|not found|no confident/i);
     expect(envelopeText(res)).not.toMatch(/confirmationToken/i);
   });
 

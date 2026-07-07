@@ -398,7 +398,13 @@ export interface EntityCandidate {
 export type ResolveEnvelope =
   | { status: "resolved"; id: number; via: "id" | ResolveTier }
   | { status: "ambiguous"; candidates: EntityCandidate[] } // 2+ matches — caller MUST disambiguate
-  | { status: "not_found"; warning: string; suggestion?: EntityCandidate }; // zero match — never silent
+  // zero match — never silent. `didYouMean` is a top-N ranked candidate list
+  // (WITH ids), always populated when the user's inventory is non-empty so
+  // EVERY family emits the SAME recovery affordance (FINLYNQ-273 — the bare
+  // "matched no goal" shape gains suggestions-with-ids like categories/
+  // holdings). `suggestion` is the single best legacy low-confidence hit,
+  // kept for back-compat callers; it is always `didYouMean[0]` when present.
+  | { status: "not_found"; warning: string; suggestion?: EntityCandidate; didYouMean?: EntityCandidate[] };
 
 export type ResolveEntityType =
   | "account"
@@ -406,7 +412,8 @@ export type ResolveEntityType =
   | "holding"
   | "goal"
   | "loan"
-  | "subscription";
+  | "subscription"
+  | "rule";
 
 export interface ResolveEntityArgs {
   entity: ResolveEntityType;
@@ -472,7 +479,72 @@ export const DEFAULT_STRICT: Record<ResolveEntityType, ResolveOpts> = {
     substringTier: "substring",
     ambiguous: true,
   },
+  // FINLYNQ-273 — rules gain a name path on delete. Rule names are stored in the
+  // `name` column (encrypted; decrypted via decryptRuleFields, NOT decryptNameish),
+  // so the caller passes already-decrypted `{id, name}` rows.
+  rule: {
+    exactFields: [{ field: "name", tier: "exact" }],
+    startsFields: [{ field: "name", tier: "startsWith" }],
+    substringField: "name",
+    substringTier: "substring",
+    ambiguous: true,
+  },
 };
+
+/**
+ * FINLYNQ-273 — rank a candidate list top-N for a `not_found` "did you mean"
+ * hint, WITH ids. Shares the ranking heuristic with `suggestionList` (startsWith
+ * → substring → reverse-substring → edit distance) but returns structured
+ * `EntityCandidate[]` (id-bearing) instead of a pre-joined string, so every
+ * family's `not_found` envelope carries the SAME machine-readable recovery set.
+ * Names only — no DEK here (options are already decrypted).
+ */
+export function rankCandidates(
+  query: string,
+  options: Row[],
+  maxCount = 5,
+): EntityCandidate[] {
+  if (!options.length) return [];
+  const lo = (query ?? "").toLowerCase().trim();
+  const editDistance = (a: string, b: string): number => {
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    const m = a.length, n = b.length;
+    let prev = new Array<number>(n + 1).fill(0);
+    let cur = new Array<number>(n + 1).fill(0);
+    for (let j = 0; j <= n; j++) prev[j] = j;
+    for (let i = 1; i <= m; i++) {
+      cur[0] = i;
+      for (let j = 1; j <= n; j++) {
+        const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      }
+      [prev, cur] = [cur, prev];
+    }
+    return prev[n];
+  };
+  const scored = options
+    .map((o) => {
+      // Match on the primary display field (name) OR symbol (holdings) so a
+      // ticker-shaped miss still surfaces the right row.
+      const name = String(o.name ?? "").trim();
+      const symbol = String(o.symbol ?? "").trim();
+      const label = name || symbol;
+      if (!label) return null;
+      const lname = name.toLowerCase();
+      const lsym = symbol.toLowerCase();
+      let bucket = 3;
+      if (lo && (lname.startsWith(lo) || (lsym && lsym.startsWith(lo)))) bucket = 0;
+      else if (lo && (lname.includes(lo) || (lsym && lsym.includes(lo)))) bucket = 1;
+      else if (lo && (lo.includes(lname) || (lsym && lo.includes(lsym)))) bucket = 2;
+      const dist = lo ? Math.min(editDistance(lname, lo), lsym ? editDistance(lsym, lo) : Infinity) : 0;
+      return { o, label, bucket, dist };
+    })
+    .filter((x): x is NonNullable<typeof x> => x != null)
+    .sort((a, b) => (a.bucket - b.bucket) || (a.dist - b.dist) || a.label.localeCompare(b.label))
+    .slice(0, maxCount);
+  return scored.map((s) => toCandidate(s.o));
+}
 
 /** Coerce a resolve candidate/suggestion Row into an EntityCandidate (null-safe). */
 function toCandidate(o: Row): EntityCandidate {
@@ -508,16 +580,53 @@ export function resolveEntity(args: ResolveEntityArgs): ResolveEnvelope {
   if (r.reason === "ambiguous") {
     return { status: "ambiguous", candidates: r.candidates.map(toCandidate) };
   }
+  // FINLYNQ-273 — a not_found ALWAYS carries a top-N `didYouMean` (WITH ids) when
+  // the inventory is non-empty, so every family emits the SAME recovery affordance
+  // (was: `low_confidence` returned one `suggestion`, `missing` returned bare).
+  // The best low-confidence hit (if any) is promoted to the head of the list so
+  // `suggestion === didYouMean[0]`.
+  const ranked = rankCandidates(trimmed, options);
   if (r.reason === "low_confidence") {
-    // Low-confidence is REJECTED (#123) — a not-found with a "did you mean" hint,
-    // never an auto-resolve.
+    const best = toCandidate(r.suggestion);
+    const didYouMean = [best, ...ranked.filter((c) => c.id !== best.id)].slice(0, 5);
     return {
       status: "not_found",
       warning: `'${trimmed}' had no confident ${entity} match`,
-      suggestion: toCandidate(r.suggestion),
+      suggestion: best,
+      didYouMean,
     };
   }
-  return { status: "not_found", warning: `'${trimmed}' matched no ${entity}` };
+  return {
+    status: "not_found",
+    warning: `'${trimmed}' matched no ${entity}`,
+    ...(ranked.length ? { suggestion: ranked[0], didYouMean: ranked } : {}),
+  };
+}
+
+/**
+ * FINLYNQ-273 — SINGLE source of truth for rendering a non-resolved envelope as
+ * a human message, so every family's ambiguous / not_found error reads
+ * IDENTICALLY (candidates WITH ids in both cases). `resolveOrReport` wraps this
+ * in an `err(...)`; the category preview/merge path throws it as a
+ * `PreviewAbortError`. Returns `null` for a `resolved` envelope (nothing to say).
+ */
+export function formatResolveFailure(label: string, env: ResolveEnvelope): string | null {
+  if (env.status === "resolved") return null;
+  if (env.status === "ambiguous") {
+    const list = env.candidates
+      .map((c) => (c.symbol ? `"${c.name}" (${c.symbol}, id=${c.id})` : `"${c.name}" (id=${c.id})`))
+      .join(", ");
+    return `${label} is ambiguous — ${env.candidates.length} matches: ${list}. Pass ${label}_id to disambiguate.`;
+  }
+  // not_found — prefer the full top-N didYouMean list (ids); fall back to the
+  // single suggestion; bare when the inventory has no candidates at all.
+  const list = env.didYouMean?.length
+    ? env.didYouMean.map((c) => (c.symbol ? `"${c.name}" (${c.symbol}, id=${c.id})` : `"${c.name}" (id=${c.id})`)).join(", ")
+    : env.suggestion
+      ? `"${env.suggestion.name}" (id=${env.suggestion.id})`
+      : "";
+  const hint = list ? ` Did you mean: ${list}?` : "";
+  return `${env.warning}.${hint}`;
 }
 
 /**
@@ -530,18 +639,10 @@ export function resolveOrReport(
   env: ResolveEnvelope,
 ): { id: number } | { report: ReturnType<typeof err> } {
   if (env.status === "resolved") return { id: env.id };
-  if (env.status === "ambiguous") {
-    const list = env.candidates
-      .map((c) => (c.symbol ? `"${c.name}" (${c.symbol}, id=${c.id})` : `"${c.name}" (id=${c.id})`))
-      .join(", ");
-    return {
-      report: err(
-        `${label} is ambiguous — ${env.candidates.length} matches: ${list}. Pass ${label}_id to disambiguate.`,
-      ),
-    };
-  }
-  const hint = env.suggestion ? ` Did you mean "${env.suggestion.name}" (id=${env.suggestion.id})?` : "";
-  return { report: err(`${env.warning}.${hint}`) };
+  // FINLYNQ-273 — the message is single-sourced in `formatResolveFailure` so
+  // ambiguous / not_found read identically across every family (candidates
+  // WITH ids in both cases).
+  return { report: err(formatResolveFailure(label, env)!) };
 }
 
 /**

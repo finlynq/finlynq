@@ -472,13 +472,38 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
   }
 
 
-  // ── op: delete — lifted VERBATIM from delete_rule ──────────────────────────
-  async function opDelete(args: { id: number }): Promise<ToolResult> {
-      const { id } = args;
-      const existing = await q(db, sql`SELECT id, name FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
-      if (!existing.length) return err(`Rule #${id} not found`);
-      await db.execute(sql`DELETE FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, data: { id, message: `Rule "${existing[0].name}" deleted` } });
+  // ── op: delete — id OR resolver name (FINLYNQ-273) ─────────────────────────
+  // Was id-only. Rule names live in the `name` column (encrypted; decrypted via
+  // decryptRuleFields, NOT decryptNameish), so the name path decrypts every
+  // rule's name into `{id, name}` rows and resolves through the shared envelope
+  // (id fast-path wins; mistyped → refuse with a `Did you mean` list; 2+ →
+  // ambiguous) — the SAME refusal shape as the other families.
+  async function opDelete(args: { id?: number; name?: string }): Promise<ToolResult> {
+      const { id, name } = args;
+      if (id == null && (name == null || name === "")) {
+        return err("Pass `id` (numeric) or `name` (fuzzy) to identify the rule.");
+      }
+      let ruleId = id;
+      let ruleName: string | null = null;
+      if (ruleId == null) {
+        const rawRules = await q(db, sql`SELECT id, name FROM transaction_rules WHERE user_id = ${userId}`);
+        // Decrypt each rule's name (name column is encrypted post-2026-06-01).
+        const options: Row[] = rawRules.map((r) => ({
+          id: Number(r.id),
+          name: decryptRuleFields(dek, { name: String(r.name ?? "") }).name ?? String(r.name ?? ""),
+        }));
+        const out = resolveOrReport("rule", resolveEntity({ entity: "rule", name, options }));
+        if ("report" in out) return out.report;
+        ruleId = out.id;
+        ruleName = options.find((o) => Number(o.id) === ruleId)?.name ?? null;
+      }
+      const existing = await q(db, sql`SELECT id, name FROM transaction_rules WHERE id = ${ruleId} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Rule #${ruleId} not found`);
+      if (ruleName == null) {
+        ruleName = decryptRuleFields(dek, { name: String(existing[0].name ?? "") }).name ?? String(existing[0].name ?? "");
+      }
+      await db.execute(sql`DELETE FROM transaction_rules WHERE id = ${ruleId} AND user_id = ${userId}`);
+      return text({ success: true, data: { id: ruleId, message: `Rule "${ruleName}" deleted` } });
   }
 
 
@@ -633,7 +658,8 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
       }),
       z.object({
         op: z.literal("delete"),
-        id: z.number().describe("Rule id"),
+        id: z.number().int().positive().optional().describe("Rule FK fast-path — wins over the fuzzy `name`. Pass this OR `name`."),
+        name: z.string().optional().describe("Rule name (fuzzy matched — mistyped/unmatched is REFUSED with a `Did you mean` list; 2+ → ambiguous). Rule names are auto-synthesized ('Match \"X\" → Category'); prefer `id` when known."),
       }),
       z.object({
         op: z.literal("list").describe("List all rules."),
@@ -701,8 +727,11 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
   registerAlias(
     server,
     "delete_rule",
-    "Delete a transaction rule by id",
-    { id: z.number().describe("Rule id") },
+    "Delete a transaction rule by id or name (FINLYNQ-273 — `name` resolves via the shared envelope; `id` fast-path wins).",
+    {
+      id: z.number().int().positive().optional().describe("Rule FK fast-path — wins over `name`. Pass this OR `name`."),
+      name: z.string().optional().describe("Rule name (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous)."),
+    },
     async (args) => opDelete(args),
   );
   registerAlias(

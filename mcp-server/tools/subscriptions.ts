@@ -235,15 +235,31 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
       return text({ success: true, data: { id, message: `Subscription #${id} updated (${updates.length} field(s))` } });
   }
 
-  // ── op: delete — lifted VERBATIM from delete_subscription ──────────────────
-  async function opDelete(args: { id: number }): Promise<ToolResult> {
-      const { id } = args;
-      const existing = await q(db, sql`SELECT id, name_ct FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
-      if (!existing.length) return err(`Subscription #${id} not found`);
+  // ── op: delete — id OR resolver name (FINLYNQ-273) ─────────────────────────
+  // Was id-only. Subscription names live in `name_ct` (decryptable), so a name
+  // path resolves through the shared envelope (id fast-path wins; mistyped →
+  // refuse with a `Did you mean` list; 2+ → ambiguous) — the SAME refusal shape
+  // as goals/holdings/categories.
+  async function opDelete(args: { id?: number; name?: string }): Promise<ToolResult> {
+      const { id, name } = args;
+      if (id == null && (name == null || name === "")) {
+        return err("Pass `id` (numeric) or `name` (fuzzy) to identify the subscription.");
+      }
+      let subId = id;
+      if (subId == null) {
+        if (!dek) return err("Cannot resolve subscription by name without an unlocked DEK (Stream D Phase 4). Pass `id` instead.");
+        const rawSubs = await q(db, sql`SELECT id, name_ct FROM subscriptions WHERE user_id = ${userId}`);
+        const allSubs = decryptNameish(rawSubs, dek);
+        const out = resolveOrReport("subscription", resolveEntity({ entity: "subscription", name, options: allSubs }));
+        if ("report" in out) return out.report;
+        subId = out.id;
+      }
+      const existing = await q(db, sql`SELECT id, name_ct FROM subscriptions WHERE id = ${subId} AND user_id = ${userId}`);
+      if (!existing.length) return err(`Subscription #${subId} not found`);
       // Stream D Phase 4: name plaintext dropped — decrypt name_ct via DEK.
       const decryptedName = existing[0].name_ct && dek ? decryptField(dek, String(existing[0].name_ct)) : null;
-      await db.execute(sql`DELETE FROM subscriptions WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, data: { id, message: `Subscription "${decryptedName ?? `#${id}`}" deleted` } });
+      await db.execute(sql`DELETE FROM subscriptions WHERE id = ${subId} AND user_id = ${userId}`);
+      return text({ success: true, data: { id: subId, message: `Subscription "${decryptedName ?? `#${subId}`}" deleted` } });
   }
 
   // ── opSummary — lifted VERBATIM from get_subscription_summary (was reads.ts) ─
@@ -571,7 +587,8 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
       }),
       z.object({
         op: z.literal("delete"),
-        id: z.number().describe("Subscription id"),
+        id: z.number().int().positive().optional().describe("Subscription FK fast-path — wins over the fuzzy `name`. Pass this OR `name`."),
+        name: z.string().optional().describe("Subscription name (fuzzy matched — mistyped/unmatched is REFUSED with a `Did you mean` list; 2+ → ambiguous). Requires an unlocked DEK. Pass `id` instead when no DEK is available."),
       }),
       z.object({
         op: z.literal("list"),
@@ -671,8 +688,11 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
   registerAlias(
     server,
     "delete_subscription",
-    "Permanently delete a subscription by id",
-    { id: z.number().describe("Subscription id") },
+    "Permanently delete a subscription by id or name (FINLYNQ-273 — `name` resolves via the shared envelope; `id` fast-path wins).",
+    {
+      id: z.number().int().positive().optional().describe("Subscription FK fast-path — wins over `name`. Pass this OR `name`."),
+      name: z.string().optional().describe("Subscription name (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Requires an unlocked DEK."),
+    },
     async (args) => opDelete(args),
   );
   registerAlias(

@@ -10,8 +10,8 @@ import {
   q,
   text,
   err,
-  suggestionList,
   resolveEntity,
+  formatResolveFailure,
   decryptNameish,
   type Row,
   type DbLike,
@@ -63,14 +63,11 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
       // FINLYNQ-267: resolve via the shared envelope — a mistyped/unmatched name
       // is REFUSED and a 2+ match returns an ambiguous list (was `fuzzyFind`
       // silent-first). `id` above is the FK fast-path.
+      // FINLYNQ-273: render the refusal via the shared formatter so category
+      // not_found/ambiguous read IDENTICALLY to goals/holdings (candidates WITH
+      // ids in both cases — was `suggestionList` names-only, no ids).
       const env = resolveEntity({ entity: "category", name, options: allCats });
-      if (env.status === "ambiguous") {
-        const list = env.candidates.map((c) => `"${c.name}" (id=${c.id})`).join(", ");
-        return err(`Category is ambiguous — ${env.candidates.length} matches: ${list}. Pass id to disambiguate.`);
-      }
-      if (env.status === "not_found") {
-        return err(`Category "${name}" not found. Did you mean: ${suggestionList(name!, allCats)}?`);
-      }
+      if (env.status !== "resolved") return err(formatResolveFailure("category", env)!);
       cat = allCats.find((c) => Number(c.id) === env.id) ?? null;
     }
     if (!cat) return err(`Category "${name}" not found.`);
@@ -199,14 +196,10 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
     const allCats = decryptNameish(rawCats, dek);
     // FINLYNQ-267 shared envelope — id fast-path handled above; a mistyped name
     // is REFUSED and a 2+ match ABORTS with the ambiguous candidate list.
+    // FINLYNQ-273: unify the refusal message with goals/holdings via the shared
+    // formatter (candidates WITH ids for both ambiguous + not_found).
     const env = resolveEntity({ entity: "category", name, options: allCats });
-    if (env.status === "ambiguous") {
-      const list = env.candidates.map((c) => `"${c.name}" (id=${c.id})`).join(", ");
-      throw new PreviewAbortError(`Category is ambiguous — ${env.candidates.length} matches: ${list}. Pass id to disambiguate.`);
-    }
-    if (env.status === "not_found") {
-      throw new PreviewAbortError(`Category "${name}" not found. Did you mean: ${suggestionList(name!, allCats)}?`);
-    }
+    if (env.status !== "resolved") throw new PreviewAbortError(formatResolveFailure("category", env)!);
     const cat = allCats.find((c) => Number(c.id) === env.id);
     if (!cat) throw new PreviewAbortError(`Category "${name}" not found.`);
     return cat;
@@ -443,8 +436,8 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
       }),
       z.object({
         op: z.literal("delete"),
-        id: z.number().int().positive().optional().describe("Category FK (categories.id). Exact match — preferred. Required on the COMMIT call (with `confirmation_token`)."),
-        name: z.string().optional().describe("Category name (fuzzy matched). Preview-only; requires an unlocked DEK. Pass `id` instead when no DEK is available."),
+        id: z.number().int().positive().optional().describe("Category FK (categories.id). Exact match — preferred. Required on the COMMIT call unless `name` is passed."),
+        name: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED with a `Did you mean` list; 2+ → ambiguous). Accepted on BOTH preview and commit (FINLYNQ-273 — the token binds the resolved id, so a name on commit is just routing). Requires an unlocked DEK. Pass `id` instead when no DEK is available."),
         confirmation_token: z.string().optional().describe("Token from the preview call for this exact id. Omit to preview; pass verbatim to commit. Single-use; 5-minute TTL."),
       }),
     ]),
@@ -454,8 +447,24 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
       if (input.op === "merge") return mergeHandler({ source: input.source, target: input.target, confirmation_token: input.confirmation_token });
       // delete: token present → commit; absent → preview.
       if (input.confirmation_token) {
-        if (input.id == null) return err("Pass `id` (numeric) with `confirmation_token` to commit the delete.");
-        return opDeleteCommit({ id: input.id, confirmation_token: input.confirmation_token });
+        // FINLYNQ-273 — the COMMIT accepts a resolver `name` (the token binds the
+        // resolved id, so name-on-commit is pure routing). id fast-path wins;
+        // else resolve the name → id via the SAME path the preview used.
+        let commitId = input.id;
+        if (commitId == null) {
+          if (input.name == null || input.name === "") {
+            return err("Pass `id` (numeric) or `name` with `confirmation_token` to commit the delete.");
+          }
+          let cat: Row;
+          try {
+            cat = await resolveCategoryStrictOrAbort({ name: input.name });
+          } catch (e) {
+            if (e instanceof PreviewAbortError) return err(e.message);
+            throw e;
+          }
+          commitId = Number(cat.id);
+        }
+        return opDeleteCommit({ id: commitId, confirmation_token: input.confirmation_token });
       }
       return opDeletePreview({ id: input.id, name: input.name });
     },
