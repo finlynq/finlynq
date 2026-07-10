@@ -48,6 +48,64 @@ interface AttachmentListResponse {
 
 const RESEND_API_BASE = "https://api.resend.com";
 
+/**
+ * Fetch the body (text/html) of a Resend Inbound email via the HTTP API.
+ *
+ * Resend's `email.received` webhook payload carries metadata only — NOT the
+ * message body (serverless body-size limits; see receiving docs). So for any
+ * inbound routed through Resend (e.g. info@ → /admin/inbox) we fetch the body
+ * separately from `GET /emails/receiving/{id}` → { text, html, ... }.
+ *
+ * Returns { text: null, html: null } (with a warn log) when RESEND_API_KEY is
+ * missing or any HTTP step fails, so the caller degrades to whatever the
+ * payload carried rather than throwing.
+ */
+export async function fetchResendReceivedBody(
+  resendEmailId: string,
+): Promise<{ text: string | null; html: string | null }> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn(
+      `[email-webhook] RESEND_API_KEY not set — cannot fetch body for ${resendEmailId}`,
+    );
+    return { text: null, html: null };
+  }
+
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `${RESEND_API_BASE}/emails/receiving/${encodeURIComponent(resendEmailId)}`,
+      { headers: { Authorization: `Bearer ${apiKey}` } },
+    );
+  } catch (e) {
+    console.warn(`[email-webhook] get-received-email network error for ${resendEmailId}:`, e);
+    return { text: null, html: null };
+  }
+
+  if (!resp.ok) {
+    console.warn(
+      `[email-webhook] get-received-email returned HTTP ${resp.status} for ${resendEmailId}`,
+    );
+    return { text: null, html: null };
+  }
+
+  try {
+    const body = (await resp.json()) as {
+      text?: unknown;
+      html?: unknown;
+      data?: { text?: unknown; html?: unknown };
+    };
+    const src = body.data && typeof body.data === "object" ? body.data : body;
+    return {
+      text: typeof src.text === "string" ? src.text : null,
+      html: typeof src.html === "string" ? src.html : null,
+    };
+  } catch (e) {
+    console.warn(`[email-webhook] get-received-email JSON parse error for ${resendEmailId}:`, e);
+    return { text: null, html: null };
+  }
+}
+
 export async function fetchResendAttachments(
   resendEmailId: string,
 ): Promise<ResendAttachment[]> {

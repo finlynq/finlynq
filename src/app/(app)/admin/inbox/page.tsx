@@ -26,7 +26,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Inbox, Trash2, RefreshCw, ArrowUpFromLine, CheckCircle2 } from "lucide-react";
+import { Inbox, Trash2, RefreshCw, ArrowUpFromLine, CheckCircle2, Send } from "lucide-react";
 
 interface InboxRow {
   id: string;
@@ -59,6 +59,10 @@ export default function AdminInboxPage() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<InboxDetail | null>(null);
   const [acting, setActing] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [replyError, setReplyError] = useState<string | null>(null);
+  const [replySent, setReplySent] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -80,6 +84,9 @@ export default function AdminInboxPage() {
   const openDetail = useCallback(async (id: string) => {
     setOpenId(id);
     setDetail(null);
+    setReplyText("");
+    setReplyError(null);
+    setReplySent(false);
     try {
       const res = await fetch(`/api/admin/inbox/${id}`);
       const data = await res.json();
@@ -91,7 +98,37 @@ export default function AdminInboxPage() {
     }
   }, []);
 
-  const closeDetail = () => { setOpenId(null); setDetail(null); };
+  const closeDetail = () => {
+    setOpenId(null);
+    setDetail(null);
+    setReplyText("");
+    setReplyError(null);
+    setReplySent(false);
+  };
+
+  const sendReply = useCallback(async (id: string) => {
+    const body = replyText.trim();
+    if (!body) return;
+    setSending(true);
+    setReplyError(null);
+    try {
+      const res = await fetch(`/api/admin/inbox/${id}/reply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to send reply");
+      setReplySent(true);
+      setReplyText("");
+      // Reflect the now-triaged state in the list without closing the panel.
+      load();
+    } catch (e) {
+      setReplyError(e instanceof Error ? e.message : "Failed to send reply");
+    } finally {
+      setSending(false);
+    }
+  }, [replyText, load]);
 
   const markTriaged = useCallback(async (id: string) => {
     setActing(true);
@@ -253,6 +290,43 @@ export default function AdminInboxPage() {
                     <p className="p-6 text-sm text-muted-foreground text-center">(no body content)</p>
                   )}
                 </div>
+
+                {detail.category === "mailbox" && (
+                  <div className="space-y-2 pt-1">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Reply to <span className="font-mono">{detail.fromAddress}</span>
+                      <span className="text-muted-foreground/70"> · sends from {detail.toAddress}</span>
+                    </label>
+                    <textarea
+                      value={replyText}
+                      onChange={(e) => {
+                        setReplyText(e.target.value);
+                        if (replySent) setReplySent(false);
+                      }}
+                      rows={5}
+                      maxLength={50000}
+                      placeholder={`Write your reply…`}
+                      disabled={sending}
+                      className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
+                    />
+                    {replyError && <p className="text-xs text-rose-700">{replyError}</p>}
+                    {replySent && (
+                      <p className="text-xs text-emerald-700 flex items-center gap-1">
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Reply sent.
+                      </p>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        onClick={() => sendReply(detail.id)}
+                        disabled={sending || !replyText.trim()}
+                      >
+                        <Send className={`h-4 w-4 mr-1.5 ${sending ? "animate-pulse" : ""}`} />
+                        {sending ? "Sending…" : "Send reply"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex items-center gap-2 pt-1">
                   {!detail.triagedAt && (

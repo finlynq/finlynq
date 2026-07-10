@@ -17,6 +17,14 @@ export interface EmailMessage {
   subject: string;
   html: string;
   text?: string;
+  /**
+   * Optional sender override. Defaults to EMAIL_FROM. MUST be on a
+   * Resend-verified domain (finlynq.com) or Resend 403s the send — callers that
+   * set this (the admin contact-inbox reply) validate the domain first.
+   */
+  from?: string;
+  /** Optional Reply-To header. Used so a reply to our reply threads back to the mailbox address. */
+  replyTo?: string;
 }
 
 export interface EmailTransport {
@@ -71,11 +79,12 @@ function createSmtpTransport(): EmailTransport {
       });
 
       await transporter.sendMail({
-        from: process.env.EMAIL_FROM || "noreply@finlynq.com",
+        from: message.from || process.env.EMAIL_FROM || "noreply@finlynq.com",
         to: message.to,
         subject: message.subject,
         html: message.html,
         text: message.text,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
       });
     },
   };
@@ -101,11 +110,12 @@ function createResendTransport(): EmailTransport {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: process.env.EMAIL_FROM || "Finlynq <noreply@finlynq.com>",
+          from: message.from || process.env.EMAIL_FROM || "Finlynq <noreply@finlynq.com>",
           to: message.to,
           subject: message.subject,
           html: message.html,
           text: message.text,
+          ...(message.replyTo ? { reply_to: message.replyTo } : {}),
         }),
       });
       if (!res.ok) {
@@ -411,5 +421,73 @@ export function feedbackReplyNotificationEmail(opts: {
     subject: `[Finlynq feedback] reply on #${opts.feedbackId}`,
     html,
     text: `New reply on feedback #${opts.feedbackId} (${opts.feedbackType || "feedback"}) from ${opts.userLabel || opts.userId}:\n\n${opts.body}`,
+  };
+}
+
+/**
+ * Admin reply to a contact-inbox email (/admin/inbox). This is a person-to-
+ * person reply from the maintainer to an external sender, so it deliberately
+ * does NOT use the marketing `baseLayout` (dark header / footer) — it renders
+ * as a plain, professional email. The admin's reply body + the (optional)
+ * quoted original are user-derived → escaped. The caller sets `from` (the
+ * verified mailbox address, e.g. "Finlynq <info@finlynq.com>") + `replyTo`.
+ */
+export function contactReplyEmail(opts: {
+  to: string;
+  from: string;
+  replyTo?: string;
+  subject: string;
+  replyBody: string;
+  original?: {
+    fromAddress: string;
+    receivedAt?: string | null;
+    bodyText?: string | null;
+  };
+}): EmailMessage {
+  const safeReply = escapeHtml(opts.replyBody).replace(/\n/g, "<br>");
+
+  let quotedHtml = "";
+  let quotedText = "";
+  if (opts.original) {
+    const when = opts.original.receivedAt
+      ? new Date(opts.original.receivedAt).toLocaleString()
+      : "earlier";
+    const safeWhen = escapeHtml(when);
+    const safeFrom = escapeHtml(opts.original.fromAddress);
+    const origBody = (opts.original.bodyText || "").trim();
+    const safeOrigBody = escapeHtml(origBody).replace(/\n/g, "<br>");
+    quotedHtml = `
+      <div style="margin-top:24px;padding-left:12px;border-left:3px solid #e4e4e7;color:#71717a;font-size:13px;line-height:1.6">
+        <p style="margin:0 0 8px">On ${safeWhen}, ${safeFrom} wrote:</p>
+        ${safeOrigBody ? `<div style="white-space:pre-wrap">${safeOrigBody}</div>` : "<em>(no message body)</em>"}
+      </div>`;
+    quotedText = `\n\n---\nOn ${when}, ${opts.original.fromAddress} wrote:\n${
+      origBody
+        ? origBody
+            .split("\n")
+            .map((l) => `> ${l}`)
+            .join("\n")
+        : "> (no message body)"
+    }`;
+  }
+
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:24px;background:#ffffff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#18181b;font-size:14px;line-height:1.6">
+  <div style="max-width:600px;margin:0 auto">
+    <div style="white-space:pre-wrap">${safeReply}</div>
+    ${quotedHtml}
+  </div>
+</body>
+</html>`;
+
+  return {
+    to: opts.to,
+    from: opts.from,
+    ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+    subject: opts.subject,
+    html,
+    text: `${opts.replyBody}${quotedText}`,
   };
 }

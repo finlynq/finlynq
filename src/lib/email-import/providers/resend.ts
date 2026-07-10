@@ -14,7 +14,7 @@ import {
   verifySvixSignature,
   SvixVerifyError,
 } from "@/lib/webhooks/svix";
-import { fetchResendAttachments } from "../fetch-resend-attachments";
+import { fetchResendAttachments, fetchResendReceivedBody } from "../fetch-resend-attachments";
 import type { ResendAttachment } from "../parse-attachments";
 import type {
   AuthResult,
@@ -55,10 +55,15 @@ class ResendProvider implements InboundEmailProvider {
   }
 
   async fetchContent(messageId: string): Promise<InboundContent> {
-    // Resend inlines body text/html in the webhook payload but NOT attachment
-    // bytes — only attachments need fetching.
-    const attachments = await fetchResendAttachments(messageId);
-    return { text: null, html: null, attachments };
+    // Resend's `email.received` webhook is metadata-only — NEITHER the body nor
+    // the attachment bytes are inlined. Fetch both from the HTTP API. (Called by
+    // `enrichInbound` only when the payload didn't already carry text/html —
+    // harmless if a future Resend payload does inline them.)
+    const [{ text, html }, attachments] = await Promise.all([
+      fetchResendReceivedBody(messageId),
+      fetchResendAttachments(messageId),
+    ]);
+    return { text, html, attachments };
   }
 
   async deleteReceived(): Promise<void> {

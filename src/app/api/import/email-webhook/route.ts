@@ -43,6 +43,7 @@ import { deserializeTemplate, findBestTemplate, autoDetectColumnMapping } from "
 import { unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { getInboundProvider } from "@/lib/email-import/providers";
+import { resendProvider } from "@/lib/email-import/providers/resend";
 import { ingestInboundEmail } from "@/lib/email-import/ingest";
 
 // Request-body cap on the JSON path. The DevManager push relay inlines
@@ -71,7 +72,18 @@ async function handleProviderInbound(request: NextRequest): Promise<NextResponse
     return NextResponse.json({ error: "Payload too large" }, { status: 413 });
   }
 
-  const provider = getInboundProvider();
+  // Content-negotiate the provider by transport signature rather than binding
+  // the single configured provider. The self-smtp DevManager relay carries an
+  // `x-webhook-secret`/HMAC and NO svix headers; Resend Inbound is svix-signed.
+  // So a svix-signed request is verified by the Resend provider even when the
+  // deployment's default provider is self-smtp — this is what lets info@ mail
+  // routed through Resend Inbound reach /admin/inbox without flipping the global
+  // INBOUND_EMAIL_PROVIDER (which would break the mail.finlynq.com import path).
+  // A request with no svix headers keeps the exact pre-existing behavior.
+  const hasSvix = !!(
+    request.headers.get("svix-signature") || request.headers.get("svix-id")
+  );
+  const provider = hasSvix ? resendProvider : getInboundProvider();
 
   // Read the raw body once — svix (Resend) needs the exact bytes for the HMAC.
   const rawBody = await request.text();
