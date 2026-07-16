@@ -148,7 +148,11 @@ describe("record_transaction refuses investment accounts", () => {
     );
     const txt = bodyText(res);
     expect(txt).toMatch(/investment account/i);
-    expect(txt).toMatch(/portfolio_buy/);
+    // FINLYNQ-282: the refusal now points at the v4 consolidated tool, not the
+    // retired per-verb portfolio_* names (which are hidden aliases absent from
+    // tools/list).
+    expect(txt).toMatch(/portfolio_record_entry/);
+    expect(txt).toMatch(/entry_type/);
     expect(createTransactionSpy).not.toHaveBeenCalled();
   });
 
