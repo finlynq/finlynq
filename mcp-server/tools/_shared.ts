@@ -12,6 +12,7 @@
  */
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import type { Toolset } from "../../src/lib/mcp/toolsets";
 import { normalizeDbRows } from "../../src/lib/db-utils";
 import { decryptField } from "../../src/lib/crypto/envelope";
 import { encryptName, nameLookup } from "../../src/lib/crypto/encrypted-columns";
@@ -41,6 +42,15 @@ export interface PgToolContext {
   /** Phase 2 (2026-06-01) note-column encrypt/decrypt helpers (DEK-bound). */
   encNote: (v: string | null | undefined) => string;
   decNote: (v: string | null | undefined) => string | null;
+  /**
+   * The toolsets enabled for THIS MCP connection (FINLYNQ-271). Threaded from
+   * the HTTP route so a handler can tell whether the caller can act on what it
+   * reports — `get_reconciliation_summary` uses it to attach an `enableHint`
+   * when the import-pipeline cohort is still scope-gated. OPTIONAL: absent (on
+   * stdio + registration-only tests) means "assume all toolsets enabled", so
+   * those surfaces stay byte-identical (no hint).
+   */
+  enabledToolsets?: ReadonlySet<Toolset>;
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

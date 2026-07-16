@@ -2,8 +2,9 @@
  * FINLYNQ-263 (child A) — toolset-registry assertion.
  *
  * Every registered tool must map to exactly one toolset, and the
- * `import-pipeline` set must have exactly the enumerated 25 members (11 imports
- * + 14 reconcile). This is the tripwire that keeps `src/lib/mcp/toolsets.ts`
+ * `import-pipeline` set must have exactly the enumerated 24 members (11 imports
+ * + 13 reconcile; get_reconciliation_summary lives in analytics — FINLYNQ-271).
+ * This is the tripwire that keeps `src/lib/mcp/toolsets.ts`
  * from drifting from the registered surface — a new reconcile/import tool added
  * without an entry, or a stale entry naming a removed tool, fails here.
  *
@@ -60,11 +61,21 @@ describe("MCP toolset registry (FINLYNQ-263)", () => {
     expect(stale, `stale import-pipeline entries: ${stale.join(", ")}`).toEqual([]);
   });
 
-  it("the live import-pipeline set is exactly the 25 enumerated tools", () => {
+  it("the live import-pipeline set is exactly the 24 enumerated tools", () => {
     const live = names.filter((n) => toolsetForTool(n) === "import-pipeline").sort();
     const expected = [...IMPORT_PIPELINE_TOOLS].sort();
     expect(live).toEqual(expected);
-    expect(expected.length).toBe(25);
+    expect(expected.length).toBe(24);
+  });
+
+  it("get_reconciliation_summary is in the default analytics profile (FINLYNQ-271)", () => {
+    expect(toolsetForTool("get_reconciliation_summary")).toBe("analytics");
+    expect(IMPORT_PIPELINE_TOOLS.has("get_reconciliation_summary")).toBe(false);
+    expect(
+      isToolInEnabledToolsets("get_reconciliation_summary", DEFAULT_TOOLSETS),
+    ).toBe(true);
+    // The write cohort stays gated.
+    expect(isToolInEnabledToolsets("upload_statement", DEFAULT_TOOLSETS)).toBe(false);
   });
 
   it("default toolsets hide import-pipeline but expose analytics + ledger-write", () => {

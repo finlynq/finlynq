@@ -10,6 +10,9 @@
 // FINLYNQ-265 (child C): get_loans retired from the advertised list (hidden alias
 // of list_loans, still callable): 76 → 75. get_portfolio_performance_v2 → renamed
 // get_portfolio_returns (old name a hidden alias) is net-0 advertised.
+// FINLYNQ-271: get_reconciliation_summary moved from the import-pipeline toolset
+// into the default analytics profile — no tool added/removed, so `http` stays 75;
+// only the DEFAULT-PROFILE tools/list membership grows 50 → 51.
 export const MCP_TOOL_COUNTS = { http: 75, stdio: 93 } as const;
 // 4.0.0 (FINLYNQ-263): MCP surface v4 — CRUD consolidation + session-scoped
 // toolsets. The 117 per-verb HTTP tools collapse into discriminated-union

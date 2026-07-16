@@ -11,9 +11,13 @@
  *   - `ledger-write`    — record/update/delete ledger + portfolio + config
  *                         writes (default-ON).
  *   - `import-pipeline` — the statement-import + bank-reconcile cohort (the 11
- *                         imports + 14 reconcile tools). Default-OFF; surfaced
+ *                         imports + 13 reconcile tools). Default-OFF; surfaced
  *                         on demand via the `mcp:import` OAuth scope or a
  *                         connection-level setting (see oauth-scopes.ts).
+ *                         `get_reconciliation_summary` was LIFTED OUT of this
+ *                         set into `analytics` (FINLYNQ-271) so a default-profile
+ *                         agent can discover reconcile state + surface an
+ *                         `enableHint` prompting the user to grant `mcp:import`.
  *   - `admin`           — reserved (no user-facing connector tools today).
  *
  * SINGLE SOURCE OF TRUTH: the `import-pipeline` set is enumerated EXPLICITLY
@@ -43,13 +47,19 @@ export const DEFAULT_TOOLSETS: ReadonlySet<Toolset> = new Set<Toolset>([
 ]);
 
 /**
- * The statement-import + bank-reconcile cohort. These 25 tools (11 imports + 14
+ * The statement-import + bank-reconcile cohort. These 24 tools (11 imports + 13
  * reconcile, FINLYNQ-150/207/208/213–221) are the newest, most invariant-dense
  * write tools; A leaves them 1:1 and gates them behind this set rather than
  * folding them. Enumerated explicitly — a name-only heuristic can't tell
  * `apply_rules_to_bank_rows` (import-pipeline) from `apply_rules_to_uncategorized`
- * (ledger-write), and the reconcile reads (`get_reconcile_suggestions`) belong
+ * (ledger-write), and most reconcile reads (`get_reconcile_suggestions`) belong
  * with their cohort, not with `analytics`.
+ *
+ * EXCEPTION (FINLYNQ-271): `get_reconciliation_summary` is deliberately NOT in
+ * this set — it is a cheap read-only portfolio-wide health call that lives in
+ * the default `analytics` profile so an agent can discover reconcile state
+ * before any `mcp:import` grant (and its response carries an `enableHint`
+ * pointing the user at the grant when the write cohort is still gated).
  */
 export const IMPORT_PIPELINE_TOOLS: ReadonlySet<string> = new Set<string>([
   // imports.ts (11)
@@ -64,10 +74,9 @@ export const IMPORT_PIPELINE_TOOLS: ReadonlySet<string> = new Set<string>([
   "link_staged_transfer_pair",
   "approve_staged_rows",
   "reject_staged_import",
-  // reconcile.ts (14)
+  // reconcile.ts (13) — get_reconciliation_summary intentionally omitted (→ analytics, FINLYNQ-271)
   "get_reconcile_suggestions",
   "find_duplicate_bank_rows",
-  "get_reconciliation_summary",
   "delete_bank_transaction",
   "get_balance_anchors",
   "upsert_balance_anchor",

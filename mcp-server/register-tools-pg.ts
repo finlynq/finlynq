@@ -17,6 +17,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { encryptField, tryDecryptField } from "../src/lib/crypto/envelope";
 import type { DbLike, PgToolContext } from "./tools/_shared";
+import type { Toolset } from "../src/lib/mcp/toolsets";
 
 // Per-group tool registrars (FINLYNQ-109).
 import { registerReadsTools } from "./tools/reads";
@@ -41,7 +42,12 @@ export function registerPgTools(
   server: McpServer,
   db: DbLike,
   userId: string,
-  dek: Buffer | null = null
+  dek: Buffer | null = null,
+  // FINLYNQ-271 — the session's enabled toolsets, threaded from the HTTP route
+  // so read handlers (get_reconciliation_summary) can attach an enableHint when
+  // the import-pipeline write cohort is still scope-gated. Undefined on stdio +
+  // registration-only tests ⇒ treated as all-enabled (no hint).
+  enabledToolsets?: ReadonlySet<Toolset>,
 ) {
   // Phase 2 (2026-06-01) — free-text note/notes columns are user-DEK encrypted
   // at rest. DEK is in scope for every HTTP tool (same as the transaction-note
@@ -56,7 +62,7 @@ export function registerPgTools(
     return tryDecryptField(dek, v) ?? v;
   };
 
-  const ctx: PgToolContext = { db, userId, dek, encNote, decNote };
+  const ctx: PgToolContext = { db, userId, dek, encNote, decNote, enabledToolsets };
 
   registerReadsTools(server, ctx);
   registerAccountsTools(server, ctx);

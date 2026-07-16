@@ -85,7 +85,7 @@ import {
 } from "../../src/lib/bank-ledger-balance";
 
 export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
-  const { db, userId, dek } = ctx;
+  const { db, userId, dek, enabledToolsets } = ctx;
 
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -311,7 +311,7 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
   // is HTTP-only / DEK-required. readOnlyHint is inferred from the get_ prefix.
   server.tool(
     "get_reconciliation_summary",
-    "Summarize reconcile health across all accounts in one call (instead of one get_reconcile_suggestions per account). Returns an array of { accountId, accountName, linked, suggestions, bankOnly, txOnly, balanceMismatch, balanceDelta?, lastAnchorDate?, currency } — one row per account. balanceDelta = system/ledger balance − bank statement balance (the same delta the /import reconcile header shows; positive ⇒ ledger says MORE than the statement; null when the account has no balance anchor yet). Omit accountIds to summarize ALL non-investment accounts (investment reconcile is out of scope); pass accountIds to scope it (owner-scoped). Counts only — drill into a specific account with get_reconcile_suggestions. Read-only. Requires an unlocked DEK (payees are decrypted to score fuzzy matches; account names are decrypted).",
+    "Summarize reconcile health across all accounts in one call (instead of one get_reconcile_suggestions per account). Returns rollups-first { totals: { accounts, withSuggestions, withBankOnly, withBalanceMismatch }, accounts: [{ accountId, accountName, linked, suggestions, bankOnly, txOnly, balanceMismatch, balanceDelta?, lastAnchorDate?, currency }] }. balanceDelta = ledger balance − bank statement balance (positive ⇒ ledger says MORE; null when no anchor yet). When unreconciled deltas exist AND the import/reconcile tools are NOT enabled this session, also carries enableHint.needsScope='mcp:import' so you can ask the user to grant it. Omit accountIds for ALL non-investment accounts; pass accountIds to scope (owner-scoped). Read-only. Requires an unlocked DEK (payees + account names are decrypted).",
     {
       accountIds: z
         .array(z.number().int().positive())
@@ -367,8 +367,42 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
         }
       }
 
+      const accounts = rows.map((r) => ({
+        ...r,
+        accountName: nameById.get(r.accountId) ?? null,
+      }));
+
+      // Rollups-first (FINLYNQ-269): counts before the per-account rows.
+      const totals = {
+        accounts: accounts.length,
+        withSuggestions: accounts.filter((a) => a.suggestions > 0).length,
+        withBankOnly: accounts.filter((a) => a.bankOnly > 0).length,
+        withBalanceMismatch: accounts.filter((a) => a.balanceMismatch).length,
+      };
+
+      // FINLYNQ-271 discoverability hook: this tool now lives in the default
+      // analytics profile, so a session that CAN read reconcile health may not
+      // be entitled to ACT on it (the import-pipeline write cohort is gated
+      // behind the mcp:import scope / connection setting). When any account
+      // shows unreconciled work AND that cohort is not enabled this session,
+      // attach an enableHint pointing the user at the grant rather than
+      // dead-ending. `enabledToolsets` is undefined on stdio / registration-only
+      // tests ⇒ treat as all-enabled (no hint).
+      const importEnabled =
+        enabledToolsets == null || enabledToolsets.has("import-pipeline");
+      const hasUnreconciledWork = accounts.some(
+        (a) => a.suggestions > 0 || a.bankOnly > 0 || a.txOnly > 0 || a.balanceMismatch,
+      );
+      const enableHint =
+        !importEnabled && hasUnreconciledWork
+          ? {
+              needsScope: "mcp:import" as const,
+              hint: "Import/reconcile tools are not enabled for this session. Ask the user to grant the mcp:import scope (or enable the import toolset in Settings → Integrations) to act on these deltas.",
+            }
+          : undefined;
+
       return dataResponse(
-        rows.map((r) => ({ ...r, accountName: nameById.get(r.accountId) ?? null })),
+        enableHint ? { totals, accounts, enableHint } : { totals, accounts },
       );
     },
   );

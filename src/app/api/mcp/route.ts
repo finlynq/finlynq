@@ -207,8 +207,11 @@ export async function POST(request: NextRequest) {
   };
 
   const dek = "dek" in auth.context ? auth.context.dek : null;
+  // FINLYNQ-271 — pass the resolved session toolsets so get_reconciliation_summary
+  // (now in the default analytics profile) can attach an enableHint when the
+  // import-pipeline write cohort is still scope-gated for this connection.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  registerPgTools(server, db as any, auth.context.userId, dek);
+  registerPgTools(server, db as any, auth.context.userId, dek, enabledSets);
 
   // Post-process `tools/list`: hide back-compat aliases (callable but not
   // advertised, decision #1) + substitute the pre-computed `oneOf` JSON schema
