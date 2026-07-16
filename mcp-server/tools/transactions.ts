@@ -690,6 +690,10 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       const results: {
         index: number;
         success: boolean;
+        // FINLYNQ-283: the inserted transactions.id on a success row (null on a
+        // failed row). Lets a caller reference just-created rows without a
+        // `search_transactions` round-trip; also survives the replay redaction.
+        transactionId?: number | null;
         message: string;
         // Issue #212: per-row failure code so callers can distinguish
         // sign-vs-category violations from generic resolution errors.
@@ -991,6 +995,12 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           results.push({
             index: i,
             success: true,
+            // FINLYNQ-283 — surface the inserted row id so a caller that just
+            // bulk-recorded can update/split/delete/link it without a
+            // `search_transactions` round-trip + fuzzy re-match (matches the
+            // single-record form at :513). Non-sensitive, so it also survives
+            // the idempotency-replay redaction below (the `{ ...r }` spread).
+            transactionId: newTxId,
             message: `${t.payee}: ${resolved.amount} ${resolved.currency}`,
             resolvedAccount: resolvedAccountInfo,
             resolvedCategory: rowCategory,
