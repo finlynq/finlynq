@@ -62,6 +62,32 @@ export interface RebuildScope {
   accountId: number;
 }
 
+/**
+ * FINLYNQ-280 — classify a `link_id`-paired opposite-sign transaction pair
+ * for the lot rebuild.
+ *
+ * A pair is an IN-KIND transfer (cost-basis carryover via `transferLot`) ONLY
+ * when both legs reference the SAME `portfolio_holding_id` — the exact
+ * condition the engine's `transferLot` guard requires (it throws
+ * `InvalidLinkPairError` on mismatched holdings). Because a holding is
+ * per-(account, security, currency), same-holding ⟹ same currency, so a
+ * DIFFERENT-holding pair is by definition a cross-holding and/or
+ * cross-currency move (a USD-cash → CAD-cash conversion, a cross-account
+ * security move). Those must be replayed as TWO INDEPENDENT close+open legs
+ * (fx-conversion-like), NOT an in-kind `transferLot`. Returns true iff the
+ * pair is a same-holding in-kind transfer.
+ */
+export function isSameHoldingInKindPair(
+  sourceHoldingId: number | null | undefined,
+  siblingHoldingId: number | null | undefined,
+): boolean {
+  return (
+    sourceHoldingId != null &&
+    siblingHoldingId != null &&
+    sourceHoldingId === siblingHoldingId
+  );
+}
+
 /** Column projection shared by the whole-user and scoped tx loads. */
 const TX_LOAD_COLS = {
   id: schema.transactions.id,
@@ -310,6 +336,19 @@ export async function buildLotsForUser(
     const key = keyOf(r.portfolioHoldingId, r.accountId);
 
     // Transfer-pair detection — same link_id with TWO legs, opposite-sign qty.
+    //
+    // FINLYNQ-280: ONLY a SAME-holding pair is an in-kind `transferLot`
+    // (cost-basis carryover). The engine's transferLot guard REQUIRES
+    // identical holdingIds and throws InvalidLinkPairError otherwise, so a
+    // link_id pair whose legs sit on DIFFERENT holdings and/or currencies (a
+    // USD-cash → CAD-cash conversion, a cross-account security move) must NOT
+    // reach transferLot. Such a pair is a cross-currency transfer /
+    // fx-conversion: we DON'T enter the transfer branch and instead let EACH
+    // leg fall through to be visited independently by the main loop — a
+    // cash-sleeve leg through the FINLYNQ-278 close+open cash path, a security
+    // leg through the buy/sell path — i.e. two independent close+open legs.
+    // Same-holding pairs stay byte-identical (still route to transferLot /
+    // defer).
     let isInKindTransfer = false;
     if (r.linkId && (r.quantity ?? 0) !== 0) {
       const peers = byLinkId.get(r.linkId) ?? [];
@@ -319,7 +358,33 @@ export async function buildLotsForUser(
           (p.quantity ?? 0) !== 0 &&
           Math.sign(p.quantity ?? 0) !== Math.sign(r.quantity ?? 0),
       );
-      if (sibling && r.quantity != null && r.quantity < 0) {
+      const sameHoldingInKind =
+        sibling != null &&
+        isSameHoldingInKindPair(
+          r.portfolioHoldingId,
+          sibling.portfolioHoldingId,
+        );
+      if (sibling && !sameHoldingInKind && r.quantity != null && r.quantity < 0) {
+        // Cross-currency / different-holding link_id transfer. Warn ONCE (on
+        // the source, qty<0, leg) for a NON-cash pair, where replaying as
+        // sell+buy loses in-kind cost-basis carryover; a both-cash
+        // fx-conversion is faithfully reproduced by the two independent legs,
+        // so stay silent. Both legs then fall through to be processed
+        // independently (no defer, no processed-mark).
+        const bothCash =
+          r.portfolioHoldingId != null &&
+          cashHoldingIds.has(r.portfolioHoldingId) &&
+          sibling.portfolioHoldingId != null &&
+          cashHoldingIds.has(sibling.portfolioHoldingId);
+        if (!bothCash) {
+          errors.push(
+            `tx ${r.id} (${r.date}): different-holding link_id transfer ` +
+              `(holding ${r.portfolioHoldingId} → ${sibling.portfolioHoldingId}) — ` +
+              `replayed as two independent close+open legs; in-kind cost-basis ` +
+              `carryover not inherited, verify the move.`,
+          );
+        }
+      } else if (sibling && sameHoldingInKind && r.quantity != null && r.quantity < 0) {
         // r is the source (qty<0); sibling is the dest (qty>0).
         const destTxRow: TxRowForLots = {
           id: sibling.id,
@@ -374,9 +439,10 @@ export async function buildLotsForUser(
         }
         processedTransferIds.add(sibling.id);
         isInKindTransfer = true;
-      } else if (sibling && r.quantity != null && r.quantity > 0) {
-        // The dest side is being visited first — defer; the source-side
-        // iteration will handle the pair.
+      } else if (sibling && sameHoldingInKind && r.quantity != null && r.quantity > 0) {
+        // Same-holding in-kind: the dest side is being visited first — defer;
+        // the source-side iteration handles the pair. A DIFFERENT-holding
+        // dest leg is NOT deferred (falls through to process independently).
         processedTransferIds.add(r.id);
         txProcessed++;
         continue;
