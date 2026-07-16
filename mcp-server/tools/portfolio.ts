@@ -196,7 +196,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     cashSleeveHoldingId?: number;
   }): Promise<ToolResult> {
       const { account, account_id, holding, holdingId, qty, totalCost, date, payee, note, tags, cashSleeveHoldingId } = argsObj;
-      if (!dek) return err("portfolio_buy requires an active session DEK — log in again to encrypt the rows.");
+      if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
       if (!a.ok) return err(a.error);
@@ -234,7 +234,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     cashSleeveHoldingId?: number;
   }): Promise<ToolResult> {
       const { account, account_id, holding, holdingId, qty, totalProceeds, date, lotSelection, payee, note, tags, cashSleeveHoldingId } = argsObj;
-      if (!dek) return err("portfolio_sell requires an active session DEK — log in again to encrypt the rows.");
+      if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
       if (!a.ok) return err(a.error);
@@ -269,7 +269,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     note?: string;
   }): Promise<ToolResult> {
       const { account, account_id, sourceHolding, sourceHoldingId, sourceQty, sourceProceeds, destHolding, destHoldingId, destQty, destCost, date, payee, note } = argsObj;
-      if (!dek) return err("portfolio_swap requires an active session DEK — log in again to encrypt the rows.");
+      if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
       if (!a.ok) return err(a.error);
@@ -303,7 +303,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     note?: string;
   }): Promise<ToolResult> {
       const { sourceAccount, sourceAccount_id, destAccount, destAccount_id, holding, holdingId, qty, date, payee, note } = argsObj;
-      if (!dek) return err("portfolio_transfer requires an active session DEK — log in again to encrypt the rows.");
+      if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
       if (!src.ok) return err(src.error);
@@ -339,7 +339,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     tags?: string;
   }): Promise<ToolResult> {
       const { account, account_id, currency, amount, incomeType, relatedHolding, relatedHoldingId, categoryId, date, payee, note, tags } = argsObj;
-      if (!dek) return err("portfolio_income_expense requires an active session DEK — log in again to encrypt the rows.");
+      if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
       if (!a.ok) return err(a.error);
@@ -386,7 +386,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     note?: string;
   }): Promise<ToolResult> {
       const { account, account_id, fromCurrency, fromAmount, toCurrency, toAmount, feeAmount, feeCurrency, feeOnSleeveCurrency, date, payee, note } = argsObj;
-      if (!dek) return err("portfolio_fx_conversion requires an active session DEK — log in again to encrypt the rows.");
+      if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
       if (!a.ok) return err(a.error);
@@ -416,7 +416,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     tags?: string;
   }): Promise<ToolResult> {
       const { sourceAccount, sourceAccount_id, destAccount, destAccount_id, destCashSleeveHoldingId, amount, date, payee, note, tags } = argsObj;
-      if (!dek) return err("portfolio_deposit requires an active session DEK — log in again to encrypt the rows.");
+      if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
       if (!src.ok) return err(src.error);
@@ -448,7 +448,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     tags?: string;
   }): Promise<ToolResult> {
       const { sourceAccount, sourceAccount_id, sourceCashSleeveHoldingId, destAccount, destAccount_id, amount, date, payee, note, tags } = argsObj;
-      if (!dek) return err("portfolio_withdrawal requires an active session DEK — log in again to encrypt the rows.");
+      if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
       if (!src.ok) return err(src.error);
@@ -1132,7 +1132,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_holdings",
-    "Manage portfolio holdings (positions inside a brokerage account): `op` selects add / update / delete. add: create a position (name + account; optional symbol/currency/isCrypto). update: change name/symbol/currency/isCrypto/note (fuzzy `holding`; moving accounts is REFUSED — use portfolio_transfer). delete: TWO-STEP when the holding has transactions/lots (preview counts + token, then commit); a clean holding deletes directly. qty/cost come from transactions, NOT this tool.",
+    "Manage portfolio holdings (positions inside a brokerage account): `op` selects add / update / delete. add: create a position (name + account; optional symbol/currency/isCrypto). update: change name/symbol/currency/isCrypto/note (fuzzy `holding`; moving accounts is REFUSED — use portfolio_record_entry (entry_type: transfer)). delete: TWO-STEP when the holding has transactions/lots (preview counts + token, then commit); a clean holding deletes directly. qty/cost come from transactions, NOT this tool.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("add"),
@@ -1150,7 +1150,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         holdingId: z.number().int().positive().optional().describe("Holding FK fast-path — wins over the fuzzy `holding` name."),
         name: z.string().min(1).max(200).optional().describe("New name"),
         symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
-        account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use portfolio_transfer (in-kind) to move shares between accounts."),
+        account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use portfolio_record_entry (entry_type: transfer) for an in-kind move of shares between accounts."),
         currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
         isCrypto: z.boolean().optional(),
         note: z.string().max(500).optional(),

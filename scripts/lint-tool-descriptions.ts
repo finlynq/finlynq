@@ -35,6 +35,8 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerPgTools } from "../mcp-server/register-tools-pg";
 import type { DbLike } from "../mcp-server/tools/_shared";
@@ -48,6 +50,65 @@ process.env.PF_STAGING_KEY = process.env.PF_STAGING_KEY ?? "lint-staging-key-32c
 const FIRST_60 = 60; // no two tools may share this many opening chars
 const FIRST_SENTENCE_MAX = 120; // first sentence (verb-first opener) ceiling
 const DESCRIPTION_MAX = 900; // whole-description ceiling
+
+// ---- Retired-tool-name denylist (FINLYNQ-282) ------------------------------
+// The 8 per-verb portfolio_* write tools were consolidated into
+// `portfolio_record_entry (entry_type: …)` in the v4.0 surface. They survive
+// only as HIDDEN back-compat aliases (registerAlias) through v4.1 — they are
+// NOT advertised in tools/list, so an error string or tool description that
+// tells an agent to "Use portfolio_buy / …" points at tools the agent can't
+// see. This scan fails on any such reference in the MCP tool source so the
+// FINLYNQ-282 rewrite (→ portfolio_record_entry) can't silently regress.
+//
+// Legitimate mentions are allowlisted (never flagged):
+//   (A) an inline `// lint-allow-retired` marker — prose that documents the
+//       retired names AS still-callable aliases (not as a remedy to call);
+//   (B) a bare `registerAlias` name argument (`"portfolio_buy",`) — the alias
+//       declaration itself;
+//   (C) a finlynq_help docs-object entry KEYED by the retired name
+//       (`portfolio_buy: "…"`) — alias self-documentation looked up by name.
+const RETIRED_REMEDY_NAMES = [
+  "portfolio_buy",
+  "portfolio_sell",
+  "portfolio_swap",
+  "portfolio_transfer",
+  "portfolio_deposit",
+  "portfolio_withdrawal",
+  "portfolio_income_expense",
+  "portfolio_fx_conversion",
+] as const;
+const RETIRED_NAME_RE = new RegExp(`\\b(?:${RETIRED_REMEDY_NAMES.join("|")})\\b`);
+const RETIRED_ALIAS_ARG_RE = new RegExp(`^"(?:${RETIRED_REMEDY_NAMES.join("|")})",?$`);
+const RETIRED_DOCS_KEY_RE = new RegExp(`^(?:${RETIRED_REMEDY_NAMES.join("|")}):`);
+
+/** MCP tool-source files scanned for retired-name references (HTTP + stdio). */
+function retiredScanFiles(): string[] {
+  const toolsDir = join(process.cwd(), "mcp-server", "tools");
+  const files = readdirSync(toolsDir)
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => join("mcp-server", "tools", f));
+  files.push(join("mcp-server", "register-core-tools.ts"));
+  return files;
+}
+
+function scanRetiredNames(): Violation[] {
+  const violations: Violation[] = [];
+  for (const rel of retiredScanFiles()) {
+    const text = readFileSync(join(process.cwd(), rel), "utf8");
+    text.split(/\r?\n/).forEach((line, i) => {
+      if (!RETIRED_NAME_RE.test(line)) return;
+      if (line.includes("lint-allow-retired")) return; // (A)
+      const trimmed = line.trim();
+      if (RETIRED_ALIAS_ARG_RE.test(trimmed)) return; // (B)
+      if (RETIRED_DOCS_KEY_RE.test(trimmed)) return; // (C)
+      violations.push({
+        code: "retired_tool_name",
+        detail: `${rel.replace(/\\/g, "/")}:${i + 1} names a retired portfolio_* tool — use "portfolio_record_entry (entry_type: …)": ${trimmed.slice(0, 120)}`,
+      });
+    });
+  }
+  return violations;
+}
 
 type RegisteredTool = { description?: string };
 
@@ -125,12 +186,13 @@ function lint(registry: Map<string, string>): Violation[] {
 
 function main(): void {
   const registry = collectRegistry();
-  const violations = lint(registry);
+  const violations = [...lint(registry), ...scanRetiredNames()];
 
   if (violations.length === 0) {
     console.log(
       `lint-tool-descriptions: OK — ${registry.size} HTTP tools, no first-${FIRST_60}-char collisions, ` +
-        `all first sentences ≤${FIRST_SENTENCE_MAX} chars, all descriptions ≤${DESCRIPTION_MAX} chars.`
+        `all first sentences ≤${FIRST_SENTENCE_MAX} chars, all descriptions ≤${DESCRIPTION_MAX} chars, ` +
+        `no retired portfolio_* tool names in error/description strings.`
     );
     process.exit(0);
   }
@@ -142,7 +204,9 @@ function main(): void {
   console.error(
     `\nStyle guide: description opens with an imperative verb + object; no two tools may share their ` +
       `first ${FIRST_60} chars; first sentence ≤${FIRST_SENTENCE_MAX} chars; description ≤${DESCRIPTION_MAX} chars. ` +
-      `The "Bookkeeping only" trust disclaimer belongs in the server \`instructions\` field, not per-tool.`
+      `The "Bookkeeping only" trust disclaimer belongs in the server \`instructions\` field, not per-tool. ` +
+      `Retired portfolio_* tool names must not appear in error/description strings — use ` +
+      `"portfolio_record_entry (entry_type: …)" (alias declarations / alias-doc lines are allowlisted).`
   );
   process.exit(1);
 }

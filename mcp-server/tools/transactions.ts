@@ -284,7 +284,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       // autoCategory call below always takes the non-investment path.
       const isInvestment = await isInvestmentAccountFn(userId, Number(acct.id));
       if (isInvestment) {
-        return err(`Account "${acct.name}" is an investment account — record_transaction can't write to it. Use portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion instead.`);
+        return err(`Account "${acct.name}" is an investment account — record_transaction can't write to it. Use portfolio_record_entry (entry_type: buy | sell | swap | transfer | deposit | withdrawal | income_expense | fx_conversion) instead.`);
       }
       // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
       // shared envelope (mistyped → refuse, 2+ → ambiguous — was `fuzzyFind`
@@ -783,7 +783,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
             results.push({
               index: i,
               success: false,
-              message: `Account "${acct.name}" is an investment account — bulk_record_transactions can't write to it. Use portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion instead.`,
+              message: `Account "${acct.name}" is an investment account — bulk_record_transactions can't write to it. Use portfolio_record_entry (entry_type: buy | sell | swap | transfer | deposit | withdrawal | income_expense | fx_conversion) instead.`,
               resolvedAccount: resolvedAccountInfo,
             });
             continue;
@@ -1461,7 +1461,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       }),
       z.object({
         op: z.literal("delete"),
-        id: z.number().describe("Transaction ID to delete"),
+        id: z.number().describe("Transaction ID to delete. (manage_transfers op=delete uses `transactionId`, and also accepts `id` as an alias.)"),
         expected: z.object({
           payee: z.string().optional().describe("The payee you believe this transaction has (case-insensitive)."),
           amount: z.number().optional().describe("The amount you believe this transaction has (±0.01)."),
@@ -1507,7 +1507,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
   registerAlias(
     server,
     "record_transaction",
-    "Record a single transaction in a cash (non-investment) account. Prefer `account_id` (exact) over `account` name; pass at least one — weak substring name matches are REJECTED with a 'did you mean…' error rather than writing to the wrong account. Category is auto-detected from payee rules/history when omitted. INVESTMENT ACCOUNTS ARE REJECTED — route all investment activity through the portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) instead. For cross-currency entries pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. Pass `dryRun: true` to validate + resolve without writing (response includes dryRun:true, wouldBeId:null, and the same resolved* fields a real write returns).",
+    "Record a single transaction in a cash (non-investment) account. Prefer `account_id` (exact) over `account` name; pass at least one — weak substring name matches are REJECTED with a 'did you mean…' error rather than writing to the wrong account. Category is auto-detected from payee rules/history when omitted. INVESTMENT ACCOUNTS ARE REJECTED — route all investment activity through portfolio_record_entry (entry_type: buy | sell | swap | transfer | deposit | withdrawal | income_expense | fx_conversion) instead. For cross-currency entries pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. Pass `dryRun: true` to validate + resolve without writing (response includes dryRun:true, wouldBeId:null, and the same resolved* fields a real write returns).",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
       payee: z.string().describe("Payee or merchant name"),
@@ -1980,8 +1980,9 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       }),
       z.object({
         op: z.literal("delete"),
-        linkId: z.string().optional().describe("UUID link_id shared by the pair. Either this OR transactionId is required."),
-        transactionId: z.number().int().optional().describe("Any one transaction id from the pair."),
+        linkId: z.string().optional().describe("UUID link_id shared by the pair. Either this, transactionId, or id is required."),
+        transactionId: z.number().int().optional().describe("Any one transaction id from the pair. `id` is an accepted alias (aligns with manage_transactions op=delete `id`); transactionId wins if both are passed."),
+        id: z.number().int().optional().describe("Alias for transactionId — any one transaction id from the pair. Provided so the delete param matches manage_transactions op=delete `id`. transactionId wins if both are passed."),
         confirmation_token: z.string().optional().describe("Omit to preview both legs; pass the preview's token to commit. Single-use, 5-min TTL."),
       }),
     ]),
@@ -1992,7 +1993,16 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         case "update":
           return opTransferUpdate(input);
         case "delete":
-          return deleteTransferHandler(input);
+          // FINLYNQ-282: accept `id` as an alias for `transactionId` so the
+          // delete param aligns with manage_transactions op=delete (`id`).
+          // transactionId wins when both are supplied; the resolved value is
+          // folded in before the withConfirmation two-step so the token
+          // payload hashes identically at preview + commit.
+          return deleteTransferHandler({
+            linkId: input.linkId,
+            transactionId: input.transactionId ?? input.id,
+            confirmation_token: input.confirmation_token,
+          });
       }
     },
   );

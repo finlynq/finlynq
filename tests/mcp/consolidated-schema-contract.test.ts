@@ -340,3 +340,40 @@ describe("consolidated tools coerce stringified params (FINLYNQ-270 tc-2)", () =
     });
   }
 });
+
+// ─── FINLYNQ-282: manage_transfers op=delete `id` alias (tc-2-param-aligned) ──
+//
+// manage_transactions op=delete takes `id`; manage_transfers op=delete
+// historically took only `transactionId`/`linkId`. FINLYNQ-282 adds `id` as an
+// accepted alias for `transactionId` on manage_transfers op=delete (transactionId
+// wins if both are passed) so the two tools' delete param spellings align, while
+// keeping the pre-existing spellings working. This asserts the SCHEMA accepts all
+// three spellings (incl. the FINLYNQ-270 stringified-id coercion path).
+describe("manage_transfers op=delete accepts the `id` alias (FINLYNQ-282)", () => {
+  let tools: Record<string, RegTool>;
+
+  beforeAll(() => {
+    const server = buildServer();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tools = (server as any)._registeredTools as Record<string, RegTool>;
+  });
+
+  const schemaOf = () => tools["manage_transfers"]?.inputSchema;
+
+  it("accepts op=delete with the new `id` spelling", () => {
+    const r = schemaOf().safeParse({ op: "delete", id: 42 });
+    expect(r.success, "id spelling").toBe(true);
+    expect((r.data as Record<string, unknown>).id).toBe(42);
+  });
+
+  it("coerces a stringified `id` to a number (FINLYNQ-270 path)", () => {
+    const r = schemaOf().safeParse({ op: "delete", id: "42" });
+    expect(r.success, "stringified id").toBe(true);
+    expect((r.data as Record<string, unknown>).id).toBe(42);
+  });
+
+  it("still accepts the legacy `transactionId` and `linkId` spellings", () => {
+    expect(schemaOf().safeParse({ op: "delete", transactionId: 42 }).success).toBe(true);
+    expect(schemaOf().safeParse({ op: "delete", linkId: "abc" }).success).toBe(true);
+  });
+});
