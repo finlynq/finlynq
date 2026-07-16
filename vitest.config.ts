@@ -57,6 +57,16 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
+    // FINLYNQ-271 — run test FILES sequentially (not in parallel workers). The
+    // DB-gated suites (readonly-contract, upload-statement-idempotency,
+    // reconcile-flow-eval) share ONE `finlynq_test` database and each calls
+    // seedContractWorld()'s global `TRUNCATE … RESTART IDENTITY CASCADE` in
+    // beforeAll. Under vitest's default file-parallelism those truncates race
+    // across workers — one file wipes another's freshly-seeded account
+    // mid-test (the "Account #N not found" / "loaded 0" flakiness). Files are
+    // small + fast (full run ~15s), so serial execution is cheap and makes the
+    // DB lane deterministic. Tests WITHIN a file still share the worker.
+    fileParallelism: false,
     include: [
       "tests/**/*.test.ts",
       "tests/**/*.test.tsx",

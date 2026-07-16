@@ -52,7 +52,20 @@ type ToolHandler = (args: unknown, extra: unknown) => Promise<ToolResponse>;
 
 function env<T = Record<string, unknown>>(res: ToolResponse): { success?: boolean; data: T } {
   expect(Array.isArray(res.content)).toBe(true);
-  return JSON.parse(res.content[0].text);
+  const text = res.content[0]?.text ?? "";
+  // A tool ERROR is `err(msg)` → `{ content: [{ text: "Error: <msg>" }] }`, which
+  // is NOT valid JSON. Surface it verbatim instead of letting JSON.parse throw a
+  // useless SyntaxError that hides the real message (FINLYNQ-271 cycle 3).
+  let parsed: { success?: boolean; data: T; error?: unknown };
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`MCP tool returned a non-JSON error: ${text}`);
+  }
+  if (parsed && parsed.success === false) {
+    throw new Error(`MCP tool returned an error: ${JSON.stringify(parsed.error ?? parsed)}`);
+  }
+  return parsed;
 }
 
 const ROW_COUNT = 200;
@@ -133,6 +146,19 @@ describeDb("AI-native reconciliation e2e eval (FINLYNQ-271)", () => {
       priority: 100,
       createdAt: new Date().toISOString(),
     });
+
+    // Defensive: confirm the eval account exists AND is owned by world.userId
+    // before any tool runs. upload_statement is owner-scoped, so a missing /
+    // mis-owned account surfaces as "Account #N not found" (the cycle-3
+    // symptom, caused by a cross-file TRUNCATE race now fixed via
+    // fileParallelism:false). Fail here with a clear message if it recurs.
+    const { eq, and } = await import("drizzle-orm");
+    const owned = await db
+      .select({ id: schema.accounts.id })
+      .from(schema.accounts)
+      .where(and(eq(schema.accounts.id, accountId), eq(schema.accounts.userId, world.userId)))
+      .get();
+    expect(owned?.id, "eval account must be owned by world.userId before the flow runs").toBe(accountId);
 
     const server = new McpServer({ name: "reconcile-eval", version: "0.0.0" });
     registerPgTools(server, db as never, world.userId, CONTRACT_DEK);
