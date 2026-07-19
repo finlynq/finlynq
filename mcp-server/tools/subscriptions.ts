@@ -110,6 +110,11 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
     notes?: string;
   }): Promise<ToolResult> {
       const { name, amount, cadence, next_billing_date, currency, category, category_id, account, account_id, notes } = args;
+      // An omitted subscription currency follows the user's display/reporting
+      // currency. The resolver falls back to CAD only when no display currency
+      // has been configured, so a CHF-configured user never gets an implicit
+      // CAD subscription.
+      const resolvedCurrency = await resolveReportingCurrency(db, userId, currency);
       // Stream D Phase 4: subscriptions.name plaintext column dropped — uniqueness
       // gate now relies on name_lookup HMAC. No DEK ⇒ no lookup ⇒ refuse cleanly.
       if (!dek) return err("Cannot create subscription without an unlocked DEK (Stream D Phase 4).");
@@ -145,10 +150,10 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
       // Stream D Phase 4 — plaintext name dropped.
       const result = await q(db, sql`
         INSERT INTO subscriptions (user_id, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
-        VALUES (${userId}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes != null ? encNote(notes) : null}, ${n.ct}, ${n.lookup})
+        VALUES (${userId}, ${amount}, ${resolvedCurrency}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes != null ? encNote(notes) : null}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
-      return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${currency ?? "CAD"} ${amount} ${cadence}, next ${next_billing_date}` } });
+      return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${resolvedCurrency} ${amount} ${cadence}, next ${next_billing_date}` } });
   }
 
   // ── op: update — lifted VERBATIM from update_subscription ──────────────────
@@ -520,6 +525,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
 
       let created = 0;
       const skipped: string[] = [];
+      const resolvedCurrency = await resolveReportingCurrency(db, userId, undefined);
       for (const c of candidates) {
         // Stream D Phase 4 — plaintext name dropped; lookup-only dedup +
         // encrypted insert. DEK is required.
@@ -533,7 +539,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         const enc = encryptName(dek, c.payee);
         await db.execute(sql`
           INSERT INTO subscriptions (user_id, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
-          VALUES (${userId}, ${c.amount}, 'CAD', ${c.cadence}, ${c.category_id ?? null}, NULL, ${next}, 'active', 'Auto-detected by MCP', ${enc.ct}, ${enc.lookup})
+          VALUES (${userId}, ${c.amount}, ${resolvedCurrency}, ${c.cadence}, ${c.category_id ?? null}, NULL, ${next}, 'active', 'Auto-detected by MCP', ${enc.ct}, ${enc.lookup})
         `);
         created++;
       }
@@ -553,7 +559,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0). For a single add."),
         cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional().describe("Billing frequency. For a single add."),
         next_billing_date: ymdDate.optional().describe("Next billing date (YYYY-MM-DD). For a single add."),
-        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code. If omitted, inherits settings.display_currency; fallback is CAD when no display currency is configured."),
         category: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED, never silently unlinked). Single add."),
         category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name. Single add."),
         account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias — mistyped/unmatched is REFUSED). Single add."),
@@ -639,7 +645,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
       amount: z.number().positive().describe("Amount per billing cycle (must be > 0)"),
       cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
       next_billing_date: ymdDate.describe("Next billing date (YYYY-MM-DD)"),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code. If omitted, inherits settings.display_currency; fallback is CAD when no display currency is configured."),
       category: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED)"),
       category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
       account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias — mistyped/unmatched is REFUSED)"),
