@@ -26,7 +26,12 @@ import {
 } from "@/lib/fx/supported-currencies";
 
 export type RateSource = "yahoo" | "coingecko" | "stooq" | "override" | "stale" | "fallback";
-export type RateLookup = { rate: number; source: RateSource; effectiveDate: string };
+export type RateLookup = {
+  rate: number;
+  source: RateSource;
+  effectiveDate: string;
+  warning?: string;
+};
 
 // Issue #231: per-leg source collapse for triangulated pairs. When `get_fx_rate`
 // or `convert_amount` resolves a cross-rate it queries two legs (from→USD and
@@ -408,15 +413,38 @@ export async function getRateToUsdDetailed(
   const code = currency.trim().toUpperCase();
   if (code === "USD") return { rate: 1, source: "yahoo", effectiveDate: date };
 
-  // 1. User override
-  const override = await findOverride(code, date, userId);
+  const cacheWarning = "FX cache unavailable; using live or fallback rate.";
+  let cacheUnavailable = false;
+  const markCacheUnavailable = (): void => {
+    if (cacheUnavailable) return;
+    cacheUnavailable = true;
+    // Deliberately log only the currency and a fixed message. Database errors
+    // can contain SQL text, parameters, or encrypted values.
+    console.warn(`[fx-service] FX cache lookup unavailable for ${code}; continuing safely`);
+  };
+  const annotate = (lookup: RateLookup): RateLookup =>
+    cacheUnavailable ? { ...lookup, warning: cacheWarning } : lookup;
+
+  // 1. User override. A missing/legacy override table must not take down a
+  // report; the normal cache/live/fallback ladder remains available.
+  let override: { rate: number; effectiveDate: string } | null = null;
+  try {
+    override = await findOverride(code, date, userId);
+  } catch {
+    markCacheUnavailable();
+  }
   if (override) {
-    return { rate: override.rate, source: "override", effectiveDate: override.effectiveDate };
+    return annotate({ rate: override.rate, source: "override", effectiveDate: override.effectiveDate });
   }
 
   // 2. Cached exact match
-  const cached = await findCached(code, date);
-  if (cached) return { rate: cached.rate, source: "yahoo", effectiveDate: cached.effectiveDate };
+  let cached: { rate: number; effectiveDate: string } | null = null;
+  try {
+    cached = await findCached(code, date);
+  } catch {
+    markCacheUnavailable();
+  }
+  if (cached) return annotate({ rate: cached.rate, source: "yahoo", effectiveDate: cached.effectiveDate });
 
   // 3. Live fetch — Yahoo for fiat + metals (futures), CoinGecko for crypto.
   //    Skip the live call entirely if this currency's source recently failed or
@@ -450,21 +478,26 @@ export async function getRateToUsdDetailed(
     if (date <= todayISO()) {
       await writeCached(code, date, fetched, liveSource);
     }
-    return { rate: fetched, source: liveSource, effectiveDate: date };
+    return annotate({ rate: fetched, source: liveSource, effectiveDate: date });
   }
 
   // 4. Nearest cached row for this currency (last effective rate — handles
   //    weekends/holidays AND future-dated entries until the date arrives).
-  const nearest = await findNearestCached(code);
-  if (nearest) return { rate: nearest.rate, source: "stale", effectiveDate: nearest.effectiveDate };
+  let nearest: { rate: number; effectiveDate: string } | null = null;
+  try {
+    nearest = await findNearestCached(code);
+  } catch {
+    markCacheUnavailable();
+  }
+  if (nearest) return annotate({ rate: nearest.rate, source: "stale", effectiveDate: nearest.effectiveDate });
 
   // 5. Hardcoded fallback
   if (FALLBACK_RATE_TO_USD[code] != null) {
-    return { rate: FALLBACK_RATE_TO_USD[code], source: "fallback", effectiveDate: date };
+    return annotate({ rate: FALLBACK_RATE_TO_USD[code], source: "fallback", effectiveDate: date });
   }
 
   // 6. Total miss — caller decides whether to 409 / prompt for an override
-  return { rate: 1, source: "fallback", effectiveDate: date };
+  return annotate({ rate: 1, source: "fallback", effectiveDate: date });
 }
 
 export async function getRateToUsd(

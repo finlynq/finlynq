@@ -68,6 +68,9 @@ export function registerFxTools(server: McpServer, ctx: PgToolContext) {
       if (toLookup.rate === 0) return err(`Cannot convert into ${toCode} (rate is zero)`);
       const rate = fromLookup.rate / toLookup.rate;
       const warnings: string[] = [];
+      for (const lookup of [fromLookup, toLookup]) {
+        if (lookup.warning && !warnings.includes(lookup.warning)) warnings.push(lookup.warning);
+      }
       if (fromLookup.source === "fallback") warnings.push(`No historical rate available for ${fromCode}; using hardcoded fallback.`);
       if (toLookup.source === "fallback") warnings.push(`No historical rate available for ${toCode}; using hardcoded fallback.`);
       // Issue #231 — top-level `source` is the worst-case across legs so a
