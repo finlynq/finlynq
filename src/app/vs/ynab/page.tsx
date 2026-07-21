@@ -5,7 +5,7 @@ import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title: "Finlynq vs YNAB: open-source alternative with investments & MCP",
   description:
-    "Finlynq vs YNAB: open-source AGPL v3 with self-host, investment tracking, envelope encryption, and a first-party MCP server, vs YNAB's closed budgeting SaaS.",
+    "Finlynq vs YNAB: open-source AGPL v3 with self-host, investment tracking, envelope encryption, and a first-party MCP server, vs YNAB's closed SaaS.",
   alternates: { canonical: "/vs/ynab" },
   openGraph: {
     title: "Finlynq vs YNAB: open-source alternative with investments & MCP",

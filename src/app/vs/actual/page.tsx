@@ -5,7 +5,7 @@ import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 export const metadata: Metadata = {
   title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",
   description:
-    "Finlynq vs Actual Budget: two open-source self-hostable PFMs. Actual is local-first envelope budgeting; Finlynq adds investments and a first-party MCP server.",
+    "Finlynq vs Actual Budget: two open-source self-hostable PFMs. Actual is local-first budgeting; Finlynq adds investments and a first-party MCP server.",
   alternates: { canonical: "/vs/actual" },
   openGraph: {
     title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",

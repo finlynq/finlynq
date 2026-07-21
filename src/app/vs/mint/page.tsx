@@ -4,7 +4,8 @@ import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title: "Finlynq vs Mint: an open-source Mint alternative after the shutdown",
-  description: `Mint shut down in 2024. Finlynq is an open-source (AGPL v3), self-hostable Mint alternative with no ads, per-user encryption, and a first-party MCP server (${MCP_TOOL_COUNTS.http} tools).`,
+  description:
+    "Mint shut down in 2024. Finlynq is the open-source (AGPL v3), self-hostable Mint alternative: no ads, per-user encryption, and a first-party MCP server.",
   alternates: {
     canonical: "/vs/mint",
   },
