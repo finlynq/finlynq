@@ -49,19 +49,8 @@ export async function register() {
       console.error("[instrumentation] Failed to start system-metrics sampler:", err);
     }
 
-    // Kick off the MCP upload GC once the DB is ready. 30-minute interval.
-    try {
-      const { startUploadCleanupTimer, cleanupExpiredUploads } = await import(
-        "./src/lib/mcp/upload-cleanup"
-      );
-      // Run one sweep at boot in case we restarted with a backlog.
-      cleanupExpiredUploads().catch((err) => {
-        console.error("[instrumentation] initial mcp-upload sweep failed:", err);
-      });
-      startUploadCleanupTimer();
-    } catch (err) {
-      console.error("[instrumentation] Failed to start mcp-upload cleanup:", err);
-    }
+    // (The legacy mcp_uploads GC cron was removed with the mcp_uploads table —
+    // every MCP statement import now runs through the staging pipeline.)
 
     // Same pattern for email-import staging + admin inbox trash.
     try {

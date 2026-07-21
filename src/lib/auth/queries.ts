@@ -422,11 +422,11 @@ export async function updateUserPlan(userId: string, plan: string, planExpiresAt
 }
 
 /**
- * Unlink a user's on-disk upload files (mcp_uploads + feedback attachments)
- * from disk. Runs BEFORE the wipe/delete transaction — unlink is not
- * transactional, and we'd rather leak a DB row than orphan a plaintext file on
- * disk if the transaction later fails. Swallows per-file errors (file may
- * already be gone) and a missing-table/column error on older deploys.
+ * Unlink a user's on-disk upload files (feedback attachments) from disk. Runs
+ * BEFORE the wipe/delete transaction — unlink is not transactional, and we'd
+ * rather leak a DB row than orphan a plaintext file on disk if the transaction
+ * later fails. Swallows per-file errors (file may already be gone) and a
+ * missing-table/column error on older deploys.
  */
 async function unlinkUserUploadFiles(userId: string) {
   const s = getSchema();
@@ -439,18 +439,6 @@ async function unlinkUserUploadFiles(userId: string) {
       // File may already be gone — swallow. The DB row delete cleans it up.
     }
   };
-
-  // mcp_uploads (encrypted import files).
-  try {
-    const uploadRows = await db
-      .select({ storagePath: s.mcpUploads.storagePath })
-      .from(s.mcpUploads)
-      .where(eq(s.mcpUploads.userId, userId));
-    for (const row of uploadRows) await unlinkPath(row.storagePath);
-  } catch {
-    // If the mcp_uploads table is missing on this environment (older deploys),
-    // the SELECT above throws — don't let that block the wipe/delete.
-  }
 
   // FINLYNQ-226 — feedback SEED attachment files (plaintext on disk, owner's).
   try {
@@ -556,9 +544,8 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
 
   // Tables missed by the original implementation — Finding #5. Covers the
   // tokens that would survive a "wipe my account" click and still decrypt the
-  // user's session DEK after wipe, plus the staged-import plaintext buffer and
-  // mcp_uploads metadata rows whose on-disk files were unlinked above.
-  await tx.delete(s.mcpUploads).where(eq(s.mcpUploads.userId, userId));
+  // user's session DEK after wipe, plus the staged-import plaintext buffer.
+  // (The mcp_uploads delete was removed with the table — v4.1 retirement.)
   // FINLYNQ-226/228 — feedback rows are maintainer-owned support records and are
   // deliberately NOT deleted on wipe/delete (the maintainer keeps the bug
   // report). But the privacy-sensitive attachments are removed: the on-disk

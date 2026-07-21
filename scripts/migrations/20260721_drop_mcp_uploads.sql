@@ -1,0 +1,21 @@
+-- FINLYNQ — retire the legacy `mcp_uploads` import path (reconcile-consolidation follow-up).
+--
+-- The MCP `mcp_uploads` flow (POST /api/mcp/upload + list_pending_uploads /
+-- preview_import / execute_import / cancel_import) was DELETED in the v4.1
+-- reconcile-consolidation (MCP surface v4.1) — every MCP statement import now
+-- runs through the shared staging pipeline (staged_imports). With the four
+-- tools + the upload route + the 30-min cleanup cron gone, the `mcp_uploads`
+-- table has zero readers and zero writers, so it is dropped here.
+--
+-- DESTRUCTIVE. Code-first: this migration ships in the SAME release that removes
+-- all `mcpUploads` references (schema-pg.ts table def, upload/route.ts,
+-- upload-cleanup.ts, the wipe-path unlink + delete in auth/queries.ts). Any rows
+-- still present are expired/pending upload metadata whose on-disk files were
+-- already GC'd by the (now-removed) cleanup sweep; no live feature depends on
+-- them. transaction_bank_links / transactions carry NO FK to this table, so the
+-- drop cannot orphan ledger data.
+--
+-- deploy.sh runs this automatically (git pull → npm install → backup →
+-- migrations → build → restart). Idempotent via IF EXISTS.
+
+DROP TABLE IF EXISTS mcp_uploads;

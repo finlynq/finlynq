@@ -46,7 +46,7 @@ vi.mock("@/db", () => {
   return {
     db: {
       transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
-      // Outer pre-tx select for mcpUploads file unlink.
+      // Outer pre-tx select for feedback-attachment file unlink.
       select: () => makeChain([]),
     },
     schema: { users: { __name: "users" } },
@@ -77,7 +77,6 @@ vi.mock("@/db/schema-pg", async () => {
     portfolioHoldings: t("portfolioHoldings"),
     categories: t("categories"),
     accounts: t("accounts"),
-    mcpUploads: t("mcpUploads"),
     mcpIdempotencyKeys: t("mcpIdempotencyKeys"),
     stagedTransactions: t("stagedTransactions"),
     stagedImports: t("stagedImports"),

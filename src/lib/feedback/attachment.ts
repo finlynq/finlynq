@@ -14,7 +14,7 @@
 import path from "path";
 import { getUploadsBaseDir } from "@/lib/uploads-dir";
 
-/** 5 MB — mirrors the import pipeline's MAX_BYTES (src/app/api/mcp/upload/route.ts). */
+/** 5 MB — mirrors the import pipeline's MAX_BYTES (src/app/api/import/staging/upload/route.ts). */
 export const FEEDBACK_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
 
 /**
