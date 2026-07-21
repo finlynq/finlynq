@@ -61,10 +61,13 @@ type Entry = {
   placement: Placement;
   /** For "rows": pull the row array out of the data envelope. */
   rows?: (data: unknown) => unknown[];
-  /** For "top": pull the basis-bearing object out of `data` when it's nested
-   * (e.g. get_investment_insights patterns nests it under `data.summary`).
-   * Defaults to `data` itself. */
-  pick?: (data: unknown) => unknown;
+  /** For "top": pull the basis-bearing object out of the RESPONSE ENVELOPE when
+   * it isn't `data` itself — either nested inside data, or a SIBLING of data at
+   * the envelope level. `manage_subscriptions(op:list, include_summary:true)`
+   * returns `{ success, data:[rows], summary:{…, basis} }`, so its basis lives at
+   * `payload.summary` (a sibling of `data`, not inside it). Receives the whole
+   * parsed envelope; defaults to `data`. */
+  pick?: (payload: Record<string, unknown>) => unknown;
   args?: (w: SeededWorld) => Record<string, unknown>;
 };
 
@@ -141,6 +144,8 @@ const MONEY_BEARING: Record<string, Entry> = {
     axis: "flow",
     placement: "top",
     args: () => ({ op: "list", include_summary: true }),
+    // basis rides on the envelope-level `summary` (sibling of data), not data.
+    pick: (p) => p.summary,
   },
 };
 
@@ -252,7 +257,7 @@ describeDb("FINLYNQ-268 tc-1 — basis on every money-bearing response (seeded D
       const data = payload.data;
 
       if (entry.placement === "top") {
-        assertBasisObject(entry.pick ? entry.pick(data) : data, entry, name);
+        assertBasisObject(entry.pick ? entry.pick(payload) : data, entry, name);
       } else {
         const rows = entry.rows!(data);
         // Per-row placement: EVERY row must carry a legal basis. An empty row
