@@ -2,7 +2,8 @@
 // No external AI API required. Queries the local SQLite database directly.
 
 import { db, schema } from "@/db";
-import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, asc, inArray } from "drizzle-orm";
+import { CASH_GROUP_NAMES } from "@/lib/accounts/groups";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { decryptField } from "@/lib/crypto/envelope";
 import { decryptName, nameLookup } from "@/lib/crypto/encrypted-columns";
@@ -656,7 +657,9 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
       .where(
         and(
           eq(schema.accounts.userId, ctx.userId),
-          sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`
+          // GH #307 — shared canonical cash-group set (was a hardcoded
+          // "Banks"/"Cash Accounts" subset that missed Checking/Savings/Cash).
+          inArray(schema.accounts.group, [...CASH_GROUP_NAMES])
         )
       )
       .all();

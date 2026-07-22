@@ -42,10 +42,13 @@ const STEP_LABELS: Record<Step, string> = {
 };
 
 const ACCOUNT_PRESETS = [
-  { name: "Checking Account", type: "A", group: "Checking", icon: Building2 },
-  { name: "Savings Account", type: "A", group: "Savings", icon: PiggyBank },
-  { name: "Credit Card", type: "L", group: "Credit Card", icon: CreditCard },
-  { name: "Investment Account", type: "A", group: "Investments", icon: TrendingUp },
+  { name: "Checking Account", type: "A", group: "Checking", icon: Building2, isInvestment: false },
+  { name: "Savings Account", type: "A", group: "Savings", icon: PiggyBank, isInvestment: false },
+  { name: "Credit Card", type: "L", group: "Credit Card", icon: CreditCard, isInvestment: false },
+  // GH #308 — the "Investment Account" preset MUST set is_investment=true, else
+  // it creates a plain cash account grouped "Investments" whose portfolio /
+  // market-basis features silently never apply.
+  { name: "Investment Account", type: "A", group: "Investments", icon: TrendingUp, isInvestment: true },
 ] as const;
 
 const BUDGET_PRESETS = [
@@ -117,7 +120,7 @@ export function OnboardingWizard({
         await fetch("/api/accounts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: preset.name, type: preset.type, group: preset.group, currency }),
+          body: JSON.stringify({ name: preset.name, type: preset.type, group: preset.group, currency, isInvestment: preset.isInvestment }),
         });
       }
 

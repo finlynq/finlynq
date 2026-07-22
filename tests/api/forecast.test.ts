@@ -45,7 +45,7 @@ vi.mock("@/lib/fx-service", () => ({
 }));
 
 vi.mock("drizzle-orm", () => ({
-  eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(),
+  eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(), inArray: vi.fn(),
 }));
 
 import { GET } from "@/app/api/forecast/route";

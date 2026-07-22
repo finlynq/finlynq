@@ -40,6 +40,37 @@ export const ACCOUNT_GROUP_DEFAULTS: Record<AccountGroupType, string[]> = {
   L: ["Credit Card", "Loan", "Mortgage", OTHER_GROUP],
 };
 
+/**
+ * Canonical set of account GROUP names treated as spendable "cash" for
+ * cash-flow scoping. The cash-flow forecast default scope, the financial-health
+ * liquid-assets filter, and the AI chat balance summary all read THIS set
+ * (GH #307: the forecast previously hardcoded only "Banks"/"Cash Accounts",
+ * silently excluding the app's own Checking/Savings/Cash defaults). Extend HERE
+ * — never re-list these strings inline.
+ *
+ * NOTE: an investment account (`is_investment=true`) is never "cash" regardless
+ * of its group — callers MUST AND this with `is_investment === false`.
+ */
+export const CASH_GROUP_NAMES = [
+  "Banks",
+  "Cash Accounts",
+  "Cash",
+  "Checking",
+  "Chequing",
+  "Savings",
+] as const;
+
+const CASH_GROUP_SET = new Set<string>(CASH_GROUP_NAMES.map((g) => g.toLowerCase()));
+
+/**
+ * True when a free-text account group is one of the canonical spendable-cash
+ * groups. Case-insensitive + trims; null/blank → false.
+ */
+export function isCashGroup(group: string | null | undefined): boolean {
+  const name = normalizeGroupName(group);
+  return name != null && CASH_GROUP_SET.has(name.toLowerCase());
+}
+
 /** A per-type ordered list of group names. */
 export type AccountGroupOrder = Record<AccountGroupType, string[]>;
 

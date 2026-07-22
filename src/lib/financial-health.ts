@@ -41,6 +41,7 @@ import { sql } from "drizzle-orm";
 import { calculateAgeOfMoney } from "./age-of-money";
 import { getRate } from "./fx-service";
 import { tagAmount, type TaggedAmount } from "../../mcp-server/currency-tagging";
+import { isCashGroup } from "./accounts/groups";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DbLike = { execute: (q: ReturnType<typeof sql>) => Promise<any> };
@@ -55,18 +56,10 @@ function asRows(result: unknown): Array<Record<string, unknown>> {
   return [];
 }
 
-// Cash-group whitelist for the liquid-assets filter (issue #235). Not an
-// exhaustive list of "user-defined cash groups" — a starting point mirroring
-// the load-bearing branching shape used by /api/goals currentAmount and the
-// account-balance rule. Extend rather than reverting to substring matching.
-const CASH_GROUPS = new Set([
-  "Banks",
-  "Cash Accounts",
-  "Cash",
-  "Savings",
-  "Chequing",
-  "Checking",
-]);
+// Cash-group whitelist for the liquid-assets filter — now the shared canonical
+// set (GH #307). `isCashGroup` (from accounts/groups) is the single source of
+// truth, reused by the cash-flow forecast + chat balance summary. Extend the
+// list THERE rather than reverting to a local copy or substring matching.
 
 // Canonical weights (must sum to 1.0).
 export const HEALTH_WEIGHTS = {
@@ -272,8 +265,7 @@ export async function calculateFinancialHealth(
     const converted = Number(b.balance) * fx;
     if (b.type === "L") totalLiabilities += Math.abs(converted);
     if (b.type === "A") {
-      const groupTrim = (b.group ?? "").trim();
-      if (b.is_investment !== true && CASH_GROUPS.has(groupTrim)) {
+      if (b.is_investment !== true && isCashGroup(b.group)) {
         liquidAssets += converted;
       }
     }
