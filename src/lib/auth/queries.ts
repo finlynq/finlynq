@@ -10,6 +10,7 @@ import { db } from "@/db";
 import type { DrizzleDb } from "@/db";
 import * as pgSchema from "@/db/schema-pg";
 import { eq, count, sql, inArray, and, isNull } from "drizzle-orm";
+import { normalizeDbRows } from "@/lib/db-utils";
 import crypto from "crypto";
 
 /** Returns the PostgreSQL schema tables */
@@ -720,5 +721,46 @@ export async function getUsageStats() {
     totalUsers: userRows[0]?.total ?? 0,
     totalTransactions: txRows[0]?.total ?? 0,
     totalAccounts: acctRows[0]?.total ?? 0,
+  };
+}
+
+/** Rolling "active now" counts derived from `users.last_active_at`. */
+export interface ActiveUserCounts {
+  /** Users with an authenticated request in the last 15 minutes. */
+  activeLast15Min: number;
+  /** Users with an authenticated request in the last 60 minutes. */
+  activeLast60Min: number;
+  /** Users with an authenticated request in the last 24 hours. */
+  activeLast24Hours: number;
+}
+
+/**
+ * Near-real-time active-user counts across three rolling windows, from
+ * `users.last_active_at` — which is bumped on ANY authenticated access (web
+ * session, OAuth/MCP token, or `pf_` API key), throttled to one write per
+ * 15-min window (see `lib/auth/last-active.ts`). Unlike `last_login_at` this
+ * captures MCP-only and API-key-only users, so it reflects real activity — the
+ * signal an operator wants before restarting/deploying.
+ *
+ * One round-trip: three `COUNT(*) FILTER` aggregates over a single scan.
+ */
+export async function getActiveUserCounts(): Promise<ActiveUserCounts> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (db as any).execute(sql`
+    SELECT
+      COUNT(*) FILTER (WHERE last_active_at > NOW() - interval '15 minutes') AS active_15m,
+      COUNT(*) FILTER (WHERE last_active_at > NOW() - interval '60 minutes') AS active_60m,
+      COUNT(*) FILTER (WHERE last_active_at > NOW() - interval '24 hours')   AS active_24h
+    FROM users
+  `);
+  const row = normalizeDbRows<{
+    active_15m: number | string;
+    active_60m: number | string;
+    active_24h: number | string;
+  }>(result)[0];
+  return {
+    activeLast15Min: Number(row?.active_15m ?? 0),
+    activeLast60Min: Number(row?.active_60m ?? 0),
+    activeLast24Hours: Number(row?.active_24h ?? 0),
   };
 }
