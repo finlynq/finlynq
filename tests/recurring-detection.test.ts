@@ -44,6 +44,115 @@ describe("analyzeRecurringGroup (Issue #235)", () => {
     expect(c.dropReason).toBe("inconsistent");
   });
 
+  // GH #307 (Problem 3) — interval-regularity + bimodal-amount scoring.
+  it("detects a constant biweekly cadence (single-amount, passes)", () => {
+    const c = analyzeRecurringGroup(
+      [
+        { date: "2026-05-01", amount: 1500 },
+        { date: "2026-05-15", amount: 1500 },
+        { date: "2026-05-29", amount: 1500 },
+      ],
+      "2026-06-05",
+    );
+    expect(c.detected).toBe(true);
+    expect(c.dropReason).toBeUndefined();
+    expect(c.consistent).toBe(true);
+    expect(c.expectedCadenceDays).toBeCloseTo(14, 1);
+    expect(c.avg).toBeCloseTo(1500, 2);
+  });
+
+  it("detects a regular biweekly paycheck alternating two amounts >=1.5x apart (GH #307)", () => {
+    // Base pay 2000 / boosted 3200 (1.6x apart) — flattened to one mean this
+    // would fall outside the +/-20% band and drop as `inconsistent`. Now the
+    // regular cadence + two tight clusters is recognized, projected off the
+    // MOST-RECENT cluster (last occurrence is 3200).
+    const c = analyzeRecurringGroup(
+      [
+        { date: "2026-04-03", amount: 2000 },
+        { date: "2026-04-17", amount: 3200 },
+        { date: "2026-05-01", amount: 2000 },
+        { date: "2026-05-15", amount: 3200 },
+        { date: "2026-05-29", amount: 2000 },
+        { date: "2026-06-12", amount: 3200 },
+      ],
+      "2026-06-20",
+    );
+    expect(c.detected).toBe(true);
+    expect(c.dropReason).toBeUndefined();
+    expect(c.consistent).toBe(true);
+    expect(c.expectedCadenceDays).toBeCloseTo(14, 1);
+    // Projects the most-recent cluster's mean (3200), NOT the blended 2600.
+    expect(c.avg).toBeCloseTo(3200, 2);
+    // A fresh recurrence, not stale.
+    expect(isStale(c)).toBe(false);
+  });
+
+  it("projects the most-recent cluster when the latest occurrence is the lower amount (GH #307)", () => {
+    const c = analyzeRecurringGroup(
+      [
+        { date: "2026-04-17", amount: 3200 },
+        { date: "2026-05-01", amount: 2000 },
+        { date: "2026-05-15", amount: 3200 },
+        { date: "2026-05-29", amount: 2000 },
+      ],
+      "2026-06-05",
+    );
+    expect(c.detected).toBe(true);
+    expect(c.avg).toBeCloseTo(2000, 2); // last occurrence (05-29) is 2000
+  });
+
+  it("still drops a single spike among constant amounts as inconsistent (not bimodal)", () => {
+    // Four identical + one 4x outlier: the minority cluster is a single row,
+    // so it stays an outlier (dropped), not a two-amount recurrence.
+    const c = analyzeRecurringGroup(
+      [
+        { date: "2026-02-01", amount: -50 },
+        { date: "2026-03-01", amount: -50 },
+        { date: "2026-04-01", amount: -50 },
+        { date: "2026-05-01", amount: -200 },
+        { date: "2026-06-01", amount: -50 },
+      ],
+      "2026-06-10",
+    );
+    expect(c.detected).toBe(false);
+    expect(c.dropReason).toBe("inconsistent");
+  });
+
+  it("drops genuinely irregular discretionary spend as inconsistent (GH #307)", () => {
+    // Scattered amounts AND irregular cadence — fails both the single-mean band
+    // and the regular-bimodal path.
+    const c = analyzeRecurringGroup(
+      [
+        { date: "2026-03-02", amount: -12 },
+        { date: "2026-03-19", amount: -85 },
+        { date: "2026-04-05", amount: -40 },
+        { date: "2026-04-09", amount: -150 },
+        { date: "2026-05-20", amount: -33 },
+      ],
+      "2026-05-25",
+    );
+    expect(c.detected).toBe(false);
+    expect(c.dropReason).toBe("inconsistent");
+  });
+
+  it("keeps a bimodal-regular but long-dormant income detectable-yet-stale (GH #307)", () => {
+    // Two-amount biweekly that stopped 100+ days ago: analyzeRecurringGroup
+    // still recognizes it as a real recurrence (detected), and the consumer's
+    // isStale gate is what drops it as `stale` — bimodal scoring must not
+    // swallow the staleness signal.
+    const c = analyzeRecurringGroup(
+      [
+        { date: "2026-01-02", amount: 2000 },
+        { date: "2026-01-16", amount: 3200 },
+        { date: "2026-01-30", amount: 2000 },
+        { date: "2026-02-13", amount: 3200 },
+      ],
+      "2026-06-20",
+    );
+    expect(c.detected).toBe(true);
+    expect(isStale(c)).toBe(true);
+  });
+
   it("detects a 30-day cadence and returns expected fields", () => {
     const c = analyzeRecurringGroup(
       [
