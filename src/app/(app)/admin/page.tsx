@@ -73,6 +73,10 @@ interface UsageStats {
   activeUsersLast7Days: number;
   activeUsersLast30Days: number;
   loginsLast24Hours?: number;
+  // FINLYNQ — near-real-time "active now" from last_active_at (web + MCP + API key).
+  activeUsersLast15Min?: number;
+  activeUsersLast60Min?: number;
+  activeUsersLast24Hours?: number;
   recentLogins?: LoginActivityRow[];
 }
 
@@ -441,6 +445,56 @@ export default function AdminPage() {
             color="bg-amber-500/15 text-amber-600"
           />
         </div>
+      )}
+
+      {/* Live activity — near-real-time "who's using it right now" from
+          last_active_at (web + MCP + API key). The 15-min window is the
+          deploy-safety glance: ~0 means a restart disrupts nobody. */}
+      {stats && (
+        <motion.div variants={itemVariants}>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="relative flex h-2 w-2">
+              {(stats.activeUsersLast15Min ?? 0) > 0 && (
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              )}
+              <span
+                className={`relative inline-flex h-2 w-2 rounded-full ${
+                  (stats.activeUsersLast15Min ?? 0) > 0
+                    ? "bg-emerald-500"
+                    : "bg-zinc-300"
+                }`}
+              />
+            </span>
+            <h2 className="text-sm font-semibold text-muted-foreground">
+              Live activity
+            </h2>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <StatCard
+              label="Active now (15 min)"
+              value={stats.activeUsersLast15Min ?? 0}
+              icon={Activity}
+              color="bg-emerald-500/15 text-emerald-600"
+            />
+            <StatCard
+              label="Active (last hour)"
+              value={stats.activeUsersLast60Min ?? 0}
+              icon={Activity}
+              color="bg-teal-500/15 text-teal-600"
+            />
+            <StatCard
+              label="Active (last 24h)"
+              value={stats.activeUsersLast24Hours ?? 0}
+              icon={Activity}
+              color="bg-sky-500/15 text-sky-600"
+            />
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">
+            Counts users with any authenticated request (web, MCP, or API key)
+            in the window. Best glance before a deploy: the restart rotates JWTs
+            and forces a re-login.
+          </p>
+        </motion.div>
       )}
 
       {/* Plan Breakdown */}
