@@ -4,6 +4,7 @@ import { sql, eq, and, inArray } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { round2 } from "@/lib/utils/number";
+import { CASH_GROUP_NAMES } from "@/lib/accounts/groups";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
@@ -57,7 +58,9 @@ export async function GET(request: NextRequest) {
     .from(schema.accounts)
     .where(and(
       eq(schema.accounts.userId, userId),
-      sql`${schema.accounts.group} IN ('Banks', 'Cash Accounts')`
+      // GH #307 — shared canonical cash-group set (was a hardcoded
+      // "Banks"/"Cash Accounts" subset that missed Checking/Savings/Cash).
+      inArray(schema.accounts.group, [...CASH_GROUP_NAMES])
     ))
     .all();
 

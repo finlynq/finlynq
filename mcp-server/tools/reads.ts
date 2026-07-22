@@ -33,6 +33,9 @@ import {
   getRate,
 } from "../../src/lib/fx-service";
 import {
+  isCashGroup,
+} from "../../src/lib/accounts/groups";
+import {
   computeAllAccountsUnrealizedPnL,
   summarizeUnrealizedPnL,
 } from "../../src/lib/unrealized-pnl";
@@ -1196,7 +1199,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_cash_flow_forecast ─────────────────────────────────────────────────
   server.tool(
     "get_cash_flow_forecast",
-    "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency). Issue #210: by default, `currentBalance` scopes to accounts in the 'Banks' or 'Cash Accounts' groups; the response surfaces `accountsIncluded` + `accountsExcluded` so callers see exactly which accounts are in scope. Pass `accountFilter` to override (include/exclude lists or set `includeInvestments: true` to fold investment-account cash sleeves into the projection). Issue #235: response now includes `recurringContributions[]` with one row per detected-or-dropped candidate (`{ name, monthly, daysSinceLast, included, dropReason? }`); empty list explains a near-zero forecast. Stale recurrences (`daysSinceLast > 1.5 × cadence`) are dropped with `dropReason: 'stale'` rather than projected forward.",
+    "Project cash flow for the next 30/60/90 days from recurring transactions. Amounts convert to reportingCurrency (defaults to display currency). By default both `currentBalance` and the recurring projection scope to spendable-cash accounts (Cash/Checking/Savings/Banks; investment, credit-card and loan accounts excluded), so an out-of-scope account's recurring items never project against the in-scope balance (GH #307). `accountsIncluded`/`accountsExcluded` show the scope; pass `accountFilter` to override (include/exclude lists, or `includeInvestments:true` to fold in investment cash sleeves). `recurringContributions[]` lists one row per detected-or-dropped candidate (`{name, monthly, daysSinceLast, included, dropReason?}`); an empty list explains a near-zero forecast. Stale recurrences (`daysSinceLast > 1.5 × cadence`) drop as `dropReason:'stale'`.",
     {
       days: z.number().optional().describe("Forecast horizon in days (default 90)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
@@ -1222,20 +1225,55 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       const cutoff = new Date(); cutoff.setFullYear(cutoff.getFullYear() - 1);
       const cutoffStr = cutoff.toISOString().split("T")[0];
 
+      // Issue #210 / GH #307 — partition accounts by scope FIRST so BOTH the
+      // starting balance AND recurring detection use the same in-scope set.
+      // Default scope = spendable-cash groups (shared CASH_GROUP_NAMES; GH #307
+      // — previously a hardcoded "Banks"/"Cash Accounts" subset that silently
+      // dropped the app's own Checking/Savings/Cash defaults). `accountFilter`
+      // overrides.
+      const allAccountsRaw = await q(db, sql`
+        SELECT a.id, a.currency, a."group" AS account_group, a.is_investment
+        FROM accounts a WHERE a.user_id = ${userId}
+      `) as { id: number; currency: string | null; account_group: string | null; is_investment: boolean | null }[];
+
+      const includeSet = accountFilter?.include ? new Set(accountFilter.include) : null;
+      const excludeSet = accountFilter?.exclude ? new Set(accountFilter.exclude) : null;
+      const includeInvestments = accountFilter?.includeInvestments ?? false;
+
+      const inScope: typeof allAccountsRaw = [];
+      const outOfScope: typeof allAccountsRaw = [];
+      for (const a of allAccountsRaw) {
+        let inc: boolean;
+        if (includeSet) {
+          inc = includeSet.has(a.id);
+        } else {
+          inc = isCashGroup(a.account_group) || (includeInvestments && a.is_investment === true);
+          if (excludeSet && excludeSet.has(a.id)) inc = false;
+        }
+        if (inc) inScope.push(a); else outOfScope.push(a);
+      }
+      // GH #307 (Problem 2) — recurring detection must only see IN-SCOPE
+      // transactions, else an out-of-scope account's recurring item (a loan's
+      // payment, a credit-card subscription, an excluded brokerage's
+      // auto-invest) projects against the in-scope balance and double-counts.
+      const inScopeIdSet = new Set(inScope.map((a) => a.id));
+
       const rawTxns = await q(db, sql`
-        SELECT t.id, t.date, t.payee, t.amount,
+        SELECT t.id, t.date, t.payee, t.amount, t.account_id,
                COALESCE(t.currency, a.currency) AS currency
         FROM transactions t
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND t.date >= ${cutoffStr} AND t.payee != ''
         ORDER BY t.date
-      `) as { id: number; date: string; payee: string; amount: number; currency: string | null }[];
+      `) as { id: number; date: string; payee: string; amount: number; account_id: number | null; currency: string | null }[];
 
       // Decrypt payee in memory before grouping. Convert each row to
       // reporting currency immediately so downstream arithmetic is in one
       // unit.
       const txns: Array<{ id: number; date: string; payee: string; amount: number; currency: string }> = [];
       for (const t of rawTxns) {
+        // GH #307 (Problem 2) — only in-scope accounts feed recurring detection.
+        if (!inScopeIdSet.has(Number(t.account_id))) continue;
         const ccy = String(t.currency ?? reporting);
         const fx = await fxFor(ccy);
         txns.push({
@@ -1319,31 +1357,8 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         });
       }
 
-      // Issue #210 — partition every account by its `group` so we can
-      // surface what's in / out of scope. Default scope is Banks + Cash
-      // Accounts (preserves prior behavior); `accountFilter` overrides.
-      const allAccountsRaw = await q(db, sql`
-        SELECT a.id, a.currency, a."group" AS account_group, a.is_investment
-        FROM accounts a WHERE a.user_id = ${userId}
-      `) as { id: number; currency: string | null; account_group: string | null; is_investment: boolean | null }[];
-
-      const isDefaultBankCash = (g: string | null) => g === "Banks" || g === "Cash Accounts";
-      const includeSet = accountFilter?.include ? new Set(accountFilter.include) : null;
-      const excludeSet = accountFilter?.exclude ? new Set(accountFilter.exclude) : null;
-      const includeInvestments = accountFilter?.includeInvestments ?? false;
-
-      const inScope: typeof allAccountsRaw = [];
-      const outOfScope: typeof allAccountsRaw = [];
-      for (const a of allAccountsRaw) {
-        let inc: boolean;
-        if (includeSet) {
-          inc = includeSet.has(a.id);
-        } else {
-          inc = isDefaultBankCash(a.account_group) || (includeInvestments && a.is_investment === true);
-          if (excludeSet && excludeSet.has(a.id)) inc = false;
-        }
-        if (inc) inScope.push(a); else outOfScope.push(a);
-      }
+      // (account scope was partitioned above — before recurring detection —
+      // so the in-scope set gates BOTH the tx query and currentBalance. GH #307)
 
       // Group out-of-scope by account group so the response is human-scannable.
       // Issue #233 — coalesce empty string AND null to "(no group)" so legacy
