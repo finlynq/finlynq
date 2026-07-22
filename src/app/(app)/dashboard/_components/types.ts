@@ -65,6 +65,10 @@ export type HealthData = {
   excludedComponents?: HealthExclusion[];
   reportingCurrency?: string;
   totals?: HealthTotals;
+  // FINLYNQ-291 — standalone headline percentages (see HealthPayload in
+  // src/lib/financial-health.ts). Optional here since older payloads omit them.
+  savingsRatePct?: number | null;
+  dti?: { pct: number | null; reliable: boolean };
 };
 
 export type SpotlightItem = {

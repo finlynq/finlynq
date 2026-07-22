@@ -102,15 +102,23 @@ function ScoreBar({ label, score, detail }: { label: string; score: number; deta
   );
 }
 
-export function HealthScoreCard() {
-  const [health, setHealth] = useState<HealthData | null>(null);
+/**
+ * When `health` is supplied (dashboard page lifts the `/api/health-score` fetch
+ * so it can also feed the KeyMetrics strip), the card renders it directly and
+ * skips its own request. When the prop is omitted the card self-fetches, keeping
+ * it usable standalone.
+ */
+export function HealthScoreCard({ health: healthProp }: { health?: HealthData | null } = {}) {
+  const [healthState, setHealthState] = useState<HealthData | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const health = healthProp !== undefined ? healthProp : healthState;
 
   useEffect(() => {
+    if (healthProp !== undefined) return; // parent supplies the data
     fetch("/api/health-score")
       .then((r) => { if (r.ok) return r.json(); })
-      .then((d) => { if (d) setHealth(d); });
-  }, []);
+      .then((d) => { if (d) setHealthState(d); });
+  }, [healthProp]);
 
   return (
     <motion.div variants={itemVariants} className="h-full">

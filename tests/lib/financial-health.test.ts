@@ -360,3 +360,89 @@ describe("calculateFinancialHealth — load-bearing branches", () => {
     expect(r.score).toBeLessThanOrEqual(100);
   });
 });
+
+// ── FINLYNQ-291: standalone savings-rate & DTI percentages ───────────────────
+describe("calculateFinancialHealth — savingsRatePct + dti standalone figures", () => {
+  beforeEach(() => {
+    fxMock.mockClear();
+    aomMock.mockReset();
+    aomMock.mockResolvedValue({ ageInDays: 0, trend: 0, history: [] });
+  });
+
+  it("savingsRatePct = round((income − expenses) / income) over the 3-month window", async () => {
+    const today = new Date();
+    const month = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+    const db = buildDb({
+      incomeExpenses3m: [
+        { month, cat_type: "I", currency: "CAD", total: 1000 },
+        { month, cat_type: "E", currency: "CAD", total: -250 },
+      ],
+      oldestRow: [{ oldest: "2020-01-01" }],
+      budgets: [],
+    });
+    const r = await calculateFinancialHealth({ db, userId: "u", dek: null, reportingCurrency: "CAD" });
+    // (1000 − 250) / 1000 = 75%
+    expect(r.savingsRatePct).toBe(75);
+  });
+
+  it("savingsRatePct is null when there is no income", async () => {
+    const db = buildDb({
+      incomeExpenses3m: [],
+      oldestRow: [{ oldest: "2020-01-01" }],
+      budgets: [],
+    });
+    const r = await calculateFinancialHealth({ db, userId: "u", dek: null, reportingCurrency: "CAD" });
+    expect(r.savingsRatePct).toBeNull();
+  });
+
+  it("dti is reliable with the real ratio when payments stay within 1.2× liabilities", async () => {
+    const db = buildDb({
+      incomeDebt12m: [
+        { cat_type: "I", currency: "CAD", account_type: null, total: 307709.52 },
+        { cat_type: null, currency: "CAD", account_type: "L", total: -44400 },
+      ],
+      balances: [
+        { type: "L", group: "Mortgage", currency: "CAD", is_investment: false, balance: -838194.15 },
+      ],
+      oldestRow: [{ oldest: "2020-01-01" }],
+      budgets: [],
+    });
+    const r = await calculateFinancialHealth({ db, userId: "u", dek: null, reportingCurrency: "CAD" });
+    expect(r.dti.reliable).toBe(true);
+    // 44,400 / 307,709.52 ≈ 14.4% → 14
+    expect(r.dti.pct).toBe(14);
+  });
+
+  it("dti.reliable is false but the raw ratio is still surfaced when the anomaly backstop fires", async () => {
+    const db = buildDb({
+      incomeDebt12m: [
+        { cat_type: "I", currency: "CAD", account_type: null, total: 307709.52 },
+        { cat_type: null, currency: "CAD", account_type: "L", total: -1200000 },
+      ],
+      balances: [
+        { type: "L", group: "Mortgage", currency: "CAD", is_investment: false, balance: -838194.15 },
+      ],
+      oldestRow: [{ oldest: "2020-01-01" }],
+      budgets: [{ budget: 100, spent: 50 }],
+    });
+    const r = await calculateFinancialHealth({ db, userId: "u", dek: null, reportingCurrency: "CAD" });
+    // DTI is dropped from the composite score…
+    expect(r.components.find((c) => c.name === "Debt-to-Income")).toBeUndefined();
+    // …but the standalone figure is still computed and flagged unreliable so the
+    // UI can caveat it (1,200,000 / 307,709.52 ≈ 390%).
+    expect(r.dti.reliable).toBe(false);
+    expect(r.dti.pct).toBe(390);
+  });
+
+  it("dti.pct is null when there is no income (12m)", async () => {
+    const db = buildDb({
+      incomeDebt12m: [
+        { cat_type: null, currency: "CAD", account_type: "L", total: -5000 },
+      ],
+      oldestRow: [{ oldest: "2020-01-01" }],
+      budgets: [],
+    });
+    const r = await calculateFinancialHealth({ db, userId: "u", dek: null, reportingCurrency: "CAD" });
+    expect(r.dti.pct).toBeNull();
+  });
+});

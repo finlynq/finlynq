@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
-import { formatCurrency } from "@/lib/currency";
+import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { Sparkline } from "@/components/sparkline";
 import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User, Upload, FileUp } from "lucide-react";
@@ -12,6 +12,7 @@ import { motion } from "framer-motion";
 import { AnimatedNumber } from "./_components/animated-number";
 import { StatCard } from "./_components/stat-card";
 import { HealthScoreCard } from "./_components/health-score-card";
+import { KeyMetrics } from "./_components/key-metrics";
 import { ActionCenter } from "./_components/action-center";
 import { WeeklyRecap } from "./_components/weekly-recap";
 import { OnboardingTips } from "@/components/onboarding-tips";
@@ -25,7 +26,7 @@ import { InsightsSection } from "./_components/insights-section";
 import { useDevMode } from "@/hooks/use-dev-mode";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { CurrencyAuditBanner } from "@/components/currency-audit-banner";
-import type { DashboardData } from "./_components/types";
+import type { DashboardData, HealthData } from "./_components/types";
 
 // --- Quick Import Widget ---
 function QuickImportWidget() {
@@ -116,6 +117,7 @@ export default function DashboardPage() {
   const devMode = useDevMode();
   const { displayCurrency, isLoading: currencyLoading } = useDisplayCurrency();
   const [data, setData] = useState<DashboardData | null>(null);
+  const [health, setHealth] = useState<HealthData | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [userInfo, setUserInfo] = useState<{ email: string; displayName?: string } | null>(null);
 
@@ -124,6 +126,13 @@ export default function DashboardPage() {
     fetch(`/api/dashboard?currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => { if (r.ok) return r.json(); })
       .then((d) => { if (d) setData(d); });
+
+    // Financial-health payload feeds both the Health Score card and the
+    // KeyMetrics strip (savings rate + DTI) — fetched once here and passed down
+    // so the two consumers don't each hit the (query-heavy) endpoint.
+    fetch(`/api/health-score?currency=${encodeURIComponent(displayCurrency)}`)
+      .then((r) => { if (r.ok) return r.json(); })
+      .then((d) => { if (d) setHealth(d); });
 
     // Check if onboarding is needed (managed mode only). Username-only users
     // (no email on file) also see the wizard — fall back to username for the
@@ -226,15 +235,29 @@ export default function DashboardPage() {
     momPct = prev !== 0 ? (momChange / Math.abs(prev)) * 100 : 0;
   }
 
-  const lastMonthIncome = incExpData.length > 0 ? incExpData[incExpData.length - 1].income : 0;
-  const lastMonthExpenses = incExpData.length > 0 ? incExpData[incExpData.length - 1].expenses : 0;
+  // FINLYNQ-291 (C1) — the Monthly Income / Expenses / Budgets tiles summarize a
+  // single reference month. The newest tracked month is usually the CURRENT
+  // calendar month, which is incomplete mid-month: before payroll lands its
+  // income reads $0, so the Monthly Income tile looked broken. Prefer the last
+  // COMPLETE month — if the newest entry is the current calendar month and an
+  // earlier month exists, step back one. A brand-new user with only the current
+  // month still sees it. Income + expenses + drill-through all key off this one
+  // index so the trio stays internally consistent.
+  const currentMonthKey = getCurrentMonth();
+  let refIdx = incExpData.length - 1;
+  if (refIdx > 0 && incExpData[refIdx].month === currentMonthKey) {
+    refIdx -= 1;
+  }
+  const refMonth = incExpData.length > 0 ? incExpData[refIdx] : null;
+  const lastMonthIncome = refMonth ? refMonth.income : 0;
+  const lastMonthExpenses = refMonth ? refMonth.expenses : 0;
   const availableToSpend = lastMonthIncome - lastMonthExpenses;
 
   // FINLYNQ-130 — drill-through: the Monthly Income / Expenses tiles show the
-  // most-recent tracked month (incExpData is "YYYY-MM" sorted asc). Derive that
+  // reference month above (incExpData is "YYYY-MM" sorted asc). Derive that
   // month's [startDate, endDate] so the tile links into /transactions scoped to
   // exactly the rows that produced the figure. Empty range ⇒ plain /transactions.
-  const lastMonthKey = incExpData.length > 0 ? incExpData[incExpData.length - 1].month : "";
+  const lastMonthKey = refMonth ? refMonth.month : "";
   const monthDrill = (() => {
     const m = /^(\d{4})-(\d{2})$/.exec(lastMonthKey);
     if (!m) return { startDate: "", endDate: "" };
@@ -268,8 +291,10 @@ export default function DashboardPage() {
     },
     {
       label: "Monthly Income",
+      // Name the month the figure covers — it's the last COMPLETE month, not
+      // necessarily the current one (FINLYNQ-291 C1), so the label must be explicit.
       value: lastMonthIncome,
-      sub: `${incExpData.length} months tracked`,
+      sub: lastMonthKey ? getMonthLabel(lastMonthKey) : `${incExpData.length} months tracked`,
       icon: TrendingUp,
       iconBg: "bg-emerald-100 text-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-400",
       sparkColor: "#10b981",
@@ -401,7 +426,7 @@ export default function DashboardPage() {
         </motion.div>
 
         {/* Health Score */}
-        <HealthScoreCard />
+        <HealthScoreCard health={health} />
       </div>
 
       {/* ============================================
@@ -412,6 +437,14 @@ export default function DashboardPage() {
           <StatCard key={card.label} {...card} currency={apiDisplayCurrency} />
         ))}
       </div>
+
+      {/* ============================================
+          ROW 2.25 — Key ratios: Savings Rate + DTI (FINLYNQ-291)
+          Standalone headline figures (previously buried as 0-100 sub-scores
+          inside the Financial Health card). Fed by the same /api/health-score
+          payload the Health card uses.
+          ============================================ */}
+      <KeyMetrics health={health} />
 
       {/* ============================================
           ROW 2.5 — Net Worth Over Time (always visible)
