@@ -239,7 +239,18 @@ export function registerManageTool<U extends AnyZod>(
   // from the RAW union so the advertised `oneOf` is byte-identical to pre-270
   // (the coercion preprocess below does not change the declared JSON Schema).
   try {
-    CONSOLIDATED_JSON_SCHEMAS.set(name, z.toJSONSchema(union));
+    const jsonSchema = z.toJSONSchema(union) as Record<string, unknown>;
+    // MCP requires `inputSchema` to be a JSON-Schema OBJECT (`type: "object"`).
+    // Zod renders a `z.discriminatedUnion` as a bare top-level `oneOf` with NO
+    // `type`, which spec-strict clients (the Claude Code CLI) reject — and they
+    // reject the ENTIRE tools/list, so every consolidated tool disappears. Each
+    // union branch is itself an object, so asserting `type: "object"` at the top
+    // is semantically sound and spec-compliant. (The claude.ai connector tolerated
+    // the missing `type`; the CLI does not.)
+    if (jsonSchema && typeof jsonSchema === "object" && jsonSchema.type === undefined) {
+      jsonSchema.type = "object";
+    }
+    CONSOLIDATED_JSON_SCHEMAS.set(name, jsonSchema);
   } catch {
     // If schema generation ever fails, tools/list falls back to the SDK's
     // (empty) rendering — validation is unaffected. Non-fatal.
