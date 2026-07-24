@@ -58,6 +58,8 @@ Submitted to the [Anthropic Connectors Directory](https://www.anthropic.com/news
 
 [AGPL v3](LICENSE). If you run a modified version as a network service, you owe your users the source. The hosted offering at finlynq.com/cloud runs the same code as this repo.
 
+Building something on Finlynq that can't carry that obligation? A commercial license is available, see [COMMERCIAL.md](COMMERCIAL.md).
+
 Donation-based. No paid tiers. If Finlynq is useful to you, [GitHub Sponsors](https://github.com/sponsors/finlynq) or [Ko-fi](https://ko-fi.com/finlynq) keep it shipping.
 
 ---
