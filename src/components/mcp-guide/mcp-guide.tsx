@@ -4,7 +4,14 @@ import { useState, useEffect } from "react";
 import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Globe, Plus, Shield, Upload, Wand2, Radar, Landmark, Globe2, Scissors, Scale, Lightbulb, Briefcase, LifeBuoy } from "lucide-react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
 
-type ClientTab = "claude-web" | "chatgpt" | "cursor" | "cline" | "windsurf" | "custom";
+type ClientTab =
+  | "claude-web"
+  | "claude-desktop"
+  | "chatgpt"
+  | "cursor"
+  | "cline"
+  | "windsurf"
+  | "custom";
 type StatusState = "checking" | "connected" | "disconnected";
 
 const examplePrompts = [
@@ -270,6 +277,22 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
   const cursorConfig = httpConfig;
   const windsurfConfig = httpConfig;
 
+  // Claude Desktop has no native remote-MCP support, so it shells out to
+  // `mcp-remote`, which bridges stdio ↔ Streamable HTTP and drives the full
+  // OAuth 2.1 flow in a browser window. No API key goes in this file — the
+  // token is minted by the consent screen and cached under ~/.mcp-auth.
+  //
+  // `--allow-http` is ONLY needed for a plaintext http:// origin (a local
+  // self-hosted instance). Against an https:// origin it must be omitted,
+  // which is why the flag is appended conditionally below.
+  const isPlainHttp = serverUrl.startsWith("http://");
+  const desktopArgs = ["-y", "mcp-remote", mcpUrl, ...(isPlainHttp ? ["--allow-http"] : [])];
+  const desktopConfig = JSON.stringify(
+    { mcpServers: { "finlynq": { command: "npx", args: desktopArgs } } },
+    null,
+    2
+  );
+
   const stdioConfig = JSON.stringify(
     {
       mcpServers: {
@@ -289,6 +312,7 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
 
   const tabs: { id: ClientTab; label: string; icon: string }[] = [
     { id: "claude-web", label: "Claude Web / Mobile", icon: "🌐" },
+    { id: "claude-desktop", label: "Claude Desktop", icon: "🖥️" },
     { id: "chatgpt", label: "ChatGPT", icon: "💬" },
     { id: "cursor", label: "Cursor", icon: "⚡" },
     { id: "cline", label: "Cline (VS Code)", icon: "🔌" },
@@ -481,6 +505,110 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
                     <strong className="text-foreground">Privacy note:</strong> Claude Web uses OAuth 2.1, so your
                     Finlynq passphrase and financial data are never shared with Anthropic. Only the tool
                     responses (query results) pass through Claude&apos;s servers.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {activeTab === "claude-desktop" && (
+              <div className="space-y-5 text-sm text-foreground">
+                <div className="flex items-start gap-3 rounded-xl border border-indigo-500/25 bg-indigo-500/8 p-4">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15">
+                    <Bot className="h-4 w-4 text-indigo-400" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-foreground mb-0.5">One line, then OAuth in the browser</p>
+                    <p className="text-xs text-muted-foreground">
+                      The desktop app has no built-in remote-MCP support, so it runs{" "}
+                      <code className="bg-muted px-1 rounded">mcp-remote</code>, which bridges to Finlynq and
+                      opens a browser window for you to approve. <strong>No API key goes in the config file</strong> —
+                      the token is minted by the consent screen. Same approach works for any stdio-only client.
+                    </p>
+                  </div>
+                </div>
+
+                <ol className="space-y-5">
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      1
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1">Open the config file</p>
+                      <p className="text-muted-foreground">
+                        In Claude Desktop go to <strong>Settings → Developer → Edit Config</strong>, which opens{" "}
+                        <code className="text-xs bg-muted px-1 py-0.5 rounded">claude_desktop_config.json</code>.
+                      </p>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      2
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium mb-2">Add the Finlynq server</p>
+                      <div className="relative">
+                        <pre className="text-xs bg-muted rounded-lg p-4 overflow-x-auto text-muted-foreground leading-relaxed pr-10">
+                          {desktopConfig}
+                        </pre>
+                        <CopyButton text={desktopConfig} />
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        {isPlainHttp ? (
+                          <>
+                            <code className="bg-muted px-1 rounded">--allow-http</code> is included because this
+                            instance is served over plain <code className="bg-muted px-1 rounded">http://</code>.
+                            Drop it once you&apos;re on HTTPS.
+                          </>
+                        ) : (
+                          <>
+                            No extra flags needed. You do <strong>not</strong> need{" "}
+                            <code className="bg-muted px-1 rounded">--static-oauth-client-metadata</code> or{" "}
+                            <code className="bg-muted px-1 rounded">--resource</code> — older workarounds that are
+                            no longer required.
+                          </>
+                        )}
+                      </p>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      3
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1">Restart Claude Desktop, then approve</p>
+                      <p className="text-muted-foreground">
+                        Quit and reopen the app (a window reload isn&apos;t enough). A browser tab opens to the
+                        Finlynq authorization page — log in if prompted and click <strong>Allow</strong>. The
+                        approved token is cached in{" "}
+                        <code className="text-xs bg-muted px-1 py-0.5 rounded">~/.mcp-auth</code>, so you only do
+                        this once.
+                      </p>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-[11px] font-bold text-emerald-500 mt-0.5">
+                      ✓
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1 text-emerald-500">You&apos;re connected!</p>
+                      <p className="text-muted-foreground">
+                        Finlynq&apos;s tools appear under the tools icon in the chat input. If they don&apos;t,
+                        see the troubleshooting section below.
+                      </p>
+                    </div>
+                  </li>
+                </ol>
+
+                <div className="flex items-start gap-2 rounded-lg bg-amber-500/5 border border-amber-500/20 p-3">
+                  <LifeBuoy className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-muted-foreground">
+                    <strong className="text-foreground">Re-connecting after an upgrade?</strong> Delete{" "}
+                    <code className="bg-muted px-1 rounded">~/.mcp-auth</code> first. It caches the client
+                    registration from your previous connection, and a stale entry can keep an old, broken
+                    handshake alive even after the server is fixed.
                   </p>
                 </div>
               </div>
@@ -931,12 +1059,90 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
               </summary>
               <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
                 Bearer token expired or missing. For Claude.ai web, re-add the integration from{" "}
-                <strong>Settings → Integrations</strong>. For Claude Desktop / Cursor / Windsurf using
-                API-key auth, generate a fresh key at{" "}
+                <strong>Settings → Integrations</strong>. For Claude Desktop (which authenticates over OAuth
+                via <code className="bg-muted px-1 rounded text-xs">mcp-remote</code>), delete{" "}
+                <code className="bg-muted px-1 rounded text-xs">~/.mcp-auth</code> and restart the app to
+                re-run the approval. For Cursor / Windsurf using API-key auth, generate a fresh key at{" "}
                 <a href="/settings/account" className="underline underline-offset-2 hover:text-foreground">
                   finlynq.com/settings/account
                 </a>{" "}
                 and replace the old one in your client config.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span>Client re-authorizes in a loop and never connects</span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed space-y-2">
+                <p>
+                  Symptom: the browser opens the approval page over and over, each time succeeding, and the
+                  tools never appear. The <code className="bg-muted px-1 rounded text-xs">mcp-remote</code> log
+                  shows repeating{" "}
+                  <code className="bg-muted px-1 rounded text-xs">UnauthorizedError</code> in{" "}
+                  <code className="bg-muted px-1 rounded text-xs">_startOrAuthSse</code>.
+                </p>
+                <p>
+                  This was a <strong>server-side bug</strong>, fixed on 2026-07-24 (
+                  <a
+                    href="https://github.com/finlynq/finlynq/issues/318"
+                    className="underline underline-offset-2 hover:text-foreground"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    #318
+                  </a>
+                  ). <code className="bg-muted px-1 rounded text-xs">GET /api/mcp</code> answered every request
+                  with 401, which the client read as &ldquo;credentials rejected&rdquo; and retried forever. It
+                  now correctly returns{" "}
+                  <code className="bg-muted px-1 rounded text-xs">405 Method Not Allowed</code>.
+                </p>
+                <p>
+                  <strong className="text-foreground">If you&apos;re self-hosting:</strong> upgrade to an image
+                  built after that date, then delete{" "}
+                  <code className="bg-muted px-1 rounded text-xs">~/.mcp-auth</code> and restart your client —
+                  the cached client registration predates the fix and will mask it. You should not need{" "}
+                  <code className="bg-muted px-1 rounded text-xs">--static-oauth-client-metadata</code> or{" "}
+                  <code className="bg-muted px-1 rounded text-xs">--resource</code>; if a guide told you to add
+                  them, they can now be removed.
+                </p>
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span>Self-hosted: client connects, but the login page points at <code className="bg-muted px-1.5 py-0.5 rounded text-xs font-mono">localhost</code></span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
+                Set <code className="bg-muted px-1 rounded text-xs">APP_URL</code> to your public origin and
+                restart. It is the single source of truth for the OAuth issuer, so when it&apos;s unset the
+                server advertises <code className="bg-muted px-1 rounded text-xs">http://localhost:3000</code>{" "}
+                in its discovery documents — which works from the same machine and fails from everywhere else.
+                Nothing in the client config can compensate for this; it has to be fixed server-side.
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="cursor-pointer list-none px-5 py-4 text-sm font-medium text-foreground hover:bg-muted/30 transition-colors flex items-center justify-between gap-3">
+                <span>Which permissions does my client get?</span>
+                <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed space-y-2">
+                <p>
+                  Two scopes: <code className="bg-muted px-1 rounded text-xs">mcp:read</code> for read-only
+                  tools and <code className="bg-muted px-1 rounded text-xs">mcp:write</code> for anything that
+                  creates, edits, or deletes. Write implies read.
+                </p>
+                <p>
+                  A client that requests <strong>no scope</strong> gets both — the default — and the consent
+                  screen always shows exactly what will be granted before you approve. Requesting{" "}
+                  <code className="bg-muted px-1 rounded text-xs">mcp:read</code> alone yields a read-only token
+                  that can see your data but never modify it, which is a reasonable choice if you only want
+                  analysis. Scopes the server doesn&apos;t recognize are ignored rather than rejected, so a
+                  client sending OIDC defaults still connects.
+                </p>
               </div>
             </details>
 
