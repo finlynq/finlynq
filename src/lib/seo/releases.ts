@@ -38,11 +38,67 @@ export type Release = {
 
 export const RELEASES: Release[] = [
   {
+    version: "3.4.0",
+    slug: "v3.4.0",
+    name: "Finlynq v3.4.0",
+    date: "2026-07-24",
+    current: true,
+    tagline:
+      "Finlynq v3.4.0 rebuilds the MCP surface around 54 focused tools, makes statement reconciliation something you can do entirely in chat, and fixes self-hosting so the documented Docker Quick Start works end to end.",
+    summary: [
+      "Finlynq v3.4.0 is the biggest update to the AI side of the app so far. The MCP server went from 117 tools to 54, reconciliation became something you can run start to finish in a conversation, and every number the assistant reports now states how it was valued.",
+      "Self-hosters get the headline fix: the published Docker image can now build its own database schema, so the Quick Start in the README actually works. Every published tag from 3.2.0 through 3.3.2 was unusable.",
+      "Finlynq is an open-source (AGPL v3) personal finance app with a first-party Model Context Protocol (MCP) server, so you can track your money in the app and analyze it from Claude, Cursor, Windsurf, or any MCP-compatible assistant.",
+    ],
+    sections: [
+      {
+        heading: "Self-hosting",
+        items: [
+          "The published Docker image now builds its own database schema on first boot, so the documented Quick Start works end to end. Previously the container crash-looped or came up with roughly half the tables missing, which made every published tag from 3.2.0 to 3.3.2 unusable for new self-hosters. Reported by jcdev7858.",
+          "CI now builds the image, runs the documented Quick Start verbatim, and registers a real user before anything is published. A health check alone passed against a half-built schema, which is exactly how this shipped in the first place.",
+        ],
+      },
+      {
+        heading: "AI assistants",
+        items: [
+          "The tool surface is consolidated from 117 tools to 54. Related operations are grouped into single tools that take an operation name, so assistants choose correctly more often and spend far fewer tokens reading the tool list.",
+          "Reconciliation now works entirely in chat: hand your assistant a statement, and it can stage it, match rows against your ledger, commit in batches, and set a balance anchor. It works on the hosted connector with no configuration, where it previously required a setting most people never found.",
+          "Every money figure now states the basis it was valued on, so market value, ledger value, and cost basis can no longer be mistaken for one another.",
+          "When a name matches two or more of your records, tools now return the candidates and ask, instead of silently picking the first one. Passing an explicit id always wins over a name.",
+          "Categories can be renamed and merged from your assistant.",
+          "Note for existing integrations: tool names retired in the v4 consolidation now return a clear error instead of working silently. If you have scripts calling the old per-verb names, point them at the grouped tools.",
+        ],
+      },
+      {
+        heading: "Investing",
+        items: [
+          "Cross-currency cash transfers no longer stop a full lot rebuild partway through.",
+          "Realized-gain responses state which FX conversion method produced them.",
+        ],
+      },
+      {
+        heading: "Fixes",
+        items: [
+          "The cash-flow forecast now scopes to your actual cash accounts rather than matching account group names literally, so default Checking and Savings accounts are no longer excluded. Recurring items from out-of-scope accounts no longer project against an unrelated balance.",
+          "A biweekly paycheck that alternates between two amounts is now detected as recurring instead of being dropped as inconsistent.",
+          "Bulk transaction creation returns each new transaction id, so an assistant can act on what it just created without searching for it again.",
+        ],
+      },
+      {
+        heading: "Licensing",
+        items: [
+          "LICENSE is now the complete, unmodified AGPL-3.0 text, so automated tooling can identify it correctly. The commercial position moved to COMMERCIAL.md and is now an offer rather than a restriction: the AGPL applies to everyone on identical terms, and a commercial license is available to companies that need an exemption from its copyleft.",
+        ],
+      },
+    ],
+    githubUrl: "https://github.com/finlynq/finlynq/releases/tag/v3.4.0",
+  },
+  {
     version: "3.3.2",
     slug: "v3.3.2",
     name: "Finlynq v3.3.2",
     date: "2026-07-01",
-    current: true,
+    current: false,
     tagline:
       "Finlynq v3.3.2 brings native iOS and Android apps, direct bank connections, a unified import pipeline, and more control over investing accuracy.",
     summary: [
