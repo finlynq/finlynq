@@ -141,4 +141,28 @@ describe("docker image can actually run the migrations", () => {
     expect(scheme).toBeDefined();
     expect(["postgres", "postgresql"]).toContain(scheme);
   });
+
+  it("the entrypoint's sed backreferences point at the right capture group", () => {
+    // Making the scheme optional adds `(ql)?` as capture group 1, so the value
+    // we want becomes group 2 in BOTH expressions. An off-by-one here is quiet
+    // and nasty: sed errors to stderr, the assignment comes back empty, and the
+    // port silently falls back to 5432 — fine against the default, broken
+    // against any custom port. Caught in review of this very fix.
+    const entrypoint = readFileSync(path.join(ROOT, "scripts", "entrypoint.sh"), "utf8");
+    const seds = [...entrypoint.matchAll(/sed -E 's\|([^']+)\|'/g)].map((m) => m[1]);
+    expect(seds.length).toBeGreaterThanOrEqual(2);
+
+    for (const expr of seds) {
+      const [pattern, replacement] = expr.split("|");
+      // Count capture groups: '(' not preceded by a backslash and not '(?'.
+      const groups = (pattern.match(/(?<!\\)\((?!\?)/g) ?? []).length;
+      for (const ref of replacement.match(/\\(\d)/g) ?? []) {
+        const n = Number(ref.slice(1));
+        expect(
+          n,
+          `backreference ${ref} in "${expr}" exceeds its ${groups} capture group(s)`,
+        ).toBeLessThanOrEqual(groups);
+      }
+    }
+  });
 });

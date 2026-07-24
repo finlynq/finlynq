@@ -18,8 +18,10 @@ echo "[entrypoint] DATABASE_URL detected — PostgreSQL mode"
 # the match, sed passed the string through untouched, and DB_HOST/DB_PORT each
 # became the WHOLE connection string — the readiness probe could never connect
 # and the container crash-looped on every published tag (GH #312, bug 1).
+# Capture groups shift because of the optional `(ql)`: it is group 1, so the
+# value we want is group 2 in BOTH expressions.
 DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|postgres(ql)?://[^@]+@([^:/]+).*|\2|')
-DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|postgres(ql)?://[^@]+@[^:]+:([0-9]+).*|\3|')
+DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|postgres(ql)?://[^@]+@[^:]+:([0-9]+).*|\2|')
 DB_PORT="${DB_PORT:-5432}"
 
 # Fail loudly rather than looping 30x on a nonsense host: if substitution didn't
