@@ -48,6 +48,7 @@ The schema had been built by three uncoordinated mechanisms:
 1. `drizzle-pg/` — 4 files, 21 tables, run only by the old Docker entrypoint
 2. `scripts/migrations/` — 70 files, run only by `deploy.sh`
 3. ~39 loose `scripts/migrate-*.sql` — **run by hand against prod, never tracked**
+   (since deleted — see [The loose scripts are gone](#the-loose-scripts-are-gone))
 
 Prod and dev were correct only because (3) had been applied to them manually.
 Anything starting from zero got a broken database, which is what GH #312
@@ -115,12 +116,36 @@ The registration step matters more than the health check. A health check passes
 against a half-built database; registration is what actually exercised the
 missing tables in #312.
 
+## The loose scripts are gone
+
+Mechanism (3) above — the ~39 loose `scripts/migrate-*.sql` — was **deleted on
+2026-07-24**, once the baseline had subsumed its effects. They executed nowhere:
+both runners glob only `scripts/migrations/*.sql` plus the single baseline file,
+and the Dockerfile copies only those two directories. Their only remaining value
+was as a record of how prod got its shape, and the baseline is now a better one.
+
+They were removed because they *read* like part of the migration path. Anyone
+finding a `scripts/migrate-*.sql` next to `scripts/migrations/` would reasonably
+assume it still runs, and reproducing prod by replaying them in guessed order is
+exactly the failure mode that produced GH #312.
+
+One file survives: **`scripts/migrate-fx-rates-legacy-drop.sql`**, kept in place
+because it is still actionable rather than historical. `fx_rates_legacy` exists
+on prod but is dead — a one-cycle safety net from the FX canonicalisation,
+superseded and never dropped, with zero code references. It is deliberately
+excluded from the baseline (a fresh install never creates it), so the drop stays
+a manual, operator-chosen step. Its header says all of this.
+
+Historical prose keeps the historical names. `CHANGELOG.md`, the design docs
+under `plan/`, and provenance comments in `src/` still cite deleted filenames —
+for example `src/lib/auth/username.ts` credits the partial unique indexes to
+`scripts/migrate-username.sql`. Those are accurate statements about how a column
+or index came to exist and were intentionally left alone; the file being gone
+does not make the history wrong. If you are chasing one of those names, the
+schema it produced is in the baseline.
+
 ## Known loose ends
 
-- The ~39 `scripts/migrate-*.sql` files remain in the repo. They are now purely
-  historical — their effects are folded into the baseline. They are not run by
-  anything. Deleting them is a separate cleanup.
-- `fx_rates_legacy` exists on prod but is dead (a one-cycle safety net from the
-  FX canonicalisation, superseded and never dropped). It is deliberately
-  excluded from the baseline. `scripts/migrate-fx-rates-legacy-drop.sql` drops it
-  when an operator chooses to.
+- Some `scripts/migrations/*.sql` headers cross-reference deleted loose scripts
+  (and one names a file that never existed). Applied migrations are not edited
+  after the fact, so these were left as-is.
