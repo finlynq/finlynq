@@ -53,8 +53,14 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
-# Copy PostgreSQL migration files
-COPY --from=builder /app/drizzle-pg ./drizzle-pg
+# Copy the schema baseline + migration chain and the runner that applies them.
+# `drizzle-pg/` is deliberately NOT copied any more: it only ever created 21 of
+# the ~68 tables the app needs, which is why the published image could never
+# reach a registerable instance (GH #312). It survives in the repo for local
+# `npm run db:generate` workflows and is no longer a deployment path.
+COPY --from=builder /app/scripts/baseline ./scripts/baseline
+COPY --from=builder /app/scripts/migrations ./scripts/migrations
+COPY --from=builder /app/scripts/run-migrations.mjs ./scripts/run-migrations.mjs
 
 # Copy and prepare the entrypoint script
 COPY scripts/entrypoint.sh /entrypoint.sh
