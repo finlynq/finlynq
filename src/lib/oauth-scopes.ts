@@ -50,6 +50,27 @@ const VALID_SCOPE_TOKENS = new Set<string>([
 ]);
 
 /**
+ * GH #318 (bug 1) — the `scopes_supported` list published on
+ * `/.well-known/oauth-authorization-server` (RFC 8414 §2) and the MCP
+ * protected-resource metadata (RFC 9728 §2). Without it a generic client has
+ * no way to learn our scopes and falls back to the OIDC defaults
+ * (`openid email profile`), which is exactly how #318 started.
+ *
+ * Deliberately NARROWER than `VALID_SCOPE_TOKENS`: `mcp:import` is still
+ * ACCEPTED (so a client that hardcoded it doesn't break) but is no longer
+ * ADVERTISED, because it is inert and slated for removal — see the
+ * SCOPE_MCP_IMPORT doc comment. Advertising a scope that grants nothing would
+ * invite clients to hardcode it right before it disappears.
+ *
+ * Exported as the single source for both metadata routes; never re-type this
+ * array as a literal at a callsite or it will drift when the import scope goes.
+ */
+export const ADVERTISED_SCOPES: readonly string[] = [
+  SCOPE_MCP_READ,
+  SCOPE_MCP_WRITE,
+];
+
+/**
  * Read-only tool prefixes. Every tool whose name begins with one of these
  * is classified read-only. Anything not matching is treated as a write.
  *
@@ -159,6 +180,43 @@ export function normalizeRequestedScope(input: string | null | undefined): strin
   const ordered: string[] = [];
   if (seen.has(SCOPE_MCP_READ)) ordered.push(SCOPE_MCP_READ);
   if (seen.has(SCOPE_MCP_WRITE)) ordered.push(SCOPE_MCP_WRITE);
+  return ordered.join(" ");
+}
+
+/**
+ * GH #318 (bug 2) — the LENIENT counterpart to `normalizeRequestedScope`:
+ * unknown scope tokens are DROPPED instead of throwing `InvalidScopeError`.
+ *
+ * This is the normalizer the OAuth authorize path uses. The strict one is kept
+ * (still exported, still tested) for callers that genuinely want a 400 on an
+ * unrecognized token, but it must never gate a generic MCP client: `mcp-remote`
+ * — the transport behind Claude Desktop, Cursor, and ChatGPT — requests
+ * `openid email profile` when the server publishes no `scopes_supported`, and
+ * the strict validator rejected the whole authorize request with
+ * `invalid_scope`, killing the connection before login.
+ *
+ * When NOTHING recognizable survives (`openid email profile` → {}), this falls
+ * back to DEFAULT_SCOPE — identical to the omitted-scope branch. That is
+ * RFC 6749 §3.3-permitted ("the authorization server MAY fully or partially
+ * ignore the scope requested") and §5.1-honest: the token endpoint echoes the
+ * GRANTED `scope` back to the client, so nobody is misled about what they got.
+ *
+ * IMPORTANT: the consent screen must parse scope through this SAME function.
+ * It used to hand-roll its own split (`scopeTokens.includes("mcp:write")`),
+ * which for `openid email profile` yielded a non-empty token list matching
+ * nothing — rendering an EMPTY permissions list while the server granted full
+ * read+write. Displayed permissions must always equal granted scope.
+ */
+export function normalizeRequestedScopeLenient(input: string | null | undefined): string {
+  if (scopeWasUnspecified(input)) return DEFAULT_SCOPE;
+  const seen = parseScope(input);
+  if (seen.size === 0) return DEFAULT_SCOPE;
+  // Same stable ordering as the strict normalizer, and `mcp:import` is likewise
+  // dropped from the canonical scope (accepted-but-inert).
+  const ordered: string[] = [];
+  if (seen.has(SCOPE_MCP_READ)) ordered.push(SCOPE_MCP_READ);
+  if (seen.has(SCOPE_MCP_WRITE)) ordered.push(SCOPE_MCP_WRITE);
+  if (ordered.length === 0) return DEFAULT_SCOPE;
   return ordered.join(" ");
 }
 

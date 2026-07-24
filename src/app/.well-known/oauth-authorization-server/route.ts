@@ -7,6 +7,7 @@
 
 import { NextResponse } from "next/server";
 import { getIssuer } from "@/lib/oauth";
+import { ADVERTISED_SCOPES } from "@/lib/oauth-scopes";
 
 export async function GET() {
   const issuer = getIssuer();
@@ -21,6 +22,11 @@ export async function GET() {
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
+      // GH #318 (bug 1) — RFC 8414 §2. Omitting this made generic clients fall
+      // back to the OIDC defaults (`openid email profile`), which the authorize
+      // path then rejected outright. Sourced from oauth-scopes.ts so it can't
+      // drift from the tokens we actually accept.
+      scopes_supported: ADVERTISED_SCOPES,
     },
     {
       headers: {

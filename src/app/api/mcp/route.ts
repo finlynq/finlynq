@@ -18,7 +18,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { db } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { accountStrategy } from "@/lib/auth/require-auth";
-import { validateOauthToken, getIssuer } from "@/lib/oauth";
+import { validateOauthToken, bearerChallenge } from "@/lib/oauth";
 import { DEFAULT_SCOPE, parseScope, isToolAllowedForScope, enabledToolsetsForRequest } from "@/lib/oauth-scopes";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -96,12 +96,11 @@ async function authenticateMcp(request: NextRequest) {
         context: { userId: result.userId, method: "oauth" as const, mfaVerified: false, dek: result.dek, sessionId: null as string | null, scope: result.scope },
       };
     }
-    const issuer = getIssuer();
     return {
       authenticated: false as const,
       response: NextResponse.json(
         { error: "invalid_token", error_description: "OAuth access token is invalid or expired" },
-        { status: 401, headers: { "WWW-Authenticate": `Bearer realm="${issuer}", error="invalid_token"` } }
+        { status: 401, headers: { "WWW-Authenticate": bearerChallenge({ error: "invalid_token" }) } }
       ),
     };
   }
@@ -117,17 +116,11 @@ async function authenticateMcp(request: NextRequest) {
   const sessionResult = await accountStrategy.authenticate(request);
   if (sessionResult.authenticated) return sessionResult;
 
-  const issuer = getIssuer();
   return {
     authenticated: false as const,
     response: NextResponse.json(
       { error: "unauthorized", error_description: "Authentication required" },
-      {
-        status: 401,
-        headers: {
-          "WWW-Authenticate": `Bearer realm="${issuer}", resource_metadata="${issuer}/api/mcp/.well-known/oauth-protected-resource"`,
-        },
-      }
+      { status: 401, headers: { "WWW-Authenticate": bearerChallenge() } }
     ),
   };
 }
@@ -259,17 +252,31 @@ export async function POST(request: NextRequest) {
   return transport.handleRequest(request);
 }
 
+/**
+ * GH #318 (bug 4, the fatal one) — this endpoint runs the Streamable HTTP
+ * transport in STATELESS mode (`sessionIdGenerator: undefined`,
+ * `enableJsonResponse: true`), so there is no server-initiated SSE stream to
+ * open here. The MCP Streamable HTTP spec says a server that does not offer an
+ * SSE stream at its endpoint MUST answer the GET with 405 Method Not Allowed.
+ *
+ * This used to return 401 UNCONDITIONALLY — it never even read the
+ * Authorization header. `StreamableHTTPClientTransport._startOrAuthSse` opens
+ * this GET before any POST, read the 401 as "credentials rejected", and ran a
+ * full re-auth; the re-auth succeeded, issued a token, and hit the same
+ * blanket 401 again — an infinite loop that never reached the POST that would
+ * have worked. It also explains why `oauth_access_tokens.last_used_at` stayed
+ * NULL across the storm: this path never calls `validateOauthToken` at all.
+ * A real prod user minted 133 tokens in 26 minutes this way (2026-07-23).
+ *
+ * 405 tells the SDK "no SSE here, use POST" and it proceeds normally. Do NOT
+ * reintroduce a WWW-Authenticate header: this is not an auth failure, and
+ * advertising one re-arms the same re-auth reflex. Mirrors DELETE below.
+ */
 export async function GET(request: NextRequest) {
   if (!isAllowedOrigin(request.headers.get("origin"))) return rejectBadOrigin();
-  const issuer = getIssuer();
   return NextResponse.json(
-    { error: "Finlynq MCP requires authentication. Use POST with a valid Bearer token." },
-    {
-      status: 401,
-      headers: {
-        "WWW-Authenticate": `Bearer realm="${issuer}", resource_metadata="${issuer}/api/mcp/.well-known/oauth-protected-resource"`,
-      },
-    }
+    { error: "Stateless mode — no SSE stream. Use POST with a valid Bearer token." },
+    { status: 405, headers: { Allow: "POST" } }
   );
 }
 
