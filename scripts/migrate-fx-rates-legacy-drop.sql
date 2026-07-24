@@ -1,13 +1,24 @@
--- Drop the legacy per-pair fx_rates table.
+-- Drop the legacy per-pair fx_rates table. OPERATOR-OPTIONAL — NOT part of the
+-- migration chain, and nothing runs it automatically.
 --
--- Background: scripts/migrate-fx-rates-canonical.sql renamed the old shape
--- (user_id, from_currency, to_currency, rate) to fx_rates_legacy and built
--- a fresh USD-anchored fx_rates. The legacy table was kept as a one-cycle
--- safety net to compare values during the rollout. After ~2 weeks of
--- stable prod operation it can be dropped — the canonical fx_rates is the
--- only authoritative source.
+-- This is the sole surviving loose SQL script at scripts/ top level. The other
+-- ~38 were removed on 2026-07-24: they had been applied to prod by hand and
+-- their effects are folded into scripts/baseline/0001_schema_baseline.sql. This
+-- one is kept because it is still actionable — see below.
 --
--- Idempotent. Safe to re-run. The `IF EXISTS` guards on tables that have
--- already been dropped on a previous run.
+-- Background: the 2026-04-27 FX canonicalisation renamed the old per-pair shape
+-- (user_id, from_currency, to_currency, rate) to fx_rates_legacy and built a
+-- fresh USD-anchored fx_rates alongside it. The legacy table was kept as a
+-- one-cycle safety net to compare values during the rollout. It has been
+-- superseded ever since and has zero code references, but it still physically
+-- exists on prod, so it is deliberately EXCLUDED from the schema baseline
+-- (a fresh install never creates it and must not try to drop it).
+--
+-- Run it by hand, per environment, whenever an operator decides to reclaim the
+-- table. A fresh install has nothing to do here.
+--
+--   psql "$PF_DATABASE_URL" -f scripts/migrate-fx-rates-legacy-drop.sql
+--
+-- Idempotent. Safe to re-run — `IF EXISTS` guards a table already dropped.
 
 DROP TABLE IF EXISTS fx_rates_legacy;
