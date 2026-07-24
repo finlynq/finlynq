@@ -142,6 +142,24 @@ describe("docker image can actually run the migrations", () => {
     expect(["postgres", "postgresql"]).toContain(scheme);
   });
 
+  it("the entrypoint stamps DEPLOY_GENERATION", () => {
+    // currentDeployGeneration() throws in production when this is unset, so
+    // without a stamp every self-hosted container 500s on login and register.
+    // deploy.sh does this via a systemd drop-in; the container equivalent of a
+    // deploy is a container start. A fixed value in compose would defeat the
+    // forced-re-auth property, so it must be stamped here, not configured.
+    const entrypoint = readFileSync(path.join(ROOT, "scripts", "entrypoint.sh"), "utf8");
+    expect(entrypoint).toMatch(/DEPLOY_GENERATION=\$\(date \+%s\)/);
+    expect(entrypoint).toContain("export DEPLOY_GENERATION");
+
+    const compose = readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8");
+    const active = compose
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+    expect(active).not.toMatch(/DEPLOY_GENERATION\s*:/);
+  });
+
   it("the entrypoint's sed backreferences point at the right capture group", () => {
     // Making the scheme optional adds `(ql)?` as capture group 1, so the value
     // we want becomes group 2 in BOTH expressions. An off-by-one here is quiet

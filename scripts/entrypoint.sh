@@ -70,6 +70,29 @@ echo "[entrypoint] Running database migrations..."
 node scripts/run-migrations.mjs
 echo "[entrypoint] Migrations complete."
 
+# ── Stamp the deploy generation ───────────────────────────────────────────────
+#
+# `currentDeployGeneration()` (src/lib/auth/jwt.ts) THROWS in production when
+# DEPLOY_GENERATION is unset, so without this every self-hosted container 500s on
+# login and registration — found by the CI smoke test on its first run, after the
+# GH #312 fixes got the app far enough to actually reach registration.
+#
+# On the VPS, deploy.sh stamps this into a systemd drop-in before restarting. The
+# container equivalent of "a deploy" is a container start, so stamp it here with
+# the same `date +%s`. That preserves the security property the value exists for
+# — every restart invalidates in-flight JWTs and forces re-auth. Do NOT move this
+# to a fixed value in docker-compose.yml; a constant would defeat the mechanism.
+#
+# An operator who deliberately wants sessions to survive a restart (a rolling
+# redeploy, say) can pin DEPLOY_GENERATION in the environment and we respect it.
+if [ -z "${DEPLOY_GENERATION:-}" ]; then
+  DEPLOY_GENERATION=$(date +%s)
+  export DEPLOY_GENERATION
+  echo "[entrypoint] Stamped DEPLOY_GENERATION=$DEPLOY_GENERATION (sessions re-auth on restart)"
+else
+  echo "[entrypoint] Using operator-supplied DEPLOY_GENERATION=$DEPLOY_GENERATION"
+fi
+
 # ── Launch the app ────────────────────────────────────────────────────────────
 echo "[entrypoint] Starting Next.js server..."
 exec "$@"
