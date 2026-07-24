@@ -63,6 +63,31 @@ export function getIssuer(): string {
   return appUrl.replace(/\/$/, "");
 }
 
+/**
+ * GH #318 (bug 3) — the single builder for the `WWW-Authenticate` challenge on
+ * every 401 out of the MCP route.
+ *
+ * `resource_metadata` (RFC 9728 §5.1) is ALWAYS emitted. It used to be hand-
+ * written at three separate callsites and one of them — the `invalid_token`
+ * branch, i.e. the one a client hits mid-session when its token goes stale —
+ * silently omitted it. Without that pointer the MCP SDK cannot rediscover the
+ * protected resource on re-auth, drops the RFC 8707 `resource` parameter, and
+ * builds a malformed authorize URL.
+ *
+ * Pass `error` for a token that was PRESENTED and rejected (`invalid_token`);
+ * omit it when no credentials were offered at all — RFC 6750 §3 says the
+ * `error` attribute belongs only on a request that actually carried one.
+ */
+export function bearerChallenge(opts?: { error?: string }): string {
+  const issuer = getIssuer();
+  const parts = [
+    `realm="${issuer}"`,
+    `resource_metadata="${issuer}/api/mcp/.well-known/oauth-protected-resource"`,
+  ];
+  if (opts?.error) parts.push(`error="${opts.error}"`);
+  return `Bearer ${parts.join(", ")}`;
+}
+
 // Typed shorthand for the raw PG executor
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const pgDb = db as any;

@@ -93,6 +93,27 @@ function makeFixtureDb(matcher: RowsetFn): {
 }
 
 /**
+ * Row shape returned by `getAccountDeleteBlockers`' single-round-trip SELECT —
+ * one column per ON DELETE NO ACTION referent, aliased to its table name.
+ * Defaults to a fully clean account; override only the referents under test.
+ */
+function blockerRow(overrides: Record<string, number> = {}): FixtureRow {
+  return {
+    transactions: 0,
+    portfolio_holdings: 0,
+    loans: 0,
+    goals: 0,
+    subscriptions: 0,
+    recurring_transactions: 0,
+    transaction_splits: 0,
+    snapshots: 0,
+    staged_imports: 0,
+    staged_transactions: 0,
+    ...overrides,
+  };
+}
+
+/**
  * Pull the delete handler off a freshly-registered server. The v4.0
  * `delete_account` alias was removed in the v4.1 clean break; the op lives on
  * `manage_accounts(op:"delete")` now, so we grab that union tool and wrap its
@@ -301,16 +322,19 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     expect(queries.filter((q) => /DELETE FROM accounts/i.test(q.text))).toHaveLength(1);
   });
 
-  // FINLYNQ-264 Phase 1: a NON-EMPTY account (transactions exist) is now
-  // gated by the preview→confirmation-token two-step regardless of `force`.
-  // A bare call returns a preview + token and deletes NOTHING; the caller
-  // re-calls with the token to commit.
-  it("previews (no delete) when transactions exist and no confirmation_token is passed", async () => {
+  // 2026-07-24 — ten of the foreign keys pointing at `accounts` are ON DELETE
+  // NO ACTION (`transactions` and `portfolio_holdings` among them), so an
+  // account with any linked record cannot be deleted at all. The op used to
+  // claim an FK CASCADE it never had and drove a raw Postgres 23503 out to the
+  // caller; it now refuses, naming the counts. `getAccountDeleteBlockers`
+  // answers in ONE round trip, matched here on its `bound_account_id` subquery.
+  it("refuses (no delete, no token) when linked records block the delete", async () => {
     const dek = randomBytes(32);
     const { db, queries } = makeFixtureDb((sqlText) => {
       if (/FROM accounts WHERE user_id/i.test(sqlText) && /AND id = /i.test(sqlText)) {
         return [{ id: 686, name_ct: encryptField(dek, "_BUSY_"), alias_ct: null }];
       }
+      if (/bound_account_id/i.test(sqlText)) return [blockerRow({ transactions: 5 })];
       if (/COUNT\(\*\)/i.test(sqlText) && /FROM transactions/i.test(sqlText)) {
         return [{ cnt: 5 }];
       }
@@ -319,21 +343,50 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     const tool = getDeleteAccountTool(db, dek);
     const result = await tool.handler({ accountId: 686 }, {});
     const text = envelopeText(result);
-    // Preview shape: no delete, a token is minted, the blast is echoed.
-    expect(text).toMatch(/"preview": true/);
-    expect(text).toMatch(/confirmationToken/);
-    expect(text).toMatch(/"transactionCount": 5/);
+    expect(text).toMatch(/5 transactions/);
+    expect(text).toMatch(/cannot be deleted/);
+    // No token for an operation that can never succeed, and nothing deleted.
+    expect(text).not.toMatch(/confirmationToken/);
     expect(queries.filter((q) => /DELETE FROM accounts/i.test(q.text))).toHaveLength(0);
   });
 
-  it("commits a non-empty (force) delete only after a valid confirmation_token round-trip", async () => {
+  // The exact prod shape. `required` keys off the TRANSACTION count alone, so
+  // an investment account with holdings but no transactions returns false,
+  // skips the preview entirely, and lands straight in `commit`. The blocker
+  // re-check inside `commit` is the only gate it ever passes through — without
+  // it this call reached Postgres and 23503'd on
+  // portfolio_holdings_account_id_fkey.
+  it("refuses a holdings-only account, which takes the direct (no-preview) path", async () => {
+    const dek = randomBytes(32);
+    const { db, queries } = makeFixtureDb((sqlText) => {
+      if (/FROM accounts WHERE user_id/i.test(sqlText) && /AND id = /i.test(sqlText)) {
+        return [{ id: 1141, name_ct: encryptField(dek, "_BROKERAGE_"), alias_ct: null }];
+      }
+      if (/bound_account_id/i.test(sqlText)) return [blockerRow({ portfolio_holdings: 8 })];
+      if (/COUNT\(\*\)/i.test(sqlText) && /FROM transactions/i.test(sqlText)) {
+        return [{ cnt: 0 }];
+      }
+      return [];
+    });
+    const tool = getDeleteAccountTool(db, dek);
+    const result = await tool.handler({ accountId: 1141 }, {});
+    const text = envelopeText(result);
+    expect(text).toMatch(/8 investment holdings/);
+    expect(queries.filter((q) => /DELETE FROM accounts/i.test(q.text))).toHaveLength(0);
+  });
+
+  it("commits a force delete on a clean account only after a valid confirmation_token round-trip", async () => {
     const dek = randomBytes(32);
     const { db, queries } = makeFixtureDb((sqlText) => {
       if (/FROM accounts WHERE user_id/i.test(sqlText) && /AND id = /i.test(sqlText)) {
         return [{ id: 686, name_ct: encryptField(dek, "_FORCE_"), alias_ct: null }];
       }
+      // Nothing references the account — the only state a delete can proceed
+      // from. `force` no longer means "delete through linked records" (it never
+      // could); it only forces the token two-step on an already-clean account.
+      if (/bound_account_id/i.test(sqlText)) return [blockerRow()];
       if (/COUNT\(\*\)/i.test(sqlText) && /FROM transactions/i.test(sqlText)) {
-        return [{ cnt: 5 }];
+        return [{ cnt: 0 }];
       }
       return [];
     });
@@ -349,7 +402,7 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     const commitRes = await tool.handler({ accountId: 686, force: true, confirmation_token: token }, {});
     const commitText = envelopeText(commitRes);
     expect(commitText).toMatch(/Account #686/);
-    expect(commitText).toMatch(/5 transactions also removed/);
+    expect(commitText).toMatch(/deleted/);
     expect(queries.filter((q) => /DELETE FROM accounts/i.test(q.text))).toHaveLength(1);
   });
 
@@ -376,8 +429,13 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     expect(sliceEnd).toBeGreaterThan(idx);
     const handler = src.slice(idx, sliceEnd);
     expect(handler).toMatch(/invalidateUserTxCache\(userId\)/);
-    // FK CASCADE comment present so future readers don't add redundant
-    // child-row DELETEs.
-    expect(handler).toMatch(/CASCADE/);
+    // The blocker pre-check must stay in the COMMIT path, not just the preview:
+    // a clean-account delete skips the preview entirely, so this is the only
+    // gate it passes through. Its absence is what let a raw Postgres 23503
+    // reach callers (prod, 2026-07-24).
+    expect(handler).toMatch(/getAccountDeleteBlockers\(db, userId, acctId\)/);
+    // Cascade behaviour stays documented so future readers don't add redundant
+    // child-row DELETEs for the referents Postgres already cleans up.
+    expect(handler).toMatch(/cascad/i);
   });
 });

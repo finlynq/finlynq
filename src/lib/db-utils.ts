@@ -31,3 +31,23 @@ export function pgErrorCode(error: unknown): string | null {
 export function isPgErrorCode(error: unknown, code: string): boolean {
   return pgErrorCode(error) === code;
 }
+
+/**
+ * Extract the violated constraint name (e.g. "uq_bank_tx_fit") from a caught
+ * Postgres error, using the same two-layer unwrap as {@link pgErrorCode} —
+ * Drizzle hides the original pg error, the only one carrying `.constraint`, on
+ * `.cause`. Needed whenever a table has MORE THAN ONE unique constraint and the
+ * recovery differs per constraint, since the SQLSTATE alone (23505) cannot tell
+ * them apart. Returns null when no constraint name is present.
+ */
+export function pgErrorConstraint(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const top = (error as { constraint?: unknown }).constraint;
+  if (typeof top === "string" && top) return top;
+  const cause = (error as { cause?: unknown }).cause;
+  if (typeof cause === "object" && cause !== null) {
+    const causeConstraint = (cause as { constraint?: unknown }).constraint;
+    if (typeof causeConstraint === "string" && causeConstraint) return causeConstraint;
+  }
+  return null;
+}

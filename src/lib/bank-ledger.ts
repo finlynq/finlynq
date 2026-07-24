@@ -15,12 +15,19 @@
  * job re-encrypts service-tier rows under the user's DEK once it becomes
  * available.
  *
- * Idempotency: ON CONFLICT (user_id, account_id, import_hash,
- * occurrence_index) DO UPDATE bumps `last_seen_at`, increments
- * `seen_count`, and appends to `source_filenames`. Content columns
- * (`import_hash`, `fit_id`, `date`, `amount`, `payee`, etc.) are NEVER
- * updated on conflict — `bank_transactions` is content-immutable once
- * written.
+ * Idempotency: a re-import bumps `last_seen_at`, increments `seen_count`, and
+ * appends to `source_filenames`. Content columns (`import_hash`, `fit_id`,
+ * `date`, `amount`, `payee`, etc.) are NEVER updated — `bank_transactions` is
+ * content-immutable once written.
+ *
+ * A row is recognised as a re-import by EITHER of the table's two unique
+ * constraints: `uq_bank_tx_fit` (user_id, account_id, fit_id) when the source
+ * supplied a bank FITID, else `uq_bank_tx_hash` (user_id, account_id,
+ * import_hash, occurrence_index) via ON CONFLICT. The fit_id check runs first
+ * and cannot be folded into the ON CONFLICT clause — one clause arbitrates one
+ * index, and a bank that edits a transaction's content under a stable FITID
+ * (pending→posted) changes the hash while keeping the fit_id. See the block
+ * comment on that check for the failure it prevents.
  *
  * Returns `{ id, wasInserted }` so callers can distinguish a fresh ledger
  * entry from a re-import hit (used by the staging-upload preview to flag
@@ -31,6 +38,7 @@
 
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
+import { isPgErrorCode, normalizeDbRows, pgErrorConstraint } from "@/lib/db-utils";
 import { encryptField } from "@/lib/crypto/envelope";
 import { encryptStaged } from "@/lib/crypto/staging-envelope";
 import { encryptStagingMeta } from "@/lib/crypto/staging-metadata";
@@ -184,10 +192,55 @@ export async function upsertBankTransaction(
     ? sql`ARRAY[${encFilename}]::TEXT[]`
     : sql`ARRAY[]::TEXT[]`;
 
+  // `bank_transactions` carries TWO unique constraints, and a single ON
+  // CONFLICT clause can only arbitrate ONE of them:
+  //
+  //   uq_bank_tx_hash — (user_id, account_id, import_hash, occurrence_index)
+  //   uq_bank_tx_fit  — (user_id, account_id, fit_id) WHERE fit_id IS NOT NULL
+  //
+  // The INSERT below arbitrates the hash. But `import_hash` is computed over
+  // date + amount + payee (generateImportHash), so when a bank re-sends a
+  // transaction under the SAME FITID with edited content — the pending→posted
+  // transition rewrites the description, moves the date to the post date, and
+  // can settle at a different amount — the hash changes, the hash arbiter
+  // misses, and the INSERT dies on uq_bank_tx_fit with a raw 23505 that aborts
+  // the entire import batch. That fired twice on prod (2026-07-22, 2026-07-23).
+  //
+  // So when the row carries a fit_id, settle THAT constraint first. A hit is
+  // the same bank transaction we already hold, so it takes the identical
+  // re-import bump the ON CONFLICT path applies. Content is deliberately left
+  // as first written: `bank_transactions` is content-immutable once written,
+  // and reconcile links plus `transactions.bank_transaction_id` lineage already
+  // point at the original values.
+  const hasFitId = row.fitId != null && row.fitId !== "";
+
+  const bumpByFitId = async (): Promise<BankLedgerUpsertResult | null> => {
+    const bumped = await db.execute(sql`
+      UPDATE bank_transactions SET
+        last_seen_at = NOW(),
+        seen_count = seen_count + 1,
+        source_filenames = CASE
+          WHEN ${encFilename}::TEXT IS NULL THEN source_filenames
+          ELSE array_append(source_filenames, ${encFilename}::TEXT)
+        END
+      WHERE user_id = ${row.userId}
+        AND account_id = ${row.accountId}
+        AND fit_id = ${row.fitId}
+      RETURNING id
+    `);
+    const hit = normalizeDbRows<{ id: string }>(bumped)[0];
+    return hit ? { id: hit.id, wasInserted: false } : null;
+  };
+
+  if (hasFitId) {
+    const hit = await bumpByFitId();
+    if (hit) return hit;
+  }
+
   // The `xmax = 0` trick distinguishes a fresh INSERT from an ON CONFLICT
   // UPDATE — xmax is 0 for newly-inserted tuples and non-0 for the
   // previously-committed tuple being touched.
-  const result = await db.execute(sql`
+  const runInsert = () => db.execute(sql`
     INSERT INTO bank_transactions (
       user_id, account_id, import_hash, occurrence_index, fit_id, date,
       amount, currency, entered_amount, entered_currency, entered_fx_rate,
@@ -231,6 +284,23 @@ export async function upsertBankTransaction(
       END
     RETURNING id, (xmax = 0) AS was_inserted
   `);
+
+  let result: unknown;
+  try {
+    result = await runInsert();
+  } catch (error) {
+    // A concurrent writer claimed this fit_id between the lookup above and
+    // this INSERT. Settle it the same way, once.
+    if (
+      hasFitId &&
+      isPgErrorCode(error, "23505") &&
+      pgErrorConstraint(error) === "uq_bank_tx_fit"
+    ) {
+      const hit = await bumpByFitId();
+      if (hit) return hit;
+    }
+    throw error;
+  }
 
   // Normalize result shape — pg drivers return { rows: [...] }, some
   // adapters return the array directly (mirrors the pattern in

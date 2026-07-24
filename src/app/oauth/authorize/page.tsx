@@ -10,6 +10,8 @@ import {
   PiggyBank,
   TrendingUp,
 } from "lucide-react";
+// Pure module (no DB/server imports) — safe in a client bundle.
+import { normalizeRequestedScopeLenient } from "@/lib/oauth-scopes";
 
 // Permissions block. Each entry is gated on whether the client requested
 // the corresponding scope (`mcp:read` for the read items, `mcp:write` for
@@ -84,10 +86,21 @@ function AuthorizePageInner() {
   // RFC 6749 §3.3 — space-separated list of scope tokens. Empty/missing
   // defaults to the full read+write scope (back-compat: pre-scope-PR clients
   // got full access, and we keep that until clients opt into narrower scopes).
+  //
+  // GH #318 — this MUST resolve the effective scope through the same
+  // `normalizeRequestedScopeLenient` the authorize route grants on, so the
+  // permissions rendered below always equal the permissions actually granted.
+  // It used to hand-roll the split and test `scopeTokens.includes("mcp:write")`
+  // directly: for a client requesting `openid email profile` (what mcp-remote
+  // sends) the token list was non-empty but matched nothing, so BOTH flags went
+  // false and the consent screen rendered an EMPTY permissions list — while the
+  // server granted full read+write. The user would have approved a blank
+  // screen. Never re-derive these flags from the raw query string.
   const requestedScope = searchParams.get("scope") ?? "";
-  const scopeTokens = requestedScope.split(/\s+/).filter(Boolean);
-  const wantsWrite = scopeTokens.length === 0 || scopeTokens.includes("mcp:write");
-  const wantsRead = scopeTokens.length === 0 || scopeTokens.includes("mcp:read") || wantsWrite;
+  const grantedScope = normalizeRequestedScopeLenient(requestedScope);
+  const grantedTokens = grantedScope.split(/\s+/).filter(Boolean);
+  const wantsWrite = grantedTokens.includes("mcp:write");
+  const wantsRead = grantedTokens.includes("mcp:read") || wantsWrite;
 
   const [sessionState, setSessionState] = useState<"loading" | "loggedIn" | "loggedOut">("loading");
   const [loading, setLoading] = useState(false);

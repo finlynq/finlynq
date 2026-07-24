@@ -12,6 +12,8 @@ import {
   mcpToolIsReadOnly,
   parseScope,
   normalizeRequestedScope,
+  normalizeRequestedScopeLenient,
+  ADVERTISED_SCOPES,
   isToolAllowedForScope,
   InvalidScopeError,
   DEFAULT_SCOPE,
@@ -126,6 +128,65 @@ describe("normalizeRequestedScope", () => {
     expect(() => normalizeRequestedScope("mcp:read mcp:bogus")).toThrow(InvalidScopeError);
     expect(() => normalizeRequestedScope("read")).toThrow(InvalidScopeError);
     expect(() => normalizeRequestedScope("write")).toThrow(InvalidScopeError);
+  });
+});
+
+describe("normalizeRequestedScopeLenient — GH #318 bug 2", () => {
+  it("drops unknown tokens instead of throwing", () => {
+    expect(normalizeRequestedScopeLenient("mcp:read mcp:bogus")).toBe("mcp:read");
+    expect(normalizeRequestedScopeLenient("openid mcp:read")).toBe("mcp:read");
+    expect(normalizeRequestedScopeLenient("mcp:admin mcp:read mcp:write")).toBe(
+      "mcp:read mcp:write"
+    );
+  });
+
+  it("falls back to DEFAULT_SCOPE when NOTHING is recognized", () => {
+    // The exact string mcp-remote sends when the server publishes no
+    // scopes_supported. This is the case that broke every generic client.
+    expect(normalizeRequestedScopeLenient("openid email profile")).toBe(DEFAULT_SCOPE);
+    expect(normalizeRequestedScopeLenient("read write")).toBe(DEFAULT_SCOPE);
+  });
+
+  it("still defaults on empty/missing input, like the strict normalizer", () => {
+    expect(normalizeRequestedScopeLenient(undefined)).toBe(DEFAULT_SCOPE);
+    expect(normalizeRequestedScopeLenient(null)).toBe(DEFAULT_SCOPE);
+    expect(normalizeRequestedScopeLenient("   ")).toBe(DEFAULT_SCOPE);
+  });
+
+  it("agrees with the strict normalizer on every all-valid input", () => {
+    for (const input of ["mcp:read", "mcp:write", "mcp:read mcp:write", "mcp:write mcp:read"]) {
+      expect(normalizeRequestedScopeLenient(input)).toBe(normalizeRequestedScope(input));
+    }
+  });
+
+  it("narrows to read-only without leaking write", () => {
+    // Regression guard: a client asking for mcp:read alongside junk must NOT
+    // be widened to DEFAULT_SCOPE by the fallback branch.
+    expect(normalizeRequestedScopeLenient("openid mcp:read")).not.toContain("mcp:write");
+  });
+
+  it("treats the inert mcp:import alone as unspecified, not as a grant", () => {
+    // mcp:import is accepted-but-inert and dropped from the canonical scope,
+    // so it can't be the only surviving token.
+    expect(normalizeRequestedScopeLenient("mcp:import")).toBe(DEFAULT_SCOPE);
+    expect(normalizeRequestedScopeLenient("mcp:read mcp:import")).toBe("mcp:read");
+  });
+});
+
+describe("ADVERTISED_SCOPES — GH #318 bug 1", () => {
+  it("publishes exactly the two scopes that grant something", () => {
+    expect(ADVERTISED_SCOPES).toEqual([SCOPE_MCP_READ, SCOPE_MCP_WRITE]);
+  });
+
+  it("every advertised scope is actually accepted by both normalizers", () => {
+    for (const s of ADVERTISED_SCOPES) {
+      expect(() => normalizeRequestedScope(s)).not.toThrow();
+      expect(normalizeRequestedScopeLenient(s)).toBe(s);
+    }
+  });
+
+  it("does not advertise the inert mcp:import scope", () => {
+    expect(ADVERTISED_SCOPES).not.toContain("mcp:import");
   });
 });
 

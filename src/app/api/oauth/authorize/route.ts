@@ -15,10 +15,9 @@ import {
   getClient,
   isRegisteredRedirectUri,
   isValidPkceMethod,
-  InvalidScopeError,
   DEFAULT_SCOPE,
 } from "@/lib/oauth";
-import { normalizeRequestedScope, scopeWasUnspecified } from "@/lib/oauth-scopes";
+import { normalizeRequestedScopeLenient, scopeWasUnspecified } from "@/lib/oauth-scopes";
 import { getDEK } from "@/lib/crypto/dek-cache";
 
 export async function POST(request: NextRequest) {
@@ -118,22 +117,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Validate the requested scope against the recognized tokens. Empty/missing
+  // Normalize the requested scope against the recognized tokens. Empty/missing
   // scope falls through to DEFAULT_SCOPE (back-compat for clients that don't
-  // know about the scope parameter). Unknown scope tokens reject with the
-  // RFC 6749 §3.3 invalid_scope error.
-  let scope: string;
-  try {
-    scope = normalizeRequestedScope(rawScope ?? DEFAULT_SCOPE);
-  } catch (err) {
-    if (err instanceof InvalidScopeError) {
-      return NextResponse.json(
-        { error: "invalid_scope", error_description: `Unknown scope: "${err.invalidToken}"` },
-        { status: 400 }
-      );
-    }
-    throw err;
-  }
+  // know about the scope parameter).
+  //
+  // GH #318 (bug 2) — this is LENIENT: unrecognized tokens are dropped, not
+  // rejected. It used to call the strict `normalizeRequestedScope` and return
+  // 400 invalid_scope on the first unknown token, which made the server
+  // unusable with every generic MCP client: `mcp-remote` requests
+  // `openid email profile` and the whole authorize request died. Dropping is
+  // RFC 6749 §3.3-permitted and the token endpoint echoes the granted scope
+  // back, so the client is told exactly what it got.
+  const scope = normalizeRequestedScopeLenient(rawScope ?? DEFAULT_SCOPE);
 
   // FINLYNQ-163 (least-privilege observability): the auth grant is where the
   // client's RAW requested scope first arrives. When it's omitted/empty/
