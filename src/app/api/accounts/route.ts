@@ -6,6 +6,11 @@ import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { backfillInvestmentAccount } from "@/lib/investment-account";
 import { isPgErrorCode } from "@/lib/db-utils";
+import { db } from "@/db";
+import {
+  getAccountDeleteBlockers,
+  accountDeleteBlockedMessage,
+} from "@/lib/accounts/delete-blockers";
 
 const postSchema = z.object({
   name: z.string(),
@@ -131,11 +136,18 @@ export async function DELETE(request: NextRequest) {
     const idParam = request.nextUrl.searchParams.get("id");
     const id = idParam ? Number(idParam) : NaN;
     if (!Number.isFinite(id)) return NextResponse.json({ error: "id is required" }, { status: 400 });
+    // Pre-check the ten ON DELETE NO ACTION referents, so the caller is told
+    // what is actually in the way and the doomed DELETE never reaches Postgres
+    // (every attempt lands in `diagnostics_log` as a db_error).
+    const blockers = await getAccountDeleteBlockers(db, auth.context.userId, id);
+    if (blockers.length > 0) {
+      return NextResponse.json({ error: accountDeleteBlockedMessage(blockers) }, { status: 409 });
+    }
     await deleteAccount(id, auth.context.userId);
     return NextResponse.json({ ok: true });
   } catch (error: unknown) {
-    // PG foreign_key_violation — account still referenced by transactions,
-    // splits, holdings, loans, goals, snapshots, subscriptions, or recurring.
+    // Backstop for the race where a linked row appears between the pre-check
+    // above and the DELETE.
     if (isPgErrorCode(error, "23503")) {
       return NextResponse.json(
         { error: "This account still has transactions or other records linked to it. Archive it instead, or remove the related records first." },

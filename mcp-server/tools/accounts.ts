@@ -40,6 +40,10 @@ import {
 } from "../../src/lib/mcp/user-tx-cache";
 import { withConfirmation, PreviewAbortError } from "./_confirm";
 import { registerManageTool } from "./_consolidate";
+import {
+  getAccountDeleteBlockers,
+  accountDeleteBlockedMessage,
+} from "../../src/lib/accounts/delete-blockers";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -191,10 +195,18 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
   }
 
   // ── op: delete — lifted VERBATIM from delete_account (withConfirmation) ─────
-  // Issue #230 / FINLYNQ-264 tier-1: the non-empty / force delete CASCADEs the
-  // account's transactions + holding_accounts + goal_accounts, so it requires
-  // the preview→token two-step; a CLEAN empty account deletes directly. The
-  // full resolution + confirmation wiring is preserved verbatim.
+  // Issue #230 / FINLYNQ-264 tier-1: the delete requires the preview→token
+  // two-step once anything references the account; a CLEAN empty account
+  // deletes directly. The full resolution + confirmation wiring is preserved.
+  //
+  // 2026-07-24: this op used to claim an FK CASCADE over `transactions`. There
+  // is none — `transactions.account_id` is ON DELETE NO ACTION, as are nine
+  // other referents including `portfolio_holdings`. Every delete of an account
+  // holding any of them died on a raw Postgres 23503 that surfaced verbatim to
+  // the caller (four hits on prod inside five minutes). The preview now refuses
+  // up front via getAccountDeleteBlockers() instead of minting a token for an
+  // operation that cannot succeed. `force` never had the power to override a
+  // foreign key.
   type DeleteAccountArgs = {
     accountId?: number;
     account?: string;
@@ -283,11 +295,28 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
     preview: async (a) => {
       const { acct, count } = await resolveDeleteAccount(a);
       const acctId = Number(acct.id);
+      // Ten of the foreign keys pointing at `accounts` are ON DELETE NO ACTION,
+      // so a single row in any of them makes this delete impossible. Refuse
+      // HERE rather than minting a confirmation token for an operation whose
+      // only possible outcome is a 23503 at commit time.
+      const blockers = await getAccountDeleteBlockers(db, userId, acctId);
+      if (blockers.length > 0) {
+        throw new PreviewAbortError(
+          `${accountDeleteBlockedMessage(blockers)} Archiving is available in the ` +
+            `Finlynq web app; this tool cannot archive.`,
+        );
+      }
       const holdingCount = Number(
         (await q(db, sql`SELECT COUNT(*) AS cnt FROM holding_accounts WHERE user_id = ${userId} AND account_id = ${acctId}`))[0]?.cnt ?? 0,
       );
       const goalCount = Number(
         (await q(db, sql`SELECT COUNT(*) AS cnt FROM goal_accounts WHERE user_id = ${userId} AND account_id = ${acctId}`))[0]?.cnt ?? 0,
+      );
+      // Bank-ledger rows DO cascade and are NOT a blocker, so an otherwise
+      // clean account can still silently drop its imported statement history.
+      // That is the one destructive consequence left worth previewing.
+      const bankRowCount = Number(
+        (await q(db, sql`SELECT COUNT(*) AS cnt FROM bank_transactions WHERE user_id = ${userId} AND account_id = ${acctId}`))[0]?.cnt ?? 0,
       );
       return {
         accountId: acctId,
@@ -295,15 +324,33 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
         transactionCount: count,
         holdingLinkCount: holdingCount,
         goalLinkCount: goalCount,
-        cascades: "transactions, holding_accounts, goal_accounts",
+        bankLedgerRowCount: bankRowCount,
+        cascades:
+          "holding_accounts, goal_accounts, bank_transactions, bank_daily_balances, " +
+          "bank_upload_batches, holding_lots, portfolio_snapshots, email_import_rules, " +
+          "simplefin_pending_transactions",
       };
     },
     commit: async (a) => {
-      const { acct, count } = await resolveDeleteAccount(a);
+      const { acct } = await resolveDeleteAccount(a);
       const acctId = Number(acct.id);
       const acctName = (acct.name as string | undefined) ?? "<encrypted>";
-      // FK CASCADE: this DELETE drops `transactions`, `holding_accounts`, and
-      // `goal_accounts` rows for this account in the same DB transaction.
+      // Load-bearing, not just a TOCTOU guard: a clean account takes the direct
+      // (no-token) path, so `required` returns false and the preview — with its
+      // blocker check — never runs. `required` also keys off the TRANSACTION
+      // count alone, so an account with holdings but no transactions reaches
+      // this line untouched. This is the only gate it passes through.
+      const blockers = await getAccountDeleteBlockers(db, userId, acctId);
+      if (blockers.length > 0) {
+        return err(
+          `${accountDeleteBlockedMessage(blockers)} Archiving is available in the ` +
+            `Finlynq web app; this tool cannot archive.`,
+        );
+      }
+      // The cascading referents (holding_accounts, goal_accounts,
+      // bank_transactions, holding_lots, portfolio_snapshots, …) are dropped in
+      // the same DB transaction. The NO ACTION referents are guaranteed empty
+      // by the check above.
       await db.execute(sql`DELETE FROM accounts WHERE id = ${acctId} AND user_id = ${userId}`);
       // CLAUDE.md invariant: every MCP tx-mutating write must invalidate the
       // per-user tx cache. Mirrors `delete_budget` precedent.
@@ -312,7 +359,9 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
         success: true,
         data: {
           accountId: acctId,
-          message: `Account #${acctId} ("${acctName}") deleted${count > 0 ? ` (${count} transactions also removed)` : ""}`,
+          // No "N transactions also removed" suffix: a non-zero transaction
+          // count now refuses the delete outright, so that branch was dead.
+          message: `Account #${acctId} ("${acctName}") deleted`,
         },
       });
     },
@@ -339,7 +388,7 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_accounts",
-    "Manage financial accounts: `op` selects add / update / delete / set_mode. add: create an account (name/type A|L, optional currency/group/alias). update: change name/group/currency/note/alias (exact `accountId` or fuzzy `account`). delete: TWO-STEP for a non-empty/force delete (preview cascade counts + token, then commit); a clean empty account deletes directly. set_mode: set the import pipeline mode (auto|approve|manual).",
+    "Manage financial accounts: `op` selects add / update / delete / set_mode. add: create an account (name/type A|L, optional currency/group/alias). update: change name/group/currency/note/alias (exact `accountId` or fuzzy `account`). delete: only possible while nothing references the account — transactions, holdings, loans, goals, subscriptions, recurring transactions, splits, snapshots and staged imports each block it, and the call is refused naming the counts (archive the account in the web app instead). TWO-STEP when a token is required (preview cascade counts, then commit); a clean empty account deletes directly. set_mode: set the import pipeline mode (auto|approve|manual).",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("add"),
@@ -364,7 +413,7 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
         op: z.literal("delete"),
         accountId: z.number().int().positive().optional().describe("Account FK (accounts.id). Exact match — preferred and the only way to delete when the DEK is not unlocked."),
         account: z.string().optional().describe("Account name or alias (fuzzy). Requires an unlocked DEK. Pass `accountId` instead when no DEK is available."),
-        force: z.boolean().optional().describe("Delete even if transactions exist. FK CASCADE removes the account's transactions/holding_accounts/goal_accounts — irreversible. A non-empty delete ALWAYS requires the confirmation token."),
+        force: z.boolean().optional().describe("Retained for compatibility; it cannot override a foreign key. An account is deletable only while nothing references it, so this flag only forces the confirmation-token two-step on an already-clean account."),
         confirmation_token: z.string().optional().describe("Omit to preview; pass the preview's token to commit a non-empty/force delete. Single-use, 5-min TTL. Not needed to delete a clean empty account."),
       }),
       z.object({
