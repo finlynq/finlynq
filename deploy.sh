@@ -211,7 +211,31 @@ if ! command -v psql >/dev/null 2>&1; then
   exit 1
 fi
 MIGRATIONS_DIR="$APP_DIR/scripts/migrations"
+BASELINE_FILE="$APP_DIR/scripts/baseline/0001_schema_baseline.sql"
 psql "$DB_URL" -v ON_ERROR_STOP=1 -q -c "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());"
+
+# Baseline step (GH #312). Replaying scripts/migrations/ against an EMPTY database
+# does not work — measured 2026-07-24: 38 of 70 files fail and only 43 of 70
+# tables get created, because much of the schema was historically created by
+# untracked `scripts/migrate-*.sql` run by hand. So on an empty database we apply
+# the full schema baseline first; it records the migrations it subsumes, and the
+# loop below then skips them.
+#
+# INERT ON PROD AND DEV BY CONSTRUCTION: the guard fires only when `public` holds
+# no ordinary tables besides `schema_migrations`, which can never be true of an
+# environment that has ever served a request. Mirrors scripts/run-migrations.mjs.
+EXISTING_TABLES=$(psql "$DB_URL" -tA -c "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'schema_migrations';")
+if [ "$EXISTING_TABLES" = "0" ]; then
+  if [ ! -f "$BASELINE_FILE" ]; then
+    echo "==> ERROR: empty database but no baseline at $BASELINE_FILE."
+    echo "==>        The migration chain alone cannot build the schema from zero."
+    exit 1
+  fi
+  echo "==> Empty database detected — applying schema baseline..."
+  psql "$DB_URL" -v ON_ERROR_STOP=1 --single-transaction -q -f "$BASELINE_FILE"
+  echo "==> Baseline applied ($(psql "$DB_URL" -tA -c "SELECT count(*) FROM schema_migrations;") migration(s) recorded as subsumed)."
+fi
+
 APPLIED_COUNT=0
 if [ -d "$MIGRATIONS_DIR" ]; then
   shopt -s nullglob

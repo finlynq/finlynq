@@ -11,11 +11,33 @@ fi
 
 echo "[entrypoint] DATABASE_URL detected — PostgreSQL mode"
 
-# Extract host and port from connection string for health check
-# Expected format: postgres://user:pass@host:port/db
-DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|postgres://[^@]+@([^:/]+).*|\1|')
-DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|postgres://[^@]+@[^:]+:([0-9]+).*|\1|')
+# Extract host and port from connection string for health check.
+# Accepts BOTH schemes: postgres://user:pass@host:port/db and postgresql://...
+# libpq treats them as synonyms and docker-compose.yml ships the `postgresql://`
+# spelling. An earlier version anchored on `postgres://` only, so the `ql` broke
+# the match, sed passed the string through untouched, and DB_HOST/DB_PORT each
+# became the WHOLE connection string — the readiness probe could never connect
+# and the container crash-looped on every published tag (GH #312, bug 1).
+DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|postgres(ql)?://[^@]+@([^:/]+).*|\2|')
+DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|postgres(ql)?://[^@]+@[^:]+:([0-9]+).*|\3|')
 DB_PORT="${DB_PORT:-5432}"
+
+# Fail loudly rather than looping 30x on a nonsense host: if substitution didn't
+# happen, the "host" still contains the scheme separator.
+case "$DB_HOST" in
+  *://*|"")
+    echo "[entrypoint] ERROR: could not parse a host out of DATABASE_URL."
+    echo "[entrypoint]        Expected postgres://user:pass@host:port/db (or postgresql://)."
+    echo "[entrypoint]        Parsed host was: '$DB_HOST'"
+    exit 1
+    ;;
+esac
+case "$DB_PORT" in
+  *[!0-9]*|"")
+    echo "[entrypoint] WARNING: could not parse a port out of DATABASE_URL; defaulting to 5432."
+    DB_PORT=5432
+    ;;
+esac
 
 echo "[entrypoint] Waiting for PostgreSQL at $DB_HOST:$DB_PORT..."
 MAX_RETRIES=30
@@ -31,26 +53,20 @@ until nc -z "$DB_HOST" "$DB_PORT" 2>/dev/null; do
 done
 echo "[entrypoint] PostgreSQL is ready."
 
-# Run database migrations via Node.js (uses the PostgresAdapter)
+# Run database migrations.
+#
+# This used to inline a `require('drizzle-orm/node-postgres')`, which could never
+# resolve: Next's standalone output compiles drizzle-orm into the server bundle
+# instead of emitting it as a package, so the module was absent from the image
+# entirely and `set -e` killed the container here (GH #312, bug 2). The runner
+# below uses `pg` only, which IS emitted (it's in `serverExternalPackages`).
+#
+# It also applies scripts/baseline/0001_schema_baseline.sql on an empty database
+# before the migration chain — the chain alone cannot build the schema from zero
+# (GH #312, bugs 3 and 4).
 echo "[entrypoint] Running database migrations..."
-node -e "
-  const { drizzle } = require('drizzle-orm/node-postgres');
-  const { migrate } = require('drizzle-orm/node-postgres/migrator');
-  const { Pool } = require('pg');
-
-  async function runMigrations() {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-    const db = drizzle(pool);
-    await migrate(db, { migrationsFolder: './drizzle-pg' });
-    await pool.end();
-    console.log('[entrypoint] Migrations complete.');
-  }
-
-  runMigrations().catch(err => {
-    console.error('[entrypoint] Migration failed:', err.message);
-    process.exit(1);
-  });
-"
+node scripts/run-migrations.mjs
+echo "[entrypoint] Migrations complete."
 
 # ── Launch the app ────────────────────────────────────────────────────────────
 echo "[entrypoint] Starting Next.js server..."
