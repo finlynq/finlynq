@@ -4,10 +4,135 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'scripts/entrypoint.sh'
+      - 'scripts/run-migrations.mjs'
+      - 'scripts/baseline/**'
+      - 'scripts/migrations/**'
+      - '.github/workflows/docker.yml'
 
 jobs:
+  # ── Smoke test ───────────────────────────────────────────────────────────────
+  # Boots the image the way a self-hoster does and proves it reaches a
+  # REGISTERABLE instance. Added after GH #312, where four compounding defects
+  # shipped in every published tag from 3.2.0 to 3.3.2 because nothing in CI had
+  # ever started the container. A build that compiles is not evidence the image
+  # works.
+  #
+  # The schema assertions at the end are the load-bearing part: a health check
+  # alone passes against a half-built database. #312's bugs 3 and 4 were exactly
+  # that — the app booted and then 500'd on registration because ~half the schema
+  # was missing.
+  smoke:
+    name: Smoke test (boot + register + schema)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Build image locally
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          # Tag as the name docker-compose.yml references so compose uses this
+          # local build instead of pulling the published (possibly broken) tag.
+          tags: ghcr.io/finlynq/finlynq:latest
+
+      - name: Generate throwaway secrets
+        run: |
+          {
+            echo "PF_JWT_SECRET=$(openssl rand -hex 32)"
+            echo "PF_PEPPER=$(openssl rand -hex 32)"
+            echo "PF_STAGING_KEY=$(openssl rand -hex 32)"
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+          } > .env
+
+      # Exactly the documented Quick Start, no patching. If this step ever needs
+      # a workaround, the README needs a fix — not this workflow.
+      - name: docker compose up
+        run: docker compose up -d
+
+      - name: Wait for /api/healthz
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/api/healthz || true)
+            if [ "$code" = "200" ]; then echo "healthy after ~${i}0s"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::app never became healthy"
+          docker compose logs app
+          exit 1
+
+      - name: Register a user (the check a health probe cannot make)
+        run: |
+          code=$(curl -s -o /tmp/reg.json -w '%{http_code}' \
+            -X POST http://localhost:3000/api/auth/register \
+            -H 'Content-Type: application/json' \
+            -H 'Origin: http://localhost:3000' \
+            -d '{"username":"smoketest","password":"correct-horse-battery-staple-42","acknowledgeNoRecovery":true}')
+          echo "HTTP $code"; cat /tmp/reg.json; echo
+          case "$code" in
+            200|201) echo "registration ok" ;;
+            *)
+              echo "::error::registration failed with HTTP $code — schema is probably incomplete"
+              docker compose logs app | tail -60
+              exit 1
+              ;;
+          esac
+
+      # Floors, not exact counts, so ordinary schema growth doesn't churn this.
+      # They sit far above what a partial migration produces: #312 shipped a
+      # 21-table database, and a from-zero replay of the migration chain alone
+      # yields 43 tables.
+      - name: Assert the schema is complete
+        run: |
+          q() { docker compose exec -T db psql -U pf -d pf -tAc "$1" | tr -d '[:space:]'; }
+          tables=$(q "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r'")
+          checks=$(q "SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE c.contype='c' AND n.nspname='public'")
+          partial=$(q "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND indexdef LIKE '%WHERE%'")
+          ledger=$(q "SELECT count(*) FROM schema_migrations")
+          echo "tables=$tables checks=$checks partial_indexes=$partial ledger=$ledger"
+          fail=0
+          [ "$tables"  -ge 68 ] || { echo "::error::only $tables tables (expected >= 68)"; fail=1; }
+          [ "$checks"  -ge 52 ] || { echo "::error::only $checks CHECK constraints (expected >= 52)"; fail=1; }
+          [ "$partial" -ge 27 ] || { echo "::error::only $partial partial indexes (expected >= 27)"; fail=1; }
+          [ "$ledger"  -ge 70 ] || { echo "::error::only $ledger ledger rows (expected >= 70)"; fail=1; }
+          exit $fail
+
+      # Every table the ORM models must exist. Catches the #312 class of defect
+      # head-on: a table defined in schema-pg.ts that no DDL in the image creates.
+      - name: Assert every schema-pg.ts table exists
+        run: |
+          docker compose exec -T db psql -U pf -d pf -tAc \
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r'" \
+            | tr -d '\r' | sed '/^$/d' | sort -u > /tmp/live_tables.txt
+          grep -oE 'pgTable\("[a-z_]+"' src/db/schema-pg.ts | sed 's/pgTable("//;s/"//' | sort -u > /tmp/orm_tables.txt
+          missing=$(comm -23 /tmp/orm_tables.txt /tmp/live_tables.txt)
+          if [ -n "$missing" ]; then
+            echo "::error::tables defined in schema-pg.ts with no DDL in the shipped image:"
+            echo "$missing"
+            exit 1
+          fi
+          echo "all $(wc -l < /tmp/orm_tables.txt) ORM-modelled tables present"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ── Publish ──────────────────────────────────────────────────────────────────
   build:
     name: Build & Push Docker Image
+    needs: smoke
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
