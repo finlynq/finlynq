@@ -1,6 +1,8 @@
 // Benchmark comparison library
 // Compares portfolio performance against major market indices
 
+import { marketFetch } from "@/lib/market-fetch";
+
 const YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance";
 
 export const BENCHMARK_INDICES = [
@@ -52,7 +54,10 @@ export async function getBenchmarkReturns(
     const period2 = Math.floor(end.getTime() / 1000);
     const url = `${YAHOO_BASE}/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${period2}&interval=1wk`;
 
-    const res = await fetch(url, {
+    // marketFetch, not bare fetch: every outbound provider call must land in the
+    // /admin/api-log ring buffer (and persist 5xx/timeouts to diagnostics_log).
+    // This one call site was missed, so benchmark traffic was invisible there.
+    const res = await marketFetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
       next: { revalidate: 3600 },
     });
