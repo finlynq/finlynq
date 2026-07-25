@@ -214,6 +214,32 @@ const METAL_YAHOO_TICKER: Record<string, string> = {
 // chart symbol: "<CCY>USD=X" for fiat (1 unit → USD) or a futures ticker like
 // "GC=F" for a metal (1 troy oz → USD). For a past date, picks the latest close
 // on/before the requested date.
+/**
+ * Latest positive close from a Yahoo chart payload, optionally capped at
+ * `cutoffMs` (inclusive). Full precision, unlike `meta.regularMarketPrice`
+ * which Yahoo rounds to 4dp — so for an ultra-low-value currency (VND ≈
+ * 0.000038 USD) the meta field arrives as a literal `0.0` while close[] still
+ * carries `3.79e-05`. Returns null when no usable close exists.
+ */
+function latestPositiveClose(
+  result: { timestamp?: unknown; indicators?: { quote?: Array<{ close?: unknown }> } },
+  cutoffMs?: number,
+): number | null {
+  const timestamps: unknown = result.timestamp;
+  const closes: unknown = result.indicators?.quote?.[0]?.close;
+  if (!Array.isArray(timestamps) || !Array.isArray(closes)) return null;
+  let best: { ts: number; close: number } | null = null;
+  for (let i = 0; i < timestamps.length; i++) {
+    const ts = timestamps[i];
+    const close = closes[i];
+    if (typeof ts !== "number" || typeof close !== "number" || close <= 0) continue;
+    const tsMs = ts * 1000;
+    if (cutoffMs != null && tsMs > cutoffMs) continue;
+    if (!best || tsMs > best.ts) best = { ts: tsMs, close };
+  }
+  return best ? best.close : null;
+}
+
 async function fetchYahooChartRateToUsd(symbol: string, date: string): Promise<number | null> {
   try {
     const today = todayISO();
@@ -249,24 +275,16 @@ async function fetchYahooChartRateToUsd(symbol: string, date: string): Promise<n
       // Issue #206: meta.regularMarketPrice is TODAY's price even on a historical
       // chart payload; the actual historical close lives at indicators.quote[0].close[]
       // indexed by the timestamp[] array. Pick the latest close <= the requested date.
-      const timestamps: unknown = result.timestamp;
-      const closes: unknown = result.indicators?.quote?.[0]?.close;
-      if (!Array.isArray(timestamps) || !Array.isArray(closes)) return null;
-      const dateMs = new Date(`${date}T23:59:59Z`).getTime();
-      let best: { ts: number; close: number } | null = null;
-      for (let i = 0; i < timestamps.length; i++) {
-        const ts = timestamps[i];
-        const close = closes[i];
-        if (typeof ts !== "number" || typeof close !== "number" || close <= 0) continue;
-        const tsMs = ts * 1000;
-        if (tsMs > dateMs) continue;
-        if (!best || tsMs > best.ts) best = { ts: tsMs, close };
-      }
-      return best ? best.close : null;
+      return latestPositiveClose(result, new Date(`${date}T23:59:59Z`).getTime());
     }
-    // Latest branch — meta.regularMarketPrice is correct here.
+    // Latest branch — meta.regularMarketPrice is normally correct here, but Yahoo
+    // rounds it to 4dp, so any currency worth < 0.00005 USD (VND, LBP…) reports a
+    // literal 0.0 and would otherwise be treated as an outright fetch failure —
+    // negative-cached every 10 min, forever, since it can never succeed. Fall back
+    // to the full-precision close[] before giving up.
     const rate = result.meta?.regularMarketPrice;
-    return typeof rate === "number" && rate > 0 ? rate : null;
+    if (typeof rate === "number" && rate > 0) return rate;
+    return latestPositiveClose(result);
   } catch {
     return null;
   }
