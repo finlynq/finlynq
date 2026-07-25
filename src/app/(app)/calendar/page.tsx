@@ -20,7 +20,11 @@ import {
 type CalendarEvent = {
   date: string;
   name: string;
+  /** NATIVE amount, shown per-row in `currency`. */
   amount: number;
+  currency: string;
+  /** Same amount converted to the display currency — month totals only. */
+  displayAmount: number;
   type: "bill" | "income";
   source: "subscription" | "recurring";
   frequency: string;
@@ -31,6 +35,7 @@ type Subscription = {
   name: string;
   amount: number;
   currency: string;
+  displayAmount?: number;
   frequency: string;
   nextDate: string | null;
   status: string;
@@ -39,6 +44,8 @@ type Subscription = {
 type RecurringItem = {
   payee: string;
   avgAmount: number;
+  currency: string;
+  avgAmountDisplay?: number;
   frequency: string;
   nextDate: string;
 };
@@ -76,6 +83,8 @@ function getFirstDayOfWeek(year: number, month: number): number {
 function generateOccurrences(
   name: string,
   amount: number,
+  currency: string,
+  displayAmount: number,
   frequency: string,
   nextDate: string,
   monthStart: string,
@@ -119,7 +128,7 @@ function generateOccurrences(
   for (let i = 0; i < 60; i++) {
     if (current > monthEnd) break;
     if (current >= monthStart && current <= monthEnd) {
-      events.push({ date: current, name, amount, type, source, frequency });
+      events.push({ date: current, name, amount, currency, displayAmount, type, source, frequency });
     }
     current = addFrequency(current, frequency);
   }
@@ -182,6 +191,8 @@ function CalendarPageContent() {
       const occurrences = generateOccurrences(
         sub.name,
         sub.amount,
+        sub.currency || displayCurrency,
+        sub.displayAmount ?? sub.amount,
         sub.frequency,
         sub.nextDate,
         monthStart,
@@ -206,6 +217,8 @@ function CalendarPageContent() {
       const occurrences = generateOccurrences(
         r.payee,
         Math.abs(r.avgAmount),
+        r.currency || displayCurrency,
+        Math.abs(r.avgAmountDisplay ?? r.avgAmount),
         r.frequency,
         r.nextDate,
         monthStart,
@@ -229,13 +242,15 @@ function CalendarPageContent() {
     return map;
   }, [events]);
 
-  // Month summary
+  // Month summary — FINLYNQ-123: totals sum the display-currency amount, never
+  // the native one. Summing mixed-currency `amount` under the `displayCurrency`
+  // label is the bug reported in feedback #7.
   const totalIncome = events
     .filter((e) => e.type === "income")
-    .reduce((s, e) => s + e.amount, 0);
+    .reduce((s, e) => s + e.displayAmount, 0);
   const totalBills = events
     .filter((e) => e.type === "bill")
-    .reduce((s, e) => s + e.amount, 0);
+    .reduce((s, e) => s + e.displayAmount, 0);
   const net = totalIncome - totalBills;
 
   const daysInMonth = getDaysInMonth(currentYear, currentMonth);
@@ -409,7 +424,7 @@ function CalendarPageContent() {
                       }`}
                     >
                       {ev.type === "income" ? "+" : "-"}
-                      {formatCurrency(ev.amount, "CAD")}
+                      {formatCurrency(ev.amount, ev.currency || displayCurrency)}
                     </span>
                   </div>
                 ))}

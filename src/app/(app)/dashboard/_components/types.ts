@@ -115,7 +115,10 @@ export type InsightsData = {
 };
 
 export type RecurringData = {
-  recurring: { payee: string; avgAmount: number; frequency: string; nextDate: string }[];
+  // `avgAmount` is NATIVE (in `currency`); `monthlyRecurringTotal` is already
+  // converted to `displayCurrency` at the current rate (FINLYNQ-123).
+  recurring: { payee: string; avgAmount: number; currency: string; frequency: string; nextDate: string }[];
+  displayCurrency: string;
   monthlyRecurringTotal: number;
   count: number;
 };

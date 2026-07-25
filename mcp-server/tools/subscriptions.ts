@@ -52,6 +52,27 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
   const { db, userId, dek, encNote, decNote } = ctx;
 
 
+  // Currency resolution for subscription writes (feedback #7). Both create
+  // paths used to hardcode "CAD", which stamped every subscription created
+  // without an explicit currency — including every auto-detected one — with a
+  // currency the user may not even hold. Order: explicit > owning account's
+  // currency > the user's reporting/display currency.
+  async function resolveSubscriptionCurrency(
+    explicit: string | null | undefined,
+    accountId: number | null,
+  ): Promise<string> {
+    const given = explicit?.trim().toUpperCase();
+    if (given) return given;
+    if (accountId != null) {
+      const acct = await q(db, sql`
+        SELECT currency FROM accounts WHERE id = ${accountId} AND user_id = ${userId}
+      `);
+      const fromAccount = acct[0]?.currency ? String(acct[0].currency).trim().toUpperCase() : "";
+      if (fromAccount) return fromAccount;
+    }
+    return resolveReportingCurrency(db, userId, null);
+  }
+
   // FINLYNQ-263 phase 2 — list/add/bulk_add/update/delete_subscription folded
   // into manage_subscriptions (op discriminator; add accepts single or items[];
   // list accepts include_summary, absorbing get_subscription_summary from
@@ -141,14 +162,18 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         if ("report" in out) return out.report;
         accountId = out.id;
       }
+      // Currency resolution (feedback #7): explicit > resolved account's
+      // currency > the user's reporting currency. A hardcoded "CAD" default
+      // stamped subscriptions with a currency the user may not even hold.
+      const resolvedCurrency = await resolveSubscriptionCurrency(currency, accountId);
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       // Stream D Phase 4 — plaintext name dropped.
       const result = await q(db, sql`
         INSERT INTO subscriptions (user_id, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
-        VALUES (${userId}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes != null ? encNote(notes) : null}, ${n.ct}, ${n.lookup})
+        VALUES (${userId}, ${amount}, ${resolvedCurrency}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes != null ? encNote(notes) : null}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
-      return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${currency ?? "CAD"} ${amount} ${cadence}, next ${next_billing_date}` } });
+      return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${resolvedCurrency} ${amount} ${cadence}, next ${next_billing_date}` } });
   }
 
   // ── op: update — lifted VERBATIM from update_subscription ──────────────────
@@ -520,6 +545,9 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
 
       let created = 0;
       const skipped: string[] = [];
+      // Bulk-add carries no account, so every row lands in the user's own
+      // reporting currency rather than a hardcoded 'CAD' (feedback #7).
+      const bulkCurrency = await resolveSubscriptionCurrency(null, null);
       for (const c of candidates) {
         // Stream D Phase 4 — plaintext name dropped; lookup-only dedup +
         // encrypted insert. DEK is required.
@@ -533,7 +561,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         const enc = encryptName(dek, c.payee);
         await db.execute(sql`
           INSERT INTO subscriptions (user_id, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
-          VALUES (${userId}, ${c.amount}, 'CAD', ${c.cadence}, ${c.category_id ?? null}, NULL, ${next}, 'active', 'Auto-detected by MCP', ${enc.ct}, ${enc.lookup})
+          VALUES (${userId}, ${c.amount}, ${bulkCurrency}, ${c.cadence}, ${c.category_id ?? null}, NULL, ${next}, 'active', 'Auto-detected by MCP', ${enc.ct}, ${enc.lookup})
         `);
         created++;
       }

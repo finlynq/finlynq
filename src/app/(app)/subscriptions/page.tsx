@@ -44,6 +44,8 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ErrorState } from "@/components/error-state";
 import { PageSkeleton } from "@/components/page-skeleton";
 import { parseSaveError } from "@/lib/save-error";
+import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
+import { useDisplayCurrency } from "@/components/currency-provider";
 
 type Subscription = {
   id: number;
@@ -59,11 +61,15 @@ type Subscription = {
   status: string;
   cancelReminderDate: string | null;
   notes: string | null;
+  /** Additive, server-computed at the CURRENT rate (FINLYNQ-123). */
+  displayCurrency?: string;
+  displayAmount?: number;
 };
 
 type DetectedSub = {
   name: string;
   amount: number;
+  currency: string;
   frequency: string;
   nextDate: string;
   accountId: number;
@@ -134,10 +140,11 @@ function SubscriptionsPageContent() {
   const [submitting, setSubmitting] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const { displayCurrency } = useDisplayCurrency();
   const [form, setForm] = useState({
     name: "",
     amount: "",
-    currency: "CAD",
+    currency: "",
     frequency: "monthly",
     categoryId: "",
     accountId: "",
@@ -171,11 +178,19 @@ function SubscriptionsPageContent() {
   const sortCategory = useDropdownOrder("category");
   const sortCurrency = useDropdownOrder("currency");
 
+  // The currency dropdown is driven by the user's own active set, never a
+  // hardcoded list (#291). Before this the picker offered CAD/USD/EUR/GBP only,
+  // so a user holding MXN could not even correct a mis-stamped row (feedback #7).
+  // `form.currency` stays empty until the user picks one and late-binds to the
+  // display currency, so the async CurrencyProvider fetch can't be captured stale.
+  const formCurrency = form.currency || displayCurrency;
+  const currencyOptions = useActiveCurrencies(formCurrency);
+
   function resetForm() {
     setForm({
       name: "",
       amount: "",
-      currency: "CAD",
+      currency: "",
       frequency: "monthly",
       categoryId: "",
       accountId: "",
@@ -208,7 +223,7 @@ function SubscriptionsPageContent() {
     const payload = {
       name: form.name,
       amount: parseFloat(form.amount),
-      currency: form.currency,
+      currency: formCurrency,
       frequency: form.frequency,
       categoryId: form.categoryId ? parseInt(form.categoryId) : null,
       accountId: form.accountId ? parseInt(form.accountId) : null,
@@ -293,6 +308,9 @@ function SubscriptionsPageContent() {
       body: JSON.stringify({
         name: d.name,
         amount: d.amount,
+        // Carry the detected native currency; omitting it is what let the
+        // server's old "CAD" fallback stamp every detected row (feedback #7).
+        currency: d.currency,
         frequency: d.frequency,
         nextDate: d.nextDate,
         accountId: d.accountId || null,
@@ -332,8 +350,14 @@ function SubscriptionsPageContent() {
   const pausedSubs = subs.filter((s) => s.status === "paused");
   const cancelledSubs = subs.filter((s) => s.status === "cancelled");
 
+  // FINLYNQ-123 — total in ONE currency. Each row's `displayAmount` is the
+  // server's current-rate conversion of its native amount; summing raw
+  // `s.amount` across mixed currencies and labelling the result CAD is what
+  // feedback #7 reported. Rows from a pre-fix response (no displayAmount) fall
+  // back to their native amount, which is exact for same-currency rows.
+  const totalCurrency = subs.find((s) => s.displayCurrency)?.displayCurrency ?? displayCurrency;
   const totalMonthly = activeSubs.reduce(
-    (sum, s) => sum + toMonthlyAmount(s.amount, s.frequency),
+    (sum, s) => sum + toMonthlyAmount(s.displayAmount ?? s.amount, s.frequency),
     0
   );
   const totalAnnual = totalMonthly * 12;
@@ -608,14 +632,14 @@ function SubscriptionsPageContent() {
                   <div>
                     <Label>Currency</Label>
                     <Combobox
-                      value={form.currency}
-                      onValueChange={(v) => setForm({ ...form, currency: v || "CAD" })}
+                      value={formCurrency}
+                      onValueChange={(v) => setForm({ ...form, currency: v || displayCurrency })}
                       items={sortCurrency(
-                        ["CAD", "USD", "EUR", "GBP"].map((c): ComboboxItemShape => ({ value: c, label: c })),
+                        currencyOptions.map((c): ComboboxItemShape => ({ value: c, label: c })),
                         (c) => c.value,
                         (a, z) => a.label.localeCompare(z.label),
                       )}
-                      placeholder="CAD"
+                      placeholder={displayCurrency}
                       searchPlaceholder="Search…"
                       emptyMessage="No matches"
                       className="w-full"
@@ -707,7 +731,7 @@ function SubscriptionsPageContent() {
             <div>
               <p className="text-sm text-muted-foreground">Monthly Cost</p>
               <p className="text-2xl font-bold">
-                {formatCurrency(totalMonthly, "CAD")}
+                {formatCurrency(totalMonthly, totalCurrency)}
               </p>
             </div>
           </CardContent>
@@ -720,7 +744,7 @@ function SubscriptionsPageContent() {
             <div>
               <p className="text-sm text-muted-foreground">Annual Cost</p>
               <p className="text-2xl font-bold text-rose-600">
-                {formatCurrency(totalAnnual, "CAD")}
+                {formatCurrency(totalAnnual, totalCurrency)}
               </p>
             </div>
           </CardContent>
@@ -816,7 +840,7 @@ function SubscriptionsPageContent() {
                   <div>
                     <p className="font-medium">{d.name}</p>
                     <p className="text-sm text-muted-foreground">
-                      {formatCurrency(d.amount, "CAD")} /{d.frequency} --{" "}
+                      {formatCurrency(d.amount, d.currency || displayCurrency)} /{d.frequency} --{" "}
                       {d.count} occurrences
                     </p>
                     <p className="text-xs text-muted-foreground">

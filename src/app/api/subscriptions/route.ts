@@ -8,6 +8,7 @@ import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows, decryptTxRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
+import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 
 const createSchema = z.object({
   name: z.string(),
@@ -70,7 +71,20 @@ export async function GET(request: NextRequest) {
     return (a.name ?? "").localeCompare(b.name ?? "");
   });
 
-  return NextResponse.json(subs);
+  // FINLYNQ-123 — a subscription's cost is a point-in-time figure, so its
+  // display-currency equivalent converts at the CURRENT rate. Native `amount`
+  // and `currency` are left untouched; these two fields are purely additive so
+  // the page can total mixed-currency subscriptions under one honest label
+  // instead of raw-summing them (feedback #7).
+  const displayCurrency = await getDisplayCurrency(userId, request.nextUrl.searchParams.get("currency"));
+  const rateMap = await getRateMap(displayCurrency, userId);
+  const withDisplay = subs.map((s) => ({
+    ...s,
+    displayCurrency,
+    displayAmount: convertWithRateMap(s.amount, s.currency ?? displayCurrency, rateMap),
+  }));
+
+  return NextResponse.json(withDisplay);
 }
 
 export async function POST(request: NextRequest) {
@@ -92,6 +106,7 @@ export async function POST(request: NextRequest) {
           date: schema.transactions.date,
           payee: schema.transactions.payee,
           amount: schema.transactions.amount,
+          currency: schema.transactions.currency,
           accountId: schema.transactions.accountId,
           categoryId: schema.transactions.categoryId,
         })
@@ -125,6 +140,10 @@ export async function POST(request: NextRequest) {
           return {
             name: r.payee,
             amount: Math.abs(r.avgAmount),
+            // Carry the source transactions' native currency through to the
+            // suggestion. Dropping it here is what silently stamped every
+            // auto-detected subscription 'CAD' (feedback #7).
+            currency: r.currency,
             frequency,
             nextDate: r.nextDate,
             accountId: r.accountId,
@@ -147,6 +166,21 @@ export async function POST(request: NextRequest) {
       categoryIds: d.categoryId != null ? [d.categoryId] : undefined,
       accountIds: d.accountId != null ? [d.accountId] : undefined,
     });
+    // Currency resolution (feedback #7). A hardcoded "CAD" fallback stamped
+    // every subscription created without an explicit currency — including
+    // every auto-detected one — with a currency the user may not even hold.
+    // Order: explicit > owning account's currency > the user's display currency.
+    let currency = d.currency?.trim().toUpperCase() || null;
+    if (!currency && d.accountId != null) {
+      const acct = await db
+        .select({ currency: schema.accounts.currency })
+        .from(schema.accounts)
+        .where(and(eq(schema.accounts.id, d.accountId), eq(schema.accounts.userId, userId)))
+        .get();
+      currency = acct?.currency ?? null;
+    }
+    if (!currency) currency = await getDisplayCurrency(userId);
+
     const enc = buildNameFields(auth.context.dek, { name: d.name });
     // Stream D Phase 4 — plaintext name dropped.
     const sub = await db
@@ -154,7 +188,7 @@ export async function POST(request: NextRequest) {
       .values({
         userId,
         amount: d.amount,
-        currency: d.currency ?? "CAD",
+        currency,
         frequency: d.frequency ?? "monthly",
         categoryId: d.categoryId || null,
         accountId: d.accountId || null,
