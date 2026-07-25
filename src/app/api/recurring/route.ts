@@ -6,6 +6,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { requireDevMode } from "@/lib/require-dev-mode";
+import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -25,6 +26,7 @@ export async function GET(request: NextRequest) {
       date: schema.transactions.date,
       payee: schema.transactions.payee,
       amount: schema.transactions.amount,
+      currency: schema.transactions.currency,
       accountId: schema.transactions.accountId,
       categoryId: schema.transactions.categoryId,
     })
@@ -47,15 +49,25 @@ export async function GET(request: NextRequest) {
     }))
   );
 
+  // FINLYNQ-123 — the monthly recurring total is a forward-looking
+  // point-in-time cost, so each series converts to the display currency at the
+  // CURRENT rate before being summed. Previously native mixed-currency amounts
+  // were added together and labelled with a single currency (feedback #7).
+  const displayCurrency = await getDisplayCurrency(userId, request.nextUrl.searchParams.get("currency"));
+  const rateMap = await getRateMap(displayCurrency, userId);
+  const toDisplay = (amount: number, currency: string | null) =>
+    convertWithRateMap(amount, currency ?? displayCurrency, rateMap);
+
   // Monthly total of recurring expenses
   const monthlyRecurring = detected
     .filter((r) => r.avgAmount < 0)
     .reduce((sum, r) => {
+      const monthly = toDisplay(r.avgAmount, r.currency);
       switch (r.frequency) {
-        case "weekly": return sum + r.avgAmount * 4.33;
-        case "biweekly": return sum + r.avgAmount * 2.17;
-        case "monthly": return sum + r.avgAmount;
-        case "yearly": return sum + r.avgAmount / 12;
+        case "weekly": return sum + monthly * 4.33;
+        case "biweekly": return sum + monthly * 2.17;
+        case "monthly": return sum + monthly;
+        case "yearly": return sum + monthly / 12;
         default: return sum;
       }
     }, 0);
@@ -64,6 +76,8 @@ export async function GET(request: NextRequest) {
     recurring: detected.map((r) => ({
       payee: r.payee,
       avgAmount: r.avgAmount,
+      currency: r.currency,
+      avgAmountDisplay: toDisplay(r.avgAmount, r.currency),
       frequency: r.frequency,
       count: r.count,
       lastDate: r.lastDate,
@@ -71,6 +85,7 @@ export async function GET(request: NextRequest) {
       accountId: r.accountId,
       categoryId: r.categoryId,
     })),
+    displayCurrency,
     monthlyRecurringTotal: Math.round(Math.abs(monthlyRecurring) * 100) / 100,
     count: detected.length,
   });

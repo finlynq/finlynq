@@ -27,6 +27,7 @@ export async function GET(request: NextRequest) {
       date: schema.transactions.date,
       payee: schema.transactions.payee,
       amount: schema.transactions.amount,
+      currency: schema.transactions.currency,
       accountId: schema.transactions.accountId,
       categoryId: schema.transactions.categoryId,
     })
@@ -94,7 +95,15 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const activeRecurring = detected.map((r) => ({ ...r, active: true }));
+  // FINLYNQ-123 — `currentBalance` above is already in the display currency, so
+  // the recurring amounts drawn against it must be too. Projecting native
+  // mixed-currency amounts onto a converted opening balance mis-stated every
+  // foreign-currency series (feedback #7).
+  const activeRecurring = detected.map((r) => ({
+    ...r,
+    avgAmount: convertWithRateMap(r.avgAmount, r.currency ?? displayCurrency, rateMap),
+    active: true,
+  }));
   const forecast = forecastCashFlow(activeRecurring, currentBalance, days);
 
   // Find warning dates (balance below threshold)

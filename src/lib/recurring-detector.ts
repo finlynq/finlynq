@@ -5,6 +5,7 @@ type Transaction = {
   date: string;
   payee: string;
   amount: number;
+  currency: string;
   accountId: number;
   categoryId: number | null;
 };
@@ -12,6 +13,8 @@ type Transaction = {
 export type DetectedRecurring = {
   payee: string;
   avgAmount: number;
+  /** Native currency of the underlying transactions (never assumed). */
+  currency: string;
   frequency: "weekly" | "biweekly" | "monthly" | "yearly";
   count: number;
   lastDate: string;
@@ -47,11 +50,15 @@ function addFrequency(date: string, frequency: string): string {
 }
 
 export function detectRecurringTransactions(transactions: Transaction[]): DetectedRecurring[] {
-  // Group by payee (normalized)
+  // Group by (payee, currency). Currency is part of the key on purpose: the
+  // same payee billed in two currencies is two different recurring series, and
+  // averaging their amounts together would produce a meaningless figure under
+  // a single currency label.
   const groups = new Map<string, Transaction[]>();
   for (const t of transactions) {
-    const key = (t.payee || "").trim().toLowerCase();
-    if (!key) continue;
+    const payeeKey = (t.payee || "").trim().toLowerCase();
+    if (!payeeKey) continue;
+    const key = `${payeeKey}|${(t.currency || "").trim().toUpperCase()}`;
     groups.set(key, [...(groups.get(key) ?? []), t]);
   }
 
@@ -90,6 +97,7 @@ export function detectRecurringTransactions(transactions: Transaction[]): Detect
     results.push({
       payee: sorted[0].payee,
       avgAmount: Math.round(avgAmount * 100) / 100,
+      currency: sorted[0].currency,
       frequency,
       count: sorted.length,
       lastDate,

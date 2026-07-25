@@ -27,21 +27,14 @@
 
 import { sql } from "drizzle-orm";
 import { normalizeDbRows } from "../db-utils";
+import {
+  collectBlockers,
+  describeDeleteBlockers,
+  type DeleteBlocker,
+  type Executor,
+} from "../delete-blockers";
 
-/**
- * Minimal structural type satisfied by BOTH the app's Drizzle proxy (`@/db`)
- * and the MCP tool context's `DbLike` (mcp-server/tools/_shared.ts), so the
- * one helper serves both surfaces without either importing the other.
- */
-type Executor = { execute: (query: ReturnType<typeof sql>) => Promise<unknown> };
-
-export interface AccountDeleteBlocker {
-  /** Table holding the rows that block the delete. */
-  table: string;
-  /** Singular human-readable noun, for message building. */
-  label: string;
-  count: number;
-}
+export type AccountDeleteBlocker = DeleteBlocker;
 
 /**
  * The ten ON DELETE NO ACTION referents, in the order they are reported.
@@ -90,20 +83,11 @@ export async function getAccountDeleteBlockers(
         (SELECT COUNT(*) FROM staged_transactions WHERE user_id = ${userId} AND target_account_id = ${accountId}) AS staged_transactions
     `),
   );
-  const counts = rows[0] ?? {};
-  return BLOCKERS.map((b) => ({
-    table: b.table,
-    label: b.label,
-    count: Number(counts[b.table] ?? 0),
-  })).filter((b) => b.count > 0);
+  return collectBlockers(rows[0] ?? {}, BLOCKERS);
 }
 
 /** `"10 transactions, 8 investment holdings and 1 goal"`. */
-export function describeAccountDeleteBlockers(blockers: AccountDeleteBlocker[]): string {
-  const parts = blockers.map((b) => `${b.count} ${b.label}${b.count === 1 ? "" : "s"}`);
-  if (parts.length <= 1) return parts[0] ?? "";
-  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
-}
+export const describeAccountDeleteBlockers = describeDeleteBlockers;
 
 /**
  * The single user-facing refusal message, shared by the REST route and the MCP
