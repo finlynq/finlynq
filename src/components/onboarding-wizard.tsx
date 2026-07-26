@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
+import { currencyLabel } from "@/lib/fx/supported-currencies";
+import { formatCurrency } from "@/lib/currency";
 import {
   Check,
   Wallet,
@@ -72,7 +75,12 @@ export function OnboardingWizard({
 }: OnboardingWizardProps) {
   const [step, setStep] = useState<Step>("welcome");
   const [direction, setDirection] = useState(1);
-  const [currency, setCurrency] = useState("CAD");
+  // Default to USD when the user has no display currency yet (the app-wide
+  // default per FINLYNQ-183). FINLYNQ-300: this answer is persisted to
+  // settings.display_currency on finish — no longer thrown into a dead
+  // localStorage key.
+  const [currency, setCurrency] = useState("USD");
+  const currencyOptions = useActiveCurrencies(currency);
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([0]);
   const [dataChoice, setDataChoice] = useState<"demo" | "import" | "skip">("import");
   const [budgetAmounts, setBudgetAmounts] = useState<Record<string, number>>(
@@ -83,6 +91,10 @@ export function OnboardingWizard({
   const [copied, setCopied] = useState(false);
 
   const stepIndex = STEPS.indexOf(step);
+  // Derive the currency symbol from the single source of truth (formatCurrency /
+  // DOLLAR_SYMBOLS) instead of a hardcoded ternary — strip digits/separators.
+  const currencySymbol =
+    formatCurrency(0, currency, { decimals: 0 }).replace(/[\d\s.,]/g, "") || "$";
 
   function goNext() {
     setDirection(1);
@@ -141,10 +153,15 @@ export function OnboardingWizard({
         await fetch("/api/onboarding/sample-data", { method: "POST" });
       }
 
-      // Save currency preference
-      if (typeof window !== "undefined") {
-        localStorage.setItem("pf-currency", currency);
-      }
+      // Persist the chosen display currency to settings.display_currency
+      // (FINLYNQ-300) — the wizard used to throw this into a dead localStorage
+      // key the app never read. Must land BEFORE onboarding is marked complete
+      // so the dashboard/totals render in the right currency.
+      await fetch("/api/settings/display-currency", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayCurrency: currency }),
+      }).catch(() => {/* non-fatal — settings fall back to USD default */});
 
       // Mark onboarding complete
       await fetch("/api/onboarding/complete", { method: "POST" });
@@ -260,10 +277,11 @@ export function OnboardingWizard({
                       onChange={(e) => setCurrency(e.target.value)}
                       className="mt-1.5 w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
                     >
-                      <option value="CAD">CAD — Canadian Dollar</option>
-                      <option value="USD">USD — US Dollar</option>
-                      <option value="EUR">EUR — Euro</option>
-                      <option value="GBP">GBP — British Pound</option>
+                      {currencyOptions.map((c) => (
+                        <option key={c} value={c}>
+                          {c} — {currencyLabel(c)}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
@@ -361,7 +379,7 @@ export function OnboardingWizard({
                         <span className="w-36 text-sm font-medium shrink-0">{category}</span>
                         <div className="relative flex-1">
                           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
-                            {currency === "USD" ? "$" : currency === "EUR" ? "€" : currency === "GBP" ? "£" : "$"}
+                            {currencySymbol}
                           </span>
                           <input
                             type="number"
