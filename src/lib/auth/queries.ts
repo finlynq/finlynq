@@ -727,6 +727,43 @@ export async function getUsageStats() {
   };
 }
 
+/** Per-(prompt, version) completion counts from `user_prompt_acks` (FINLYNQ-301). */
+export interface PromptAckStat {
+  promptId: string;
+  version: number;
+  answered: number;
+  deferred: number;
+  dismissed: number;
+}
+
+/**
+ * Group `user_prompt_acks` by (prompt_id, version) into answered/deferred/
+ * dismissed counts, for the /admin operator view — so per-prompt completion is
+ * visible without SQL. Rows exist only once a user has interacted with a prompt;
+ * the stats route merges in registered prompts that have zero acks so a live
+ * prompt still shows a row.
+ */
+export async function getPromptAckStats(): Promise<PromptAckStat[]> {
+  const s = getSchema();
+  const rows = await db
+    .select({
+      promptId: s.userPromptAcks.promptId,
+      version: s.userPromptAcks.version,
+      answered: count(sql`CASE WHEN ${s.userPromptAcks.status} = 'answered' THEN 1 END`),
+      deferred: count(sql`CASE WHEN ${s.userPromptAcks.status} = 'deferred' THEN 1 END`),
+      dismissed: count(sql`CASE WHEN ${s.userPromptAcks.status} = 'dismissed' THEN 1 END`),
+    })
+    .from(s.userPromptAcks)
+    .groupBy(s.userPromptAcks.promptId, s.userPromptAcks.version);
+  return rows.map((r) => ({
+    promptId: r.promptId,
+    version: Number(r.version),
+    answered: Number(r.answered),
+    deferred: Number(r.deferred),
+    dismissed: Number(r.dismissed),
+  }));
+}
+
 /** Rolling "active now" counts derived from `users.last_active_at`. */
 export interface ActiveUserCounts {
   /** Users with an authenticated request in the last 15 minutes. */

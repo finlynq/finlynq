@@ -77,7 +77,19 @@ interface UsageStats {
   activeUsersLast15Min?: number;
   activeUsersLast60Min?: number;
   activeUsersLast24Hours?: number;
+  // FINLYNQ-301 — per-prompt decision-prompt completion.
+  promptAcks?: PromptAckRow[];
   recentLogins?: LoginActivityRow[];
+}
+
+// FINLYNQ-301 — per-prompt answered/deferred/dismissed completion counts.
+interface PromptAckRow {
+  promptId: string;
+  title: string;
+  version: number;
+  answered: number;
+  deferred: number;
+  dismissed: number;
 }
 
 // FINLYNQ-167 — a live OAuth grant across all users for the admin panel.
@@ -494,6 +506,45 @@ export default function AdminPage() {
             in the window. Best glance before a deploy: the restart rotates JWTs
             and forces a re-login.
           </p>
+        </motion.div>
+      )}
+
+      {/* FINLYNQ-301 — Decision-prompt completion (per prompt, current version) */}
+      {stats && stats.promptAcks && stats.promptAcks.length > 0 && (
+        <motion.div variants={itemVariants}>
+          <Card>
+            <CardContent className="p-4">
+              <h3 className="text-sm font-semibold mb-3">Decision prompts</h3>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Prompt</TableHead>
+                    <TableHead className="text-right">Answered</TableHead>
+                    <TableHead className="text-right">Deferred</TableHead>
+                    <TableHead className="text-right">Dismissed</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {stats.promptAcks.map((p) => (
+                    <TableRow key={`${p.promptId}:${p.version}`}>
+                      <TableCell>
+                        <span className="font-medium">{p.promptId}</span>
+                        <span className="ml-2 text-xs text-muted-foreground">v{p.version}</span>
+                      </TableCell>
+                      <TableCell className="text-right">{p.answered}</TableCell>
+                      <TableCell className="text-right">{p.deferred}</TableCell>
+                      <TableCell className="text-right">{p.dismissed}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <p className="text-xs text-muted-foreground mt-2">
+                Rows appear once a user has interacted with a prompt; users never
+                shown a prompt have no ack row. Answered is terminal for that
+                version; bump the prompt&apos;s version to re-ask everyone.
+              </p>
+            </CardContent>
+          </Card>
         </motion.div>
       )}
 
