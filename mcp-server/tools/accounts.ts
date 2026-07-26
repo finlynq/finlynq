@@ -40,6 +40,7 @@ import {
 } from "../../src/lib/mcp/user-tx-cache";
 import { withConfirmation, PreviewAbortError } from "./_confirm";
 import { registerManageTool } from "./_consolidate";
+import { resolveReportingCurrency } from "../reporting-currency";
 import {
   getAccountDeleteBlockers,
   accountDeleteBlockedMessage,
@@ -79,6 +80,9 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
       if (trimmed) return trimmed;
       return type === "L" ? "Liability" : "";
     })();
+    // FINLYNQ-284: an omitted currency resolves to the user's display currency
+    // (USD terminal fallback) — never a hardcoded "CAD". explicit param wins.
+    const resolvedCurrency = await resolveReportingCurrency(db, userId, currency);
     // Stream D Phase 4 — plaintext name/alias columns dropped.
     const result = await q(db, sql`
       INSERT INTO accounts (
@@ -86,13 +90,13 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
         name_ct, name_lookup, alias_ct, alias_lookup
       )
       VALUES (
-        ${userId}, ${type}, ${resolvedGroup}, ${currency ?? "CAD"}, ${encNote(note)},
+        ${userId}, ${type}, ${resolvedGroup}, ${resolvedCurrency}, ${encNote(note)},
         ${nameEnc.ct}, ${nameEnc.lookup}, ${aliasEnc.ct}, ${aliasEnc.lookup}
       )
       RETURNING id
     `);
 
-    return text({ success: true, data: { accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${currency ?? "CAD"})${aliasValue ? `, alias "${aliasValue}"` : ""}` } });
+    return text({ success: true, data: { accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${resolvedCurrency})${aliasValue ? `, alias "${aliasValue}"` : ""}` } });
   }
 
   // ── op: update — lifted VERBATIM from update_account ───────────────────────
@@ -395,7 +399,7 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
         name: z.string().describe("Account name (must be unique)"),
         type: z.enum(["A", "L"]).describe("Account type: 'A' for asset, 'L' for liability"),
         group: z.string().optional().describe("Account group (e.g. 'Banks', 'Credit Cards', 'Investment')"),
-        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: any currency in SUPPORTED_CURRENCIES is accepted; FX engine triangulates through USD."),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (defaults to your display currency). Issue #206: any currency in SUPPORTED_CURRENCIES is accepted; FX engine triangulates through USD."),
         note: z.string().optional().describe("Optional note"),
         alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
       }),
