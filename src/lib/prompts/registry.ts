@@ -17,6 +17,7 @@
 
 import type { z } from "zod";
 import type { DrizzleDb } from "@/db";
+import { displayCurrencyPrompt } from "./display-currency";
 
 /**
  * A db handle usable by predicates + writers. Accepts both the global `db` (for
@@ -58,7 +59,7 @@ export interface PromptDef<A = unknown> {
  * The active prompt registry, in surface order. A prompt ships in the same
  * commit as the change that needs it (Phase 4 registers `displayCurrencyPrompt`).
  */
-export const PROMPTS: PromptDef[] = [];
+export const PROMPTS: PromptDef[] = [displayCurrencyPrompt];
 
 /** Look a prompt up by its stable id. */
 export function getPromptDef(id: string): PromptDef | undefined {

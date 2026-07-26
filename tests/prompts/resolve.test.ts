@@ -66,14 +66,26 @@ describe("isAckPending", () => {
 });
 
 describe("getPendingPrompts", () => {
-  it("returns [] for an empty registry without touching the db", async () => {
-    // Stub db whose `.select` would throw if reached — the empty registry means
-    // no predicate/ack query runs.
-    const stubDb = {
-      select() {
-        throw new Error("db should not be queried for an empty registry");
-      },
-    } as never;
-    await expect(getPendingPrompts(stubDb, "user-1")).resolves.toEqual([]);
+  // Chainable drizzle stub: every `.select().from().where().limit()` resolves to
+  // the same `rows`. getPendingPrompts issues one predicate query (settings row)
+  // and, when it applies, one ack query — both see `rows`.
+  function stubDb(rows: unknown[]) {
+    const chain: Record<string, unknown> = {};
+    chain.select = () => chain;
+    chain.from = () => chain;
+    chain.where = () => chain;
+    chain.limit = () => Promise.resolve(rows);
+    return chain as never;
+  }
+
+  it("surfaces display_currency when there is no settings row (absent ack)", async () => {
+    const pending = await getPendingPrompts(stubDb([]), "user-1");
+    expect(pending.map((p) => p.id)).toEqual(["display_currency"]);
+    expect(pending[0]).toMatchObject({ version: 1, deferrable: true, deferCount: 0 });
+  });
+
+  it("does not surface display_currency once a settings row exists", async () => {
+    const pending = await getPendingPrompts(stubDb([{ value: "USD" }]), "user-1");
+    expect(pending).toEqual([]);
   });
 });

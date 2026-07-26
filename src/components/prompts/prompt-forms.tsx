@@ -12,7 +12,16 @@
  * How to add a prompt's form: docs/user-prompts.md.
  */
 
-import type { ComponentType } from "react";
+import { type ComponentType, useState } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
 
 /** The pending-prompt shape the gate hands each form (from GET /api/prompts/pending). */
 export interface PromptView {
@@ -35,9 +44,49 @@ export interface PromptFormProps {
 }
 
 /**
- * Prompt id → form component. Empty until a consumer registers one (the
- * display-currency form lands with its prompt in phase 4). A pending prompt
- * with no entry here is skipped by the gate, so the surface never renders a
- * dialog it can't fill.
+ * FINLYNQ-301 phase 4 — display-currency form. A single currency Select seeded
+ * to USD, sourced from `useActiveCurrencies` (#291 — never a hardcoded array),
+ * with USD force-included so the seed always has a matching item. Submits
+ * `{ currency }`, which the server `displayCurrencyPrompt.answerSchema` validates.
  */
-export const PROMPT_FORMS: Record<string, ComponentType<PromptFormProps>> = {};
+function DisplayCurrencyForm({ submitting, error, onSubmit }: PromptFormProps) {
+  const [currency, setCurrency] = useState("USD");
+  const currencies = useActiveCurrencies(currency);
+
+  return (
+    <div className="mt-2 space-y-3">
+      <Select
+        value={currency}
+        onValueChange={(v) => setCurrency(v || "USD")}
+        disabled={submitting}
+      >
+        <SelectTrigger className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {currencies.map((c) => (
+            <SelectItem key={c} value={c}>
+              {c}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      <Button
+        className="w-full"
+        disabled={submitting}
+        onClick={() => onSubmit({ currency })}
+      >
+        {submitting ? "Saving…" : "Save currency"}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Prompt id → form component. A pending prompt with no entry here is skipped by
+ * the gate, so the surface never renders a dialog it can't fill.
+ */
+export const PROMPT_FORMS: Record<string, ComponentType<PromptFormProps>> = {
+  display_currency: DisplayCurrencyForm,
+};
