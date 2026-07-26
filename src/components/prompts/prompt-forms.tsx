@@ -3,9 +3,10 @@
 /**
  * FINLYNQ-301 — client id→form map for the decision-prompt gate.
  *
- * Deliberately SEPARATE from the server registry (`src/lib/prompts/registry.ts`,
- * which reaches `db`). Never import that registry into a client component — it
- * drags `pg`/`dns` into the browser bundle (Don't rule #1). This module holds
+ * Deliberately SEPARATE from the server-side prompt registry (the module under
+ * src/lib/prompts/ that reaches `db`). Never import that server registry into a
+ * client component — it drags `pg`/`dns` into the browser bundle (Don't rule
+ * #1); the CI bundle guard greps client dirs for that import path. This module holds
  * only the presentational half: each prompt id maps to a small form component
  * that collects an answer and hands it back via `onSubmit`.
  *
