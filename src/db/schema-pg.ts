@@ -632,6 +632,33 @@ export const announcementReads = pgTable(
   ],
 );
 
+// FINLYNQ-301 — per-(user, prompt, version) completion tracking for the generic
+// "we need an answer from you" surface (docs/user-prompts.md). Mirrors
+// `announcementReads`: TEXT user_id (no FK), a composite PK, and a `_user_idx`.
+// `version` is in the PK so bumping a prompt's version in the code registry
+// re-asks everyone while preserving the prior answer as its own audit row.
+// `answer` is the accepted value as text for AUDIT ONLY — never the source of
+// truth (the registry writer persists to the real destination, e.g.
+// settings.display_currency). `status` ∈ {'answered','deferred','dismissed'}.
+export const userPromptAcks = pgTable(
+  "user_prompt_acks",
+  {
+    userId: text("user_id").notNull(),
+    promptId: text("prompt_id").notNull(),
+    version: integer("version").notNull().default(1),
+    status: text("status").notNull(), // 'answered' | 'deferred' | 'dismissed'
+    answer: text("answer"), // accepted value, audit trail only
+    deferCount: integer("defer_count").notNull().default(0),
+    deferredUntil: timestamp("deferred_until", { withTimezone: true }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.promptId, t.version] }),
+    index("user_prompt_acks_user_idx").on(t.userId),
+  ],
+);
+
 // ─── User feedback (bug reports / ideas) ─────────────────────────────────────
 // Plaintext by design: feedback must be readable by the maintainer (admin
 // review page + email to feedback@finlynq.com), and the submitting user's
