@@ -564,6 +564,16 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // `users` at all — neither delete path reached it.
   await tx.delete(s.securities).where(eq(s.securities.userId, userId));
   await tx.delete(s.categories).where(eq(s.categories.userId, userId));
+  // Staged import pipeline — MUST precede `accounts`. Both reference it with
+  // ON DELETE NO ACTION (`staged_imports.bound_account_id`,
+  // `staged_transactions.target_account_id`), so leaving them until later in
+  // the sweep made the `accounts` DELETE raise 23503 and abort the WHOLE
+  // transaction: any user who had ever uploaded a statement bound to an
+  // account could not delete their account or wipe their data at all.
+  // staged_transactions first — `staged_transactions.staged_import_id` is
+  // NOT NULL ON DELETE CASCADE off staged_imports, so the child goes first.
+  await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
+  await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
   await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));
 
   // ── Portfolio snapshot / lot bookkeeping ──────────────────────────────────
@@ -646,8 +656,6 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // wipe keeps the user row so we delete explicitly here.
   await tx.delete(s.emailInbox).where(eq(s.emailInbox.userId, userId));
   await tx.delete(s.emailImportRules).where(eq(s.emailImportRules.userId, userId));
-  await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
-  await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
   await tx
     .delete(s.simplefinPendingTransactions)
     .where(eq(s.simplefinPendingTransactions.userId, userId));
