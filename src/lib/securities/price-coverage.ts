@@ -107,9 +107,12 @@ export function isPriceCoverageCandidate(c: PriceCoverageCandidate, now: number 
  * DB error it returns an EMPTY set, i.e. "flag nothing", so a failed probe can
  * never fabricate a warning on a healthy ticker.
  *
- * Both the verbatim key and its upper-cased form are probed: cache rows are
- * written with whatever casing the holding carries, and a security renamed to a
- * different casing must not read as unpriced.
+ * Casing: cache rows are written with whatever casing the holding carried at
+ * the time, so a security since re-typed in another case must still match. We
+ * probe the verbatim / upper / lower forms rather than `upper(symbol) IN (…)`,
+ * which would forfeit the (symbol, date) index and seq-scan the table (164k
+ * rows on prod) on every settings-page load. Every symbol prod has ever cached
+ * is already upper-case, so the extra two forms are pure belt-and-braces.
  */
 export async function findNeverPricedSecurityIds(
   candidates: PriceCoverageCandidate[],
@@ -125,6 +128,7 @@ export async function findNeverPricedSecurityIds(
   for (const key of keyById.values()) {
     probe.add(key);
     probe.add(key.toUpperCase());
+    probe.add(key.toLowerCase());
   }
 
   try {
