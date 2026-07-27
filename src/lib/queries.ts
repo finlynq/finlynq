@@ -1114,6 +1114,11 @@ export async function getInvestmentSnapshotsInRange(
       snapDate: schema.portfolioSnapshots.snapDate,
       marketValue: schema.portfolioSnapshots.marketValue,
       currency: schema.portfolioSnapshots.currency,
+      // FINLYNQ-303 — the same balance in the ACCOUNT currency. NULL on rows
+      // written before the dual-basis rebuild; the caller falls back to the
+      // reporting basis rather than rendering zeros.
+      nativeMarketValue: schema.portfolioSnapshots.nativeMarketValue,
+      nativeCurrency: schema.portfolioSnapshots.nativeCurrency,
     })
     .from(schema.portfolioSnapshots)
     .innerJoin(accounts, eq(schema.portfolioSnapshots.accountId, accounts.id))
@@ -1186,6 +1191,10 @@ export async function getCashSnapshotsInRange(
       snapDate: schema.portfolioSnapshots.snapDate,
       marketValue: schema.portfolioSnapshots.marketValue,
       currency: schema.portfolioSnapshots.currency,
+      // FINLYNQ-303 — the same balance in the ACCOUNT currency (see the
+      // investment reader above for the NULL-fallback contract).
+      nativeMarketValue: schema.portfolioSnapshots.nativeMarketValue,
+      nativeCurrency: schema.portfolioSnapshots.nativeCurrency,
     })
     .from(schema.portfolioSnapshots)
     .innerJoin(accounts, eq(schema.portfolioSnapshots.accountId, accounts.id))

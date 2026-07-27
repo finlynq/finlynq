@@ -144,14 +144,35 @@ export async function buildDailySnapshot(
   let totalMv = 0;
   let totalCb = 0;
   let totalContrib = 0;
-  const accountRows: Array<{ accountId: number; mv: number; cb: number; contribution: number }> = [];
+  const accountRows: Array<{
+    accountId: number;
+    mv: number;
+    cb: number;
+    contribution: number;
+    nativeMv: number;
+    nativeCurrency: string;
+  }> = [];
 
   for (const [accountId, v] of perAccount) {
     const fxRate = await fx(v.currency, reportingCurrency);
     const mv = v.value * fxRate;
     const cb = v.costBasis * fxRate;
     const contribution = (perAccountContribution.get(accountId) ?? 0) * fxRate;
-    accountRows.push({ accountId, mv, cb, contribution });
+    // FINLYNQ-303 — dual basis. `v.value` IS the native-currency valuation:
+    // getHoldingsValueByAccount is documented and built to return market value
+    // in the ACCOUNT currency (holdings-value.ts), so this is the input to the
+    // `* fxRate` above, not something derived back out of it. NOTE this is NOT
+    // FX-free the way cash is — a USD security inside a CAD account was already
+    // converted holding→account inside valueHoldingsAtDate. It removes only the
+    // account→reporting leg.
+    accountRows.push({
+      accountId,
+      mv,
+      cb,
+      contribution,
+      nativeMv: v.value,
+      nativeCurrency: v.currency,
+    });
     totalMv += mv;
     totalCb += cb;
     totalContrib += contribution;
@@ -165,10 +186,13 @@ export async function buildDailySnapshot(
   const valueTuples = [
     ...accountRows.map(
       (r) =>
-        sql`(${userId}, ${date}, ${r.accountId}, ${r.mv}, ${r.cb}, ${r.contribution}, ${reportingCurrency}, ${gapsFilled}, ${'cron'})`,
+        sql`(${userId}, ${date}, ${r.accountId}, ${r.mv}, ${r.cb}, ${r.contribution}, ${reportingCurrency}, ${r.nativeMv}, ${r.nativeCurrency}, ${gapsFilled}, ${'cron'})`,
     ),
     // Whole-portfolio aggregate (account_id NULL → COALESCE(-1) in the index).
-    sql`(${userId}, ${date}, NULL, ${totalMv}, ${totalCb}, ${totalContrib}, ${reportingCurrency}, ${gapsFilled}, ${'cron'})`,
+    // Its native columns are deliberately NULL: this row sums accounts of
+    // differing currencies, so no single native currency exists for it. A
+    // native basis is only ever defined for ONE account (FINLYNQ-303).
+    sql`(${userId}, ${date}, NULL, ${totalMv}, ${totalCb}, ${totalContrib}, ${reportingCurrency}, ${null}, ${null}, ${gapsFilled}, ${'cron'})`,
   ];
 
   // The unique index is the EXPRESSION index (user_id, snap_date,
@@ -180,7 +204,8 @@ export async function buildDailySnapshot(
   await db.execute(sql`
     INSERT INTO portfolio_snapshots (
       user_id, snap_date, account_id, market_value, cost_basis,
-      net_contribution, currency, gaps_filled, source
+      net_contribution, currency, native_market_value, native_currency,
+      gaps_filled, source
     ) VALUES ${sql.join(valueTuples, sql`, `)}
     ON CONFLICT (user_id, snap_date, COALESCE(account_id, -1))
     DO UPDATE SET
@@ -188,6 +213,8 @@ export async function buildDailySnapshot(
       cost_basis = EXCLUDED.cost_basis,
       net_contribution = EXCLUDED.net_contribution,
       currency = EXCLUDED.currency,
+      native_market_value = EXCLUDED.native_market_value,
+      native_currency = EXCLUDED.native_currency,
       gaps_filled = EXCLUDED.gaps_filled
   `);
 

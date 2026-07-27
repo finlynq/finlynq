@@ -2030,6 +2030,13 @@ export const portfolioSnapshots = pgTable("portfolio_snapshots", {
   costBasis: doublePrecision("cost_basis").notNull(),
   netContribution: doublePrecision("net_contribution").notNull().default(0),
   currency: text("currency").notNull(),
+  // FINLYNQ-303 — the SAME balance in the ACCOUNT's own currency, written by
+  // the same builder pass that produces `market_value` (it is the input to that
+  // conversion, not derived from it). NULL on the whole-portfolio aggregate row
+  // (account_id IS NULL), which spans currencies and has no native basis, and
+  // on rows written before the dual-basis rebuild landed.
+  nativeMarketValue: doublePrecision("native_market_value"),
+  nativeCurrency: text("native_currency"),
   gapsFilled: boolean("gaps_filled").notNull().default(false),
   source: text("source").notNull().default("cron"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -507,7 +507,11 @@ export default function AccountDetailPage() {
       {/* Balance Over Time — accurate daily series (cash live from
           transactions, investments from stored snapshots).
           plan/net-worth-over-time.md Part A. */}
-      <NetWorthHistoryChart accountId={account.id} title="Balance Over Time" />
+      <NetWorthHistoryChart
+        accountId={account.id}
+        title="Balance Over Time"
+        accountCurrency={account.currency}
+      />
 
       {/* Reconciliation mode, Import preferences, and Cash sleeves moved into
           the Edit dialog (FINLYNQ-227) — they declutter the main page and are

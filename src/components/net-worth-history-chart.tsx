@@ -46,6 +46,9 @@ interface NetWorthPoint {
   members?: BreakdownMember[];
 }
 
+/** FINLYNQ-303 — which currency the series is expressed in. */
+type Basis = "reporting" | "native";
+
 interface ApiResponse {
   displayCurrency: string;
   period: Period;
@@ -53,6 +56,15 @@ interface ApiResponse {
   series: NetWorthPoint[];
   hasInvestmentData: boolean;
   fxApproximation: boolean;
+  /**
+   * FINLYNQ-303 — the basis the series is ACTUALLY in, and the currency
+   * `series[].value` is denominated in. A native request downgrades to
+   * reporting when the stored rows predate the dual-basis rebuild, so the
+   * chart labels from these and never from what it asked for. Optional so a
+   * cached/older API response still renders.
+   */
+  basisUsed?: Basis;
+  seriesCurrency?: string;
 }
 
 const PERIODS: { key: Period; label: string }[] = [
@@ -114,13 +126,29 @@ export interface NetWorthHistoryChartProps {
   /** Restrict to one account; null/undefined = whole net worth. */
   accountId?: number | null;
   title?: string;
+  /**
+   * The account's own currency (FINLYNQ-303). Supplying it alongside
+   * `accountId` enables the native/reporting toggle — but only when it differs
+   * from the user's display currency, since an identical pair makes the two
+   * bases the same series. Omit for the whole-portfolio chart, which spans
+   * currencies and has no native basis.
+   */
+  accountCurrency?: string | null;
 }
 
 export function NetWorthHistoryChart({
   accountId,
   title = "Net Worth Over Time",
+  accountCurrency,
 }: NetWorthHistoryChartProps) {
   const [period, setPeriod] = useState<Period>("6m");
+  // FINLYNQ-303 — session-only (resets on reload), mirroring the period +
+  // stacked toggles. Per-account charts default to NATIVE so the line ties out
+  // with the account currency Balance tile directly above it; the
+  // whole-portfolio chart has no native basis and is pinned to reporting.
+  const [basis, setBasis] = useState<Basis>(
+    accountId != null ? "native" : "reporting",
+  );
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -133,6 +161,9 @@ export function NetWorthHistoryChart({
     const params = new URLSearchParams();
     params.set("period", period);
     if (accountId != null) params.set("accountId", String(accountId));
+    // Only ever ask for native on a single-account chart — the route rejects it
+    // otherwise, since a cross-account total has no native currency.
+    if (accountId != null && basis === "native") params.set("basis", "native");
     setLoading(true);
     setError(false);
     fetch(`/api/net-worth-history?${params.toString()}`)
@@ -148,9 +179,18 @@ export function NetWorthHistoryChart({
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period, accountId]);
+  }, [period, accountId, basis]);
 
-  const currency = data?.displayCurrency ?? "CAD";
+  // Label from what the API actually returned, never from the requested basis:
+  // a native request silently downgrades when the stored rows predate the
+  // dual-basis rebuild, and mislabelling that would misstate the currency.
+  const currency = data?.seriesCurrency ?? data?.displayCurrency ?? "CAD";
+  // The toggle is pointless when both bases resolve to the same currency.
+  const canToggleBasis =
+    accountId != null &&
+    !!accountCurrency &&
+    !!data?.displayCurrency &&
+    accountCurrency.toUpperCase() !== data.displayCurrency.toUpperCase();
   const rawSeries = useMemo(() => data?.series ?? [], [data]);
   const { data: series, domain, spansZero } = useMemo(
     () =>
@@ -203,6 +243,26 @@ export function NetWorthHistoryChart({
               >
                 By account
               </Button>
+            )}
+            {canToggleBasis && (
+              <>
+                <Button
+                  size="sm"
+                  variant={basis === "native" ? "default" : "outline"}
+                  onClick={() => setBasis("native")}
+                  title={`Show this balance in the account's own currency (${accountCurrency})`}
+                >
+                  {accountCurrency}
+                </Button>
+                <Button
+                  size="sm"
+                  variant={basis === "reporting" ? "default" : "outline"}
+                  onClick={() => setBasis("reporting")}
+                  title={`Show this balance converted to your display currency (${data?.displayCurrency})`}
+                >
+                  {data?.displayCurrency}
+                </Button>
+              </>
             )}
             {PERIODS.map((p) => (
               <Button

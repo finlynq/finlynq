@@ -22,7 +22,15 @@
  * at the CURRENT rate only when the user switched display currency after the
  * snapshot was stored (the same documented value-chart discontinuity the
  * investment side has). The live-today override + that display-switch re-base
- * are the only current-rate uses left, so `fxApproximation` stays `true`.
+ * are the only current-rate uses left under the `reporting` basis, so it keeps
+ * `fxApproximation: true`.
+ *
+ * FINLYNQ-303 — the series can also be built on the `native` basis: each value
+ * read straight from the stored native columns (the account's OWN currency)
+ * with NO conversion at all, which sidesteps both of those approximations. It
+ * is valid ONLY for a single account (a mixed-currency total has no native
+ * basis) and only when every in-scope row carries a native value; otherwise the
+ * result downgrades to `reporting` and says so via `basisUsed`.
  */
 
 import { convertWithRateMap } from "@/lib/fx-service";
@@ -30,15 +38,33 @@ import { convertWithRateMap } from "@/lib/fx-service";
 export type NetWorthPeriod = "6m" | "1y" | "all";
 
 /**
+ * Which currency basis a series is expressed in (FINLYNQ-303).
+ *
+ * - `reporting` — the historical default: every account translated into the
+ *   user's display currency. The ONLY basis valid for a multi-account series,
+ *   since that is the only way a mixed-currency total means anything.
+ * - `native` — each account in its OWN currency, read straight from the stored
+ *   native columns with NO conversion. Only meaningful for a SINGLE account;
+ *   the caller must reject it when `accountId` is absent (FINLYNQ-123: never
+ *   sum mixed currencies under one label).
+ */
+export type CurrencyBasis = "reporting" | "native";
+
+/**
  * One per-account stored snapshot row. `marketValue` is in `currency` (the
- * reporting currency at snap time). Used for BOTH the cash and investment
- * passes — they're structurally identical (per-account carry-forward).
+ * reporting currency at snap time). `nativeMarketValue`/`nativeCurrency` carry
+ * the SAME balance in the account's own currency (FINLYNQ-303) — null on the
+ * whole-portfolio aggregate row and on rows written before the dual-basis
+ * rebuild. Used for BOTH the cash and investment passes — they're structurally
+ * identical (per-account carry-forward).
  */
 export interface AccountSnapshot {
   accountId: number;
   snapDate: string; // YYYY-MM-DD
   marketValue: number;
   currency: string;
+  nativeMarketValue?: number | null;
+  nativeCurrency?: string | null;
 }
 
 /** @deprecated alias kept for callers/tests — same shape as AccountSnapshot. */
@@ -56,6 +82,17 @@ export type LiveInvestmentValue = LiveAccountValue;
 export interface BuildNetWorthHistoryInput {
   period: NetWorthPeriod;
   displayCurrency: string;
+  /**
+   * Currency basis to express the series in (FINLYNQ-303). Defaults to
+   * `reporting` — the historical behaviour. `native` is honoured only when
+   * EVERY in-scope snapshot row carries a native value; otherwise the result
+   * silently downgrades to `reporting` and reports that via `basisUsed`. The
+   * all-or-nothing rule is deliberate: a per-row fallback would draw one line
+   * whose points are partly in the account currency and partly in the display
+   * currency, which is precisely the mixed-currency-under-one-label failure
+   * FINLYNQ-123 forbids.
+   */
+  basis?: CurrencyBasis;
   /** Rate map keyed by source currency → factor to displayCurrency (getRateMap). */
   rateMap: Map<string, number>;
   /**
@@ -108,10 +145,26 @@ export interface BuildNetWorthHistoryResult {
   series: NetWorthPoint[];
   hasInvestmentData: boolean;
   /**
-   * Always true — the live-today override and a post-storage display-currency
-   * switch still use the current rate (documented approximation).
+   * The basis the series is ACTUALLY in. Equals the requested `basis` unless a
+   * native request had to downgrade for lack of native columns — callers must
+   * label the chart from this, never from what they asked for.
    */
-  fxApproximation: true;
+  basisUsed: CurrencyBasis;
+  /**
+   * The currency `series[].value` is denominated in. Under `reporting` this is
+   * the display currency; under `native` it is the account's own currency.
+   */
+  seriesCurrency: string;
+  /**
+   * True when any value went through a current-rate conversion. Under
+   * `reporting` this is always true (the live-today override and a post-storage
+   * display-currency switch both re-base at the current rate). Under `native`
+   * it is true only when investments are involved: a cash series is genuinely
+   * FX-free (pure cumulative SUM in the account currency), whereas an
+   * investment's holdings were already converted holding→account currency at
+   * build time — native removes only the account→reporting leg.
+   */
+  fxApproximation: boolean;
 }
 
 const PERIOD_DAYS: Record<Exclude<NetWorthPeriod, "all">, number> = {
@@ -191,11 +244,18 @@ function sumPassForDay(
   liveByAccount: Map<number, LiveAccountValue> | undefined,
   rateMap: Map<string, number>,
   perAccount: Map<number, number>,
+  basis: CurrencyBasis,
 ): number {
+  // Under `native` NOTHING is converted: the stored native column and the live
+  // override are both already in the account's own currency (LiveAccountValue
+  // is documented "in account currency"), so the rate is 1 by construction.
+  const native = basis === "native";
   if (isFinalDay && liveByAccount) {
     let sum = 0;
     for (const [accId, live] of liveByAccount) {
-      const v = convertWithRateMap(live.value, live.currency, rateMap);
+      const v = native
+        ? live.value
+        : convertWithRateMap(live.value, live.currency, rateMap);
       perAccount.set(accId, (perAccount.get(accId) ?? 0) + v);
       sum += v;
     }
@@ -205,7 +265,9 @@ function sumPassForDay(
   for (const [accId, st] of states) {
     while (st.ptr < st.rows.length && st.rows[st.ptr].snapDate <= day) {
       const snap = st.rows[st.ptr];
-      st.lastValue = convertWithRateMap(snap.marketValue, snap.currency, rateMap);
+      st.lastValue = native
+        ? snap.nativeMarketValue ?? 0
+        : convertWithRateMap(snap.marketValue, snap.currency, rateMap);
       st.ptr++;
     }
     if (st.lastValue !== 0) {
@@ -221,6 +283,7 @@ export function buildNetWorthHistory(
 ): BuildNetWorthHistoryResult {
   const {
     period,
+    displayCurrency,
     rateMap,
     cashSnapshots,
     liveCashByAccount,
@@ -231,6 +294,32 @@ export function buildNetWorthHistory(
 
   const hasInvestmentData =
     snapshots.length > 0 || (liveInvestmentByAccount?.size ?? 0) > 0;
+
+  // ── 0. Resolve the basis actually usable (FINLYNQ-303) ───────────────────
+  // A native series requires a native value on EVERY in-scope snapshot row
+  // (all-or-nothing — see the `basis` doc on the input type). Rows predating
+  // the dual-basis rebuild have NULL native columns, so a request arriving in
+  // that window downgrades to reporting rather than drawing a line that mixes
+  // currencies point-to-point.
+  const allRows = [...cashSnapshots, ...snapshots];
+  const nativeComplete =
+    allRows.length > 0 &&
+    allRows.every(
+      (s) => s.nativeMarketValue != null && s.nativeCurrency != null,
+    );
+  const basisUsed: CurrencyBasis =
+    input.basis === "native" && nativeComplete ? "native" : "reporting";
+
+  // Under `native` every in-scope row shares ONE account currency (the caller
+  // only permits native for a single account), so the first row names it; the
+  // live map is the fallback when the range holds no stored rows yet.
+  const seriesCurrency =
+    basisUsed === "native"
+      ? allRows[0]?.nativeCurrency ??
+        [...(liveCashByAccount?.values() ?? []), ...(liveInvestmentByAccount?.values() ?? [])][0]
+          ?.currency ??
+        displayCurrency
+      : displayCurrency;
 
   // ── 1. Determine the first grid day ──────────────────────────────────────
   let firstDay: string;
@@ -262,10 +351,10 @@ export function buildNetWorthHistory(
     // (the readers partition on is_investment), so no key collision.
     const perAccount = new Map<number, number>();
     const cash = sumPassForDay(
-      cashState, day, isFinalDay, liveCashByAccount, rateMap, perAccount,
+      cashState, day, isFinalDay, liveCashByAccount, rateMap, perAccount, basisUsed,
     );
     const investment = sumPassForDay(
-      invState, day, isFinalDay, liveInvestmentByAccount, rateMap, perAccount,
+      invState, day, isFinalDay, liveInvestmentByAccount, rateMap, perAccount, basisUsed,
     );
     const breakdown: NetWorthBreakdownEntry[] = [];
     for (const [accountId, v] of perAccount) {
@@ -281,5 +370,14 @@ export function buildNetWorthHistory(
     day = addDaysISO(day, 1);
   }
 
-  return { series, hasInvestmentData, fxApproximation: true };
+  return {
+    series,
+    hasInvestmentData,
+    basisUsed,
+    seriesCurrency,
+    // Native removes the account→reporting conversion entirely, so a CASH
+    // series is genuinely FX-free. An investment series still carries the
+    // holding→account conversion done at build time, so it stays approximate.
+    fxApproximation: basisUsed === "native" ? hasInvestmentData : true,
+  };
 }
