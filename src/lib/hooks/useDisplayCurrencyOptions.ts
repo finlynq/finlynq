@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
-  SUPPORTED_FIAT_CURRENCIES,
+  REPORTABLE_FIAT_CURRENCIES,
   currencyLabel,
 } from "@/lib/fx/supported-currencies";
 import type { ComboboxItemShape } from "@/components/ui/combobox";
@@ -19,17 +19,20 @@ import type { ComboboxItemShape } from "@/components/ui/combobox";
  * and for a user with no display-currency row and no data it collapses to two
  * options.
  *
- * The list is the built-in fiat set PLUS any currency the user has an
+ * The list is `REPORTABLE_FIAT_CURRENCIES` (146 codes measured as live on
+ * Yahoo — deliberately NOT `SUPPORTED_CURRENCIES`, which also decides whether a
+ * TICKER is cash; see that constant's header) PLUS any currency the user has an
  * `fx_overrides` row for. That second half matters: `PUT /api/settings/display-
- * currency` rejects anything `isSupportedCurrency()` says no to, with "Add a
- * custom rate via Settings → Custom exchange rates first" — but until now, once
- * you HAD added that rate, no picker listed the currency, so the instruction
- * led to a dead end. An override is also exactly what makes reporting correct:
- * `getRateToUsd` checks `fx_overrides` FIRST, ahead of `fx_rates` and Yahoo.
+ * currency` rejects anything outside the reportable set with "Add a custom rate
+ * via Settings → Custom exchange rates first" — but until this hook existed,
+ * once you HAD added that rate, no picker listed the currency, so the
+ * instruction led to a dead end. An override is also exactly what makes
+ * reporting correct: `getRateToUsd` checks `fx_overrides` FIRST, ahead of
+ * `fx_rates` and Yahoo.
  *
- * Currencies with neither a built-in rate source nor an override are omitted on
- * purpose. FX resolution ends in a `rate = 1` fallback rather than an error, so
- * offering them would silently convert 1:1 and put every total out by orders of
+ * Currencies with neither a live quote nor an override are omitted on purpose.
+ * FX resolution ends in a `rate = 1` fallback rather than an error, so offering
+ * them would silently convert 1:1 and put every total out by orders of
  * magnitude — a wrong number that looks plausible.
  *
  * `ensure` force-includes a code regardless (the value a form is currently bound
@@ -61,7 +64,7 @@ export function useDisplayCurrencyOptions(
     };
   }, []);
 
-  const builtIn = new Set<string>(SUPPORTED_FIAT_CURRENCIES);
+  const builtIn = new Set<string>(REPORTABLE_FIAT_CURRENCIES);
   const ensured = ensure?.trim().toUpperCase();
 
   // Built-ins first, in their curated order (USD, CAD, EUR, … — most-used
@@ -75,7 +78,7 @@ export function useDisplayCurrencyOptions(
   ).sort();
 
   return [
-    ...SUPPORTED_FIAT_CURRENCIES.map((c) => ({
+    ...REPORTABLE_FIAT_CURRENCIES.map((c) => ({
       value: c,
       label: `${c} — ${currencyLabel(c)}`,
     })),

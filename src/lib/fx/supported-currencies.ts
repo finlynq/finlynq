@@ -25,6 +25,69 @@ export const SUPPORTED_CURRENCIES = [
   ...SUPPORTED_METAL_CURRENCIES,
 ] as const;
 
+/**
+ * Additional fiat currencies that Yahoo quotes as `<CCY>USD=X` but that are
+ * NOT in `SUPPORTED_CURRENCIES` (2026-07-27).
+ *
+ * ⚠️ THE SPLIT IS THE POINT — do not merge this into `SUPPORTED_CURRENCIES`.
+ * That constant answers "is this TICKER a currency rather than a stock"
+ * (`isCurrencyCodeSymbol`, `/api/portfolio/symbol-info`, `/api/securities/define`),
+ * and several codes here are live Yahoo EQUITY/ETF tickers — `AED` is Aegon
+ * N.V. PERP CAP SECS, `SAR` is Saratoga Investment Corp. Adding them there
+ * would reclassify anyone HOLDING those tickers as holding foreign cash: the
+ * documented "CAD -> Cadiz Inc" mispricing in reverse, a 100x-scale valuation
+ * error. This list is only ever asked "can we get an FX rate for it", which is
+ * safe.
+ *
+ * Nothing in the rate stack needed to change to support these: `getRateToUsd`
+ * never consulted the supported list — it fetches `<CCY>USD=X` for any code
+ * (fx-service.ts). The 32-currency list was gating the display-currency PICKER
+ * and its PUT validation only, so a user wanting to report in AED had to add a
+ * manual custom rate for a currency we could already price.
+ *
+ * Membership was MEASURED, not assumed: every code below returned a positive
+ * close from Yahoo within the last 5 days on 2026-07-27. Six candidates were
+ * deliberately excluded for having no recent quote — ANG (replaced by XCG),
+ * BGN (Bulgaria adopted the euro 2026-01-01), BTN, KGS, SSP, ZWL. A retired or
+ * thinly-quoted currency would fall through to the most-recent cached rate and
+ * silently report at a months-old number; `fx_overrides` remains the escape
+ * hatch for those. Re-measure before adding more.
+ */
+export const ADDITIONAL_REPORTABLE_CURRENCIES = [
+  "AED", "AFN", "ALL", "AMD", "AOA", "AWG", "AZN", "BAM", "BBD", "BDT",
+  "BHD", "BIF", "BMD", "BND", "BOB", "BSD", "BWP", "BYN", "BZD", "CDF",
+  "CRC", "CUP", "CVE", "DJF", "DOP", "DZD", "EGP", "ERN", "ETB", "FJD",
+  "FKP", "GEL", "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD", "HNL", "HTG",
+  "IQD", "IRR", "ISK", "JMD", "JOD", "KES", "KHR", "KMF", "KWD", "KYD",
+  "KZT", "LAK", "LBP", "LKR", "LRD", "LSL", "LYD", "MAD", "MDL", "MGA",
+  "MKD", "MMK", "MNT", "MOP", "MUR", "MVR", "MWK", "MZN", "NAD", "NGN",
+  "NIO", "NPR", "OMR", "PAB", "PEN", "PGK", "PKR", "PYG", "QAR", "RSD",
+  "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SLE", "SOS", "SRD", "STN",
+  "SVC", "SYP", "SZL", "TJS", "TMT", "TND", "TOP", "TTD", "TWD", "TZS",
+  "UAH", "UGX", "UYU", "UZS", "VES", "VND", "VUV", "WST", "XAF", "XCD",
+  "XOF", "XPF", "YER", "ZMW",
+] as const;
+
+/**
+ * Every fiat currency offerable as the app-wide DISPLAY (reporting) currency.
+ * Built-ins first (curated, most-used order), then the rest alphabetically —
+ * the pickers are searchable, so ordering only has to serve the common case.
+ *
+ * This is the list for "what can totals be reported in". It is NOT the list for
+ * "is this ticker cash" — see the warning above.
+ */
+export const REPORTABLE_FIAT_CURRENCIES = [
+  ...SUPPORTED_FIAT_CURRENCIES,
+  ...ADDITIONAL_REPORTABLE_CURRENCIES,
+] as const;
+
+const REPORTABLE_SET = new Set<string>(REPORTABLE_FIAT_CURRENCIES);
+
+/** True if `code` can be selected as the display/reporting currency. */
+export function isReportableCurrency(code: string): boolean {
+  return REPORTABLE_SET.has(code.trim().toUpperCase());
+}
+
 export type SupportedCurrency = (typeof SUPPORTED_CURRENCIES)[number];
 
 const SUPPORTED_SET = new Set<string>(SUPPORTED_CURRENCIES);
@@ -141,6 +204,125 @@ export const CURRENCY_LABELS: Record<string, string> = {
   XAG: "Silver (oz)",
   XPT: "Platinum (oz)",
   XPD: "Palladium (oz)",
+
+  // ADDITIONAL_REPORTABLE_CURRENCIES. Names matter more here than for the
+  // built-ins: the display-currency pickers are type-ahead and filter on the
+  // LABEL as well as the code, so without a name "dirham" or "riyal" finds
+  // nothing and the user has to already know the ISO code.
+  AED: "UAE Dirham",
+  AFN: "Afghan Afghani",
+  ALL: "Albanian Lek",
+  AMD: "Armenian Dram",
+  AOA: "Angolan Kwanza",
+  AWG: "Aruban Florin",
+  AZN: "Azerbaijani Manat",
+  BAM: "Bosnia-Herzegovina Convertible Mark",
+  BBD: "Barbadian Dollar",
+  BDT: "Bangladeshi Taka",
+  BHD: "Bahraini Dinar",
+  BIF: "Burundian Franc",
+  BMD: "Bermudan Dollar",
+  BND: "Brunei Dollar",
+  BOB: "Bolivian Boliviano",
+  BSD: "Bahamian Dollar",
+  BWP: "Botswanan Pula",
+  BYN: "Belarusian Ruble",
+  BZD: "Belize Dollar",
+  CDF: "Congolese Franc",
+  CRC: "Costa Rican Colón",
+  CUP: "Cuban Peso",
+  CVE: "Cape Verdean Escudo",
+  DJF: "Djiboutian Franc",
+  DOP: "Dominican Peso",
+  DZD: "Algerian Dinar",
+  EGP: "Egyptian Pound",
+  ERN: "Eritrean Nakfa",
+  ETB: "Ethiopian Birr",
+  FJD: "Fijian Dollar",
+  FKP: "Falkland Islands Pound",
+  GEL: "Georgian Lari",
+  GHS: "Ghanaian Cedi",
+  GIP: "Gibraltar Pound",
+  GMD: "Gambian Dalasi",
+  GNF: "Guinean Franc",
+  GTQ: "Guatemalan Quetzal",
+  GYD: "Guyanaese Dollar",
+  HNL: "Honduran Lempira",
+  HTG: "Haitian Gourde",
+  IQD: "Iraqi Dinar",
+  IRR: "Iranian Rial",
+  ISK: "Icelandic Króna",
+  JMD: "Jamaican Dollar",
+  JOD: "Jordanian Dinar",
+  KES: "Kenyan Shilling",
+  KHR: "Cambodian Riel",
+  KMF: "Comorian Franc",
+  KWD: "Kuwaiti Dinar",
+  KYD: "Cayman Islands Dollar",
+  KZT: "Kazakhstani Tenge",
+  LAK: "Laotian Kip",
+  LBP: "Lebanese Pound",
+  LKR: "Sri Lankan Rupee",
+  LRD: "Liberian Dollar",
+  LSL: "Lesotho Loti",
+  LYD: "Libyan Dinar",
+  MAD: "Moroccan Dirham",
+  MDL: "Moldovan Leu",
+  MGA: "Malagasy Ariary",
+  MKD: "Macedonian Denar",
+  MMK: "Myanmar Kyat",
+  MNT: "Mongolian Tugrik",
+  MOP: "Macanese Pataca",
+  MUR: "Mauritian Rupee",
+  MVR: "Maldivian Rufiyaa",
+  MWK: "Malawian Kwacha",
+  MZN: "Mozambican Metical",
+  NAD: "Namibian Dollar",
+  NGN: "Nigerian Naira",
+  NIO: "Nicaraguan Córdoba",
+  NPR: "Nepalese Rupee",
+  OMR: "Omani Rial",
+  PAB: "Panamanian Balboa",
+  PEN: "Peruvian Sol",
+  PGK: "Papua New Guinean Kina",
+  PKR: "Pakistani Rupee",
+  PYG: "Paraguayan Guarani",
+  QAR: "Qatari Riyal",
+  RSD: "Serbian Dinar",
+  RUB: "Russian Ruble",
+  RWF: "Rwandan Franc",
+  SAR: "Saudi Riyal",
+  SBD: "Solomon Islands Dollar",
+  SCR: "Seychellois Rupee",
+  SDG: "Sudanese Pound",
+  SLE: "Sierra Leonean Leone",
+  SOS: "Somali Shilling",
+  SRD: "Surinamese Dollar",
+  STN: "São Tomé & Príncipe Dobra",
+  SVC: "Salvadoran Colón",
+  SYP: "Syrian Pound",
+  SZL: "Swazi Lilangeni",
+  TJS: "Tajikistani Somoni",
+  TMT: "Turkmenistani Manat",
+  TND: "Tunisian Dinar",
+  TOP: "Tongan Paʻanga",
+  TTD: "Trinidad & Tobago Dollar",
+  TWD: "New Taiwan Dollar",
+  TZS: "Tanzanian Shilling",
+  UAH: "Ukrainian Hryvnia",
+  UGX: "Ugandan Shilling",
+  UYU: "Uruguayan Peso",
+  UZS: "Uzbekistani Som",
+  VES: "Venezuelan Bolívar",
+  VND: "Vietnamese Dong",
+  VUV: "Vanuatu Vatu",
+  WST: "Samoan Tala",
+  XAF: "Central African CFA Franc",
+  XCD: "East Caribbean Dollar",
+  XOF: "West African CFA Franc",
+  XPF: "CFP Franc",
+  YER: "Yemeni Rial",
+  ZMW: "Zambian Kwacha",
 };
 
 export function currencyLabel(code: string): string {
