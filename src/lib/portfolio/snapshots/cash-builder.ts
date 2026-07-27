@@ -348,6 +348,12 @@ export async function buildCashSnapshots(
       if (day < entry.earliest) continue;
       const { rate, fellBack } = await fx(entry.currency, reporting, day);
       const mv = running * rate;
+      // FINLYNQ-303 — dual basis. `running` IS the native-currency balance: the
+      // cumulative SUM(transactions.amount) in the account's own currency,
+      // before the `* rate` above. Writing it costs nothing (no extra FX call,
+      // no extra query) and is genuinely FX-free for cash, so the native series
+      // never moves when a rate moves or the user switches display currency.
+      const nativeMv = running;
       // Verbatim UPSERT shape from builder.ts (COALESCE conflict target — the
       // unique index is an expression index, so Drizzle's onConflictDoUpdate on
       // bare columns finds no matching constraint). source='cash',
@@ -355,10 +361,12 @@ export async function buildCashSnapshots(
       await db.execute(sql`
         INSERT INTO portfolio_snapshots (
           user_id, snap_date, account_id, market_value, cost_basis,
-          net_contribution, currency, gaps_filled, source
+          net_contribution, currency, native_market_value, native_currency,
+          gaps_filled, source
         ) VALUES (
           ${userId}, ${day}, ${accId}, ${mv}, ${mv},
-          ${0}, ${reporting}, ${fellBack}, ${"cash"}
+          ${0}, ${reporting}, ${nativeMv}, ${entry.currency},
+          ${fellBack}, ${"cash"}
         )
         ON CONFLICT (user_id, snap_date, COALESCE(account_id, -1))
         DO UPDATE SET
@@ -366,6 +374,8 @@ export async function buildCashSnapshots(
           cost_basis = EXCLUDED.cost_basis,
           net_contribution = EXCLUDED.net_contribution,
           currency = EXCLUDED.currency,
+          native_market_value = EXCLUDED.native_market_value,
+          native_currency = EXCLUDED.native_currency,
           gaps_filled = EXCLUDED.gaps_filled,
           source = EXCLUDED.source
       `);

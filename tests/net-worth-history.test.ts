@@ -296,3 +296,193 @@ describe("buildNetWorthHistory", () => {
     expect(res.series[res.series.length - 1].date).toBe("2026-06-02");
   });
 });
+
+/**
+ * FINLYNQ-303 — the `native` basis: each value read straight from the stored
+ * native columns (the account's OWN currency) with no conversion at all.
+ *
+ * The rate map below is deliberately non-identity so a leaked conversion would
+ * change a number rather than silently pass. Stored rows model a USD account
+ * under a CAD reporting currency: `marketValue` is the CAD figure the builder
+ * wrote, `nativeMarketValue` the USD one it used to produce it.
+ */
+describe("buildNetWorthHistory — native basis", () => {
+  const RATES = new Map<string, number>([["CAD", 1], ["USD", 1.4]]);
+
+  const dualCash: AccountSnapshot[] = [
+    {
+      accountId: 1,
+      snapDate: "2026-05-01",
+      marketValue: 140,
+      currency: "CAD",
+      nativeMarketValue: 100,
+      nativeCurrency: "USD",
+    },
+  ];
+
+  it("reads the native column verbatim and labels the account currency", () => {
+    const res = buildNetWorthHistory({
+      period: "all",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: dualCash,
+      snapshots: [],
+      today: "2026-05-02",
+    });
+    expect(res.basisUsed).toBe("native");
+    expect(res.seriesCurrency).toBe("USD");
+    // 100 (native), NOT 140 (reporting) and NOT 140×1.4 (a double conversion).
+    expect(res.series.map((p) => p.value)).toEqual([100, 100]);
+  });
+
+  it("still returns the reporting figures when basis is omitted", () => {
+    const res = buildNetWorthHistory({
+      period: "all",
+      displayCurrency: "CAD",
+      rateMap: RATES,
+      cashSnapshots: dualCash,
+      snapshots: [],
+      today: "2026-05-01",
+    });
+    expect(res.basisUsed).toBe("reporting");
+    expect(res.seriesCurrency).toBe("CAD");
+    expect(res.series[0].value).toBe(140);
+  });
+
+  it("downgrades to reporting when any row lacks a native value", () => {
+    // A partially-backfilled range. Honouring native here would draw one line
+    // whose points are partly USD and partly CAD, so the whole series falls
+    // back rather than mixing currencies point-to-point.
+    const mixed: AccountSnapshot[] = [
+      ...dualCash,
+      { accountId: 1, snapDate: "2026-05-02", marketValue: 210, currency: "CAD" },
+    ];
+    const res = buildNetWorthHistory({
+      period: "all",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: mixed,
+      snapshots: [],
+      today: "2026-05-02",
+    });
+    expect(res.basisUsed).toBe("reporting");
+    expect(res.seriesCurrency).toBe("CAD");
+    expect(res.series.map((p) => p.value)).toEqual([140, 210]);
+  });
+
+  it("ignores un-backfilled rows OUTSIDE the rendered window", () => {
+    // Regression (caught on dev): callers fetch from "1900-01-01" and let the
+    // period bound the grid, so a single legacy row from years earlier must not
+    // veto native for a fully-rebuilt window. Only rows the walk consumes count.
+    const res = buildNetWorthHistory({
+      period: "6m",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: [
+        // Pre-dual-basis row SUPERSEDED by the seed below, so the walk never
+        // reads it. The cash builder writes one row per DAY, so a user with
+        // years of history has hundreds of these — they must not veto native.
+        { accountId: 1, snapDate: "2020-01-01", marketValue: 5, currency: "CAD" },
+        // The seed: newest row strictly before the 6m window opens (2025-11-03).
+        {
+          accountId: 1,
+          snapDate: "2025-10-01",
+          marketValue: 42,
+          currency: "CAD",
+          nativeMarketValue: 30,
+          nativeCurrency: "USD",
+        },
+        {
+          accountId: 1,
+          snapDate: "2026-05-01",
+          marketValue: 140,
+          currency: "CAD",
+          nativeMarketValue: 100,
+          nativeCurrency: "USD",
+        },
+      ],
+      snapshots: [],
+      today: "2026-05-02",
+    });
+    expect(res.basisUsed).toBe("native");
+    expect(res.seriesCurrency).toBe("USD");
+    expect(res.series[res.series.length - 1].value).toBe(100);
+  });
+
+  it("still downgrades when the window's SEED row lacks a native value", () => {
+    // The seed row (latest before firstDay) is what carry-forward starts from,
+    // so it IS consumed — a NULL native there must still downgrade.
+    const res = buildNetWorthHistory({
+      period: "6m",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: [
+        // Inside the 6m lookback and the newest row before the window opens.
+        { accountId: 1, snapDate: "2026-01-05", marketValue: 70, currency: "CAD" },
+      ],
+      snapshots: [],
+      today: "2026-05-02",
+    });
+    expect(res.basisUsed).toBe("reporting");
+    expect(res.seriesCurrency).toBe("CAD");
+  });
+
+  it("takes the live-today override in native currency without converting", () => {
+    // LiveAccountValue is already in account currency, so native must use it
+    // verbatim — converting it here is what would break the tie-out with the
+    // account page's Balance tile.
+    const res = buildNetWorthHistory({
+      period: "all",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: dualCash,
+      liveCashByAccount: new Map([[1, { value: 250, currency: "USD" }]]),
+      snapshots: [],
+      today: "2026-05-02",
+    });
+    expect(res.series[res.series.length - 1].value).toBe(250);
+  });
+
+  it("reports a cash-only native series as FX-exact, investments as approximate", () => {
+    const cashOnly = buildNetWorthHistory({
+      period: "all",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: dualCash,
+      snapshots: [],
+      today: "2026-05-01",
+    });
+    // Cash is a pure cumulative SUM in the account currency — nothing was ever
+    // converted, so the approximation flag clears.
+    expect(cashOnly.fxApproximation).toBe(false);
+
+    const withInvestments = buildNetWorthHistory({
+      period: "all",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: [],
+      snapshots: [
+        {
+          accountId: 2,
+          snapDate: "2026-05-01",
+          marketValue: 1400,
+          currency: "CAD",
+          nativeMarketValue: 1000,
+          nativeCurrency: "USD",
+        },
+      ],
+      today: "2026-05-01",
+    });
+    // Holdings were already converted holding→account at build time; native
+    // removes only the account→reporting leg, so this stays approximate.
+    expect(withInvestments.basisUsed).toBe("native");
+    expect(withInvestments.fxApproximation).toBe(true);
+  });
+});

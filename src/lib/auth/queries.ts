@@ -482,6 +482,18 @@ async function unlinkUserUploadFiles(userId: string) {
  * single deletion body is load-bearing: the two paths must never drift on which
  * tables they cover. Add a new per-user table here and BOTH paths pick it up.
  *
+ * IMPORTANT — an `ON DELETE CASCADE` FK to `users` is NOT coverage. Only
+ * `deleteUserAccount` drops the user row; WIPE keeps it, so a table that relies
+ * on that cascade survives a wipe untouched. Cascading off a NOT NULL FK to a
+ * table this function deletes (accounts / transactions / portfolio_holdings /
+ * securities / holding_lots / backfill_runs / webhooks) DOES count. A NULLABLE
+ * cascade parent does not — `portfolio_snapshots.account_id IS NULL` rows are
+ * exactly how the whole-portfolio bars escaped.
+ *
+ * `tests/delete-all-user-data-coverage.test.ts` enforces this: every table in
+ * `schema-pg.ts` carrying a `user_id` column must be deleted here or listed in
+ * that test's documented exemptions.
+ *
  * Each delete filters strictly by user_id — never by FK reach — so it can ONLY
  * remove rows owned by this user. If any other user's row holds an FK into one
  * of our accounts/categories, the final accounts/categories delete fails with
@@ -540,8 +552,46 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // referenced and can be safely dropped via the user_id filter alone.
   await tx.delete(s.bankTransactions).where(eq(s.bankTransactions.userId, userId));
   await tx.delete(s.portfolioHoldings).where(eq(s.portfolioHoldings.userId, userId));
+  // Securities master (Tier 2) — MUST come after portfolioHoldings: the
+  // `portfolio_holdings.security_id` FK is ON DELETE SET NULL, so deleting
+  // securities first would pointlessly rewrite rows we're about to drop.
+  // `custom_security_prices.security_id` is NOT NULL ON DELETE CASCADE, so the
+  // user's manual price marks go with it — no separate delete needed.
+  //
+  // This carries the user's DEK-encrypted `symbol_ct`/`name_ct` +
+  // `symbol_lookup`/`name_lookup`, so leaving it behind meant encrypted
+  // security identities SURVIVED an account deletion. The table has NO FK to
+  // `users` at all — neither delete path reached it.
+  await tx.delete(s.securities).where(eq(s.securities.userId, userId));
   await tx.delete(s.categories).where(eq(s.categories.userId, userId));
   await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));
+
+  // ── Portfolio snapshot / lot bookkeeping ──────────────────────────────────
+  // None of these have an FK to `users`, so NEITHER path reached them.
+  // `portfolio_snapshots.account_id` cascades from accounts, but it is
+  // NULLABLE (account_id IS NULL = the whole-portfolio aggregate bar), so the
+  // aggregate rows survived even on delete-account. The rest are keyed on
+  // user_id alone with no FK anywhere.
+  //
+  // Not listed (covered transitively, all NOT NULL ON DELETE CASCADE):
+  //   holding_accounts / holding_lots  → portfolio_holdings
+  //   holding_lot_closures             → holding_lots
+  //   custom_security_prices           → securities
+  await tx.delete(s.portfolioSnapshots).where(eq(s.portfolioSnapshots.userId, userId));
+  await tx.delete(s.portfolioSnapshotDirty).where(eq(s.portfolioSnapshotDirty.userId, userId));
+  await tx
+    .delete(s.portfolioCashSnapshotDirty)
+    .where(eq(s.portfolioCashSnapshotDirty.userId, userId));
+  await tx
+    .delete(s.portfolioCashSnapshotMeta)
+    .where(eq(s.portfolioCashSnapshotMeta.userId, userId));
+  await tx.delete(s.portfolioLotsStatus).where(eq(s.portfolioLotsStatus.userId, userId));
+  await tx
+    .delete(s.portfolioLegacyRealizedGainSnapshot)
+    .where(eq(s.portfolioLegacyRealizedGainSnapshot.userId, userId));
+  await tx
+    .delete(s.reportingRecomputeStatus)
+    .where(eq(s.reportingRecomputeStatus.userId, userId));
 
   // Tables missed by the original implementation — Finding #5. Covers the
   // tokens that would survive a "wipe my account" click and still decrypt the
@@ -610,6 +660,25 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
     // (best-effort; don't cascade-delete unrelated admin-inbox content).
     await tx.delete(s.incomingEmails).where(eq(s.incomingEmails.toAddress, userImportEmail));
   }
+
+  // FINLYNQ-301 — per-user prompt completion acks (generic decision surface).
+  await tx.delete(s.userPromptAcks).where(eq(s.userPromptAcks.userId, userId));
+  // Per-user read/dismiss state for global admin announcements. Its only FK is
+  // to `announcements` (which are never deleted), so nothing cleaned it up.
+  await tx.delete(s.announcementReads).where(eq(s.announcementReads.userId, userId));
+
+  // ── users-CASCADE-only tables ─────────────────────────────────────────────
+  // These DO cascade off the `users` row, which covers `deleteUserAccount` —
+  // but WIPE keeps the user row, so without an explicit delete here a "wipe my
+  // account" left them fully intact. Same reasoning as the email group above.
+  await tx.delete(s.backfillProposals).where(eq(s.backfillProposals.userId, userId));
+  await tx.delete(s.backfillRuns).where(eq(s.backfillRuns.userId, userId));
+  // webhook_deliveries cascades off webhooks (NOT NULL) — no separate delete.
+  await tx.delete(s.webhooks).where(eq(s.webhooks.userId, userId));
+  // No FK to users at all; previously deleted only on the delete-account path,
+  // so a wipe left the keys behind. Belongs in the shared body like everything
+  // else — see the header note about the two paths never drifting.
+  await tx.delete(s.mcpIdempotencyKeys).where(eq(s.mcpIdempotencyKeys.userId, userId));
 
   // settings last — it holds the api_key/api_key_dek/email_webhook_* rows and
   // we also just read the import_email from here above.
@@ -685,10 +754,11 @@ export async function wipeUserDataAndRewrap(
  * row itself. Used by POST /api/auth/delete-account.
  *
  * Unlike `wipeUserDataAndRewrap`, there is no DEK to rewrap afterward — the
- * identity is gone. The final `DELETE FROM users` cascades the ON DELETE
- * CASCADE children (webhooks, webhook_deliveries, transaction_flags, backfill
- * audit/runs). `mcp_idempotency_keys` has no FK to users, so it's deleted
- * explicitly here to avoid orphaning.
+ * identity is gone. `deleteAllUserDataTx` now covers every per-user table
+ * explicitly (including the ones that merely cascade off the `users` row, which
+ * the wipe path could not rely on), so the final `DELETE FROM users` should
+ * find nothing left to cascade. That is asserted by
+ * `tests/delete-all-user-data-coverage.test.ts`.
  *
  * Edge case — `admin_audit.admin_user_id` is NOT NULL with no cascade. A normal
  * `role='user'` account has zero rows there, so the delete is safe. If an admin
@@ -705,9 +775,8 @@ export async function deleteUserAccount(userId: string) {
 
   await db.transaction(async (tx) => {
     await deleteAllUserDataTx(tx, userId);
-    // No FK to users — would orphan if we relied on the user-row cascade.
-    await tx.delete(s.mcpIdempotencyKeys).where(eq(s.mcpIdempotencyKeys.userId, userId));
-    // Final — drops the identity row and cascades its ON DELETE CASCADE children.
+    // Final — drops the identity row. Any ON DELETE CASCADE child is already
+    // gone (deleteAllUserDataTx deletes them explicitly so WIPE covers them too).
     await tx.delete(s.users).where(eq(s.users.id, userId));
   });
 }
@@ -722,6 +791,43 @@ export async function getUsageStats() {
     totalTransactions: txRows[0]?.total ?? 0,
     totalAccounts: acctRows[0]?.total ?? 0,
   };
+}
+
+/** Per-(prompt, version) completion counts from `user_prompt_acks` (FINLYNQ-301). */
+export interface PromptAckStat {
+  promptId: string;
+  version: number;
+  answered: number;
+  deferred: number;
+  dismissed: number;
+}
+
+/**
+ * Group `user_prompt_acks` by (prompt_id, version) into answered/deferred/
+ * dismissed counts, for the /admin operator view — so per-prompt completion is
+ * visible without SQL. Rows exist only once a user has interacted with a prompt;
+ * the stats route merges in registered prompts that have zero acks so a live
+ * prompt still shows a row.
+ */
+export async function getPromptAckStats(): Promise<PromptAckStat[]> {
+  const s = getSchema();
+  const rows = await db
+    .select({
+      promptId: s.userPromptAcks.promptId,
+      version: s.userPromptAcks.version,
+      answered: count(sql`CASE WHEN ${s.userPromptAcks.status} = 'answered' THEN 1 END`),
+      deferred: count(sql`CASE WHEN ${s.userPromptAcks.status} = 'deferred' THEN 1 END`),
+      dismissed: count(sql`CASE WHEN ${s.userPromptAcks.status} = 'dismissed' THEN 1 END`),
+    })
+    .from(s.userPromptAcks)
+    .groupBy(s.userPromptAcks.promptId, s.userPromptAcks.version);
+  return rows.map((r) => ({
+    promptId: r.promptId,
+    version: Number(r.version),
+    answered: Number(r.answered),
+    deferred: Number(r.deferred),
+    dismissed: Number(r.dismissed),
+  }));
 }
 
 /** Rolling "active now" counts derived from `users.last_active_at`. */

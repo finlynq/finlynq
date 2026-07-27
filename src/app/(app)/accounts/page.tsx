@@ -265,8 +265,21 @@ export default function AccountsPage() {
                       {a.archived && <Badge variant="secondary" className="text-[10px] shrink-0">Archived</Badge>}
                     </div>
                   </div>
-                  <span className={`font-mono text-sm font-semibold shrink-0 mr-2 ${a.balance >= 0 ? color : "text-rose-600"}`}>
-                    {formatCurrency(a.balance, a.currency)}
+                  {/* FINLYNQ-303 — both bases per row: the account's own
+                      currency is the primary figure, with the display-currency
+                      equivalent beneath it when they differ. The totals below
+                      remain reporting-only (a cross-currency sum has no native
+                      basis). */}
+                  <span className="shrink-0 mr-2 text-right">
+                    <span className={`font-mono text-sm font-semibold block ${a.balance >= 0 ? color : "text-rose-600"}`}>
+                      {formatCurrency(a.balance, a.currency)}
+                    </span>
+                    {a.convertedBalance != null &&
+                      a.currency.toUpperCase() !== displayCurrency.toUpperCase() && (
+                        <span className="font-mono text-[11px] text-muted-foreground block">
+                          {formatCurrency(a.convertedBalance, displayCurrency)}
+                        </span>
+                      )}
                   </span>
                 </Link>
               </div>

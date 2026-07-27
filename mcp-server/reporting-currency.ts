@@ -3,7 +3,7 @@
  *
  * Tools that aggregate amounts (net worth, spending, balances) accept an
  * optional `reportingCurrency` argument. When omitted, fall back to the
- * user's saved `display_currency` setting; otherwise to "CAD".
+ * user's saved `display_currency` setting; otherwise to "USD".
  *
  * Used by the HTTP MCP transport (PostgreSQL via Drizzle). The stdio
  * MCP transport has its own slimmer resolver in register-core-tools.ts
@@ -24,13 +24,19 @@ function rowsOf(result: unknown): Array<Record<string, unknown>> {
   return [];
 }
 
-const DEFAULT_REPORTING_CURRENCY = "CAD";
+// FINLYNQ-284: the terminal fallback is USD, matching the app-wide
+// "default display currency = USD" convention (getDisplayCurrency in
+// src/lib/fx-service.ts) and the ONE-user-facing-currency invariant
+// (FINLYNQ-183). Was "CAD", which silently stamped CAD onto every MCP
+// record created without an explicit currency by a user with no
+// display_currency row.
+const DEFAULT_REPORTING_CURRENCY = "USD";
 
 /**
  * Resolve the reporting currency for a tool call:
  *   - explicit param (uppercased) wins
  *   - else user's settings.display_currency (uppercased)
- *   - else "CAD"
+ *   - else "USD"
  */
 export async function resolveReportingCurrency(
   db: AnyDb,

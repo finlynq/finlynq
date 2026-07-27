@@ -89,8 +89,11 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           port: ${{ secrets.DEPLOY_SSH_PORT }}
           script: |
+            # See the matching comment in deploy-prod.yml — without `set -e`
+            # this step cannot fail, which is how a broken dev deploy used to
+            # report green.
+            set -e
             echo "==> pf-dev service status:"
             sudo systemctl status pf-dev --no-pager -l | head -20
             echo ""
-            curl -sf http://localhost:3458/api/healthz -o /dev/null -w "Dev HTTP %{http_code}\n" || \
-              echo "Note: app may still be warming up"
+            sudo bash /home/projects/pf-dev/scripts/smoke-check.sh http://localhost:3458 30

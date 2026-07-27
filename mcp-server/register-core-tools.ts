@@ -98,7 +98,7 @@ type SqliteRow = Record<string, unknown>;
  * Returns the user's display currency for a tool call:
  *   - explicit param wins (uppercased)
  *   - else settings.display_currency (uppercased)
- *   - else "CAD"
+ *   - else "USD"
  */
 async function resolveReportingCurrencyStdio(
   sqlite: PgCompatDb,
@@ -114,7 +114,9 @@ async function resolveReportingCurrencyStdio(
   } catch {
     // Best effort — fall through to default.
   }
-  return "CAD";
+  // FINLYNQ-284: USD terminal fallback, matching the HTTP resolver and the
+  // app-wide "default display currency = USD" convention (FINLYNQ-183).
+  return "USD";
 }
 
 /**
@@ -1357,7 +1359,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       name: z.string().describe("Account name (must be unique)"),
       type: z.enum(["A", "L"]).describe("'A'=asset, 'L'=liability"),
       group: z.string().optional().describe("Account group"),
-      currency: supportedCurrencyEnum.optional().describe("Currency (default CAD)"),
+      currency: supportedCurrencyEnum.optional().describe("Currency (defaults to your display currency)"),
       note: z.string().optional(),
       alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
     },

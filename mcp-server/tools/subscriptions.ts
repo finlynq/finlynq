@@ -581,7 +581,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0). For a single add."),
         cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional().describe("Billing frequency. For a single add."),
         next_billing_date: ymdDate.optional().describe("Next billing date (YYYY-MM-DD). For a single add."),
-        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (defaults to your display currency). Issue #206: full SUPPORTED_CURRENCIES list."),
         category: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED, never silently unlinked). Single add."),
         category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name. Single add."),
         account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias — mistyped/unmatched is REFUSED). Single add."),

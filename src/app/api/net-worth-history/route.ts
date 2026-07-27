@@ -35,6 +35,7 @@ import {
   buildNetWorthHistory,
   type NetWorthPeriod,
   type LiveAccountValue,
+  type CurrencyBasis,
 } from "@/lib/net-worth-history";
 import {
   rebuildPortfolioSnapshots,
@@ -226,6 +227,20 @@ function parsePeriod(raw: string | null): NetWorthPeriod {
   return raw === "6m" || raw === "1y" || raw === "all" ? raw : "6m";
 }
 
+/**
+ * FINLYNQ-303 — `?basis=native` renders the series in the ACCOUNT's own
+ * currency instead of the reporting currency.
+ *
+ * Rejected outright without an `accountId`: the whole-portfolio series spans
+ * accounts of differing currencies, so there is no single native currency to
+ * express it in, and silently honouring it would produce one label over a
+ * mixed-currency sum (the FINLYNQ-123 failure). Anything unrecognized falls
+ * back to `reporting`, so an old client is never broken by a typo'd param.
+ */
+function parseBasis(raw: string | null, accountId: number | null): CurrencyBasis {
+  return raw === "native" && accountId != null ? "native" : "reporting";
+}
+
 export function GET(request: NextRequest) {
   return withOp("GET /api/net-worth-history", () => handleGet(request));
 }
@@ -241,6 +256,7 @@ async function handleGet(request: NextRequest) {
   const accountId = params.get("accountId")
     ? parseInt(params.get("accountId")!, 10)
     : null;
+  const basis = parseBasis(params.get("basis"), accountId);
 
   try {
     const today = new Date().toISOString().slice(0, 10);
@@ -301,22 +317,39 @@ async function handleGet(request: NextRequest) {
       liveInvestmentByAccount.set(accId, { value: v.value, currency: v.currency });
     }
 
-    const snapshots = snapshotRows.map((r) => ({
+    // FINLYNQ-303 — carry the native pair through. These mappings build fresh
+    // object literals, so any field not named here is silently dropped before
+    // the core ever sees it (which is exactly how the native basis appeared to
+    // "never activate" despite fully-backfilled rows).
+    const toSnapshot = (r: {
+      accountId: number | null;
+      snapDate: string;
+      marketValue: number;
+      currency: string;
+      nativeMarketValue: number | null;
+      nativeCurrency: string | null;
+    }) => ({
       accountId: r.accountId as number,
       snapDate: r.snapDate,
       marketValue: Number(r.marketValue),
       currency: r.currency,
-    }));
-    const cashSnapshots = cashSnapshotRows.map((r) => ({
-      accountId: r.accountId as number,
-      snapDate: r.snapDate,
-      marketValue: Number(r.marketValue),
-      currency: r.currency,
-    }));
+      nativeMarketValue:
+        r.nativeMarketValue == null ? null : Number(r.nativeMarketValue),
+      nativeCurrency: r.nativeCurrency,
+    });
+    const snapshots = snapshotRows.map(toSnapshot);
+    const cashSnapshots = cashSnapshotRows.map(toSnapshot);
 
-    const { series: rawSeries, hasInvestmentData, fxApproximation } = buildNetWorthHistory({
+    const {
+      series: rawSeries,
+      hasInvestmentData,
+      fxApproximation,
+      basisUsed,
+      seriesCurrency,
+    } = buildNetWorthHistory({
       period,
       displayCurrency,
+      basis,
       rateMap,
       cashSnapshots,
       liveCashByAccount,
@@ -423,6 +456,13 @@ async function handleGet(request: NextRequest) {
       series,
       hasInvestmentData,
       fxApproximation,
+      // FINLYNQ-303 — `basisUsed` is what the series is ACTUALLY in (a native
+      // request downgrades when the rows predate the dual-basis rebuild), and
+      // `seriesCurrency` is what `series[].value` is denominated in. The client
+      // MUST label from these, not from what it asked for; `displayCurrency`
+      // stays in the payload for back-compat with callers that read it.
+      basisUsed,
+      seriesCurrency,
     });
   } catch (error: unknown) {
     await logApiError("GET", "/api/net-worth-history", error, userId);

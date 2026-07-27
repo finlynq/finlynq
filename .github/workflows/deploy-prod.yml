@@ -63,11 +63,18 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           port: ${{ secrets.DEPLOY_SSH_PORT }}
           script: |
+            # `set -e` matters here. Without it this step's exit code is just
+            # the last command's, so the old `curl ... || echo "warming up"`
+            # tail made the step green no matter what the deploy did.
+            set -e
             echo "==> Service status:"
             sudo systemctl status pf --no-pager -l
             echo ""
-            curl -sf http://localhost:3456/api/healthz -o /dev/null -w "Production HTTP %{http_code}\n" || \
-            echo "Note: app may still be warming up"
+            # Second look, from a fresh SSH session a few seconds after
+            # deploy.sh ran its own smoke check. Catches an app that came up
+            # and then crashed on its first real traffic. Short readiness
+            # timeout (30s) because deploy.sh already waited for warmup.
+            sudo bash /home/projects/pf/scripts/smoke-check.sh http://localhost:3456 30
 
       - name: Create issue on failure
         if: failure()
