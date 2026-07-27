@@ -25,13 +25,43 @@
 -- Defensive: only drops when empty. If an old self-hosted deployment somehow
 -- has rows, the migration leaves the table alone and warns rather than
 -- destroying data or blocking the deploy.
+--
+-- It must ALSO tolerate not owning the table. `api_keys` predates the tracked
+-- migration chain, so on any deployment where it was created by hand as a
+-- different role (prod: owner `postgres`, while migrations run as the app
+-- role) `DROP TABLE` fails with "must be owner of table api_keys" — SQLSTATE
+-- 42501. That aborts the migration runner and takes the whole deploy with it,
+-- which is precisely what the paragraph above says this migration must never
+-- do: it is opportunistic cleanup of a dead, empty table, not a load-bearing
+-- schema change. Ownership is checked up front and the drop is additionally
+-- wrapped so a privilege error downgrades to a warning. Leaving the table is
+-- harmless — the FK trap it describes needs at least one row, and no code path
+-- can create one. An operator finishes the job with:
+--     ALTER TABLE public.api_keys OWNER TO <app_role>;   -- then re-run, or
+--     DROP TABLE public.api_keys;                        -- as a superuser
+-- (Discovered by a failed prod deploy, 2026-07-27.)
 
 DO $$
 DECLARE
   n bigint;
+  owner_name text;
 BEGIN
   IF to_regclass('public.api_keys') IS NULL THEN
     RAISE NOTICE 'api_keys: already absent, nothing to do';
+    RETURN;
+  END IF;
+
+  SELECT tableowner INTO owner_name
+    FROM pg_tables WHERE schemaname = 'public' AND tablename = 'api_keys';
+  IF NOT pg_has_role(current_user, owner_name, 'USAGE') THEN
+    -- NB: records as applied, so it will not re-run. Deliberate: re-running
+    -- would fail identically until an operator intervenes, and the table is
+    -- inert either way.
+    RAISE WARNING
+      'api_keys: owned by % but migrating as % — NOT dropping. The table is '
+      'empty and unreachable from the app, so this is safe to leave. To finish: '
+      'ALTER TABLE public.api_keys OWNER TO %; or DROP TABLE it as a superuser.',
+      owner_name, current_user, current_user;
     RETURN;
   END IF;
 
@@ -46,6 +76,15 @@ BEGIN
     RETURN;
   END IF;
 
-  DROP TABLE public.api_keys;
-  RAISE NOTICE 'api_keys: dropped (was empty)';
+  -- Belt-and-braces: the ownership probe above should already have caught the
+  -- privilege case, but a DROP can still be refused (e.g. an event trigger, or
+  -- a role grant changing mid-deploy). Never let cleanup abort a release.
+  BEGIN
+    DROP TABLE public.api_keys;
+    RAISE NOTICE 'api_keys: dropped (was empty)';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE WARNING
+      'api_keys: insufficient privilege to drop as % — left in place (empty, '
+      'inert). Drop it manually as its owner or a superuser.', current_user;
+  END;
 END $$;
