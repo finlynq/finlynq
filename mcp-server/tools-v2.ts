@@ -15,12 +15,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { PgCompatDb } from "./pg-compat.js";
-import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies.js";
-
-// Issue #206 — currency enum widened to the full SUPPORTED_CURRENCIES list.
-const supportedCurrencyEnum = z.enum(
-  SUPPORTED_CURRENCIES as unknown as [string, ...string[]]
-);
 
 // ============ TYPES ============
 
@@ -227,18 +221,10 @@ export function registerV2Tools(server: McpServer, sqlite: PgCompatDb, opts: V2T
     async () => mcpError("search_transactions requires an unlocked DEK to decrypt account/category names after Stream D Phase 4. Stdio MCP cannot decrypt — use the HTTP MCP transport at /mcp or the web UI for this query."),
   );
 
-  // ---- WRITE TOOLS ----
-
-  server.tool(
-    "add_account",
-    "Create a new financial account. Stream D Phase 4: stdio cannot create accounts (would require writing the encrypted name siblings). Use HTTP MCP at /mcp or the web UI.",
-    {
-      name: z.string().describe("Account name (must be unique)"),
-      type: z.enum(["A", "L"]).describe("Account type: 'A' for asset, 'L' for liability"),
-      group: z.string().optional(),
-      currency: supportedCurrencyEnum.optional(),
-      note: z.string().optional(),
-    },
-    async () => mcpError("add_account requires an unlocked DEK to write the encrypted accounts.name_ct/name_lookup columns after Stream D Phase 4. Stdio MCP cannot encrypt — use the HTTP MCP transport at /mcp or the web UI."),
-  );
+  // NOTE: `add_account` is deliberately NOT registered here. It used to be, and
+  // because `registerCoreTools` ALSO registers it (as an identical Stream D
+  // refusal, with the newer `alias` param), the MCP SDK threw
+  // "Tool add_account is already registered" and killed the stdio server before
+  // it could serve anything. The core registration is the surviving one — see
+  // the `add_account` block in register-core-tools.ts.
 }

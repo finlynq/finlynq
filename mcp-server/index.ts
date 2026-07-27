@@ -35,15 +35,24 @@ if (!userId) {
 
 const pool = new Pool({ connectionString: databaseUrl });
 
-// Validate connection
-try {
-  const client = await pool.connect();
-  await client.query("SELECT 1");
-  client.release();
-} catch (err) {
-  console.error("ERROR: Could not connect to PostgreSQL database.");
-  console.error(err);
-  process.exit(1);
+// Validate connection.
+//
+// This MUST stay inside a function. package.json has no `"type": "module"`, so
+// tsx/esbuild transpiles this entry to CommonJS, where top-level `await` is a
+// hard transform error — the process dies before registering a single tool, and
+// every stdio client (Claude Desktop, `npm run build:mcp`, the container image)
+// sees only "Transform failed". Keep every `await` in this file inside a
+// function body.
+async function validateConnection() {
+  try {
+    const client = await pool.connect();
+    await client.query("SELECT 1");
+    client.release();
+  } catch (err) {
+    console.error("ERROR: Could not connect to PostgreSQL database.");
+    console.error(err);
+    process.exit(1);
+  }
 }
 
 // Create PostgreSQL-compatible database interface
@@ -70,6 +79,7 @@ registerV2Tools(server, db, { userId });
 registerImportTemplateTools(server, db, { userId });
 
 async function main() {
+  await validateConnection();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`Finlynq MCP server v3.3 running on stdio (PostgreSQL mode, user=${userId})`);
