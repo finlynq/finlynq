@@ -122,6 +122,13 @@ export function OnboardingWizard({
   // DOLLAR_SYMBOLS) instead of a hardcoded ternary — strip digits/separators.
   const currencySymbol =
     formatCurrency(0, currency, { decimals: 0 }).replace(/[\d\s.,]/g, "") || "$";
+  // Symbols are not all one character — `$` and `€` are, but `C$` is two and
+  // `JP¥` / `CHF` are three, and the budget inputs below overlay the symbol on
+  // the field. A fixed `pl-7` sized for `$` made JPY render as "JP¥600" with the
+  // symbol sitting on top of the amount. Only reachable since the currency list
+  // widened past USD/CAD, so scale the padding with the symbol instead.
+  const amountPadding =
+    currencySymbol.length >= 3 ? "pl-12" : currencySymbol.length === 2 ? "pl-9" : "pl-7";
 
   function goNext() {
     setDirection(1);
@@ -472,7 +479,7 @@ export function OnboardingWizard({
                                 [category]: Number(e.target.value),
                               }))
                             }
-                            className="w-full rounded-lg border bg-background pl-7 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
+                            className={`w-full rounded-lg border bg-background ${amountPadding} pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20`}
                           />
                         </div>
                       </div>
