@@ -48,18 +48,59 @@ describe("migration runner parity", () => {
     expect(bad).toEqual([]);
   });
 
+  /**
+   * Strip comments, then dollar-quoted bodies (`$$…$$`, `$tag$…$tag$`).
+   *
+   * The dollar-quote pass is what makes the transaction guard below correct
+   * rather than merely strict. Inside a `DO $$ … $$` body, BEGIN/END are
+   * PL/pgSQL *block* delimiters — they cannot commit or roll back the runner's
+   * transaction, so a nested `BEGIN … EXCEPTION … END;` (the standard way to
+   * make one statement non-fatal) is completely safe. Without this pass the
+   * guard flags that as an offender, which is a false positive that pushes
+   * authors toward removing legitimate error handling.
+   *
+   * Existing DO blocks slipped through only incidentally: they end `END $$;`,
+   * and the `$$` between END and `;` happens not to match the regex.
+   */
+  function stripCommentsAndDollarBodies(sql: string): string {
+    return sql
+      .replace(/--[^\n]*/g, "")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$/g, " ");
+  }
+
   it("no migration opens its own transaction", () => {
     // Both runners wrap file body + ledger INSERT in ONE transaction. An inner
     // COMMIT would close it early and decouple the bookkeeping from the DDL,
     // so a later failure would leave the migration recorded but half-applied.
     const offenders: string[] = [];
     for (const f of readdirSync(MIGRATIONS_DIR).filter((x) => x.endsWith(".sql"))) {
-      const sql = readFileSync(path.join(MIGRATIONS_DIR, f), "utf8")
-        .replace(/--[^\n]*/g, "")
-        .replace(/\/\*[\s\S]*?\*\//g, "");
+      const sql = stripCommentsAndDollarBodies(
+        readFileSync(path.join(MIGRATIONS_DIR, f), "utf8"),
+      );
       if (/^\s*(BEGIN|COMMIT|END)\s*;/im.test(sql)) offenders.push(f);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it("still catches a migration that really does open its own transaction", () => {
+    // Guards the guard: the dollar-quote exemption above must not blunt the
+    // check for top-level transaction control, which is the thing that would
+    // actually decouple the ledger INSERT from the DDL.
+    const check = (sql: string) =>
+      /^\s*(BEGIN|COMMIT|END)\s*;/im.test(stripCommentsAndDollarBodies(sql));
+
+    expect(check("BEGIN;\nALTER TABLE t ADD COLUMN c int;\nCOMMIT;\n")).toBe(true);
+    expect(check("ALTER TABLE t ADD COLUMN c int;\nCOMMIT;\n")).toBe(true);
+    expect(check("-- BEGIN;\nALTER TABLE t ADD COLUMN c int;\n")).toBe(false);
+    // A nested PL/pgSQL block with exception handling is NOT transaction control.
+    expect(
+      check(
+        "DO $$\nBEGIN\n  BEGIN\n    DROP TABLE t;\n  EXCEPTION WHEN insufficient_privilege THEN\n    RAISE WARNING 'skipped';\n  END;\nEND $$;\n",
+      ),
+    ).toBe(false);
+    // ...but a real COMMIT after a DO block is still caught.
+    expect(check("DO $$\nBEGIN\n  PERFORM 1;\nEND $$;\nCOMMIT;\n")).toBe(true);
   });
 });
 
