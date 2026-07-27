@@ -350,14 +350,27 @@ if ! systemctl is-active --quiet "$SERVICE_NAME"; then
 fi
 echo "==> $SERVICE_NAME is running"
 
-# 8. Health check — confirm the app is serving requests
-echo "==> Running health check..."
-sleep 2
+# 8. Smoke check — BLOCKING. Confirms the app is genuinely serving requests.
+#
+# This used to be a single `curl ... || echo "app may still be warming up"`,
+# which could not fail: the warn branch swallowed the error and the deploy
+# printed "completed successfully" over a dead app. It only checked healthz,
+# so it also could not have caught a deploy that answered API routes while
+# 500-ing on every page. Now delegated to scripts/smoke-check.sh (shared with
+# the "Verify deployment" step in deploy-{prod,dev}.yml) and allowed to fail
+# the deploy, which is what surfaces the breakage — on prod that non-zero exit
+# is what opens the "🚨 Production deploy failed" issue.
+echo "==> Running smoke check..."
 APP_PORT=$(sudo systemctl show "$SERVICE_NAME" -p Environment --value 2>/dev/null | tr ' ' '\n' | grep '^PORT=' | cut -d= -f2 || echo "3000")
-HEALTH_URL="http://localhost:${APP_PORT}/api/healthz"
-if curl -fs --max-time 10 "$HEALTH_URL" -o /dev/null; then
-  echo "==> Health check passed ($HEALTH_URL)"
-else
-  echo "==> Warning: health check at $HEALTH_URL did not respond (app may still be warming up)"
+
+# set -e is already on, so a non-zero exit here aborts the deploy script. Print
+# the tail of the service journal first — by the time anyone reads the CI log
+# the interesting startup errors are the ones from the last few seconds.
+if ! bash "$APP_DIR/scripts/smoke-check.sh" "http://localhost:${APP_PORT}" 90; then
+  echo ""
+  echo "==> Last 50 log lines from $SERVICE_NAME:"
+  sudo journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
+  exit 1
 fi
+
 echo "==> Deploy completed successfully at $(date)"
