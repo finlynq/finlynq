@@ -295,32 +295,6 @@ export function buildNetWorthHistory(
   const hasInvestmentData =
     snapshots.length > 0 || (liveInvestmentByAccount?.size ?? 0) > 0;
 
-  // ── 0. Resolve the basis actually usable (FINLYNQ-303) ───────────────────
-  // A native series requires a native value on EVERY in-scope snapshot row
-  // (all-or-nothing — see the `basis` doc on the input type). Rows predating
-  // the dual-basis rebuild have NULL native columns, so a request arriving in
-  // that window downgrades to reporting rather than drawing a line that mixes
-  // currencies point-to-point.
-  const allRows = [...cashSnapshots, ...snapshots];
-  const nativeComplete =
-    allRows.length > 0 &&
-    allRows.every(
-      (s) => s.nativeMarketValue != null && s.nativeCurrency != null,
-    );
-  const basisUsed: CurrencyBasis =
-    input.basis === "native" && nativeComplete ? "native" : "reporting";
-
-  // Under `native` every in-scope row shares ONE account currency (the caller
-  // only permits native for a single account), so the first row names it; the
-  // live map is the fallback when the range holds no stored rows yet.
-  const seriesCurrency =
-    basisUsed === "native"
-      ? allRows[0]?.nativeCurrency ??
-        [...(liveCashByAccount?.values() ?? []), ...(liveInvestmentByAccount?.values() ?? [])][0]
-          ?.currency ??
-        displayCurrency
-      : displayCurrency;
-
   // ── 1. Determine the first grid day ──────────────────────────────────────
   let firstDay: string;
   if (period === "all") {
@@ -331,6 +305,56 @@ export function buildNetWorthHistory(
     firstDay = addDaysISO(today, -PERIOD_DAYS[period]);
   }
   if (firstDay > today) firstDay = today;
+
+  // ── 1b. Resolve the basis actually usable (FINLYNQ-303) ──────────────────
+  // A native series requires a native value on every row the walk will CONSUME
+  // (all-or-nothing — see the `basis` doc on the input type). Rows predating
+  // the dual-basis rebuild have NULL native columns, so a request arriving in
+  // that window downgrades to reporting rather than drawing a line that mixes
+  // currencies point-to-point.
+  //
+  // Scoping to the consumed rows is load-bearing, not an optimization: callers
+  // fetch from "1900-01-01" and let the period bound the GRID, so checking
+  // every fetched row would let a single un-rebuilt row from years before the
+  // window veto the native basis for a fully-rebuilt 6m range — which is
+  // exactly what happened on dev. "Consumed" = every row on-or-after firstDay,
+  // plus each account's seed row (its latest row strictly before firstDay),
+  // which is what carry-forward starts the window from.
+  const relevantRows = (rows: AccountSnapshot[]): AccountSnapshot[] => {
+    const seedByAccount = new Map<number, AccountSnapshot>();
+    const inWindow: AccountSnapshot[] = [];
+    for (const s of rows) {
+      if (s.snapDate >= firstDay) {
+        inWindow.push(s);
+        continue;
+      }
+      const seed = seedByAccount.get(s.accountId);
+      if (!seed || s.snapDate > seed.snapDate) seedByAccount.set(s.accountId, s);
+    }
+    return [...seedByAccount.values(), ...inWindow];
+  };
+  const consumedRows = [
+    ...relevantRows(cashSnapshots),
+    ...relevantRows(snapshots),
+  ];
+  const nativeComplete =
+    consumedRows.length > 0 &&
+    consumedRows.every(
+      (s) => s.nativeMarketValue != null && s.nativeCurrency != null,
+    );
+  const basisUsed: CurrencyBasis =
+    input.basis === "native" && nativeComplete ? "native" : "reporting";
+
+  // Under `native` every in-scope row shares ONE account currency (the caller
+  // only permits native for a single account), so the first row names it; the
+  // live map is the fallback when the range holds no stored rows yet.
+  const seriesCurrency =
+    basisUsed === "native"
+      ? consumedRows[0]?.nativeCurrency ??
+        [...(liveCashByAccount?.values() ?? []), ...(liveInvestmentByAccount?.values() ?? [])][0]
+          ?.currency ??
+        displayCurrency
+      : displayCurrency;
 
   // ── 2. Per-account walking state for both passes ─────────────────────────
   const cashState = buildSnapStates(cashSnapshots);

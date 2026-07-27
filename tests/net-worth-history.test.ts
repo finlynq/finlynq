@@ -372,6 +372,65 @@ describe("buildNetWorthHistory — native basis", () => {
     expect(res.series.map((p) => p.value)).toEqual([140, 210]);
   });
 
+  it("ignores un-backfilled rows OUTSIDE the rendered window", () => {
+    // Regression (caught on dev): callers fetch from "1900-01-01" and let the
+    // period bound the grid, so a single legacy row from years earlier must not
+    // veto native for a fully-rebuilt window. Only rows the walk consumes count.
+    const res = buildNetWorthHistory({
+      period: "6m",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: [
+        // Pre-dual-basis row SUPERSEDED by the seed below, so the walk never
+        // reads it. The cash builder writes one row per DAY, so a user with
+        // years of history has hundreds of these — they must not veto native.
+        { accountId: 1, snapDate: "2020-01-01", marketValue: 5, currency: "CAD" },
+        // The seed: newest row strictly before the 6m window opens (2025-11-03).
+        {
+          accountId: 1,
+          snapDate: "2025-10-01",
+          marketValue: 42,
+          currency: "CAD",
+          nativeMarketValue: 30,
+          nativeCurrency: "USD",
+        },
+        {
+          accountId: 1,
+          snapDate: "2026-05-01",
+          marketValue: 140,
+          currency: "CAD",
+          nativeMarketValue: 100,
+          nativeCurrency: "USD",
+        },
+      ],
+      snapshots: [],
+      today: "2026-05-02",
+    });
+    expect(res.basisUsed).toBe("native");
+    expect(res.seriesCurrency).toBe("USD");
+    expect(res.series[res.series.length - 1].value).toBe(100);
+  });
+
+  it("still downgrades when the window's SEED row lacks a native value", () => {
+    // The seed row (latest before firstDay) is what carry-forward starts from,
+    // so it IS consumed — a NULL native there must still downgrade.
+    const res = buildNetWorthHistory({
+      period: "6m",
+      displayCurrency: "CAD",
+      basis: "native",
+      rateMap: RATES,
+      cashSnapshots: [
+        // Inside the 6m lookback and the newest row before the window opens.
+        { accountId: 1, snapDate: "2026-01-05", marketValue: 70, currency: "CAD" },
+      ],
+      snapshots: [],
+      today: "2026-05-02",
+    });
+    expect(res.basisUsed).toBe("reporting");
+    expect(res.seriesCurrency).toBe("CAD");
+  });
+
   it("takes the live-today override in native currency without converting", () => {
     // LiveAccountValue is already in account currency, so native must use it
     // verbatim — converting it here is what would break the tie-out with the
