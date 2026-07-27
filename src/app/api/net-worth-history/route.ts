@@ -317,18 +317,28 @@ async function handleGet(request: NextRequest) {
       liveInvestmentByAccount.set(accId, { value: v.value, currency: v.currency });
     }
 
-    const snapshots = snapshotRows.map((r) => ({
+    // FINLYNQ-303 — carry the native pair through. These mappings build fresh
+    // object literals, so any field not named here is silently dropped before
+    // the core ever sees it (which is exactly how the native basis appeared to
+    // "never activate" despite fully-backfilled rows).
+    const toSnapshot = (r: {
+      accountId: number | null;
+      snapDate: string;
+      marketValue: number;
+      currency: string;
+      nativeMarketValue: number | null;
+      nativeCurrency: string | null;
+    }) => ({
       accountId: r.accountId as number,
       snapDate: r.snapDate,
       marketValue: Number(r.marketValue),
       currency: r.currency,
-    }));
-    const cashSnapshots = cashSnapshotRows.map((r) => ({
-      accountId: r.accountId as number,
-      snapDate: r.snapDate,
-      marketValue: Number(r.marketValue),
-      currency: r.currency,
-    }));
+      nativeMarketValue:
+        r.nativeMarketValue == null ? null : Number(r.nativeMarketValue),
+      nativeCurrency: r.nativeCurrency,
+    });
+    const snapshots = snapshotRows.map(toSnapshot);
+    const cashSnapshots = cashSnapshotRows.map(toSnapshot);
 
     const {
       series: rawSeries,
