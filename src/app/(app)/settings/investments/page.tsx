@@ -71,7 +71,7 @@ import {
   AlertTriangle,
   DollarSign,
 } from "lucide-react";
-import { getTickerAdvisory } from "@/lib/securities/ticker-advisories";
+import { resolveTickerAdvisory } from "@/lib/securities/ticker-advisories";
 import { ManagePricesDialog } from "./_components/manage-prices-dialog";
 
 type SecurityAccount = {
@@ -94,6 +94,9 @@ type Security = {
   // the user's price marks). `latestPrice` is the newest mark for the status cell.
   priceSource: "auto" | "manual";
   latestPrice: { date: string; price: number } | null;
+  // Server-detected: this held, auto-priced ticker has never produced a single
+  // price_cache row — no provider recognizes it. Drives the `unpriced` advisory.
+  neverPriced?: boolean;
   image: string | null;
   accounts: SecurityAccount[];
 };
@@ -121,6 +124,14 @@ function descriptionOf(s: Security): string {
   const sym = symbolLabel(s);
   const nm = s.name?.trim() ?? "";
   return nm && nm.toUpperCase() !== sym.toUpperCase() ? nm : "";
+}
+
+/**
+ * The pricing advisory for a security: a curated entry (POL → MATIC …) if one
+ * exists, else the server-detected "we've never priced this ticker" warning.
+ */
+function advisoryFor(s: Security) {
+  return resolveTickerAdvisory(s.symbol, { neverPriced: s.neverPriced });
 }
 
 type SortKey = "symbol" | "description" | "type" | "currency";
@@ -183,6 +194,9 @@ export default function InvestmentsSettingsPage() {
   // Edit dialog (rename + FINLYNQ-201 user-settable asset type + pricing mode).
   const [renameSecurity, setRenameSecurity] = useState<Security | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  // Ticker. Changing it RE-CLUSTERS (PATCH {symbol}) — the fix for a mistyped or
+  // provider-unknown symbol surfaced by the `unpriced` advisory.
+  const [renameSymbol, setRenameSymbol] = useState("");
   const [assetTypeValue, setAssetTypeValue] = useState("stock");
   const [editPriceSource, setEditPriceSource] = useState<"auto" | "manual">("auto");
   const [renameErrors, setRenameErrors] = useState<Record<string, string>>({});
@@ -198,6 +212,8 @@ export default function InvestmentsSettingsPage() {
   // Ticker change (re-cluster) confirm — from the unpriceable-ticker advisory.
   const [tickerTarget, setTickerTarget] = useState<{ security: Security; toSymbol: string } | null>(null);
   const [tickerBusy, setTickerBusy] = useState(false);
+  // Which security is mid-flight switching to manual pricing (advisory action).
+  const [manualBusyId, setManualBusyId] = useState<number | null>(null);
 
   // Link dialog (Tab 2 "+ Account" / Tab 3 "+ Security").
   const [linkDialog, setLinkDialog] = useState<LinkDialogState>(null);
@@ -461,6 +477,7 @@ export default function InvestmentsSettingsPage() {
   function openRename(s: Security) {
     setRenameSecurity(s);
     setRenameValue(s.name ?? "");
+    setRenameSymbol(s.symbol ?? "");
     setAssetTypeValue(s.assetType || "stock");
     setEditPriceSource(s.priceSource ?? "auto");
     setRenameErrors({});
@@ -473,13 +490,38 @@ export default function InvestmentsSettingsPage() {
       setRenameErrors({ name: "Name is required" });
       return;
     }
+    const symbol = renameSymbol.trim();
+    const symbolChanged =
+      !renameSecurity.isCash && symbol !== "" && symbol !== (renameSecurity.symbol ?? "").trim();
     setRenameErrors({});
     setRenaming(true);
     try {
+      // A ticker change is a RE-CLUSTER and the server handles it EXCLUSIVELY —
+      // PATCH {symbol} returns before it looks at name/assetType/priceSource. So
+      // send it as its own request FIRST, then fold the remaining edits into the
+      // usual PATCH against whichever security the re-cluster landed on (an
+      // existing security for the new ticker is reused = a legitimate merge, and
+      // that target's id is what the rest of the edits must address).
+      let targetId = renameSecurity.id;
+      if (symbolChanged) {
+        const symRes = await fetch("/api/securities", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: renameSecurity.id, symbol }),
+        });
+        if (!symRes.ok) {
+          setRenameErrors({ symbol: await parseSaveError(symRes, "Failed to change ticker") });
+          return;
+        }
+        const symJson = await symRes.json().catch(() => null);
+        const newId = symJson?.data?.newSecurityId;
+        if (typeof newId === "number") targetId = newId;
+      }
+
       // Send the asset type only when the user changed it (FINLYNQ-201). It's a
       // cosmetic, user-settable override — the server never re-clusters on it.
       const body: { id: number; name: string; assetType?: string; priceSource?: "auto" | "manual" } = {
-        id: renameSecurity.id,
+        id: targetId,
         name,
       };
       if (assetTypeValue && assetTypeValue !== renameSecurity.assetType) {
@@ -499,7 +541,7 @@ export default function InvestmentsSettingsPage() {
         return;
       }
       setRenameSecurity(null);
-      showToast("success", "Security updated");
+      showToast("success", symbolChanged ? `Ticker changed to ${symbol}` : "Security updated");
       await load();
     } catch (e) {
       setRenameErrors({ name: e instanceof Error ? e.message : "Update failed" });
@@ -530,6 +572,34 @@ export default function InvestmentsSettingsPage() {
       showToast("error", e instanceof Error ? e.message : "Failed to change ticker");
     } finally {
       setTickerBusy(false);
+    }
+  }
+
+  // ---- Switch an unpriceable ticker to manual pricing ----
+  // The other half of the `unpriced` advisory's fix (the first being "correct
+  // the symbol", handled by the Edit dialog). Flipping price_source to 'manual'
+  // takes the security out of the Yahoo/CoinGecko path entirely — no more
+  // doomed 404s — and values it off the user's own marks, entered via the
+  // "Prices" button that appears on the row once the mode has changed.
+  // NB: not named `use…` — that reads as a React Hook to rules-of-hooks.
+  async function switchToManualPricing(s: Security) {
+    setManualBusyId(s.id);
+    try {
+      const res = await fetch("/api/securities", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: s.id, priceSource: "manual" }),
+      });
+      if (!res.ok) {
+        showToast("error", await parseSaveError(res, "Failed to switch to manual pricing"));
+        return;
+      }
+      showToast("success", `${symbolLabel(s)} now uses manual pricing — add a price with "Prices".`);
+      await load();
+    } catch (e) {
+      showToast("error", e instanceof Error ? e.message : "Failed to switch to manual pricing");
+    } finally {
+      setManualBusyId(null);
     }
   }
 
@@ -749,7 +819,7 @@ export default function InvestmentsSettingsPage() {
           </div>
 
           {(() => {
-            const flagged = allSecurities.filter((s) => getTickerAdvisory(s.symbol));
+            const flagged = allSecurities.filter((s) => advisoryFor(s));
             if (flagged.length === 0) return null;
             return (
               <Card className="border-amber-300 bg-amber-50/50 dark:border-amber-900/50 dark:bg-amber-950/20">
@@ -760,7 +830,7 @@ export default function InvestmentsSettingsPage() {
                   </div>
                   <ul className="space-y-1 text-xs text-amber-800/90 dark:text-amber-200/80">
                     {flagged.map((s) => {
-                      const a = getTickerAdvisory(s.symbol)!;
+                      const a = advisoryFor(s)!;
                       return (
                         <li key={s.id} className="flex flex-wrap items-center gap-2">
                           <span>
@@ -773,7 +843,7 @@ export default function InvestmentsSettingsPage() {
                             )}
                             {`: ${a.message}`}
                           </span>
-                          {a.suggestedSymbol && (
+                          {a.suggestedSymbol ? (
                             <Button
                               variant="outline"
                               size="sm"
@@ -782,13 +852,39 @@ export default function InvestmentsSettingsPage() {
                             >
                               Change to {a.suggestedSymbol}
                             </Button>
+                          ) : (
+                            // No replacement ticker to suggest (detected/unknown
+                            // symbol) — offer the other fix: price it by hand.
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-6 shrink-0 border-amber-400 px-2 text-[11px] text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900/40"
+                                onClick={() => openRename(s)}
+                              >
+                                Fix symbol
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={manualBusyId === s.id}
+                                className="h-6 shrink-0 border-amber-400 px-2 text-[11px] text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900/40"
+                                onClick={() => switchToManualPricing(s)}
+                              >
+                                {manualBusyId === s.id && (
+                                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                )}
+                                Use manual price
+                              </Button>
+                            </div>
                           )}
                         </li>
                       );
                     })}
                   </ul>
                   <p className="text-[11px] text-amber-700/80 dark:text-amber-300/70">
-                    To fix, edit the holding on the Portfolio page and change its ticker to the suggested symbol.
+                    Until this is resolved these holdings have no market price, so they don&apos;t
+                    contribute to your portfolio value.
                   </p>
                 </CardContent>
               </Card>
@@ -840,10 +936,10 @@ export default function InvestmentsSettingsPage() {
                               cash
                             </Badge>
                           )}
-                          {getTickerAdvisory(r.symbol) && (
+                          {advisoryFor(r.s) && (
                             <span
                               className="ml-1.5 inline-flex align-text-bottom"
-                              title={getTickerAdvisory(r.symbol)!.message}
+                              title={advisoryFor(r.s)!.message}
                             >
                               <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
                             </span>
@@ -1299,6 +1395,30 @@ export default function InvestmentsSettingsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
+            {/* Ticker. Hidden for cash sleeves — their symbol IS a currency code
+                and is structural, not a lookup key. Changing it re-points every
+                position (and its full history) at the new ticker; the server
+                reuses an existing security for that symbol if there is one. */}
+            {renameSecurity && !renameSecurity.isCash && (
+              <div>
+                <Label>Ticker</Label>
+                <Input
+                  value={renameSymbol}
+                  onChange={(e) => setRenameSymbol(e.target.value)}
+                  placeholder="e.g. AMZN"
+                  className="font-mono"
+                />
+                {renameErrors.symbol ? (
+                  <p className="text-xs text-rose-600 mt-1">{renameErrors.symbol}</p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    {advisoryFor(renameSecurity)
+                      ? "This ticker can't be priced. Correct it here, or switch Pricing to Manual below."
+                      : "Changing this re-points the holding and its history to the new ticker."}
+                  </p>
+                )}
+              </div>
+            )}
             <div>
               <Label>Display name</Label>
               <Input
