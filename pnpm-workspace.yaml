@@ -1,0 +1,14 @@
+# pnpm does NOT read the npm-style `"workspaces"` field in package.json, so
+# without this file `@finlynq/import-connectors` (private, never published) is
+# resolved against registry.npmjs.org and every `pnpm install` dies with
+# ERR_PNPM_FETCH_404. npm ignores this file entirely — it exists purely so
+# third-party builders on pnpm (e.g. the glama.ai container build) work.
+#
+# Keep the package list in lockstep with `"workspaces"` in package.json.
+packages:
+  - 'packages/*'
+
+# Required on pnpm 10+: `linkWorkspacePackages` defaults to false there, so the
+# `"@finlynq/import-connectors": "*"` range would STILL be fetched from the
+# registry even with the package list above. Do not remove this line.
+linkWorkspacePackages: true
