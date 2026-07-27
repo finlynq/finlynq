@@ -38,11 +38,81 @@ export type Release = {
 
 export const RELEASES: Release[] = [
   {
+    version: "3.4.1",
+    slug: "v3.4.1",
+    name: "Finlynq v3.4.1",
+    date: "2026-07-27",
+    current: true,
+    tagline:
+      "Finlynq v3.4.1 records every balance in the account's own currency as well as your reporting currency, warns you when a holding cannot be priced, and makes MCP connections work with standard clients.",
+    summary: [
+      "Finlynq v3.4.1 is an interim update since v3.4.0. The theme is honesty about your money: balances in the currency the account is actually held in, a loud warning when a holding cannot be priced, and an end to hardcoded currency defaults quietly stamping the wrong currency on your records.",
+      "Finlynq is an open-source (AGPL v3) personal finance app with a first-party Model Context Protocol (MCP) server, so you can track your money in the app and analyze it from Claude, Cursor, Windsurf, or any MCP-compatible assistant.",
+    ],
+    sections: [
+      {
+        heading: "Accounts and balances",
+        items: [
+          "Foreign-currency accounts now track their balance in their own currency as well as your reporting currency. Opening a USD account previously showed two numbers that never tied out: the Balance tile in account currency, and the Balance Over Time chart directly beneath it in your reporting currency. Both bases are now recorded, the account page defaults to the account's own currency, and a toggle switches between them. No existing number changes.",
+          "The accounts list shows each account's native balance first, with the converted amount underneath.",
+        ],
+      },
+      {
+        heading: "Investing",
+        items: [
+          "Finlynq now tells you when a holding cannot be priced. If no provider can return a quote for a ticker, the Securities tab flags it with two one-click fixes: correct the symbol, or switch the holding to manual pricing. Previously the price simply stayed blank and Finlynq retried in the background forever without saying anything.",
+          "Class shares such as BRK.B and warrants are now sent to the price provider in the notation it expects, so they price correctly instead of failing silently forever.",
+          "Renamed tickers get a suggested replacement with a one-click switch, starting with Polygon's MATIC to POL rename.",
+          "You can now edit a holding's ticker symbol directly from the Securities tab, and positions re-point cleanly when you do.",
+        ],
+      },
+      {
+        heading: "Currency",
+        items: [
+          "Detected subscriptions are no longer stamped and totalled in CAD regardless of what currency you actually spend in. A subscription now inherits the currency of the account it came from, and a payee billed in two currencies stays two separate series.",
+          "The onboarding wizard now saves the currency you pick. It asked, then wrote the answer to a key nothing ever read, so every new account silently kept the default.",
+          "Records created by an AI assistant resolve currency from the account or your display currency rather than a hardcoded default.",
+          "Currencies worth a fraction of a cent, such as VND, now get a live rate instead of failing every lookup permanently.",
+        ],
+      },
+      {
+        heading: "AI assistants (MCP)",
+        items: [
+          "Connecting from a standard MCP client now works. Claude Desktop, Cursor, and ChatGPT could get stuck re-authenticating in a loop, and read-only tokens were shown an empty permissions list on the consent screen while being granted full read and write access. Both are fixed, along with three related defects.",
+          "The local stdio server starts again. The entry point documented for Claude Desktop could not launch at all.",
+          "Setup instructions for the Claude Desktop path are now in the MCP guide.",
+        ],
+      },
+      {
+        heading: "Privacy",
+        items: [
+          "Deleting your account now removes everything. An audit found 13 per-user tables left behind, including encrypted security names. All of them are now deleted, and a test enforces that any new table is covered before it can ship.",
+        ],
+      },
+      {
+        heading: "Fixes",
+        items: [
+          "Deleting an account that still has transactions, loans, or goals attached now explains exactly what is blocking it instead of failing with a database error. Archiving remains the answer for an account with history.",
+          "Renaming a category to a name you already use, or deleting one still attached to a budget, now returns a clear message instead of a raw error.",
+          "Re-importing a statement where the bank edited a pending charge before it posted no longer aborts the whole import.",
+          "New in-app prompts can ask you a single question when Finlynq needs an answer it cannot infer. The first one asks for your display currency if you never set one.",
+        ],
+      },
+      {
+        heading: "Self-hosting",
+        items: [
+          "Third-party container builds using pnpm now resolve the workspace package correctly.",
+        ],
+      },
+    ],
+    githubUrl: "https://github.com/finlynq/finlynq/releases/tag/v3.4.1",
+  },
+  {
     version: "3.4.0",
     slug: "v3.4.0",
     name: "Finlynq v3.4.0",
     date: "2026-07-24",
-    current: true,
+    current: false,
     tagline:
       "Finlynq v3.4.0 rebuilds the MCP surface around 54 focused tools, makes statement reconciliation something you can do entirely in chat, and fixes self-hosting so the documented Docker Quick Start works end to end.",
     summary: [
