@@ -183,8 +183,12 @@ export default function GeneralSettingsPage() {
           <DialogHeader>
             <DialogTitle>Switch display currency to {pendingCurrency}?</DialogTitle>
             <DialogDescription>
-              This recalculates all your reports into {pendingCurrency} using each
-              transaction&apos;s historical exchange rate. Your realized gains and
+              {/* The explicit {" "} is required: JSX DROPS whitespace that
+                  contains a newline when it sits between an expression and the
+                  next line's text, so this rendered as "into AEDusing each". */}
+              This recalculates all your reports into {pendingCurrency}{" "}
+              using each transaction&apos;s historical exchange rate. Your
+              realized gains and
               tax figures will also re-base to {pendingCurrency}. It runs in the
               background; your reports stay usable while it finishes.
             </DialogDescription>
