@@ -11,8 +11,10 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  isPastGracePeriod,
   isPriceCoverageCandidate,
   priceCacheKeyFor,
+  NEW_SECURITY_GRACE_MS,
   type PriceCoverageCandidate,
 } from "@/lib/securities/price-coverage";
 import {
@@ -29,6 +31,7 @@ function candidate(over: Partial<PriceCoverageCandidate> = {}): PriceCoverageCan
     isCrypto: false,
     priceSource: "auto",
     heldIn: 1,
+    createdAt: new Date(Date.now() - 30 * 24 * 3600_000),
     ...over,
   };
 }
@@ -75,6 +78,28 @@ describe("isPriceCoverageCandidate", () => {
 
   it("treats a null price_source (un-backfilled row) as auto", () => {
     expect(isPriceCoverageCandidate(candidate({ priceSource: null }))).toBe(true);
+  });
+
+  it("spares a just-added security — nothing has had a chance to price it yet", () => {
+    expect(isPriceCoverageCandidate(candidate({ createdAt: new Date() }))).toBe(false);
+  });
+});
+
+describe("isPastGracePeriod", () => {
+  const now = Date.UTC(2026, 6, 27, 12, 0, 0);
+
+  it("is false inside the window and true once past it", () => {
+    expect(isPastGracePeriod(new Date(now - NEW_SECURITY_GRACE_MS + 1000), now)).toBe(false);
+    expect(isPastGracePeriod(new Date(now - NEW_SECURITY_GRACE_MS - 1000), now)).toBe(true);
+  });
+
+  it("accepts an ISO string as well as a Date", () => {
+    expect(isPastGracePeriod("2026-07-01T00:00:00Z", now)).toBe(true);
+  });
+
+  it("treats a missing or unparseable stamp as long-standing", () => {
+    expect(isPastGracePeriod(null, now)).toBe(true);
+    expect(isPastGracePeriod("not-a-date", now)).toBe(true);
   });
 });
 

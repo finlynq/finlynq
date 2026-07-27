@@ -33,6 +33,32 @@ export interface PriceCoverageCandidate {
   priceSource: string | null;
   /** How many accounts hold this security (0 = catalog-only entry). */
   heldIn: number;
+  /** When the security row was created — drives the new-security grace period. */
+  createdAt: Date | string | null;
+}
+
+/**
+ * How long after creation a security is exempt from the check.
+ *
+ * Nothing records "we attempted to price this", so an empty cache means either
+ * "the providers rejected it" OR "nothing has asked yet" — a brand-new security
+ * has no row until the next page that prices holdings (dashboard, portfolio
+ * overview, account charts) runs. Those fire on essentially any app load, so
+ * the gap is normally seconds; an hour is a generous margin that keeps a
+ * just-added VALID ticker from being announced as unpriceable.
+ */
+export const NEW_SECURITY_GRACE_MS = 60 * 60 * 1000;
+
+/** True once `createdAt` is old enough for an empty cache to mean something. */
+export function isPastGracePeriod(
+  createdAt: Date | string | null | undefined,
+  now: number = Date.now(),
+  graceMs: number = NEW_SECURITY_GRACE_MS,
+): boolean {
+  if (createdAt == null) return true; // no stamp → treat as long-standing
+  const ms = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
+  if (Number.isNaN(ms)) return true;
+  return now - ms > graceMs;
 }
 
 /**
@@ -61,15 +87,17 @@ export function priceCacheKeyFor(symbol: string, isCrypto: boolean): string {
  *  - a currency-code symbol (USD, EUR, XAU, …) → priced through fx-service
  *    (metals via front-month futures), which writes `fx_rates`, not
  *    `price_cache`. Same exclusion the portfolio aggregators apply before
- *    calling Yahoo (`isCurrencyCodeSymbol`).
+ *    calling Yahoo (`isCurrencyCodeSymbol`);
+ *  - created within the grace period → nothing has had a chance to price it.
  */
-export function isPriceCoverageCandidate(c: PriceCoverageCandidate): boolean {
+export function isPriceCoverageCandidate(c: PriceCoverageCandidate, now: number = Date.now()): boolean {
   const sym = c.symbol?.trim();
   if (!sym) return false;
   if (c.isCash) return false;
   if ((c.priceSource ?? "auto") !== "auto") return false;
   if (c.heldIn <= 0) return false;
   if (isCurrencyCodeSymbol(sym)) return false;
+  if (!isPastGracePeriod(c.createdAt, now)) return false;
   return true;
 }
 

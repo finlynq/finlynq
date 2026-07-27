@@ -60,6 +60,7 @@ export const GET = apiHandler(
         image: schema.securities.image,
         symbolCt: schema.securities.symbolCt,
         nameCt: schema.securities.nameCt,
+        createdAt: schema.securities.createdAt,
       })
       .from(schema.securities)
       .where(eq(schema.securities.userId, userId));
@@ -121,6 +122,7 @@ export const GET = apiHandler(
         isCrypto: s.isCrypto === 1,
         priceSource: s.priceSource,
         heldIn: (linksBySecurity.get(s.id) ?? []).length,
+        createdAt: s.createdAt,
       })),
     );
 
