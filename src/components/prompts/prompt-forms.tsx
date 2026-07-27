@@ -15,17 +15,8 @@
 
 import { type ComponentType, useState } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  SUPPORTED_FIAT_CURRENCIES,
-  currencyLabel,
-} from "@/lib/fx/supported-currencies";
+import { Combobox } from "@/components/ui/combobox";
+import { useDisplayCurrencyOptions } from "@/lib/hooks/useDisplayCurrencyOptions";
 
 /** The pending-prompt shape the gate hands each form (from GET /api/prompts/pending). */
 export interface PromptView {
@@ -48,40 +39,31 @@ export interface PromptFormProps {
 }
 
 /**
- * FINLYNQ-301 phase 4 — display-currency form. A single currency Select seeded
- * to USD. Submits `{ currency }`, which the server
+ * FINLYNQ-301 phase 4 — display-currency form. A searchable currency Combobox
+ * seeded to USD. Submits `{ currency }`, which the server
  * `displayCurrencyPrompt.answerSchema` validates.
  *
- * Options come from `SUPPORTED_FIAT_CURRENCIES`, mirroring the Display Currency
- * picker on `/settings/general` — deliberately NOT `useActiveCurrencies`. #291
- * scopes RECORD currency pickers (account / transaction / holding / goal) to the
- * user's active set; the display currency is the app-wide REPORTING choice and
- * the active set is derived FROM it, so scoping this picker to it is circular.
- * For a user with no `display_currency` row — the only user this prompt asks —
- * that derivation collapsed to the default plus the seed, and the dropdown
- * offered literally two options.
+ * Options come from the shared `useDisplayCurrencyOptions` — the same list the
+ * onboarding wizard and Settings → General use, and deliberately NOT
+ * `useActiveCurrencies` (see that hook's header for why scoping this picker to
+ * the active set is circular; it collapsed to two options for exactly the
+ * rowless users this prompt targets).
  */
 function DisplayCurrencyForm({ submitting, error, onSubmit }: PromptFormProps) {
   const [currency, setCurrency] = useState("USD");
+  const options = useDisplayCurrencyOptions(currency);
 
   return (
     <div className="mt-2 space-y-3">
-      <Select
+      <Combobox
         value={currency}
         onValueChange={(v) => setCurrency(v || "USD")}
+        items={options}
         disabled={submitting}
-      >
-        <SelectTrigger className="w-full">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {SUPPORTED_FIAT_CURRENCIES.map((c) => (
-            <SelectItem key={c} value={c}>
-              {c} — {currencyLabel(c)}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+        placeholder="Select currency"
+        searchPlaceholder="Search currencies…"
+        emptyMessage="No matching currency"
+      />
       {error && <p className="text-sm text-destructive">{error}</p>}
       <Button
         className="w-full"

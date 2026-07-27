@@ -26,7 +26,8 @@ import {
 import { Settings2, Shield, Database, Loader2 } from "lucide-react";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { useFont, FONT_OPTIONS, type FontKey } from "@/components/font-provider";
-import { SUPPORTED_FIAT_CURRENCIES, currencyLabel } from "@/lib/fx/supported-currencies";
+import { Combobox } from "@/components/ui/combobox";
+import { useDisplayCurrencyOptions } from "@/lib/hooks/useDisplayCurrencyOptions";
 import { FxOverridesSection } from "@/components/fx-overrides-section";
 import { ActiveCurrenciesSection } from "@/components/active-currencies-section";
 
@@ -34,6 +35,7 @@ type RecomputeState = { active: boolean; target: string; done: number; total: nu
 
 export default function GeneralSettingsPage() {
   const { displayCurrency, setDisplayCurrency } = useDisplayCurrency();
+  const currencyOptions = useDisplayCurrencyOptions(displayCurrency);
   const { font, setFont } = useFont();
   const [currencyError, setCurrencyError] = useState("");
   // Pending currency awaiting confirmation (Phase 3: switching re-derives every
@@ -117,16 +119,21 @@ export default function GeneralSettingsPage() {
                 Per-row amounts (transactions, holdings) keep their entered currency.
               </p>
             </div>
-            <Select value={displayCurrency} onValueChange={handleCurrencySelect}>
-              <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {SUPPORTED_FIAT_CURRENCIES.map((c) => (
-                  <SelectItem key={c} value={c}>
-                    {c} — {currencyLabel(c)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {/* Shared `useDisplayCurrencyOptions` rather than the bare built-in
+                list: it also offers any currency the user has a custom rate
+                for. Without that, the PUT route's own rejection message ("Add a
+                custom rate via Settings → Custom exchange rates first") was a
+                dead end — after adding the rate, no picker listed the currency. */}
+            <div className="w-56">
+              <Combobox
+                value={displayCurrency}
+                onValueChange={handleCurrencySelect}
+                items={currencyOptions}
+                placeholder="Select currency"
+                searchPlaceholder="Search currencies…"
+                emptyMessage="No matching currency"
+              />
+            </div>
           </div>
 
           <div className="flex items-center justify-between">

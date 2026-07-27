@@ -1,10 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import {
-  SUPPORTED_FIAT_CURRENCIES,
-  currencyLabel,
-} from "@/lib/fx/supported-currencies";
+import { currencyLabel } from "@/lib/fx/supported-currencies";
+import { Combobox } from "@/components/ui/combobox";
+import { useDisplayCurrencyOptions } from "@/lib/hooks/useDisplayCurrencyOptions";
 import { formatCurrency } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import {
@@ -108,6 +107,7 @@ export function OnboardingWizard({
   const [currency, setCurrency] = useState("USD");
   // The provider's setter — updates the app-wide context AND persists.
   const { setDisplayCurrency: persistDisplayCurrency } = useDisplayCurrency();
+  const currencyOptions = useDisplayCurrencyOptions(currency);
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([0]);
   const [dataChoice, setDataChoice] = useState<"demo" | "import" | "skip">("import");
   const [budgetAmounts, setBudgetAmounts] = useState<Record<string, number>>(
@@ -316,18 +316,16 @@ export function OnboardingWizard({
                     <label className="text-sm font-medium" htmlFor="currency">
                       Reporting currency
                     </label>
-                    <select
-                      id="currency"
-                      value={currency}
-                      onChange={(e) => setCurrency(e.target.value)}
-                      className="mt-1.5 w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
-                    >
-                      {SUPPORTED_FIAT_CURRENCIES.map((c) => (
-                        <option key={c} value={c}>
-                          {c} — {currencyLabel(c)}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="mt-1.5">
+                      <Combobox
+                        value={currency}
+                        onValueChange={(v) => setCurrency(v || "USD")}
+                        items={currencyOptions}
+                        placeholder="Select currency"
+                        searchPlaceholder="Search currencies…"
+                        emptyMessage="No matching currency"
+                      />
+                    </div>
                   </div>
 
                   <p className="text-xs text-muted-foreground">
