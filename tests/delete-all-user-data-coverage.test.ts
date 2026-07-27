@@ -290,13 +290,44 @@ describe("deleteAllUserDataTx table coverage", () => {
     expect(BODY.indexOf("s.securities")).toBeGreaterThan(BODY.indexOf("s.portfolioHoldings"));
   });
 
-  it("routes both delete paths through the shared body", () => {
-    // The two paths must never drift on which tables they cover, so neither
-    // may carry a delete of its own.
+  it("sends a cleared account back through onboarding", () => {
+    // Both surviving-account paths (wipe, DELETE /api/data) drop `settings` —
+    // display_currency included — so without this the user lands on an empty
+    // dashboard with no route back to the setup flow. It also keeps the
+    // FINLYNQ-301 gate coherent: prompts stay silent while onboarding is
+    // incomplete, so a cleared user is asked by the wizard, like a new signup.
+    expect(BODY).toMatch(/onboardingComplete:\s*0/);
+  });
+
+  it("routes ALL THREE delete paths through the shared body", () => {
+    // The paths must never drift on which tables they cover, so none may carry
+    // a delete of its own. `DELETE /api/data` did exactly that until
+    // 2026-07-27: 15 hand-rolled `db.delete()` calls, no transaction, and no
+    // staged_imports/staged_transactions delete despite deleting `accounts`.
+    // It was invisible to every assertion here because it lives in another
+    // file — hence this explicit third check.
     const wipe = QUERIES_SRC.slice(QUERIES_SRC.indexOf("export async function wipeUserDataAndRewrap"));
     const del = QUERIES_SRC.slice(QUERIES_SRC.indexOf("export async function deleteUserAccount"));
+    const clear = QUERIES_SRC.slice(QUERIES_SRC.indexOf("export async function clearAllUserData"));
     expect(wipe).toContain("deleteAllUserDataTx(tx, userId)");
     expect(del).toContain("deleteAllUserDataTx(tx, userId)");
+    expect(clear).toContain("deleteAllUserDataTx(tx, userId)");
+
+    const dataRoute = readFileSync(
+      path.join(ROOT, "src/app/api/data/route.ts"),
+      "utf8",
+    );
+    expect(dataRoute).toContain("clearAllUserData");
+    // Strip comments first — the route's own header explains the deletes it no
+    // longer performs, and prose must not read as code.
+    const routeCode = dataRoute
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    const routeDeletes = [...routeCode.matchAll(/\bdb\s*\n?\s*\.delete\(/g)];
+    expect(
+      routeDeletes.length,
+      "DELETE /api/data must delegate to clearAllUserData, never delete rows itself",
+    ).toBe(0);
     // deleteUserAccount may only delete the identity row itself.
     const strayDeletes = [...del.matchAll(/tx\.delete\(s\.(\w+)\)/g)]
       .map((m) => m[1])
