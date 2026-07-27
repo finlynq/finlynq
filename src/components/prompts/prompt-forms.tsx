@@ -22,7 +22,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
+import {
+  SUPPORTED_FIAT_CURRENCIES,
+  currencyLabel,
+} from "@/lib/fx/supported-currencies";
 
 /** The pending-prompt shape the gate hands each form (from GET /api/prompts/pending). */
 export interface PromptView {
@@ -46,13 +49,20 @@ export interface PromptFormProps {
 
 /**
  * FINLYNQ-301 phase 4 — display-currency form. A single currency Select seeded
- * to USD, sourced from `useActiveCurrencies` (#291 — never a hardcoded array),
- * with USD force-included so the seed always has a matching item. Submits
- * `{ currency }`, which the server `displayCurrencyPrompt.answerSchema` validates.
+ * to USD. Submits `{ currency }`, which the server
+ * `displayCurrencyPrompt.answerSchema` validates.
+ *
+ * Options come from `SUPPORTED_FIAT_CURRENCIES`, mirroring the Display Currency
+ * picker on `/settings/general` — deliberately NOT `useActiveCurrencies`. #291
+ * scopes RECORD currency pickers (account / transaction / holding / goal) to the
+ * user's active set; the display currency is the app-wide REPORTING choice and
+ * the active set is derived FROM it, so scoping this picker to it is circular.
+ * For a user with no `display_currency` row — the only user this prompt asks —
+ * that derivation collapsed to the default plus the seed, and the dropdown
+ * offered literally two options.
  */
 function DisplayCurrencyForm({ submitting, error, onSubmit }: PromptFormProps) {
   const [currency, setCurrency] = useState("USD");
-  const currencies = useActiveCurrencies(currency);
 
   return (
     <div className="mt-2 space-y-3">
@@ -65,9 +75,9 @@ function DisplayCurrencyForm({ submitting, error, onSubmit }: PromptFormProps) {
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {currencies.map((c) => (
+          {SUPPORTED_FIAT_CURRENCIES.map((c) => (
             <SelectItem key={c} value={c}>
-              {c}
+              {c} — {currencyLabel(c)}
             </SelectItem>
           ))}
         </SelectContent>

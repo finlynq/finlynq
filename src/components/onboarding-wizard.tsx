@@ -1,11 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
-import { currencyLabel } from "@/lib/fx/supported-currencies";
+import {
+  SUPPORTED_FIAT_CURRENCIES,
+  currencyLabel,
+} from "@/lib/fx/supported-currencies";
 import { formatCurrency } from "@/lib/currency";
 import {
   Check,
+  Coins,
   Wallet,
   Upload,
   Sparkles,
@@ -31,12 +34,28 @@ interface OnboardingWizardProps {
   onComplete: () => void;
 }
 
-type Step = "welcome" | "accounts" | "data" | "budget" | "mcp" | "done";
+type Step =
+  | "welcome"
+  | "currency"
+  | "accounts"
+  | "data"
+  | "budget"
+  | "mcp"
+  | "done";
 
-const STEPS: Step[] = ["welcome", "accounts", "data", "budget", "mcp", "done"];
+const STEPS: Step[] = [
+  "welcome",
+  "currency",
+  "accounts",
+  "data",
+  "budget",
+  "mcp",
+  "done",
+];
 
 const STEP_LABELS: Record<Step, string> = {
   welcome: "Welcome",
+  currency: "Currency",
   accounts: "Accounts",
   data: "Import",
   budget: "Budget",
@@ -79,8 +98,13 @@ export function OnboardingWizard({
   // default per FINLYNQ-183). FINLYNQ-300: this answer is persisted to
   // settings.display_currency on finish — no longer thrown into a dead
   // localStorage key.
+  //
+  // This IS the reporting-currency question the `display_currency` decision
+  // prompt asks; onboarding owns it for new users and the gate stays silent
+  // until onboarding completes (see src/lib/prompts/resolve.ts). It gets its own
+  // step so it reads as an app-wide decision rather than a field above the
+  // account tiles, and stays reachable via Back for the rest of the wizard.
   const [currency, setCurrency] = useState("USD");
-  const currencyOptions = useActiveCurrencies(currency);
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([0]);
   const [dataChoice, setDataChoice] = useState<"demo" | "import" | "skip">("import");
   const [budgetAmounts, setBudgetAmounts] = useState<Record<string, number>>(
@@ -106,6 +130,12 @@ export function OnboardingWizard({
     setDirection(-1);
     const prev = STEPS[stepIndex - 1];
     if (prev) setStep(prev);
+  }
+
+  /** Jump to a step by name — the Accounts step's "Change" currency link. */
+  function goTo(target: Step) {
+    setDirection(STEPS.indexOf(target) > stepIndex ? 1 : -1);
+    setStep(target);
   }
 
   function toggleAccount(idx: number) {
@@ -229,7 +259,7 @@ export function OnboardingWizard({
                   </motion.div>
                   <h2 className="text-2xl font-bold mb-2">Welcome to Finlynq</h2>
                   <p className="text-muted-foreground max-w-sm mb-4">
-                    Let&apos;s get you set up in 5 steps. You&apos;ll be tracking your finances and
+                    Let&apos;s get you set up in 6 steps. You&apos;ll be tracking your finances and
                     querying them with your AI in under 10 minutes.
                   </p>
                   <p className="text-xs text-muted-foreground">Signed in as {userEmail}</p>
@@ -258,6 +288,46 @@ export function OnboardingWizard({
                 </div>
               )}
 
+              {/* ─── Currency ────────────────────────────── */}
+              {step === "currency" && (
+                <div className="flex-1 flex flex-col py-6 gap-4">
+                  <div className="flex items-center gap-3 mb-1">
+                    <Coins className="h-6 w-6 text-muted-foreground" />
+                    <h2 className="text-lg font-semibold">
+                      Which currency should we show your money in?
+                    </h2>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    We report every total in one currency. Individual accounts and
+                    transactions keep their own — you can change this anytime in
+                    Settings.
+                  </p>
+
+                  <div>
+                    <label className="text-sm font-medium" htmlFor="currency">
+                      Reporting currency
+                    </label>
+                    <select
+                      id="currency"
+                      value={currency}
+                      onChange={(e) => setCurrency(e.target.value)}
+                      className="mt-1.5 w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
+                    >
+                      {SUPPORTED_FIAT_CURRENCIES.map((c) => (
+                        <option key={c} value={c}>
+                          {c} — {currencyLabel(c)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground">
+                    Totals like net worth and monthly spending are converted to{" "}
+                    {currency}. The accounts you add next start in this currency.
+                  </p>
+                </div>
+              )}
+
               {/* ─── Accounts ────────────────────────────── */}
               {step === "accounts" && (
                 <div className="flex-1 flex flex-col py-6 gap-4">
@@ -269,20 +339,23 @@ export function OnboardingWizard({
                     Pick the accounts you use. You can add more later.
                   </p>
 
-                  <div>
-                    <label className="text-sm font-medium" htmlFor="currency">Currency</label>
-                    <select
-                      id="currency"
-                      value={currency}
-                      onChange={(e) => setCurrency(e.target.value)}
-                      className="mt-1.5 w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
+                  {/* The currency lives on its own step now — echo it here so
+                      the choice stays visible (and changeable) instead of
+                      disappearing once the wizard moves on. */}
+                  <div className="flex items-center justify-between rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+                    <span className="text-muted-foreground">
+                      Created in{" "}
+                      <span className="font-medium text-foreground">
+                        {currency} — {currencyLabel(currency)}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => goTo("currency")}
+                      className="text-xs font-medium underline underline-offset-2 hover:text-foreground text-muted-foreground"
                     >
-                      {currencyOptions.map((c) => (
-                        <option key={c} value={c}>
-                          {c} — {currencyLabel(c)}
-                        </option>
-                      ))}
-                    </select>
+                      Change
+                    </button>
                   </div>
 
                   <div className="grid grid-cols-2 gap-3 mt-1">
