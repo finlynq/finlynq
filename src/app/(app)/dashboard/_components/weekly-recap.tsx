@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/currency";
+import { useDisplayCurrency } from "@/components/currency-provider";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { Calendar, ChevronDown, ChevronUp, ArrowUpRight, ArrowDownRight } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -15,6 +16,11 @@ const itemVariants = {
 };
 
 export function WeeklyRecap() {
+  // [lib/weekly-recap.ts](../../../../lib/weekly-recap.ts) already converts every
+  // figure to the user's display currency (FINLYNQ-123) — this card was just
+  // LABELLING them "CAD" unconditionally, so a EUR/USD user read correct numbers
+  // under a C$ symbol. The provider holds the same value the server resolved.
+  const { displayCurrency } = useDisplayCurrency();
   const [recap, setRecap] = useState<WeeklyRecapData | null>(null);
   const [expanded, setExpanded] = useState(false);
 
@@ -82,7 +88,7 @@ export function WeeklyRecap() {
             <div>
               <p className="text-[11px] text-muted-foreground mb-0.5">Spent</p>
               <p className="text-lg font-bold tracking-tight tabular-nums">
-                {formatCurrency(recap.spending.total, "CAD")}
+                {formatCurrency(recap.spending.total, displayCurrency)}
               </p>
               <span className={`inline-flex items-center gap-0.5 text-[11px] font-semibold ${spendingUp ? "text-rose-500" : "text-emerald-500"}`}>
                 {spendingUp ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
@@ -92,13 +98,13 @@ export function WeeklyRecap() {
             <div>
               <p className="text-[11px] text-muted-foreground mb-0.5">Income</p>
               <p className="text-lg font-bold tracking-tight text-emerald-600 dark:text-emerald-400 tabular-nums">
-                {formatCurrency(recap.income.total, "CAD")}
+                {formatCurrency(recap.income.total, displayCurrency)}
               </p>
             </div>
             <div>
               <p className="text-[11px] text-muted-foreground mb-0.5">Net Flow</p>
               <p className={`text-lg font-bold tracking-tight tabular-nums ${recap.netCashFlow >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500"}`}>
-                {formatCurrency(recap.netCashFlow, "CAD")}
+                {formatCurrency(recap.netCashFlow, displayCurrency)}
               </p>
             </div>
           </div>
@@ -120,7 +126,7 @@ export function WeeklyRecap() {
                     tick={{ fill: "var(--color-muted-foreground)" }}
                   />
                   <Tooltip
-                    formatter={(v) => formatCurrency(Number(v), "CAD")}
+                    formatter={(v) => formatCurrency(Number(v), displayCurrency)}
                     contentStyle={{
                       background: "var(--color-card)",
                       border: "1px solid var(--color-border)",
@@ -187,7 +193,7 @@ export function WeeklyRecap() {
                               <span className="text-muted-foreground ml-2 text-[11px]">{t.date}</span>
                             </div>
                             <span className="font-mono font-semibold text-rose-500 tabular-nums shrink-0 ml-2">
-                              {formatCurrency(t.amount, "CAD")}
+                              {formatCurrency(t.amount, displayCurrency)}
                             </span>
                           </div>
                         ))}
@@ -207,7 +213,7 @@ export function WeeklyRecap() {
                               <span className="text-muted-foreground ml-2 text-[11px]">{b.date}</span>
                             </div>
                             <span className="font-mono font-semibold tabular-nums shrink-0 ml-2">
-                              {formatCurrency(b.amount, "CAD")}
+                              {formatCurrency(b.amount, displayCurrency)}
                             </span>
                           </div>
                         ))}
@@ -219,7 +225,7 @@ export function WeeklyRecap() {
                   <div className="flex items-center justify-between text-[12px] border-t pt-2.5">
                     <span className="text-muted-foreground">Net worth change this week</span>
                     <span className={`font-semibold tabular-nums ${recap.netWorthChange >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
-                      {recap.netWorthChange >= 0 ? "+" : ""}{formatCurrency(recap.netWorthChange, "CAD")}
+                      {recap.netWorthChange >= 0 ? "+" : ""}{formatCurrency(recap.netWorthChange, displayCurrency)}
                     </span>
                   </div>
                 </div>

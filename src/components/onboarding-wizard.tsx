@@ -6,6 +6,7 @@ import {
   currencyLabel,
 } from "@/lib/fx/supported-currencies";
 import { formatCurrency } from "@/lib/currency";
+import { useDisplayCurrency } from "@/components/currency-provider";
 import {
   Check,
   Coins,
@@ -105,6 +106,8 @@ export function OnboardingWizard({
   // step so it reads as an app-wide decision rather than a field above the
   // account tiles, and stays reachable via Back for the rest of the wizard.
   const [currency, setCurrency] = useState("USD");
+  // The provider's setter — updates the app-wide context AND persists.
+  const { setDisplayCurrency: persistDisplayCurrency } = useDisplayCurrency();
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([0]);
   const [dataChoice, setDataChoice] = useState<"demo" | "import" | "skip">("import");
   const [budgetAmounts, setBudgetAmounts] = useState<Record<string, number>>(
@@ -187,11 +190,17 @@ export function OnboardingWizard({
       // (FINLYNQ-300) — the wizard used to throw this into a dead localStorage
       // key the app never read. Must land BEFORE onboarding is marked complete
       // so the dashboard/totals render in the right currency.
-      await fetch("/api/settings/display-currency", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ displayCurrency: currency }),
-      }).catch(() => {/* non-fatal — settings fall back to USD default */});
+      //
+      // Goes through the CurrencyProvider's setter, NOT a raw PUT to the same
+      // route: the provider reads the currency once from `/api/auth/session` at
+      // mount, which for a brand-new user is the USD default (no settings row
+      // yet). A bare PUT persists the choice but leaves that context stale, so
+      // the whole app — including Settings → Display Currency — kept rendering
+      // USD after the user picked EUR, until a hard reload. The setter updates
+      // the context and PUTs the same endpoint.
+      await persistDisplayCurrency(currency).catch(() => {
+        /* non-fatal — settings fall back to the USD default */
+      });
 
       // Mark onboarding complete
       await fetch("/api/onboarding/complete", { method: "POST" });
