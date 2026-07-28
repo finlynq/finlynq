@@ -6,6 +6,12 @@
  * `appliesTo()` is true AND its ack row is either absent, or `status='deferred'`
  * with a cooled-down `deferred_until` and `defer_count` still under `maxDefers`.
  * `answered` and `dismissed` are terminal for that (prompt, version).
+ *
+ * Prompts are a BACK-FILL surface for EXISTING users only: a user who has not
+ * finished onboarding gets none, because the wizard is still on screen asking
+ * its own questions and two modals stacked on the same decision is what shipped
+ * the display-currency double-ask. A new user's answer must come from the
+ * onboarding wizard (or a safe default) — see docs/user-prompts.md.
  */
 
 import { and, eq } from "drizzle-orm";
@@ -78,13 +84,37 @@ async function loadAck(
 }
 
 /**
+ * Has this user finished the onboarding wizard?
+ *
+ * A MISSING user row reads as complete — the worse failure is a silently dead
+ * prompt surface, and `/api/auth/session` already defaults `onboardingComplete`
+ * to true when it can't resolve the user (self-hosted / non-postgres), which is
+ * exactly the population the wizard never shows to either.
+ */
+async function hasCompletedOnboarding(
+  db: PromptDb,
+  userId: string,
+): Promise<boolean> {
+  const rows = await db
+    .select({ onboardingComplete: schema.users.onboardingComplete })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+  if (rows.length === 0) return true;
+  return Boolean(rows[0].onboardingComplete);
+}
+
+/**
  * Evaluate every registered prompt for a user and return those still pending,
- * in registry order. Returns `[]` for an empty registry.
+ * in registry order. Returns `[]` for an empty registry, and `[]` for a user
+ * still inside onboarding (see the module header).
  */
 export async function getPendingPrompts(
   db: PromptDb,
   userId: string,
 ): Promise<PendingPrompt[]> {
+  if (!(await hasCompletedOnboarding(db, userId))) return [];
+
   const now = new Date();
   const out: PendingPrompt[] = [];
   for (const def of PROMPTS) {

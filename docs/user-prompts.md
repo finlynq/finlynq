@@ -24,7 +24,8 @@ Plan / rationale: [plan/user-decision-prompts.md](../plan/user-decision-prompts.
   `getPendingPrompts(db, userId)` runs every predicate and filters by the ack row
   (pure `isAckPending`): pending when `appliesTo` is true AND the ack is absent,
   or `deferred` with a cooled-down `deferred_until` and `defer_count` under
-  `maxDefers`. `answered`/`dismissed` are terminal.
+  `maxDefers`. `answered`/`dismissed` are terminal. It short-circuits to `[]` for
+  a user with `users.onboarding_complete = 0` — see "Existing users only" below.
 - **API** — `GET /api/prompts/pending`, `POST /api/prompts/[id]/answer`
   (validates with the def's schema, then runs `persist()` + the ack upsert in one
   transaction), `POST /api/prompts/[id]/defer`. All on `apiHandler`.
@@ -35,6 +36,28 @@ Plan / rationale: [plan/user-decision-prompts.md](../plan/user-decision-prompts.
   deliberately separate from the server registry.
 - **Operator view** — `/admin` shows a per-prompt answered/deferred/dismissed
   table.
+
+## Existing users only
+
+Prompts are a **back-fill** surface: they exist to collect an answer from users
+who predate the change that needs it. `getPendingPrompts` returns `[]` while
+`users.onboarding_complete = 0`, so a user still inside the wizard is never
+asked. (A missing user row reads as complete — a silently dead prompt surface is
+the worse failure, and it matches how `/api/auth/session` defaults
+`onboardingComplete` to true when it can't resolve the user.)
+
+That makes the new-user path your responsibility when you add a prompt. Pick one:
+
+- **Ask it in the wizard** ([src/components/onboarding-wizard.tsx](../src/components/onboarding-wizard.tsx))
+  and persist through the same helper the prompt's `persist` uses, so
+  `appliesTo` is already false by the time the gate first runs. This is what
+  `display_currency` does — the wizard's Currency step and the prompt ask the
+  identical question, and the ONE that runs is decided by onboarding state.
+- **Decide for them** — ship a safe default and make `appliesTo` return false.
+
+Never leave it to the gate: before this rule the wizard and the display-currency
+prompt both rendered for a brand-new user, one modal stacked on the other, each
+writing `settings.display_currency` independently.
 
 ## Adding a prompt (a 3-file change)
 
@@ -51,9 +74,12 @@ Plan / rationale: [plan/user-decision-prompts.md](../plan/user-decision-prompts.
      (≈ 20 for "next login").
 2. **Write the form** — a client component and an entry in `PROMPT_FORMS`
    (`prompt-forms.tsx`) keyed by the prompt `id`. It collects the answer and
-   hands it back via `onSubmit(answer)`. Use shared inputs (e.g.
-   `useActiveCurrencies` for a currency, never a hardcoded list). A pending
-   prompt with no form entry is silently skipped.
+   hands it back via `onSubmit(answer)`. Use shared inputs, and source options
+   from the shared list for that concept rather than a literal array — for a
+   RECORD currency that is `useActiveCurrencies` (#291); for the app-wide
+   REPORTING currency it is `SUPPORTED_FIAT_CURRENCIES`, mirroring
+   `/settings/general` (see Don't rule #6). A pending prompt with no form entry
+   is silently skipped.
 3. **Wipe is already covered** — `user_prompt_acks` is deleted in
    `deleteAllUserDataTx`, so a new prompt needs no wipe change.
 
@@ -78,4 +104,10 @@ prior version's ack row is kept for audit.
 4. The gate lives inside `UnlockGate` and never blocks DEK-unlock or login; a
    failing `GET /api/prompts/pending` renders nothing, never an error state.
 5. Dialogs prefix their width (`sm:max-w-lg`), never bare `max-w-*`.
-6. No hardcoded currency arrays — `useActiveCurrencies` only.
+6. No hardcoded currency arrays. Which shared list depends on the concept:
+   `useActiveCurrencies` for a currency stored ON a record (#291), but
+   `SUPPORTED_FIAT_CURRENCIES` for the display currency — the active set is
+   DERIVED from the display currency, so scoping that picker to it is circular
+   and collapses to two options for exactly the rowless users the prompt targets.
+7. A prompt never covers new users — onboarding or a default does (see "Existing
+   users only").

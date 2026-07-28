@@ -564,6 +564,16 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // `users` at all — neither delete path reached it.
   await tx.delete(s.securities).where(eq(s.securities.userId, userId));
   await tx.delete(s.categories).where(eq(s.categories.userId, userId));
+  // Staged import pipeline — MUST precede `accounts`. Both reference it with
+  // ON DELETE NO ACTION (`staged_imports.bound_account_id`,
+  // `staged_transactions.target_account_id`), so leaving them until later in
+  // the sweep made the `accounts` DELETE raise 23503 and abort the WHOLE
+  // transaction: any user who had ever uploaded a statement bound to an
+  // account could not delete their account or wipe their data at all.
+  // staged_transactions first — `staged_transactions.staged_import_id` is
+  // NOT NULL ON DELETE CASCADE off staged_imports, so the child goes first.
+  await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
+  await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
   await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));
 
   // ── Portfolio snapshot / lot bookkeeping ──────────────────────────────────
@@ -646,8 +656,6 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // wipe keeps the user row so we delete explicitly here.
   await tx.delete(s.emailInbox).where(eq(s.emailInbox.userId, userId));
   await tx.delete(s.emailImportRules).where(eq(s.emailImportRules.userId, userId));
-  await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
-  await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
   await tx
     .delete(s.simplefinPendingTransactions)
     .where(eq(s.simplefinPendingTransactions.userId, userId));
@@ -683,6 +691,24 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // settings last — it holds the api_key/api_key_dek/email_webhook_* rows and
   // we also just read the import_email from here above.
   await tx.delete(s.settings).where(eq(s.settings.userId, userId));
+
+  // Send the user back through onboarding. Every caller of this body has just
+  // removed ALL of their data, so the account is indistinguishable from a fresh
+  // signup and should be treated as one — the wizard is where the display
+  // currency, starter accounts and budgets come from, and `settings` (including
+  // `display_currency`) was just dropped one line above, so without this the
+  // user lands on an empty dashboard with no way back to that setup flow.
+  //
+  // This also keeps the FINLYNQ-301 prompt gate coherent: `getPendingPrompts`
+  // returns nothing while `onboarding_complete = 0`, so a freshly-cleared user
+  // is asked by the wizard rather than by a decision prompt — exactly as a new
+  // signup is.
+  //
+  // No-op for `deleteUserAccount`, which drops the row immediately after.
+  await tx
+    .update(s.users)
+    .set({ onboardingComplete: 0 })
+    .where(eq(s.users.id, userId));
 }
 
 /**
@@ -746,6 +772,37 @@ export async function wipeUserDataAndRewrap(
         updatedAt: now,
       })
       .where(eq(s.users.id, userId));
+  });
+}
+
+/**
+ * Clear every per-user data row but KEEP the account (and its DEK) — the
+ * "Clear All Data" danger-zone action, `DELETE /api/data`.
+ *
+ * Exists because that route used to carry its OWN hand-rolled delete list: 15
+ * tables against this function's ~50, outside a transaction, and with no
+ * `staged_imports` / `staged_transactions` delete even though it deleted
+ * `accounts` (which they reference NO ACTION). Consequences, all observed on
+ * dev 2026-07-27:
+ *   - `settings` survived, so a user's `display_currency` and custom
+ *     `active_currencies` came back after "delete everything".
+ *   - `onboarding_complete` stayed 1, so the wizard never replayed.
+ *   - The `accounts` DELETE 23503'd for any user with a bound staged import,
+ *     and because each delete auto-committed, it left a HALF-WIPED account
+ *     (the demo user lost transactions/categories/budgets/goals/holdings but
+ *     kept its 4 accounts).
+ * The UI promises "permanently delete all your data", so the fix is to route
+ * it through the same audited body as the other two paths rather than to keep
+ * a third list in sync.
+ *
+ * Differs from `wipeUserDataAndRewrap` only in NOT rotating the DEK — this
+ * path has no password to re-derive a KEK from. The data it protected is gone
+ * either way.
+ */
+export async function clearAllUserData(userId: string) {
+  await unlinkUserUploadFiles(userId);
+  await db.transaction(async (tx) => {
+    await deleteAllUserDataTx(tx, userId);
   });
 }
 

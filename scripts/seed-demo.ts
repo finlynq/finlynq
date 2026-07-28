@@ -450,6 +450,22 @@ async function main() {
     await client.query(`DELETE FROM categories WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM accounts WHERE user_id = $1`, [userId]);
 
+    // Restore the demo's display currency. The wipe above drops `settings`, and
+    // the `display_currency` decision prompt (FINLYNQ-301) asks any onboarded
+    // user with no such row — which, after every nightly reseed, is the demo.
+    // Without this, a public demo visitor is greeted by a "which currency?"
+    // modal before seeing anything.
+    //
+    // USD, matching the fixture: every seeded account and transaction below is
+    // USD-denominated. Anything else would run every demo figure through an FX
+    // conversion for no reason and drift from the app-wide USD default
+    // (FINLYNQ-183).
+    await client.query(
+      `INSERT INTO settings (user_id, key, value) VALUES ($1, 'display_currency', 'USD')
+       ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value`,
+      [userId]
+    );
+
     // 3. Insert accounts. Stream D Phase 4 cutover (2026-05-03): plaintext
     // `name` and `alias` columns physically dropped — only name_ct + name_lookup
     // carry the display name. Demo's DEK is derivable here, so we encrypt directly.

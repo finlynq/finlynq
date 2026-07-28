@@ -16,7 +16,7 @@ import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
-import { isSupportedCurrency } from "@/lib/fx/supported-currencies";
+import { DEFAULT_DISPLAY_CURRENCY } from "@/lib/settings/display-currency";
 import { logApiError, safeErrorMessage, validateBody } from "@/lib/validate";
 
 const KEY = "active_currencies";
@@ -51,7 +51,10 @@ async function readDisplay(userId: string): Promise<string> {
       )
     )
     .limit(1);
-  return row[0]?.value ?? "CAD";
+  // FINLYNQ-183: the app-wide default is USD, never CAD. This fallback is what
+  // a user with no `display_currency` row derives their whole active set from,
+  // so a stale CAD here seeded every currency dropdown with the wrong code.
+  return row[0]?.value ?? DEFAULT_DISPLAY_CURRENCY;
 }
 
 async function deriveFromData(userId: string): Promise<string[]> {

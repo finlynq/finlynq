@@ -3,7 +3,7 @@ import { z } from "zod";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { db, schema } from "@/db";
 import { eq, and } from "drizzle-orm";
-import { isSupportedCurrency } from "@/lib/fx/supported-currencies";
+import { isReportableCurrency } from "@/lib/fx/supported-currencies";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import {
   setDisplayCurrency,
@@ -52,10 +52,18 @@ export async function PUT(request: NextRequest) {
   if (parsed.error) return parsed.error;
   const { displayCurrency } = parsed.data;
 
-  if (!isSupportedCurrency(displayCurrency)) {
+  // Validates against the REPORTABLE set, not `isSupportedCurrency`. The latter
+  // also answers "is this ticker cash rather than a stock", and several
+  // reportable codes are live equity/ETF tickers (AED = Aegon, SAR = Saratoga),
+  // so the two lists must stay separate — see supported-currencies.ts. A code
+  // outside the reportable set has no live quote, and FX resolution ends in a
+  // `rate = 1` fallback rather than an error, so accepting it would silently
+  // report every total at 1:1. The custom-rate path is the escape hatch, and
+  // `useDisplayCurrencyOptions` surfaces those currencies in the picker.
+  if (!isReportableCurrency(displayCurrency)) {
     return NextResponse.json(
       {
-        error: `Currency ${displayCurrency} is not in the supported list. Add a custom rate via Settings → Custom exchange rates first.`,
+        error: `Currency ${displayCurrency} has no live exchange rate. Add a custom rate via Settings → Custom exchange rates first.`,
         code: "currency-unsupported",
       },
       { status: 400 }

@@ -81,8 +81,16 @@ function parseSchema(src: string): Table[] {
 
     // Column declarations sit at 2 spaces of indent in the `pgTable("x", {…})`
     // form and 4 in the multi-line `pgTable(\n "x",\n {…},\n (t) => […])` form.
-    // Deeper indents are option objects (`{ onDelete: … }`), not columns.
-    const declRe = /\n {2,4}(\w+):/g;
+    //
+    // The trailing `\w+\(` is load-bearing: a column is always `name: text(…)` /
+    // `integer(…)` / …, whereas an option key is `onDelete: "set null"` with no
+    // call. Without it, a multi-line `.references(() => x.id, {\n onDelete: … })`
+    // put `onDelete` at exactly 4 spaces, so it parsed as its OWN column and
+    // truncated the real column's span before its options — every such FK then
+    // read as NO ACTION. That made the ordering check below report
+    // `email_inbox.staged_import_id` and `email_import_rules.category_id` as
+    // violations when both are ON DELETE SET NULL in the database.
+    const declRe = /\n {2,4}(\w+): \w+\(/g;
     const decls: { column: string; index: number }[] = [];
     let d: RegExpExecArray | null;
     while ((d = declRe.exec(body)) !== null) {
@@ -96,8 +104,16 @@ function parseSchema(src: string): Table[] {
       );
       // `.references(() => accounts.id, { onDelete: "cascade" })`, also
       // tolerating the self-referential `(): any =>` form (holding_lots).
+      // The `,?` before the closing brace is load-bearing: the multi-line form
+      //     .references(() => stagedImports.id, {
+      //       onDelete: "set null",
+      //     })
+      // carries a TRAILING COMMA, so `"…"\s*\}` never matched and the FK read
+      // as NO ACTION. That made the ordering check below report
+      // `email_inbox.staged_import_id` and `email_import_rules.category_id` as
+      // violations when both are ON DELETE SET NULL in the database.
       const ref = span.match(
-        /\.references\(\s*\(\)(?:\s*:\s*any)?\s*=>\s*(\w+)\.\w+\s*(?:,\s*\{\s*onDelete:\s*"([\w ]+)"\s*\})?/,
+        /\.references\(\s*\(\)(?:\s*:\s*any)?\s*=>\s*(\w+)\.\w+\s*(?:,\s*\{\s*onDelete:\s*"([\w ]+)"\s*,?\s*\})?/,
       );
       return {
         column: decl.column,
@@ -221,19 +237,97 @@ describe("deleteAllUserDataTx table coverage", () => {
     }
   });
 
+  it("deletes children before parents across every NO ACTION FK", () => {
+    // Presence is not enough — ORDER is load-bearing, and only for NO ACTION.
+    // Confirmed on pf_dev 2026-07-27: `staged_imports` and `staged_transactions`
+    // were both deleted (so the coverage test above passed) but ~80 lines AFTER
+    // `accounts`, which they reference NO ACTION via `bound_account_id` /
+    // `target_account_id`. The `accounts` DELETE raised 23503 and aborted the
+    // whole transaction, so any user who had ever uploaded a statement bound to
+    // an account could not delete their account or wipe their data at all.
+    //
+    // CASCADE and SET NULL impose no ordering (Postgres fixes the child up
+    // itself), so only an FK with no `onDelete` is checked here.
+    const deleteIndex = (variable: string) =>
+      BODY.search(new RegExp(`tx\\s*\\n?\\s*\\.delete\\(s\\.${variable}\\)`));
+
+    let edgesChecked = 0;
+    const violations: string[] = [];
+    for (const t of TABLES) {
+      if (!EXPLICIT.has(t.variable)) continue;
+      for (const c of t.columns) {
+        if (!c.refTable || c.onDelete) continue; // cascade/set null: order-free
+        if (c.refTable === t.variable) continue; // self-reference
+        if (!EXPLICIT.has(c.refTable)) continue; // parent not deleted here
+        const child = deleteIndex(t.variable);
+        const parent = deleteIndex(c.refTable);
+        if (child < 0 || parent < 0) continue;
+        edgesChecked++;
+        if (child > parent) {
+          const parentTable =
+            TABLES.find((x) => x.variable === c.refTable)?.table ?? c.refTable;
+          violations.push(
+            `${t.table}.${c.sqlName ?? c.column} -> ${parentTable} ` +
+              `(child deleted AFTER parent — will raise 23503)`,
+          );
+        }
+      }
+    }
+
+    // Floor: if the parse silently stops matching, the assertion below passes
+    // vacuously and the alarm is dead.
+    expect(edgesChecked).toBeGreaterThan(8);
+    expect(
+      violations,
+      `NO ACTION FK children must be deleted BEFORE their parent in ` +
+        `deleteAllUserDataTx:\n  ${violations.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
   it("deletes securities after portfolio_holdings", () => {
     // portfolio_holdings.security_id is ON DELETE SET NULL, so the reverse
     // order would rewrite rows we are about to drop.
     expect(BODY.indexOf("s.securities")).toBeGreaterThan(BODY.indexOf("s.portfolioHoldings"));
   });
 
-  it("routes both delete paths through the shared body", () => {
-    // The two paths must never drift on which tables they cover, so neither
-    // may carry a delete of its own.
+  it("sends a cleared account back through onboarding", () => {
+    // Both surviving-account paths (wipe, DELETE /api/data) drop `settings` —
+    // display_currency included — so without this the user lands on an empty
+    // dashboard with no route back to the setup flow. It also keeps the
+    // FINLYNQ-301 gate coherent: prompts stay silent while onboarding is
+    // incomplete, so a cleared user is asked by the wizard, like a new signup.
+    expect(BODY).toMatch(/onboardingComplete:\s*0/);
+  });
+
+  it("routes ALL THREE delete paths through the shared body", () => {
+    // The paths must never drift on which tables they cover, so none may carry
+    // a delete of its own. `DELETE /api/data` did exactly that until
+    // 2026-07-27: 15 hand-rolled `db.delete()` calls, no transaction, and no
+    // staged_imports/staged_transactions delete despite deleting `accounts`.
+    // It was invisible to every assertion here because it lives in another
+    // file — hence this explicit third check.
     const wipe = QUERIES_SRC.slice(QUERIES_SRC.indexOf("export async function wipeUserDataAndRewrap"));
     const del = QUERIES_SRC.slice(QUERIES_SRC.indexOf("export async function deleteUserAccount"));
+    const clear = QUERIES_SRC.slice(QUERIES_SRC.indexOf("export async function clearAllUserData"));
     expect(wipe).toContain("deleteAllUserDataTx(tx, userId)");
     expect(del).toContain("deleteAllUserDataTx(tx, userId)");
+    expect(clear).toContain("deleteAllUserDataTx(tx, userId)");
+
+    const dataRoute = readFileSync(
+      path.join(ROOT, "src/app/api/data/route.ts"),
+      "utf8",
+    );
+    expect(dataRoute).toContain("clearAllUserData");
+    // Strip comments first — the route's own header explains the deletes it no
+    // longer performs, and prose must not read as code.
+    const routeCode = dataRoute
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    const routeDeletes = [...routeCode.matchAll(/\bdb\s*\n?\s*\.delete\(/g)];
+    expect(
+      routeDeletes.length,
+      "DELETE /api/data must delegate to clearAllUserData, never delete rows itself",
+    ).toBe(0);
     // deleteUserAccount may only delete the identity row itself.
     const strayDeletes = [...del.matchAll(/tx\.delete\(s\.(\w+)\)/g)]
       .map((m) => m[1])

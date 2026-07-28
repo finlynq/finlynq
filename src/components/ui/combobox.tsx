@@ -138,9 +138,20 @@ function ComboboxContent({
   )
 }
 
+/**
+ * `autoFocus` is deliberate: opening the popup leaves focus on the TRIGGER
+ * button, so without it you had to click the search box before typing —
+ * which defeats the point of a type-ahead control (measured on
+ * /settings/general: `document.activeElement` was `BUTTON[role=combobox]`
+ * after opening). Keyboard users were unaffected either way (base-ui forwards
+ * printable keys from the trigger), but pointer users had to click twice.
+ *
+ * The caller can still pass `autoFocus={false}` to opt out.
+ */
 function ComboboxInput({
   className,
   placeholder = "Search…",
+  autoFocus = true,
   ...props
 }: ComboboxPrimitive.Input.Props) {
   return (
@@ -149,6 +160,7 @@ function ComboboxInput({
       <ComboboxPrimitive.Input
         data-slot="combobox-input"
         placeholder={placeholder}
+        autoFocus={autoFocus}
         className={cn(
           "flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
           className

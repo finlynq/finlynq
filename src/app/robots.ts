@@ -19,6 +19,8 @@ export default function robots(): MetadataRoute.Robots {
         disallow: [
           "/api/",
           "/oauth/",
+          // Prefix match — deliberately also covers `/try-demo2`, the unlisted
+          // scratch test account. Don't tighten this to an exact path.
           "/try-demo",
           "/dashboard",
           "/transactions",

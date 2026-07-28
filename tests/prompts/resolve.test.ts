@@ -66,26 +66,52 @@ describe("isAckPending", () => {
 });
 
 describe("getPendingPrompts", () => {
-  // Chainable drizzle stub: every `.select().from().where().limit()` resolves to
-  // the same `rows`. getPendingPrompts issues one predicate query (settings row)
-  // and, when it applies, one ack query — both see `rows`.
-  function stubDb(rows: unknown[]) {
+  /**
+   * Chainable drizzle stub. `getPendingPrompts` issues its queries in a fixed
+   * order — the onboarding gate first, then per prompt the predicate (settings
+   * row) and the ack row — so the stub answers `.limit()` from a queue in that
+   * order. The last entry repeats, so a short queue means "empty from here".
+   */
+  function stubDb(...results: unknown[][]) {
+    let call = 0;
     const chain: Record<string, unknown> = {};
     chain.select = () => chain;
     chain.from = () => chain;
     chain.where = () => chain;
-    chain.limit = () => Promise.resolve(rows);
+    chain.limit = () =>
+      Promise.resolve(results[Math.min(call++, results.length - 1)] ?? []);
     return chain as never;
   }
 
+  const ONBOARDED = [{ onboardingComplete: 1 }];
+
   it("surfaces display_currency when there is no settings row (absent ack)", async () => {
-    const pending = await getPendingPrompts(stubDb([]), "user-1");
+    const pending = await getPendingPrompts(stubDb(ONBOARDED, [], []), "user-1");
     expect(pending.map((p) => p.id)).toEqual(["display_currency"]);
     expect(pending[0]).toMatchObject({ version: 1, deferrable: true, deferCount: 0 });
   });
 
   it("does not surface display_currency once a settings row exists", async () => {
-    const pending = await getPendingPrompts(stubDb([{ value: "USD" }]), "user-1");
+    const pending = await getPendingPrompts(
+      stubDb(ONBOARDED, [{ value: "USD" }]),
+      "user-1",
+    );
     expect(pending).toEqual([]);
+  });
+
+  // Prompts are an EXISTING-user back-fill: the onboarding wizard asks its own
+  // version of the same questions, so stacking a prompt dialog on top of it is
+  // a double-ask. Onboarding (or a default) covers new users.
+  it("returns nothing while the user is still in onboarding", async () => {
+    const pending = await getPendingPrompts(
+      stubDb([{ onboardingComplete: 0 }], []),
+      "user-1",
+    );
+    expect(pending).toEqual([]);
+  });
+
+  it("treats a missing user row as onboarded rather than silently muting prompts", async () => {
+    const pending = await getPendingPrompts(stubDb([], [], []), "user-1");
+    expect(pending.map((p) => p.id)).toEqual(["display_currency"]);
   });
 });

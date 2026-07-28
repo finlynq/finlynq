@@ -30,7 +30,10 @@ type CurrencyContextValue = {
 
 const CurrencyContext = createContext<CurrencyContextValue | null>(null);
 
-const DEFAULT_CURRENCY = "CAD";
+// FINLYNQ-183: the app-wide default is USD, never CAD. This is what renders
+// before `/api/auth/session` resolves (and from the outside-provider stub), so a
+// stale CAD here leaked C$ into a USD user's first paint.
+const DEFAULT_CURRENCY = "USD";
 
 export function CurrencyProvider({ children }: { children: ReactNode }) {
   const [displayCurrency, setDisplayCurrencyState] = useState(DEFAULT_CURRENCY);
@@ -87,7 +90,7 @@ export function useDisplayCurrency(): CurrencyContextValue {
   const ctx = useContext(CurrencyContext);
   if (!ctx) {
     // Outside a provider — return a no-op stub so static contexts (login pages)
-    // still render. The default currency is CAD; setDisplayCurrency throws to
+    // still render. The default currency is USD; setDisplayCurrency throws to
     // surface misuse during development.
     return {
       displayCurrency: DEFAULT_CURRENCY,
