@@ -3,12 +3,12 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs YNAB: open-source alternative with MCP",
+  title: "YNAB MCP server & Linux alternative: Finlynq vs YNAB",
   description:
-    "Finlynq vs YNAB: open-source AGPL v3 with self-host, investment tracking, envelope encryption, and a first-party MCP server, vs YNAB's closed SaaS.",
+    "Does YNAB have an MCP server, and does YNAB run on Linux? Finlynq is the open-source, self-hostable YNAB alternative with a first-party MCP server and investments.",
   alternates: { canonical: "/vs/ynab" },
   openGraph: {
-    title: "Finlynq vs YNAB: open-source alternative with MCP",
+    title: "YNAB MCP server & Linux alternative: Finlynq vs YNAB",
     description:
       "Open-source self-hostable PFM with investments, multi-currency, encryption, and a first-party MCP server, compared with YNAB's zero-based budgeting SaaS.",
     url: "/vs/ynab",
@@ -136,6 +136,14 @@ const content: VsPageContent = {
       q: "Can my household share a Finlynq budget like YNAB's family plan?",
       a: "Not yet. Finlynq is single-user today. YNAB's shared-budget pricing is genuinely strong for households.",
     },
+    {
+      q: "Does YNAB have an MCP server?",
+      a: `Not a first-party one. YNAB has a well-documented official REST API, and community-built MCP servers (like calebl/ynab-mcp-server) wrap it so Claude and other AI assistants can reach your budget with a personal access token, subject to the API's 200-requests-per-hour rate limit. Finlynq's MCP server is first-party: ${MCP_TOOL_COUNTS.http} HTTP tools with OAuth 2.1, maintained in the same repo as the app, with no third-party wrapper in the loop.`,
+    },
+    {
+      q: "Does YNAB run on Linux?",
+      a: "In a browser, yes: today's YNAB is a web app, so it works fine on Linux. There is no native Linux desktop app, and the old YNAB 4 desktop era is long gone. What you cannot do is host YNAB yourself. If what you actually want is a budgeting app that lives on your own Linux box, Finlynq self-hosts with Docker and PostgreSQL.",
+    },
   ],
   sources: [
     {
@@ -159,7 +167,7 @@ const content: VsPageContent = {
       note: "AGPL v3 source",
     },
   ],
-  lastUpdated: "2026-07-01",
+  lastUpdated: "2026-07-29",
 };
 
 export default function VsYnabPage() {

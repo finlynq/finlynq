@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from "react";
 import Script from "next/script";
+import { inferCtaEvent, trackEvent } from "@/lib/analytics";
 
 const GA_MEASUREMENT_ID = "G-ZDQJXS0C3Z";
 const STORAGE_KEY = "finlynq:analytics-consent";
@@ -113,9 +114,32 @@ function ConsentBanner({ onChoice }: { onChoice: (v: "accepted" | "declined") =>
   );
 }
 
+/**
+ * Delegated CTA click tracking: one document-level listener instead of
+ * per-link markup. Fires a GA4 event when a clicked anchor matches a known
+ * CTA href (see inferCtaEvent) or carries an explicit `data-ga-event`
+ * attribute. No-op until the user accepts analytics consent (trackEvent
+ * checks for window.gtag).
+ */
+function useCtaClickTracking() {
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      const anchor = (e.target as Element | null)?.closest?.("a[href]");
+      if (!(anchor instanceof HTMLAnchorElement)) return;
+      const explicit = anchor.getAttribute("data-ga-event");
+      const name = explicit ?? inferCtaEvent(anchor.getAttribute("href") ?? "");
+      if (name) trackEvent(name, { link_url: anchor.href });
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, []);
+}
+
 export function AnalyticsConsent() {
   const consent = useConsent();
   const [hydrated, setHydrated] = useState(false);
+
+  useCtaClickTracking();
 
   useEffect(() => {
     setHydrated(true);
