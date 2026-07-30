@@ -92,17 +92,18 @@ function wrapPgBuilder(obj: any): any {
 //   - Nesting is safe — an inner call JOINS the outer transaction rather than
 //     opening a second one (no nested BEGIN, no savepoint churn).
 //
-// The store lives on `globalThis`, for the SAME reason the adapter and the MCP
-// tx cache do — and this one is not merely an HMR nicety. Turbopack emits this
-// module into SEVERAL server chunks (measured on dev 2026-07-30: two distinct
-// copies of the proxy, and `operations.ts` / `delete-cascade.ts` / a route's
-// `_helpers.ts` do not reliably land in the same one). A module-scoped
-// AsyncLocalStorage therefore gives each copy its OWN scope: the outer
-// `withDbTransaction` opens a real transaction in copy A while every `db.*`
-// inside runs through copy B, sees an empty store, and goes to the pool —
-// silently NON-transactional, which is worse than no transaction at all
-// because it reads as fixed. One shared instance keyed on globalThis is what
-// makes "the ambient transaction" ambient across chunk boundaries.
+// The store lives on `globalThis`, for the SAME reason the adapter, the
+// Drizzle instance and the MCP tx cache do — and here it is load-bearing, not
+// just an HMR nicety. Turbopack emits this module into MORE THAN ONE server
+// chunk (measured on the dev build 2026-07-30: two distinct copies of the
+// proxy). A module-scoped AsyncLocalStorage would give each copy its own
+// scope, so an outer `withDbTransaction` running in copy A would open a real
+// transaction while a `db.*` call reached through copy B saw an empty store
+// and went to the pool instead — silently NON-transactional, which is worse
+// than having no transaction because it reads as fixed. Which modules share a
+// chunk is a build-layout detail that changes whenever routes do, so this must
+// not depend on it. One instance keyed on globalThis is what makes "the
+// ambient transaction" ambient across chunk boundaries.
 const txScope: AsyncLocalStorage<DrizzleDb> =
   (g.__pfTxScope ??= new AsyncLocalStorage<DrizzleDb>());
 
