@@ -7,17 +7,17 @@
  */
 
 import { NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";
-import { db, schema } from "@/db";
+import { withDbTransaction } from "@/db";
 import {
   CashSleeveNotFoundError,
   CurrencyMismatchError,
   HoldingNotFoundError,
   InvalidLinkPairError,
-  canEditPortfolioRow,
 } from "@/lib/portfolio/operations";
-import { reverseLotsForDeleteHook } from "@/lib/portfolio/lots/write-hooks";
-import { deleteTransaction } from "@/lib/queries";
+import {
+  deleteTransactionsCascade,
+  planTransactionDelete,
+} from "@/lib/transactions/delete-cascade";
 
 export function mapOperationError(err: unknown): NextResponse | null {
   if (err instanceof CashSleeveNotFoundError) {
@@ -54,137 +54,92 @@ export function mapOperationError(err: unknown): NextResponse | null {
       { status: 400 },
     );
   }
+  if (err instanceof ReplaceRefusedError) {
+    return NextResponse.json(
+      { error: err.message, code: err.code },
+      { status: 409 },
+    );
+  }
   return null;
 }
 
 /**
- * Edit-as-replace helper for the operation POST routes (2026-05-25 follow-up).
+ * Edit-as-replace for the operation POST routes.
  *
  * When the client passes `editId` in the body of a POST to
  * `/api/portfolio/operations/<op>`, we treat it as "replace the existing pair
- * with new values". The cleanest semantics:
+ * with new values": cascade-delete the old pair, then record the new one.
  *
- *   1. Verify the editId tx belongs to this user.
- *   2. Run the edit guard — refuse with 409 if the row opens a lot that has
- *      downstream closures (sell or transfer-out) we'd orphan.
- *   3. Cascade-delete the existing pair (every row sharing trade_link_id /
- *      link_id), reversing lot effects first.
- *   4. Caller then runs the normal `recordX` helper which creates a fresh
- *      pair with the new values.
+ * ── THE DATA-LOSS BUG THIS FIXES (2026-07-30) ──────────────────────────────
+ * The old shape was a standalone `cascadeDeleteForReplace(userId, editId)`
+ * that DELETED AND COMMITTED, then returned so the route could call
+ * `recordBuy`/`recordSell`/… as a separate step. Every ordinary validation
+ * failure in that second step — `CashSleeveNotFoundError` (editing a trade
+ * into an account with no sleeve in that currency), `CurrencyMismatchError`,
+ * an FX 409 — therefore PERMANENTLY DESTROYED the user's original trade while
+ * returning a 400 that read like nothing had happened.
  *
- * Returns NextResponse on refusal/error; null when the caller may proceed.
+ * `replacePortfolioOperation` folds both halves into ONE ambient transaction
+ * (`withDbTransaction`), so a throw from `record()` rolls the delete back and
+ * the original pair is still there. The route surfaces the same 400 it always
+ * did; the difference is the ledger is unchanged.
+ *
+ * Reordering alone (validate before deleting) would NOT have been enough — a
+ * dropped connection between the delete and the insert loses the pair just as
+ * completely.
+ *
+ * Steps:
+ *   1. Verify the editId tx belongs to this user (404).
+ *   2. Edit-guard every row in the link closure — refuse 409 when a row opens
+ *      a lot with downstream closures we'd orphan.
+ *   3. Delete the closure (lot effects reversed first) and record the
+ *      replacement, atomically.
  */
-export async function cascadeDeleteForReplace(
+export async function replacePortfolioOperation<T>(
   userId: string,
   editId: number,
-): Promise<NextResponse | null> {
-  const target = await db
-    .select({
-      id: schema.transactions.id,
-      tradeLinkId: schema.transactions.tradeLinkId,
-      linkId: schema.transactions.linkId,
-      swapLinkId: schema.transactions.swapLinkId,
-    })
-    .from(schema.transactions)
-    .where(
-      and(
-        eq(schema.transactions.id, editId),
-        eq(schema.transactions.userId, userId),
+  record: () => Promise<T>,
+): Promise<{ ok: true; result: T } | { ok: false; response: NextResponse }> {
+  // Plan OUTSIDE the transaction so refusals (404 / 409) never open one.
+  const plan = await planTransactionDelete(userId, [editId]);
+  if (plan.ids.length === 0) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: `Transaction ${editId} not found` },
+        { status: 404 },
       ),
-    )
-    .get();
-  if (!target) {
-    return NextResponse.json(
-      { error: `Transaction ${editId} not found` },
-      { status: 404 },
-    );
+    };
   }
-  const idSet = new Set<number>([editId]);
-  if (target.tradeLinkId) {
-    const siblings = await db
-      .select({ id: schema.transactions.id })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, userId),
-          eq(schema.transactions.tradeLinkId, target.tradeLinkId),
-        ),
-      );
-    for (const r of siblings) idSet.add(r.id);
-  }
-  if (target.linkId) {
-    const siblings = await db
-      .select({ id: schema.transactions.id })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, userId),
-          eq(schema.transactions.linkId, target.linkId),
-        ),
-      );
-    for (const r of siblings) idSet.add(r.id);
-  }
-  // Phase 4 — swap_link_id ties the 4 rows of a swap; cascade across
-  // their inner tradeLinkIds too so all stock+cash legs land in the set.
-  if (target.swapLinkId) {
-    const siblings = await db
-      .select({
-        id: schema.transactions.id,
-        tradeLinkId: schema.transactions.tradeLinkId,
-      })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, userId),
-          eq(schema.transactions.swapLinkId, target.swapLinkId),
-        ),
-      );
-    for (const r of siblings) idSet.add(r.id);
-    const tradeLinks = new Set(
-      siblings.map((r) => r.tradeLinkId).filter((v): v is string => !!v),
-    );
-    for (const tl of tradeLinks) {
-      const more = await db
-        .select({ id: schema.transactions.id })
-        .from(schema.transactions)
-        .where(
-          and(
-            eq(schema.transactions.userId, userId),
-            eq(schema.transactions.tradeLinkId, tl),
-          ),
-        );
-      for (const r of more) idSet.add(r.id);
-    }
-  }
-  const allIds = Array.from(idSet);
-
-  const blockingClosureTxIds: number[] = [];
-  for (const txId of allIds) {
-    const guard = await canEditPortfolioRow(userId, txId);
-    if (!guard.allowed && guard.blockingClosureTxIds) {
-      for (const b of guard.blockingClosureTxIds) {
-        if (!idSet.has(b)) blockingClosureTxIds.push(b);
-      }
-    }
-  }
-  if (blockingClosureTxIds.length > 0) {
-    return NextResponse.json(
-      {
-        error:
-          `Cannot edit — this transaction opens a lot that has been sold or transferred out. ` +
-          `Delete the ${blockingClosureTxIds.length} dependent transaction(s) first.`,
-        code: "portfolio_edit_blocked",
-        blockingClosureTxIds,
-      },
-      { status: 409 },
-    );
+  if (plan.blockingClosureTxIds.length > 0) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error:
+            `Cannot edit — this transaction opens a lot that has been sold or transferred out. ` +
+            `Delete the ${plan.blockingClosureTxIds.length} dependent transaction(s) first.`,
+          code: "portfolio_edit_blocked",
+          blockingClosureTxIds: plan.blockingClosureTxIds,
+        },
+        { status: 409 },
+      ),
+    };
   }
 
-  for (const txId of allIds) {
-    await reverseLotsForDeleteHook(userId, txId);
-  }
-  for (const txId of allIds) {
-    await deleteTransaction(txId, userId);
-  }
-  return null;
+  const result = await withDbTransaction(async () => {
+    const outcome = await deleteTransactionsCascade(userId, [editId], { plan });
+    if (!outcome.ok) {
+      // Re-checked inside the transaction; a refusal here aborts it.
+      throw new ReplaceRefusedError(outcome.message);
+    }
+    return record();
+  });
+  return { ok: true, result };
 }
+
+/** Internal — a plan/execute disagreement, surfaced as a 409 by the caller. */
+export class ReplaceRefusedError extends Error {
+  readonly code = "portfolio_edit_blocked" as const;
+}
+

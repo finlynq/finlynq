@@ -4,7 +4,7 @@ import { apiHandler } from "@/lib/api-handler";
 import { recordSwap } from "@/lib/portfolio/operations";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
-import { mapOperationError, cascadeDeleteForReplace } from "../_helpers";
+import { mapOperationError, replacePortfolioOperation } from "../_helpers";
 
 const schema = z.object({
   accountId: z.number().int().positive(),
@@ -31,16 +31,23 @@ export const POST = apiHandler(
   },
   async ({ userId, dek, body }) => {
     const { editId, ...input } = body;
-    if (editId != null) {
-      const refusal = await cascadeDeleteForReplace(userId, editId);
-      if (refusal) return refusal;
-    }
-    const result = await recordSwap({
+    // Edit-as-replace runs the cascade-delete AND the record in ONE
+    // transaction (`replacePortfolioOperation`) — a validation failure
+    // here used to destroy the original pair. See ../_helpers.ts.
+    const record = () => recordSwap({
       ...input,
       userId,
       dek,
       source: "manual",
     });
+    let result;
+    if (editId != null) {
+      const replaced = await replacePortfolioOperation(userId, editId, record);
+      if (!replaced.ok) return replaced.response;
+      result = replaced.result;
+    } else {
+      result = await record();
+    }
     invalidateUserTxCache(userId);
     // Snapshot history is stale from this trade date forward — auto-rebuild.
     await markSnapshotsDirty(userId, input.date);

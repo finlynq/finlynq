@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db, schema } from "@/db";
+import { db, schema, withDbTransaction } from "@/db";
 import { eq, and, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
@@ -212,28 +212,34 @@ export async function POST(request: NextRequest) {
     // Stream D Phase 4 — plaintext `name` column dropped; only encrypted
     // siblings persist. Issue #130: dual-write `goals.account_id` (first id
     // only, legacy fallback) and the `goal_accounts` join.
-    const inserted = await db.insert(schema.goals).values({
-      userId,
-      type: d.type,
-      targetAmount: d.targetAmount,
-      ...(d.currency ? { currency: d.currency.toUpperCase() } : {}),
-      deadline: d.deadline || null,
-      accountId: accountIds[0] ?? null,
-      priority: d.priority ?? 1,
-      status: d.status ?? "active",
-      note: encryptOptional(dek, d.note) ?? "",
-      ...enc,
-    }).returning({ id: schema.goals.id });
-    const newId = inserted[0]?.id;
-    if (newId && accountIds.length > 0) {
-      await db.insert(schema.goalAccounts).values(
-        accountIds.map((accountId) => ({
-          userId,
-          goalId: newId,
-          accountId,
-        })),
-      );
-    }
+    // The goal row and its `goal_accounts` links are ONE fact — a goal that
+    // committed without its links tracks zero accounts and reports $0 progress
+    // (review API-M2). `withDbTransaction` binds both writes to one connection.
+    const newId = await withDbTransaction(async () => {
+      const inserted = await db.insert(schema.goals).values({
+        userId,
+        type: d.type,
+        targetAmount: d.targetAmount,
+        ...(d.currency ? { currency: d.currency.toUpperCase() } : {}),
+        deadline: d.deadline || null,
+        accountId: accountIds[0] ?? null,
+        priority: d.priority ?? 1,
+        status: d.status ?? "active",
+        note: encryptOptional(dek, d.note) ?? "",
+        ...enc,
+      }).returning({ id: schema.goals.id });
+      const id = inserted[0]?.id;
+      if (id && accountIds.length > 0) {
+        await db.insert(schema.goalAccounts).values(
+          accountIds.map((accountId) => ({
+            userId,
+            goalId: id,
+            accountId,
+          })),
+        );
+      }
+      return id;
+    });
     // Re-read the row so the response carries the canonical shape.
     const goal = newId
       ? (await db.select().from(schema.goals).where(eq(schema.goals.id, newId)))[0]
@@ -282,28 +288,29 @@ export async function PUT(request: NextRequest) {
     if (replaceAccountIds !== null) {
       updatePayload.accountId = replaceAccountIds[0] ?? null;
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const goalRows = await db.update(schema.goals).set(updatePayload as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, userId))).returning();
-    const goal = goalRows[0];
-
-    // Replace the join (DELETE existing + INSERT new) only when the caller
-    // supplied a fresh account list. Atomic-enough on PostgreSQL — the
-    // surrounding request is serialized; a partial state would only show
-    // briefly under concurrent edits to the same goal.
-    if (replaceAccountIds !== null) {
-      await db
-        .delete(schema.goalAccounts)
-        .where(and(eq(schema.goalAccounts.goalId, id), eq(schema.goalAccounts.userId, userId)));
-      if (replaceAccountIds.length > 0) {
-        await db.insert(schema.goalAccounts).values(
-          replaceAccountIds.map((accountId) => ({
-            userId,
-            goalId: id,
-            accountId,
-          })),
-        );
+    // The row UPDATE and the join replacement (DELETE existing + INSERT new,
+    // only when the caller supplied a fresh account list) go in ONE
+    // transaction — a failure between them used to leave the goal tracking
+    // ZERO accounts, i.e. permanently reporting $0 progress (review API-M2).
+    const goal = await withDbTransaction(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const goalRows = await db.update(schema.goals).set(updatePayload as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, userId))).returning();
+      if (replaceAccountIds !== null) {
+        await db
+          .delete(schema.goalAccounts)
+          .where(and(eq(schema.goalAccounts.goalId, id), eq(schema.goalAccounts.userId, userId)));
+        if (replaceAccountIds.length > 0) {
+          await db.insert(schema.goalAccounts).values(
+            replaceAccountIds.map((accountId) => ({
+              userId,
+              goalId: id,
+              accountId,
+            })),
+          );
+        }
       }
-    }
+      return goalRows[0];
+    });
 
     return NextResponse.json(goal);
   } catch (error: unknown) {
