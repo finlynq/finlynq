@@ -43,6 +43,7 @@
 import { randomUUID } from "crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
+import { normalizeDbRows } from "@/lib/db-utils";
 import { encryptField } from "@/lib/crypto/envelope";
 import {
   openLotForBuyHook,
@@ -192,7 +193,9 @@ export interface RecordBuyResult {
   lotId: number | null;
 }
 
-export async function recordBuy(input: RecordBuyInput): Promise<RecordBuyResult> {
+export async function recordBuy(
+  input: RecordBuyInput,
+): Promise<RecordBuyResult> {
   if (input.qty <= 0) throw new Error(`recordBuy: qty must be > 0 (got ${input.qty})`);
   if (input.totalCost <= 0) throw new Error(`recordBuy: totalCost must be > 0 (got ${input.totalCost})`);
 
@@ -350,7 +353,9 @@ export interface RecordSellResult {
   closuresWritten: number;
 }
 
-export async function recordSell(input: RecordSellInput): Promise<RecordSellResult> {
+export async function recordSell(
+  input: RecordSellInput,
+): Promise<RecordSellResult> {
   if (input.qty <= 0) throw new Error(`recordSell: qty must be > 0 (got ${input.qty})`);
   if (input.totalProceeds <= 0) throw new Error(`recordSell: totalProceeds must be > 0 (got ${input.totalProceeds})`);
 
@@ -506,7 +511,9 @@ export interface RecordSwapResult {
   swapLinkId: string;
 }
 
-export async function recordSwap(input: RecordSwapInput): Promise<RecordSwapResult> {
+export async function recordSwap(
+  input: RecordSwapInput,
+): Promise<RecordSwapResult> {
   if (input.sourceHoldingId === input.destHoldingId) {
     throw new Error(`recordSwap: source and dest holdings must differ`);
   }
@@ -2000,34 +2007,29 @@ export interface EditGuardResult {
 export async function canEditPortfolioRow(
   userId: string,
   txId: number,
+  // Raw `sql` + `execute` (rather than the query builder) so the MCP tool
+  // context's execute-only `DbLike` can run the same guard — the shared
+  // delete chokepoint threads its executor straight through.
+  executor: { execute: (query: ReturnType<typeof sql>) => Promise<unknown> } = db,
 ): Promise<EditGuardResult> {
   // Find all lots opened by this tx.
-  const lots = await db
-    .select({ id: schema.holdingLots.id })
-    .from(schema.holdingLots)
-    .where(
-      and(
-        eq(schema.holdingLots.userId, userId),
-        eq(schema.holdingLots.openTxId, txId),
-      ),
-    );
+  const lots = normalizeDbRows<{ id: number }>(
+    await executor.execute(
+      sql`SELECT id FROM holding_lots WHERE user_id = ${userId} AND open_tx_id = ${txId}`,
+    ),
+  );
   if (lots.length === 0) return { allowed: true };
 
-  const lotIds = lots.map((l) => l.id);
+  const lotIds = lots.map((l) => Number(l.id));
 
   // Any closure references one of these lots?
-  const closures = await db
-    .select({
-      closeTxId: schema.holdingLotClosures.closeTxId,
-      closeKind: schema.holdingLotClosures.closeKind,
-    })
-    .from(schema.holdingLotClosures)
-    .where(
-      and(
-        eq(schema.holdingLotClosures.userId, userId),
-        sql`${schema.holdingLotClosures.lotId} IN (${sql.join(lotIds.map((i) => sql`${i}`), sql`, `)})`,
-      ),
-    );
+  const closures = normalizeDbRows<{ close_tx_id: number }>(
+    await executor.execute(sql`
+      SELECT close_tx_id FROM holding_lot_closures
+       WHERE user_id = ${userId}
+         AND lot_id = ANY(ARRAY[${sql.join(lotIds.map((i) => sql`${i}`), sql`, `)}]::int[])
+    `),
+  );
 
   if (closures.length === 0) return { allowed: true };
 
@@ -2036,7 +2038,7 @@ export async function canEditPortfolioRow(
     reason:
       `This transaction opens a lot that has been sold or transferred out. ` +
       `Delete the ${closures.length} dependent transaction(s) first, then retry.`,
-    blockingClosureTxIds: closures.map((c) => c.closeTxId),
+    blockingClosureTxIds: closures.map((c) => Number(c.close_tx_id)),
   };
 }
 

@@ -78,8 +78,42 @@ registerCoreTools(server, db, { userId });
 registerV2Tools(server, db, { userId });
 registerImportTemplateTools(server, db, { userId });
 
+/**
+ * Bootstrap the shared `@/db` Drizzle adapter inside the stdio process
+ * (2026-07-30).
+ *
+ * Most stdio tools talk to Postgres through the SQLite-shaped `pg-compat`
+ * layer above, but a handful of them reach into `src/lib` helpers that import
+ * the `@/db` proxy — `getUserTransactions` (detect_subscriptions) already did,
+ * and `deleteTransactionsCascade` (delete_transaction) now does. Without an
+ * adapter registered, that proxy throws "Database adapter not initialized" on
+ * first property access, so those tools were dead in stdio.
+ *
+ * Small dedicated pool (the stdio server is one local user, one request at a
+ * time). Failure is non-fatal: pg-compat-only tools keep working, and the
+ * `@/db`-backed ones fail loudly on use rather than at startup.
+ */
+async function initSharedAdapter() {
+  try {
+    const { PostgresAdapter, setAdapter, setDialect } = await import("../src/db/index.js");
+    const adapter = new PostgresAdapter();
+    await adapter.initialize({
+      dialect: "postgres",
+      postgres: { connectionString: databaseUrl!, userId: "", poolSize: 3 },
+    });
+    setAdapter(adapter);
+    setDialect("postgres");
+  } catch (err) {
+    console.error(
+      "[mcp-stdio] shared DB adapter unavailable; @/db-backed tools will fail:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 async function main() {
   await validateConnection();
+  await initSharedAdapter();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`Finlynq MCP server v3.3 running on stdio (PostgreSQL mode, user=${userId})`);

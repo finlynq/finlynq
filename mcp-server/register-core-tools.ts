@@ -1082,16 +1082,51 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   );
 
   // ── delete_transaction ─────────────────────────────────────────────────────
+  // Routed through the SHARED delete chokepoint (2026-07-30). This used to be
+  // a bare single-row DELETE: no link-sibling cascade (so deleting one leg of
+  // a transfer left the other behind as phantom money), no lot reversal (so
+  // closures pointed at a deleted open), no snapshot-dirty markers. stdio has
+  // no DEK and no confirmation-token machinery — that stays as documented —
+  // but the ledger-integrity steps are transport-independent and now apply.
+  //
+  // The chokepoint is `@/db`-backed, not pg-compat; the stdio entry
+  // (mcp-server/index.ts) registers that adapter at startup.
   server.tool(
     "delete_transaction",
-    "Permanently delete a transaction by ID",
-    { id: z.number().describe("Transaction ID to delete") },
-    async ({ id }) => {
+    "Permanently delete a transaction by ID. If the row is one leg of a transfer / trade / swap, ALL linked legs are deleted together (deleting just one would leave phantom money in the other account) — pass confirm_cascade to acknowledge.",
+    {
+      id: z.number().describe("Transaction ID to delete"),
+      confirm_cascade: z.boolean().optional().describe("Acknowledge that every linked sibling leg will be deleted too. Without it, a linked row is refused and the refusal names each sibling id."),
+    },
+    async ({ id, confirm_cascade }) => {
       const t = await sqlite.prepare(`SELECT id, payee, amount, date FROM transactions WHERE id = ? AND user_id = ?`).get(id, userId) as { id: number; payee: string; amount: number; date: string } | undefined;
       if (!t) return sqliteErr(`Transaction #${id} not found or not owned by user`);
-      await sqlite.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).run(id, userId);
-      invalidateUserTxCache(userId);
-      return txt({ success: true, data: { message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}` } });
+      try {
+        const { planTransactionDelete, deleteTransactionsCascade } = await import(
+          "../src/lib/transactions/delete-cascade.js"
+        );
+        const plan = await planTransactionDelete(userId, [id]);
+        if (plan.siblingIds.length > 0 && !confirm_cascade) {
+          return sqliteErr(
+            `Transaction #${id} is one leg of a linked pair. Deleting it also deletes ` +
+            `${plan.siblingIds.length} sibling row(s): #${plan.siblingIds.join(", #")} ` +
+            `(total ${plan.ids.length} rows). Re-run with confirm_cascade: true to proceed.`,
+          );
+        }
+        const outcome = await deleteTransactionsCascade(userId, [id], { plan });
+        if (!outcome.ok) return sqliteErr(outcome.message);
+        const extra = outcome.deletedIds.length > 1
+          ? ` (cascaded to ${outcome.deletedIds.length} linked rows: #${outcome.deletedIds.join(", #")})`
+          : "";
+        return txt({ success: true, data: { message: `Deleted transaction #${id}: "${t.payee}" ${t.amount} on ${t.date}${extra}`, deletedIds: outcome.deletedIds, cascaded: outcome.cascaded } });
+      } catch (e) {
+        // Fail LOUD rather than falling back to the unsafe bare DELETE — an
+        // orphaned transfer leg is worse than a refused delete.
+        return sqliteErr(
+          `Delete refused: the ledger-integrity path is unavailable (${e instanceof Error ? e.message : String(e)}). ` +
+          `Delete this transaction from the web app or HTTP MCP instead.`,
+        );
+      }
     }
   );
 
