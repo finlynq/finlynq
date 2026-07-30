@@ -72,7 +72,7 @@ vi.mock("@/db", async () => {
   };
 });
 
-const recomputeMock = vi.fn(() => Promise.resolve());
+const recomputeMock = vi.fn((..._args: unknown[]) => Promise.resolve());
 vi.mock("@/lib/fx/reporting-amount", () => ({
   recomputeReportingAmounts: (...args: unknown[]) => recomputeMock(...args),
 }));
