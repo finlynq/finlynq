@@ -5,6 +5,10 @@ import { db, schema } from "@/db";
 import { eq, and, gte, lte, desc, sql, asc, inArray } from "drizzle-orm";
 import { CASH_GROUP_NAMES } from "@/lib/accounts/groups";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
+import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
+import { convertReportingSlice } from "@/lib/fx/reporting-amount";
+import { getAccountBalances, getSpendingByCategoryWithReporting } from "@/lib/queries";
+import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { decryptField } from "@/lib/crypto/envelope";
 import { decryptName, nameLookup } from "@/lib/crypto/encrypted-columns";
 import { todayISO } from "@/lib/utils/date";
@@ -116,40 +120,50 @@ type IntentCtx = { userId: string; dek: Buffer | null };
 type IntentHandler = (msg: string, ctx: IntentCtx) => Promise<ChatResponse | null>;
 
 const handleNetWorth: IntentHandler = async (_msg, ctx) => {
-  // Stream D Phase 4 — plaintext name dropped; ciphertext only.
-  const balances = await db
-    .select({
-      accountNameCt: schema.accounts.nameCt,
-      accountType: schema.accounts.type,
-      accountGroup: schema.accounts.group,
-      currency: schema.accounts.currency,
-      balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
-    })
-    .from(schema.accounts)
-    .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .where(eq(schema.accounts.userId, ctx.userId))
-    .groupBy(schema.accounts.id, schema.accounts.nameCt, schema.accounts.type, schema.accounts.group, schema.accounts.currency)
-    .orderBy(schema.accounts.type, schema.accounts.group)
-    .all();
+  // FINLYNQ-183 — ONE user-facing currency, resolved per user. Never a literal.
+  const displayCurrency = await getDisplayCurrency(ctx.userId);
+  // FINLYNQ-123 — net worth is a POINT-IN-TIME figure, so every account
+  // balance converts at the CURRENT rate before anything is summed. The old
+  // code added raw `SUM(amount)` across mixed account currencies and labelled
+  // the result "CAD".
+  const rateMap = await getRateMap(displayCurrency, ctx.userId);
+
+  // Reuse the canonical balance query (same one the dashboard uses) — it
+  // carries `isInvestment`, which the hand-rolled query here did not.
+  const balances = await getAccountBalances(ctx.userId);
+  // "Account balance for accounts with holdings = holdings.value" (FINLYNQ-151).
+  // An investment account's SUM(transactions.amount) is just the cash legs of
+  // buys/sells, which net to ~0 — chat used to report every brokerage account
+  // as roughly zero and disagreed with MCP `get_net_worth` on the same question.
+  const holdingsByAccount = await getHoldingsValueByAccount(ctx.userId, ctx.dek);
 
   let assets = 0;
   let liabilities = 0;
-  for (const b of balances) {
-    if (b.accountType === "A") assets += b.balance;
-    else liabilities += b.balance;
-  }
+  const rows = balances.map((b) => {
+    const native = b.isInvestment
+      ? (holdingsByAccount.get(b.accountId)?.value ?? 0)
+      : b.balance;
+    const display = convertWithRateMap(native, b.currency, rateMap);
+    if (b.accountType === "A") assets += display;
+    else liabilities += display;
+    return {
+      name: decryptName(b.accountNameCt, ctx.dek, null) ?? "Account",
+      accountType: b.accountType,
+      display,
+    };
+  });
   const netWorth = assets + liabilities; // liabilities are negative
 
-  const chartData = balances
-    .filter((b) => Math.abs(b.balance) > 0)
-    .map((b) => ({
-      name: decryptName(b.accountNameCt, ctx.dek, null) ?? "Account",
-      value: Math.round(Math.abs(b.balance) * 100) / 100,
-      type: b.accountType === "A" ? "Asset" : "Liability",
+  const chartData = rows
+    .filter((r) => Math.abs(r.display) > 0)
+    .map((r) => ({
+      name: r.name,
+      value: Math.round(Math.abs(r.display) * 100) / 100,
+      type: r.accountType === "A" ? "Asset" : "Liability",
     }));
 
   return {
-    text: `Your net worth is ${formatCurrency(netWorth, "CAD")}.\n\nAssets: ${formatCurrency(assets, "CAD")}\nLiabilities: ${formatCurrency(Math.abs(liabilities), "CAD")}`,
+    text: `Your net worth is ${formatCurrency(netWorth, displayCurrency)}.\n\nAssets: ${formatCurrency(assets, displayCurrency)}\nLiabilities: ${formatCurrency(Math.abs(liabilities), displayCurrency)}`,
     chartType: "bar",
     chartData,
   };
@@ -158,6 +172,13 @@ const handleNetWorth: IntentHandler = async (_msg, ctx) => {
 const handleSpending: IntentHandler = async (msg, ctx) => {
   const range = parseDateRange(msg);
   const categoryName = await findCategoryName(msg, ctx.userId, ctx.dek);
+  // FINLYNQ-183 / FINLYNQ-123 — spending is a FLOW figure: each
+  // (currency, reporting_currency) slice converts through the shared
+  // `convertReportingSlice` (stored historical reporting_amount when it
+  // matches the display currency, else a current-rate fallback) BEFORE the
+  // slices are added together. Never `SUM(amount)` across currencies.
+  const displayCurrency = await getDisplayCurrency(ctx.userId);
+  const rateMap = await getRateMap(displayCurrency, ctx.userId);
 
   if (categoryName) {
     // Stream D Phase 4 — match by name_lookup HMAC.
@@ -171,8 +192,13 @@ const handleSpending: IntentHandler = async (msg, ctx) => {
       : null;
     if (!cat) return { text: `I couldn't find a category named "${categoryName}".` };
 
-    const result = await db
-      .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
+    const slices = await db
+      .select({
+        currency: schema.transactions.currency,
+        reportingCurrency: schema.transactions.reportingCurrency,
+        totalAmount: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
+        totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+      })
       .from(schema.transactions)
       .where(
         and(
@@ -182,37 +208,36 @@ const handleSpending: IntentHandler = async (msg, ctx) => {
           lte(schema.transactions.date, range.end)
         )
       )
-      .get();
+      .groupBy(schema.transactions.currency, schema.transactions.reportingCurrency)
+      .all();
 
-    const total = Math.abs(result?.total ?? 0);
+    const total = Math.abs(
+      slices.reduce((sum, s) => sum + convertReportingSlice(s, displayCurrency, rateMap), 0)
+    );
     return {
-      text: `You spent ${formatCurrency(total, "CAD")} on ${categoryName} during ${range.label}.`,
+      text: `You spent ${formatCurrency(total, displayCurrency)} on ${categoryName} during ${range.label}.`,
     };
   }
 
-  // Overall spending by category (Stream D Phase 4: ciphertext only)
-  const rawSpending = await db
-    .select({
-      categoryNameCt: schema.categories.nameCt,
-      total: sql<number>`SUM(${schema.transactions.amount})`,
-    })
-    .from(schema.transactions)
-    .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
-    .where(
-      and(
-        eq(schema.transactions.userId, ctx.userId),
-        eq(schema.categories.type, "E"),
-        gte(schema.transactions.date, range.start),
-        lte(schema.transactions.date, range.end)
-      )
-    )
-    .groupBy(schema.categories.id, schema.categories.nameCt)
-    .orderBy(sql`SUM(${schema.transactions.amount}) ASC`)
-    .all();
-  const spending = rawSpending.map((s) => ({
-    categoryName: decryptName(s.categoryNameCt, ctx.dek, null) ?? "Uncategorized",
-    total: s.total,
-  }));
+  // Overall spending by category. `getSpendingByCategoryWithReporting` is the
+  // shared per-(category, currency, reporting_currency) slice query the
+  // dashboard already converts through — reuse it rather than re-deriving a
+  // cross-currency sum here. Stream D Phase 4: ciphertext only.
+  const spendingSlices = await getSpendingByCategoryWithReporting(ctx.userId, range.start, range.end);
+  const byCategory = new Map<string, { nameCt: string | null; total: number }>();
+  for (const s of spendingSlices) {
+    const key = String(s.categoryId ?? "null");
+    const cur = byCategory.get(key) ?? { nameCt: s.categoryNameCt, total: 0 };
+    cur.total += convertReportingSlice(s, displayCurrency, rateMap);
+    byCategory.set(key, cur);
+  }
+  const spending = Array.from(byCategory.values())
+    .map((c) => ({
+      categoryName: decryptName(c.nameCt, ctx.dek, null) ?? "Uncategorized",
+      total: c.total,
+    }))
+    // Expenses are stored negative — most-spent first (ascending, as before).
+    .sort((a, b) => a.total - b.total);
 
   const total = spending.reduce((s, c) => s + Math.abs(c.total), 0);
   const chartData = spending.map((c) => ({
@@ -221,11 +246,11 @@ const handleSpending: IntentHandler = async (msg, ctx) => {
   }));
 
   const top3 = spending.slice(0, 3).map(
-    (c) => `  ${c.categoryName}: ${formatCurrency(Math.abs(c.total), "CAD")}`
+    (c) => `  ${c.categoryName}: ${formatCurrency(Math.abs(c.total), displayCurrency)}`
   ).join("\n");
 
   return {
-    text: `You spent ${formatCurrency(total, "CAD")} in total during ${range.label}.\n\nTop categories:\n${top3}`,
+    text: `You spent ${formatCurrency(total, displayCurrency)} in total during ${range.label}.\n\nTop categories:\n${top3}`,
     chartType: "pie",
     chartData,
   };
