@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { decryptNamedRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
@@ -36,7 +37,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption, not requireAuth: encryptOptional(null, note) stores the
+  // free-text note as PLAINTEXT at rest (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const body = await request.json();
 
@@ -52,16 +56,16 @@ export async function POST(request: NextRequest) {
     // Cross-tenant FK guard (H-1). Without this, a snapshot row for user B's
     // account_id would land under user A's user_id and surface in A's UI
     // (or just silently corrupt B's account-balance history).
-    await verifyOwnership(auth.context.userId, {
+    await verifyOwnership(userId, {
       accountIds: [parsed.data.accountId],
     });
 
     const snap = await db.insert(schema.snapshots).values({
-      userId: auth.context.userId,
+      userId: userId,
       accountId: parsed.data.accountId,
       date: parsed.data.date,
       value: parsed.data.value,
-      note: encryptOptional(auth.context.dek, parsed.data.note) ?? "",
+      note: encryptOptional(dek, parsed.data.note) ?? "",
     }).returning().get();
     return NextResponse.json(snap, { status: 201 });
   } catch (error: unknown) {

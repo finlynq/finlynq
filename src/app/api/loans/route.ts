@@ -9,6 +9,7 @@ import {
   PAYMENT_FREQUENCIES,
 } from "@/lib/loan-calculator";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
@@ -218,7 +219,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption, not requireAuth: buildNameFields(null) returns {} and
+  // encryptOptional(null, note) stores the note as PLAINTEXT — a DEK-less
+  // write persisted a permanently nameless row (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   try {
     const body = await request.json();
@@ -260,7 +265,7 @@ export async function POST(request: NextRequest) {
     // Cross-tenant FK guard (H-1) — verify the optional accountId belongs
     // to the caller before INSERT. `null`/undefined skipped by the helper.
     if (d.accountId != null) {
-      await verifyOwnership(auth.context.userId, { accountIds: [d.accountId] });
+      await verifyOwnership(userId, { accountIds: [d.accountId] });
     }
     // FINLYNQ-136: reject non-amortizing inputs (payment below first period's
     // interest, residual >= principal) at create time with a clear 400.
@@ -274,10 +279,10 @@ export async function POST(request: NextRequest) {
       extraPayment: d.extraPayment ?? 0,
       residualValue: d.residualValue,
     });
-    const enc = buildNameFields(auth.context.dek, { name: d.name });
+    const enc = buildNameFields(dek, { name: d.name });
     // Stream D Phase 4 — plaintext name dropped.
     const loan = await db.insert(schema.loans).values({
-      userId: auth.context.userId,
+      userId,
       type: d.type,
       accountId: d.accountId || null,
       ...(d.currency ? { currency: d.currency.toUpperCase() } : {}),
@@ -289,7 +294,7 @@ export async function POST(request: NextRequest) {
       paymentFrequency: d.paymentFrequency ?? "monthly",
       extraPayment: d.extraPayment ?? 0,
       residualValue: d.residualValue ?? null,
-      note: encryptOptional(auth.context.dek, d.note) ?? "",
+      note: encryptOptional(dek, d.note) ?? "",
       ...enc,
     }).returning().get();
 
@@ -301,13 +306,16 @@ export async function POST(request: NextRequest) {
     if (error instanceof LoanValidationError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
-    await logApiError("POST", "/api/loans", error, auth.context.userId);
+    await logApiError("POST", "/api/loans", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
 
 export async function PUT(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption — with a null DEK the rename silently no-ops and the note
+  // lands in plaintext (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   try {
     const body = await request.json();
@@ -317,14 +325,14 @@ export async function PUT(request: NextRequest) {
     // Cross-tenant FK guard (H-1) — `accountId` may be re-pointed to another
     // user's account on update. `null` is an explicit unlink; skip it.
     if (data.accountId != null && data.accountId > 0) {
-      await verifyOwnership(auth.context.userId, { accountIds: [data.accountId] });
+      await verifyOwnership(userId, { accountIds: [data.accountId] });
     }
     // FINLYNQ-136: validate the MERGED row still amortizes (e.g. lowering the
     // payment below the period interest, or raising residual past principal).
     const existing = await db
       .select()
       .from(schema.loans)
-      .where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId)))
+      .where(and(eq(schema.loans.id, id), eq(schema.loans.userId, userId)))
       .all();
     if (!existing.length) return NextResponse.json({ error: "Not found" }, { status: 404 });
     const merged = { ...existing[0], ...data };
@@ -342,15 +350,15 @@ export async function PUT(request: NextRequest) {
     }
     const toEncrypt: Record<string, string | null | undefined> = {};
     if (name !== undefined) toEncrypt.name = name;
-    const enc = buildNameFields(auth.context.dek, toEncrypt);
+    const enc = buildNameFields(dek, toEncrypt);
     if (data.currency) data.currency = data.currency.toUpperCase();
     const updatePayload: Record<string, unknown> = { ...data, ...enc };
     // Encrypt the free-text note when present (2026-06-01 plaintext-gap closure).
     if (data.note !== undefined) {
-      updatePayload.note = encryptOptional(auth.context.dek, data.note);
+      updatePayload.note = encryptOptional(dek, data.note);
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const loan = await db.update(schema.loans).set(updatePayload as any).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).returning().get();
+    const loan = await db.update(schema.loans).set(updatePayload as any).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, userId))).returning().get();
     return NextResponse.json(loan);
   } catch (error: unknown) {
     if (error instanceof OwnershipError) {
@@ -359,7 +367,7 @@ export async function PUT(request: NextRequest) {
     if (error instanceof LoanValidationError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
-    await logApiError("PUT", "/api/loans", error, auth.context.userId);
+    await logApiError("PUT", "/api/loans", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCategories, createCategory, updateCategory, deleteCategory } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
@@ -55,24 +56,29 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption, not requireAuth: buildNameFields(null) returns {}, so a
+  // DEK-less create persisted a permanently nameless category, and a DEK-less
+  // rename silently no-opped while reporting success (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
-    const enc = buildNameFields(auth.context.dek, { name: parsed.data.name });
-    const category = await createCategory(auth.context.userId, { ...parsed.data, ...enc });
+    const enc = buildNameFields(dek, { name: parsed.data.name });
+    const category = await createCategory(userId, { ...parsed.data, ...enc });
     return NextResponse.json(category, { status: 201 });
   } catch (error: unknown) {
     const duplicate = duplicateNameResponse(error);
     if (duplicate) return duplicate;
-    await logApiError("POST", "/api/categories", error, auth.context.userId);
+    await logApiError("POST", "/api/categories", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create category") }, { status: 500 });
   }
 }
 
 export async function PUT(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
@@ -80,13 +86,13 @@ export async function PUT(request: NextRequest) {
     const { id, ...data } = parsed.data;
     const toEncrypt: Record<string, string | null | undefined> = {};
     if ("name" in data && data.name !== undefined) toEncrypt.name = data.name;
-    const enc = buildNameFields(auth.context.dek, toEncrypt);
-    const category = await updateCategory(id, auth.context.userId, { ...data, ...enc });
+    const enc = buildNameFields(dek, toEncrypt);
+    const category = await updateCategory(id, userId, { ...data, ...enc });
     return NextResponse.json(category);
   } catch (error: unknown) {
     const duplicate = duplicateNameResponse(error);
     if (duplicate) return duplicate;
-    await logApiError("PUT", "/api/categories", error, auth.context.userId);
+    await logApiError("PUT", "/api/categories", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update category") }, { status: 500 });
   }
 }

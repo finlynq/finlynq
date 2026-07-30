@@ -118,6 +118,26 @@ vi.mock("@/lib/crypto/envelope", async () => {
   };
 });
 
+// The chat engine resolves the user's display currency and a current-rate map
+// before summing balances (FINLYNQ-123/183). Both are DB + network reads that
+// this file's in-memory `db` shim deliberately doesn't model, and neither is
+// what these tests are asserting — stub them so the assertions stay squarely on
+// TENANT ISOLATION. The pure converters keep their real implementations.
+vi.mock("@/lib/fx-service", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/fx-service")>("@/lib/fx-service");
+  return {
+    ...actual,
+    getDisplayCurrency: async () => "CAD",
+    getRateMap: async () => new Map<string, number>([["CAD", 1]]),
+  };
+});
+
+// Investment accounts value through the holdings aggregator (FINLYNQ-151).
+// No user in these fixtures holds positions; an empty map is the honest stub.
+vi.mock("@/lib/holdings-value", () => ({
+  getHoldingsValueByAccount: async () => new Map(),
+}));
+
 vi.mock("@/db", () => {
   const schema = schemaModule;
 
