@@ -9,6 +9,7 @@ const g = globalThis as typeof globalThis & {
   __pfDrizzle?: DrizzleDb | null;
   __pfAdapter?: DatabaseAdapter | null;
   __pfDialect?: DbDialect;
+  __pfTxScope?: AsyncLocalStorage<DrizzleDb>;
 };
 
 /** Get or create the active database adapter */
@@ -90,7 +91,20 @@ function wrapPgBuilder(obj: any): any {
 //     block resolves would use a released client. Await everything.
 //   - Nesting is safe — an inner call JOINS the outer transaction rather than
 //     opening a second one (no nested BEGIN, no savepoint churn).
-const txScope = new AsyncLocalStorage<DrizzleDb>();
+//
+// The store lives on `globalThis`, for the SAME reason the adapter and the MCP
+// tx cache do — and this one is not merely an HMR nicety. Turbopack emits this
+// module into SEVERAL server chunks (measured on dev 2026-07-30: two distinct
+// copies of the proxy, and `operations.ts` / `delete-cascade.ts` / a route's
+// `_helpers.ts` do not reliably land in the same one). A module-scoped
+// AsyncLocalStorage therefore gives each copy its OWN scope: the outer
+// `withDbTransaction` opens a real transaction in copy A while every `db.*`
+// inside runs through copy B, sees an empty store, and goes to the pool —
+// silently NON-transactional, which is worse than no transaction at all
+// because it reads as fixed. One shared instance keyed on globalThis is what
+// makes "the ambient transaction" ambient across chunk boundaries.
+const txScope: AsyncLocalStorage<DrizzleDb> =
+  (g.__pfTxScope ??= new AsyncLocalStorage<DrizzleDb>());
 
 /**
  * Run `fn` with every `db.*` access in its async context bound to a single
