@@ -437,9 +437,22 @@ async function handleGet(request: NextRequest) {
         // Per-account dirty markers (the impacted account + earliest date) drive
         // a scoped rebuild; their absence falls back to the full/windowed path.
         // An orphan reap (count 0 but stale rows) has no markers → fallback.
+        //
+        // A NULL watermark also forces the fallback, dirty rows or not: missing
+        // meta means never-built OR a full invalidation (a display-currency
+        // change deletes the watermark so history re-materializes in the new
+        // currency — markAllSnapshotsStale). The fast path rebuilds ONLY the
+        // dirty accounts and then stamps the watermark fresh, which would
+        // strand every other account's stored history (e.g. in the old
+        // currency) with no remaining staleness signal. Rows skipped here are
+        // not lost: the full rebuild covers their accounts, and any row a
+        // concurrent write creates survives for the next staleness trip.
         let cashDirty: CashDirtyRow[] = [];
         try {
-          cashDirty = hasCashOrphans ? [] : await listCashDirtyAccounts(userId);
+          cashDirty =
+            hasCashOrphans || cashMeta == null
+              ? []
+              : await listCashDirtyAccounts(userId);
         } catch {
           /* dirty lookup is best-effort — fall back to full rebuild */
         }
