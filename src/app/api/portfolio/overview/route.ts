@@ -468,14 +468,30 @@ async function handleGet(request: NextRequest) {
   // Pre-compute the quote currency for each holding â€” the currency that
   // marketValue (price Ã— quantity) will be in once we enrich. Cost basis
   // MUST be normalized to this currency so unrealizedGain = marketValue âˆ’
-  // costBasis is dimensionally consistent. Crypto's quote is "CAD" (the
-  // crypto-service quirk); cash uses the symbol; stocks use Yahoo's q.currency.
+  // costBasis is dimensionally consistent. Crypto uses the crypto price's own
+  // currency; cash uses the symbol; stocks use Yahoo's q.currency.
+  //
+  // Shared crypto-price lookup so this pre-pass and the enrichment loop below
+  // can never disagree about a holding's quote currency. They DID disagree
+  // (review 2026-07-30 finding #1): this pass hardcoded "CAD" while enrichment
+  // set `cp.currency || "USD"`, so a USD-priced crypto position had its cost
+  // basis normalized into CAD and then subtracted from a USD market value —
+  // inflating unrealized G/L by the whole CAD/USD spread on EVERY crypto
+  // holding. crypto-service caches `vs_currency=usd`, so the truth is USD.
+  const cryptoPriceForSymbol = (symbol: string | null | undefined) =>
+    symbol ? cryptoPriceMap.get(String(symbol).toUpperCase().split("-")[0]) : undefined;
   const quoteCurrencyById = new Map<number, string>();
   for (const h of holdings) {
     const isCryptoH = h.isCrypto === 1 || (h.symbol ? isCryptoSymbol(h.symbol) : false);
     const symbolIsCurrencyH = symbolIsCash(h.symbol);
     let qc = h.currency;
-    if (isCryptoH) qc = "CAD";
+    if (isCryptoH) {
+      // Mirror the enrichment branch EXACTLY: a resolved price contributes
+      // `cp.currency || "USD"`; with no price the row keeps h.currency, which
+      // is what `fxRates.get(quoteCurrency ?? h.currency)` falls back to there.
+      const cp = cryptoPriceForSymbol(h.symbol);
+      if (cp) qc = cp.currency || "USD";
+    }
     else if (symbolIsCurrencyH && h.symbol) {
       const symU = h.symbol.toUpperCase();
       // Metals (XAU/XAG/XPT/XPD) are tradeable units priced in the holding's
@@ -493,8 +509,8 @@ async function handleGet(request: NextRequest) {
   }
 
   // Backfill fxRates with any quote currencies not already covered (crypto
-  // returns "CAD" even when h.currency is USD; Yahoo may return a quote
-  // currency that doesn't match the holding's row currency).
+  // quotes come back USD-based even when h.currency is something else; Yahoo
+  // may return a quote currency that doesn't match the holding's row currency).
   for (const qc of new Set(quoteCurrencyById.values())) {
     if (qc && !fxRates.has(qc)) {
       fxRates.set(qc, await getRate(qc, displayCurrency, todayDate, userId));
@@ -713,8 +729,9 @@ async function handleGet(request: NextRequest) {
       price = effectivePriceAtDate(points, todayDate) ?? 0;
       quoteCurrency = h.currency;
     } else if (isCrypto && h.symbol) {
-      const base = String(h.symbol).toUpperCase().split("-")[0];
-      const cp = cryptoPriceMap.get(base);
+      // Same lookup the quoteCurrencyById pre-pass uses (shared helper) so the
+      // cost-basis target currency and the market-value currency stay identical.
+      const cp = cryptoPriceForSymbol(h.symbol);
       if (cp) {
         price = cp.price;
         change = cp.change24h;
